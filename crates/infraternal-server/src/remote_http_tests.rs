@@ -12,6 +12,80 @@ use openssl::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+/// Retains structured join diagnostics for assertions without installing a global subscriber.
+#[derive(Clone, Default)]
+struct JoinLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for JoinLog {
+    /// Append only the structured event being asserted by this test.
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    /// The in-memory capture has no buffered destination.
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Supplies the same bounded test capture to each tracing event.
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for JoinLog {
+    type Writer = Self;
+    /// Share the test's event buffer without installing global logging.
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+/// An anonymous join refusal identifies its failed phase without exposing its capability or CSR.
+#[tokio::test]
+async fn join_refusal_logs_a_safe_reason() {
+    let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let material = crate::ca::tests::test_material();
+    let app = router(
+        auth,
+        pool,
+        Arc::new(Signer(material.clone())),
+        EnrollmentEndpoint {
+            ca_der: material.issuer().to_der().unwrap(),
+            endpoint: "127.0.0.1:4443".parse().unwrap(),
+            server_name: "localhost".into(),
+        },
+    );
+    let capture = JoinLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .json()
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let capability = "x".repeat(43);
+    let encoded_csr = B64.encode(csr(&PKey::generate_ed25519().unwrap()));
+    let response = request(
+        &app,
+        "/remote/join",
+        json!({
+            "host_id": host, "mode": "rootless", "token": capability, "csr_der": encoded_csr,
+        }),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let text = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("remote_join_refused"), "{text}");
+    assert!(text.contains("invitation"), "{text}");
+    assert!(!text.contains(&capability));
+    assert!(!text.contains(&encoded_csr));
+}
+
 fn csr(key: &openssl::pkey::PKey<openssl::pkey::Private>) -> Vec<u8> {
     let mut builder = X509Req::builder().unwrap();
     builder
@@ -127,6 +201,8 @@ async fn assert_bound_join_response(
     );
 }
 
+/// An invitation is bound to its key digest, used once, keeps its token while the CA is locked, and publishes the
+/// public origin plus the direct QUIC endpoint (#146).
 #[tokio::test]
 async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() {
     let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -173,7 +249,8 @@ async fn enrollment_http_is_bound_single_use_and_preserves_token_while_locked() 
     let published: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(published["public_origin"], "https://auth.example.test");
-    assert!(published.get("endpoint").is_none());
+    // The direct QUIC listener is published again; the HTTPS origin stays the fallback (#146).
+    assert!(published["endpoint"].is_string());
     let joined: JoinInvitation = serde_json::from_value(published).unwrap();
     assert_eq!(joined.execution_uid, 1002);
     assert_eq!(
@@ -348,10 +425,10 @@ async fn machine_invitation_redeems_with_the_approved_public_key() {
     assert_eq!(api_keys, 0, "machine approval does not mint an API key");
 }
 
+/// Keep approval, replay, pending predecessor rejoin and key binding in one real HTTP lifecycle.
 #[tokio::test]
-// This test keeps approval, replay, and key-binding assertions in one real HTTP lifecycle.
 async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() {
-    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let (store, pool, old_host) = crate::enrollment::authority::tests::enrolled().await;
     let auth = Auth::new(
         pool.clone(),
         "auth.example.test",
@@ -360,8 +437,27 @@ async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() 
     .await
     .unwrap();
     let token = session(&pool).await;
-    let now = super::now().unwrap() + 1;
+    // The enrollment router uses wall time, so the approval's issue time must
+    // not be in its future when this lifecycle reaches /remote/join.
+    let now = super::now().unwrap();
     auth.set_test_http_time(now);
+    // A reinstall gets a fresh host id. Old same-name tombstones and unfinished
+    // removal must keep denying their old identities without denying the new one.
+    sqlx::query("UPDATE remote_hosts SET hostname='laptop' WHERE id=?")
+        .bind(old_host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES(?,'owner',0)",
+    )
+    .bind(old_host.as_bytes().as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let removed_host = Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,revoked_at,hostname) VALUES(?,'owner','rootful',0,100,200,'laptop')")
+        .bind(removed_host.as_bytes().as_slice()).execute(&pool).await.unwrap();
     let material = crate::ca::tests::test_material();
     let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
         material.issuer().clone(),
@@ -381,7 +477,13 @@ async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() 
         },
     );
     let app = crate::auth::router_with_invitation_issuer(auth.clone(), Some(issuer)).merge(
-        router_with_store(auth.clone(), pool.clone(), store.clone(), source, endpoint),
+        router_with_store(
+            auth.clone(),
+            pool.clone(),
+            store.clone(),
+            source.clone(),
+            endpoint,
+        ),
     );
     let host_id = Uuid::new_v4();
     let key = PKey::generate_ed25519().unwrap();
@@ -483,6 +585,51 @@ async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() 
         .await
         .unwrap();
     assert_eq!(api_keys, 0, "machine approval does not mint an API key");
+
+    source.unlock_from(&Administrator(material)).unwrap();
+    let capture = JoinLog::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    assert_eq!(
+        request(
+            &app,
+            "/remote/join",
+            json!({
+                "host_id": host_id, "mode": "rootful", "token": first.token,
+                "csr_der": B64.encode(csr(&key)),
+            }),
+            None,
+            ""
+        )
+        .await
+        .status(),
+        StatusCode::OK,
+        "a newly approved key joins even while its previous same-name hosts are removed or pending: {}",
+        String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+    );
+    let pending: i64 =
+        sqlx::query_scalar("SELECT confirmed FROM remote_login_cleanup WHERE host_id=?")
+            .bind(old_host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        pending, 0,
+        "a reinstall must not clear the old identity's denial"
+    );
+    let revoked: Option<i64> = sqlx::query_scalar("SELECT revoked_at FROM remote_hosts WHERE id=?")
+        .bind(removed_host.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        revoked,
+        Some(200),
+        "the old tombstone must survive the new join"
+    );
 
     auth.set_test_http_time(now + 601);
     assert_eq!(

@@ -73,7 +73,7 @@ async fn confirmed_cleanup(refusals: usize) {
     let actor = crate::embedded::EmbeddedAgent::from_test_socket(socket);
     let revocations = Revocations::default();
     let host = Uuid::new_v4();
-    let signal = revocations.register(host).unwrap();
+    let signal = revocations.register(host, 1000).unwrap();
     *signal.login_actor.lock().unwrap() = Some(actor.downgrade());
     assert!(
         tokio::time::timeout(
@@ -221,13 +221,15 @@ async fn saturated_actor(
     (actor, calls, peer_task, reserve_rx)
 }
 
+/// Whether a login cleanup is still delivered while `capacity` ordinary
+/// control calls are pending on the same host.
 async fn cleanup_with_pending_calls(capacity: usize) -> bool {
     // A burst of legitimate operations may fill the 64 ordinary control slots.
     // Access removal must still reach a connected host before its channel retires.
     let (actor, calls, peer_task, _) = saturated_actor(capacity, None).await;
     let revocations = Revocations::default();
     let host = Uuid::new_v4();
-    let signal = revocations.register(host).unwrap();
+    let signal = revocations.register(host, 1000).unwrap();
     *signal.login_actor.lock().unwrap() = Some(actor.downgrade());
     let confirmed = tokio::time::timeout(
         Duration::from_secs(5),

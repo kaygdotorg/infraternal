@@ -3,6 +3,8 @@ import { afterAll, beforeEach, expect, mock, test } from "bun:test";
 
 let importFails = true;
 const mounted: unknown[] = [];
+/** Copy exports before mocking: Bun mutates module namespaces and keeps mocks between test files. */
+const realOnDemand = { ...(await import("./on-demand")) };
 mock.module("./on-demand", () => ({
   whenIdle: () => {},
   onDemand: <T>(load: () => Promise<T>) => (importFails ? Promise.reject(new Error("chunk")) : load()),
@@ -13,7 +15,11 @@ mock.module("./onboarding-setup.on-demand", () => ({ mountSetup: (host: unknown)
 // module back afterwards (#263: a stand-in AuthError here broke join-review's error mapping in the gate's batch).
 const realAuth = { ...(await import("./auth")) };
 mock.module("./auth", () => ({ ...realAuth, loginWithPasskey: async () => "u" }));
-afterAll(() => { mock.module("./auth", () => realAuth); });
+afterAll(() => {
+  mock.module("./auth", () => realAuth);
+  // Later reconciliation and startup-hint tests must load their real on-demand modules.
+  mock.module("./on-demand", () => realOnDemand);
+});
 mock.module("./auth-motion", () => ({ swapCard: () => {} }));
 mock.module("./recovery-ui", () => ({ recoveryUiEnabled: () => false }));
 mock.module("../../../packages/ui/src/countup", () => ({ loading: () => ({ done() {} }) }));

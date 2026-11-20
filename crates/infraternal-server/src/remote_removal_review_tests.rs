@@ -4,15 +4,22 @@
 //! can no longer see. They must delete no more than the automatic cleanup would:
 //! only an installation whose `.bootstrap-owner` names this host, and only a mesh
 //! interface or packet filter carrying our ownership marker.
-use super::outcome;
+use super::{Installation, outcome};
 
 const HOST: &str = "0123456789abcdef0123456789abcdef";
 
 /// Extract the ownership-checked command from a completed removal response.
 fn manual(mode: &str) -> String {
-    outcome("unreachable", mode, "host.example", &[], Some(HOST), false)
-        .1
-        .unwrap()
+    outcome(
+        "unreachable",
+        mode,
+        "host.example",
+        &[],
+        Some(Installation::Bootstrap(HOST)),
+        false,
+    )
+    .1
+    .unwrap()
 }
 
 /// The server machine joins its own mesh (D239) with the same interface name;
@@ -88,7 +95,7 @@ fn accepted_uninstall_names_the_objects_it_leaves() {
         "rootful",
         "host.example",
         &["infraternal0"],
-        Some(HOST),
+        Some(Installation::Bootstrap(HOST)),
         false,
     );
     assert_eq!(
@@ -103,7 +110,14 @@ fn accepted_uninstall_names_the_objects_it_leaves() {
 /// machine that never comes back; the command ends the text verbatim.
 #[test]
 fn pending_uninstall_says_when_and_keeps_the_manual_command() {
-    let (message, manual) = outcome("pending", "rootless", "host.example", &[], Some(HOST), true);
+    let (message, manual) = outcome(
+        "pending",
+        "rootless",
+        "host.example",
+        &[],
+        Some(Installation::Bootstrap(HOST)),
+        true,
+    );
     let command = format!("~/.local/bin/infraternal --bootstrap-uninstall {HOST}");
     assert_eq!(
         message,
@@ -124,7 +138,7 @@ fn rootless_manual_wording_reads_once() {
             "rootless",
             "host.example",
             &[],
-            Some(HOST),
+            Some(Installation::Bootstrap(HOST)),
             pending,
         );
         assert!(
@@ -133,4 +147,23 @@ fn rootless_manual_wording_reads_once() {
         );
         assert!(!message.contains("with with"), "{message}");
     }
+}
+
+/// Offline Macs offer their checked uninstaller even if the PATH link is already gone.
+#[test]
+fn pending_mac_removal_offers_the_installed_binary() {
+    let (message, manual) = outcome(
+        "pending",
+        "rootful",
+        "host.example",
+        &[],
+        Some(Installation::Mac(HOST)),
+        true,
+    );
+    let command = format!(
+        "'/Library/Application Support/infraternal/bin/infraternal' --bootstrap-uninstall {HOST}"
+    );
+    assert_eq!(manual.as_deref(), Some(command.as_str()));
+    assert!(message.contains("on macOS as root"));
+    assert!(message.ends_with(&command));
 }

@@ -19,6 +19,10 @@ export interface MeshNode {
     host: string;
     tags: readonly string[];
   };
+  /** Whether this node's attached infraternal agent supports safe mesh key rotation. */
+  key_rotation_supported?: boolean;
+  /** Whether the attached node can retire stale peers after a server authority restore. */
+  restore_safe?: boolean;
   live: boolean;
   last_seen: number | null;
   last_rtt_us: number | null;

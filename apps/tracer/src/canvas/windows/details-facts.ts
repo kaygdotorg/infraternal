@@ -5,22 +5,35 @@
  */
 import { hostPlatformFromOs, type HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ICON } from "../views/icons";
-import type { DetailsFacts, HostFactsSnapshot } from "./details-source";
+import type { DetailsFacts, HostFactsSnapshot, MeshProtectionSnapshot } from "./details-source";
 
 const OS_NAME: Record<HostPlatform, string> = { ubuntu: "Ubuntu", debian: "Debian", redhat: "Red Hat", proxmox: "Proxmox", nixos: "NixOS", apple: "macOS", unknown: "" };
 
 const ICON_HOST = ICON.host;
 const ICON_CONNECTION = '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>';
-const ICON_SESSION = '<rect x="3.5" y="5" width="17" height="14" rx="2.5"/><path d="m7.5 10 2.5 2-2.5 2M12.5 14h4"/>';
 
+/** Everything the details panel is built from: the reported host, its local Mesh protection, the connection, the optional session, and extra facts. */
 export interface DetailsInput {
-  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot };
+  /**
+   * `unavailable` says why there are no `facts` for this host: `offline` (its infraternal agent is not connected) or `pending`
+   * (not read yet, or never readable from here). The System row then says so in plain words; no other host's facts stand in.
+   */
+  host: { name: string; user?: string; os?: HostPlatform; address?: string; reach?: string; facts?: HostFactsSnapshot; unavailable?: "offline" | "pending" };
+  /** Local `mesh.status` state, when this host has the Mesh component enabled. */
+  mesh?: MeshProtectionSnapshot;
   connection: { state: "connected" | "connecting" | "offline"; delayMs?: number; encrypted?: boolean };
   /** Extended machine info (Settings): adds the technical facts (init, virtualization, shell, locale, how it is reached). */
   extended?: boolean;
+  /**
+   * The facts are being read and have not arrived yet. Every fact row the machine will fill is then drawn at once with "Reading…",
+   * so the panel opens at the height it will keep when the facts land (#500, J528) instead of growing under the person's eyes.
+   */
+  loading?: boolean;
   session?: { name?: string; lastCommand?: string; size?: string; sizedBy?: string; lastUsed?: string; started?: string };
 }
 
+/** The value of a fact row whose machine reading is still on its way. */
+const READING = "Reading…";
 const STATE_TEXT = { connected: "Connected", connecting: "Connecting…", offline: "Offline. This machine can't be reached right now." } as const;
 
 function compactBytes(bytes: number): string {
@@ -51,6 +64,7 @@ function uptime(seconds: number | undefined): string {
   return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
 }
 
+/** The machine card's facts for one window: the Machine tab (host facts) and the Connection tab (link and session rows), in plain words (D385). */
 export function detailsFacts(input: DetailsInput): DetailsFacts {
   const { host, connection, session } = input;
   const facts = host.facts;
@@ -65,7 +79,7 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
   const row = (group: string, core: boolean, key: string, value: string) => ({ key, value, group, core });
   const allHostRows = [
     row("System", true, "Name", host.name),
-    row("System", true, "System", facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : osName),
+    row("System", true, "System", facts ? `${facts.os}${facts.version ? ` ${facts.version}` : ""}` : host.unavailable === "offline" ? "Can't be read while this machine is offline" : host.unavailable === "pending" ? "Not known yet" : osName),
     row("System", true, "Kernel", facts?.kernel ?? ""),
     row("System", true, "Architecture", facts?.architecture ?? ""),
     row("System", true, "Model", facts?.model ?? ""),
@@ -79,31 +93,47 @@ export function detailsFacts(input: DetailsInput): DetailsFacts {
     row("Access", true, "Infraternal agent", facts ? `${facts.mode === "embedded" ? "Embedded" : "Remote"} · ${facts.executionUid === 0 ? "root" : "user"}` : ""),
     row("Access", true, "Engines", facts ? facts.engines.length ? facts.engines.join(", ") : "None detected" : ""),
     row("Access", true, "Login", host.user ?? ""),
-    row("Access", true, "Address", host.address ?? ""),
-    row("Access", false, "How it is reached", host.reach ?? ""),
     row("Access", false, "Shell", facts?.shell ?? ""),
     row("Access", false, "Locale", facts?.locale ?? ""),
   ];
-  const hostRows = allHostRows.filter((r) => r.core || input.extended).map(({ key, value, group }) => ({ key, value, group }));
+  const hostRows = allHostRows.filter((r) => r.core || input.extended).map(({ key, value, group }) => ({ key, value: value === "" && input.loading ? READING : value, group }));
   const section = (id: string, label: string, icon: string, rows: DetailsFacts["sections"][number]["rows"]) => ({ id, label, icon, rows });
+  // D385: two tabs. Everything about how this machine is reached lives in the Connection tab: the link's state and delay,
+  // where the server reaches it and how (moved from the Host tab's Access group), and the terminal session's own facts
+  // (the old third tab), under their own headings. A heading shows only when one of its rows has a value.
+  const link = (key: string, value: string, hint?: string) => ({ key, value, group: "Link", ...(hint ? { hint } : {}) });
+  const mesh = (key: string, value: string) => ({ key, value, group: "Mesh" });
+  const own = (key: string, value: string) => ({ key, value, group: "Session" });
+  const meshAccess = input.mesh?.state !== "On"
+    ? ({ Off: "Off", Waiting: "Waiting for server", Stopping: "Stopping" } as const)[input.mesh?.state ?? "Off"]
+    : input.mesh.enforcement === "userspace" ? "Userspace packet filter" : "Kernel WireGuard";
+  const kernelGuard = input.mesh?.kernelGuard;
+  const kernelGuardText = kernelGuard && (kernelGuard.state === "installed"
+    ? kernelGuard.detail
+    : `Missing: ${kernelGuard.missing.join(", ")}${kernelGuard.missing.length ? "; " : ""}${kernelGuard.detail}`);
   return {
+    ...(input.loading ? { loading: true } : {}),
     ...(os ? { os } : {}),
     title: osName || host.name,
     subtitle: osName ? `${host.user ? `${host.user}@` : ""}${host.name}` : host.user ? `${host.user}@${host.name}` : "",
     sections: [
-      section("host", "Host", ICON_HOST, hostRows),
+      section("host", "Machine", ICON_HOST, hostRows),
       section("connection", "Connection", ICON_CONNECTION, [
-        { key: "Status", value: STATE_TEXT[connection.state] },
-        { key: "Connection delay", value: connection.delayMs === undefined ? "" : `${Math.round(connection.delayMs)} ms`, hint: "Round-trip time to the server" },
-        { key: "Encrypted", value: connection.encrypted === undefined ? "" : connection.encrypted ? "Yes" : "No, this page is not on HTTPS" },
-      ]),
-      section("session", "Session", ICON_SESSION, [
-        { key: "Name", value: session?.name ?? "" },
-        { key: "Started", value: session?.started ?? "" },
-        { key: "Last used", value: session?.lastUsed ?? "" },
-        { key: "Running now", value: session?.lastCommand ?? "" },
-        { key: "Size", value: session?.size ?? "" },
-        { key: "Sized by", value: session?.sizedBy ?? "" },
+        link("Status", STATE_TEXT[connection.state]),
+        link("Connection delay", connection.delayMs === undefined ? "" : `${Math.round(connection.delayMs)} ms`, "Round-trip time to the server"),
+        link("Encrypted", connection.encrypted === undefined ? "" : connection.encrypted ? "Yes" : "No, this page is not on HTTPS"),
+        link("Address", host.address ?? ""),
+        link("How it is reached", input.extended ? host.reach ?? "" : ""),
+        ...(input.mesh ? [
+          mesh("Mesh access rules", meshAccess),
+          ...(kernelGuardText ? [mesh("Kernel guard", kernelGuardText)] : []),
+        ] : []),
+        own("Name", session?.name ?? ""),
+        own("Started", session?.started ?? ""),
+        own("Last used", session?.lastUsed ?? ""),
+        own("Running now", session?.lastCommand ?? ""),
+        own("Size", session?.size ?? ""),
+        own("Sized by", session?.sizedBy ?? ""),
       ]),
     ],
   };

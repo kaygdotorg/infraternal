@@ -60,6 +60,8 @@ const RECENT_HEALTH: Duration = Duration::from_secs(60);
 const CONNECT: Duration = Duration::from_secs(5);
 /// Avoid letting a failed handshake wait through QUIC's longer idle timeout during quick recovery.
 const CONNECT_RECENT: Duration = Duration::from_millis(750);
+/// Recheck Quinn's live application-payload limit for path-MTU changes.
+const RELAY_MTU_POLL: Duration = Duration::from_secs(1);
 /// How long a new link may still change before the session start (`settle`).
 const SETTLE: Duration = Duration::from_millis(25);
 /// Probe retransmissions after the first send (#220 design §2: 250/750 ms).
@@ -119,6 +121,31 @@ pub enum Event {
     },
 }
 
+/// Watches one connection's application-payload limit and reports changed inner route budgets.
+#[derive(Default)]
+struct RelayMtuTracker {
+    last_limit: Option<Option<usize>>,
+}
+
+impl RelayMtuTracker {
+    /// Return a new safe mesh MTU only when Quinn's current limit changes.
+    fn update(&mut self, max_datagram_size: Option<usize>) -> Option<u16> {
+        if self.last_limit == Some(max_datagram_size) {
+            return None;
+        }
+        self.last_limit = Some(max_datagram_size);
+        Some(crate::mesh_mtu::for_relay_datagram(max_datagram_size))
+    }
+
+    /// Retry a failed route update on the next observation, even if Quinn's limit is unchanged.
+    fn retry(&mut self) {
+        self.last_limit = None;
+    }
+}
+
+/// A callback that installs a relay-specific MTU or re-derives the direct endpoint MTU.
+pub type RouteMtuUpdater = Arc<dyn Fn(Option<u16>) -> io::Result<()> + Send + Sync>;
+
 /// Data-path counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -168,22 +195,32 @@ struct Counters {
     receive_errors: AtomicU64,
 }
 
+/// Holds a connected relay session and the peer links that use it.
 struct Live {
+    /// Relay slot that owns this connection.
+    index: usize,
     client: Client,
     links: RwLock<HashMap<LinkId, HostId>>,
 }
 
+/// Tracks one peer's relay control state and active path callbacks.
 struct Peer {
     host: HostId,
     /// Moves the peer to the shim once a relay link is active (see `settle`).
     prepare_handshake: Arc<dyn Fn() -> io::Result<()> + Send + Sync>,
     /// Starts a handshake through the engine that owns this peer.
     handshake_starter: Arc<dyn Fn() + Send + Sync>,
+    /// Updates this peer's route from the live relay MTU, or re-derives its direct-path budget.
+    route_mtu_updater: RouteMtuUpdater,
     socket: UdpSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
     state: Mutex<PeerState>,
+    /// Serializes MTU route writes and invalidates results from an older selected path.
+    route_mtu_generation: Mutex<u64>,
     active: RwLock<Option<(Arc<Live>, LinkId)>>,
+    /// Limits concurrent route refreshes after an oversized relay packet.
+    refreshing_route_mtu: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -246,23 +283,9 @@ pub trait EndpointUpdater {
     /// # Errors
     /// Reports a stopped or unavailable data plane.
     fn handshake_starter(&self, peer: &dataplane::Peer) -> io::Result<Arc<dyn Fn() + Send + Sync>>;
-}
 
-impl EndpointUpdater for wireguard::Client {
-    fn handshake_starter(&self, peer: &dataplane::Peer) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
-        let peer = peer.clone();
-        Ok(Arc::new(move || {
-            let _ = start_kernel_handshake(&peer);
-        }))
-    }
-
-    fn handshake_preparer(
-        &self,
-        peer: &dataplane::Peer,
-    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
-        let peer = peer.clone();
-        Ok(Arc::new(move || prepare_kernel_handshake(&peer)))
-    }
+    /// Return a callback that writes this peer's route budget for a direct or relayed path.
+    fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater;
 }
 
 impl EndpointUpdater for crate::node::Node {
@@ -275,6 +298,10 @@ impl EndpointUpdater for crate::node::Node {
         peer: &dataplane::Peer,
     ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
         self.relay_handshake_preparer(peer)
+    }
+
+    fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater {
+        self.relay_route_mtu_updater(peer)
     }
 }
 
@@ -312,14 +339,6 @@ impl RelayPaths {
         })
     }
 
-    /// Relay `peer` through the legacy kernel data plane.
-    /// # Errors
-    /// Fails if the socket cannot be bound or the kernel client cannot be opened.
-    pub async fn relay(&self, peer: HostId, kernel: &dataplane::Peer) -> io::Result<SocketAddr> {
-        let mut client = wireguard::Client::new()?;
-        self.relay_with_endpoint(&mut client, peer, kernel).await
-    }
-
     /// Relay `peer`: bind its shim socket and ask the live relays for a link. The data
     /// plane's endpoint moves to the shim once a link is active (see `settle`).
     /// # Errors
@@ -347,19 +366,23 @@ impl RelayPaths {
         };
         let prepare_handshake = endpoint_updater.handshake_preparer(&relayed_peer)?;
         let handshake_starter = endpoint_updater.handshake_starter(&relayed_peer)?;
+        let route_mtu_updater = endpoint_updater.route_mtu_updater(kernel);
         let relays = self.shared.relays.len();
         let shim = Arc::new(Peer {
             host: peer,
             prepare_handshake,
             handshake_starter,
+            route_mtu_updater,
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
+            route_mtu_generation: Mutex::new(0),
             state: Mutex::new(PeerState {
                 links: vec![None; relays],
                 requested: vec![false; relays],
                 active: None,
             }),
             active: RwLock::new(None),
+            refreshing_route_mtu: std::sync::atomic::AtomicBool::new(false),
         });
         write(&self.shared.peers).insert(peer, shim.clone());
         let task = tokio::spawn(outbound(self.shared.clone(), shim.clone()));
@@ -474,6 +497,28 @@ fn live(shared: &Shared, index: usize) -> Option<Arc<Live>> {
     slot.clone()
 }
 
+/// Advance the generation when relay state and the published data path select `expected`.
+fn route_generation_for_live(shared: &Shared, peer: &Peer, expected: &Arc<Live>) -> Option<u64> {
+    let state = lock(&peer.state);
+    let (index, link_id) = state.active?;
+    if index != expected.index
+        || !live(shared, index).is_some_and(|current| Arc::ptr_eq(&current, expected))
+    {
+        return None;
+    }
+    if !read(&peer.active)
+        .as_ref()
+        .is_some_and(|(current, current_id)| {
+            *current_id == link_id && Arc::ptr_eq(current, expected)
+        })
+    {
+        return None;
+    }
+    let mut generation = lock(&peer.route_mtu_generation);
+    *generation = generation.wrapping_add(1);
+    Some(*generation)
+}
+
 fn emit(shared: &Shared, event: Event) {
     let _ = shared.events.try_send(event);
 }
@@ -498,11 +543,34 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
         };
         buffer[..wire::HEADER].copy_from_slice(&id.0.to_be_bytes());
         match live.client.connection().send_datagram(buffer.freeze()) {
-            Ok(()) => shared.counters.sent.fetch_add(1, Ordering::Relaxed),
-            Err(quinn::SendDatagramError::TooLarge) => {
-                shared.counters.too_large.fetch_add(1, Ordering::Relaxed)
+            Ok(()) => {
+                shared.counters.sent.fetch_add(1, Ordering::Relaxed);
             }
-            Err(_) => shared.counters.unlinked.fetch_add(1, Ordering::Relaxed),
+            Err(quinn::SendDatagramError::TooLarge) => {
+                shared.counters.too_large.fetch_add(1, Ordering::Relaxed);
+                if !peer.refreshing_route_mtu.swap(true, Ordering::AcqRel) {
+                    if let Some(generation) = route_generation_for_live(&shared, &peer, &live) {
+                        let refresh = peer.clone();
+                        let mtu = crate::mesh_mtu::for_relay_datagram(
+                            live.client.connection().max_datagram_size(),
+                        );
+                        tokio::spawn(async move {
+                            if !update_peer_route_mtu(&refresh, generation, Some(mtu)).await {
+                                tracing::warn!(
+                                    relay_mtu = mtu,
+                                    "Could not refresh peer route after an oversized relay datagram"
+                                );
+                            }
+                            refresh.refreshing_route_mtu.store(false, Ordering::Release);
+                        });
+                    } else {
+                        peer.refreshing_route_mtu.store(false, Ordering::Release);
+                    }
+                }
+            }
+            Err(_) => {
+                shared.counters.unlinked.fetch_add(1, Ordering::Relaxed);
+            }
         };
     }
 }
@@ -582,7 +650,7 @@ async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
 
 /// Keep the lowest-indexed link, withdraw the others, publish the choice.
 async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
-    let (changed, withdraw) = {
+    let (changed, withdraw, route_mtu_generation) = {
         let mut state = lock(&peer.state);
         let active = state
             .links
@@ -598,8 +666,18 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
             }
         }
         let changed = state.active != active;
+        if changed {
+            // Route writers hold this lock through the install, so a path change either waits
+            // for an older write or advances first and makes that queued result stale.
+            let mut generation = lock(&peer.route_mtu_generation);
+            *generation = generation.wrapping_add(1);
+        }
         state.active = active;
-        (changed.then_some(active), withdraw)
+        (
+            changed.then_some(active),
+            withdraw,
+            *lock(&peer.route_mtu_generation),
+        )
     };
     for index in withdraw {
         if let Some(live) = live(shared, index) {
@@ -611,7 +689,49 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     };
     let installed = active.and_then(|(index, id)| live(shared, index).map(|live| (live, id)));
     let linked = installed.is_some();
-    *write(&peer.active) = installed;
+    let previous_mtu = read(&peer.active).as_ref().map(|(live, _)| {
+        crate::mesh_mtu::for_relay_datagram(live.client.connection().max_datagram_size())
+    });
+    let route_mtu = installed.as_ref().map(|(live, _)| {
+        crate::mesh_mtu::for_relay_datagram(live.client.connection().max_datagram_size())
+    });
+    match (previous_mtu, route_mtu) {
+        (Some(previous), Some(next)) => {
+            // The smaller budget is safe on both connections while the data path switches.
+            let transition = previous.min(next);
+            if !update_peer_route_mtu(peer, route_mtu_generation, Some(transition)).await {
+                tracing::warn!(
+                    relay_mtu = transition,
+                    "Could not install relay transition route MTU"
+                );
+            }
+            *write(&peer.active) = installed.clone();
+            if next != transition
+                && !update_peer_route_mtu(peer, route_mtu_generation, Some(next)).await
+            {
+                tracing::warn!(
+                    relay_mtu = next,
+                    "Could not refresh peer route for relay path change"
+                );
+            }
+        }
+        (None, Some(next)) => {
+            if !update_peer_route_mtu(peer, route_mtu_generation, Some(next)).await {
+                tracing::warn!(
+                    relay_mtu = next,
+                    "Could not refresh peer route for relay path change"
+                );
+            }
+            *write(&peer.active) = installed.clone();
+        }
+        (_, None) => {
+            // Stop sending through a lost relay before restoring the direct-path budget.
+            *write(&peer.active) = None;
+            if !update_peer_route_mtu(peer, route_mtu_generation, None).await {
+                tracing::warn!("Could not refresh peer route for direct-path fallback");
+            }
+        }
+    }
     // Prepare the endpoint only after the relay is active. Existing sessions are
     // retained with an endpoint-only update; incomplete handshakes are reset on
     // both ends and the lower host id starts the replacement session after settling.
@@ -644,6 +764,56 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     );
     if active.is_none() {
         request_everywhere(shared, peer).await;
+    }
+}
+
+/// Install one peer's newly derived direct or relayed route budget on a blocking netlink worker.
+async fn update_peer_route_mtu(peer: &Arc<Peer>, generation: u64, mtu: Option<u16>) -> bool {
+    let updater = peer.route_mtu_updater.clone();
+    let peer = peer.clone();
+    tokio::task::spawn_blocking(move || {
+        let current = lock(&peer.route_mtu_generation);
+        if *current != generation {
+            return Ok(());
+        }
+        // Keep the generation stable until the route write completes.
+        updater(mtu)
+    })
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
+/// Poll a live connection for path-MTU changes and refresh every peer using that connection.
+async fn watch_relay_mtu(shared: Arc<Shared>, live: Arc<Live>) {
+    let connection = live.client.connection().clone();
+    let mut ticker = tokio::time::interval(RELAY_MTU_POLL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut tracker = RelayMtuTracker::default();
+    loop {
+        ticker.tick().await;
+        let Some(mtu) = tracker.update(connection.max_datagram_size()) else {
+            continue;
+        };
+        let peers: Vec<_> = read(&shared.peers)
+            .values()
+            .filter_map(|peer| {
+                route_generation_for_live(&shared, peer, &live)
+                    .map(|generation| (peer.clone(), generation))
+            })
+            .collect();
+        let mut updated = true;
+        for (peer, generation) in peers {
+            if !update_peer_route_mtu(&peer, generation, Some(mtu)).await {
+                tracing::warn!(
+                    relay_mtu = mtu,
+                    "Could not refresh peer route for relay MTU change"
+                );
+                updated = false;
+            }
+        }
+        if !updated {
+            tracker.retry();
+        }
     }
 }
 
@@ -719,14 +889,17 @@ async fn drive(shared: Arc<Shared>, index: usize) {
     }
 }
 
+/// Serve one relay connection until its control stream closes, watching path MTU changes too.
 async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: Notices) {
     let live = Arc::new(Live {
+        index,
         client,
         links: RwLock::new(HashMap::new()),
     });
     *write(&shared.live[index]) = Some(live.clone());
     emit(shared, Event::RelayUp { relay: index });
     let reader = tokio::spawn(inbound(shared.clone(), live.clone()));
+    let mtu_watcher = tokio::spawn(watch_relay_mtu(shared.clone(), live.clone()));
     let peers: Vec<Arc<Peer>> = read(&shared.peers).values().cloned().collect();
     for peer in &peers {
         request_everywhere(shared, peer).await;
@@ -763,6 +936,7 @@ async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: 
         settle(shared, &peer).await;
     }
     reader.abort();
+    mtu_watcher.abort();
     *write(&shared.live[index]) = None;
     emit(shared, Event::RelayDown { relay: index });
     let peers: Vec<Arc<Peer>> = read(&shared.peers).values().cloned().collect();
@@ -862,7 +1036,7 @@ impl Drop for Observer {
 #[cfg(test)]
 mod tests {
     //! The slice-1 relay trigger; the data path itself runs in the namespace proof.
-    use super::direct_failed;
+    use super::{RelayMtuTracker, direct_failed};
     use crate::wireguard::Counters;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -870,6 +1044,7 @@ mod tests {
         UNIX_EPOCH + Duration::new(seconds, nanoseconds)
     }
 
+    /// A peer is a relay candidate when its endpoint has no newer handshake.
     #[test]
     fn a_pair_is_relayed_only_without_a_handshake_since_its_endpoint() {
         let since = 1_800_000_000;
@@ -892,6 +1067,16 @@ mod tests {
             };
             assert!(!direct_failed(Some(&counters), installed_at));
         }
+    }
+
+    /// A live QUIC path change must produce a new route budget only when its limit changes.
+    #[test]
+    fn relay_route_budget_tracks_live_datagram_limit_changes() {
+        let mut tracker = RelayMtuTracker::default();
+        assert_eq!(tracker.update(Some(1434)), Some(1392));
+        assert_eq!(tracker.update(Some(1434)), None);
+        assert_eq!(tracker.update(Some(1214)), Some(1168));
+        assert_eq!(tracker.update(Some(1434)), Some(1392));
     }
 
     #[test]
@@ -939,6 +1124,118 @@ mod tests {
         assert!(
             direct_failed(Some(&counters), installed_at),
             "equal timestamps do not establish ordering"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod review_j375_tests {
+    //! Deterministically exercises a stale relay-MTU write across direct-path fallback (#381).
+    use super::*;
+    use infraternal_plugin_relay::{
+        relay::{Admission, Limits, Relay},
+        testing::{Authority, Purpose},
+        tls,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU16};
+
+    /// A delayed relay callback must not overwrite a subsequently restored direct MTU.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_relay_callback_must_not_overwrite_direct_path_budget() {
+        let mut authority = Authority::new();
+        let admission: Admission = Arc::new(|_| true);
+        let relay = Relay::start(
+            "127.0.0.1:0".parse().unwrap(),
+            authority.issue(Purpose::Relay("relay.mesh.test")),
+            Limits::default(),
+            admission,
+        )
+        .unwrap();
+        let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut config =
+            tls::client_config(authority.issue(Purpose::Host(HostId([1; 16])))).unwrap();
+        let mut transport = quinn::TransportConfig::default();
+        transport
+            .initial_mtu(1472)
+            .min_mtu(1472)
+            .mtu_discovery_config(None);
+        config.transport_config(Arc::new(transport));
+        let (client, _notices) = Client::connect(
+            &endpoint,
+            config.clone(),
+            relay.local_addr().unwrap(),
+            "relay.mesh.test",
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let live = Arc::new(Live {
+            index: 0,
+            client,
+            links: RwLock::default(),
+        });
+        let maximum = live.client.connection().max_datagram_size();
+        assert_eq!(maximum, Some(1434));
+        let budget = Arc::new(AtomicU16::new(1392));
+        let callback_budget = budget.clone();
+        let callback: RouteMtuUpdater = Arc::new(move |mtu| {
+            callback_budget.store(mtu.unwrap_or(1200), Ordering::Release);
+            Ok(())
+        });
+        let host = HostId([2; 16]);
+        let peer = Arc::new(Peer {
+            host,
+            prepare_handshake: Arc::new(|| Ok(())),
+            handshake_starter: Arc::new(|| {}),
+            route_mtu_updater: callback,
+            socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            starting: AtomicBool::new(false),
+            route_mtu_generation: Mutex::new(0),
+            state: Mutex::new(PeerState {
+                links: vec![None],
+                requested: vec![false],
+                active: Some((0, LinkId(1))),
+            }),
+            active: RwLock::new(Some((live.clone(), LinkId(1)))),
+            refreshing_route_mtu: AtomicBool::new(false),
+        });
+        let (events, _rx) = mpsc::channel(16);
+        let shared = Arc::new(Shared {
+            local: HostId([1; 16]),
+            wg_port: 0,
+            endpoint,
+            config,
+            relays: vec![],
+            live: vec![],
+            peers: RwLock::new(HashMap::from([(host, peer.clone())])),
+            events,
+            counters: Default::default(),
+        });
+        let stale_generation = *lock(&peer.route_mtu_generation);
+        let delayed_peer = peer.clone();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let delayed_relay_result = tokio::spawn(async move {
+            release_rx.await.unwrap();
+            update_peer_route_mtu(&delayed_peer, stale_generation, Some(1392)).await
+        });
+        // This is settle's direct-path order: retire the relay, then restore the direct budget.
+        settle(&shared, &peer).await;
+        assert!(read(&peer.active).is_none());
+        assert_eq!(budget.load(Ordering::Acquire), 1200);
+        release_tx.send(()).unwrap();
+        assert!(delayed_relay_result.await.unwrap());
+        let final_budget = budget.load(Ordering::Acquire);
+        let mut tracker = RelayMtuTracker::default();
+        assert_eq!(tracker.update(maximum), Some(1392));
+        assert_eq!(tracker.update(maximum), None);
+        live.client.connection().close(0_u32.into(), b"done");
+        relay.close().await;
+        println!(
+            "direct MTU=1200, stale relay MTU=1392, final route MTU={final_budget}, unchanged relay limit produces no further refresh"
+        );
+        assert_eq!(
+            final_budget, 1200,
+            "inactive relay overwrote the direct path's safe route budget"
         );
     }
 }

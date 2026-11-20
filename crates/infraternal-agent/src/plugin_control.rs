@@ -193,10 +193,12 @@ impl Registry {
     pub(crate) fn unavailable() -> Self {
         Self::from_factory(Some(Box::new(|| Err(PluginError::Rejected))))
     }
+    /// Build the compiled plugin registry for one runtime mode and its state paths.
     fn for_mode(
         state: PathBuf,
         mode: crate::plugins::ExecutionMode,
         installation: Option<crate::plugins::Installation>,
+        mesh_state: Option<PathBuf>,
     ) -> Self {
         #[cfg(test)]
         if let Ok(factory) = TEST_FACTORY.try_with(std::sync::Arc::clone) {
@@ -208,7 +210,12 @@ impl Registry {
             None
         } else {
             Some(Box::new(move || {
-                crate::plugins::registry_at(mode, Some(&state), installation.as_ref())
+                crate::plugins::registry_at_with_mesh_state(
+                    mode,
+                    Some(&state),
+                    mesh_state.as_deref(),
+                    installation.as_ref(),
+                )
             }))
         });
         if matches!(mode, crate::plugins::ExecutionMode::Embedded) {
@@ -491,6 +498,9 @@ pub(crate) struct Service {
     _local: Local,
 }
 impl Service {
+    /// Start a process-owned plugin service at the given runtime state path.
+    /// # Errors
+    /// Returns an error if the state directory or its local control socket cannot be opened.
     pub(crate) async fn start(
         state: &Path,
         mode: crate::plugins::ExecutionMode,
@@ -500,24 +510,52 @@ impl Service {
             state,
             mode,
             installation,
+            None,
             #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            #[cfg(all(feature = "remote", feature = "mesh", target_os = "linux"))]
             None,
             #[cfg(any(test, feature = "native-streams"))]
             None,
         )
         .await
     }
+    /// Starts an embedded service with a Mesh state directory apart from session state.
+    /// # Errors
+    /// Returns an error if the service state or its local control socket is unavailable.
+    pub(crate) async fn start_with_mesh_state(state: &Path, mesh_state: &Path) -> io::Result<Self> {
+        Self::start_inner(
+            state,
+            crate::plugins::ExecutionMode::Embedded,
+            None,
+            Some(mesh_state.to_owned()),
+            #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            #[cfg(all(feature = "remote", feature = "mesh", target_os = "linux"))]
+            None,
+            #[cfg(any(test, feature = "native-streams"))]
+            None,
+        )
+        .await
+    }
+    /// Start a remote plugin service while retaining its validated runtime lifetime lock.
+    /// # Errors
+    /// Returns an error if the state lock, plugin service, or control socket cannot start.
     #[cfg(all(feature = "remote", target_os = "linux"))]
     pub(crate) async fn start_retained(
         state: &Path,
         installation: Option<&crate::plugins::Installation>,
         lifetime: &mut Option<std::sync::Arc<std::fs::File>>,
+        #[cfg(feature = "mesh")] enrolment: infraternal_plugin_mesh::node::Enrolment,
     ) -> io::Result<Self> {
         let service = Self::start_inner(
             state,
             crate::plugins::ExecutionMode::Remote,
             installation,
+            None,
             lifetime.clone(),
+            #[cfg(feature = "mesh")]
+            Some(enrolment),
             #[cfg(any(test, feature = "native-streams"))]
             None,
         )
@@ -531,13 +569,19 @@ impl Service {
     /// lifetime lock: it validates a `lifetime` lock the caller already has, or
     /// acquires one on a blocking thread, so the caller's event loop keeps
     /// running while acquisition waits (#355). `installation`, when present,
-    /// binds acquisition to its host; `supplied` replaces the registry in tests.
+    /// binds acquisition to its host; `mesh_state` changes only the Mesh node's
+    /// files; `enrolment` reconciles remote Mesh files under the lifetime lock;
+    /// `supplied` replaces the registry in tests.
     fn start_inner<'a>(
         state: &'a Path,
         mode: crate::plugins::ExecutionMode,
         installation: Option<&'a crate::plugins::Installation>,
+        mesh_state: Option<PathBuf>,
         #[cfg(all(feature = "remote", target_os = "linux"))] lifetime: Option<
             std::sync::Arc<std::fs::File>,
+        >,
+        #[cfg(all(feature = "remote", feature = "mesh", target_os = "linux"))] enrolment: Option<
+            infraternal_plugin_mesh::node::Enrolment,
         >,
         #[cfg(any(test, feature = "native-streams"))] supplied: Option<Registry>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Self>> + Send + 'a>> {
@@ -571,6 +615,20 @@ impl Service {
                     )
                 };
                 crate::sessions::state(Some(state.to_owned()))?;
+                #[cfg(feature = "mesh")]
+                if let Some(enrolment) = enrolment {
+                    let path = state.to_owned();
+                    let mesh_guard = guard.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _guard = mesh_guard;
+                        infraternal_plugin_mesh::node::Node::prepare_enrolled_restore(
+                            &path, enrolment,
+                        )
+                        .inspect_err(|error| eprintln!("Infraternal Mesh restore refused: {error}"))
+                    })
+                    .await
+                    .map_err(io::Error::other)??;
+                }
                 Some(guard)
             } else {
                 None
@@ -593,10 +651,11 @@ impl Service {
             )))]
             let installation = installation.copied();
             #[cfg(any(test, feature = "native-streams"))]
-            let registry = supplied
-                .unwrap_or_else(|| Registry::for_mode(state.to_owned(), mode, installation));
+            let registry = supplied.unwrap_or_else(|| {
+                Registry::for_mode(state.to_owned(), mode, installation, mesh_state)
+            });
             #[cfg(not(any(test, feature = "native-streams")))]
-            let registry = Registry::for_mode(state.to_owned(), mode, installation);
+            let registry = Registry::for_mode(state.to_owned(), mode, installation, mesh_state);
             // Listener tasks and synchronous workers retain the same ownership even
             // when cancellation has been requested but their work has not stopped.
             #[cfg(all(feature = "remote", target_os = "linux"))]
@@ -620,13 +679,19 @@ impl Service {
             })
         })
     }
+    /// Start a remote service using a registry supplied by a test or native stream.
+    /// # Errors
+    /// Returns an error if the service state or its control socket cannot be opened.
     #[cfg(any(test, feature = "native-streams"))]
     pub(crate) async fn with_registry(state: &Path, registry: Registry) -> io::Result<Self> {
         Self::start_inner(
             state,
             crate::plugins::ExecutionMode::Remote,
             None,
+            None,
             #[cfg(all(feature = "remote", target_os = "linux"))]
+            None,
+            #[cfg(all(feature = "remote", feature = "mesh", target_os = "linux"))]
             None,
             Some(registry),
         )
@@ -1073,6 +1138,9 @@ mod tests {
                         None,
                         None,
                         None,
+                        #[cfg(feature = "mesh")]
+                        None,
+                        None,
                     )
                     .await;
                 }
@@ -1451,6 +1519,7 @@ mod tests {
         let registry = Registry::for_mode(
             PathBuf::from("unused-empty-catalog-state"),
             crate::plugins::ExecutionMode::Remote,
+            None,
             None,
         );
         let mut events = registry.subscribe();

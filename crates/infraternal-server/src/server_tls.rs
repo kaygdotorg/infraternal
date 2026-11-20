@@ -31,6 +31,7 @@ pub(crate) mod tests {
     };
     use tokio::net::TcpStream;
 
+    /// Check the production TLS acceptor before sending any HTTP request.
     #[tokio::test]
     async fn standalone_https_disables_nagle_before_application_bytes() {
         assert_nodelay_with(acceptor).await;
@@ -40,7 +41,7 @@ pub(crate) mod tests {
     pub(crate) async fn assert_nodelay_with<F, A>(build: F)
     where
         F: FnOnce(OpenSSLConfig) -> A,
-        A: Accept<TcpStream, (), Stream = tokio_openssl::SslStream<TcpStream>, Service = ()>,
+        A: Accept<TcpStream, (), Stream = tokio_openssl::SslStream<TcpStream>>,
     {
         let key = PKey::generate_ed25519().unwrap();
         let mut name = X509NameBuilder::new().unwrap();
@@ -101,7 +102,7 @@ pub(crate) mod tests {
             stream
         });
         let (socket, _) = listener.accept().await.unwrap();
-        let (stream, ()) = build(config).accept(socket, ()).await.unwrap();
+        let (stream, _) = build(config).accept(socket, ()).await.unwrap();
         assert!(
             stream.get_ref().nodelay().unwrap(),
             "standalone HTTPS retains Nagle on terminal traffic"

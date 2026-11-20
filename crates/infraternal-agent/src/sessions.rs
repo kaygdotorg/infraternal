@@ -2,7 +2,8 @@
 //!
 //! Discovery recovers every live socket with bounded concurrent handshakes, each
 //! with a two-second handshake deadline; a nonresponsive shim cannot serialize
-//! recovery of healthy sessions. Only refused sockets are removed as stale.
+//! recovery of healthy sessions. Refused sockets and reset private probes are
+//! removed as stale; other failed handshakes need exit proof.
 //! Launching a shim is process creation, not a handshake: it fails when the
 //! launcher exits first, and only a hung start meets the longer launch bound.
 
@@ -294,16 +295,17 @@ pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
             "/run/infraternal"
         })
     } else {
-        let runtime = PathBuf::from(
-            std::env::var_os("XDG_RUNTIME_DIR")
-                .ok_or_else(|| invalid("rootless infraternal agent requires XDG_RUNTIME_DIR"))?,
-        );
-        let meta = fs::symlink_metadata(&runtime)?;
-        if !meta.is_dir() || meta.uid() != Uid::effective().as_raw() || meta.mode() & 0o777 != 0o700
-        {
-            return Err(invalid("invalid runtime directory"));
-        }
-        runtime.join("infraternal")
+        // XDG_RUNTIME_DIR, or on macOS the account's private ~/Library/Caches;
+        // the shim uses the same function, so both always pick one place.
+        infraternal_shim::runtime_dir::user_runtime_dir()
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::PermissionDenied => invalid("invalid runtime directory"),
+                io::ErrorKind::InvalidData => {
+                    invalid("rootless infraternal agent requires XDG_RUNTIME_DIR")
+                }
+                _ => error,
+            })?
+            .join("infraternal")
     };
     Ok(path)
 }
@@ -496,6 +498,54 @@ pub fn gone(error: &io::Error) -> bool {
     )
 }
 
+/// Check whether a rendezvous socket has a private readiness marker.
+///
+/// Only an empty regular file owned by this user with mode `0600` can mark a
+/// short-lived readiness probe. Its socket may be discarded after a reset;
+/// ordinary shims still need a sealed exit record before discovery ignores a
+/// failed handshake.
+/// # Errors
+/// Returns a filesystem error other than a missing readiness marker.
+pub(crate) fn private_readiness(path: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path.with_extension("readiness")) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(metadata.is_file()
+        && metadata.uid() == Uid::effective().as_raw()
+        && metadata.mode() & 0o7777 == 0o600
+        && metadata.len() == 0)
+}
+
+/// Remove a rendezvous that is known to be stale, including its probe marker.
+///
+/// A refused connection proves that no listener accepted the socket. A reset
+/// is treated the same way only for a private readiness probe, because an
+/// ordinary shim may still be running after a broken handshake.
+/// # Errors
+/// Returns a filesystem error while checking or removing the stale records.
+fn remove_stale_rendezvous(path: &Path, error: &io::Error) -> io::Result<bool> {
+    let stale = match error.kind() {
+        io::ErrorKind::ConnectionRefused => true,
+        io::ErrorKind::ConnectionReset => private_readiness(path)?,
+        _ => false,
+    };
+    if !stale {
+        return Ok(false);
+    }
+    // Remove the socket first so any concurrent cleanup still sees its role
+    // marker for as long as the rendezvous remains visible.
+    for stale in [path.to_path_buf(), path.with_extension("readiness")] {
+        match fs::remove_file(stale) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(true)
+}
+
 /// Discover every socket identity with bounded parallel handshakes.
 /// # Errors
 /// Returns directory errors or a live shim handshake failure.
@@ -508,6 +558,12 @@ pub fn discover(
     // scans and bounded concurrent handshakes into each caller's poll/drop paths.
     Box::pin(discover_inner(state))
 }
+/// Discover live shims and remove only rendezvous records that are proven stale.
+///
+/// Private readiness probes may be discarded after a reset; ordinary shim
+/// handshakes still need a sealed exit record before discovery ignores errors.
+/// # Errors
+/// Returns directory, handshake, or task errors that cannot be proven stale.
 async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
     let mut sessions = Vec::new();
@@ -554,22 +610,12 @@ async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
         tasks.spawn(async move {
             match connect(path.clone(), id).await {
                 Ok(session) => Ok(Some(session)),
-                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-                    // An interrupted fixed probe can leave its role marker.
-                    // Unlink the refused socket first, preserving classification
-                    // for any concurrent revocation while it remains visible.
-                    let marker = path.with_extension("readiness");
-                    for stale in [path, marker] {
-                        match fs::remove_file(stale) {
-                            Ok(()) => {}
-                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Ok(None)
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
                 Err(error) => {
+                    if remove_stale_rendezvous(&path, &error)?
+                        || error.kind() == io::ErrorKind::NotFound
+                    {
+                        return Ok(None);
+                    }
                     // The sealed exit can precede listener teardown. A known
                     // ended session cannot make restart fail on its last EOF;
                     // unknown or insecure records retain the strict error path.

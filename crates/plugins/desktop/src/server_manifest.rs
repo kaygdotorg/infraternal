@@ -68,6 +68,24 @@ pub const ACTIONS: &[ActionDef] = &[
         fresh_passkey: false,
     },
     ActionDef {
+        id: "desktop.icon",
+        summary: "Read one app icon from an enrolled host by its content hash",
+        instructions: &[
+            "List the host's app windows; each row names its app icon by hash.",
+            "Ask for an icon you do not have yet, by host and hash.",
+            "Keep it by hash: the same hash is always the same image.",
+        ],
+        input: SchemaRef("desktop.icon"),
+        output: SchemaRef("desktop.icon"),
+        permission: Permission::One("desktop.read"),
+        effect: Effect::Read,
+        target: Target::Host,
+        dry_run: DryRun::Unsupported,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+    },
+    ActionDef {
         id: "desktop.session.start",
         summary: "Start a server-held window or whole-screen session",
         instructions: START,
@@ -154,16 +172,18 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         resumable: false,
         wire: Some(crate::server::WIRE),
     }],
+    // On by default wherever the build includes app windows (#146, D349); the
+    // owner can switch it off in Settings › Machines › App Windows.
     defaults: &[SettingDefault {
         id: "enabled",
-        value: DefaultValue::Bool(false),
+        value: DefaultValue::Bool(true),
     }],
     dependencies: &[Dependency::ExistingServer],
     can_enable_components: &[],
     roles: &[RoleDef {
         id: "server",
         requires: &["server"],
-        default_enabled: false,
+        default_enabled: true,
     }],
     max_frame_len: crate::protocol::MAX_CONTROL,
     unavailable: br#"{"error":"Desktop sessions are unavailable."}"#,
@@ -171,12 +191,14 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
 };
 
 #[cfg(test)]
+/// Checks the server desktop declaration.
 mod tests {
     use super::*;
+    /// The declaration validates, needs an existing server, is on by default (#146) and asks for explicit delivery.
     #[test]
     fn server_metadata_requires_existing_server_and_explicit_delivery() {
         DESCRIPTOR.validate().unwrap();
-        assert!(!DESCRIPTOR.roles[0].default_enabled);
+        assert!(DESCRIPTOR.roles[0].default_enabled);
         assert_eq!(DESCRIPTOR.dependencies, &[Dependency::ExistingServer]);
         assert_eq!(DESCRIPTOR.can_enable_components, &[] as &[&str]);
         assert!(

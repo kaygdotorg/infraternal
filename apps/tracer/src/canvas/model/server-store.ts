@@ -1,6 +1,6 @@
-/** Per-tab layout intents and same-ID snapshot recovery; the server is the only saved copy (D312). */
+/** Per-tab canvas intents and same-ID snapshot recovery; the server is the only saved copy (D312). A refused whole-look CAS requests a fresh snapshot before publishing canonical state. */
 import { canvasKey, readStoredJson } from "../../account-storage";
-import { parseDocument, type CanvasDocument } from "./schema";
+import { parseDocument, type CanvasDocument, type DocLook } from "./schema";
 import type { LayoutEdit } from "./operations";
 import { ActionRefused, type SubscriptionHandle } from "../../connection";
 import { registerAccountWork } from "../../account-lifetime";
@@ -26,6 +26,7 @@ export interface LayoutTransport {
  */
 export type RevokedWork = "none" | "unconfirmed" | "unsent";
 
+/** Keeps the account document current, journals optimistic edits, and recovers server-confirmed state after gaps or refusals. */
 export class ServerCanvasStore implements CanvasStore {
   readonly acceptsPendingReferences = true;
   readonly #journal: LayoutJournal;
@@ -53,11 +54,19 @@ export class ServerCanvasStore implements CanvasStore {
   #incarnation: string | undefined;
   #revoked = false;
 
+  /** Opens the account subscription and starts its bounded local journal.
+   * @param transport The authenticated connection for document requests and snapshots.
+   * @param account The account whose shared canvas document this tab edits.
+   * @param refused The existing callback for layout-save notices.
+   * @param onSessionRevoked The callback that ends this canvas when its account lifetime changes.
+   * @param onLookRefused Runs only when the server definitively refuses a whole-look compare-and-set.
+   */
   constructor(
     private readonly transport: LayoutTransport,
     account: string,
     private readonly refused: (definitive?: boolean, delayed?: boolean, capacity?: boolean) => void = () => {},
     private readonly onSessionRevoked: (work: RevokedWork) => void = () => {},
+    private readonly onLookRefused: (look: DocLook) => void = () => {},
   ) {
     this.#offAccount = registerAccountWork(account, { pause: (value) => { this.#paused = value; if (!value) this.#pump(); }, dispose: () => this.dispose() });
     this.#incarnation = transport.sessionIncarnation;
@@ -172,6 +181,7 @@ export class ServerCanvasStore implements CanvasStore {
     this.#notice = setTimeout(() => { this.#notice = undefined; if (!this.#disposed && this.pending) { this.#notified = true; this.refused(false, true); } }, Math.max(0, budget - (performance.now() - this.#pendingSince)));
   }
   #publish(): void { for (const listener of this.#listeners) listener(); }
+  /** Sends the next journaled intent when the connection is ready; a definitive refusal of a whole-look edit also requests a fresh snapshot. */
   #pump(): void {
     if (this.#disposed || this.#revoked || this.#paused || this.#resyncing || this.transport.isWelcomed === false) return;
     const entry = this.#journal.next(); if (!entry) return;
@@ -194,7 +204,13 @@ export class ServerCanvasStore implements CanvasStore {
       if (this.#disposed) return;
       if (error instanceof ActionRefused) {
         if (!this.#journal.refuse(entry, epoch)) return;
-        this.#publish(); this.#pendingChanged(); this.refused(true); this.#pump(); return;
+        const refusedLook = "intent" in entry && entry.intent.type === "look.set" ? entry.intent.look : undefined;
+        if (refusedLook) {
+          // A stale whole-look edit has no safe local rollback until the current account document arrives.
+          this.onLookRefused(refusedLook);
+          this.#recover();
+        } else this.#publish();
+        this.#pendingChanged(); this.refused(true); this.#pump(); return;
       }
       if (!this.#journal.fail(entry, epoch)) return;
       this.#pendingChanged(); this.#recover();

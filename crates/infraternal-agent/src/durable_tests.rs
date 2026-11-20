@@ -1,4 +1,8 @@
 //! Causal checks for stalled disk writes on the current-thread host reactor.
+//!
+//! Thread identity rejects a durable write on the reactor without a disk-speed
+//! deadline. Off-reactor writes remain held until unrelated reactor work answers;
+//! admission delays and filesystem contention cannot release that hold early.
 use std::{
     collections::HashMap,
     future::Future,
@@ -10,11 +14,35 @@ use std::{
 };
 
 /// One write waits here until unrelated reactor work has answered.
-#[derive(Default)]
 struct Gate {
+    /// The sole reactor thread of the current-thread test runtime.
+    reactor: std::thread::ThreadId,
+    /// Published before `entered` if the disk hook runs on that reactor.
+    on_reactor: AtomicBool,
+    /// The disk hook has either held a worker or detected an inline write.
     entered: AtomicBool,
+    /// Only the reactor releases an off-reactor write after its causal checks.
     released: Mutex<bool>,
+    /// Wake the held disk worker once unrelated reactor work has answered.
     changed: Condvar,
+}
+
+/// Release the worker and unregister its hook even if a causal assertion panics.
+/// This owns cleanup separately from the worker's reference to the shared gate.
+struct HeldWrite {
+    /// The unique hook registration removed when this check ends.
+    path: PathBuf,
+    /// A worker may retain this gate until the reactor releases its write.
+    gate: Arc<Gate>,
+}
+
+impl Drop for HeldWrite {
+    /// Unwinding must never leave runtime shutdown waiting on a held disk worker.
+    fn drop(&mut self) {
+        *self.gate.released.lock().unwrap() = true;
+        self.gate.changed.notify_all();
+        GATES.lock().unwrap().remove(&self.path);
+    }
 }
 
 /// Paths isolate simultaneously running tests from each other and ordinary saves.
@@ -32,6 +60,13 @@ pub(crate) fn hold(path: &Path) {
     let Some(gate) = GATES.lock().unwrap().get(path).cloned() else {
         return;
     };
+    if std::thread::current().id() == gate.reactor {
+        // Record the regression instead of deadlocking the only reactor thread.
+        // The caller asserts this after releasing and joining the operation.
+        gate.on_reactor.store(true, Ordering::Relaxed);
+        gate.entered.store(true, Ordering::Release);
+        return;
+    }
     let mut released = gate.released.lock().unwrap();
     gate.entered.store(true, Ordering::Release);
     while !*released {
@@ -40,7 +75,8 @@ pub(crate) fn hold(path: &Path) {
 }
 
 /// Require another reactor task to answer before releasing the blocked save.
-/// The watchdog only frees a deadlocked test; no elapsed time determines success.
+/// A write on the sole reactor thread fails by identity, not elapsed time.
+/// Slow admission or unrelated disk work cannot masquerade as a held reactor.
 pub(crate) async fn responsive<T: Send + 'static>(
     path: PathBuf,
     operation: impl Future<Output = T> + Send + 'static,
@@ -63,24 +99,23 @@ async fn check<T: Send + 'static>(
     operation: impl Future<Output = T> + Send + 'static,
     cancel: Option<PathBuf>,
 ) -> Option<T> {
-    let gate = Arc::new(Gate::default());
-    GATES.lock().unwrap().insert(path.clone(), gate.clone());
-    let watchdog = std::thread::spawn({
-        let gate = gate.clone();
-        move || {
-            let (mut released, waited) = gate
-                .changed
-                .wait_timeout_while(
-                    gate.released.lock().unwrap(),
-                    std::time::Duration::from_secs(30),
-                    |released| !*released,
-                )
-                .unwrap();
-            *released = true;
-            gate.changed.notify_all();
-            waited.timed_out()
-        }
+    assert_eq!(
+        tokio::runtime::Handle::current().runtime_flavor(),
+        tokio::runtime::RuntimeFlavor::CurrentThread,
+        "durable write checks require a single reactor thread"
+    );
+    let gate = Arc::new(Gate {
+        reactor: std::thread::current().id(),
+        on_reactor: AtomicBool::new(false),
+        entered: AtomicBool::new(false),
+        released: Mutex::new(false),
+        changed: Condvar::new(),
     });
+    GATES.lock().unwrap().insert(path.clone(), gate.clone());
+    let held_write = HeldWrite {
+        path,
+        gate: gate.clone(),
+    };
     let save = tokio::spawn(operation);
     while !gate.entered.load(Ordering::Acquire) && !save.is_finished() {
         tokio::task::yield_now().await;
@@ -106,11 +141,10 @@ async fn check<T: Send + 'static>(
     *gate.released.lock().unwrap() = true;
     gate.changed.notify_all();
     let result = save.await;
-    let fired = watchdog.join().unwrap();
-    GATES.lock().unwrap().remove(&path);
+    drop(held_write);
     assert!(
-        !fired,
-        "durable write held the reactor until the watchdog released it"
+        !gate.on_reactor.load(Ordering::Acquire),
+        "durable write ran on the reactor thread"
     );
     assert!(
         held,

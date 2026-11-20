@@ -8,6 +8,7 @@ import type { Ctx } from "../context";
 import type { DetailsModule } from "./details.on-demand";
 import type { DetailsSourceLoader } from "./details-source";
 
+/** Keep details actions lazy; a model refresh never loads or opens a closed panel. */
 export function createDetailsHandle(cx: Ctx, loadSource: DetailsSourceLoader): DetailsModule {
   let real: DetailsModule | undefined;
   let loading: Promise<DetailsModule> | undefined;
@@ -18,6 +19,7 @@ export function createDetailsHandle(cx: Ctx, loadSource: DetailsSourceLoader): D
   return {
     toggle: (rec, how) => { void load().then((d) => d.toggle(rec, how)); },
     close: (instant) => real?.close(instant),
+    refresh: (windowId) => real?.refresh(windowId),
     isOpen: () => real?.isOpen() ?? false,
     dispose: () => real?.dispose(),
   };

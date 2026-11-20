@@ -12,6 +12,7 @@ mod native;
 // it before exercising cancellation/deadlines so those operations stay parallel.
 static FIXTURE_PUBLICATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Cancellation must release native writes and reply waits before their worker joins.
 #[test]
 fn cancelled_capture_releases_native_write_and_reply_waits() {
     use std::{
@@ -40,7 +41,14 @@ fn cancelled_capture_releases_native_write_and_reply_waits() {
         } else {
             "length, = struct.unpack('>I', source.read(4))\nsource.read(length)"
         };
-        fs::write(&executable, format!("#!/usr/bin/env python3\n# Role: block at a known native write or reply boundary.\nimport signal, struct, sys\nsource = sys.stdin.buffer\n{read}\nwith open(sys.argv[0] + '.ready', 'w') as output:\n    output.write('ready')\nsignal.pause()\n")).unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/usr/bin/env python3\n{}# Role: block at a known native write or reply boundary.\nimport signal, struct, sys\nsource = sys.stdin.buffer\n{read}\npublish_marker(sys.argv[0] + '.ready', b'ready')\nsignal.pause()\n",
+                include_str!("fixtures/atomic_marker.py")
+            ),
+        )
+        .unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let mut companion = native::Native::spawn(&executable).unwrap();
         drop(publication);
@@ -83,6 +91,7 @@ fn cancelled_capture_releases_native_write_and_reply_waits() {
     }
 }
 
+/// A slow control companion must share one bounded deadline across write and reply waits.
 #[test]
 fn slow_write_and_reply_share_one_operation_deadline() {
     use std::{
@@ -128,6 +137,7 @@ sys.stdout.buffer.flush()
     );
 }
 
+/// EOF cleanup must finish before the native control companion retires.
 #[test]
 fn timed_out_control_companion_gets_eof_cleanup_before_retirement() {
     use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
@@ -139,16 +149,18 @@ fn timed_out_control_companion_gets_eof_cleanup_before_retirement() {
     let executable = dir.join("native-fixture.py");
     fs::write(
         &executable,
-        r"#!/usr/bin/env python3
-# Role: acknowledge cleanup only after the controller closes its input.
+        concat!(
+            "#!/usr/bin/env python3\n",
+            include_str!("fixtures/atomic_marker.py"),
+            r#"# Role: acknowledge cleanup only after the controller closes its input.
 import struct, sys
 source = sys.stdin.buffer
 length, = struct.unpack('>I', source.read(4))
 source.read(length)
 if source.read(4) == b'':
-    with open(sys.argv[0] + '.restored', 'w') as output:
-        output.write('restored')
-",
+    publish_marker(sys.argv[0] + '.restored', b'restored')
+"#,
+        ),
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();

@@ -119,7 +119,7 @@ fn hash(path: &Path, identity: Identity) -> Result<Arc<str>, Failure> {
     if Identity::of(&file.metadata().map_err(|_| unreadable())?) != identity {
         return Err(changed());
     }
-    Ok(format!("{:x}", hash.finalize()).into())
+    Ok(format!("{:x}", base16ct::HexDisplay(&hash.finalize())).into())
 }
 
 /// Error for a file replaced or edited while it was being hashed.

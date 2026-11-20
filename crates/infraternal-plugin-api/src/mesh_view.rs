@@ -25,6 +25,9 @@ pub struct MeshView {
     pub addresses: Vec<IpAddr>,
     /// The mesh network interface those addresses live on.
     pub interface: String,
+    /// Whether `GotaTun` checks access at the userspace TUN boundary for this node.
+    /// Mesh SSH uses this to redirect TCP/22 inside that packet path instead of nftables.
+    pub userspace_filter: bool,
     /// Every peer in the applied configuration, by mesh ID.
     pub peers: BTreeMap<u64, MeshPeer>,
 }

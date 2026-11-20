@@ -212,6 +212,13 @@ fn setup_token_permission_hint_covers_a_private_socket_in_a_readable_directory()
         "a refused socket connection must identify the elevated command even when its directory is readable"
     );
 }
+/// A server unit installed through a versioned executable symlink is found by `setup-token`.
+///
+/// The plan is made with `--host-firewall-off`, so it holds only the server
+/// unit. Since J671 a default-drop plan needs every port sshd uses, from a
+/// console or over SSH, and an unprivileged runner cannot read root's sshd,
+/// so a firewall plan here would be (correctly) refused before symlink
+/// discovery is reached.
 #[test]
 fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink() {
     let root = std::path::PathBuf::from(std::env::var_os("HOME").expect("fixture home"))
@@ -237,6 +244,7 @@ fn setup_token_discovers_a_service_installed_through_a_versioned_binary_symlink(
             "--data",
         ])
         .arg(&data)
+        .arg("--host-firewall-off")
         .current_dir(&root)
         .env_clear()
         .env("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR", &units)

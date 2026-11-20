@@ -3,6 +3,8 @@
 
 /// Shared compiled release identity; channel policy remains in the release plugin [225,226].
 pub use infraternal_plugin_api::{VERSION, release_version};
+/// Each account's live browser sockets, and taking over the longest-hidden one when the account is full (#523).
+mod account_sockets;
 pub mod auth;
 #[cfg(feature = "remote")]
 pub mod ca;
@@ -36,6 +38,8 @@ mod completion;
 #[cfg(feature = "remote")]
 pub mod csr;
 mod embedded;
+/// Moves embedded server mesh state between durable storage and rollback runtime paths [J501, #489].
+pub mod embedded_mesh_state;
 mod node_bridge;
 #[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;
@@ -54,7 +58,6 @@ pub mod login_access;
 mod mesh_ssh;
 #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
 mod node_host;
-pub mod release_manifest;
 pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
@@ -66,6 +69,17 @@ mod access_report;
 mod api_actions;
 #[cfg(feature = "remote")]
 pub mod enrollment;
+/// The host activity log and the root upgrade's wait rule (D376, #399).
+pub mod host_activity;
+/// The server's side of a root upgrade over the rootless infraternal agent (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_privilege;
+/// The browser's endpoints for a root upgrade (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_privilege_http;
+/// Drives one root upgrade from begin to handover (D376, #399).
+#[cfg(all(feature = "ssh", feature = "remote"))]
+mod host_promotion;
 /// Server-scheduled host identity key rotation (#285).
 #[cfg(feature = "remote")]
 mod identity_rotation;
@@ -92,6 +106,9 @@ pub mod remote_http;
 mod remote_inventory;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::inventory::decode_list as decode_host_inventory;
+/// Process-bound readiness for the local server relocation transaction.
+#[cfg(target_os = "linux")]
+pub mod move_health;
 #[cfg(feature = "remote")]
 mod remote_link;
 #[cfg(all(test, feature = "mesh", feature = "remote"))]
@@ -109,6 +126,9 @@ mod remote_standby;
 pub mod remote_standby_request;
 #[cfg(feature = "remote")]
 mod remote_startup;
+/// A root upgrade's successor lane and its outboxes (D376, #399).
+#[cfg(feature = "remote")]
+mod remote_successor;
 mod runtime;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]

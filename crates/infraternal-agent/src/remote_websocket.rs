@@ -101,6 +101,10 @@ fn trace_client_phase<T>(phase: &'static str, result: io::Result<T>) -> io::Resu
     result
 }
 
+/// The TLS client for the agent's server link: either the enrolled server's pinned root, or the
+/// first trusted fixed system bundle from [`tls_roots`].
+///
+/// [`tls_roots`]: infraternal_plugin_api::tls_roots
 fn https_connector(root: Option<&X509>, system_roots: bool) -> io::Result<SslConnector> {
     let mut config = SslConnector::builder(SslMethod::tls_client()).map_err(|_| refused())?;
     // The app route uses RFC 6455's HTTP/1.1 Upgrade; it does not implement RFC 8441 extended CONNECT.
@@ -109,17 +113,10 @@ fn https_connector(root: Option<&X509>, system_roots: bool) -> io::Result<SslCon
         .map_err(|_| refused())?;
     config.set_verify(SslVerifyMode::PEER);
     if system_roots {
-        config.set_default_verify_paths().map_err(|_| refused())?;
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if std::path::Path::new(bundle).is_file() {
-                config.set_ca_file(bundle).map_err(|_| refused())?;
-                break;
-            }
-        }
+        // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        config.set_cert_store(
+            infraternal_plugin_api::tls_roots::public_root_store().map_err(|_| refused())?,
+        );
     } else {
         let mut trust = X509StoreBuilder::new().map_err(|_| refused())?;
         trust

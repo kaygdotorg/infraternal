@@ -160,6 +160,7 @@ async fn reassigned_session_cannot_authorize_work_for_its_former_account() {
     assert!(f.auth.live_expiry(&f.session, &b, NOW, ()).await.is_ok());
 }
 
+/// Retire the deleted account’s live sockets while keeping another account’s sockets open.
 #[tokio::test(start_paused = true)]
 async fn account_deletion_retires_open_sockets_without_affecting_other_accounts() {
     let _serial = SERIAL.lock().await;
@@ -187,11 +188,13 @@ async fn account_deletion_retires_open_sockets_without_affecting_other_accounts(
     // one real transaction, then explicitly notify its known affected account.
     let mut tx = f.auth.pool.begin().await.unwrap();
     for table in ["sessions", "passkeys", "wraps"] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE user_id=?"))
-            .bind(&f.user)
-            .execute(&mut *tx)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE user_id=?"
+        )))
+        .bind(&f.user)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     }
     sqlx::query("DELETE FROM users WHERE id=?")
         .bind(&f.user)

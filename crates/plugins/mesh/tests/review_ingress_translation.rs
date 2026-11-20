@@ -59,6 +59,8 @@ fn check(firewall: Firewall) {
     node.chunk(Chunk {
         access_updates: Vec::new(),
         local_key: None,
+        authority_epoch: None,
+        rotation_operation: None,
         server: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]

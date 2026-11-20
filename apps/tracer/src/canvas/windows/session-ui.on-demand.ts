@@ -10,7 +10,8 @@
  *   a row swipes open 1:1 with the finger to show the same actions.
  * - An exited session shows its final screen read-only, with one floating pill: Run again, Dismiss.
  * - A session the host no longer has (#158) shows the same pill, quieter: "Session ended", New shell (a new shell
- *   on the same host, in this window) and Close window. There is no exit code or final screen to show.
+ *   on the same host, in this window) and Close window. A recorded status names its exit code or signal; a missing
+ *   status says only that the session ended.
  * - A session another device typed in last is shown scaled to fit with a quiet "Sized for <device>" badge; typing
  *   or tapping the badge takes the size over (D183).
  *
@@ -25,12 +26,13 @@
  * The inventory is the source of truth: every change it reports repaints the windows, the tree and an open
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
+import { endedStripText } from "../status";
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
-import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
+import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import { openAnchoredPopover, type AnchoredPopover, type PopoverSource } from "../../../../../packages/ui/src/anchored-popover";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import { beginInlineRename } from "../../../../../packages/ui/src/inline-rename.on-demand";
-import { ICON_ALERT, ICON_X, icon } from "../../../../../packages/ui/src/icons";
+import { ICON_ALERT, ICON_INFO, ICON_X, icon } from "../../../../../packages/ui/src/icons";
 import { createSpinner } from "../../../../../packages/ui/src/spinner";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import type { Ctx, WinRec } from "../context";
@@ -49,7 +51,7 @@ export interface SessionUiPart {
   closeManager(): void;
   arrived(rec: WinRec): void;
   /** The host refused this window's shell: the strip says why and offers the one action that helps. False when the window already has a session (the caller shows a toast). */
-  refused(rec: WinRec, message: string, action?: RefusalAction): boolean;
+  refused(rec: WinRec, message: string, action?: RefusalAction, calm?: boolean): boolean;
   /** The window has been connecting too long (`message`), or connects again (undefined): its strip says so, with a retry. */
   unreachable(rec: WinRec, message: string | undefined): void;
   /** Repaints an open manager (the inventory changed). */
@@ -91,11 +93,13 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     result: "ok" | "fail" | "ended" | "refused" | "unreachable";
     label: string;
     text: string;
+    /** A state that clears by itself: the leading mark is the shared info icon, never the red cross. */
+    calm?: boolean;
     action?: { label: string; icon: string; run: () => void };
     dismiss: { label: string; run: () => void };
   }
   /** Why the host would not start a shell in a window, in plain words, and the one action that helps, for the strip. */
-  const refusals = new WeakMap<WinRec, { message: string; action: RefusalAction }>();
+  const refusals = new WeakMap<WinRec, { message: string; action: RefusalAction; calm: boolean }>();
   /** Windows that have been connecting too long, with the sentence saying so. Cleared as soon as the window connects again. */
   const unreachables = new WeakMap<WinRec, string>();
   /** Windows that asked for a new shell and have not heard back: they claim a refusal even when they still show a session. */
@@ -106,8 +110,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const dismiss = { label: gone ? "Close window" : "Dismiss", run: () => dismissSession(rec.model.host, s) };
     if (gone) {
       return {
-        signature: `${s.id}:gone:${s.exit?.code ?? ""}`, result: "ended", label: `${s.name} ended`,
-        text: `Session ended${s.exit ? ` · Exit ${s.exit.code}` : ""}`,
+        signature: `${s.id}:gone:${s.exit?.code ?? ""}`, result: "ended", label: `${s.name}: ${endedStripText(s.exit?.code)}`,
+        text: endedStripText(s.exit?.code),
         // The obvious next step: a new shell on the same host, in this same window.
         ...(rec.binding?.openNew ? { action: { label: "New shell", icon: ICON.plus, run: () => newShell(rec) } } : {}), dismiss,
       };
@@ -118,8 +122,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     };
   };
   const closeStrip = (rec: WinRec): StripView["dismiss"] => ({ label: "Close window", run: () => cx.win.close(rec) });
-  const refusedStrip = (rec: WinRec, message: string, action: RefusalAction): StripView => ({
-    signature: `refused:${action}:${message}`, result: "refused", label: message, text: message,
+  const refusedStrip = (rec: WinRec, message: string, action: RefusalAction, calm: boolean): StripView => ({
+    signature: `refused:${action}:${calm ? "calm:" : ""}${message}`, result: "refused", label: message, text: message, ...(calm ? { calm } : {}),
     // One action at most: asking again, or a host that can do what this one cannot. "none" leaves only closing the window.
     ...(action === "retry" ? { action: { label: "Try again", icon: SESSION_ICON.again, run: () => newShell(rec) } }
       : action === "add-host" && cx.adapters.addHost ? { action: { label: "Add host", icon: ICON.plus, run: () => cx.adapters.addHost?.() } }
@@ -158,7 +162,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     paintLink(rec, exited, refusal?.message);
     let strip: HTMLElement | null = body.querySelector<HTMLElement>(".cl-sx-strip");
     const view: StripView | undefined = exited && s ? stripOf(rec, s)
-      : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action)
+      : refusal && !s ? refusedStrip(rec, refusal.message, refusal.action, refusal.calm)
       : unreachable ? unreachableStrip(rec, unreachable) : undefined;
     if (view) {
       if (strip?.dataset.leaving !== undefined) { strip.remove(); strip = null; }
@@ -173,8 +177,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         strip.dataset.result = view.result;
         strip.setAttribute("aria-label", view.label);
         const mark = el("span", "ui-mark");
+        // A self-clearing state is information, not a failure: the shared info icon in the secondary colour (D393, owner 2026-11-15).
+        if (view.calm) { mark.classList.add("cl-sx-info"); mark.innerHTML = icon(ICON_INFO); }
         // Waiting is a neutral turning arc; only a real refusal or failure is a red cross.
-        mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : view.result === "unreachable" ? "busy" : "fail";
+        else mark.dataset.mark = view.result === "ended" ? "ended" : view.result === "ok" ? "ok" : view.result === "unreachable" ? "busy" : "fail";
         const text = el("span", "cl-sx-strip-text", view.text);
         const nodes: HTMLElement[] = [mark, text];
         if (view.action) {
@@ -227,7 +233,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
         if (v === 1) { preview.style.transform = ""; preview.style.transformOrigin = ""; return; }
         preview.style.transform = `scale(${v})`;
         preview.style.transformOrigin = "0 0";
-      }, { visualDuration: 0.34 });
+      }, { visualDuration: 0.28 });
       spring.set(1);
     }
     const done = (): void => { leaving.delete(rec); badge?.remove(); paint(rec); };
@@ -256,7 +262,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     const frame = el("span", "cl-sx-flash");
     frame.setAttribute("aria-hidden", "true");
     rec.card.root.append(frame);
-    frame.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 520, easing: "ease-out" }).onfinish = () => frame.remove();
+    frame.animate([{ opacity: 0.9 }, { opacity: 0 }], { duration: 240, easing: EASE_OUT }).onfinish = () => frame.remove();
   };
   const slideLabel = (rec: WinRec): void => {
     if (reduced.matches) return;
@@ -276,7 +282,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
    * back with the reason; a window that cannot start one says so instead of doing nothing.
    */
   const newShell = (rec: WinRec): void => {
-    if (!rec.binding?.openNew) { refusals.set(rec, { message: "This window cannot start a shell. Close it and open a new one.", action: "none" }); paint(rec); return; }
+    if (!rec.binding?.openNew) { refusals.set(rec, { message: "This window cannot start a shell. Close it and open a new one.", action: "none", calm: false }); paint(rec); return; }
     const s = recordOf(rec);
     refusals.delete(rec);
     asked.add(rec);
@@ -290,10 +296,10 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
    * A window with no session has nothing else to show, so it claims its own refusal (a window's first open is a request too);
    * one that still shows a session claims it only if it asked for the new shell itself.
    */
-  const refused = (rec: WinRec, message: string, action: RefusalAction = "retry"): boolean => {
+  const refused = (rec: WinRec, message: string, action: RefusalAction = "retry", calm = false): boolean => {
     const requested = asked.delete(rec);
     if (!requested && rec.model.sessionId) return false;
-    refusals.set(rec, { message, action });
+    refusals.set(rec, { message, action, calm });
     unreachables.delete(rec);
     paint(rec);
     return true;
@@ -338,18 +344,22 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       root.querySelector<HTMLElement>(".cl-sx-title")!.textContent = rec.model.host;
       this.scroll = root.querySelector<HTMLElement>(".cl-sx-scroll")!;
       this.scroll.addEventListener("click", (event) => this.onClick(event));
+      // A row's actions replace its meta while it holds focus (sessions.css). The browser brings styles up to date when focus() moves, before
+      // it fires focusin, so the popover is marked before each focus() below, not in a focusin handler. A key does it at once; the mouse
+      // moving over the popover afterwards fades again (#427).
+      root.addEventListener("pointerover", () => { if (root.dataset.motion === "instant") root.dataset.motion = "animate"; });
       // Arrows walk the rows.
       root.addEventListener("keydown", (event) => {
         if ((event.key !== "ArrowDown" && event.key !== "ArrowUp") || (event.target as Element).closest(".cl-sx-name-input")) return;
         const rows = [...this.scroll.querySelectorAll<HTMLElement>(".cl-sx-main")];
         const at = rows.indexOf(document.activeElement as HTMLElement);
         const next = rows[Math.max(0, Math.min(rows.length - 1, at + (event.key === "ArrowDown" ? 1 : -1)))];
-        if (next) { event.preventDefault(); next.focus(); }
+        if (next) { event.preventDefault(); markMotion(root); next.focus(); }
       });
       // The canvas moving under it ends it: the card belongs to its window, not to the screen.
       cx.viewport.addEventListener("wheel", () => this.close(), { passive: true, signal: this.life.signal });
       this.render();
-      if (source === "keyboard") this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true });
+      if (source === "keyboard") { markMotion(root); this.scroll.querySelector<HTMLElement>(".cl-sx-main")?.focus({ preventScroll: true }); }
     }
     private readonly life = new AbortController();
     /** Closes the manager: at once after a key, with the popover fade after a pointer. */
@@ -554,7 +564,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       li.style.setProperty("--sx-open", String(Math.min(1, Math.max(0, -value / (width || 1)))));
     };
     let start: { id: number; x: number; y: number; base: number } | undefined, dragging = false, open = false;
-    const spring = new Spring(0, slide, { visualDuration: 0.3 });
+    const spring = new Spring(0, slide, { visualDuration: 0.26 });
     const down = (event: PointerEvent): void => {
       if (event.pointerType === "mouse" || (event.target as Element).closest(".cl-sx-act, .cl-sx-name-input")) return;
       width = acts.offsetWidth + 8;

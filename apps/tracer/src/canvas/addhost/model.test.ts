@@ -1,7 +1,7 @@
 /** Tests bounded SSH target parsing and the progress model used by the add-host flow. */
 // SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, test } from "bun:test";
-import { awaitingFresh, foldEvent, pendingTarget, type BootstrapEvent, type FailureKind } from "../../provisioning-client";
+import { awaitingFresh, foldEvent, pendingTarget, type BootstrapEvent, type FailureDetail, type FailureKind } from "../../provisioning-client";
 import { authLabel, failureDiagnostics, failureLine, guideFor, looksLikeSshConfig, matchListed, parseSshConfig, parseTarget, stagesOf } from "./model";
 
 const event = (step: BootstrapEvent["step"], extra: Partial<BootstrapEvent> = {}): BootstrapEvent => ({ sequence: 1, target: "h", attempt: 1, step, message: `${step} message`, elapsed_ms: 1, log_tail: [], ...extra });
@@ -282,4 +282,38 @@ test("early terminal publication selects only its canonical host-bound shim sess
   expect(fold(event("connect", { host_id: host, session_id: session })).sessionId).toBeUndefined();
   expect(fold(event("done", { host_id: "host", session_id: session })).sessionId).toBeUndefined();
   expect(fold(event("done", { host_id: host, session_id: "shell" })).sessionId).toBeUndefined();
+});
+
+/** #433 P3: the takeover failure page preserves the server's cause and close state. */
+test("takeover failures show the trusted manager and terminal messages unchanged", () => {
+  for (const [exit_status, message] of [
+    [73, "This machine has an infraternal agent from an earlier setup, but Take over could not confirm that only its own terminals were using it. No terminal was closed, and the old install's files were kept. Try again."],
+    [74, "Take over closed the terminals you confirmed, but could not confirm that the old infraternal agent was no longer in use. The old install's files were kept, and those terminals stay closed. Try again."],
+    [75, "This install or its open terminals changed since you reviewed them, so no terminal was closed and the old install was left as it was found. Try again to review it before taking over."],
+    [79, "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again."],
+    [80, "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again."],
+    [81, "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again."],
+  ] as const) {
+    const failure: FailureDetail = { kind: exit_status >= 80 ? "install" : "unrecognized_install", message, exit_status, failed_step: "install", log_tail: [] };
+    const guide = guideFor("fixture", failure);
+    expect(guide.happened).toBe(message);
+    expect(guide.fix).toBe("retry");
+    expect(guide.title).toBe("Take over on fixture didn't finish");
+    expect(failureLine(failure)).toBe("Take over didn't finish");
+  }
+});
+
+/** #433 P3: cached clients discard exit_status, so the wire kind must remain truthful on its own. */
+test("manager failures without exit status have a generic setup headline and retain the cause", () => {
+  for (const message of [
+    "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again.",
+    "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again.",
+  ]) {
+    const failure: FailureDetail = { kind: "install", failed_step: "install", message, log_tail: [] };
+    const guide = guideFor("fixture", failure);
+    expect(guide.title).toBe("Setting up fixture didn't finish");
+    expect(guide.happened).toBe(message);
+    expect(failureLine(failure)).toBe("Installing on the host didn't finish");
+    expect(guide.fix).toBe("retry");
+  }
 });

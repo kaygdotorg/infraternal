@@ -17,6 +17,7 @@
 //! Executable and runtime paths come from trusted node setup, never from action
 //! bodies.
 use crate::{
+    app_icons::IconStore,
     protocol::{Kind, Start},
     source_inventory::Snapshot,
     source_ipc::{Config, Helper},
@@ -40,7 +41,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -56,6 +57,8 @@ pub(super) struct Metadata {
     /// Last video sequence number used. Shared with the worker so a later lane
     /// carries on counting instead of repeating numbers.
     pub sequence: AtomicU64,
+    /// Latches only when the native companion confirms the target window closed.
+    pub gone: AtomicBool,
 }
 /// A session that has been prepared by the server.
 struct Prepared {
@@ -78,6 +81,8 @@ struct State {
     inventory: Option<Arc<Worker>>,
     /// The window inventory currently being paged through.
     snapshot: Option<Snapshot>,
+    /// App icons named by content hash, served by `desktop.source.icon` (#146).
+    icons: IconStore,
 }
 /// Shared innards of [`SourceBridge`].
 struct Inner {
@@ -233,6 +238,7 @@ impl SourceBridge {
                 prepared: HashMap::new(),
                 inventory: None,
                 snapshot: None,
+                icons: IconStore::default(),
             }),
         }))
     }
@@ -259,6 +265,7 @@ impl SourceBridge {
         sequence_floor: u64,
     ) -> Result<Value, PluginError> {
         start.validate().map_err(|_| PluginError::Rejected)?;
+        let passive_geometry = start.passive_geometry;
         if id.is_nil() || sequence_floor == u64::MAX {
             return Err(PluginError::Rejected);
         }
@@ -294,6 +301,7 @@ impl SourceBridge {
                     metadata: Arc::new(Metadata {
                         start: Mutex::new(start),
                         sequence: AtomicU64::new(sequence_floor),
+                        gone: AtomicBool::new(false),
                     }),
                     worker: None,
                     stopping: false,
@@ -301,6 +309,17 @@ impl SourceBridge {
             );
         }
         let prepared = state.prepared.get(&id).ok_or(PluginError::Rejected)?;
+        if prepared.metadata.gone.load(Ordering::Acquire) {
+            return Ok(json!({"session_id":id,"state":"gone"}));
+        }
+        if passive_geometry {
+            prepared
+                .metadata
+                .start
+                .lock()
+                .map_err(|_| PluginError::Rejected)?
+                .passive_geometry = true;
+        }
         // An active helper may advance concurrently; raising the floor must
         // never overwrite that newer counter or replay an older sequence.
         prepared
@@ -374,12 +393,12 @@ impl SourceBridge {
         }
         Ok(value)
     }
-    /// Starts a short-lived helper, sends it one command of `kind` (list or
-    /// status), returns its JSON answer, and retires the helper.
+    /// Starts a short-lived helper, sends one bounded command body, returns its
+    /// JSON answer, and retires the helper.
     ///
     /// One send-and-reply budget of 3 seconds covers everything. Only one such
     /// helper may run at a time; a second request is refused.
-    async fn idle_request(&self, kind: Kind) -> Result<Value, PluginError> {
+    async fn idle_request(&self, kind: Kind, body: Vec<u8>) -> Result<Value, PluginError> {
         let worker = {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
             if !state.enabled
@@ -406,7 +425,7 @@ impl SourceBridge {
                     // silence before the first byte. Idle capture receives keep
                     // their existing partial-frame-only deadline.
                     result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-                        helper.send(kind, b"{}").await?;
+                        helper.send(kind, &body).await?;
                         let (reply, body) = helper.receive().await?;
                         if reply == Kind::Error { return Err(std::io::ErrorKind::PermissionDenied.into()); }
                         serde_json::from_slice(&body).map_err(std::io::Error::other)
@@ -428,6 +447,10 @@ impl SourceBridge {
     /// Returns one page of the window inventory. Without a cursor it takes a
     /// fresh inventory from a helper and returns its first page; with a cursor it
     /// returns the next page of the current snapshot, if the cursor is valid.
+    ///
+    /// The helper is told which app icons this source already holds, so it
+    /// renders only new ones; their bytes go to the icon store, and the rows
+    /// carry just each icon's hash (#146).
     async fn windows(&self, cursor: Option<String>) -> Result<Value, PluginError> {
         if let Some(cursor) = cursor {
             let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
@@ -440,11 +463,24 @@ impl SourceBridge {
             }
             return snapshot.page();
         }
-        let inventory = self.idle_request(Kind::List).await?;
+        let known = self
+            .0
+            .state
+            .lock()
+            .map_err(|_| PluginError::Rejected)?
+            .icons
+            .known();
+        let mut request = json!({});
+        if !known.is_empty() {
+            request["known_icons"] = json!(known);
+        }
+        let body = serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)?;
+        let mut inventory = self.idle_request(Kind::List, body).await?;
         let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
         if !state.enabled {
             return Err(PluginError::Rejected);
         }
+        state.icons.absorb(&mut inventory);
         let mut snapshot = Snapshot::new(inventory)?;
         let page = snapshot.page()?;
         state.snapshot = Some(snapshot);
@@ -483,7 +519,7 @@ impl SourceBridge {
             }
         };
         let Some((worker, sender)) = sender else {
-            return self.idle_request(Kind::Status).await;
+            return self.idle_request(Kind::Status, b"{}".to_vec()).await;
         };
         let (reply, result) = oneshot::channel();
         sender
@@ -523,6 +559,16 @@ impl SourceBridge {
             }
             SourceRequest::Windows(cursor) => self.windows(cursor).await,
             SourceRequest::Clock(id) => self.clock(id).await,
+            SourceRequest::Icon { sha256, offset } => {
+                let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
+                if !state.enabled {
+                    return Err(PluginError::Rejected);
+                }
+                state
+                    .icons
+                    .chunk(&sha256, offset)
+                    .ok_or(PluginError::Rejected)
+            }
         }
     }
     /// Before a new lane for session `id`: fails if the previous worker is still
@@ -597,6 +643,7 @@ impl SourceBridge {
             }
             let record = state.prepared.get_mut(&id).ok_or(())?;
             if record.stopping
+                || record.metadata.gone.load(Ordering::Acquire)
                 || record
                     .worker
                     .as_ref()
@@ -637,7 +684,25 @@ impl SourceBridge {
 impl AgentPlugin for SourceBridge {
     /// Records what the connection to the server supports. If desktop lanes are
     /// not supported, running workers are cancelled but prepared sessions are kept.
+    ///
+    /// When the server offers desktop lanes on this connection, the source also
+    /// switches itself on (#146, D349): the server advertises the capability
+    /// only when it was built with app windows, this plugin is registered only on
+    /// macOS, and nothing else ever sent `desktop.up`, so a Mac host could list
+    /// windows but never start one. It is never switched off here: a link that
+    /// drops reports 0 and must keep prepared sessions for the next link, and
+    /// `desktop.down` stays the explicit way to turn capture off. The switch is
+    /// skipped while an explicit `desktop.up`/`desktop.down` holds the lifecycle
+    /// lock or an old cleanup is unjoined; the next link tries again.
     fn transport_capabilities(&mut self, capabilities: u64) {
+        if capabilities & WIRE.capability != 0
+            && let Ok(_lifecycle) = self.0.lifecycle.try_lock()
+            && let Ok(mut state) = self.0.state.lock()
+            && !state.enabled
+            && !state.prepared.values().any(|record| record.stopping)
+        {
+            state.enabled = true;
+        }
         if let Ok(mut state) = self.0.state.lock() {
             state.native_caps = Some(capabilities);
             if capabilities & WIRE.capability == 0 {

@@ -209,6 +209,10 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private alive = true;
     private finished = false;
 
+    /**
+     * Builds the card and its first step. `startEmpty` opens on the empty state, `animate` plays the card's
+     * entrance (ease-out, under 300 ms; off under reduced motion), and `review` replays a recorded run.
+     */
     constructor(startEmpty: boolean, animate: boolean, review?: Review) {
       this.win = canvas.openFlowWindow({ title: "Add hosts", icon: svg(ICON.plus, "is-line") });
       this.card = this.win.card.root;
@@ -243,7 +247,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.float.style.opacity = String(clamped);
         this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
         scrim.style.opacity = String(clamped);
-      }, { visualDuration: 0.32 });
+      }, { visualDuration: 0.26 });
       if (review?.failures.length) {
         this.run = review.run;
         this.jobs = review.failures.map((failure) => ({
@@ -469,6 +473,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       else this.startInstall(false);
     }
 
+    /** Draws the credentials page: one secret field for the hosts that need a key or password. */
     private renderCredentials(page: HTMLElement): void {
       const needing = this.selected.filter((host) => host.credentialRequired);
       const names = needing.map((host) => `${host.user}@${host.id}`);
@@ -481,7 +486,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
             <span class="ah-option-text"><span>Paste a key or password</span><span class="ah-option-hint">Encrypted with your passkey.</span></span></label>
         </div>
         <div class="ah-reveal" data-open="false"><div class="ah-reveal-in">
-          <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" aria-label="SSH key or password" placeholder="Paste a private key or password" tabindex="-1"></textarea>
+          <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" autocapitalize="none" autocorrect="off" aria-label="SSH key or password" placeholder="Paste a private key or password" tabindex="-1"></textarea>
         </div></div>`;
       this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="credentials"><span>Continue</span></button>`);
     }

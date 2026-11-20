@@ -45,7 +45,9 @@ struct Budget {
 /// the exception. The admin rule only selects the sudo group, which the outer
 /// privilege check independently checks. The network rule names one account.
 fn rule_allows_or_unknown(text: &[u8], user: &str) -> bool {
-    let digest = format!("{:x}", Sha256::digest(text));
+    // sha2 0.11 digests are byte arrays without `LowerHex`; format them the
+    // way the startup trust check does.
+    let digest = format!("{:x}", base16ct::HexDisplay(&Sha256::digest(text)));
     match digest.as_str() {
         "29f073ed9a8a6996b62f718e2bec962d5c84d311d23bb874830b4f9887eeabbf" => false,
         "f199e386a9297858331b00df07ed0b0ee5fcf4bea67f6c0bccc8a92b7e310bbd" => {

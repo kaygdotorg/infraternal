@@ -63,6 +63,7 @@ async fn wait_identity(
     .await
     .unwrap()
 }
+/// Bootstrap a fresh machine CA through the shipping HTTPS ceremony and scoped key derivation.
 async fn bootstrap_server(binary: &std::path::Path) -> (UnlockFixture, X509, ShippingServer, u128) {
     let (mut f, https_root) = shipping_fixture().await;
     let ca = f.root.join("fresh-ca");

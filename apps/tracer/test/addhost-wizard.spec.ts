@@ -16,23 +16,47 @@ type Probe = { views(): Array<{ id: string; windows: string[] }>; activeWindow()
 const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
-async function config(page: Page, body: Record<string, string>): Promise<void> {
+/** Sets the test double's scripted modes (`/__mock/bootstrap/config`); `drop: true` closes every open bootstrap socket, as a server restart does. */
+async function config(page: Page, body: Record<string, string | boolean>): Promise<void> {
   await page.request.post("/__mock/bootstrap/config", { data: body, maxRetries: 1 });
 }
 
-async function open(page: Page, query = "", settings: Record<string, string> = {}): Promise<void> {
-  // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
+/**
+ * Puts the shared test double in a known state before a case. Fixture setup is idempotent: retry only a reset keep-alive
+ * connection, never a product operation or an assertion failure.
+ *
+ * The double keeps one owner session for the whole run, and a page load mints a session only while nothing has signed the
+ * preview out. A spec that ran before this one and signed out leaves every page here without a canvas (`.cl-mockup` never
+ * appears), and only the full `/__mock/reset` clears that. The bootstrap reset alone clears this wizard's own state, not
+ * the session, so both run: each case starts from a known double instead of from the previous spec's leftovers.
+ */
+async function resetDouble(page: Page): Promise<void> {
+  await page.request.post("/__mock/reset", { maxRetries: 1 });
   await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+}
+
+/**
+ * Opens the clusters canvas at 1440x900 on a freshly reset double, with the double's `settings` applied first, and waits
+ * until the canvas has views. `query` is appended to the page address, and `theme` picks the display theme (D368's
+ * terminal list is checked in both). Every case starts here.
+ */
+async function open(page: Page, query = "", settings: Record<string, string> = {}, theme = "ink"): Promise<void> {
+  await resetDouble(page);
   if (Object.keys(settings).length) await config(page, settings);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=ink&bg=none${query}`);
+  await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => probe(page, (p) => p.views().length), { timeout: 45_000 }).toBeGreaterThan(0);
   await page.waitForTimeout(400);
 }
 
 const wizard = (page: Page) => page.locator(".ah-float");
+/**
+ * The wizard page named `name` that is on screen. When a page hands over to another (Back, Continue), the page being left stays
+ * in the DOM for its exit, inert and marked `is-leaving`, next to the new one; both then match a plain `data-page` selector, and
+ * the progress page's job rows exist in both. Ask for the page on screen, and look for rows inside it.
+ */
+const onScreen = (page: Page, name: string) => page.locator(`.ah-page[data-page='${name}']:not(.is-leaving)`);
 /** Buttons of the wizard card only: the canvas has its own Back, Close and Retry-like controls. */
 const inWizard = (page: Page, name: string) => wizard(page).getByRole("button", { name, exact: true });
 /** Waits until a closed wizard has finished its exit, so the next one is the only one on screen. */
@@ -223,6 +247,139 @@ test("an unknown host key shows its fingerprint and is never trusted without a c
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
+/**
+ * Clicks "Trust and continue" several times at once (a double or triple click, as under load) and proves the
+ * flow simply continues: one confirmation reaches the server, no error line, no failure screen (#449).
+ */
+async function trustWithRapidClicks(page: Page, clicks: number): Promise<void> {
+  await open(page);
+  await openWizard(page);
+  await watchForFailure(page);
+  const confirmations: string[] = [];
+  page.on("websocket", (socket) => socket.on("framesent", (frame) => {
+    if (typeof frame.payload === "string" && frame.payload.includes("confirm-host-key")) confirmations.push(frame.payload);
+  }));
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const trust = inWizard(page, "Trust and continue");
+  await expect(trust).toBeVisible();
+  await trust.click({ clickCount: clicks, delay: 0 });
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator(".ah-error")).toHaveCount(0);
+  expect(await sawFailure(page)).toEqual([]);
+  expect(confirmations).toHaveLength(1);
+}
+
+test("a server restart under the host-key step is recovered: the key is fetched again and can be trusted (#510)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  // The server restarts under the open card: its sockets close, and what the page knew of the key is gone.
+  await config(page, { drop: true });
+  // The card must recover by itself and ask again for the new observation, never stay on a dead "Trust" button.
+  const trust = inWizard(page, "Trust and continue");
+  await expect(trust).toBeVisible({ timeout: 15_000 });
+  await trust.click();
+  await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
+  await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-newkey.lab");
+});
+
+/** Counts the bootstrap sockets the page opens from now on, so a spec can tell how often a host is asked again. */
+function countBootstrapSockets(page: Page): () => number {
+  let opened = 0;
+  page.on("websocket", (socket) => { if (socket.url().includes("/v1/bootstrap/ws")) opened++; });
+  return () => opened;
+}
+
+test("a server that stays down is asked 15 times, then the host fails as an ordinary connection error (#510)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  // The server goes away and does not come back: every new socket is closed at once.
+  await config(page, { refuse: true });
+  await config(page, { drop: true });
+  await expect(onScreen(page, "failure").getByText("Setting up newkey.lab didn't finish")).toBeVisible({ timeout: 60_000 });
+  // One first re-ask plus 15 timed ones, and no more.
+  const total = opened();
+  expect(total).toBe(16);
+  await expect(wizard(page).locator(".ah-error")).toHaveCount(0);
+  // sleep: a count that is still growing after the limit would show here
+  await page.waitForTimeout(3_000);
+  expect(opened()).toBe(total);
+});
+
+test("closing the card while a host is being asked again stops the asking (#510)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  await expect(page.getByRole("heading", { name: /Check newkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  await config(page, { refuse: true });
+  await config(page, { drop: true });
+  await expect.poll(opened, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
+  await page.locator(".ah-close").click();
+  await inWizard(page, "Stop installing").click();
+  await gone(page);
+  const after = opened();
+  // sleep: any timer left behind by the closed card would open another socket in this time
+  await page.waitForTimeout(3_500);
+  expect(opened()).toBe(after);
+});
+
+test("a changed key after a restart is shown as changed, not as a new key (#510)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@changedkey.lab");
+  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  const opened = countBootstrapSockets(page);
+  await config(page, { drop: true });
+  // The card asks again by itself (a new socket), and the new observation is still the warning with its own button.
+  await expect.poll(opened, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
+  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  await expect(inWizard(page, "Replace trusted key")).toBeVisible({ timeout: 15_000 });
+  await expect(inWizard(page, "Trust and continue")).toHaveCount(0);
+  await inWizard(page, "Replace trusted key").click();
+  await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-changedkey.lab");
+});
+
+test("a key that is different after a restart's re-ask is called out as changed, not shown as the same question (#510, J558)", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  await addTyped(page, "kayg@newkey.lab");
+  const block = wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-keyblock");
+  await expect(block).toContainText(/SHA256:/, { timeout: 15_000 });
+  const before = await block.textContent();
+  // The person is comparing this fingerprint with the host when the server restarts, and the key the host presents
+  // is a different one by the time the card asks again (a machine in the path swapped it during the restart window).
+  await config(page, { rotateKey: true });
+  await config(page, { drop: true });
+  await expect.poll(() => block.textContent(), { timeout: 15_000 }).not.toBe(before);
+  // Same title, same neutral lede and the same "Trust and continue" in the same place: someone who already compared
+  // the first key clicks it. The page must say that the key differs from the one shown before the restart.
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-lede")).toContainText(/changed/i);
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey']:not(.is-leaving) .ah-hero")).toBeVisible();
+  // Evidence for the issue: the changed-key page at desktop and phone width.
+  for (const width of [1440, 393]) {
+    await page.setViewportSize({ width, height: width === 393 ? 852 : 900 });
+    // The page that just left must be gone, or its fading text shows through behind the new one.
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `rekeyed-after-restart-${width}.png`) });
+  }
+});
+
+test("a double click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
+  await trustWithRapidClicks(page, 2);
+});
+
+test("a triple click on Trust and continue continues once, without an error (#449)", async ({ page }) => {
+  await trustWithRapidClicks(page, 3);
+});
+
 /** Records every moment a failure screen, a failed row or a danger-toned hero is on screen, so a flow can prove it never showed one. */
 async function watchForFailure(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -386,9 +543,7 @@ test("the wizard works on a phone and keeps the footer on screen", async ({ brow
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true, baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}` });
   const page = await context.newPage();
   try {
-    // Fixture setup is idempotent: retry only a reset keep-alive connection,
-  // never a product operation or an assertion failure.
-  await page.request.post("/__mock/bootstrap/reset", { maxRetries: 1 });
+    await resetDouble(page);
     await page.goto("/?mock=1&proto=clusters&scene=3&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
     await openWizard(page);
@@ -528,17 +683,47 @@ test("leftovers: one Start fresh continues the same setup to done", async ({ pag
   await expect.poll(() => consoleWindows(page)).toContain("w-stale.lab");
 });
 
+/**
+ * D368 (#433, J205c legacy1): a stuck first install's own open terminal is listed before Start fresh closes it.
+ * The progress row's quick Start fresh must open that page too, never confirm from the row with the generic
+ * (nil) challenge, which the server refuses.
+ */
+test("leftovers with a terminal: the row opens the list, and only its button confirms", async ({ page }) => {
+  await open(page);
+  await openWizard(page);
+  const sent: Array<Record<string, unknown>> = [];
+  page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+    if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+  }));
+  await addTyped(page, "stale-terminals.lab");
+  const failure = page.locator(".ah-page[data-page='failure']");
+  await expect(failure.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Start fresh closes it.", { timeout: 15_000 });
+  await expect(failure.locator(".ui-kv-value")).toContainText(["root, bash on pts/0, since 17 Oct 2026, "]);
+  await expect(inWizard(page, "Close it and start fresh")).toBeVisible();
+  // Back to the list: the row's quick fix opens the same page and sends nothing.
+  await wizard(page).locator('[data-ah="back-progress"]').click();
+  await wizard(page).locator('[data-ah="fix-job"]').first().click();
+  await expect(failure.locator("[data-terminal-summary]")).toBeVisible();
+  expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+  await inWizard(page, "Close it and start fresh").click();
+  await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  const fresh = sent.filter((command) => command.action === "start-fresh");
+  expect(fresh).toHaveLength(1);
+  expect(fresh[0]?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+});
+
 test("leftovers: Back returns to the host list and Start fresh needs the server's challenge", async ({ page }) => {
   await open(page);
   await openWizard(page);
   await addTyped(page, "stale.lab");
   await expect(page.getByRole("heading", { name: "This host has leftovers from an earlier setup" })).toBeVisible({ timeout: 15_000 });
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
   // The row offers the same one tap instead of a retry that would only find the leftovers again.
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Start fresh");
-  await page.locator(".ah-job-fix").click();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Start fresh");
+  await progress.locator(".ah-job-fix").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -551,8 +736,8 @@ test("a setup that is still running: wait, then try again", async ({ page }) => 
   expect(await heroTone(page)).toBeNull();
   await expect(inWizard(page, "Start fresh")).toHaveCount(0);
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await page.locator(".ah-job-retry").click();
+  await expect(onScreen(page, "progress")).toBeVisible();
+  await onScreen(page, "progress").locator(".ah-job-retry").click();
   await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
 });
 
@@ -639,6 +824,43 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `no-account-${viewport.width}.png`) });
   });
 
+  test(`a locked server offers Unlock on the card and carries on after it at ${viewport.width} (#510)`, async ({ page }) => {
+    // The card opened while the server was unlocked, then the server restarted and locked again: the card's own
+    // check passed, so the lock arrives as the host's failure. The card must not be a dead end.
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock.lab");
+    const failure = onScreen(page, "failure");
+    await expect(failure.getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await expect(failure).toContainText("administrator passkey");
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `locked-card-${viewport.width}.png`) });
+    // The same Unlock as the host-connections toast: it runs the shared ceremony, then the host carries on.
+    await wizard(page).locator("footer, .ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock.lab");
+  });
+
+  test(`after Unlock a host whose password was used once asks for it again, and says why at ${viewport.width} (#510)`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "kayg@relock-pw.lab");
+    await expect(page.getByRole("heading", { name: /Sign in to relock-pw.lab/ })).toBeVisible({ timeout: 15_000 });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect(onScreen(page, "failure").getByRole("heading", { name: "Host connections are locked" })).toBeVisible({ timeout: 15_000 });
+    await wizard(page).locator(".ah-foot").getByRole("button", { name: "Unlock", exact: true }).click();
+    // The password was sent once and is gone: a retry would fail to sign in, so the card asks for it again.
+    const choose = onScreen(page, "choose");
+    await expect(choose.locator(".ah-lede")).toContainText("Your password was used once and isn't kept", { timeout: 15_000 });
+    await page.screenshot({ path: tracerEvidencePath("addhost-510", `sign-in-again-${viewport.width}.png`) });
+    await page.getByText("Sign in with a password").click();
+    await page.locator("[data-secret='password']").fill("not-a-real-password");
+    await inWizard(page, "Sign in").click();
+    await expect.poll(() => consoleWindows(page), { timeout: 20_000 }).toContain("w-relock-pw.lab");
+  });
+
   test(`a failed host's progress row says it in one line beside its name at ${viewport.width}`, async ({ page }) => {
     await open(page);
     await page.setViewportSize(viewport);
@@ -701,7 +923,8 @@ for (const [host, title] of [
     await expect(inWizard(page, "Try again")).toHaveCount(0);
     await expect(inWizard(page, "Retry")).toHaveCount(0);
     await inWizard(page, "Back").click();
-    await expect(page.locator(".ah-job-retry")).toBeHidden();
+    await expect(onScreen(page, "progress")).toBeVisible();
+    await expect(onScreen(page, "progress").locator(".ah-job-retry")).toBeHidden();
     await page.screenshot({ path: tracerEvidencePath("addhost-394", `refusal-${host.split(".")[0]}-1440.png`) });
   });
 }
@@ -780,10 +1003,11 @@ test("root: Back from the Take over confirmation changes nothing, and the row as
   await inWizard(page, "Back").click();
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   await inWizard(page, "Back").click();
-  await expect(page.locator(".ah-page[data-page='progress']")).toBeVisible();
-  await expect(page.locator(".ah-job-retry")).toBeHidden();
-  await expect(page.locator(".ah-job-fix")).toHaveText("Take over");
-  await page.locator(".ah-job-fix").click();
+  const progress = onScreen(page, "progress");
+  await expect(progress).toBeVisible();
+  await expect(progress.locator(".ah-job-retry")).toBeHidden();
+  await expect(progress.locator(".ah-job-fix")).toHaveText("Take over");
+  await progress.locator(".ah-job-fix").click();
   // The row opens the page, never the action itself.
   await expect(page.getByRole("heading", { name: "takeover.lab is set up elsewhere" })).toBeVisible();
   expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
@@ -799,3 +1023,89 @@ test("rootless: a finished install of another server offers no Take over", async
   await expect(inWizard(page, "Try again")).toBeVisible();
   await page.screenshot({ path: tracerEvidencePath("addhost-takeover", "rootless-1440.png") });
 });
+
+/** D368: terminal details are visible before consent, at both required sizes and themes. */
+for (const theme of ["ink", "paper"]) for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`Take over lists terminals before closing them: ${theme} ${viewport.width}`, async ({ page }) => {
+    await open(page, "", {}, theme);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    const sent: Array<Record<string, unknown>> = [];
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* binary frames */ } }
+    }));
+    await addTyped(page, "root@takeover-terminals.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    const confirm = wizard(page).locator(".ah-page[data-page='takeover']");
+    await expect(confirm.locator("[data-terminal-summary]")).toHaveText("1 open terminal. Take over closes it.");
+    await expect(inWizard(page, "Close it and take over")).toBeVisible();
+    await expect(page.locator(".ah-float")).toHaveCount(1);
+    await expect(confirm.locator(".ui-kv-value")).toContainText([TAKEOVER_INSTALL, "root, bash on pts/0 and 1 other program, since 17 Oct 2026, "]);
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await confirm.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const summary = root.querySelector("[data-terminal-summary]")!.getBoundingClientRect();
+      return { title: title.left, summary: summary.left, right: summary.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.summary)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `terminals-${theme}-${viewport.width}.png`) });
+    await inWizard(page, "Back").click();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toBeVisible();
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    await wizard(page).locator('[data-ah="review-take-over"]').click();
+    await wizard(page).locator('[data-ah="take-over"]').click();
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(1);
+    expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+  });
+}
+
+/** #433 P3: the production failure page preserves each close state from the server without guessing. */
+for (const [status, message] of [
+  [79, "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again."],
+  [80, "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again."],
+  [81, "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again."],
+] as const) for (const width of [1440, 393]) {
+  test(`takeover failure copy and alignment: status ${status} width ${width}`, async ({ page }) => {
+    await page.routeWebSocket("**/v1/bootstrap/ws", (socket) => {
+      const server = socket.connectToServer();
+      server.onMessage((data) => {
+        const event = JSON.parse(String(data)) as { step?: string; message?: string; failure?: { kind: string; message: string; exit_status?: number; takeover?: unknown }; leftovers?: unknown };
+        if (event.failure?.kind === "unrecognized_install") {
+          event.step = "failed";
+          event.message = "Take over didn't finish";
+          event.failure.message = message;
+          event.failure.kind = status >= 80 ? "install" : "unrecognized_install";
+          event.failure.exit_status = status;
+          delete event.failure.takeover;
+          delete event.leftovers;
+        }
+        socket.send(JSON.stringify(event));
+      });
+    });
+    await open(page);
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 852 });
+    await openWizard(page);
+    await addTyped(page, "root@takeover.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    await expect(page.getByRole("heading", { name: "Take over on takeover.lab didn't finish", exact: true })).toBeVisible();
+    const failure = onScreen(page, "failure");
+    await expect(failure.locator(".ah-lede")).toHaveText(message);
+    await expect(inWizard(page, "Try again")).toBeVisible();
+    await expect(wizard(page).locator('[data-ah="review-take-over"]')).toHaveCount(0);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    const edges = await failure.evaluate((root) => {
+      const title = root.querySelector(".ah-title")!.getBoundingClientRect();
+      const text = root.querySelector(".ah-lede")!.getBoundingClientRect();
+      return { title: title.left, text: text.left, right: text.right, width: innerWidth };
+    });
+    expect(Math.abs(edges.title - edges.text)).toBeLessThanOrEqual(0.5);
+    expect(edges.right).toBeLessThanOrEqual(edges.width);
+    await page.screenshot({ path: tracerEvidencePath("addhost-takeover", `failure-${status}-${width}.png`) });
+  });
+}

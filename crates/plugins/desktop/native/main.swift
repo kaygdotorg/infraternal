@@ -73,9 +73,9 @@ private var companionInput = FileHandle.standardInput
 private var companionOutput = FileHandle.standardOutput
 
 /// Why an operation failed: `invalid` (malformed or out-of-range request), `permission` (Screen
-/// Recording or Accessibility missing) or `unavailable` (window closed, encoder or capture
-/// failed). The text sent to the caller is generic; details go to standard error.
-enum HelperFailure: Error { case invalid, permission, unavailable }
+/// Recording or Accessibility missing), `gone` (WindowServer confirmed closure) or
+/// `unavailable` (temporary failure). The text sent to the caller stays generic.
+enum HelperFailure: Error { case invalid, permission, gone, unavailable }
 
 /// Connects to the Unix socket named by `--socket PATH` and uses it for all packets.
 ///
@@ -204,7 +204,7 @@ private final class Session {
     /// off.
     func command(_ kind: UInt8, _ body: [String: Any]) throws -> (UInt8, [String: Any]) {
         switch kind {
-        case 1: return (65,try inventory())
+        case 1: return (65,try inventory(knownIcons: body["known_icons"]))
         case 2:
             guard geometry == nil && screen == nil, CGPreflightScreenCaptureAccess(), AXIsProcessTrusted(),
                   let target = body["target"] as? [String: Any], let type = target["type"] as? String,
@@ -218,7 +218,7 @@ private final class Session {
                     surfacePending = true
                 } else if type == "window" {
                     guard let id = target["window_id"] as? UInt32, let pid = target["owner_pid"] as? Int32 else { throw HelperFailure.invalid }
-                    geometry = try WindowGeometry(id:id,pid:pid,size:size)
+                    geometry = try WindowGeometry(id:id,pid:pid,size:size,passive:body["passive_geometry"] as? Bool == true)
                 } else if type == "screen" {
                     guard let id = target["display_id"] as? UInt32, CGDisplayIsActive(id) != 0 else { throw HelperFailure.invalid }
                     displayID = id; screen = CGDisplayBounds(id)
@@ -231,11 +231,13 @@ private final class Session {
                 return (66,state())
             } catch { _ = stop(); throw error }
         case 3:
+            if geometry?.closed == true { throw HelperFailure.gone }
             guard geometry?.exists != false, geometry != nil || screen != nil, let w = body["width"] as? Int, let h = body["height"] as? Int else { throw HelperFailure.invalid }
             try geometry?.resize(body); output = CGSize(width:w,height:h)
             if encoderMode { try encoder.configure(width:w,height:h) }
             return (66,state())
         case 4:
+            if geometry?.closed == true { throw HelperFailure.gone }
             if let displayID {
                 guard CGDisplayIsActive(displayID) != 0 else { throw HelperFailure.unavailable }
                 screen = CGDisplayBounds(displayID)
@@ -248,7 +250,10 @@ private final class Session {
                 guard CGDisplayIsActive(displayID) != 0 else { throw HelperFailure.unavailable }
                 screen = CGDisplayBounds(displayID)
             }
-            guard geometry?.exists != false else { throw HelperFailure.unavailable }
+            if let geometry {
+                if body["check_window"] as? Bool == true { geometry.follow() }
+                if geometry.closed { throw HelperFailure.gone }
+            }
             let ticks = mach_absolute_time()
             var result = state(); result["capture_ticks"] = ticks; result["capture_ns"] = nanos(ticks)
             return (68,result)
@@ -337,7 +342,9 @@ DispatchQueue.global(qos:.userInteractive).async {
                 }
             } catch {
                 let message = error as? HelperFailure == .permission ? "Screen Recording and Accessibility are required." : "The desktop operation is unavailable."
-                try sendPacket(69,try json(["error":message]))
+                var reply = ["error":message]
+                if error as? HelperFailure == .gone { reply["state"] = "gone" }
+                try sendPacket(69,try json(reply))
             }
         }
     } catch {

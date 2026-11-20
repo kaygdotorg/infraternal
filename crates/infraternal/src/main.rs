@@ -31,6 +31,12 @@ mod restart;
 mod restart_binary;
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 mod restart_image;
+/// Owns the server's private, credential-checked control endpoint.
+#[cfg(all(
+    feature = "plugin-server",
+    any(feature = "remote", target_os = "linux")
+))]
+mod server_control;
 mod shim_cli;
 #[cfg(feature = "remote")]
 mod sign_in;
@@ -40,11 +46,17 @@ mod ssh_askpass;
 mod ssh_internal;
 #[cfg(test)]
 mod test_executable;
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 mod up;
 
 #[cfg(feature = "plugin-server")]
 mod install;
+/// Moves an existing install's data folder to the D395 default [#516].
+#[cfg(feature = "plugin-server")]
+mod install_move;
+/// OS-standard default folders for `server init` [D395].
+#[cfg(feature = "plugin-server")]
+mod install_paths;
 
 use std::{
     io::{self, IsTerminal, Write},
@@ -52,6 +64,13 @@ use std::{
     process::ExitCode,
 };
 
+#[cfg(all(
+    any(feature = "plugin-server", feature = "plugin-mesh"),
+    target_os = "linux"
+))]
+use infraternal_plugin_mesh::host_firewall;
+#[cfg(all(feature = "plugin-server", target_os = "linux"))]
+use infraternal_plugin_mesh::host_firewall::{AllowRule, Listener, Policy, Protocol};
 #[cfg(feature = "plugin-server")]
 use std::net::SocketAddr;
 
@@ -78,6 +97,18 @@ struct ServerArgs {
     tls_key: Option<PathBuf>,
     behind_proxy: bool,
     trusted_proxies: Vec<infraternal_server::ProxyNetwork>,
+    /// Interface restriction for the application listener's host firewall rule.
+    host_firewall_listen_interface: Option<String>,
+    /// Interface restriction for the remote listener's host firewall rule.
+    host_firewall_remote_interface: Option<String>,
+    /// Peer ranges permitted to use the remote listener.
+    host_firewall_remote_sources: Vec<String>,
+    /// Interfaces with an explicitly retained broad host input allowance.
+    host_firewall_accept_interfaces: Vec<String>,
+    /// Extra typed host input rules, including explicit administrator paths.
+    host_firewall_allow: Vec<String>,
+    /// Clear the server policy from the shared host table during a system install.
+    host_firewall_off: bool,
 }
 
 /// Options controlling a user or system service installation.
@@ -91,6 +122,21 @@ struct InstallArgs {
     force: bool,
     name: String,
 }
+
+/// The global allocator of static (musl) builds (#522, owner decision
+/// 2026-11-16): mimalloc.
+///
+/// One static binary serves every product role, so this applies to the
+/// server, the infraternal agent (and the `GotaTun` mesh engine inside it) and
+/// every per-session shim alike. musl's own allocator returns freed memory to
+/// the kernel eagerly and the next burst faults it in again, which ran
+/// `GotaTun` at about half of glibc's speed; mimalloc keeps freed memory for
+/// reuse and runs it at glibc's speed. glibc and macOS builds use the C
+/// library's allocator. Static builds also turn transparent huge pages off
+/// first thing (see `harden_startup`), which keeps mimalloc's arenas small.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
     run_invocation()
@@ -118,6 +164,17 @@ fn run_invocation() -> ExitCode {
     if harden_startup().is_err() {
         return ExitCode::FAILURE;
     }
+    #[cfg(all(
+        any(feature = "plugin-server", feature = "plugin-mesh"),
+        target_os = "linux"
+    ))]
+    if let Some(result) = run_internal_host_firewall_command() {
+        return result;
+    }
+    #[cfg(all(feature = "plugin-server", target_os = "linux"))]
+    if let Some(result) = install_move::manager::run_if_requested() {
+        return result;
+    }
     // The macOS PTY child's private entry runs before any runtime or thread
     // exists: it drops privileges and execs the person's shell (D335, #328).
     #[cfg(target_os = "macos")]
@@ -142,6 +199,25 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    #[cfg(all(machine_up, target_os = "macos"))]
+    if let Some(result) = infraternal_plugin_mesh::macos_service::remove_if_requested() {
+        return result;
+    }
+    // The root agent retiring the rootless install it replaced (D376, #399).
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    if let Some(result) = remote::promotion_retire_if_requested() {
+        return result;
+    }
+    // An abandoned root upgrade's cleanup, as root (D376, J465 P1).
+    #[cfg(all(feature = "remote", feature = "ssh", target_os = "linux"))]
+    if let Some(result) = remote::promotion_abandon_if_requested() {
+        return result;
+    }
+    // A root upgrade's relay, started by sudo, doas or su (D376, #399).
+    #[cfg(all(feature = "remote", target_os = "linux"))]
+    if let Some(result) = infraternal_agent::privilege_relay_host::run_if_requested() {
+        return result;
+    }
     #[cfg(feature = "plugin-agent")]
     if let Some(result) = infraternal_agent::startup_guard::run_if_requested() {
         return result;
@@ -154,6 +230,11 @@ fn run_invocation() -> ExitCode {
     }
     #[cfg(feature = "ssh")]
     if let Some(result) = ssh_internal::run_if_requested() {
+        return result;
+    }
+    // One install step of a root upgrade, bridged to the host's relay (D376).
+    #[cfg(feature = "ssh")]
+    if let Some(result) = infraternal_plugin_ssh::relay_session::run_if_requested() {
         return result;
     }
     #[cfg(all(feature = "session-payload", target_os = "linux"))]
@@ -202,6 +283,40 @@ fn run_invocation() -> ExitCode {
     dispatch_selected_action(&registry, &selected, json_output)
 }
 
+/// Handle the systemd-only command that applies the root-owned saved host policy.
+#[cfg(all(
+    any(feature = "plugin-server", feature = "plugin-mesh"),
+    target_os = "linux"
+))]
+fn run_internal_host_firewall_command() -> Option<ExitCode> {
+    let mut arguments = std::env::args_os();
+    let _binary = arguments.next();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("__host-firewall-apply")) {
+        return None;
+    }
+    if arguments.next().is_some() {
+        eprintln!("infraternal host firewall apply: unexpected argument");
+        return Some(ExitCode::FAILURE);
+    }
+    // Fails open: a saved table that would drop sshd's current ports is not
+    // enforced, and the unit fails so the journal says why (J671, #483).
+    let result = host_firewall::boot_apply_from_config();
+    match result {
+        Ok(report) => {
+            print!("{report}");
+            Some(ExitCode::SUCCESS)
+        }
+        Err(error @ host_firewall::PolicyError::FailedOpen { .. }) => {
+            eprintln!("<2>infraternal host firewall: {error}");
+            Some(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            eprintln!("infraternal host firewall apply failed: {error}");
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn dispatch_selected_action(
     registry: &ActionRegistry,
     selected: &cli::command_tree::SelectedCommand<'_>,
@@ -219,6 +334,9 @@ fn dispatch_selected_action(
 }
 
 // Keep feature-gated command handlers beside their registry mappings.
+/// Dispatch one registered action to its local, remote, or server handler.
+///
+/// Feature-gated handlers share this path so unavailable actions return the same CLI result.
 fn dispatch_action(
     registry: &ActionRegistry,
     action: &ActionDefinition,
@@ -331,12 +449,13 @@ fn dispatch_action(
         }
         CliHandler::RemoteAgent
         | CliHandler::ServerRestart
+        | CliHandler::ServerMeshStatus
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn dispatch_up_action(
     action: &ActionDefinition,
     matches: &ArgMatches,
@@ -349,7 +468,7 @@ fn dispatch_up_action(
     }
 }
 
-#[cfg(not(all(feature = "remote", target_os = "linux")))]
+#[cfg(not(machine_up))]
 fn dispatch_up_action(
     action: &ActionDefinition,
     matches: &ArgMatches,
@@ -464,13 +583,10 @@ fn report_mesh_service_status_result(
     }
 }
 
-/// Says what `enforcement: unavailable` means for someone reading `mesh status`.
-///
-/// The server is named as something that can reach this Mac, not only as something
-/// the Mac connects to: until the slice-3 filter (#265), the coordinator's peer is
-/// installed without an inbound check, so the server host reaches every port here.
+/// Says where `mesh status` enforces network access on this Mac.
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
-const MESH_ENFORCEMENT_DETAILS: &str = "Access rules are not enforced on this Mac yet. Until they are, the server can reach every port on this Mac, and other peers connect only if they are allowed to reach every port on it.";
+const MESH_ENFORCEMENT_DETAILS: &str =
+    "Mesh access rules are enforced in the GotaTun userspace packet filter on this Mac.";
 
 /// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
@@ -557,7 +673,8 @@ fn run_sign_in(_action: &ActionDefinition, matches: &ArgMatches, json_output: bo
     }
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
+/// Run the `up` action with its server origin and typed host rules.
 fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(server) = matches.get_one::<String>("server") else {
         return report_failure_as(
@@ -568,10 +685,25 @@ fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
             Exit::Usage,
         );
     };
-    up::run(server, json_output)
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-server", feature = "plugin-mesh")
+    ))]
+    let host_firewall_allow = matches
+        .get_many::<String>("host_firewall_allow")
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    #[cfg(not(all(
+        target_os = "linux",
+        any(feature = "plugin-server", feature = "plugin-mesh")
+    )))]
+    let host_firewall_allow = Vec::new();
+    up::run(server, &host_firewall_allow, json_output)
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn run_up_system(matches: &ArgMatches, json_output: bool) -> ExitCode {
     let Some(server) = matches.get_one::<String>("server") else {
         return report_failure_as(
@@ -699,6 +831,11 @@ fn status_result(
         Activity::Unknown => CommandState::Unknown,
     };
     // A component without a runtime yet is not something this machine has.
+    // Only server builds with remote access append the CA row below.
+    #[cfg_attr(
+        not(all(feature = "remote", feature = "plugin-server")),
+        allow(unused_mut)
+    )]
     let mut components: Vec<_> = node
         .components
         .iter()
@@ -707,6 +844,10 @@ fn status_result(
         .collect();
     // People get the components table; the role id is a scripting detail.
     let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    #[cfg_attr(
+        not(all(feature = "remote", feature = "plugin-server")),
+        allow(unused_mut)
+    )]
     let mut rows: Vec<Vec<String>> = node
         .components
         .iter()
@@ -1156,6 +1297,7 @@ fn run_server(matches: &ArgMatches, json_output: bool) -> ExitCode {
 }
 
 #[cfg(feature = "plugin-server")]
+/// Return whether any server configuration option was supplied on the command line.
 fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
     [
         "listen",
@@ -1171,9 +1313,23 @@ fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
     .any(|name| matches.get_one::<String>(name).is_some())
         || matches.get_flag("behind_proxy")
         || matches.get_many::<String>("trusted_proxy").is_some()
+        || matches.get_many::<String>("host_firewall_allow").is_some()
+        || matches
+            .get_many::<String>("host_firewall_accept_interface")
+            .is_some()
+        || matches
+            .get_one::<String>("host_firewall_listen_interface")
+            .is_some()
+        || matches
+            .get_one::<String>("host_firewall_remote_interface")
+            .is_some()
+        || matches
+            .get_many::<String>("host_firewall_remote_source")
+            .is_some()
 }
 
 #[cfg(feature = "plugin-server")]
+/// Parse listener, proxy, persistence and host-policy options into server settings.
 fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     let listen = matches.get_one::<String>("listen").map_or_else(
         || Ok(SocketAddr::from(([127, 0, 0, 1], 7443))),
@@ -1227,12 +1383,131 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
         tls_key: matches.get_one::<String>("tls_key").map(PathBuf::from),
         behind_proxy: matches.get_flag("behind_proxy"),
         trusted_proxies,
+        host_firewall_listen_interface: matches
+            .get_one::<String>("host_firewall_listen_interface")
+            .cloned(),
+        host_firewall_remote_interface: matches
+            .get_one::<String>("host_firewall_remote_interface")
+            .cloned(),
+        host_firewall_remote_sources: matches
+            .get_many::<String>("host_firewall_remote_source")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_accept_interfaces: matches
+            .get_many::<String>("host_firewall_accept_interface")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_allow: matches
+            .get_many::<String>("host_firewall_allow")
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect(),
+        host_firewall_off: matches
+            .try_get_one::<bool>("host_firewall_off")
+            .ok()
+            .flatten()
+            .copied()
+            .unwrap_or(false),
     })
 }
 
+/// Convert server flags into a root-owned host firewall policy.
+#[cfg(all(feature = "plugin-server", target_os = "linux"))]
+fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
+    if args.behind_proxy == args.trusted_proxies.is_empty() {
+        return Err("--behind-proxy and --trusted-proxy must be configured together".to_owned());
+    }
+    let mut admin_rules = args
+        .host_firewall_allow
+        .iter()
+        .map(|value| {
+            value
+                .parse::<AllowRule>()
+                .map_err(|_| "host firewall allow rule is invalid".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Any TCP admin rule may be sshd's (it need not listen on 22); the live
+    // session, when there is one, is checked port-exactly at install time.
+    // Without one, the session's port is admitted from anywhere, as `up` does
+    // (J589): never pinned to the installer's address or interface.
+    if !admin_rules
+        .iter()
+        .any(|rule| rule.protocol == Protocol::Tcp)
+    {
+        let active_ssh = std::env::var("SSH_CONNECTION").map_err(|_| {
+            "set an explicit TCP --host-firewall-allow rule for sshd's port".to_owned()
+        })?;
+        admin_rules.push(
+            host_firewall::admin_rule_for_ssh_session(&active_ssh).map_err(|_| {
+                "the active SSH path could not be added to the host policy".to_owned()
+            })?,
+        );
+    }
+    if args.host_firewall_remote_interface.is_some() && args.remote.remote_listen.is_none()
+        || !args.host_firewall_remote_sources.is_empty() && args.remote.remote_listen.is_none()
+    {
+        return Err("remote host firewall settings need --remote-listen".to_owned());
+    }
+    let proxy_sources = if args.behind_proxy {
+        args.trusted_proxies
+            .iter()
+            .map(|network| network.to_string().parse())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "trusted proxy firewall source is invalid".to_owned())?
+    } else {
+        Vec::new()
+    };
+    let mut listeners = vec![Listener {
+        interface: args.host_firewall_listen_interface.clone(),
+        address: args.listen,
+        protocol: Protocol::Tcp,
+        sources: proxy_sources,
+    }];
+    if let Some(address) = args.remote.remote_listen {
+        let sources = args
+            .host_firewall_remote_sources
+            .iter()
+            .map(|source| {
+                source
+                    .parse()
+                    .map_err(|_| "remote host firewall source is invalid".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        listeners.push(Listener {
+            interface: args.host_firewall_remote_interface.clone(),
+            address,
+            protocol: Protocol::Tcp,
+            sources: sources.clone(),
+        });
+        listeners.push(Listener {
+            interface: args.host_firewall_remote_interface.clone(),
+            address,
+            protocol: Protocol::Udp,
+            sources,
+        });
+    }
+    let policy = Policy {
+        admin_rules,
+        accept_interfaces: args.host_firewall_accept_interfaces.clone(),
+        listeners,
+        mesh_enabled: false,
+        mesh_udp_port: None,
+    };
+    host_firewall::validate(&policy).map_err(|_| {
+        "host firewall policy needs valid rules and an explicit TCP admin path for sshd".to_owned()
+    })?;
+    Ok(policy)
+}
+
+/// Plan or perform `server init`: choose absolute folders, confirm, then install the service.
 #[cfg(feature = "plugin-server")]
 fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
-    let args = match server_args(matches) {
+    let mut args = match server_args(matches) {
         Ok(args) => args,
         Err(error) => {
             return report_failure(
@@ -1244,12 +1519,104 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         }
     };
     let dry_run = matches.get_flag("dry_run");
+    let scope = if matches.get_flag("system") {
+        install_paths::Scope::System
+    } else {
+        install_paths::Scope::User
+    };
+    let environment = install_paths::Environment::detect();
+    let name = matches
+        .get_one::<String>("name")
+        .map_or("infraternal-server", String::as_str);
+    // Init, unlike the readers, never falls back to `./data` or the cwd, and a
+    // re-run keeps what the installed unit records [#516, D395].
+    let roots = infraternal_status::Roots::detect();
+    let installed = install_paths::Installed {
+        unit: infraternal_status::recorded_server_unit(
+            &roots,
+            match scope {
+                install_paths::Scope::System => infraternal_status::Scope::System,
+                install_paths::Scope::User => infraternal_status::Scope::User,
+            },
+            name,
+        ),
+        system_data: infraternal_status::server_data_directory(&roots),
+        system_unit: infraternal_status::recorded_server_unit(
+            &roots,
+            infraternal_status::Scope::System,
+            name,
+        )
+        .is_some(),
+    };
+    if let Some(warning) = install_paths::root_user_scope_warning(scope, &installed, &environment) {
+        eprintln!("{warning}");
+    }
+    let folders = install_paths::check_scope(scope, dry_run, &environment).and_then(|()| {
+        install_paths::resolve_server_init(
+            scope,
+            matches.get_one::<String>("data").map(Path::new),
+            matches.get_one::<String>("web_root").map(Path::new),
+            &installed,
+            &environment,
+        )
+    });
+    match folders {
+        Ok(folders) => {
+            args.data = folders.data;
+            args.web_root = folders.web_root;
+        }
+        Err(error) => {
+            return report_failure(
+                "server init",
+                "The server folders could not be chosen.",
+                error.to_string(),
+                json_output,
+            );
+        }
+    }
+    // An existing unit's non-standard folder moves to the D395 one (owner,
+    // 2026-11-15: "change for existing installs too"); `--data` keeps any folder.
+    let relocation = match plan_server_data_move(
+        matches.get_one::<String>("data").is_some(),
+        installed
+            .unit
+            .as_ref()
+            .and_then(|unit| unit.data.as_deref()),
+        scope,
+        &environment,
+        &roots,
+        name,
+    ) {
+        Ok(relocation) => relocation,
+        Err(error) => {
+            return report_failure(
+                "server init",
+                "The existing data folder cannot be moved to its standard location.",
+                error,
+                json_output,
+            );
+        }
+    };
+    if let Some(relocation) = &relocation {
+        args.data.clone_from(&relocation.to);
+        relocation.relocate_path(&mut args.web_root);
+        relocation.relocate_path(&mut args.tls_cert);
+        relocation.relocate_path(&mut args.tls_key);
+        relocation.relocate_path(&mut args.remote.remote_ca_dir);
+    }
     let yes = matches.get_flag("yes");
     if let Err(error) = confirm_server_setup(
         yes,
         dry_run,
         args.listen,
-        &args.data,
+        &match &relocation {
+            Some(relocation) => format!(
+                "{} (moved from {})",
+                args.data.display(),
+                relocation.from.display()
+            ),
+            _ => args.data.display().to_string(),
+        },
         if matches.get_flag("system") {
             "system"
         } else {
@@ -1263,10 +1630,6 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             json_output,
         );
     }
-    let name = matches
-        .get_one::<String>("name")
-        .cloned()
-        .unwrap_or_else(|| "infraternal-server".to_owned());
     if matches.get_flag("system") && matches.get_flag("user") {
         return report_failure(
             "server init",
@@ -1280,17 +1643,162 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         user: !matches.get_flag("system"),
         dry_run,
         force: matches.get_flag("force"),
-        name: name.clone(),
+        name: name.to_owned(),
     };
-    install_server("server init", &args, &install_args, json_output)
+    let moved = match &relocation {
+        None => None,
+        Some(relocation) if dry_run => {
+            Some((relocation.describe(), relocation_json(relocation, None)))
+        }
+        Some(relocation) => {
+            let admitted = match install::prepare_move(&args, &install_args, relocation) {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data move was refused.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            };
+            let service = install_move::Systemd {
+                program: admitted.systemctl.clone(),
+                user: !install_args.system,
+                service: format!("{name}.service"),
+                listen: args.listen,
+                tls: args.tls_cert.is_some(),
+            };
+            #[cfg(target_os = "linux")]
+            let result = install_move::manager::trigger(relocation, service, admitted);
+            #[cfg(not(target_os = "linux"))]
+            let result =
+                install_move::apply(relocation, &service, std::time::SystemTime::now(), || {
+                    admitted.publish()
+                });
+            match result {
+                Ok(outcome) => {
+                    install::finish_move(!install_args.system, &args.data);
+                    Some((
+                        outcome.describe(relocation),
+                        relocation_json(relocation, Some(&outcome)),
+                    ))
+                }
+                Err(error) => {
+                    return report_failure(
+                        "server init",
+                        "The data move could not finish.",
+                        error.to_string(),
+                        json_output,
+                    );
+                }
+            }
+        }
+    };
+    install_server("server init", &args, &install_args, moved, json_output)
 }
 
+/// Plan the move of an existing unit's data folder to the D395 default [#516].
+///
+/// Nothing is planned for a fresh install, an explicit `--data`, or a unit
+/// already at the standard folder with no unfinished move.
+#[cfg(feature = "plugin-server")]
+fn plan_server_data_move(
+    explicit_data: bool,
+    recorded: Option<&Path>,
+    scope: install_paths::Scope,
+    environment: &install_paths::Environment,
+    roots: &infraternal_status::Roots,
+    name: &str,
+) -> Result<Option<install_move::Relocation>, String> {
+    let Some(recorded) = recorded else {
+        return Ok(None);
+    };
+    // Rewrite the unit the recorded folder was read from, found the way
+    // `recorded_server_unit` finds it, so reading and rewriting never disagree.
+    let file = format!("{name}.service");
+    let directories: Vec<&PathBuf> = match scope {
+        install_paths::Scope::System => roots.system_units.iter().collect(),
+        install_paths::Scope::User => roots.user_units.iter().collect(),
+    };
+    let unit = match directories
+        .into_iter()
+        .map(|directory| directory.join(&file))
+        .find(|path| path.exists())
+    {
+        Some(path) => path,
+        None => install::unit_path(scope == install_paths::Scope::User, name)
+            .map_err(|error| error.to_string())?,
+    };
+    let target =
+        install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let target = if scope == install_paths::Scope::System
+        && target == Path::new(install_paths::LINUX_SYSTEM_BASE)
+    {
+        combined_server_move_target(target, recorded, &unit)?
+    } else {
+        target
+    };
+    if explicit_data {
+        #[cfg(target_os = "linux")]
+        let requested =
+            install_move::manager::requested(&target).map_err(|error| error.to_string())?;
+        #[cfg(not(target_os = "linux"))]
+        let requested = false;
+        if requested || install_move::pending(&target, &unit).map_err(|error| error.to_string())? {
+            return Err("a data move is in progress; run init with the original service flags and without --data to finish it".to_owned());
+        }
+        return Ok(None);
+    }
+    install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
+}
+
+/// Keep the systemd-selected private child or resume a recorded cutover to it.
+#[cfg(all(target_os = "linux", feature = "plugin-server"))]
+fn combined_server_move_target(
+    base: PathBuf,
+    recorded: &Path,
+    unit: &Path,
+) -> Result<PathBuf, String> {
+    let child = base.join("server");
+    if recorded == child
+        || install_move::manager::requested(&child).map_err(|error| error.to_string())?
+        || install_move::pending(&child, unit).map_err(|error| error.to_string())?
+    {
+        Ok(child)
+    } else {
+        Ok(base)
+    }
+}
+
+/// The move as JSON for `--json`: folders, method and any leftover to remove.
+#[cfg(feature = "plugin-server")]
+fn relocation_json(
+    relocation: &install_move::Relocation,
+    outcome: Option<&install_move::Outcome>,
+) -> serde_json::Value {
+    json!({
+        "from": relocation.from,
+        "to": relocation.to,
+        "same_filesystem": relocation.same_filesystem,
+        "unit_files": relocation.unit_files().collect::<Vec<_>>(),
+        "moved": outcome.is_some(),
+        "leftover": outcome.and_then(|outcome| outcome.leftover.as_ref()),
+        "warning": null,
+    })
+}
+
+/// Ask before creating the service on a terminal; `--yes` and `--dry-run` skip it.
+///
+/// `data_dir` is the text shown for the data folder, which names the old
+/// folder too when init is about to move it.
 #[cfg(feature = "plugin-server")]
 fn confirm_server_setup(
     yes: bool,
     dry_run: bool,
     listen: SocketAddr,
-    data_dir: &Path,
+    data_dir: &str,
     scope: &str,
 ) -> Result<(), String> {
     if yes || dry_run {
@@ -1300,8 +1808,7 @@ fn confirm_server_setup(
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
     print!(
-        "Create and start the {scope} server service on {listen} with data in {}? [y/N] ",
-        data_dir.display()
+        "Create and start the {scope} server service on {listen} with data in {data_dir}? [y/N] ",
     );
     io::stdout()
         .flush()
@@ -1329,20 +1836,36 @@ fn run_server_install_compat(_matches: &ArgMatches, json_output: bool) -> ExitCo
     emit(result, json_output, Exit::Usage)
 }
 
+/// Install (or plan) the unit and print the result, with any data-folder move told first.
 #[cfg(feature = "plugin-server")]
 fn install_server(
     command: &str,
     args: &ServerArgs,
     install_args: &InstallArgs,
+    moved: Option<(String, serde_json::Value)>,
     json_output: bool,
 ) -> ExitCode {
-    match install::install(args, install_args) {
+    let installed = if moved.is_some() && !install_args.dry_run {
+        Ok(String::new())
+    } else {
+        install::install(args, install_args)
+    };
+    match installed {
         Ok(plan) => {
             let mut data = json!({
                 "service": format!("{}.service", install_args.name),
                 "enabled": !install_args.dry_run,
                 "dry_run": install_args.dry_run,
             });
+            // The move is told first: in a dry run it is the first step, and
+            // after a real one its leftover note must not scroll away.
+            let (moved_text, plan) = match moved {
+                Some((text, value)) => {
+                    data["data_move"] = value;
+                    (text.clone(), format!("{text}{plan}"))
+                }
+                None => (String::new(), plan),
+            };
             if install_args.dry_run {
                 data["plan"] = json!(plan);
             }
@@ -1365,6 +1888,8 @@ fn install_server(
                 // The unit file is data for a person to read and copy: the generic renderer
                 // would reflow its lines into prose and break it.
                 result = result.with_body(plan);
+            } else if !moved_text.is_empty() {
+                result = result.with_body(moved_text);
             }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
@@ -2298,23 +2823,25 @@ mod dispatch_tests {
     use super::mesh_status_result;
 
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
+    /// Mac mesh status reports that GotaTun enforces D164 rules in userspace.
     #[test]
-    fn mesh_status_reports_that_access_rules_are_not_enforced() {
+    fn mesh_status_reports_userspace_access_enforcement() {
         let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
             loaded: true,
             running: true,
             pid: Some(42),
         });
-        assert_eq!(data["enforcement"], "unavailable");
+        assert_eq!(data["enforcement"], "userspace");
         assert_eq!(data["running"], true);
+        assert!(super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"));
     }
 
-    /// J162 F1 (#265): the details must not hide that the server reaches every port here.
+    /// The Mac's visible status describes its active userspace access filter.
     #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
     #[test]
-    fn mesh_status_says_the_server_can_reach_every_port_on_this_mac() {
+    fn mesh_status_says_access_rules_are_enforced_on_this_mac() {
         assert!(
-            super::MESH_ENFORCEMENT_DETAILS.contains("the server can reach every port on this Mac"),
+            super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"),
             "{}",
             super::MESH_ENFORCEMENT_DETAILS
         );
@@ -2424,6 +2951,20 @@ mod startup_tests;
 
 /// First userspace entry protection applies equally to server and child modes.
 fn harden_startup() -> Result<(), nix::errno::Errno> {
+    // Record the transparent-huge-page policy we were started with before
+    // anything can change it: the mesh engine turns THP off for the whole
+    // infraternal agent, and the programs this process starts (shims, and
+    // through them people's shells) must get the original back (#522). Best
+    // effort: a kernel without the flag (before 3.15) leaves nothing to keep.
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    let _ = infraternal_shim::record_launcher_thp();
+    // Static builds (mimalloc, see `GLOBAL_ALLOCATOR`) then turn THP off for
+    // this whole process (#522): on a THP=`always` host mimalloc's arenas would
+    // be backed by 2 MiB pages, about five times an idle shim's memory, for no
+    // speed gain. The same call records the launcher's policy first, so started
+    // programs and an in-place restart still get it back.
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    let _ = infraternal_shim::disable_process_thp();
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]
@@ -2510,7 +3051,9 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused) | None => "REFUSED",
+                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
+                        "REFUSED"
+                    }
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -2601,13 +3144,23 @@ fn run_remote_agent(
                 "The infraternal agent could not finish.",
                 remote::public_error,
             ),
-            "Check the server address and that this machine is still enrolled, then run the command again.",
+            result
+                .as_ref()
+                .err()
+                .and_then(remote::mesh_restore_failure)
+                .map_or(
+                    "Check the server address and that this machine is still enrolled, then run the command again.",
+                    |(_, recovery)| recovery,
+                ),
             result
                 .as_ref()
                 .err()
                 .map_or(Exit::Failed, |error| match remote::Failure::of(error) {
-                    Some(remote::Failure::Tls) => Exit::NotAllowed,
+                    Some(remote::Failure::Tls | remote::Failure::IdentityMismatch) => {
+                        Exit::NotAllowed
+                    }
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
+                    None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
                         | remote::Failure::Upgrade
@@ -2673,6 +3226,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
             );
             let options = restart::Options {
                 binary: matches.get_one::<String>("binary").map(PathBuf::from),
+                rollback: matches.get_flag("rollback"),
             };
             return match tokio::runtime::Runtime::new() {
                 Ok(runtime) => restart::run(&runtime, &data, &options, json),
@@ -2683,6 +3237,14 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     json,
                 ),
             };
+        }
+        #[cfg(all(feature = "plugin-server", feature = "remote"))]
+        if action.cli_handler == CliHandler::ServerMeshStatus {
+            let data = server_data_directory(
+                matches.get_one::<String>("data").map(String::as_str),
+                infraternal_status::Roots::detect,
+            );
+            return restart::mesh_status(&data, json);
         }
         if action.cli_handler == CliHandler::RemoveHost {
             let host = matches

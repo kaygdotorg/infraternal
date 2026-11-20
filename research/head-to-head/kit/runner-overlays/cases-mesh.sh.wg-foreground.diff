@@ -1,0 +1,15 @@
+--- cases/mesh.sh.before
++++ cases/mesh.sh.after
+@@ -164,10 +164,10 @@
+     command -v openssl >/dev/null || die "WireGuard key setup requires OpenSSL"
+     python3 -I "$H2H_KIT/lib/gotatun_uapi.py" keys "$D/keys"
+     START=$("$H" now)
+-    sandboxed "$A_PID" env WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 LOG_LEVEL=error "$H2H_BIN/wireguard-go" wgA \
++    sandboxed "$A_PID" env WG_PROCESS_FOREGROUND=1 LOG_LEVEL=error "$H2H_BIN/wireguard-go" wgA \
+         > "$D/a/daemon.log" 2>&1 &
+     WG_A_PID=$!; register_pid "$WG_A_PID"
+-    sandboxed "$B_PID" env WG_I_PREFER_BUGGY_USERSPACE_TO_POLISHED_KMOD=1 LOG_LEVEL=error "$H2H_BIN/wireguard-go" wgB \
++    sandboxed "$B_PID" env WG_PROCESS_FOREGROUND=1 LOG_LEVEL=error "$H2H_BIN/wireguard-go" wgB \
+         > "$D/b/daemon.log" 2>&1 &
+     WG_B_PID=$!; register_pid "$WG_B_PID"
+     wait_for 20 nsenter -t "$WG_A_PID" -m -- test -S /var/run/wireguard/wgA.sock \

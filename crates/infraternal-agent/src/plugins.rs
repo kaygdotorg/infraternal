@@ -2,6 +2,11 @@
 
 use infraternal_plugin_api::{PluginDescriptor, PluginError, PluginRegistry};
 
+/// Removal of device-approved launchd installations.
+#[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+#[path = "macos_uninstall.rs"]
+mod macos_uninstall;
+
 /// One node registry survives authenticated transport replacement; owned
 /// asynchronous operations never hold this lock while waiting on native I/O.
 pub type SharedRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>;
@@ -51,6 +56,13 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
     registry_at(mode, None, None)
 }
 
+/// Builds the infraternal agent's plugin registry for `mode`, with node state at
+/// `state` and the enrolment in `installation` when they exist.
+///
+/// On macOS a rootless agent leaves the mesh node out (it needs root) and
+/// still registers the desktop source, which app windows use (#146).
+/// # Errors
+/// Returns an error if a plugin cannot be built or its descriptor conflicts.
 // Even an empty build keeps the same fallible factory contract as builds with
 // registered plugins; feature selection must not change its caller's API.
 #[cfg_attr(
@@ -65,9 +77,39 @@ pub fn registry(mode: ExecutionMode) -> Result<PluginRegistry, PluginError> {
         reason = "Keep the fallible registry API identical when every optional component is compiled out."
     )
 )]
+/// Build a plugin registry whose state is rooted at `state`.
+/// # Errors
+/// Returns an error if the selected plugins cannot be registered.
 pub(crate) fn registry_at(
     mode: ExecutionMode,
     state: Option<&std::path::Path>,
+    installation: Option<&Installation>,
+) -> Result<PluginRegistry, PluginError> {
+    registry_at_with_mesh_state(mode, state, None, installation)
+}
+
+/// Create a registry whose embedded Mesh node may keep state apart from sessions.
+///
+/// `mesh_state` is an internal server override. Remote hosts continue to use `state` for Mesh,
+/// matching their installed `--state` directory.
+/// # Errors
+/// Returns an error if the compiled plugin descriptors conflict with the plugin API.
+#[cfg_attr(
+    not(any(
+        feature = "plugin-host-facts",
+        feature = "proxy",
+        feature = "remote",
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos"))
+    )),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "Keep the fallible registry API identical when every optional component is compiled out."
+    )
+)]
+pub(crate) fn registry_at_with_mesh_state(
+    mode: ExecutionMode,
+    state: Option<&std::path::Path>,
+    mesh_state: Option<&std::path::Path>,
     installation: Option<&Installation>,
 ) -> Result<PluginRegistry, PluginError> {
     #[cfg(any(
@@ -100,7 +142,7 @@ pub(crate) fn registry_at(
     #[cfg(not(feature = "plugin-host-facts"))]
     let _ = mode;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
-    let mesh_plugin = state.map_or_else(
+    let mesh_plugin = mesh_state.or(state).map_or_else(
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::default,
         infraternal_plugin_mesh::node_actions::MeshNodePlugin::new,
     );
@@ -138,10 +180,20 @@ pub(crate) fn registry_at(
             registry.register(Box::new(plugin))?;
         }
     }
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    if mode == ExecutionMode::Remote
+        && state
+            == Some(std::path::Path::new(
+                infraternal_plugin_mesh::macos_service::MACHINE_STATE,
+            ))
+        && let Some(enrolment) = installation
+        && let Some(plugin) = macos_uninstall::Uninstall::for_enrolment(enrolment)
+    {
+        registry.register(Box::new(plugin))?;
+    }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
-        let home = std::env::var_os("HOME").ok_or(PluginError::Rejected)?;
-        let runtime = std::path::PathBuf::from(home).join(".cache/infraternal/desktop-source");
+        let runtime = desktop_source_runtime().map_err(|_| PluginError::Rejected)?;
         let executable = std::env::current_exe().map_err(|_| PluginError::Rejected)?;
         let helper = executable
             .parent()
@@ -164,10 +216,25 @@ pub(crate) fn registry_at(
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
+    // The Darwin mesh node owns a utun device and a system-keychain key, so it
+    // only runs in the root system service. A rootless agent (the one in a
+    // person's login session that shows app windows) still links to the
+    // server; it just leaves the mesh node out instead of failing to start.
     #[cfg(all(feature = "mesh", target_os = "macos"))]
-    registry.register(Box::new(darwin_mesh_plugin(state, installation)?))?;
+    if nix::unistd::Uid::effective().is_root() {
+        registry.register(Box::new(darwin_mesh_plugin(
+            mesh_state.or(state),
+            installation,
+        )?))?;
+    } else {
+        eprintln!(
+            "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
+        );
+    }
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;
+    #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
+    let _ = mesh_state;
     Ok(registry)
 }
 
@@ -290,6 +357,7 @@ pub fn set_mesh_service(factory: MeshServiceFactory) {
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 fn mesh_view(
     config: &infraternal_plugin_mesh::dataplane::Config,
+    userspace_filter: bool,
 ) -> infraternal_plugin_api::mesh_view::MeshView {
     use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
     use std::net::IpAddr;
@@ -300,6 +368,7 @@ fn mesh_view(
             IpAddr::V6(config.addresses.ipv6),
         ],
         interface: infraternal_plugin_mesh::wireguard::INTERFACE.to_owned(),
+        userspace_filter,
         peers: config
             .peers
             .iter()
@@ -328,8 +397,12 @@ fn observe_mesh(
     let Some(service) = service else {
         return mesh_plugin;
     };
-    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config| {
-        service(config.as_ref().map(mesh_view));
+    mesh_plugin.with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
+        service(
+            config
+                .as_ref()
+                .map(|config| mesh_view(config, userspace_filter)),
+        );
         Ok(())
     }))
 }
@@ -352,9 +425,13 @@ fn connect_proxy_and_mesh(
         .set_mesh_ingress_observer(mesh_plugin.proxy_ingress_observer())
         .map_err(|_| PluginError::Rejected)?;
     Ok(mesh_plugin
-        .with_configuration_observer(std::sync::Arc::new(move |config| {
+        .with_configuration_observer(std::sync::Arc::new(move |config, userspace_filter| {
             if let Some(service) = &service {
-                service(config.as_ref().map(mesh_view));
+                service(
+                    config
+                        .as_ref()
+                        .map(|config| mesh_view(config, userspace_filter)),
+                );
             }
             let context = config
                 .as_ref()
@@ -472,6 +549,7 @@ mod proxy_mesh_context_tests {
                     ipv6: format!("fd00::{id:x}").parse().expect("IPv6 mesh address"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound,
@@ -479,7 +557,7 @@ mod proxy_mesh_context_tests {
         }
     }
 
-    /// Accepted exposure policy publishes only inbound-authorized TCP sources.
+    /// The accepted Mesh exposure policy publishes only inbound-authorized TCP sources.
     #[test]
     fn accepted_config_exports_only_inbound_tcp_sources_for_the_published_port() {
         let tcp_3000 = Port {
@@ -492,6 +570,8 @@ mod proxy_mesh_context_tests {
         };
         let config = Config {
             local_key: None,
+            authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
             #[cfg(feature = "mesh")]
@@ -604,3 +684,12 @@ fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static 
 /// Exact private handoff decoder shared with parser fuzzing; parsing grants no authority.
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall_request;
+
+/// Names a private desktop runtime with room for source sockets under Darwin's 104-byte limit.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn desktop_source_runtime() -> std::io::Result<std::path::PathBuf> {
+    let parent = infraternal_shim::session_shell::darwin_user_temp_dir()
+        .ok_or(std::io::ErrorKind::NotFound)?;
+    infraternal_plugin_desktop::socket::validate_runtime(&parent)?;
+    Ok(parent.join("ifd"))
+}

@@ -43,7 +43,7 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       // ---- the view: one window per page of the folder, found through the index, nothing written in the app -----------
       await expect.poll(() => requests.includes("/docs/index.json"), { timeout: 15_000 }).toBe(true);
       const slugs = (await (await page.request.get("/docs/index.json")).json() as { pages: { slug: string; title: string }[] }).pages;
-      expect(slugs.map((entry) => entry.slug).sort()).toEqual(["access", "appearance", "index", "machines", "mesh", "reference", "reference/keys", "sharing", "start", "terminal", "terminal/multiplexer", "you"]);
+      expect(slugs.map((entry) => entry.slug).sort()).toEqual(["access", "appearance", "index", "machines", "mesh", "mesh/networking", "reference", "reference/keys", "sharing", "start", "terminal", "terminal/multiplexer", "you"]);
       await expect(page.locator('section.cl[data-view="docs"]')).toBeAttached({ timeout: 10_000 });
       expect(await page.locator('section.cl[data-view="docs"] .ui-window').evaluateAll((windows) => windows.map((w) => (w as HTMLElement).dataset.windowId).sort())).toEqual(slugs.map((entry) => `d-${entry.slug}`).sort());
 
@@ -187,6 +187,9 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       // Another page: its window is the one in view, and the first page's window stays where it was.
       await openPalette(page);
       await page.keyboard.type("infraternal multiplexer");
+      // The query also names a Settings row (the "Offer To Switch" setting explains the switch to the Infraternal Multiplexer), but the
+      // page's title starts with it, so the palette lists the Docs group first (palette-rank.ts) and Enter opens the page.
+      await expect(page.locator(".palette .result").first()).toContainText("Terminal › The Infraternal Multiplexer");
       await page.keyboard.press("Enter");
       await expect(page.locator('.ui-window[data-window-id="d-terminal/multiplexer"] .dr-page h1')).toHaveText("The Infraternal Multiplexer", { timeout: 10_000 });
       await page.waitForTimeout(900);

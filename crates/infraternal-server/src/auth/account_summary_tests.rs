@@ -99,6 +99,7 @@ async fn summary_counts_only_the_session_account_and_has_an_exact_nonsecret_shap
     assert_eq!(payload["recovery_set_up"], false);
 }
 
+/// Require a current, unlocked session from the configured origin before returning the account summary.
 #[tokio::test]
 async fn summary_requires_current_unlocked_same_origin_authority() {
     let (auth, pool) = fixture().await;
@@ -121,10 +122,12 @@ async fn summary_requires_current_unlocked_same_origin_authority() {
         StatusCode::BAD_REQUEST
     );
     for clause in ["unlocked=0", "unlocked=1,expires=1800000000"] {
-        sqlx::query(&format!("UPDATE sessions SET {clause} WHERE user_id='one'"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE sessions SET {clause} WHERE user_id='one'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             request(&auth, Some("one"), ORIGIN, "{}").await.0,
             StatusCode::UNAUTHORIZED

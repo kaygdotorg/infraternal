@@ -18,6 +18,13 @@ pub struct HostAuthority {
 
 impl EnrollmentStore {
     /// Admit an exact certificate fingerprint against live, persisted host authority.
+    ///
+    /// Only the host's ordinary identity passes: a certificate with
+    /// `role='active'` issued for the host's current uid (J415 R1). A root
+    /// upgrade's successor certificate never does; it has its own check,
+    /// [`EnrollmentStore::admit_successor`], whose result this guard can't take.
+    /// After an upgrade, a leftover rootless certificate (issued for the old
+    /// uid) is refused here too, even before the handover revoked it.
     /// # Errors
     /// Refuses unknown/expired/revoked certificates, invalid time and storage failure.
     pub async fn admit(
@@ -33,6 +40,7 @@ impl EnrollmentStore {
              JOIN remote_certificates c ON c.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND c.role='active' AND c.execution_uid=h.execution_uid \
              AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         )
         .bind(fingerprint.as_slice())
@@ -68,7 +76,8 @@ impl EnrollmentStore {
              JOIN remote_certificates c ON c.host_id=h.id \
              JOIN remote_login_cleanup q ON q.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
-             AND c.revoked_at IS NULL AND q.confirmed=0",
+             AND c.revoked_at IS NULL AND q.confirmed=0 \
+             AND c.role='active' AND c.execution_uid=h.execution_uid",
         )
         .bind(fingerprint.as_slice())
         .bind(now)
@@ -250,6 +259,10 @@ impl EnrollmentStore {
     }
 
     /// Persist a renewed certificate only for the live predecessor's same host key.
+    ///
+    /// The renewal inherits the predecessor's role and uid in the same
+    /// statement, and only an admissible (`active`, current uid) predecessor
+    /// renews; a successor never renews (its promotion is shorter than a week).
     /// # Errors
     /// Refuses expired/revoked predecessors, changed keys, invalid validity or storage failure.
     pub async fn renew(
@@ -267,11 +280,12 @@ impl EnrollmentStore {
         // INSERT SELECT is one serialized write. Revocation either precedes this
         // statement and refuses it, or follows it and denies both generations.
         let changed = sqlx::query(
-            "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, public_key, not_before, not_after) \
-             SELECT ?, old.host_id, ?, ?, ?, ? FROM remote_certificates old \
+            "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, public_key, not_before, not_after, role, execution_uid) \
+             SELECT ?, old.host_id, ?, ?, ?, ?, old.role, old.execution_uid FROM remote_certificates old \
              JOIN remote_hosts h ON h.id=old.host_id \
              WHERE old.fingerprint=? AND old.public_key=? AND old.not_before<=? AND old.not_after>? \
              AND old.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND old.role='active' AND old.execution_uid=h.execution_uid \
              AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         ).bind(certificate.fingerprint.as_slice()).bind(certificate.issuer_fingerprint.as_slice())
             .bind(certificate.public_key.as_slice()).bind(certificate.not_before).bind(certificate.not_after)
@@ -375,6 +389,14 @@ impl EnrollmentStore {
         let person = owner
             .as_deref()
             .and_then(|owner| Uuid::parse_str(owner).ok());
+        // A removal ends any root upgrade of the host in the same write, so
+        // its handover can never commit afterwards; a successor that had
+        // joined is asked to uninstall itself (D376, J415 R5).
+        sqlx::query(super::promotion::ABANDON_WHERE_HOST)
+            .bind(now)
+            .bind(host.as_bytes().as_slice())
+            .execute(&mut *transaction)
+            .await?;
         if let Some(person) = person {
             sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?) ON CONFLICT(host_id) DO NOTHING")
                 .bind(host.as_bytes().as_slice()).bind(person.to_string())

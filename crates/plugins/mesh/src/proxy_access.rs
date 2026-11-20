@@ -92,6 +92,7 @@ mod tests {
                     ipv6: "fd01::3".parse().expect("IPv6"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::None,

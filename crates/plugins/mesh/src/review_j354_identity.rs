@@ -55,7 +55,9 @@ impl NodeChannel for OldNode {
 /// Enabling DNS must retain independently supported capabilities on existing nodes.
 #[tokio::test]
 async fn review_j354_dns_upgrade_keeps_old_nodes_rotation_capability() {
-    let (identity, rotation) = read_identity(&OldNode).await.expect("old node identity");
+    let probe = read_identity(&OldNode).await.expect("old node identity");
+    let identity = probe.identity;
+    let rotation = probe.key_rotation_supported;
     eprintln!(
         "J354 classified rotation={rotation:?}, compact={}",
         identity.compact_access

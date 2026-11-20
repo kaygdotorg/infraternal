@@ -36,6 +36,8 @@ mod durable_io;
 mod durable_tests;
 /// Keep binaries that systemd starts executable under `SELinux` (#401).
 pub mod exec_label;
+/// The host OS named in the infraternal agent's link Hello, and the server's reader for it.
+pub mod host_os;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lifecycle;
 mod login_auth;
@@ -46,6 +48,18 @@ pub mod logins;
 mod native_dispatch;
 pub mod plugin_control;
 pub mod plugins;
+/// The rootless infraternal agent's control actions for its own root upgrade (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_agent;
+/// Becoming root once with the person's password for a root upgrade (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_elevate;
+/// The short-lived root relay that runs a root upgrade's install steps (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_relay_host;
+/// The root infraternal agent retiring the rootless install it replaced (D376).
+#[cfg(all(feature = "remote", target_os = "linux"))]
+pub mod privilege_take_over;
 // Shim census exists only on the local terminal platform; portable control has no PTYs.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_exits;
@@ -98,13 +112,30 @@ pub(crate) fn test_state_root() -> std::path::PathBuf {
 /// # Errors
 /// Returns reactor initialization or trusted leg-B protocol/IO failures.
 pub fn run_embedded(fd: i32, state: Option<std::path::PathBuf>) -> std::io::Result<()> {
+    run_embedded_with_mesh_state(fd, state, None)
+}
+
+/// Run the inherited-fd daemon with an independent mesh state path when the server owns it.
+///
+/// `state` still controls sessions and the other plugins. `mesh_state` changes only the Mesh
+/// node's files, so an embedded server can keep its mesh identity durable without making its
+/// live sessions durable.
+/// # Errors
+/// Returns reactor initialization or trusted leg-B protocol/IO failures.
+pub fn run_embedded_with_mesh_state(
+    fd: i32,
+    state: Option<std::path::PathBuf>,
+    mesh_state: Option<std::path::PathBuf>,
+) -> std::io::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     // Components' host state goes when this daemon ends, by return or SIGTERM (#221).
     block_on_io(
         &runtime,
-        Box::pin(shutdown::run_then_stop(daemon::run(fd, state))),
+        Box::pin(shutdown::run_then_stop(daemon::run_with_mesh_state(
+            fd, state, mesh_state,
+        ))),
     )
 }
 

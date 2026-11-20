@@ -873,15 +873,7 @@ mod tests {
     /// only explicitly loaded roots count.
     #[test]
     fn removal_trusts_the_host_ca_bundle() {
-        let bundles = [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ];
-        if !bundles
-            .iter()
-            .any(|bundle| std::path::Path::new(bundle).is_file())
-        {
+        if infraternal_plugin_api::tls_roots::first_present().is_none() {
             return;
         }
         let child = std::process::Command::new(std::env::current_exe().expect("test binary"))

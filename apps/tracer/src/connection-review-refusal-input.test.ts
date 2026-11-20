@@ -1,6 +1,7 @@
 /** Independent #244 review: a refused connection resume must retain typing never sent to the host. */
 import { expect, test } from "bun:test";
 import { MuxConnection, type StreamHandler } from "./connection";
+import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
 import { encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
 
@@ -62,6 +63,8 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
     const conn = connection;
     const terminal = Object.assign(Object.create(TerminalClient.prototype), {
       synchronizedOutput: { reset() {}, dispose() {} },
+      // The constructor builds this private field, and Object.create skips it; a real scanner keeps the OSC 52 path honest (#440).
+      clipboardWrites: new Osc52Scanner(),
       parsedOutputVersion: 0,
       closed: false, attached: false, attachmentConfirmed: false, sessionGone: false,
       hasAttached: false, sessionId: new Uint8Array(16), streamId: 1,

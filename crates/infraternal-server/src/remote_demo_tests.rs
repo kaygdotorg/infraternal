@@ -8,7 +8,7 @@ use axum::{
     response::Response,
     routing::get,
 };
-use axum_server::{accept::Accept, tls_openssl::OpenSSLAcceptor};
+use axum_server::{accept::Accept, tls::TlsService, tls_openssl::OpenSSLAcceptor};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
@@ -47,10 +47,15 @@ impl<S> Accept<TcpStream, S> for RecordingProxyAcceptor
 where
     S: Send + 'static,
 {
+    /// The negotiated OpenSSL connection used by the test proxy.
     type Stream = tokio_openssl::SslStream<TcpStream>;
-    type Service = S;
-    type Future = Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, S)>> + Send>>;
+    /// Preserve the TLS metadata service wrapper while recording ALPN.
+    type Service = TlsService<S>;
+    /// Return the same TLS connection and wrapped service as the inner acceptor.
+    type Future =
+        Pin<Box<dyn Future<Output = std::io::Result<(Self::Stream, Self::Service)>> + Send>>;
 
+    /// Record the negotiated protocol after the inner TLS handshake completes.
     fn accept(&self, stream: TcpStream, service: S) -> Self::Future {
         let accepted = self.inner.accept(stream, service);
         let negotiated = self.negotiated.clone();
@@ -242,18 +247,14 @@ fn fixture_repository() -> PathBuf {
 
 struct Directory(PathBuf);
 impl Directory {
+    /// Create a private data directory for the two-process fixture.
     fn new() -> Self {
         let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map_or_else(
             || PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/codex-scratch/ra6"),
             PathBuf::from,
         );
         let path = root.join(format!("{:08x}", rand::random::<u32>()));
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&path)
-            .unwrap();
-        set_private_directory(&path).unwrap();
+        create_data_directory(&path).unwrap();
         Self(path)
     }
 }

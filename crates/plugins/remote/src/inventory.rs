@@ -8,6 +8,12 @@ use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
+
+/// At most eight distinct hosts may occupy facts reads or queued replies on one socket.
+const MAX_FACTS_READS: usize = 8;
+/// Admission is non-queuing: callers retry instead of accumulating host work behind a slow read.
+pub const HOST_BUSY: &str = "host busy";
 
 /// Public read action; the source repeats the terminal admission account filter.
 pub const LIST: ActionDef = ActionDef {
@@ -28,6 +34,30 @@ pub const LIST: ActionDef = ActionDef {
     api_scope: Some("hosts:read"),
     fresh_passkey: false,
 };
+/// Reads the machine facts of one admitted host, so a window's details describe its own host and never the server.
+/// Keys use hosts:read (D371); the source keeps the same person-level host ownership check.
+pub const FACTS: ActionDef = ActionDef {
+    id: "remote.host.facts",
+    summary: "Read the machine facts of one admitted host.",
+    instructions: &[
+        "Sign in to the existing server.",
+        "Name the admitted host by its id.",
+        "An offline or unknown host is refused; the server's own facts are never returned in its place.",
+    ],
+    input: SchemaRef("remote.host.facts"),
+    output: SchemaRef("remote.host.facts.reply"),
+    target: infraternal_plugin_api::Target::Host,
+    effect: Effect::Read,
+    permission: Permission::One("authenticated"),
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: Some("hosts:read"),
+    fresh_passkey: false,
+};
+/// The refusal for a host that is admitted to the account but whose infraternal agent is not connected.
+pub const HOST_OFFLINE: &str = "host offline";
+/// The refusal for a host the account does not have, or whose facts could not be read.
+pub const HOST_UNAVAILABLE: &str = "host unavailable";
 /// Inventory remains readable when transport is unavailable; disabling this feature cancels all its socket work.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "remote.host",
@@ -38,7 +68,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         id: "enabled",
         value: infraternal_plugin_api::DefaultValue::Bool(true),
     }],
-    actions: &[LIST],
+    actions: &[LIST, FACTS],
     topics: &["remote.hosts"],
     roles: &[RoleDef {
         id: "server",
@@ -97,6 +127,31 @@ pub fn decode_list(input: &[u8]) -> Option<ListRequest> {
     }
     Some(request)
 }
+/// Bounded input to the host facts read: exactly one canonical host id.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FactsRequest {
+    /// The admitted host's canonical lowercase UUID, never an SSH destination or account id.
+    pub host_id: String,
+}
+/// Reject arrays, unknown fields and anything but a canonical lowercase UUID before any storage access.
+#[must_use]
+pub fn decode_facts(input: &[u8]) -> Option<FactsRequest> {
+    if input.len() > 256 || input.iter().find(|byte| !byte.is_ascii_whitespace()) != Some(&b'{') {
+        return None;
+    }
+    let request: FactsRequest = serde_json::from_slice(input).ok()?;
+    let id = &request.host_id;
+    (id.len() == 36
+        && id.bytes().enumerate().all(|(offset, byte)| {
+            if matches!(offset, 8 | 13 | 18 | 23) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        }))
+    .then_some(request)
+}
 /// Existing server records and live transport registry, supplied without exposing credentials.
 pub trait Inventory: Send + Sync {
     fn list<'a>(
@@ -104,6 +159,13 @@ pub trait Inventory: Send + Sync {
         account: &'a str,
         after: Option<&'a str>,
     ) -> Operation<'a, Result<Value, ()>>;
+    /// Live facts of one host the account has admitted. Fails with [`HOST_OFFLINE`] when its infraternal
+    /// agent is not connected and [`HOST_UNAVAILABLE`] for an unknown, foreign or unreadable host.
+    fn facts<'a>(
+        &'a self,
+        account: &'a str,
+        host_id: &'a str,
+    ) -> Operation<'a, Result<Value, &'static str>>;
     fn changes(&self) -> watch::Receiver<()>;
     fn observe(
         &self,
@@ -139,26 +201,60 @@ impl Plugin for InventoryPlugin {
         Box::pin(async move {
             let mut changes = source.changes();
             let mut subscriptions = Vec::<(u32, u32)>::new();
+            let mut reads = JoinSet::new();
+            let mut reading = std::collections::HashSet::new();
             loop {
                 subscriptions
                     .retain(|(id, generation)| subscription_current(&registry, *id, *generation));
                 let result = tokio::select! {
+                    completed = reads.join_next(), if !reads.is_empty() => {
+                        match completed {
+                            Some(Ok((id, result))) => { reading.remove(&id); result }
+                            _ => Err(()),
+                        }
+                    }
                     request = requests.recv() => {
                         let Some(request) = request else { break; };
                         let Ok(decoded) = decode_muxed_frame(&request) else { break; };
                         match decoded.frame {
                             Frame::Call { call_id, action_id, input_json } => {
-                                let input = decode_list(input_json);
-                                let after = input.as_ref().and_then(|request| request.after.as_deref());
+                                if action_id == FACTS.id {
+                                    let request = decode_facts(input_json);
+                                    let error = match &request {
+                                        None => Some("invalid input"),
+                                        Some(request) if reading.len() >= MAX_FACTS_READS || reading.contains(&request.host_id) => Some(HOST_BUSY),
+                                        Some(_) => None,
+                                    };
+                                    if let Some(error) = error {
+                                        host.authorized(Box::pin(reply_result(&replies, call_id, Err(error)))).await
+                                    } else if let Some(request) = request {
+                                        reading.insert(request.host_id.clone());
+                                        let host = host.clone();
+                                        let source = source.clone();
+                                        let replies = replies.clone();
+                                        // The task owns its admission through outbound backpressure. Dropping
+                                        // this worker aborts every task; authority loss cancels reads and replies.
+                                        reads.spawn(async move {
+                                            let result = host.authorized(Box::pin(async {
+                                                let output = source.facts(host.user_id(), &request.host_id).await;
+                                                reply_result(&replies, call_id, output).await
+                                            })).await;
+                                            (request.host_id, result)
+                                        });
+                                        Ok(())
+                                    } else { unreachable!() }
+                                } else {
                                 // Keep authorization active through outbound backpressure, not just SQL.
                                 host.authorized(Box::pin(async {
-                                    let output = if action_id == LIST.id && input.is_some() {
-                                        source.list(host.user_id(), after).await
-                                    } else { Err(()) };
-                                    let ok = output.is_ok();
-                                    let json = serde_json::to_vec(&output.unwrap_or_else(|()| json!({"error":"inventory unavailable"}))).map_err(|_| ())?;
-                                    send(&replies, 0, Frame::Result { call_id, ok, json: &json }).await
+                                    let output = if action_id == LIST.id {
+                                        match decode_list(input_json) {
+                                            Some(request) => source.list(host.user_id(), request.after.as_deref()).await.map_err(|()| "inventory unavailable"),
+                                            None => Err("inventory unavailable"),
+                                        }
+                                    } else { Err("inventory unavailable") };
+                                    reply_result(&replies, call_id, output).await
                                 })).await
+                                }
                             }
                             Frame::Subscribe { sub_id, .. } => {
                                 let generation = decoded.stream_id >> 1;
@@ -190,6 +286,28 @@ impl Plugin for InventoryPlugin {
         })
     }
 }
+/// Serialize one bounded result while retaining the caller's authorization through socket credit.
+async fn reply_result(
+    replies: &ReplySender,
+    call_id: u32,
+    output: Result<Value, &str>,
+) -> Result<(), ()> {
+    let ok = output.is_ok();
+    let json = serde_json::to_vec(&output.unwrap_or_else(|error| json!({"error":error})))
+        .map_err(|_| ())?;
+    send(
+        replies,
+        0,
+        Frame::Result {
+            call_id,
+            ok,
+            json: &json,
+        },
+    )
+    .await
+}
+
+/// Send one frame through the host-owned bounded reply queue.
 async fn send(replies: &ReplySender, stream_id: u32, frame: Frame<'_>) -> Result<(), ()> {
     let mut wire = Vec::new();
     encode_muxed_frame_into(stream_id, &frame, &mut wire).map_err(|_| ())?;
@@ -199,6 +317,7 @@ async fn send(replies: &ReplySender, stream_id: u32, frame: Frame<'_>) -> Result
     replies.send(Bytes::from(wire)).await.map_err(|_| ())
 }
 
+/// Tests the inventory descriptor and the two request decoders.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,8 +340,29 @@ mod tests {
         }
         assert!(decode_list(&[b' '; 1025]).is_none());
     }
+    /// The facts request names exactly one canonical host id and nothing else.
+    #[test]
+    fn facts_input_takes_exactly_one_canonical_host_id() {
+        let id = "00000000-0000-0000-0000-000000000042";
+        assert_eq!(
+            decode_facts(format!(r#"{{"host_id":"{id}"}}"#).as_bytes()).map(|r| r.host_id),
+            Some(id.to_owned())
+        );
+        for invalid in [
+            b"{}".as_slice(),
+            b"[]",
+            br#"{"host_id":"wrong"}"#,
+            br#"{"host_id":4}"#,
+            br#"{"host_id":"AAAAAAAA-0000-0000-0000-000000000042"}"#,
+            br#"{"host_id":"00000000-0000-0000-0000-000000000042","account":"other"}"#,
+        ] {
+            assert!(decode_facts(invalid).is_none());
+        }
+        assert!(decode_facts(&[b' '; 257]).is_none());
+    }
 }
 
+/// Tests that inventory events keep their subscription generation under a fake socket host.
 #[cfg(test)]
 mod authority_tests {
     use super::*;
@@ -266,6 +406,13 @@ mod authority_tests {
                 self.read.notify_one();
                 Ok(json!({"hosts":[],"next":null}))
             })
+        }
+        fn facts<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a str,
+        ) -> Operation<'a, Result<Value, &'static str>> {
+            Box::pin(async { Err(HOST_OFFLINE) })
         }
         fn changes(&self) -> watch::Receiver<()> {
             self.changes.subscribe()
@@ -365,3 +512,8 @@ mod authority_tests {
         );
     }
 }
+
+/// Selected-host concurrency and admission regressions.
+#[cfg(test)]
+#[path = "inventory_facts_tests.rs"]
+mod facts_tests;

@@ -33,6 +33,8 @@ pub mod stop_hook;
 #[cfg(feature = "socket-host")]
 pub mod storage;
 pub mod streams;
+/// Shared list of system TLS root bundles, including the macOS one (#483).
+pub mod tls_roots;
 
 #[cfg(feature = "socket-host")]
 use bytes::Bytes;
@@ -1115,6 +1117,31 @@ pub enum PluginError {
     MessageTooLarge,
     /// The plugin rejected a validly routed action.
     Rejected,
+    /// Kernel `WireGuard` refused because no fixed root-owned nft tool is usable.
+    KernelFirewallUnavailable,
+}
+
+impl PluginError {
+    /// Return the short, safe reason a local operator can act on.
+    ///
+    /// Only the D346 firewall refusal carries a reason, naming where nft is looked for (D384);
+    /// all other plugin failures keep the existing generic message.
+    #[must_use]
+    pub const fn control_error_message(self) -> &'static str {
+        match self {
+            Self::KernelFirewallUnavailable => {
+                "Kernel WireGuard requires a root-owned nft executable in /usr/sbin, /usr/bin, a root or system Nix profile, or the Nix store; none was usable or it could not apply its firewall rules."
+            }
+            _ => "plugin action rejected",
+        }
+    }
+
+    /// Encode the short refusal as a bounded JSON body for the local control channel.
+    #[must_use]
+    pub fn control_error_json(self) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "error": self.control_error_message() }))
+            .unwrap_or_else(|_| br#"{"error":"plugin action rejected"}"#.to_vec())
+    }
 }
 
 #[cfg(test)]

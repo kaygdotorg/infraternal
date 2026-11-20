@@ -34,7 +34,7 @@ async fn live(f: &Fixture, host: Uuid) -> bool {
         .unwrap()
 }
 
-/// Offline removal records denial and reports pending; a durable receipt retires it.
+/// Offline removal survives a service restart and a second request until the host confirms it.
 #[tokio::test]
 async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
     let f = fixture().await;
@@ -96,11 +96,43 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
         live(&f, host).await,
         "pending denial is not a durable receipt"
     );
+    // A service restart drops review tokens and in-memory delivery state. A new
+    // review must leave the original offline request in charge of cleanup.
+    drop(service);
+    let restarted = removal(&f);
+    let repeat = restarted.start(&f.session, host, false, NOW).await.unwrap();
+    let repeated = restarted
+        .finish_host(&f.session, host, str_field(&repeat, "review"), NOW)
+        .await
+        .expect("a repeat must return the already-pending uninstall");
+    assert_eq!(
+        repeated["host_id"],
+        json!(host),
+        "the host is the stable request id"
+    );
+    assert_eq!(repeated["state"], result["state"]);
+    assert_eq!(repeated["host_cleanup"], result["host_cleanup"]);
+    assert_eq!(repeated["message"], result["message"]);
+    assert_eq!(repeated["manual"], result["manual"]);
+    let pending: bool =
+        sqlx::query_scalar("SELECT confirmed=0 FROM remote_login_cleanup WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert!(
+        pending,
+        "only the original host receipt can complete cleanup"
+    );
     crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
         .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
         .await
         .unwrap();
     assert!(!live(&f, host).await);
+    assert!(
+        restarted.start(&f.session, host, true, NOW).await.is_err(),
+        "a completed removal refuses a fresh review"
+    );
     let coordinates: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_host_bootstrap")
         .fetch_one(&f.auth.pool)
         .await
@@ -770,7 +802,7 @@ async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
         .execute(&f.auth.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),?,?)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,zeroblob(32),zeroblob(32),?3,?4,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
         .bind(host.as_bytes().repeat(2)).bind(host.as_bytes().as_slice()).bind(now - 604_800 + i64::from(valid) * 3600).bind(now + i64::from(valid) * 3600).execute(&f.auth.pool).await.unwrap();
     sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,1,1,'pending')")
         .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
@@ -841,12 +873,13 @@ async fn forget_retired_host_keeps_audit_and_denial() {
         "remote_login_cleanup",
         "remote_host_bootstrap",
     ] {
-        let count: i64 =
-            sqlx::query_scalar(&format!("SELECT count(*) FROM {table} WHERE host_id=?"))
-                .bind(host.as_bytes().as_slice())
-                .fetch_one(&f.auth.pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT count(*) FROM {table} WHERE host_id=?"
+        )))
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
         assert_eq!(count, 0, "{table}");
     }
     let detail: String = sqlx::query_scalar(
@@ -935,4 +968,357 @@ async fn forget_retired_host_without_removal_record_matches_inventory() {
         .unwrap();
     assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
     assert!(!live(&f, host).await);
+}
+
+/// Return the browser removal-start status using this fixture's same-origin owner cookie.
+async fn removal_start_status(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    crate::remote_removal_http::router(f.auth.clone(), removal(f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/remote/hosts/remove/start")
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(json!({"host_id":host}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Send a same-origin owner request through one browser router and decode its JSON response.
+async fn removal_json(
+    app: &axum::Router,
+    session: &str,
+    path: &str,
+    payload: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use tower::ServiceExt;
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={session}"))
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), 32768)
+        .await
+        .unwrap();
+    let value = serde_json::from_slice(&body).unwrap_or_else(|error| {
+        panic!(
+            "expected JSON from HTTP {status}, got {error}: {}",
+            String::from_utf8_lossy(&body)
+        )
+    });
+    (status, value)
+}
+
+/// Repeating an offline browser removal returns its existing status and checked uninstall command (#483).
+#[tokio::test]
+async fn repeated_pending_removal_returns_existing_browser_response() {
+    let f = fixture().await;
+    // The HTTP adapter uses wall time, so give the fixture session a live admin window.
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET unlocked=1,fresh=?,expires=? WHERE token_hash=?")
+        .bind(now)
+        .bind(now + 3600)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let host = owned_host(&f).await;
+    let app = crate::remote_removal_http::router(f.auth.clone(), removal(&f));
+    let (status, first_review) = removal_json(
+        &app,
+        &f.session,
+        "/remote/hosts/remove/start",
+        json!({"host_id":host,"uninstall":true}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (status, first) = removal_json(
+        &app,
+        &f.session,
+        "/remote/hosts/remove/finish",
+        json!({"host_id":host,"review":str_field(&first_review, "review")}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(first["state"], "pending");
+
+    let (status, repeat_review) = removal_json(
+        &app,
+        &f.session,
+        "/remote/hosts/remove/start",
+        json!({"host_id":host,"uninstall":false}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let (status, repeated) = removal_json(
+        &app,
+        &f.session,
+        "/remote/hosts/remove/finish",
+        json!({"host_id":host,"review":str_field(&repeat_review, "review")}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::OK,
+        "a repeat must not become 503"
+    );
+    assert_eq!(repeated["host_id"], first["host_id"]);
+    assert_eq!(repeated["state"], first["state"]);
+    assert_eq!(repeated["host_cleanup"], first["host_cleanup"]);
+    assert_eq!(repeated["message"], first["message"]);
+    assert_eq!(repeated["manual"], first["manual"]);
+
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+        .bind(host.as_bytes().as_slice())
+        .fetch_one(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "the repeat must preserve the first cleanup request"
+    );
+}
+
+/// An expired admin window asks for a tap while the owner's browser session stays signed in (#498).
+#[tokio::test]
+async fn expired_removal_window_requests_passkey_instead_of_sign_in() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    sqlx::query("UPDATE sessions SET fresh=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+    assert!(
+        f.auth
+            .session(&f.session, crate::runtime::unix_seconds().unwrap())
+            .await
+            .is_ok()
+    );
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::FORBIDDEN,
+        "a non-owner must not receive the window-expired response"
+    );
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        removal_start_status(&f, host).await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "an ended session must not receive the window-expired response"
+    );
+    assert!(live(&f, host).await);
+}
+
+/// A real identity-only tap renews this session, resumes removal and cannot revive a per-action grant (#498).
+#[tokio::test]
+async fn removal_passkey_renews_same_session_and_cannot_replay() {
+    let mut f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let now = NOW + 901;
+    bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
+    let before = f
+        .auth
+        .session(&f.session, now)
+        .await
+        .unwrap()
+        .session_incarnation;
+    let start = service.reauth_start(&f.session, host, now).await.unwrap();
+    assert!(
+        start["options"]["publicKey"].get("extensions").is_none(),
+        "renewal needs no PRF secret"
+    );
+    let ceremony = str_field(&start, "ceremony");
+    let proof = f.software.login(&start, ORIGIN, true);
+    let cross_session = crate::auth::random_capability();
+    let mut tx = f.auth.pool.begin().await.unwrap();
+    insert_session(
+        &mut tx,
+        &cross_session,
+        &f.user,
+        "second browser",
+        now,
+        None,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert!(f.auth.session(&cross_session, now).await.is_ok());
+    assert!(
+        service
+            .reauth_finish(&f.session, Uuid::new_v4(), ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .reauth_finish(&cross_session, host, ceremony, proof.clone(), now)
+            .await
+            .is_err()
+    );
+    service
+        .reauth_finish(&f.session, host, ceremony, proof.clone(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.auth
+            .fresh_session(&f.session, now)
+            .await
+            .unwrap()
+            .session_incarnation,
+        before
+    );
+    assert!(
+        f.auth.add_start(&f.session, now).await.is_err(),
+        "renewal must not resurrect the old per-action tap"
+    );
+    assert!(
+        service
+            .reauth_finish(&f.session, host, ceremony, proof, now)
+            .await
+            .is_err()
+    );
+    let review = service.start(&f.session, host, true, now).await.unwrap();
+    assert_eq!(
+        service
+            .finish_host(&f.session, host, str_field(&review, "review"), now)
+            .await
+            .unwrap()["state"],
+        "pending"
+    );
+}
+
+/// Unrelated ceremonies, stale requests and authority revoked during the prompt never renew a session (#498).
+#[tokio::test]
+async fn removal_passkey_rechecks_authority_and_rejects_unrelated_ceremonies() {
+    for rule in [
+        "unrelated",
+        "expired",
+        "owner-revoked",
+        "session-revoked",
+        "host-revoked",
+        "no-uv",
+        "wrong-origin",
+        "wrong-rp-id",
+    ] {
+        let mut f = fixture().await;
+        let host = owned_host(&f).await;
+        let service = removal(&f);
+        let now = NOW + 901;
+        let start = if rule == "unrelated" {
+            f.auth.login_start(&f.user, now).await.unwrap()
+        } else {
+            service.reauth_start(&f.session, host, now).await.unwrap()
+        };
+        let proof = match rule {
+            "no-uv" => f.software.login(&start, ORIGIN, false),
+            "wrong-origin" => f.software.login(&start, "https://evil.example.test", true),
+            "wrong-rp-id" => {
+                f.software.rp_id = "evil.example.test";
+                f.software.login(&start, ORIGIN, true)
+            }
+            _ => f.software.login(&start, ORIGIN, true),
+        };
+        match rule {
+            "owner-revoked" => {
+                sqlx::query("UPDATE users SET owner=0")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "session-revoked" => {
+                sqlx::query("DELETE FROM sessions")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            "host-revoked" => {
+                sqlx::query("UPDATE remote_hosts SET revoked_at=1")
+                    .execute(&f.auth.pool)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        assert!(
+            service
+                .reauth_finish(
+                    &f.session,
+                    host,
+                    str_field(&start, "ceremony"),
+                    proof,
+                    if rule == "expired" { now + 120 } else { now }
+                )
+                .await
+                .is_err(),
+            "{rule}"
+        );
+        assert!(
+            f.auth.fresh_session(&f.session, now).await.is_err(),
+            "{rule}"
+        );
+    }
+}
+
+/// Concurrent reviews for one host share one pending request and one removal record (#483).
+#[tokio::test]
+async fn concurrent_second_removal_returns_existing_pending_response() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let first = service.start(&f.session, host, true, NOW).await.unwrap();
+    let second = service.start(&f.session, host, true, NOW).await.unwrap();
+    let first_review = str_field(&first, "review").to_owned();
+    let second_review = str_field(&second, "review").to_owned();
+    let (first, second) = tokio::join!(
+        service.finish_host(&f.session, host, &first_review, NOW),
+        service.finish_host(&f.session, host, &second_review, NOW),
+    );
+    let first = first.expect("the first review records the offline cleanup");
+    let second = second.expect("the second review returns the existing cleanup");
+    assert_eq!(first["host_id"], second["host_id"]);
+    assert_eq!(first["state"], second["state"]);
+    assert_eq!(first["manual"], second["manual"]);
+    let removals: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        removals, 1,
+        "the second request cannot publish another removal"
+    );
 }

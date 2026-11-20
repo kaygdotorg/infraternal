@@ -26,8 +26,10 @@ let tilingManagerExecutables: Set<String> = [
 struct WindowResizeOwnership {
     /// True once the desktop is known to own this window's size. Never goes back to false.
     private(set) var managed = false
-    /// Size requested by the last accepted `attempt`, which `observe` checks against.
+    /// Applied size, or requested size until acknowledged, which `observe` checks against.
     private var expected: CGSize?
+    /// Size before the request, so an unchanged AX read cannot hide an immediate external undo.
+    private var before: CGSize?
     /// Time of the last accepted `attempt`, bounding the observation window.
     private var attemptedAt: Double?
     /// Last size requested, so the same size is not requested a second time.
@@ -36,9 +38,18 @@ struct WindowResizeOwnership {
     /// Records that a tiling manager is running. Passing `false` never clears `managed`.
     mutating func detectManager(_ present: Bool) { managed = managed || present }
 
+    /// Records the size Accessibility actually applied, including an app's size constraints.
+    /// Call immediately after a successful size request, before processing later notifications.
+    mutating func applied(_ actual: CGSize) {
+        guard !managed, let before, actual.width.isFinite, actual.height.isFinite,
+              actual.width > 0, actual.height > 0, !matches(actual, before) else { return }
+        expected = actual
+    }
+
     /// Reports the window size seen after an `attempt`.
     ///
-    /// If it differs from the requested size (within 1 point) and the report arrives no more than
+    /// If it differs from the applied size (or requested size before acknowledgment, within 1 point)
+    /// and the report arrives no more than
     /// two seconds after the attempt, the desktop undid the resize and `managed` latches. Reports
     /// with a non-finite time, a time before the attempt, or a late time are ignored; late ones
     /// are more likely the user resizing than a manager.
@@ -66,7 +77,7 @@ struct WindowResizeOwnership {
               !matches(actual, desired), attempted.map({ !matches($0, desired) }) ?? true else { return false }
         // A refused or constrained AX request is never retried by a timer. A new
         // canvas size may request once again, unless managed ownership latched.
-        attempted = desired; expected = desired; attemptedAt = now
+        attempted = desired; expected = desired; before = actual; attemptedAt = now
         return true
     }
 
@@ -74,6 +85,12 @@ struct WindowResizeOwnership {
     private func matches(_ a: CGSize, _ b: CGSize) -> Bool {
         abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
     }
+}
+
+/// Compares native point frames while allowing for sub-point rounding.
+func sameWindowFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+    abs(a.minX - b.minX) < 1 && abs(a.minY - b.minY) < 1
+        && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
 }
 
 /// Where picture content lands inside an output frame when it is scaled to fit and centered

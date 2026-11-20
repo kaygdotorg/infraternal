@@ -14,39 +14,70 @@ let
     then (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version
     else releaseVersion;
   # Same tarball and checksum table as scripts/auth-toolchain (D213, D328).
-  zigArchive = (import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; }).archive;
-  zig = runCommand "infraternal-zig-0.17.0" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
+  zigToolchain = import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; };
+  zig = runCommand "infraternal-zig-${zigToolchain.version}" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
     ${lowerBuildPriority}
     mkdir -p "$out"
-    tar -xJf ${zigArchive} --strip-components=1 -C "$out"
+    tar -xJf ${zigToolchain.archive} --strip-components=1 -C "$out"
     # Keep the checksum-pinned compiler executable unchanged. Its build runner
     # must discover the Nix build host through an existing ELF, then pass that
     # resolved target explicitly to native generators. Cross targets keep the
     # shipping flags; only build-host discovery changes.
+    #
+    # The compiler binary's own host detection reads /usr/bin/env, which the
+    # sandbox lacks. The configure and make processes are compiled from this
+    # lib/ tree, so they detect correctly once system.zig points at a real ELF.
     substituteInPlace "$out/lib/std/zig/system.zig" \
       --replace-fail '"/usr/bin/env"' '"${coreutils}/bin/env"'
-    python3 - "$out/lib/std/Build/Module.zig" <<'PY'
+    # Zig 0.17 moved argv assembly from std/Build/Module.zig into the make
+    # step (lib/compiler/Maker/Step/Compile.zig). A host target's query is
+    # stored as `.none`, so stock Zig passes no -target and the compiler
+    # binary re-detects the host by itself. The patch rebuilds the query from
+    # the configured `result` (the target the build runner resolved), with the
+    # same add/sub feature arithmetic as std.Target.Query.fromTarget: the
+    # stored result lists every enabled feature as "add", so without the
+    # subtraction the model's defaults could switch on features the build
+    # host lacks. Explicit (cross) queries keep upstream's branch unchanged.
+    #
+    # The host branch emits its own flags and copies the dynamic-linker path
+    # into the arena. A DynamicLinker keeps its path in an inline buffer, so
+    # a slice of a stack-local query's copy dangles once the block ends; the
+    # compiler then got a garbage --dynamic-linker and crashed (SEGV, #476).
+    python3 - "$out/lib/compiler/Maker/Step/Compile.zig" <<'PY'
     from pathlib import Path
     import sys
     path = Path(sys.argv[1])
-    before = "        if (!target.query.isNative()) {"
-    after = """        if (target.query.isNative()) {
-                const native_query = std.Target.Query.fromTarget(&target.result);
-                try zig_args.appendSlice(&.{
-                    "-target", try native_query.zigTriple(b.allocator),
-                    "-mcpu", try native_query.serializeCpuAlloc(b.allocator),
+    before = "        if (resolved_target.unwrapQuery(conf)) |query| {\n"
+    after = """        if (resolved_target.query == .none) {
+                const host_target: Configuration.ResolvedTarget = .{
+                    .query = .init(resolved_target.result),
+                    .result = resolved_target.result,
+                };
+                var host_query = host_target.unwrapQuery(conf).?;
+                const enabled = host_query.cpu_features_add;
+                var model_features = host_query.cpu_model.explicit.features;
+                model_features.populateDependencies(host_query.cpu_arch.?.allFeaturesList());
+                host_query.cpu_features_add = enabled;
+                host_query.cpu_features_add.removeFeatureSet(model_features);
+                host_query.cpu_features_sub = model_features;
+                host_query.cpu_features_sub.removeFeatureSet(enabled);
+                try zig_args.appendSlice(gpa, &.{
+                    "-target", try host_query.zigTriple(arena),
+                    "-mcpu", try host_query.serializeCpuAlloc(arena),
                 });
-                if (target.result.dynamic_linker.get()) |dynamic_linker| {
-                    try zig_args.append("--dynamic-linker");
-                    try zig_args.append(dynamic_linker);
+                if (host_query.dynamic_linker) |dynamic_linker| {
+                    if (dynamic_linker.get()) |dynamic_linker_path| {
+                        try zig_args.appendSlice(gpa, &.{ "--dynamic-linker", try arena.dupe(u8, dynamic_linker_path) });
+                    }
                 }
-            } else {"""
+            } else if (resolved_target.unwrapQuery(conf)) |query| {
+    """
     source = path.read_text()
     assert source.count(before) == 1, "native build target boundary changed"
     path.write_text(source.replace(before, after))
     PY
   '';
-  vtVersion = "1.0.0";
+  vtVersion = "1.0.1";
   vtFiles = builtins.listToAttrs (map
     (line: let fields = lib.splitString "  " line; in {
       name = builtins.elemAt fields 1;
@@ -80,7 +111,7 @@ let
   cargoDeps = rustPlatform.importCargoLock {
     lockFile = ../Cargo.lock;
     # Fixed source hash for the commit pinned in Cargo.lock; required in the sandbox.
-    outputHashes."gotatun-0.10.2" = "sha256-mS0CUgX9V/8z8GNYqnXzBaoaLOMGI/ffekINaWA4rks=";
+    outputHashes."gotatun-0.10.3" = "sha256-YHJv6l/Uhp0opWj0OGDa0R+xFfhE+ULYEEj6bHsEOoc=";
   };
   bunDeps = stdenv.mkDerivation {
     name = "infraternal-bun-deps";
@@ -103,7 +134,9 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-PSBZH4iSSZJJSTImCUk4ayupmor08VwHXfXHR/vh7i4=";
+    # Refresh this hash when either Bun input changes: a cached fixed output
+    # can otherwise retain an older dependency tree without rebuilding it.
+    outputHash = "sha256-r6aHNw0NsOimex8a0vkKs7Ki7mIXe1liDZPGQx/R8oQ=";
     dontFixup = true;
   };
   rustupShim = writeShellScriptBin "rustup" ''

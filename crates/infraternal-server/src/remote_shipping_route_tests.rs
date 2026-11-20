@@ -3,6 +3,8 @@
 use super::super::*;
 use tower::ServiceExt;
 
+/// The default server, built by the production router without a test signer, mounts the
+/// remote enrollment endpoint: it answers rather than returning 404 (#78).
 #[tokio::test]
 async fn review_default_server_must_register_remote_join() {
     let data = PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -20,7 +22,7 @@ async fn review_default_server_must_register_remote_join() {
         behind_proxy: false,
         trusted_proxies: Vec::new(),
     };
-    let (app, _, _, _, _) = build_router_core(
+    let (app, _, _, _, auth) = build_router_core(
         config,
         Some(EmbeddedAgent::unavailable()),
         None,
@@ -77,7 +79,13 @@ async fn review_default_server_must_register_remote_join() {
         response.status(),
         axum::http::StatusCode::METHOD_NOT_ALLOWED
     );
-    std::fs::remove_dir_all(data).unwrap();
+    // Cleanup is best effort, as in the other router fixtures: the router's
+    // detached background tasks keep running until the test runtime ends, and
+    // on a loaded host one can still create a file here while the directory
+    // is being removed ("Directory not empty", #525). Close the database pool
+    // first so its threads are done with the files.
+    auth.close_database().await;
+    let _ = std::fs::remove_dir_all(data);
     assert_ne!(
         status,
         axum::http::StatusCode::NOT_FOUND,
@@ -124,7 +132,7 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
         roots: vec![issuer],
         clock_health: Arc::new(crate::clock_health::ClockHealth::default()),
     };
-    let (app, _, listeners, _, _) = build_router_core(
+    let (app, _, listeners, _, auth) = build_router_core(
         config,
         Some(EmbeddedAgent::unavailable()),
         Some(remote.enrollment.clone()),
@@ -158,7 +166,13 @@ async fn independent_review_configured_server_mounts_ca_unlock_routes() {
     }
     drop(app);
     drop(listeners);
-    std::fs::remove_dir_all(data).unwrap();
+    // Cleanup is best effort, as in the other router fixtures: the router's
+    // detached background tasks keep running until the test runtime ends, and
+    // on a loaded host one can still create a file here while the directory
+    // is being removed ("Directory not empty", #525). Close the database pool
+    // first so its threads are done with the files.
+    auth.close_database().await;
+    let _ = std::fs::remove_dir_all(data);
     assert_eq!(
         statuses,
         vec![axum::http::StatusCode::UNAUTHORIZED; 3],

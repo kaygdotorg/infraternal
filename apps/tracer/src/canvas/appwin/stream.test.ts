@@ -1,9 +1,10 @@
 /** Exercises viewer/control ownership through public stream operations without a decoder or DOM renderer [D208,D232]. */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
-import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
+import { MAX_VIDEO_BYTES, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { AppStream, parseStatus, type StreamOptions } from "./stream";
+import type { FromWorker, ToWorker } from "./worker-protocol";
 import type { ControlState } from "./status";
 
 const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -26,6 +27,7 @@ afterAll(() => {
   }
 });
 
+/** Makes a reattachable stream and records frames without running the worker. */
 async function fixture(deferControl = false, onControl: (control: ControlState) => void = () => undefined) {
   const shapes: number[] = [];
   let controlReply: ((allowed: boolean) => void) | undefined;
@@ -36,7 +38,13 @@ async function fixture(deferControl = false, onControl: (control: ControlState) 
   const frames: Array<{ id: number; frame: WireFrame }> = [];
   const actions: string[] = [];
   const closed: number[] = [];
-  const worker = { postMessage() {}, terminate() {}, onerror: null as ((event: Event) => void) | null };
+  const chunks: Extract<ToWorker, { t: "chunk" }>[] = [];
+  const worker = {
+    postMessage(message: ToWorker) { if (message.t === "chunk") chunks.push(message); },
+    terminate() {},
+    onerror: null as ((event: Event) => void) | null,
+    onmessage: null as ((event: { data: FromWorker }) => void) | null,
+  };
   const connection: StreamOptions["connection"] = {
     isWelcomed: true, onWelcome: () => () => undefined,
     async call(action, input) {
@@ -59,7 +67,7 @@ async function fixture(deferControl = false, onControl: (control: ControlState) 
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, shapes, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, shapes, frames, actions, closed, handlers, worker, chunks, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
 
 interface BindingProbe {
@@ -101,6 +109,49 @@ test("server Close unregisters its app-window handler before disposal", async ()
     // MuxConnection dispatches Close to the registered handler; only
     // closeStream removes that handler from the page's shared stream table.
     expect([...f.handlers.keys()]).toEqual([]);
+  } finally { f.stream.dispose(); }
+});
+
+/** A confirmed native close must retire a reattached viewer even when its cached picture was live. */
+test("authoritative window retirement after reconnect clears the viewer and worker", async () => {
+  const f = await fixture();
+  try {
+    const viewer = f.handlers.get(1)!;
+    f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
+    viewer.onDisconnected(false);
+    viewer.onWelcome(true);
+    viewer.onFrame({ type: "Close", code: 4410, reason: "window closed" }, new Uint8Array(), 0);
+    f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
+    expect(f.stream.current.kind).toBe("closed");
+    expect(f.handlers.size).toBe(0);
+    expect(f.actions).not.toContain("desktop.windows");
+  } finally { f.stream.dispose(); }
+});
+
+/** A worker that never runs cannot accumulate access units, even across a socket reconnect. */
+test("stalled worker handoff stays within one maximum access unit and resumes on a keyframe", async () => {
+  const f = await fixture();
+  try {
+    const viewer = f.handlers.get(1)!;
+    const bytes = new Uint8Array(MAX_VIDEO_BYTES);
+    const deliver = (sequence: number, keyframe: boolean, payload = bytes) => viewer.onFrame({
+      type: "Desktop", message: { kind: "video", sequence: BigInt(sequence), captureNs: 0n, keyframe, bytes: payload },
+    }, new Uint8Array(), 0);
+    deliver(1, true);
+    for (let sequence = 2; sequence <= 20; sequence++) deliver(sequence, false, bytes.subarray(0, 1));
+    viewer.onDisconnected(false);
+    viewer.onWelcome(true);
+    deliver(21, true);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1]);
+    f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "repair")).toBe(true);
+    deliver(22, false);
+    deliver(23, true);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23]);
+    f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
+    const tiny = bytes.subarray(0, 1);
+    for (let sequence = 24; sequence <= 1000; sequence++) deliver(sequence, sequence === 24, tiny);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, 24, 25, 26, 27]);
   } finally { f.stream.dispose(); }
 });
 
@@ -272,7 +323,7 @@ test("a resize queued during control confirmation reaches the machine before pen
     const worker = f.worker as unknown as { onmessage: (event: { data: unknown }) => void };
     worker.onmessage({ data: { t: "first", width: 800, height: 600 } });
     await new Promise<void>(resolve => setImmediate(resolve));
-    resize = () => f.stream.resize({ width: 1000, height: 600, density: 1 }, false);
+    resize = () => f.stream.resize({ width: 1000, height: 600, density: 1 });
 
     binding.send({ kind: "text", scalar: 97 });
     expect(binding.queued).toEqual([{ kind: "text", scalar: 97 }]);
@@ -359,6 +410,26 @@ test("control held before a dropped connection comes back by itself on reconnect
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(2);
     expect(f.stream.controlState.kind).toBe("controlled");
+  } finally { f.stream.dispose(); }
+});
+
+/** An automatic control renewal and the resulting canvas refit preserve a local Mac resize. */
+test("reconnecting renews control without replaying geometry", async () => {
+  const f = await fixture();
+  const sizes = () => f.frames.filter(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size");
+  try {
+    expect(await f.stream.takeControl()).toBe(true);
+    expect(sizes()).toHaveLength(1);
+    const handler = f.handlers.get(1)!;
+    handler.onDisconnected(false);
+    handler.onWelcome(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.stream.controlState.kind).toBe("controlled");
+    expect(sizes()).toHaveLength(1);
+    f.stream.resize({ width: 940, height: 500, density: 1 }, false);
+    expect(sizes()).toHaveLength(1);
+    f.stream.resize({ width: 980, height: 500, density: 1 }, true);
+    expect(sizes()).toHaveLength(2);
   } finally { f.stream.dispose(); }
 });
 

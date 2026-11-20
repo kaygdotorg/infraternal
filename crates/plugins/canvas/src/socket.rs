@@ -1,5 +1,5 @@
 //! Hosts idle-free layout subscriptions on the existing authorized control stream [16,183,198].
-use crate::store::LayoutStore;
+use crate::store::{LayoutStore, Refusal};
 use bytes::Bytes;
 use infraternal_plugin_api::{
     ActionDef, DefaultValue, Dependency, DryRun, Effect, Operation, Permission, Plugin,
@@ -115,12 +115,14 @@ impl Plugin for CanvasPlugin {
                                 if let Some(incarnation) = host.session_incarnation() {
                                     let binding = serde_json::from_slice::<SessionBinding<'_>>(input_json).ok();
                                     if binding.as_ref().map(|v| v.session_incarnation.as_ref()) != Some(incarnation) {
+                                        // Refusals before storage admission still need a safe diagnostic, never the binding itself.
+                                        tracing::warn!(intent = "unbound", initialize = action_id == "canvas.layout.initialize", input_bytes = input_json.len(), reason = "layout_session_changed", "canvas layout refused");
                                         return send(&replies, 0, Frame::Result { call_id, ok: false, json: br#"{"error":"layout session changed","reason":"layout_session_changed"}"# }).await;
                                     }
                                 }
                                 let result = match action_id {
                                     "canvas.layout.apply" | "canvas.layout.initialize" => store.call(action_id=="canvas.layout.initialize",host.user_id(),input_json).await,
-                                    _=>Err(()),
+                                    _=>Err(Refusal::InvalidRequest),
                                 };
                                 let mut output = Vec::new();
                                 let (ok, json) = result_json(result, &mut output)?;
@@ -188,7 +190,8 @@ async fn send(replies: &ReplySender, stream: u32, frame: Frame<'_>) -> Result<()
     replies.send(Bytes::from(wire)).await.map_err(|_| ())
 }
 
-fn result_json(result: Result<i64, ()>, output: &mut Vec<u8>) -> Result<(bool, &[u8]), ()> {
+/// Encodes a revision or a fixed public refusal, never internal storage errors or caller text.
+fn result_json(result: Result<i64, Refusal>, output: &mut Vec<u8>) -> Result<(bool, &[u8]), ()> {
     match result {
         Ok(revision) => {
             output.extend_from_slice(b"{\"revision\":");
@@ -196,7 +199,15 @@ fn result_json(result: Result<i64, ()>, output: &mut Vec<u8>) -> Result<(bool, &
             output.push(b'}');
             Ok((true, output))
         }
-        Err(()) => Ok((false, br#"{"error":"invalid canvas operation"}"#)),
+        Err(refusal) => {
+            let (reason, error) = refusal.public();
+            serde_json::to_writer(
+                &mut *output,
+                &serde_json::json!({"error": error, "reason": reason}),
+            )
+            .map_err(|_| ())?;
+            Ok((false, output))
+        }
     }
 }
 
@@ -236,14 +247,19 @@ mod tests {
         assert!(matches!(plain.session_incarnation, Cow::Borrowed(_)));
         assert_eq!(plain.session_incarnation, escaped.session_incarnation);
     }
+    /// Keeps successful receipts compatible and checks the safe refusal wire fields.
     #[test]
     fn result_json_preserves_both_wire_shapes() {
         let mut output = Vec::new();
         let (ok, json) = result_json(Ok(9), &mut output).unwrap();
         assert!(ok);
         assert_eq!(json, br#"{"revision":9}"#);
-        let (ok, json) = result_json(Err(()), &mut output).unwrap();
+        output.clear();
+        let (ok, json) = result_json(Err(Refusal::InvalidRequest), &mut output).unwrap();
         assert!(!ok);
-        assert_eq!(json, br#"{"error":"invalid canvas operation"}"#);
+        assert_eq!(
+            json,
+            br#"{"error":"The layout request is invalid.","reason":"invalid_request"}"#
+        );
     }
 }

@@ -11,17 +11,42 @@ use tokio::{sync::watch, time::Instant};
 use uuid::Uuid;
 
 /// One event source per runtime store, shared by its clones. Weak entries do not
-/// retain transports, and dead host registrations are pruned at the host cap.
+/// retain transports, and dead registrations are pruned at the cap.
+///
+/// Signals are kept per authority epoch: a host *and* the uid its infraternal
+/// agent runs as (J415 R2). A host has one epoch in its life, except during a
+/// root upgrade, when the rootless epoch (host, 1001 say) and the root
+/// successor's epoch (host, 0) briefly coexist. The handover cuts only the old
+/// epoch, so the new one keeps its link. Removing a host cuts every epoch it
+/// has, and keeps refusing new ones until the tombstone commits.
 #[derive(Default)]
 pub(crate) struct Revocations {
-    signals: Mutex<HashMap<Uuid, Weak<Revocation>>>,
+    signals: Mutex<HashMap<Epoch, Weak<Revocation>>>,
     // Storage refusal must not let the last transport drop the cancellation
     // signal and permit a reconnect. Successful tombstones release this hold.
-    cuts: Mutex<HashMap<Uuid, Arc<Revocation>>>,
+    cuts: Mutex<Cuts>,
     pub(crate) plugins: Mutex<crate::plugins::WeakRuntime>,
     #[cfg(test)]
     pub(crate) publication_pause: Mutex<Option<Arc<PublicationPause>>>,
 }
+
+/// One authority epoch: the host and the uid its infraternal agent runs as.
+pub(crate) type Epoch = (Uuid, u32);
+
+/// The cuts still held until their tombstone commits.
+#[derive(Default)]
+struct Cuts {
+    /// Cut epochs, each holding its (already cancelled) signal alive.
+    epochs: HashMap<Epoch, Arc<Revocation>>,
+    /// Hosts cut as a whole (removal): every epoch, including ones that
+    /// register later, starts cancelled until [`Revocations::tombstoned`].
+    hosts: std::collections::HashSet<Uuid>,
+}
+
+/// The signals one cut cancelled. Holding it keeps them registered, so a
+/// reconnect in the gap before the tombstone finds them already cancelled.
+pub(crate) struct Cut(Vec<Arc<Revocation>>);
+
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct PublicationPause {
@@ -37,6 +62,17 @@ pub(crate) struct Revocation {
     writes: Arc<tokio::sync::RwLock<()>>,
 }
 
+impl Revocation {
+    /// A fresh signal, cancelled from the start when `cut`.
+    fn new(cut: bool) -> Arc<Self> {
+        Arc::new(Self {
+            login_actor: Mutex::default(),
+            changed: watch::channel(cut).0,
+            writes: Arc::default(),
+        })
+    }
+}
+
 impl Revocations {
     #[cfg(test)]
     pub(crate) async fn after_commit(&self) {
@@ -46,14 +82,23 @@ impl Revocations {
             pause.release.notified().await;
         }
     }
-    fn register(&self, host: Uuid) -> io::Result<Arc<Revocation>> {
+
+    /// The live signal for `epoch`, creating it when there is none. A signal
+    /// created while its host or epoch is cut starts cancelled.
+    pub(crate) fn register(&self, host: Uuid, uid: u32) -> io::Result<Arc<Revocation>> {
+        let epoch = (host, uid);
+        // Lock order: cuts, then signals (the same as `cut`).
+        let cuts = self
+            .cuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // This map contains only independent weak registrations; Rust containers
         // retain their invariants after unwinding, so poison can be recovered.
         let mut signals = self
             .signals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(signal) = signals.get(&host).and_then(Weak::upgrade) {
+        if let Some(signal) = signals.get(&epoch).and_then(Weak::upgrade) {
             return Ok(signal);
         }
         if signals.len() >= 10_000 {
@@ -62,12 +107,8 @@ impl Revocations {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
-        let signal = Arc::new(Revocation {
-            login_actor: Mutex::default(),
-            changed: watch::channel(false).0,
-            writes: Arc::default(),
-        });
-        signals.insert(host, Arc::downgrade(&signal));
+        let signal = Revocation::new(cuts.hosts.contains(&host));
+        signals.insert(epoch, Arc::downgrade(&signal));
         Ok(signal)
     }
 
@@ -79,8 +120,9 @@ impl Revocations {
             .signals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&host)
-            .and_then(Weak::upgrade)
+            .iter()
+            .filter(|((id, _), _)| *id == host)
+            .find_map(|(_, signal)| signal.upgrade())
             .and_then(|signal| {
                 signal
                     .login_actor
@@ -94,37 +136,83 @@ impl Revocations {
         durable_cleanup(actor, person).await.is_some()
     }
 
+    /// Cut every epoch of `host`, then wait until each one's admitted writes
+    /// have drained. Hold the result until the tombstone commits.
     pub(crate) async fn quiesce(
         &self,
         host: Uuid,
-    ) -> io::Result<(Arc<Revocation>, tokio::sync::OwnedRwLockWriteGuard<()>)> {
-        let signal = self.cut(host)?;
-        let drained = signal.writes.clone().write_owned().await;
-        Ok((signal, drained))
+    ) -> io::Result<(Cut, Vec<tokio::sync::OwnedRwLockWriteGuard<()>>)> {
+        let cut = self.cut(host)?;
+        let mut drained = Vec::with_capacity(cut.0.len());
+        for signal in &cut.0 {
+            drained.push(signal.writes.clone().write_owned().await);
+        }
+        Ok((cut, drained))
     }
 
-    /// Fence new writes before waiting for SQLite's writer slot. The caller
-    /// retains the signal until the durable tombstone has committed, so a
-    /// reconnect cannot allocate an uncancelled registration in that gap.
-    pub(crate) fn cut(&self, host: Uuid) -> io::Result<Arc<Revocation>> {
-        let signal = self.register(host)?;
+    /// Fence new writes on every epoch of `host` before waiting for SQLite's
+    /// writer slot. The caller retains the cut until the durable tombstone
+    /// has committed, so a reconnect, as any uid, cannot allocate an
+    /// uncancelled registration in that gap.
+    pub(crate) fn cut(&self, host: Uuid) -> io::Result<Cut> {
         let mut cuts = self
             .cuts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cuts.len() >= 10_000 && !cuts.contains_key(&host) {
+        if cuts.hosts.len() >= 10_000 && !cuts.hosts.contains(&host) {
             return Err(io::ErrorKind::WouldBlock.into());
         }
-        cuts.insert(host, signal.clone());
+        cuts.hosts.insert(host);
+        let live: Vec<Arc<Revocation>> = self
+            .signals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|((id, _), _)| *id == host)
+            .filter_map(|(_, signal)| signal.upgrade())
+            .collect();
+        for signal in &live {
+            signal.changed.send_replace(true);
+        }
+        Ok(Cut(live))
+    }
+
+    /// Cut one epoch only: the old rootless authority right after a root
+    /// upgrade's handover commits (J415 R2). The host's other epochs, the new
+    /// root one included, are untouched. Release it with
+    /// [`Self::tombstoned_epoch`] once the change is durable.
+    pub(crate) fn cut_epoch(&self, host: Uuid, uid: u32) -> io::Result<Arc<Revocation>> {
+        let signal = self.register(host, uid)?;
+        let mut cuts = self
+            .cuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cuts.epochs.len() >= 10_000 && !cuts.epochs.contains_key(&(host, uid)) {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        cuts.epochs.insert((host, uid), signal.clone());
         signal.changed.send_replace(true);
         Ok(signal)
     }
 
+    /// The host's tombstone committed: release every cut of it.
     pub(crate) fn tombstoned(&self, host: Uuid) {
+        let mut cuts = self
+            .cuts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cuts.hosts.remove(&host);
+        cuts.epochs.retain(|(id, _), _| *id != host);
+    }
+
+    /// One epoch's end is durable (its certificates are revoked): release its
+    /// cut. Admission refuses that epoch's certificates from here on anyway.
+    pub(crate) fn tombstoned_epoch(&self, host: Uuid, uid: u32) {
         self.cuts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&host);
+            .epochs
+            .remove(&(host, uid));
     }
 }
 
@@ -158,6 +246,10 @@ pub(crate) struct AuthorityGuard {
     provisioning_owner: Option<String>,
     /// A revoked certificate can carry only this retained durable cleanup.
     cleanup_person: Option<Uuid>,
+    /// Set only for a root upgrade's successor (J415 R1, R2): admitted by its
+    /// own check, never published as the host, and limited to proof calls
+    /// (or, once abandoned, to uninstalling itself).
+    successor: Option<crate::enrollment::promotion::SuccessorAuthority>,
     pub(crate) identity: HostAuthority,
     signal: Arc<Revocation>,
     certificate: Arc<watch::Sender<Admission>>,
@@ -176,7 +268,7 @@ impl AuthorityGuard {
             .map_err(io::Error::other)?;
         let now = i64::try_from(elapsed.as_secs()).map_err(io::Error::other)?;
         let identity = store.admit(&fingerprint, now).await.map_err(|_| denied())?;
-        let signal = store.1.register(identity.host)?;
+        let signal = store.1.register(identity.host, identity.execution_uid)?;
         // Register before the final ledger read, so revocation racing initial
         // admission either denies that read or marks the already registered guard.
         let live = store.admit(&fingerprint, now).await.map_err(|_| denied())?;
@@ -207,6 +299,7 @@ impl AuthorityGuard {
             store,
             provisioning_owner: None,
             cleanup_person: None,
+            successor: None,
             certificate: Arc::new(
                 watch::channel(Admission {
                     fingerprint,
@@ -233,6 +326,9 @@ impl AuthorityGuard {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?;
         let now = i64::try_from(elapsed.as_secs()).map_err(io::Error::other)?;
+        if let Ok(successor) = store.admit_successor(&fingerprint, now).await {
+            return Self::successor(store, successor, elapsed);
+        }
         let (identity, person) = store
             .admit_cleanup(&fingerprint, now)
             .await
@@ -246,13 +342,10 @@ impl AuthorityGuard {
             store,
             provisioning_owner: None,
             cleanup_person: Some(person),
+            successor: None,
             identity: identity.clone(),
             // Never revive the ordinary registration already cut by revocation.
-            signal: Arc::new(Revocation {
-                login_actor: Mutex::default(),
-                changed: watch::channel(false).0,
-                writes: Arc::default(),
-            }),
+            signal: Revocation::new(false),
             certificate: Arc::new(
                 watch::channel(Admission {
                     fingerprint,
@@ -267,6 +360,57 @@ impl AuthorityGuard {
     /// Only the private cleanup path may consume this person; ordinary admission refuses it.
     pub(crate) fn cleanup_person(&self) -> Option<Uuid> {
         self.cleanup_person
+    }
+
+    /// A root upgrade's successor, admitted for its promotion only (J415 R1).
+    ///
+    /// Its signal is the host's root epoch, `(host, 0)`, which the handover's
+    /// cut of the rootless epoch leaves alone, and which host removal cuts
+    /// with every other epoch (R2). Its lifetime ends with the promotion's
+    /// deadline (or its certificate, for an uninstall).
+    fn successor(
+        store: EnrollmentStore,
+        successor: crate::enrollment::promotion::SuccessorAuthority,
+        elapsed: Duration,
+    ) -> io::Result<Self> {
+        let lifetime =
+            Duration::from_secs(u64::try_from(successor.not_after).map_err(|_| denied())?)
+                .checked_sub(elapsed)
+                .ok_or_else(denied)?;
+        let signal = store.1.register(successor.host, 0)?;
+        if *signal.changed.borrow() {
+            return Err(denied());
+        }
+        let identity = HostAuthority {
+            host: successor.host,
+            mode: crate::enrollment::Mode::Rootful,
+            execution_uid: 0,
+            not_after: successor.not_after,
+        };
+        Ok(Self {
+            store,
+            provisioning_owner: None,
+            cleanup_person: None,
+            certificate: Arc::new(
+                watch::channel(Admission {
+                    fingerprint: successor.fingerprint,
+                    identity: identity.clone(),
+                    expires: Instant::now() + lifetime,
+                })
+                .0,
+            ),
+            successor: Some(successor),
+            identity,
+            signal,
+        })
+    }
+
+    /// The successor this guard admitted, if it is one. Only the private
+    /// successor path in the runtime consumes it; the host registry refuses it.
+    pub(crate) fn successor_authority(
+        &self,
+    ) -> Option<&crate::enrollment::promotion::SuccessorAuthority> {
+        self.successor.as_ref()
     }
 
     #[cfg(test)]
@@ -301,7 +445,7 @@ impl AuthorityGuard {
             execution_uid: uid,
             not_after: 0,
         };
-        let signal = store.1.register(host)?;
+        let signal = store.1.register(host, uid)?;
         if *signal.changed.borrow() {
             return Err(denied());
         }
@@ -309,6 +453,7 @@ impl AuthorityGuard {
             store,
             provisioning_owner: Some(owner.to_owned()),
             cleanup_person: None,
+            successor: None,
             signal,
             certificate: Arc::new(
                 watch::channel(Admission {
@@ -395,7 +540,8 @@ impl AuthorityGuard {
             .unwrap_or_else(Instant::now)
     }
     pub(crate) async fn acknowledge(&self, fingerprint: [u8; 32]) -> io::Result<()> {
-        if !self.permits() {
+        // A successor never renews: its promotion is far shorter than a week.
+        if self.successor.is_some() || !self.permits() {
             return Err(denied());
         }
         let fresh = Self::admit(self.store.clone(), fingerprint).await?;
@@ -421,6 +567,26 @@ impl AuthorityGuard {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?;
         let now = i64::try_from(now.as_secs()).map_err(io::Error::other)?;
+        if let Some(successor) = &self.successor {
+            // A successor's operations recheck its own admission: the same
+            // promotion and purpose, still live (abandonment or the handover
+            // end it at once).
+            let live = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.store.admit_successor(&successor.fingerprint, now),
+            )
+            .await
+            .map_err(|_| denied())?
+            .map_err(|_| denied())?;
+            return if live.attempt == successor.attempt
+                && live.purpose == successor.purpose
+                && self.permits()
+            {
+                Ok(())
+            } else {
+                Err(denied())
+            };
+        }
         if let Some(owner) = &self.provisioning_owner {
             let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND execution_uid=? AND revoked_at IS NULL AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0))")
                 .bind(self.identity.host.as_bytes().as_slice()).bind(owner).bind(i64::from(self.identity.execution_uid))
@@ -458,16 +624,42 @@ mod cut_tests {
     //! A storage refusal cannot make transport retirement disappear on reconnect.
     use super::*;
 
+    /// A host-wide cut outlives its last transport: every epoch that
+    /// registers before the tombstone starts cancelled.
     #[test]
     fn cancellation_survives_last_transport_until_durable_tombstone() {
         let revocations = Revocations::default();
         let host = Uuid::new_v4();
         drop(revocations.cut(host).unwrap());
-        let reconnect = revocations.register(host).unwrap();
+        let reconnect = revocations.register(host, 1000).unwrap();
         assert!(*reconnect.changed.borrow());
+        // Every epoch of a removed host starts cancelled, root included.
+        assert!(*revocations.register(host, 0).unwrap().changed.borrow());
         revocations.tombstoned(host);
         drop(reconnect);
-        assert!(revocations.cuts.lock().unwrap().is_empty());
+        let cuts = revocations.cuts.lock().unwrap();
+        assert!(cuts.hosts.is_empty() && cuts.epochs.is_empty());
+    }
+
+    /// J415 R2: the handover cuts the rootless epoch only. The root
+    /// successor's signal, on the same host, stays live, and a fresh rootless
+    /// registration stays cancelled until that epoch's end is durable.
+    #[test]
+    fn an_epoch_cut_leaves_the_hosts_other_epoch_live() {
+        let revocations = Revocations::default();
+        let host = Uuid::new_v4();
+        let rootless = revocations.register(host, 1000).unwrap();
+        let root = revocations.register(host, 0).unwrap();
+        let _cut = revocations.cut_epoch(host, 1000).unwrap();
+        assert!(*rootless.changed.borrow());
+        assert!(!*root.changed.borrow());
+        drop(rootless);
+        assert!(*revocations.register(host, 1000).unwrap().changed.borrow());
+        revocations.tombstoned_epoch(host, 1000);
+        assert!(!*revocations.register(host, 0).unwrap().changed.borrow());
+        // A host-wide cut reaches the root epoch too.
+        let _removal = revocations.cut(host).unwrap();
+        assert!(*root.changed.borrow());
     }
     #[cfg(feature = "ssh")]
     #[tokio::test]

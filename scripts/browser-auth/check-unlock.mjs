@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { routeWithLatency } from './latency-route.mjs';
+import { responseHeaders } from './response-headers.mjs';
 import { resolve, extname, sep } from 'node:path';
 
 const root = resolve(import.meta.dirname, '../..');
@@ -72,7 +73,7 @@ try {
     if (breakUnwrap && path === '/auth/wraps' && response.status === 200) {
       for (const entry of response.body) if (entry.kind === 'passkey') entry.wrap.nonce = 'AAAAAAAAAAAAAAAA';
     }
-    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers),
+    await route.fulfill({ status: response.status, headers: responseHeaders(response.headers),
       body: JSON.stringify(response.body) });
   });
   // This fixture verifies auth only. Close terminal sockets locally rather than dialing a host.

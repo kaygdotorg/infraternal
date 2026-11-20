@@ -31,22 +31,26 @@ export const settled = async (page: Page): Promise<void> => {
   await expect.poll(async () => (await cache(page))?.pending.length, { timeout: 15_000 }).toBe(0);
   await expect(page.getByText("Not saved — keep this tab open", { exact: true })).toHaveCount(0);
 };
-export async function enrol(page: Page, server: RealServer): Promise<void> {
+/** Enrolls a private software passkey; refusal specs may select a login absent from the rootless fixture host. */
+export async function enrol(page: Page, server: RealServer, options: { username?: string; refusedShell?: boolean } = {}): Promise<void> {
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("WebAuthn.enable");
   await cdp.send("WebAuthn.addVirtualAuthenticator", { options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true } });
   await page.goto(server.origin + "/?theme=ink&bg=none");
   await page.locator("#setup-token").fill(server.token);
   await page.getByRole("button", { name: "Continue", exact: true }).click();
-  await page.locator("#setup-username").fill(personName("layout_phone"));
+  await page.locator("#setup-username").fill(options.username ?? personName("layout_phone"));
   await page.locator("#setup-display-name").fill("Layout phone");
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByRole("button", { name: "Create passkey" }).click();
   await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
   await page.locator(".auth-check").click();
   await page.getByRole("button", { name: "Open infraternal" }).click();
-  await expect(windows(page)).toHaveCount(1);
-  await settled(page);
+  await expect(windows(page)).toHaveCount(1, { timeout: 30_000 });
+  if (options.refusedShell) {
+    await expect(page.locator('.ui-window[data-kind="terminal"] .cl-sx-strip-text')).toContainText("This server runs without root", { timeout: 30_000 });
+    await expect.poll(async () => (await cache(page)).initialized).toBe(true);
+  } else await settled(page);
 }
 /** Bind valid test requests to the welcome while preserving intentionally invalid wire input. */
 export function layoutRequestJson(input: unknown, incarnation: string | undefined): Buffer {

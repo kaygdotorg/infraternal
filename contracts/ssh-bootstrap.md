@@ -632,37 +632,71 @@ A base with no journal is a finished install owned by the host id in its
 never `INFRATERNAL_SETUP_CLEAR`: every new attempt carries a new host id, and
 staging refuses (71) a base whose owner names another host. `<takeover>` is
 `ready` only for root's own `/var/lib/infraternal` whose every entry, launcher,
-unit header and `ExecStart` are proven infraternal's and that nothing uses but
-the agent's own unit; `busy` when it is proven but a terminal's shim or another
-process uses it; `unproven` otherwise, including every rootless install. After
-the existing already-added preflight, the server answers `unrecognized_install`
-at the `connect` step before any write, unless it offers Take over.
-Its sentence holds whoever enrolled it: another server, another person on this
-server, or an earlier setup this server retired.
+unit header and `ExecStart` are proven infraternal's, and whose only users are
+its own service and authenticated terminal sessions. `busy` means another user
+of the install was found or terminal attribution could not be proven;
+`unproven` covers unverified ownership, including every rootless install. A
+`ready` record may append terminal records carrying the session id, account,
+foreground program, opening time, PTY, other-program count, verified systemd
+unit and process fingerprint. After the existing already-added preflight, the
+server answers `unrecognized_install` at the `connect` step before any write,
+unless it offers Take over. Its sentence holds whoever enrolled it: another
+server, another person on this server, or an earlier setup this server retired.
 
-### Take over (D359)
+### Take over (D359, refined by D368)
 
 A root-mode add whose check reports `ready`, for a host id that is no working
 host of this server (unknown, removed or revoked), pauses on a `check` event
 whose failure is `unrecognized_install` with
-`takeover: {"install": "<32 hex host id>", "live": <bool>}` and `leftovers`
-(root mode). The browser shows Take over and a confirmation naming
-`takeover.install`; `start-fresh` with the leftovers' challenge confirms it.
+`takeover: {"install": "<32 hex host id>", "live": <bool>, "terminals": [...]}`
+and `leftovers` (root mode). Each public terminal names its account, foreground
+program and opening time, plus its PTY and other-program count when available.
+The browser offers Take over, then shows a confirmation naming the old install
+and listing every terminal that will close. Back changes nothing. With no
+terminals, `start-fresh` uses the leftovers' challenge; with terminals, the
+server requires the distinct `takeover.close_challenge` returned with that list.
+Generic cleanup consent cannot authorize closing terminals. Older clients
+that cannot show and confirm the terminal list cannot authorize closure.
 Rootless adds, `busy` (its own sentence) and `unproven` keep the plain
-`unrecognized_install` refusal. The server asks whether the id is still no
-working host again right before the host acts.
+`unrecognized_install` refusal. The server rechecks that the id is still no
+working host immediately before the host acts. The host compares the exact
+reviewed install and terminal records again before closing anything; changed
+records require a fresh review (75).
 
 The host then runs `take_over_finished_install '<the exact record>' <token>`
-under the setup guard. It refuses (71) any base but root's, (75) a changed
-record or an idle record whose agent has started, (73) a busy install, and (75)
-a token whose restore already ran. It builds
+under the setup guard; the reviewed record travels over stdin, so long terminal
+lists do not hit the operating system's single-argument limit. It refuses (71) any base but root's, (75) a changed
+record or an idle record whose agent has started, (73) an install whose users
+cannot be proven safe, and (75) a token whose restore already ran. It builds
 `/var/lib/infraternal.bootstrap-taking-<token>` (0700: the old id, the service
 state found, a copy of the unit) and renames it to
 `/var/lib/infraternal.bootstrap-takeover-<token>` before anything is stopped.
-It then stops and disables the agent, requires that nothing else holds the
-install, renames the base into `<set-aside>/install`, and removes the unit and
-launcher. Any failure or signal before the end puts everything back. The
-attempt continues as a fresh install with a new host id. If it fails, the
+It stops the old infraternal agent, rechecks the reviewed terminal records,
+and stops only the verified systemd units the person confirmed. It then
+requires that nothing else holds the install, disables the old service,
+renames the base into `<set-aside>/install`, and removes the unit and launcher.
+Failures restore the old install's files and attempt to restore its service
+state. Closed terminals cannot be reopened; a service-manager failure cannot
+promise successful service recovery.
+
+The host statuses distinguish what happened:
+
+| Status | Meaning |
+| --- | --- |
+| 73 | Could not prove that only the old install's own terminals used it, before any terminal closed. No terminal was closed; the old install's files were kept. |
+| 74 | Every confirmed terminal unit stopped, but the final holder check could not prove the old install unused. Files were kept; closed terminals stay closed. |
+| 79 | A confirmed terminal unit could not be confirmed stopped. Some terminals may already be closed and others may remain open; the old install is restored. |
+| 80 | The service manager could not stop or update the old service before any terminal closed. Files were kept; no terminal was closed. |
+| 81 | The service manager failed while updating the old service after every confirmed terminal unit stopped. Files were kept; closed terminals stay closed. |
+
+Public failures preserve `exit_status` for diagnostics. Statuses 80 and 81 use
+the existing `install` failure kind and `failed_step: "install"` with the trusted
+service-manager message,
+so a cached client that drops `exit_status` shows a truthful generic setup
+failure instead of claiming the host is set up elsewhere. The other statuses
+above use `unrecognized_install` with their corresponding trusted messages.
+
+After a successful takeover, the attempt continues as a fresh install with a new host id. If it fails, the
 server runs `restore_taken_over_install <token>`, which is idempotent and puts
 back the install, unit, launcher and service state exactly (`restored`), or
 reports `untouched` and leaves the cancel token. The new install's commit

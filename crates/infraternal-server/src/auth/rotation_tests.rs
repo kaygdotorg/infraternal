@@ -7,6 +7,7 @@ fn rotation_tap() -> String {
 }
 
 #[tokio::test]
+/// Verify that an authorized recovery rotation replaces the legacy envelope with 24-word material.
 async fn recovery_rotation_requires_session_and_replaces_legacy_envelope() {
     let _guard = SERIAL.lock().await;
     let mut f = fixture().await;
@@ -20,7 +21,9 @@ async fn recovery_rotation_requires_session_and_replaces_legacy_envelope() {
     let (status, _, state) = http_post_json_with_cookie(&app, "session", json!({}), &cookie).await;
     assert_eq!(status, axum::http::StatusCode::OK);
     assert_eq!(state["recovery_words_need_replacing"], true);
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let wrap = browser_wrap(
         &recovery_material(&words, "wrap"),
         &f.dek,
@@ -106,12 +109,15 @@ async fn recovery_phrase_routes_are_removed_and_words_fail_closed() {
 }
 
 #[tokio::test]
+/// Keep pending, expired and stale sessions from rotating recovery material.
 async fn recovery_rotation_denies_pending_expired_and_stale_sessions() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let wrap = browser_wrap(
         &recovery_material(&words, "wrap"),
         &f.dek,
@@ -152,6 +158,7 @@ async fn recovery_rotation_denies_pending_expired_and_stale_sessions() {
 }
 
 #[tokio::test]
+/// Verify that concurrent signed-in recovery rotations produce exactly one committed replacement.
 async fn reviewer_concurrent_signed_in_rotations_commit_once() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -168,7 +175,9 @@ async fn reviewer_concurrent_signed_in_rotations_commit_once() {
         .unwrap();
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={}", f.session);
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let wrap = browser_wrap(
         &recovery_material(&words, "wrap"),
         &f.dek,
@@ -202,9 +211,12 @@ async fn reviewer_concurrent_signed_in_rotations_commit_once() {
     );
 }
 
+/// Build fresh 24-word recovery material for the rotation race fixtures.
 async fn replacement_for_rotation(f: &Fixture, start: &Value, now: i64) -> Result<String> {
     let software = Software::new();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     f.auth
         .registration_finish_with_verifier(
             str_field(start, "ceremony"),
@@ -237,6 +249,7 @@ async fn rotation_post(
 }
 
 #[tokio::test]
+/// Keep recovery rotation bound to its original account when the browser cookie changes.
 async fn recovery_rotation_cannot_follow_a_cookie_account_switch() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -246,7 +259,9 @@ async fn recovery_rotation_cannot_follow_a_cookie_account_switch() {
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,tap_action) VALUES (?,?,'other device',unixepoch()+60,unixepoch(),?)").bind(hash(&token)).bind(&other).bind(rotation_tap()).execute(&f.auth.pool).await.unwrap();
     let app = router(f.auth.clone());
     let cookie = format!("__Host-infraternal={token}");
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let wrap = browser_wrap(
         &recovery_material(&words, "wrap"),
         &f.dek,
