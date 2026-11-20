@@ -187,6 +187,11 @@ def run_case(workspace, case, combined=False):
         base_id, agent_id = identity(old), identity(agent / "state")
     frontier = "ready" if case in COMBINED_RETIREMENT else case
     control.mkdir(mode=0o700)
+    if case == "shared-link":
+        bundle = old / "bin/web"
+        bundle.mkdir(parents=True)
+        (bundle / "index.html").write_text("bundled web")
+        (old / "web").symlink_to("bin/web")
 
     def originals():
         """List the stopped server entries, excluding the separate infraternal agent and cutover paths."""
@@ -201,7 +206,8 @@ def run_case(workspace, case, combined=False):
 
     def command(path, binary=BIN):
         """Render the product command the real manager will run."""
-        return f'ExecStart="{binary}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"\n'
+        web = f' "--web-root" "{path / "web"}"' if case == "shared-link" else ""
+        return f'ExecStart="{binary}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"{web}\n'
 
     pre = root / "pre"
     pre.write_text(
@@ -480,6 +486,12 @@ def run_case(workspace, case, combined=False):
         systemctl("start", server)
         assert systemctl("show", "-p", "MainPID", "--value", server).stdout.strip() == pid
         assert health(port)
+        if case == "shared-link":
+            assert (new / "web").readlink() == Path("../bin/web")
+            assert (new / "web/index.html").read_text() == "bundled web"
+            assert not (old / "web").is_symlink()
+            systemctl("restart", server)
+            assert wait_for(lambda: health(port)) and sqlite_values(new) == rows
         print(f"CASE {label} completed systemctl_exit={result.returncode} elapsed={time.monotonic()-timer:.2f}s", flush=True)
     except Exception:
         subprocess.run(["journalctl", "--user", "--quiet", "--no-pager", "-n", "12", "--user-unit", server], check=False)
@@ -596,7 +608,7 @@ if __name__ == "__main__":
     failed = []
     with tempfile.TemporaryDirectory(prefix="d395-", dir=os.environ["XDG_RUNTIME_DIR"]) as workspace:
         for scenario in sys.argv[1:] or (*CASES, *(f"combined-{case}" for case in (*CASES, *COMBINED_RETIREMENT)),
-                                         "cli-admission", "staging-refusal", "destination-drift"):
+                                         "combined-shared-link", "cli-admission", "staging-refusal", "destination-drift"):
             try:
                 if scenario == "cli-admission":
                     cli_admission(Path(workspace))

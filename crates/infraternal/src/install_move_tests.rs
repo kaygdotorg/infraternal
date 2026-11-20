@@ -475,23 +475,41 @@ fn combined_move_preserves_links_into_shared_bundle() {
         fixture.old.join("web").display()
     );
     fs::write(&fixture.unit, &unit).unwrap();
-    let outcome = fixture.apply(&fixture.old, &Fake::default());
-    if outcome.is_ok() {
-        assert_eq!(
-            fs::read_to_string(fixture.new.join("web/index.html"))
-                .ok()
-                .as_deref(),
-            Some("bundled web")
-        );
-    } else {
-        // Refusal is safe if the unit and original data are still usable.
-        assert_eq!(fs::read_to_string(&fixture.unit).unwrap(), unit);
-        assert_eq!(Install::data(&fixture.old), "original");
-        assert_eq!(
-            fs::read_to_string(fixture.old.join("web/index.html")).unwrap(),
-            "bundled web"
-        );
-    }
+    fixture.apply(&fixture.old, &Fake::default()).unwrap();
+    assert_eq!(
+        fs::read_link(fixture.new.join("web")).unwrap(),
+        Path::new("../bin/web")
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.new.join("web/index.html")).unwrap(),
+        "bundled web"
+    );
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert!(fs::symlink_metadata(fixture.old.join("web")).is_err());
+}
+
+/// An unsupported link deep inside the server tree is refused before admitting the move.
+#[cfg(target_os = "linux")]
+#[test]
+fn combined_move_refuses_unsupported_links_during_planning() {
+    let mut fixture = Install::new();
+    fixture.new = fixture.old.join("server");
+    fs::create_dir_all(fixture.old.join("bin/web")).unwrap();
+    fs::create_dir(fixture.old.join("assets")).unwrap();
+    fs::write(fixture.old.join("bin/web/index.html"), "bundled web").unwrap();
+    std::os::unix::fs::symlink("../bin/web", fixture.old.join("assets/web")).unwrap();
+    let before = fs::read(&fixture.unit).unwrap();
+    let error = plan(&fixture.old, &fixture.new, &fixture.unit)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("link leaves the data folder"), "{error}");
+    assert_eq!(fs::read(&fixture.unit).unwrap(), before);
+    assert_eq!(Install::data(&fixture.old), "original");
+    assert_eq!(
+        fs::read_to_string(fixture.old.join("assets/web/index.html")).unwrap(),
+        "bundled web"
+    );
+    assert!(!fixture.new.exists());
 }
 
 /// Planning twice on the standard path leaves the unit and data entries intact.

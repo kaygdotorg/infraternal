@@ -232,6 +232,16 @@ pub(super) fn copy_tree(from: &File, to: &File) -> io::Result<()> {
 /// Copy one descriptor-checked file or directory, or reproduce a safe relative link.
 /// Sockets belong to the old process and are recreated by the new process.
 pub(super) fn copy_entry(from: &File, to: &File, name: &OsStr) -> io::Result<()> {
+    copy_entry_with_link(from, to, name, None)
+}
+
+/// Copy an entry, optionally supplying the validated link text at the destination.
+pub(super) fn copy_entry_with_link(
+    from: &File,
+    to: &File,
+    name: &OsStr,
+    relocated_link: Option<&OsStr>,
+) -> io::Result<()> {
     let info = entry(from, name)?;
     match kind(&info) {
         SFlag::S_IFDIR => {
@@ -248,14 +258,8 @@ pub(super) fn copy_entry(from: &File, to: &File, name: &OsStr) -> io::Result<()>
             source.rewind_and_compare(child)?;
         }
         SFlag::S_IFLNK => {
-            let link = readlinkat(from, name)?;
-            if !Path::new(&link)
-                .components()
-                .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
-            {
-                return Err(invalid("link leaves the data folder"));
-            }
-            symlinkat(link.as_os_str(), to, name)?;
+            let link = relative_link(from, name)?;
+            symlinkat(relocated_link.unwrap_or(&link), to, name)?;
             let copied = fstatat(to, name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
             if copied.st_gid != info.st_gid {
                 nix::unistd::fchownat(
@@ -270,6 +274,78 @@ pub(super) fn copy_entry(from: &File, to: &File, name: &OsStr) -> io::Result<()>
         SFlag::S_IFSOCK => {}
         _ => return Err(invalid("unsupported file type in data folder")),
     }
+    Ok(())
+}
+
+/// Read link text confined to the directory containing the link.
+fn relative_link(dir: &File, name: &OsStr) -> io::Result<OsString> {
+    let link = readlinkat(dir, name)?;
+    if !Path::new(&link)
+        .components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(invalid("link leaves the data folder"));
+    }
+    Ok(link)
+}
+
+/// Verify a combined-move entry's links before stopping the source service.
+///
+/// A top-level link into the release bundle crosses the new parent boundary.
+/// Nested links stay inside the copied tree. A target that requires following
+/// another symlink cannot be verified by this walk and needs a manual layout.
+pub(super) fn combined_link(
+    dir: &File,
+    name: &OsStr,
+    reserved: Option<fn(&OsStr) -> bool>,
+) -> io::Result<Option<OsString>> {
+    match kind(&entry(dir, name)?) {
+        SFlag::S_IFDIR => {
+            let child = tree(dir, name)?;
+            for name in names(&child)? {
+                combined_link(&child, &name, None)?;
+            }
+        }
+        SFlag::S_IFLNK => {
+            let link = relative_link(dir, name)?;
+            let first = Path::new(&link).components().find_map(|part| match part {
+                Component::Normal(part) => Some(part),
+                _ => None,
+            });
+            let bundle = reserved.is_some() && first == Some(OsStr::new("bin"));
+            if !bundle && first.is_some_and(|part| reserved.is_some_and(|check| check(part))) {
+                return Err(invalid("link targets a reserved entry in the shared base"));
+            }
+            check_link_target(dir, Path::new(&link))?;
+            if bundle {
+                return Ok(Some(Path::new("..").join(link).into_os_string()));
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
+}
+
+/// Validate the relative referent without following links, mounts or transient sockets.
+fn check_link_target(dir: &File, target: &Path) -> io::Result<()> {
+    let mut parts = target.components().filter_map(|part| match part {
+        Component::Normal(part) => Some(part),
+        _ => None,
+    });
+    let Some(first) = parts.next() else {
+        return Ok(());
+    };
+    let mut current = dir.try_clone()?;
+    let mut part = first;
+    for next in parts {
+        current = tree(&current, part)?;
+        part = next;
+    }
+    if !matches!(kind(&entry(&current, part)?), SFlag::S_IFREG | SFlag::S_IFDIR) {
+        return Err(invalid("link must target a regular file or directory directly"));
+    }
+    // A trailing slash or "/." requires a directory even if components() normalizes it.
+    fstatat(dir, target, AtFlags::AT_SYMLINK_NOFOLLOW)?;
     Ok(())
 }
 

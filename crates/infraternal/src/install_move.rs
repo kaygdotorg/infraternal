@@ -482,6 +482,9 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
                 return Err(disk::invalid("nested move requires a shared install base"));
             }
             database_identity(source)?;
+            for name in combined_entries(source)?.keys() {
+                checked_combined_link(source, OsStr::new(name))?;
+            }
         } else {
             reject_shared(source, "source")?;
         }
@@ -1003,7 +1006,12 @@ fn prepare_data(
                 "original folder contains files reserved for the install base",
             ));
         }
-        disk::copy_entry(&source, &stage, &name)?;
+        let link = if journal.original_entries.is_some() {
+            checked_combined_link(&source, &name)?
+        } else {
+            None
+        };
+        disk::copy_entry_with_link(&source, &stage, &name, link.as_deref())?;
     }
     if let Some(entries) = &journal.original_entries
         && combined_entries(&source)? != *entries
@@ -1469,6 +1477,18 @@ fn combined_entries(source: &File) -> io::Result<BTreeMap<String, Identity>> {
         entries.insert(name, identity);
     }
     Ok(entries)
+}
+
+/// Name the entry that prevented a safe combined move, including on dry runs.
+fn checked_combined_link(source: &File, name: &OsStr) -> io::Result<Option<OsString>> {
+    disk::combined_link(source, name, Some(excluded_combined_entry)).map_err(|error| {
+        io::Error::other(format!("checking links in {}: {error}", name.to_string_lossy()))
+    })
+}
+
+/// Entries intentionally absent from the new server data directory.
+fn excluded_combined_entry(name: &OsStr) -> bool {
+    shared_base_entry(name) || name == MARKER
 }
 
 /// Map a server-owned path while preserving executables and other shared-base paths.
