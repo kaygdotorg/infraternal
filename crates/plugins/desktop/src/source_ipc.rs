@@ -1,7 +1,7 @@
 //! Owns one same-user helper process, private runtime and cancellation-safe IPC parser per admitted source leg [D203,D232].
 //!
 //! A [`Helper`] launches the desktop helper executable in one-shot mode, inside a
-//! fresh `source-<uuid>` directory under the configured runtime directory (mode
+//! fresh compact UUID directory under the configured runtime directory (mode
 //! 0700). It then connects to the helper's Unix socket, checks that the socket
 //! is a same-user, owner-only socket, and exchanges length-framed protocol
 //! packets with it ([`Helper::send`] / [`Helper::receive`]).
@@ -75,7 +75,8 @@ struct Directory {
     identity: (u64, u64),
 }
 impl Directory {
-    /// Creates `source-<uuid>` (mode 0700) under `base`. `base` must already be a
+    /// Creates a compact UUID directory (mode 0700) under `base`, leaving room for the
+    /// socket within Darwin's 104-byte pathname limit. `base` must already be a
     /// safe runtime directory, or be missing, in which case it is created
     /// privately. An existing base that is permissive, foreign or a symlink is an
     /// error and is not repaired.
@@ -94,7 +95,7 @@ impl Directory {
             }
             Err(error) => return Err(error),
         }
-        let path = base.join(format!("source-{}", uuid::Uuid::new_v4()));
+        let path = base.join(uuid::Uuid::new_v4().simple().to_string());
         fs::DirBuilder::new().mode(0o700).create(&path)?;
         let metadata = fs::symlink_metadata(&path)?;
         Ok(Self {

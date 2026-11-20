@@ -40,7 +40,7 @@ use std::{
     ffi::{CString, OsStr, OsString},
     io,
     os::unix::{
-        ffi::{OsStrExt as _, OsStringExt as _},
+        ffi::OsStrExt as _,
         fs::{FileTypeExt as _, MetadataExt as _},
         process::CommandExt as _,
     },
@@ -67,8 +67,6 @@ const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const PASSED: [&str; 3] = ["TERM", "COLORTERM", "INFRATERNAL_SESSION"];
 // <bsm/audit.h>: AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS.
 const GRAPHIC_ACCESS: u64 = 0x10;
-// <unistd.h>: _CS_DARWIN_USER_TEMP_DIR.
-const USER_TEMP_DIR: nix::libc::c_int = 65537;
 /// The literal program arrives on the entry's argv after `--`; the shim already
 /// bounds it to 8 KiB (`startup::read_command`).
 const MAX_PROGRAM: usize = 8192;
@@ -293,7 +291,7 @@ fn prepare(request: &Request) -> io::Result<Command> {
         .env("LOGNAME", &user.name)
         .env("SHELL", &shell)
         .env("PATH", PATH);
-    if let Some(directory) = temporary_directory() {
+    if let Some(directory) = crate::runtime_dir::darwin_user_temp_dir() {
         command.env("TMPDIR", directory);
     }
     if placed && let Some(socket) = agent_socket(user.uid) {
@@ -399,16 +397,6 @@ fn classify(through_asuser: bool, uid: Uid, audit_user: u32, flags: u64) -> io::
         ));
     }
     Ok(own && flags & GRAPHIC_ACCESS != 0)
-}
-
-/// The account's per-user temporary directory, as login shells receive it.
-fn temporary_directory() -> Option<OsString> {
-    let mut buffer = [0_u8; 1024];
-    // SAFETY: confstr writes at most `buffer.len()` bytes, NUL included.
-    let length =
-        unsafe { nix::libc::confstr(USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
-    (length > 1 && length <= buffer.len())
-        .then(|| OsString::from_vec(buffer[..length - 1].to_vec()))
 }
 
 /// The placed bootstrap's ssh-agent socket, when it is a socket the account owns.

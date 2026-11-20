@@ -53,6 +53,25 @@ fn fallback() -> io::Result<PathBuf> {
     Ok(PathBuf::from(home).join("Library/Caches"))
 }
 
+/// Returns the system's per-user temporary directory, independently of the process environment.
+///
+/// This is the directory macOS assigns to the current login. Socket callers should add
+/// a short path beneath it, and verify its privacy before creating an endpoint.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn darwin_user_temp_dir() -> Option<PathBuf> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+    // <unistd.h>: _CS_DARWIN_USER_TEMP_DIR.
+    const USER_TEMP_DIR: nix::libc::c_int = 65537;
+    let mut buffer = [0_u8; 1024];
+    // SAFETY: confstr writes at most buffer.len() bytes, NUL included.
+    let length =
+        unsafe { nix::libc::confstr(USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
+    (length > 1 && length <= buffer.len())
+        .then(|| PathBuf::from(OsString::from_vec(buffer[..length - 1].to_vec())))
+}
+
 /// Other systems have no safe default, so the variable stays required there.
 #[cfg(not(target_os = "macos"))]
 fn fallback() -> io::Result<PathBuf> {

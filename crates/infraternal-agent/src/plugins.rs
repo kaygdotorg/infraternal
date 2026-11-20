@@ -177,8 +177,7 @@ pub(crate) fn registry_at_with_mesh_state(
     }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
-        let home = std::env::var_os("HOME").ok_or(PluginError::Rejected)?;
-        let runtime = std::path::PathBuf::from(home).join(".cache/infraternal/desktop-source");
+        let runtime = desktop_source_runtime().map_err(|_| PluginError::Rejected)?;
         let executable = std::env::current_exe().map_err(|_| PluginError::Rejected)?;
         let helper = executable
             .parent()
@@ -669,3 +668,13 @@ fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static 
 /// Exact private handoff decoder shared with parser fuzzing; parsing grants no authority.
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall_request;
+
+
+/// Names a private desktop runtime with room for source sockets under Darwin's 104-byte limit.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn desktop_source_runtime() -> std::io::Result<std::path::PathBuf> {
+    let parent = infraternal_shim::runtime_dir::darwin_user_temp_dir()
+        .ok_or(std::io::ErrorKind::NotFound)?;
+    infraternal_plugin_desktop::socket::validate_runtime(&parent)?;
+    Ok(parent.join("ifd"))
+}
