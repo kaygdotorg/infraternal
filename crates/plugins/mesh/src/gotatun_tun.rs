@@ -9,7 +9,7 @@
 use crate::policy::model::PublicKey;
 use bytes::BytesMut;
 use gotatun::{
-    packet::{Ip, Packet, PacketBufPool},
+    packet::{Ip, Packet, PacketBufPool, WgData},
     tun::{IpRecv, IpSend, MtuWatcher},
 };
 use infraternal_linux_tun::Device as TunDevice;
@@ -36,6 +36,8 @@ const WRITE_QUEUE: usize = 256;
 const GRO_BATCH: usize = 64;
 /// Most TCP segments merged into one GSO frame.
 const GRO_MAX_SEGMENTS: usize = 64;
+/// Writable space after each TCP segment for 16-byte alignment and the transport envelope.
+const TCP_SEGMENT_TAILROOM: usize = 15 + WgData::OVERHEAD;
 const TCP_FIN: u8 = 0x01;
 const TCP_PSH: u8 = 0x08;
 const TCP_ACK: u8 = 0x10;
@@ -848,22 +850,21 @@ fn segment_tcp(
     )
 }
 
+/// Build TCP segments in one allocation with independent writable space after each IP packet.
 fn segment_tcp_packets(packet: &[u8], plan: TcpSegmentation) -> io::Result<Vec<Packet<Ip>>> {
     let segment_count = plan.payload_len.max(1).div_ceil(plan.segment_payload_len);
-    let output_capacity = plan
-        .header_len
+    let output_capacity = (plan.header_len + TCP_SEGMENT_TAILROOM)
         .checked_mul(segment_count)
         .and_then(|headers| headers.checked_add(plan.payload_len))
         .ok_or_else(|| invalid_tun("TCP GSO packet size overflow"))?;
     let mut output = BytesMut::with_capacity(output_capacity);
-    let mut segment_lengths = Vec::with_capacity(segment_count);
+    let mut packets = Vec::with_capacity(segment_count);
     let mut payload_offset = 0;
     for index in 0..segment_count {
         let current_payload_len = plan
             .payload_len
             .saturating_sub(payload_offset)
             .min(plan.segment_payload_len);
-        let start = output.len();
         append_tcp_segment(
             &mut output,
             packet,
@@ -872,20 +873,20 @@ fn segment_tcp_packets(packet: &[u8], plan: TcpSegmentation) -> io::Result<Vec<P
             payload_offset,
             current_payload_len,
         )?;
-        segment_lengths.push(output.len() - start);
-        payload_offset += current_payload_len;
-    }
-    let mut packets = Vec::with_capacity(segment_count);
-    for length in segment_lengths {
-        let segment = output.split_to(length);
+        // Split the capacity past the IP length without initializing or copying the suffix.
+        // The transport can fill it without reaching the next segment.
+        let rest = output.split_off(output.len() + TCP_SEGMENT_TAILROOM);
+        let segment = std::mem::replace(&mut output, rest);
         let packet = Packet::from_bytes(segment)
             .try_into_ip()
             .map_err(|error| invalid_tun_owned(error.to_string()))?;
         packets.push(packet);
+        payload_offset += current_payload_len;
     }
     Ok(packets)
 }
 
+/// Copy and repair one segment in the current window of the output allocation.
 fn append_tcp_segment(
     output: &mut BytesMut,
     packet: &[u8],
@@ -894,7 +895,6 @@ fn append_tcp_segment(
     payload_offset: usize,
     payload_len: usize,
 ) -> io::Result<()> {
-    let start = output.len();
     output.extend_from_slice(&packet[..plan.header_len]);
     if payload_len != 0 {
         output.extend_from_slice(
@@ -902,8 +902,7 @@ fn append_tcp_segment(
                 [plan.header_len + payload_offset..plan.header_len + payload_offset + payload_len],
         );
     }
-    let end = output.len();
-    let segment = &mut output[start..end];
+    let segment = &mut output[..];
     let sequence_offset =
         u32::try_from(payload_offset).map_err(|_| invalid_tun("TCP sequence offset overflow"))?;
     segment[plan.tcp_offset + 4..plan.tcp_offset + 8]
@@ -1047,12 +1046,21 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TunWriter, build_gso_frame, coalescible_run,
-        decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
-        recompute_transport_checksum,
+        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, TunWriter,
+        build_gso_frame, coalescible_run, decode_frame, internet_checksum, ip_details,
+        recompute_ipv4_checksum, recompute_transport_checksum,
     };
     use bytes::BytesMut;
-    use gotatun::packet::{Ip, Packet, PacketBufPool};
+    use gotatun::{
+        noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
+        packet::{Ip, Packet, PacketBufPool, WgData, WgKind},
+        tun::MtuWatcher,
+        udp::{
+            UdpSend,
+            socket::{SockOpt, UdpSocket},
+        },
+        x25519,
+    };
     use std::{
         fs::File,
         io::Read as _,
@@ -1061,6 +1069,7 @@ mod tests {
             unix::net::{UnixDatagram, UnixStream},
         },
         sync::Arc,
+        time::Duration,
     };
     use tokio::io::unix::AsyncFd;
 
@@ -1494,6 +1503,155 @@ mod tests {
         pseudo[9] = 6;
         pseudo[10..12].copy_from_slice(&transport_len.to_be_bytes());
         internet_checksum(&[&pseudo, &packet[20..]])
+    }
+
+    /// Both TCP versions leave space for the complete envelope without touching nearby segments.
+    #[test]
+    fn tcp_segments_keep_independent_transport_tailroom() {
+        let pool = PacketBufPool::new(1);
+        for frame in [ipv4_tcp_frame(2300), ipv6_hop_by_hop_tcp_frame(2300)] {
+            let mut packets: Vec<_> = decode_frame(&frame, true, &pool)
+                .unwrap()
+                .into_iter()
+                .map(Packet::into_bytes)
+                .collect();
+            assert_eq!(packets.len(), 3);
+            let original: Vec<_> = packets.iter().map(|packet| packet.to_vec()).collect();
+            for packet in &mut packets {
+                let bytes = packet.buf_mut();
+                let capacity = bytes.len() + TCP_SEGMENT_TAILROOM;
+                assert_eq!(bytes.capacity(), capacity);
+                let pointer = bytes.as_ptr();
+                bytes.resize(capacity, 0xef);
+                assert_eq!(bytes.as_ptr(), pointer);
+            }
+            for (packet, expected) in packets.iter().zip(&original) {
+                assert_eq!(&packet[..expected.len()], expected);
+                assert_eq!(&packet[expected.len()..], &[0xef; TCP_SEGMENT_TAILROOM]);
+            }
+        }
+    }
+
+    /// Connect two local tunnels so the receiver can verify the encrypted UDP payloads.
+    fn transport_round_trip_pair() -> (Tunn, Tunn) {
+        let a = x25519::StaticSecret::from([1; 32]);
+        let b = x25519::StaticSecret::from([2; 32]);
+        let a_pub = x25519::PublicKey::from(&a);
+        let b_pub = x25519::PublicKey::from(&b);
+        let mut sender = Tunn::new(
+            a,
+            b_pub,
+            None,
+            None,
+            IndexTable::from_os_rng(),
+            Arc::new(RateLimiter::new(&a_pub, 100)),
+        );
+        let mut receiver = Tunn::new(
+            b,
+            a_pub,
+            None,
+            None,
+            IndexTable::from_os_rng(),
+            Arc::new(RateLimiter::new(&b_pub, 100)),
+        );
+        let init = sender.format_handshake_initiation(false).unwrap();
+        let TunnResult::WriteToNetwork(response) =
+            receiver.handle_incoming_packet(WgKind::HandshakeInit(init))
+        else {
+            panic!("expected a handshake response");
+        };
+        let TunnResult::WriteToNetwork(confirmation) = sender.handle_incoming_packet(response)
+        else {
+            panic!("expected a handshake confirmation");
+        };
+        assert!(matches!(
+            receiver.handle_incoming_packet(confirmation),
+            TunnResult::WriteToTunnel(packet) if packet.is_empty()
+        ));
+        (sender, receiver)
+    }
+
+    /// Send MTU-sized and odd TCP segments through transport reuse and the Linux UDP batch writer.
+    #[tokio::test]
+    async fn reused_tcp_segments_preserve_udp_lengths_and_plaintext() {
+        let (mut sender, mut receiver) = transport_round_trip_pair();
+        let pool = PacketBufPool::new(1);
+        // Use the IPv4 datagram limit and the IPv6 loopback link MTU, less the outer headers.
+        for (address, header_len, jumbo_mtu) in
+            [("127.0.0.1:0", 40, 65_475), ("[::1]:0", 68, 65_456)]
+        {
+            let socket = UdpSocket::bind(address.parse().unwrap(), SockOpt::default()).unwrap();
+            let sink = tokio::net::UdpSocket::bind(address).await.unwrap();
+            let destination = sink.local_addr().unwrap();
+            let mut send_buffer = <UdpSocket as UdpSend>::SendManyBuf::default();
+            // Two full segments and a short one can share an ordinary UDP batch. The jumbo
+            // segment fits alone and the following short segment takes the batch over budget.
+            for (mtu, full_segments) in [(1420_usize, 2), (jumbo_mtu, 1)] {
+                let mss = mtu - header_len;
+                let odd_payload = if header_len == 40 { 9 } else { 13 };
+                let payload = mss * full_segments + odd_payload;
+                let mut frame = if header_len == 40 {
+                    ipv4_tcp_frame(payload)
+                } else {
+                    ipv6_hop_by_hop_tcp_frame(payload)
+                };
+                frame[4..6].copy_from_slice(&u16::try_from(mss).unwrap().to_ne_bytes());
+                let mut watcher = MtuWatcher::new(u16::try_from(mtu).unwrap());
+                let segments = decode_frame(&frame, true, &pool).unwrap();
+                assert_eq!(segments.len(), full_segments + 1);
+
+                let mut outbound = Vec::new();
+                let mut expected = Vec::new();
+                for (index, segment) in segments.into_iter().enumerate() {
+                    let mut segment = segment.into_bytes();
+                    let length = segment.len();
+                    let full = index < full_segments;
+                    assert_eq!(length, if full { mtu } else { header_len + odd_payload });
+                    let pointer = segment.as_ptr();
+                    let mut plaintext = segment.to_vec();
+                    // Dirty the entire writable suffix, then restore the logical IP length.
+                    segment
+                        .buf_mut()
+                        .resize(length + TCP_SEGMENT_TAILROOM, 0xef);
+                    segment.truncate(length);
+                    plaintext.resize(if full { mtu } else { length + 15 }, 0);
+
+                    let Some(WgKind::Data(encrypted)) =
+                        sender.handle_outgoing_packet(segment, Some(&mut watcher))
+                    else {
+                        panic!("expected an encrypted data packet");
+                    };
+                    let encrypted = encrypted.into_bytes();
+                    assert_eq!(encrypted.as_ptr(), pointer);
+                    assert_eq!(encrypted.len(), plaintext.len() + WgData::OVERHEAD);
+                    outbound.push((encrypted, destination));
+                    expected.push(plaintext);
+                }
+                socket
+                    .send_many_to(&mut send_buffer, &mut outbound)
+                    .await
+                    .unwrap();
+                assert!(outbound.is_empty());
+
+                let mut datagram = vec![0; 65_536];
+                for plaintext in expected {
+                    let (length, _) =
+                        tokio::time::timeout(Duration::from_secs(5), sink.recv_from(&mut datagram))
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(length, plaintext.len() + WgData::OVERHEAD);
+                    let WgKind::Data(encrypted) = Packet::copy_from(&datagram[..length])
+                        .try_into_wg()
+                        .unwrap()
+                    else {
+                        panic!("expected an encrypted UDP datagram");
+                    };
+                    let decrypted = receiver.decapsulate_with_session(encrypted).unwrap();
+                    assert_eq!(&decrypted[..], plaintext);
+                }
+            }
+        }
     }
 
     #[test]

@@ -1010,10 +1010,10 @@ const SQLX_WAL_RETAINED_BYTES: u64 = 8 * 1024 * 1024;
 /// Unix socket path is capped at 108 bytes and a relative one is shorter.
 /// `std::path::absolute` doesn't touch the disk or follow symlinks.
 async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerError> {
-    std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
-    set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    create_data_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
     let database = std::path::absolute(data_dir.join("infraternal.sqlite"))
         .map_err(|_| ServerError::InvalidConfiguration)?;
+    protect_database(&database).map_err(|_| ServerError::InvalidConfiguration)?;
     let options = SqliteConnectOptions::new()
         .filename(database)
         .create_if_missing(true)
@@ -1039,8 +1039,6 @@ async fn open_database(data_dir: &std::path::Path) -> Result<SqlitePool, ServerE
         .connect_with(options)
         .await
         .map_err(ServerError::Storage)?;
-    set_private_file(&data_dir.join("infraternal.sqlite"))
-        .map_err(|_| ServerError::InvalidConfiguration)?;
     tracing::info!(
         sqlx_wal_retained_bytes = SQLX_WAL_RETAINED_BYTES,
         "SQLx WAL retention limit configured; pinned readers may exceed it until reuse"
@@ -1113,9 +1111,28 @@ fn logging_color(terminal: bool, no_color: Option<std::ffi::OsString>) -> bool {
     terminal && no_color.is_none_or(|value| value.is_empty())
 }
 
-async fn health(State(pool): State<SqlitePool>) -> Response {
+/// Report SQLite readiness and answer a relocation challenge when present.
+async fn health(
+    State(pool): State<SqlitePool>,
+    #[cfg(target_os = "linux")] request: Request<axum::body::Body>,
+) -> Response {
     if server_healthy(&pool).await {
-        Json(json!({"status":"ok"})).into_response()
+        let response = Json(json!({"status":"ok"})).into_response();
+        #[cfg(target_os = "linux")]
+        if let Some(proof) = request
+            .headers()
+            .get(crate::move_health::HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::move_health::proof)
+            .and_then(|proof| axum::http::HeaderValue::from_str(&proof).ok())
+        {
+            let mut response = response;
+            response
+                .headers_mut()
+                .insert(crate::move_health::HEADER, proof);
+            return response;
+        }
+        response
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1297,14 +1314,60 @@ pub(crate) fn admit_temporal_request<K: Eq + std::hash::Hash + Clone>(
     Ok(())
 }
 
+/// Create private server folders while preserving traversal on an existing base.
 #[cfg(unix)]
-fn set_private_directory(path: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+fn create_data_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.mode() & 0o022 != 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "server data directory must be owned by the server and must not allow other users to write it",
+        ));
+    }
+    Ok(())
 }
 
+/// Create the server's data folder on platforms without Unix file modes.
 #[cfg(not(unix))]
-fn set_private_directory(_path: &std::path::Path) -> std::io::Result<()> {
+fn create_data_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
+/// Set the database to 0600 before SQLite can derive WAL and SHM modes from it.
+#[cfg(unix)]
+fn protect_database(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.nlink() != 1
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "database must be a regular file owned by the server",
+        ));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+}
+
+/// SQLite manages data file permissions on platforms without Unix file modes.
+#[cfg(not(unix))]
+fn protect_database(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -1330,7 +1393,7 @@ mod tests {
 
     use super::{
         LISTENER_BIND_RETRY_WINDOW, ProxyNetwork, ServerConfig, TlsFiles, bind_listener_with_retry,
-        logging_color, router_with_agent, set_private_directory, start_setup_token_socket,
+        create_data_directory, logging_color, router_with_agent, start_setup_token_socket,
         validate_config,
     };
     use crate::embedded::EmbeddedAgent;
@@ -2708,6 +2771,7 @@ mod tests {
         std::fs::remove_dir_all(data_dir).expect("remove socket cleanup fixture");
     }
 
+    /// A newly created data directory supports a private, explicitly requested setup token.
     #[cfg(unix)]
     #[tokio::test]
     async fn setup_token_socket_is_private_and_requires_explicit_request() {
@@ -2718,8 +2782,11 @@ mod tests {
         };
 
         let data_dir = temp_dir();
-        std::fs::create_dir_all(&data_dir).expect("create private data directory");
-        set_private_directory(&data_dir).expect("protect data directory");
+        create_data_directory(&data_dir).expect("create private data directory");
+        assert_eq!(
+            std::fs::metadata(&data_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let path = data_dir.join("setup-token.sock");
         start_setup_token_socket(&data_dir, "test-capability".to_owned())
             .expect("start token control socket");
@@ -3216,9 +3283,9 @@ pub(crate) async fn test_open_database(
     data_dir: &std::path::Path,
 ) -> Result<SqlitePool, ServerError> {
     // This test-only copy preserves production pool setup while allowing shared-disk startup slack.
-    std::fs::create_dir_all(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
-    set_private_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
+    create_data_directory(data_dir).map_err(|_| ServerError::InvalidConfiguration)?;
     let database = data_dir.join("infraternal.sqlite");
+    protect_database(&database).map_err(|_| ServerError::InvalidConfiguration)?;
     let options = SqliteConnectOptions::new()
         .filename(database)
         .create_if_missing(true)
@@ -3237,7 +3304,5 @@ pub(crate) async fn test_open_database(
         .connect_with(options)
         .await
         .map_err(ServerError::Storage)?;
-    set_private_file(&data_dir.join("infraternal.sqlite"))
-        .map_err(|_| ServerError::InvalidConfiguration)?;
     Ok(pool)
 }
