@@ -253,7 +253,7 @@ fn remove_installation(host: &str) -> io::Result<()> {
         Err(error) => return Err(error),
     }
     let identity = installed_identity(host)?;
-    let verify = || {
+    let verify = || -> io::Result<()> {
         if installed_identity(host)? == identity {
             Ok(())
         } else {
