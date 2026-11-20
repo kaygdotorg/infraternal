@@ -26,6 +26,7 @@ from mesh_agent_fixture import BinaryNode, CoordinatorFixture
 
 MEMBERS = ("S", "A", "B", "C")
 CLIENTS = ("A", "B", "C")
+LISTEN_PORTS = {"S": 25000, "A": 25001, "B": 25002, "C": 25003}
 RECOVERY_BOUND_SECONDS = 30.0
 ANNOUNCEMENT_BOUND_SECONDS = 5.0
 IDLE_WINDOW_SECONDS = 7.0
@@ -107,6 +108,26 @@ def peer_rows(node: BinaryNode) -> dict[str, dict[str, Any]]:
             raise RuntimeError(f"mesh.peers returned a missing or duplicate peer address: {row!r}")
         indexed[address] = row
     return indexed
+
+
+def start_node(
+    binary: str,
+    scratch: str,
+    namespace_pid: int,
+    listen_port: int,
+    state_path: str | None = None,
+) -> BinaryNode:
+    """Start one real node with a distinct NAT-safe UDP port, restoring the parent environment."""
+    variable = "INFRATERMINAL_MESH_PORT"
+    previous = os.environ.get(variable)
+    os.environ[variable] = str(listen_port)
+    try:
+        return BinaryNode(binary, scratch, namespace_pid, state_path=state_path)
+    finally:
+        if previous is None:
+            os.environ.pop(variable, None)
+        else:
+            os.environ[variable] = previous
 
 
 def expected_endpoint(source: str, target: str, topology: ThreeNodeTopology, ports: dict[str, int]) -> str:
@@ -255,7 +276,13 @@ def restart_node(
     before_pid = old.pid
     restart_started = time.monotonic()
     old.crash()
-    restarted = BinaryNode(binary, scratch, topology.node_pid[member], state_path=old_state)
+    restarted = start_node(
+        binary,
+        scratch,
+        topology.node_pid[member],
+        LISTEN_PORTS[member],
+        state_path=old_state,
+    )
     nodes[member] = restarted
     observer.nodes = [nodes[name] for name in MEMBERS]
     identity = json.loads(restarted.stdout.readline())
@@ -314,7 +341,12 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         topology.create()
         topology.add_server()
         for member in MEMBERS:
-            nodes[member] = BinaryNode(binary, scratch, topology.node_pid[member])
+            nodes[member] = start_node(
+                binary,
+                scratch,
+                topology.node_pid[member],
+                LISTEN_PORTS[member],
+            )
             identities[member] = json.loads(nodes[member].stdout.readline())
         ports = {member: int(identities[member]["port"]) for member in MEMBERS}
         topology.configure({member: ports[member] for member in CLIENTS})
