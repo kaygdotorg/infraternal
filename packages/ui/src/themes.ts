@@ -284,8 +284,8 @@ function installLevelRules(): void {
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
 }
 
-/** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.on-demand.ts`). */
-export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
+/** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.on-demand.ts`): the fill, the blur (0px when the card turns solid) and each text role. */
+export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", blur: "--ui-glass-adapt-blur", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
 
 /** The adaptive chunk once it has loaded (it carries the rules writer); `undefined` until then. */
 let rulesModule: typeof import("./glass-adapt.on-demand") | undefined;

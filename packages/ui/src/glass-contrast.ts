@@ -102,10 +102,17 @@ export interface GlassSolution {
   alpha: number;
   /** Role name to the colour to use on this glass (the original when it already passes). */
   colours: Record<string, string>;
-  /** Whether every role reaches its line over the whole range. False only if even the ceiling opacity cannot. */
+  /** Whether every role reaches its line over the whole range. Always true now: what the glass cannot hold becomes the solid card (`solid`). */
   ok: boolean;
   /** True when the opacity had to go above the level's own because no text colour could reach the line at it. */
   raised: boolean;
+  /**
+   * True when the glass cannot hold the line inside its range (opacity up to the adaptive limit, text moving within its
+   * allowance, the fill staying close to its own lightness). Then the surface is the theme's solid card: `alpha` is 1, the
+   * blur is dropped and `colours` are the theme's own text colours, which reach the line on the opaque tint. There is no
+   * glow and no flat grey in between (TASTE: no glow behind text; glass that cannot stay readable turns solid).
+   */
+  solid: boolean;
 }
 
 /**
@@ -134,6 +141,13 @@ export const MAX_SHIFT = 0.15;
  */
 export const GLASS_CEILING = 0.92;
 
+/**
+ * The most opaque the adaptive solver lets a glass card get before it turns solid instead (0.8: just past Tinted's 0.78 on
+ * a light theme, the thickest approved level). Between that and fully opaque a card would be a near-solid grey slab over a
+ * hard backdrop, which is the look the owner rejected (#448, 2026-11-20).
+ */
+export const ADAPT_LIMIT = 0.8;
+
 /** How far (OKLab lightness) the glass may drift from its own tint over the far end of the range on the static floor. */
 export const MAX_DRIFT = 0.1;
 
@@ -145,14 +159,16 @@ export interface SolveOptions {
   fills?: GlassFills;
   /** The most a text colour may move before tint is raised instead (OKLab lightness). Default 1, which is as far as it can go. */
   maxShift?: number;
+  /** The most opaque the glass may get before the answer is the solid card. Default {@link GLASS_CEILING}; the adaptive paths pass {@link ADAPT_LIMIT}. */
+  maxAlpha?: number;
   /** If set, the tint's opacity starts high enough that over either end of `range` its lightness is within this of the tint's own. */
   maxDrift?: number;
 }
 
 /**
  * The answer for one tint: starting at `nominal` (the level's own opacity), the first opacity, in 1% steps up to
- * {@link GLASS_CEILING}, at which every role reaches its line over `range` and `fills` with a lightness move of at most
- * `maxShift`; if none does, the ceiling with text moving as far as it must. `lighter` says which way text moves away from
+ * `maxAlpha` (default {@link GLASS_CEILING}), at which every role reaches its line over `range` and `fills` with a lightness
+ * move of at most `maxShift`; if none does, the answer is the solid card (`solid: true`), never a glow or a flat grey. `lighter` says which way text moves away from
  * the tint: true on dark themes (light text), false on light themes. A `nominal` at or above the ceiling (Solid) is kept.
  */
 export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn: readonly GlassRole[], opts: SolveOptions = {}): GlassSolution {
@@ -161,7 +177,7 @@ export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn
   // opacity) is brought to it first, uncapped; the shift cap below then measures only what the glass itself costs.
   const solid: BackdropRange = { dark: tint, light: tint };
   const roles = rolesIn.map((r) => ({ ...r, colour: nudge(r.colour, lighter, (r.need ?? TEXT_LINE) + MARGIN, tint, 1, solid, 1, fills) ?? r.colour }));
-  const ceiling = Math.max(nominal, GLASS_CEILING);
+  const ceiling = Math.max(nominal, opts.maxAlpha ?? GLASS_CEILING);
   const attempt = (alpha: number, shift: number): GlassSolution | undefined => {
     const colours: Record<string, string> = {};
     for (const { role, colour, need } of roles) {
@@ -169,7 +185,7 @@ export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn
       if (fixed === undefined) return undefined;
       colours[role] = fixed;
     }
-    return { alpha, colours, ok: true, raised: alpha > nominal + 1e-9 };
+    return { alpha, colours, ok: true, raised: alpha > nominal + 1e-9, solid: false };
   };
   const [tintL] = hexToOklab(rgbToHex(tint));
   const drifts = (alpha: number): boolean => [range.dark, range.light].every((end) => Math.abs(hexToOklab(rgbToHex(composite(tint, alpha, end)))[0] - tintL) <= (opts.maxDrift ?? Infinity));
@@ -188,6 +204,13 @@ export function solveGlass(tint: Rgb, nominal: number, lighter: boolean, rolesIn
       if (found) return found;
     }
   }
-  // The thinnest levels cannot get there by tint alone: stop at the ceiling and let the colours move as far as they need.
-  return attempt(ceiling, 1) ?? { alpha: ceiling, colours: Object.fromEntries(roles.map((r) => [r.role, r.colour])), ok: false, raised: ceiling > nominal + 1e-9 };
+  // Nothing inside the range holds the line. A level the person chose as Solid (nominal at the ceiling) is kept as it is; any
+  // other card becomes the theme's solid surface, whose text colours stage 0 already brought to the line on the opaque tint.
+  if (nominal >= ceiling) return attempt(ceiling, 1) ?? solidAnswer(roles);
+  return solidAnswer(roles);
+}
+
+/** The solid card: the opaque tint with each role's own colour (already at the line on it). */
+function solidAnswer(roles: readonly GlassRole[]): GlassSolution {
+  return { alpha: 1, colours: Object.fromEntries(roles.map((r) => [r.role, r.colour])), ok: true, raised: true, solid: true };
 }

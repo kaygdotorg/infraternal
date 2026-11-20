@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Adaptive glass density (D365): when the app can see what is behind a glass card, the card asks for only as much tint
- * and text colour as that content needs, so the approved levels stay distinct whenever the backdrop allows it.
+ * and text colour as that content needs, so the approved levels stay distinct whenever the backdrop allows it. When no glass reaches the line over what is behind (a light card over a dark picture, a dark one over a light picture) the card turns solid: the theme's opaque card colour, no blur, its own text colours; the solver never reaches for a glow behind the text.
  *
  * `glass-under.on-demand.ts` finds what a surface is over and starts one of two trackers here. Until the first value arrives the
  * surface is on the static floor (set by the CSS from `data-glass-under`), which is correct over anything, so this module
@@ -17,7 +17,7 @@
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
  */
 import { activeGlass, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
-import { glassFor, nominalOpacity } from "./glass-rules.on-demand";
+import { glassSeen, nominalOpacity } from "./glass-rules.on-demand";
 // The rules are written by the same chunk: `themes.ts` requests this module at the start of boot and calls `installGlassRules`.
 export { installGlassRules } from "./glass-rules.on-demand";
 import { hexToRgb, luminanceOf, type BackdropRange, type Rgb } from "./glass-contrast";
@@ -60,18 +60,29 @@ export interface BackdropWatch {
   level: () => number;
 }
 
-/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level, the starting opacity (a look's tint moves it) and range. */
-const solved = new Map<string, ReturnType<typeof glassFor>>();
-/** The solved glass for a theme, level and sampled range, from the memo or the solver. */
-const solveFor = (theme: Theme, level: number, range: BackdropRange): ReturnType<typeof glassFor> => {
+/**
+ * How much wider (0 to 255 per channel) the backdrop range is taken while a card is solid, before it may turn back to glass.
+ * A card that went solid over a backdrop returns to glass only when the content is clearly easier than the line it crossed,
+ * so text scrolling under the edge of the limit does not flicker the card between the two.
+ */
+export const SOLID_HYSTERESIS = 24;
+
+/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level, the starting opacity (a look's tint moves it), range and whether the card is solid now. */
+const solved = new Map<string, ReturnType<typeof glassSeen>>();
+/**
+ * The solved glass for a theme, level and sampled range, from the memo or the solver. `wasSolid` is whether the card is solid
+ * now: then the range is widened by {@link SOLID_HYSTERESIS} first, so the card only goes back to glass with margin to spare.
+ */
+export const solveFor = (theme: Theme, level: number, range: BackdropRange, wasSolid = false): ReturnType<typeof glassSeen> => {
   // Quantised to 8/255 so a flicker of a few levels in a video reuses the answer.
   const q = (rgb: Rgb): string => rgb.map((v) => v >> 3).join(",");
   const nominal = nominalOpacity(theme, level);
-  const key = `${theme.name}|${level}|${nominal}|${q(range.dark)}|${q(range.light)}`;
+  const key = `${theme.name}|${level}|${nominal}|${q(range.dark)}|${q(range.light)}|${wasSolid}`;
   let hit = solved.get(key);
   if (!hit) {
     if (solved.size > 256) solved.clear();
-    hit = glassFor(theme, level, range, nominal);
+    const widen = (rgb: Rgb, sign: number): Rgb => rgb.map((v) => Math.min(255, Math.max(0, v + sign * SOLID_HYSTERESIS))) as unknown as Rgb;
+    hit = glassSeen(theme, level, wasSolid ? { dark: widen(range.dark, -1), light: widen(range.light, 1) } : range, nominal);
     solved.set(key, hit);
   }
   return hit;
@@ -110,6 +121,7 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
   const { marker } = watch;
   let timer = 0;
   let last = "";
+  let solid = false;
   const tick = (): void => {
     // The card is gone (closed, removed): stop for good, nobody will call the disposer.
     if (!marker.isConnected) return;
@@ -118,10 +130,11 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
     const region = watch.region();
     const rgba = region ? readSample(watch.source, region) : null;
     if (!rgba) return;
-    const sol = solveFor(watch.theme(), watch.level(), rangeOfSample(rgba));
-    const signature = `${sol.alpha}|${Object.values(sol.colours).join()}`;
+    const sol = solveFor(watch.theme(), watch.level(), rangeOfSample(rgba), solid);
+    const signature = `${sol.solid}|${sol.alpha}|${Object.values(sol.colours).join()}`;
     if (signature === last) return;
     last = signature;
+    solid = sol.solid;
     writeSolution(marker, sol, watch.theme());
   };
   // First sample off the current task, so opening the card never waits on it.
@@ -132,15 +145,43 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
   };
 }
 
-/** Writes a solved opacity and text colours onto `surface`, where the glass rules read them in place of the static floor. */
-function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassFor>, theme: Theme): void {
-  surface.style.setProperty(GLASS_ADAPT_VARS.overlay, `rgb(${hexToRgb(glassTint(theme)).join(" ")} / ${sol.alpha})`);
-  for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
+/** How long the fill and blur take to cross-fade between glass and solid, in milliseconds. */
+export const FADE_MS = 160;
+
+/**
+ * Runs `change` (which rewrites the glass custom properties on `surface`) and cross-fades the fill and the blur from what
+ * the card showed to what it shows now, so glass turning solid (or back) never pops. It uses the Web Animations API, which
+ * layers over whatever transitions the card already has (opening, hiding), so none of those is touched. Skipped for a
+ * card that is not drawn yet and for reduced motion. Only text colours, which are a few percent apart, change at once.
+ */
+function crossFade(surface: HTMLElement, change: () => void): void {
+  const drawn = surface.isConnected && !surface.hidden && typeof surface.animate === "function" && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const before = drawn ? getComputedStyle(surface) : undefined;
+  const from = before && { backgroundColor: before.backgroundColor, backdropFilter: before.backdropFilter };
+  change();
+  if (!from) return;
+  const after = getComputedStyle(surface);
+  if (after.backgroundColor === from.backgroundColor && after.backdropFilter === from.backdropFilter) return;
+  surface.animate(
+    [{ backgroundColor: from.backgroundColor, backdropFilter: from.backdropFilter, webkitBackdropFilter: from.backdropFilter }, { backgroundColor: after.backgroundColor, backdropFilter: after.backdropFilter, webkitBackdropFilter: after.backdropFilter }],
+    { duration: FADE_MS, easing: "ease-out" },
+  );
+}
+
+/** Writes a solved opacity, blur and text colours onto `surface`, where the glass rules read them in place of the static floor. */
+function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, theme: Theme): void {
+  crossFade(surface, () => {
+    surface.style.setProperty(GLASS_ADAPT_VARS.overlay, `rgb(${hexToRgb(glassTint(theme)).join(" ")} / ${sol.alpha})`);
+    // A solid card carries no blur; a glass one takes the level's own (the property is removed, so the rule's default applies).
+    if (sol.solid) surface.style.setProperty(GLASS_ADAPT_VARS.blur, "0px"); else surface.style.removeProperty(GLASS_ADAPT_VARS.blur);
+    for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
+  });
 }
 
 /** Removes what {@link writeSolution} wrote, which puts the surface back on the static floor. */
 function clearSolution(surface: HTMLElement): void {
   surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
+  surface.style.removeProperty(GLASS_ADAPT_VARS.blur);
   for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
 }
 
@@ -224,6 +265,7 @@ function blurOf(surface: HTMLElement): number {
 export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
   let frame = 0;
   let last = "";
+  let solid = false;
   const run = (): void => {
     frame = 0;
     if (!surface.isConnected || surface.hidden) return;
@@ -232,9 +274,9 @@ export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
     const read = grid.read(surface.getBoundingClientRect(), hexToRgb(theme.bg));
     const readMs = performance.now() - started;
     if (!read) return;
-    const sol = solveFor(theme, level, rangeOfGrid(read, blurOf(surface)));
-    const signature = `${sol.alpha}|${Object.values(sol.colours).join()}`;
-    if (signature !== last) { last = signature; writeSolution(surface, sol, theme); }
+    const sol = solveFor(theme, level, rangeOfGrid(read, blurOf(surface)), solid);
+    const signature = `${sol.solid}|${sol.alpha}|${Object.values(sol.colours).join()}`;
+    if (signature !== last) { last = signature; solid = sol.solid; writeSolution(surface, sol, theme); }
     stat(started, readMs);
   };
   const refresh = (): void => { if (!frame) frame = requestAnimationFrame(run); };
