@@ -199,18 +199,12 @@ async fn access_report(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (parts, body) = incoming.into_parts();
-    let (token, now) = authority(&api, &parts.headers)?;
-    let _permit = api
-        .admission
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-    let bytes = axum::body::to_bytes(body, 1024)
-        .await
-        .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
+    // The shared owner admission answers an ended session 401, a non-owner
+    // 403 and an expired admin window 428 (#498), so the browser can ask for
+    // a passkey tap instead of treating the report as forbidden.
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
     let input: ReportRequest = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
-    match api.removal.access_report(token, input.host_id, now).await {
+    match api.removal.access_report(&token, input.host_id, now).await {
         Ok(Some(report)) => Ok(Json(report)),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(crate::auth::Error::Storage(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),

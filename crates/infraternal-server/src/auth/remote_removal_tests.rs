@@ -989,6 +989,30 @@ async fn removal_start_status(f: &Fixture, host: Uuid) -> axum::http::StatusCode
         .status()
 }
 
+/// POST `payload` to the browser removal router at `path` as the fixture's
+/// same-origin session, returning only the status code.
+async fn owner_post_status(
+    f: &Fixture,
+    path: &str,
+    payload: serde_json::Value,
+) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    crate::remote_removal_http::router(f.auth.clone(), removal(f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
 /// Send a same-origin owner request through one browser router and decode its JSON response.
 async fn removal_json(
     app: &axum::Router,
@@ -1320,5 +1344,44 @@ async fn concurrent_second_removal_returns_existing_pending_response() {
     assert_eq!(
         removals, 1,
         "the second request cannot publish another removal"
+    );
+}
+
+/// The access report (D356, D367) answers an expired admin window the way
+/// removal does since #498: 428, so the browser can ask for a passkey tap
+/// instead of reading the refusal as "not the owner". A non-owner still gets
+/// 403 and an ended session 401, never the window-expired answer.
+#[tokio::test]
+async fn expired_window_on_the_access_report_asks_for_a_tap() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let report = || owner_post_status(&f, "/remote/hosts/access-report", json!({"host_id":host}));
+    sqlx::query("UPDATE sessions SET fresh=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        report().await,
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        report().await,
+        axum::http::StatusCode::FORBIDDEN,
+        "a non-owner must not receive the window-expired response"
+    );
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        report().await,
+        axum::http::StatusCode::UNAUTHORIZED,
+        "an ended session must not receive the window-expired response"
     );
 }
