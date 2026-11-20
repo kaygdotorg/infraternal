@@ -46,8 +46,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Why a Linux Mesh enrollment cannot be bound to this installation.
 #[cfg(target_os = "linux")]
-#[derive(Debug, thiserror::Error)]
-#[error("{} {}", .summary(), .recovery())]
+#[derive(Debug)]
 pub enum MachineBindingError {
     /// The current installation has no persistent machine ID.
     MissingId,
@@ -56,6 +55,18 @@ pub enum MachineBindingError {
     /// The old record has no fingerprint to establish where it was created.
     UnboundRecord,
 }
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Display for MachineBindingError {
+    /// Format the refusal and matching recovery as a diagnostic for service logs.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{} {}", self.summary(), self.recovery())
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// Preserve the typed refusal across the service and CLI error boundary.
+impl std::error::Error for MachineBindingError {}
 
 #[cfg(target_os = "linux")]
 impl MachineBindingError {
