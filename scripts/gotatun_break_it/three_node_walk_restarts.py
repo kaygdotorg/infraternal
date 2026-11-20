@@ -427,6 +427,13 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
 
         stop_pingers(pingers)
         pingers = []
+        row["endpoints_before_underlay_change"] = {
+            source: peer_rows(nodes[source])
+            .get(addresses["C"], {})
+            .get("counters", {})
+            .get("endpoint")
+            for source in ("S", "A", "B")
+        }
         old_address = topology.node_address["C"]
         new_address = "10.9.0.44"
         proof.ns("node-c", "ip", "addr", "add", f"{new_address}/24", "dev", "eth0")
@@ -458,6 +465,12 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             .get("endpoint")
             for source in ("S", "A", "B")
         }
+        row["client_route_to_server_after_underlay_change"] = proof.ns(
+            "node-c", "ip", "route", "get", proof.SERVER_ADDRESS
+        ).strip()
+        row["router_conntrack_after_underlay_change"] = proof.ns(
+            "rs", "conntrack", "-L", "-p", "udp", check=False
+        ).splitlines()
 
         stale_probe = dict(probes[MEMBERS.index("C")])
         stale_probe["lan"] = [f"10.9.0.45:{ports['C']}"]
