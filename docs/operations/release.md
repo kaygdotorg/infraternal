@@ -30,6 +30,12 @@ work begins. Every image is uploaded and included in the signer-generated
 checksums. Public verification still accepts older signed releases without
 session images; an advertised session image must be present and match its
 signed digest.
+
+The Linux host images include the Mesh node, so Add host can enroll a node
+with Mesh traffic available after the coordinator assigns its addresses and
+peers. Linux Mesh enrollment state belongs to its original machine ID. A
+backup of that state can restore the same enrollment on the original
+installation. Another installation must enroll through Add host.
 The build requires `--channel`; there is no default. Use `--channel stable`
 for the workspace version. Both architecture binaries and signed `VERSION`
 carry the same stamped identity.
