@@ -37,7 +37,7 @@ function refusedActions(server: RealServer): string[] {
   const names: string[] = [];
   for (const b of server.bridges) {
     const asked = new Map(b.control.filter((f) => f.dir === "up" && f.type === "Call").map((f) => [f.callId, f.detail]));
-    for (const f of b.control) if (f.dir === "down" && f.type === "Result" && f.detail !== "ok") names.push(String(asked.get(f.callId) ?? "?"));
+    for (const f of b.control) if (f.dir === "down" && f.type === "Result" && f.detail !== "ok") names.push(`${asked.get(f.callId) ?? "?"}: ${f.reason ?? ""}`);
   }
   return names;
 }
