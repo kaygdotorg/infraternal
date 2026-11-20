@@ -828,7 +828,7 @@ fn print_approval(
 }
 
 async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> {
-    let response = post_json(server, "/auth/device-start", body).await?;
+    let response = post_json(server, "/auth/device-start", body, None, REQUEST_TIMEOUT).await?;
     if response.status != StatusCode::OK {
         return Err(map_http_status(response.status));
     }
@@ -847,35 +847,44 @@ async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> 
     })
 }
 
+/// Redeem as soon as approval arrives and retain the old cadence on polling-only servers.
 async fn wait_for_approval(
     server: &Url,
     approval: &Approval,
     host_id: uuid::Uuid,
     origin: &str,
 ) -> Result<ApprovedInvitation, Failure> {
+    use tokio::time::Instant;
+
     let deadline = Instant::now() + approval.lifetime;
-    let mut delay = POLL_INTERVAL;
+    let body = Zeroizing::new(
+        serde_json::to_vec(&DeviceRedeemRequest {
+            token: &approval.poll_token,
+        })
+        .map_err(|_| Failure::Failed)?,
+    );
+    let mut next = Instant::now();
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        tokio::time::sleep_until(next.min(deadline)).await;
+        let started = Instant::now();
+        let remaining = deadline.saturating_duration_since(started);
         if remaining.is_zero() {
             return Err(Failure::Expired);
         }
-        tokio::time::sleep(delay.min(remaining)).await;
-        if Instant::now() >= deadline {
-            return Err(Failure::Expired);
-        }
-        let body = Zeroizing::new(
-            serde_json::to_vec(&DeviceRedeemRequest {
-                token: &approval.poll_token,
-            })
-            .map_err(|_| Failure::Failed)?,
-        );
-        let response = match post_json(server, "/auth/device-redeem", &body).await {
+        next = started + POLL_INTERVAL;
+        // Older servers ignore Prefer and respond immediately; new servers
+        // spend the same interval waiting, with the usual request I/O budget.
+        let response = match post_json(
+            server,
+            "/auth/device-redeem",
+            &body,
+            Some("wait=10"),
+            remaining.min(POLL_INTERVAL + REQUEST_TIMEOUT),
+        )
+        .await
+        {
             Ok(response) => response,
-            Err(Failure::Unreachable) => {
-                delay = POLL_INTERVAL;
-                continue;
-            }
+            Err(Failure::Unreachable) => continue,
             Err(failure) => return Err(failure),
         };
         match response.status {
@@ -886,27 +895,32 @@ async fn wait_for_approval(
                 validate_invitation(&invitation.0, origin, Some(host_id))?;
                 return Ok(invitation);
             }
-            StatusCode::UNAUTHORIZED => delay = POLL_INTERVAL,
+            StatusCode::UNAUTHORIZED => {}
             StatusCode::TOO_MANY_REQUESTS => {
-                delay = response
+                let delay = response
                     .retry_after
                     .unwrap_or(POLL_INTERVAL)
-                    .max(Duration::from_secs(1));
+                    .max(Duration::from_secs(1))
+                    .min(remaining);
+                next = Instant::now() + delay;
             }
-            status if status.is_server_error() => delay = POLL_INTERVAL,
+            status if status.is_server_error() => {}
             status => return Err(map_http_status(status)),
         }
     }
 }
 
+/// Apply the caller's timeout to the shared, bounded JSON transport.
 async fn post_json(
     server: &Url,
     path: &'static str,
     body: &[u8],
+    preference: Option<&'static str>,
+    timeout: Duration,
 ) -> Result<crate::remote::ClientResponse, Failure> {
     let mut request_started = false;
     match tokio::time::timeout(
-        REQUEST_TIMEOUT,
+        timeout,
         crate::remote::post_json(
             server,
             path,
@@ -914,6 +928,7 @@ async fn post_json(
             None,
             MAX_RESPONSE_BYTES,
             &mut request_started,
+            preference,
         ),
     )
     .await

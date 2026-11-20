@@ -38,6 +38,51 @@ fn sign_in() -> Value {
     json!({"device": "cli", "scopes": ["hosts:read"]})
 }
 
+/// A pending redeem wakes on its own approval, and a missed signal falls back to SQLite.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn machine_approval_wait_rechecks_durable_state_with_or_without_a_signal() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    for notify in [true, false] {
+        let response = browser(&app, "device-start", None, &join()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let approval = json_body(response).await;
+        let token = str_field(&approval, "poll_token");
+        let code = str_field(&approval, "user_code");
+        f.auth.device_inspect(&f.session, code, NOW).await.unwrap();
+
+        let wait = if notify {
+            std::time::Duration::from_secs(10)
+        } else {
+            std::time::Duration::from_millis(100)
+        };
+        let check = f.auth.wait_for_device_join(token, NOW, wait);
+        tokio::pin!(check);
+        assert!(futures_util::poll!(&mut check).is_pending());
+        if notify {
+            f.auth
+                .approve_without_passkey_for_tests(&f.session, code, NOW)
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), &mut check)
+                .await
+                .expect("matching approval must wake without the fallback timer")
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE approvals SET user_id=(SELECT id FROM users WHERE owner=1) WHERE token_hash=?")
+                .bind(hash(token))
+                .execute(&f.auth.pool)
+                .await
+                .unwrap();
+            check.await.unwrap();
+        }
+        assert!(f.auth.device_join_approved(token, NOW).await.unwrap());
+    }
+}
+
 async fn rows(auth: &Auth) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM approvals")
         .fetch_one(&auth.pool)

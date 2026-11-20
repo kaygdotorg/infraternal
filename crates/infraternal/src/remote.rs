@@ -649,6 +649,7 @@ pub(crate) async fn post_json(
     root: Option<&X509>,
     max_response_bytes: usize,
     request_started: &mut bool,
+    preference: Option<&'static str>,
 ) -> Result<ClientResponse, ClientFailure> {
     use http_body_util::BodyExt;
 
@@ -687,14 +688,18 @@ pub(crate) async fn post_json(
         let _ = connection.await;
     }));
     let request_body = SecretBytes(body);
-    let request = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method("POST")
         .uri(path)
         .header(
             header::HOST,
             url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
         )
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(preference) = preference {
+        request = request.header("prefer", preference);
+    }
+    let request = request
         .body(http_body_util::Full::new(request_body.clone_for_request()))
         .map_err(|_| ClientFailure::HttpHandshake)?;
     // Hyper may poll the request body as soon as this send future is polled.
@@ -811,6 +816,7 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
         root,
         8192,
         &mut request_started,
+        None,
     )
     .await
     .map_err(client_failure_to_io)?;

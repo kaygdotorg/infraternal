@@ -205,6 +205,10 @@ pub struct Auth {
     ingress: Arc<Mutex<http::Ingress>>,
     device_sources: Arc<Mutex<devices::PendingSources>>,
     approval_ceremonies: Arc<Mutex<devices::ApprovalCeremonies>>,
+    /// Approval commits wake only waiters that hold the matching poll capability.
+    join_approval_changes: Arc<account_events::AccountEvents>,
+    /// Cap long requests even when clients reuse a valid capability.
+    join_approval_waiters: Arc<tokio::sync::Semaphore>,
     recovery_changes: Arc<account_events::AccountEvents>,
     recovery_clock: Arc<recovery::Clock>,
     revocations: Arc<account_events::AccountEvents>,
@@ -300,6 +304,8 @@ impl Auth {
             ingress: Arc::default(),
             device_sources: Arc::default(),
             approval_ceremonies: Arc::default(),
+            join_approval_changes: Arc::default(),
+            join_approval_waiters: Arc::new(tokio::sync::Semaphore::new(128)),
             recovery_changes: Arc::default(),
             recovery_clock,
             revocations: Arc::default(),
