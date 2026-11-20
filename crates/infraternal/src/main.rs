@@ -1678,7 +1678,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                 });
             match result {
                 Ok(outcome) => {
-                    install::finish_move(!install_args.system);
+                    install::finish_move(!install_args.system, &args.data);
                     Some((
                         outcome.describe(relocation),
                         relocation_json(relocation, Some(&outcome)),
@@ -1714,8 +1714,6 @@ fn plan_server_data_move(
     let Some(recorded) = recorded else {
         return Ok(None);
     };
-    let target =
-        install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
     // Rewrite the unit the recorded folder was read from, found the way
     // `recorded_server_unit` finds it, so reading and rewriting never disagree.
     let file = format!("{name}.service");
@@ -1732,6 +1730,16 @@ fn plan_server_data_move(
         None => install::unit_path(scope == install_paths::Scope::User, name)
             .map_err(|error| error.to_string())?,
     };
+    let target =
+        install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
+    #[cfg(target_os = "linux")]
+    let target = if scope == install_paths::Scope::System
+        && target == Path::new(install_paths::LINUX_SYSTEM_BASE)
+    {
+        combined_server_move_target(target, recorded, &unit)?
+    } else {
+        target
+    };
     if explicit_data {
         #[cfg(target_os = "linux")]
         let requested =
@@ -1744,6 +1752,24 @@ fn plan_server_data_move(
         return Ok(None);
     }
     install_move::plan(recorded, &target, &unit).map_err(|error| error.to_string())
+}
+
+/// Keep the systemd-selected private child or resume a recorded cutover to it.
+#[cfg(all(target_os = "linux", feature = "plugin-server"))]
+fn combined_server_move_target(
+    base: PathBuf,
+    recorded: &Path,
+    unit: &Path,
+) -> Result<PathBuf, String> {
+    let child = base.join("server");
+    if recorded == child
+        || install_move::manager::requested(&child).map_err(|error| error.to_string())?
+        || install_move::pending(&child, unit).map_err(|error| error.to_string())?
+    {
+        Ok(child)
+    } else {
+        Ok(base)
+    }
 }
 
 /// The move as JSON for `--json`: folders, method and any leftover to remove.
@@ -3115,7 +3141,14 @@ fn run_remote_agent(
                 "The infraternal agent could not finish.",
                 remote::public_error,
             ),
-            "Check the server address and that this machine is still enrolled, then run the command again.",
+            result
+                .as_ref()
+                .err()
+                .and_then(remote::mesh_restore_failure)
+                .map_or(
+                    "Check the server address and that this machine is still enrolled, then run the command again.",
+                    |(_, recovery)| recovery,
+                ),
             result
                 .as_ref()
                 .err()
@@ -3124,6 +3157,7 @@ fn run_remote_agent(
                         Exit::NotAllowed
                     }
                     Some(remote::Failure::Dns(_) | remote::Failure::Connect) => Exit::Unreachable,
+                    None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
                         | remote::Failure::Upgrade

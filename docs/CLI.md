@@ -94,7 +94,11 @@ server's data folder is
 `$XDG_STATE_HOME/infraternal` (else `~/.local/state/infraternal`) per user on
 Linux, `/var/lib/infraternal` system-wide on Linux (D229), and
 `~/Library/Application Support/infraternal` or
-`/Library/Application Support/infraternal` on macOS. An empty or relative
+`/Library/Application Support/infraternal` on macOS. When the Linux system
+install shares its base with an infraternal agent, the default is
+`/var/lib/infraternal/server`, mode 0700 and owned by the server account.
+The shared base keeps its traversal permissions, and the infraternal agent
+keeps its paths and the existing system command link. An empty or relative
 `XDG_STATE_HOME` is ignored, as the XDG specification says. Without
 `--web-root`, a fresh install uses the `web/` folder beside the `infraternal`
 binary (the release bundle layout) when it exists, and otherwise leaves the
@@ -107,9 +111,9 @@ paths. The rules live in `crates/infraternal/src/install_paths.rs`.
 
 An existing install moves to the standard folder too (D395, amended
 2026-11-15). When the unit records a different `--data` and you do not pass
-`--data`, `server init` moves the whole data folder (database with its WAL and
-SHM files, identity, SSH trust, the mesh key and anything else in it) and
-rewrites every `ExecStart` path inside it, in the unit and its drop-ins. Pass
+`--data`, `server init` moves the server data (database with its WAL and
+SHM files, identity, SSH trust and the mesh key) and rewrites the associated
+`ExecStart` paths in the unit and its drop-ins. Pass
 `--data <current folder>` to keep a folder where it is. `--dry-run` prints the
 move first: the two folders, the method, and the unit files it rewrites.
 The move stops the service and copies its data into a private staging folder.
@@ -135,15 +139,19 @@ as a failed start and leaves the request available for retry. The private journa
 records the data paths and identities, staging and backup locations, and
 complete unit set. If the moved server
 may have accepted writes, recovery keeps both trees and retries the selected
-destination. Init refuses a move from or into a shared infraternal install
-base before stopping the service. Init also refuses a destination with
-unrelated files or a concurrent configuration change, such as a new listen
+destination. On a combined host that stored server data directly in the
+shared base, the same systemd job copies only the server entries into the
+private child. The journal tracks each original server entry so recovery can
+resume retirement after a partial cleanup. Reserved install paths and the
+host firewall policy files stay in the shared base. Other moves that would
+take over a shared base are refused before stopping the service. Init also
+refuses a destination with unrelated files or a concurrent configuration change, such as a new listen
 port, even with `--force`. Use the existing
 service flags for relocation and apply changes separately.
 
 Relocation is a no-op for an install already at its standard folder, such as
-a system server in `/var/lib/infraternal`. Ordinary `server init` still
-reconciles the service and firewall. Relocation leaves sockets in `/run`
+a combined system server in `/var/lib/infraternal/server`. Ordinary
+`server init` still reconciles the service and firewall. Relocation leaves sockets in `/run`
 alone. The server's updater (#211) is meant to call the same move while
 the service is stopped; `server restart --binary` keeps the service running
 and never moves the folder. On macOS, `server init` does not install a

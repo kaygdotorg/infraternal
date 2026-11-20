@@ -294,16 +294,17 @@ pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
             "/run/infraternal"
         })
     } else {
-        let runtime = PathBuf::from(
-            std::env::var_os("XDG_RUNTIME_DIR")
-                .ok_or_else(|| invalid("rootless infraternal agent requires XDG_RUNTIME_DIR"))?,
-        );
-        let meta = fs::symlink_metadata(&runtime)?;
-        if !meta.is_dir() || meta.uid() != Uid::effective().as_raw() || meta.mode() & 0o777 != 0o700
-        {
-            return Err(invalid("invalid runtime directory"));
-        }
-        runtime.join("infraternal")
+        // XDG_RUNTIME_DIR, or on macOS the account's private ~/Library/Caches;
+        // the shim uses the same function, so both always pick one place.
+        infraternal_shim::runtime_dir::user_runtime_dir()
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::PermissionDenied => invalid("invalid runtime directory"),
+                io::ErrorKind::InvalidData => {
+                    invalid("rootless infraternal agent requires XDG_RUNTIME_DIR")
+                }
+                _ => error,
+            })?
+            .join("infraternal")
     };
     Ok(path)
 }

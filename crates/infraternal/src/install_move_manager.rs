@@ -388,12 +388,7 @@ fn complete_start(dir: &File, request: &Request) -> io::Result<()> {
                 .checked(&["enable", "--no-reload", &request.service.service])?;
             journal.ready = true;
             save(transaction.work, journal)?;
-            let outcome = finish(
-                transaction.old_parent,
-                transaction.old_name,
-                journal,
-                &request.service,
-            )?;
+            let outcome = finish(transaction, journal, &request.service)?;
             let receipt = Receipt::Ready {
                 outcome,
                 target: journal

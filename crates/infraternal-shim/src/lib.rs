@@ -49,6 +49,9 @@ mod pty;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
+/// The private per-user runtime directory shared by a rootless agent and its shims.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod runtime_dir;
 /// Private macOS entry that places and drops privileges for each PTY child (D335).
 #[cfg(target_os = "macos")]
 pub mod session_shell;

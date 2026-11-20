@@ -20,6 +20,7 @@
 //! for each worker to finish native cleanup. A start that is cancelled half-way
 //! withdraws its session at once; the worker still finishes retirement.
 use crate::{
+    app_icons::{ICON_CHUNK_BYTES, MAX_ICON_PNG_BYTES, content_hash, valid_hash, valid_png},
     protocol::Start,
     registry::Registry,
     server_manifest::DESCRIPTOR,
@@ -32,13 +33,13 @@ use infraternal_plugin_api::{
 };
 use infraternal_protocol::{
     Frame, decode_muxed_frame,
-    desktop::{Delivery, Message},
+    desktop::{Delivery, Message, WINDOW_CLOSED},
     encode_frame_into, encode_muxed_frame_into,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -137,6 +138,8 @@ struct State {
     /// Maximum number of sessions, counting ones still shutting down.
     limit: usize,
     records: HashMap<SessionId, Record>,
+    /// Recent native closures, bounded independently of live capture capacity.
+    closed_windows: VecDeque<(SessionId, Arc<dyn NodeHost>)>,
 }
 /// The desktop plugin for the server. Cloning is cheap and shares all state.
 ///
@@ -157,6 +160,7 @@ impl DesktopServer {
                 enabled: false,
                 limit,
                 records: HashMap::new(),
+                closed_windows: VecDeque::new(),
             })),
         }
     }
@@ -201,7 +205,23 @@ impl DesktopServer {
             if !state.enabled || !host.permits() {
                 return Err(Error::Unavailable);
             }
-            state.records.retain(|_, record| !record.worker.finished());
+            // Finished closures lose their capture slot but keep a bounded
+            // receipt for viewers returning on a new socket.
+            let mut closed = std::mem::take(&mut state.closed_windows);
+            let limit = state.limit;
+            state.records.retain(|id, record| {
+                if !record.worker.finished() {
+                    return true;
+                }
+                if record.session.window_closed() && limit != 0 {
+                    if closed.len() == limit {
+                        closed.pop_front();
+                    }
+                    closed.push_back((*id, record.host.clone()));
+                }
+                false
+            });
+            state.closed_windows = closed;
             // Attachment withdrawal is immediate, but native cleanup may still
             // be running. Keep its resource reservation until the worker ends.
             if state.records.len() >= state.limit {
@@ -225,7 +245,11 @@ impl DesktopServer {
                     } => Err(Error::Unavailable),
                     response = tokio::time::timeout(Duration::from_secs(5), worker_host.call("desktop.source.start", &input)) => {
                         response.map_err(|_| Error::Unavailable).and_then(|value| value.map_err(|()| Error::Unavailable))
-                            .and_then(|bytes| validate_prepared(&bytes, id))
+                            .and_then(|bytes| prepared_capture(&bytes, id))
+                            .and_then(|state| match state {
+                                PreparedCapture::Ready => Ok(()),
+                                PreparedCapture::Gone => Err(Error::Unavailable),
+                            })
                     },
                 };
                 let ready = preparation.is_ok();
@@ -313,6 +337,24 @@ impl DesktopServer {
         self.registry
             .attach_authorized(id, host.user_id().to_owned(), host.authority())
     }
+    /// Reads a terminal reason only for the live owner of the original capture.
+    fn window_closed_for(&self, id: &SessionId, socket: &dyn SocketHost) -> bool {
+        if !socket.authority().permits() {
+            return false;
+        }
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        let owns = |node: &dyn NodeHost| node.owner_id() == socket.user_id() && node.permits();
+        state
+            .records
+            .get(id)
+            .is_some_and(|record| record.session.window_closed() && owns(record.host.as_ref()))
+            || state
+                .closed_windows
+                .iter()
+                .any(|(closed, node)| closed == id && owns(node.as_ref()))
+    }
     /// Runs one browser action and returns its JSON result.
     ///
     /// - `desktop.windows`: asks the host for its window list page by page and
@@ -333,54 +375,8 @@ impl DesktopServer {
         input: &[u8],
     ) -> Result<Value, Error> {
         match action {
-            "desktop.windows" => {
-                let input: HostInput = parse(input)?;
-                let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
-                let mut inventory: Option<Value> = None;
-                let mut cursor: Option<String> = None;
-                let mut seen = std::collections::HashSet::new();
-                loop {
-                    let input = cursor.as_ref().map_or_else(
-                        || b"{}".to_vec(),
-                        |cursor| serde_json::to_vec(&json!({"cursor":cursor})).unwrap_or_default(),
-                    );
-                    let bytes = node
-                        .call("desktop.source.windows", &input)
-                        .await
-                        .map_err(|()| Error::Unavailable)?;
-                    let mut page: InventoryPage =
-                        serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
-                    let windows = page
-                        .inventory
-                        .get_mut("windows")
-                        .and_then(Value::as_array_mut)
-                        .ok_or(Error::Invalid)?;
-                    if let Some(inventory) = inventory.as_mut() {
-                        inventory
-                            .get_mut("windows")
-                            .and_then(Value::as_array_mut)
-                            .ok_or(Error::Invalid)?
-                            .append(windows);
-                    } else {
-                        inventory = Some(page.inventory);
-                    }
-                    if serde_json::to_vec(&inventory)
-                        .map_err(|_| Error::Invalid)?
-                        .len()
-                        > crate::protocol::MAX_CONTROL - 1024
-                    {
-                        return Err(Error::Limit);
-                    }
-                    cursor = page.cursor;
-                    if let Some(cursor) = &cursor {
-                        if !seen.insert(cursor.clone()) || seen.len() > 256 {
-                            return Err(Error::Invalid);
-                        }
-                    } else {
-                        return inventory.ok_or(Error::Invalid);
-                    }
-                }
-            }
+            "desktop.windows" => Self::list_windows(host, input).await,
+            "desktop.icon" => Self::fetch_icon(host, input).await,
             "desktop.session.start" => {
                 let input: StartInput = parse(input)?;
                 let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
@@ -428,6 +424,104 @@ impl DesktopServer {
             // arbitrary UUID. The viewer adapter owns that lease and operation.
             _ => Err(Error::Invalid),
         }
+    }
+
+    /// Joins a host's bounded window inventory pages into one browser reply.
+    async fn list_windows(host: &dyn SocketHost, input: &[u8]) -> Result<Value, Error> {
+        let input: HostInput = parse(input)?;
+        let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
+        let mut inventory: Option<Value> = None;
+        let mut cursor: Option<String> = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let input = cursor.as_ref().map_or_else(
+                || b"{}".to_vec(),
+                |cursor| serde_json::to_vec(&json!({"cursor":cursor})).unwrap_or_default(),
+            );
+            let bytes = node
+                .call("desktop.source.windows", &input)
+                .await
+                .map_err(|()| Error::Unavailable)?;
+            let mut page: InventoryPage =
+                serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
+            let windows = page
+                .inventory
+                .get_mut("windows")
+                .and_then(Value::as_array_mut)
+                .ok_or(Error::Invalid)?;
+            if let Some(inventory) = inventory.as_mut() {
+                inventory
+                    .get_mut("windows")
+                    .and_then(Value::as_array_mut)
+                    .ok_or(Error::Invalid)?
+                    .append(windows);
+            } else {
+                inventory = Some(page.inventory);
+            }
+            if serde_json::to_vec(&inventory)
+                .map_err(|_| Error::Invalid)?
+                .len()
+                > crate::protocol::MAX_CONTROL - 1024
+            {
+                return Err(Error::Limit);
+            }
+            cursor = page.cursor;
+            if let Some(cursor) = &cursor {
+                if !seen.insert(cursor.clone()) || seen.len() > 256 {
+                    return Err(Error::Invalid);
+                }
+            } else {
+                return inventory.ok_or(Error::Invalid);
+            }
+        }
+    }
+
+    /// Reads one app icon from a host by its content hash and returns it whole
+    /// as `{"png": <base64>}` (#146, D349).
+    ///
+    /// The host answers in pieces of at most 4 KiB, so each piece fits the
+    /// action limit. The host is untrusted: every piece must agree on one total
+    /// of at most 16 KiB and arrive at the expected offset with the expected
+    /// length, the joined bytes must hash to the name the browser asked for, and
+    /// they must pass the PNG check. Anything else is `Invalid`, and the browser
+    /// keeps the letter tile.
+    async fn fetch_icon(host: &dyn SocketHost, input: &[u8]) -> Result<Value, Error> {
+        use base64::Engine;
+        let input: IconInput = parse(input)?;
+        if !valid_hash(&input.sha256) {
+            return Err(Error::Invalid);
+        }
+        let node = host.node(&input.host_id).await.ok_or(Error::Forbidden)?;
+        let mut png: Vec<u8> = Vec::with_capacity(MAX_ICON_PNG_BYTES);
+        let mut total = None;
+        while total.is_none_or(|total| png.len() < total) {
+            let request = serde_json::to_vec(&json!({"sha256":input.sha256,"offset":png.len()}))
+                .map_err(|_| Error::Invalid)?;
+            let bytes = node
+                .call("desktop.source.icon", &request)
+                .await
+                .map_err(|()| Error::Unavailable)?;
+            let piece: IconPiece = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
+            if piece.total == 0
+                || piece.total > MAX_ICON_PNG_BYTES
+                || total.is_some_and(|total| total != piece.total)
+                || piece.data.len() > ICON_CHUNK_BYTES.div_ceil(3) * 4
+            {
+                return Err(Error::Invalid);
+            }
+            total = Some(piece.total);
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(piece.data)
+                .map_err(|_| Error::Invalid)?;
+            if data.len() != ICON_CHUNK_BYTES.min(piece.total - png.len()) {
+                return Err(Error::Invalid);
+            }
+            png.extend_from_slice(&data);
+        }
+        if content_hash(&png) != input.sha256 || !valid_png(&png) {
+            return Err(Error::Invalid);
+        }
+        Ok(json!({"png": base64::engine::general_purpose::STANDARD.encode(&png)}))
     }
 }
 impl Plugin for DesktopServer {
@@ -528,25 +622,28 @@ impl Plugin for DesktopServer {
                             if stream != 0 {
                                 if let Frame::Desktop(Message::Attach { session_id, delivery: Delivery::Reliable }) = decoded.frame {
                                     if viewers.contains_key(&stream) || viewers.len() >= WIRE.max_streams { break; }
-                                    match server.attach(session_id, host.as_ref()) {
-                                        Ok(viewer) => {
-                                            // At most 32 small commands (64 bytes each) buffer one socket
-                                            // ingress burst plus independent control, never media/RPC bodies.
-                                            let (tx, rx) = mpsc::channel(32);
-                                            let (stop, stopped) = watch::channel(false);
-                                            let replies = replies.clone();
-                                            let task = workers.spawn(async move {
-                                                // A late Close belongs to this attachment, just as its video does.
-                                                // Keep the reply guarded through the actual socket write.
-                                                let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
-                                                let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
-                                                let mut closed = Vec::new();
-                                                if encode_muxed_frame_into(stream, &Frame::Close { code: 4404, reason: "viewer ended" }, &mut closed).is_ok() { let _ = tokio::time::timeout(Duration::from_secs(1), completed.send_and_wait(Bytes::from(closed))).await; }
-                                                stream
-                                            });
-                                            viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
-                                        }
-                                        Err(_) => { send_viewer_close(&replies, stream).await; }
+                                    if let Ok(viewer) = server.attach(session_id, host.as_ref()) {
+                                        // At most 32 small commands (64 bytes each) buffer one socket
+                                        // ingress burst plus independent control, never media/RPC bodies.
+                                        let (tx, rx) = mpsc::channel(32);
+                                        let (stop, stopped) = watch::channel(false);
+                                        let replies = replies.clone();
+                                        let server = server.clone();
+                                        let host = host.clone();
+                                        let id = *session_id;
+                                        let task = workers.spawn(async move {
+                                            // A late Close belongs to this attachment, just as its video does.
+                                            // Keep the reply guarded through the actual socket write.
+                                            let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
+                                            let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
+                                            let closed = server.window_closed_for(&id, host.as_ref());
+                                            let _ = tokio::time::timeout(Duration::from_secs(1), send_viewer_close(&completed, stream, closed, true)).await;
+                                            stream
+                                        });
+                                        viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
+                                    } else {
+                                        let closed = server.window_closed_for(session_id, host.as_ref());
+                                        send_viewer_close(&replies, stream, closed, false).await;
                                     }
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
                                     viewers.remove(&stream);
@@ -556,7 +653,7 @@ impl Plugin for DesktopServer {
                                     }
                                     if wire.len() > 64 || !matches!(decoded.frame, Frame::Desktop(Message::Input(_) | Message::Size { .. } | Message::Repair { .. }))
                                         || sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
-                                } else { send_viewer_close(&replies, stream).await; }
+                                } else { send_viewer_close(&replies, stream, false, false).await; }
                                 continue;
                             }
                             let Frame::Call { action_id, input_json, .. } = decoded.frame else { break; };
@@ -640,7 +737,7 @@ async fn stop_source(host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
 /// Repeatedly opens a data lane to the host and relays through
 /// `crate::relay::run`. After a failed lane it waits 200 ms and prepares the
 /// source again, continuing the sequence numbers (`sequence_floor`) and the last
-/// size the viewer asked for. Stops when the session is closed, the host
+/// output size the viewer asked for. Native geometry is passive until a fresh Size. Stops when the window is confirmed gone, the session is closed, the host
 /// withdraws admission, or sequence numbers run out. There is no timer while a
 /// lane is healthy. `preparation` is the JSON used for the first start.
 async fn capture(
@@ -670,18 +767,26 @@ async fn capture(
                 break;
             }
             preparation["sequence_floor"] = json!(floor);
+            preparation["start"]["passive_geometry"] = json!(true);
             if let Some(size) = session.last_forwarded_size() {
                 preparation["start"]["size"] =
                     serde_json::to_value(size).map_err(|_| Error::Invalid)?;
             }
             let preparation = serde_json::to_vec(&preparation).map_err(|_| Error::Invalid)?;
-            let ready = tokio::select! { biased;
+            let prepared = tokio::select! { biased;
                 _ = stopped.changed() => break,
-                response = tokio::time::timeout(Duration::from_secs(5), host.call("desktop.source.start", &preparation)) => response.ok().and_then(Result::ok).is_some_and(|bytes| validate_prepared(&bytes, session.id()).is_ok()),
+                response = tokio::time::timeout(Duration::from_secs(5), host.call("desktop.source.start", &preparation)) => response.ok().and_then(Result::ok).and_then(|bytes| prepared_capture(&bytes, session.id()).ok()),
             };
-            if !ready {
-                tokio::select! { biased; _ = stopped.changed() => break, () = tokio::time::sleep(Duration::from_millis(200)) => {} }
-                continue;
+            match prepared {
+                Some(PreparedCapture::Ready) => {}
+                Some(PreparedCapture::Gone) => {
+                    session.close_window();
+                    break;
+                }
+                None => {
+                    tokio::select! { biased; _ = stopped.changed() => break, () = tokio::time::sleep(Duration::from_millis(200)) => {} }
+                    continue;
+                }
             }
         }
         reconnect = true;
@@ -721,6 +826,20 @@ fn parse<T: serde::de::DeserializeOwned>(input: &[u8]) -> Result<T, Error> {
 #[serde(deny_unknown_fields)]
 struct HostInput {
     host_id: String,
+}
+/// Body of `desktop.icon`: which host, and the icon's content hash from a window row.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IconInput {
+    host_id: String,
+    sha256: String,
+}
+/// One `desktop.source.icon` reply: the icon's full length and one base64 piece.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IconPiece {
+    total: usize,
+    data: String,
 }
 /// Body of `desktop.session.start`.
 #[derive(Deserialize)]
@@ -889,20 +1008,22 @@ enum ViewerCommand {
         oneshot::Sender<Result<(), Error>>,
     ),
 }
-/// Tells the browser that `stream` has no viewer (close code 4403). Best effort.
-async fn send_viewer_close(replies: &ReplySender, stream: u32) {
+/// Retires a viewer, preserving native window closure when the source confirmed it.
+async fn send_viewer_close(replies: &ReplySender, stream: u32, closed: bool, attached: bool) {
+    let (code, reason) = if closed {
+        (WINDOW_CLOSED, "window closed")
+    } else if attached {
+        (4404, "viewer ended")
+    } else {
+        (4403, "viewer unavailable")
+    };
     let mut wire = Vec::new();
-    if encode_muxed_frame_into(
-        stream,
-        &Frame::Close {
-            code: 4403,
-            reason: "viewer unavailable",
-        },
-        &mut wire,
-    )
-    .is_ok()
-    {
-        let _ = replies.send(Bytes::from(wire)).await;
+    if encode_muxed_frame_into(stream, &Frame::Close { code, reason }, &mut wire).is_ok() {
+        if attached {
+            let _ = replies.send_and_wait(Bytes::from(wire)).await;
+        } else {
+            let _ = replies.send(Bytes::from(wire)).await;
+        }
     }
 }
 /// The task behind one attached viewer: forwards commands from the browser to
@@ -986,8 +1107,17 @@ struct InventoryPage {
     /// Where to continue, or `None` on the last page.
     cursor: Option<String>,
 }
-/// Checks that the host's reply to `desktop.source.start` names session `id`.
-fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
+/// The source either reserved the capture or confirmed that its original window closed.
+enum PreparedCapture {
+    /// The source can accept a capture lane.
+    Ready,
+    /// This session's window no longer exists.
+    Gone,
+}
+
+/// Reads the source's preparation reply, after confirming it names session `id`.
+/// Older sources acknowledge preparation with the session ID alone.
+fn prepared_capture(bytes: &[u8], id: SessionId) -> Result<PreparedCapture, Error> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
     if value
         .get("session_id")
@@ -995,7 +1125,11 @@ fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .is_some_and(|value| *value.as_bytes() == id)
     {
-        Ok(())
+        if value["state"] == "gone" {
+            Ok(PreparedCapture::Gone)
+        } else {
+            Ok(PreparedCapture::Ready)
+        }
     } else {
         Err(Error::Invalid)
     }
@@ -1929,5 +2063,149 @@ mod slow_action_tests {
             "finite burst retired its viewer (resize={resize}, forwarded={forwarded})"
         );
         assert_eq!(forwarded, "ordinary text 🐈!".chars().count());
+    }
+}
+
+#[cfg(test)]
+/// The server reads an icon from an untrusted host in pieces and returns it
+/// only when the bytes match the hash and pass the PNG check (#146, D349).
+mod icon_tests {
+    use super::*;
+    use base64::Engine;
+    use infraternal_plugin_api::streams::{Authority, WireLane, WireStreamDef};
+
+    /// A host that answers `desktop.source.icon` from `png`, reporting `total` as its length.
+    struct IconNode {
+        png: Vec<u8>,
+        total: usize,
+    }
+    impl NodeHost for IconNode {
+        fn id(&self) -> &'static str {
+            "mac"
+        }
+        fn owner_id(&self) -> &'static str {
+            "owner"
+        }
+        fn permits(&self) -> bool {
+            true
+        }
+        fn authorized<'a>(
+            &'a self,
+            operation: Operation<'a, Result<(), ()>>,
+        ) -> Operation<'a, Result<(), ()>> {
+            operation
+        }
+        fn call<'a>(
+            &'a self,
+            action: &'a str,
+            input: &'a [u8],
+        ) -> Operation<'a, Result<Vec<u8>, ()>> {
+            Box::pin(async move {
+                assert_eq!(action, "desktop.source.icon");
+                let request: Value = serde_json::from_slice(input).map_err(|_| ())?;
+                let offset =
+                    usize::try_from(request["offset"].as_u64().ok_or(())?).map_err(|_| ())?;
+                let end = self.png.len().min(offset + ICON_CHUNK_BYTES);
+                let data = base64::engine::general_purpose::STANDARD.encode(&self.png[offset..end]);
+                serde_json::to_vec(&json!({"total": self.total, "data": data})).map_err(|_| ())
+            })
+        }
+        fn open<'a>(
+            &'a self,
+            _: &'static WireStreamDef,
+            _: &'a [u8],
+        ) -> Operation<'a, Result<Arc<dyn WireLane>, ()>> {
+            Box::pin(async { Err(()) })
+        }
+    }
+    /// Always-live authority for the fixture socket.
+    struct Live;
+    impl Authority for Live {
+        fn permits(&self) -> bool {
+            true
+        }
+        fn cancelled(&self) -> Operation<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+    /// A browser socket of the host's owner.
+    struct Browser(Arc<IconNode>);
+    impl SocketHost for Browser {
+        fn user_id(&self) -> &'static str {
+            "owner"
+        }
+        fn token_hash(&self) -> &'static str {
+            "fixture"
+        }
+        fn authority(&self) -> Arc<dyn Authority> {
+            Arc::new(Live)
+        }
+        fn authorized<'a>(
+            &'a self,
+            operation: Operation<'a, Result<(), ()>>,
+        ) -> Operation<'a, Result<(), ()>> {
+            operation
+        }
+        fn fresh(&self, _: i64) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn live(&self) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn may_configure(&self) -> Operation<'_, bool> {
+            Box::pin(async { true })
+        }
+        fn node<'a>(&'a self, _: &'a str) -> Operation<'a, Option<Arc<dyn NodeHost>>> {
+            Box::pin(async move { Some(self.0.clone() as Arc<dyn NodeHost>) })
+        }
+    }
+    /// Asks the server for icon `sha256` from a host serving `png` with the given `total`.
+    async fn fetch(png: Vec<u8>, total: usize, sha256: &str) -> Result<Value, Error> {
+        let browser = Browser(Arc::new(IconNode { png, total }));
+        let input = serde_json::to_vec(&json!({"host_id":"mac","sha256":sha256})).unwrap();
+        DesktopServer::fetch_icon(&browser, &input).await
+    }
+
+    /// A 9 KiB icon arrives in three pieces and comes back whole.
+    #[tokio::test]
+    async fn an_honest_host_gives_the_whole_icon() {
+        let png = crate::app_icons::tests::png(64, 64, 9000);
+        let reply = fetch(png.clone(), png.len(), &content_hash(&png))
+            .await
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(reply["png"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png);
+    }
+
+    /// Bytes that do not match the requested hash, a bad PNG, a lying total
+    /// and a malformed hash are all refused.
+    #[tokio::test]
+    async fn a_lying_host_is_refused() {
+        let png = crate::app_icons::tests::png(64, 64, 0);
+        let other = crate::app_icons::tests::png(64, 64, 10);
+        assert!(
+            fetch(other.clone(), other.len(), &content_hash(&png))
+                .await
+                .is_err()
+        );
+        let small = crate::app_icons::tests::png(32, 32, 0);
+        assert!(
+            fetch(small.clone(), small.len(), &content_hash(&small))
+                .await
+                .is_err()
+        );
+        assert!(
+            fetch(png.clone(), MAX_ICON_PNG_BYTES + 1, &content_hash(&png))
+                .await
+                .is_err()
+        );
+        assert!(
+            fetch(png.clone(), png.len() + 1, &content_hash(&png))
+                .await
+                .is_err()
+        );
+        assert!(fetch(png.clone(), png.len(), "ABC").await.is_err());
     }
 }

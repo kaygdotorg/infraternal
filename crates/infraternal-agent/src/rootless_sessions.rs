@@ -332,9 +332,9 @@ async fn stop(path: PathBuf, id: [u8; 16]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
-    //! Cleanup refuses unsupported or unconfirmed peers without inventing exit proof.
+    //! Linux-only cleanup coverage refuses unsupported peers without inventing exit proof.
     use super::*;
 
     /// A private state root with one recorded terminal of `person` and a fake

@@ -30,6 +30,9 @@ pub const NATIVE_CAPABILITY: u64 = 1 << 8;
 /// plus the largest desktop header (the 41-byte `Fragment` header).
 pub const MAX_VIDEO_BYTES: usize = MAX_FRAME_LEN - 42;
 
+/// Viewer Close code for an authoritative native window retirement.
+pub const WINDOW_CLOSED: u16 = 4410;
+
 /// How video reaches the viewer. The viewer picks one in [`Message::Attach`]. Both candidates
 /// stay available until the owner selects one from measurements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
