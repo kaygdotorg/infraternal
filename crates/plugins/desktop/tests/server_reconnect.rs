@@ -40,6 +40,7 @@ impl WireLane for Lane {
     }
     fn retire(&self) {}
 }
+/// Simulates the host source before and after its first capture lane ends.
 struct Node {
     lane: Arc<Lane>,
     opens: AtomicUsize,
@@ -148,8 +149,8 @@ impl infraternal_plugin_api::SocketHost for Host {
     }
 }
 
-// The node fixture retains no metadata across a dropped capture leg: each
-// preparation records precisely what a fresh node process would receive.
+/// Checks that a new source receives the last size forwarded to its predecessor.
+/// The node fixture records each preparation without retaining the old lane's settings.
 #[tokio::test]
 async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initial_size() {
     let (media, rx) = mpsc::channel(4);
@@ -250,6 +251,7 @@ fn video(sequence: u64) -> Bytes {
     .unwrap();
     Bytes::from(wire)
 }
+/// Checks that the restarted source resumes media above the last delivered sequence.
 #[tokio::test]
 async fn source_restart_receives_the_server_video_floor_and_continues_live_media() {
     let (first, rx) = mpsc::channel(4);

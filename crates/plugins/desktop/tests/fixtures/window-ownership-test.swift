@@ -1,7 +1,9 @@
 /// Role: deterministic managed-desktop backoff, unmanaged resizing and aspect-fit regressions [D290].
 import Foundation
 
+/// Exercises resize ownership and fitted geometry without a WindowServer session.
 @main struct WindowOwnershipTests {
+    /// Runs the cases with fixed point sizes and simulated monotonic time.
     static func main() {
         let tiled = CGSize(width: 1920, height: 1080)
         let canvas = CGSize(width: 800, height: 600)

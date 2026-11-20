@@ -290,6 +290,7 @@ export class AppStream {
 
   // ---- the viewer on the socket -----------------------------------------------------------------------------------
 
+  /** Attaches the viewer and renews its control lease after a dropped connection. */
   private attach(): void {
     if (this.streamId !== undefined || !this.session || this.disposed) return;
     this.ensureSurface();
