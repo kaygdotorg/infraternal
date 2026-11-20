@@ -553,6 +553,7 @@ async fn issue_invitation(
     Ok(invitation)
 }
 
+/// Publish the host and exact-key receipt together for a live owner approval.
 async fn issue_approved_machine_join(
     api: Api,
     poll_token: &str,
@@ -576,8 +577,8 @@ async fn issue_approved_machine_join(
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     // A device approval can create only its requested owner-bound host row.
     sqlx::query(
-        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) \
-         SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved) \
+         SELECT ?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1) \
          ON CONFLICT(id) DO NOTHING",
     )
@@ -686,7 +687,11 @@ async fn join(
             .admit_successor(&certificate.record.fingerprint, now()?)
             .await
             .map(|_| 0)
-            .map_err(|_| StatusCode::FORBIDDEN)?,
+            .map_err(|_| {
+                tracing::debug!(event = "remote_join_refused", host_id = %request.host_id,
+                    reason = "post_commit_admission", "Machine join refused");
+                StatusCode::FORBIDDEN
+            })?,
     };
     Ok(Json(JoinResponse {
         certificate_der: B64.encode(certificate.der),

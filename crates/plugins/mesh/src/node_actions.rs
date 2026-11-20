@@ -170,6 +170,8 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
 struct Owner {
     node: Option<Node>,
     path: Option<std::path::PathBuf>,
+    /// Suppress repeated restore failures until the next successful restore.
+    restore_failed: bool,
 }
 impl Owner {
     /// Return the process-owned node, restoring it lazily when this action first needs it.
@@ -182,14 +184,41 @@ impl Owner {
             // only Linux reaches this lazy path, through `new`.
             #[cfg(target_os = "macos")]
             let node = Node::restore(path, None);
-            self.node = Some(node.map_err(|error| node_action_error(&error))?);
+            self.node = Some(startup_result(node, &mut self.restore_failed, "restore")?);
         }
         self.node.as_mut().ok_or(PluginError::Rejected)
     }
 }
+/// Report a startup error once per streak, even before a tracing subscriber exists.
+fn startup_result<T>(
+    result: std::io::Result<T>,
+    failed: &mut bool,
+    phase: &str,
+) -> Result<T, PluginError> {
+    match result {
+        Ok(value) => {
+            *failed = false;
+            Ok(value)
+        }
+        Err(error) => {
+            if !*failed {
+                eprintln!(
+                    "Mesh node failed phase={phase} kind={:?}; check local mesh permissions and tunnel availability.",
+                    error.kind()
+                );
+            }
+            *failed = true;
+            Err(node_action_error(&error))
+        }
+    }
+}
+
+/// Owns the process's mesh actions and their startup diagnostics.
 pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
+    /// Reports activation failures once per streak.
+    ensure_failed: bool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
@@ -321,8 +350,10 @@ impl MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: None,
                 path: Some(path.to_owned()),
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -337,8 +368,10 @@ impl MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: Some(node),
                 path: None,
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -385,8 +418,10 @@ impl Default for MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: Some(Node::default()),
                 path: None,
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -675,7 +710,8 @@ impl AgentPlugin for MeshNodePlugin {
                         candidates: candidates && walks_candidates(node),
                     };
                     let candidates = requested.candidates;
-                    let identity = node.ensure().map_err(|error| node_action_error(&error))?;
+                    let identity =
+                        startup_result(node.ensure(), &mut self.ensure_failed, "activate")?;
                     let lan = match (&identity, candidates) {
                         (Some(identity), true) => {
                             // The node's own mesh addresses are never LAN candidates.
@@ -941,6 +977,43 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
+    /// Embedded infraternal agents have no tracing subscriber; repeated restore failures still reach stderr once.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_failure_reaches_stderr_without_a_tracing_subscriber() {
+        const CHILD: &str = "INFRATERNAL_MESH_RESTORE_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let directory =
+                std::env::temp_dir().join(format!("missing-mesh-{}", std::process::id()));
+            let mut plugin = MeshNodePlugin::new(&directory);
+            for _ in 0..3 {
+                assert!(plugin.call("mesh.identity", b"{}").is_err());
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "node_actions::tests::restore_failure_reaches_stderr_without_a_tracing_subscriber",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run diagnostic child");
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+        assert_eq!(
+            stderr
+                .matches("Mesh node failed phase=restore kind=NotFound")
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("missing-mesh-"),
+            "paths do not enter diagnostics"
+        );
+    }
     use super::*;
 
     /// `mesh.status` exposes only the live public identity needed to verify persistence.
