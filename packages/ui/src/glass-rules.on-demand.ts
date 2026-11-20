@@ -134,7 +134,9 @@ export function installGlassRules(): void {
     return own + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
   };
   const css: string[] = [];
-  for (const level of Object.keys(CARD_LEVELS)) {
+  // Without a look every level is written (a level can be chosen by `data-card` alone). With a look the product pins the card level, so
+  // only that one is solved: a tint slider moves this on every frame, and eight solves cost about 3 ms where two cost under 1 ms.
+  for (const level of look ? [String(cardLevel)] : Object.keys(CARD_LEVELS)) {
     const name = levelName(Number(level)).toLowerCase();
     css.push(`:where(:root[data-card="${name}"]) :where(${TINT_USERS}) { ${write(glassFor(active, Number(level)))} }`);
     // On the surface itself: `glass-under.on-demand.ts` marks the surface it finds over a picture or a terminal.
