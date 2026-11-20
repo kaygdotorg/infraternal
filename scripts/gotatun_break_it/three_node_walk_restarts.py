@@ -434,6 +434,10 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             .get("endpoint")
             for source in ("S", "A", "B")
         }
+        row["peer_state_before_underlay_change"] = {
+            source: peer_rows(nodes[source]).get(addresses["C"])
+            for source in ("S", "A", "B")
+        }
         old_address = topology.node_address["C"]
         new_address = "10.9.0.44"
         proof.ns("node-c", "ip", "addr", "add", f"{new_address}/24", "dev", "eth0")
@@ -465,6 +469,10 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             .get("endpoint")
             for source in ("S", "A", "B")
         }
+        row["peer_state_after_announcement"] = {
+            source: peer_rows(nodes[source]).get(addresses["C"])
+            for source in ("S", "A", "B")
+        }
         row["client_route_to_server_after_underlay_change"] = proof.ns(
             "node-c", "ip", "route", "get", proof.SERVER_ADDRESS
         ).strip()
@@ -488,6 +496,10 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             .get(addresses["C"], {})
             .get("counters", {})
             .get("endpoint")
+            for source in ("S", "A", "B")
+        }
+        row["peer_state_after_stale_snapshot"] = {
+            source: peer_rows(nodes[source]).get(addresses["C"])
             for source in ("S", "A", "B")
         }
         post_snapshot = start_pingers(
