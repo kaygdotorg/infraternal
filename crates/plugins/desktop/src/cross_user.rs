@@ -31,10 +31,12 @@
 //!    the helper sends must equal the token, compared in constant time.
 //! 5. *While it runs.* [`ConsoleWatch`] checks the console owner once a
 //!    second (one `stat`). When the person at the screen changes (fast user
-//!    switching, logout), the leg ends and its helper is retired. The next
-//!    attach starts a helper for the new console user. With nobody at the
-//!    screen, a leg waits idle ([`someone_at_screen`]) rather than failing in
-//!    a loop.
+//!    switching, logout), the leg ends, its helper is retired, and the
+//!    session ends for good, whole-screen sessions included: a session first
+//!    shown for one person is never shown for another (owner decision
+//!    2026-11-20, `source::Metadata::bind_console`). New sessions then start
+//!    helpers for the new console user. With nobody at the screen, a leg
+//!    waits idle ([`someone_at_screen`]) rather than failing in a loop.
 //!
 //! **What the helper can and cannot do.** It runs with the console user's
 //! rights only and can see what that user can see. It never receives the

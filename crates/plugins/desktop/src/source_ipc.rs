@@ -333,6 +333,10 @@ impl Helper {
             console: cross.as_ref().map(|(_, user, _)| user.uid),
         })
     }
+    /// The console uid a cross-user helper runs as; `None` for same-user.
+    pub fn console_uid(&self) -> Option<u32> {
+        self.console
+    }
     /// A watch that resolves when the person at the screen is no longer the
     /// one this helper runs as. A same-user helper's watch never resolves.
     pub fn console_watch(&self) -> ConsoleWatch {

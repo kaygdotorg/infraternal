@@ -126,3 +126,45 @@ async fn a_held_lifecycle_lock_blocks_the_automatic_switch() {
     assert!(!bridge.0.state.lock().unwrap().enabled);
     drop(held);
 }
+
+/// A whole-screen session first shown for one console user is never shown
+/// for another: a leg for someone else ends it for good, and the server's
+/// next prepare reads `gone` (owner decision 2026-11-20, #146, D203 C2).
+#[tokio::test]
+async fn a_whole_screen_session_ends_when_the_person_at_the_screen_changes() {
+    let bridge = SourceBridge::new("missing-runtime".into(), "missing-helper".into(), 2);
+    bridge.set_enabled(true).await.unwrap();
+    let id = Uuid::from_u128(7);
+    bridge.prepare(id, start()).unwrap();
+    let metadata = bridge.0.state.lock().unwrap().prepared[&id]
+        .metadata
+        .clone();
+    assert!(
+        metadata.bind_console(None),
+        "a same-user helper never changes person"
+    );
+    assert!(
+        metadata.bind_console(Some(501)),
+        "the first person binds the session"
+    );
+    assert!(
+        metadata.bind_console(Some(501)),
+        "the same person may reattach"
+    );
+    assert_eq!(bridge.prepare(id, start()).unwrap()["state"], Value::Null);
+    assert!(
+        !metadata.bind_console(Some(502)),
+        "another person must not see it"
+    );
+    assert_eq!(bridge.prepare(id, start()).unwrap()["state"], "gone");
+}
+
+/// A running leg that sees the console change ends its session the same way.
+#[test]
+fn a_console_change_during_a_leg_latches_gone() {
+    let metadata = Metadata::new(start(), 0);
+    assert!(metadata.bind_console(Some(501)));
+    metadata.console_changed();
+    assert!(metadata.gone.load(Ordering::Acquire));
+}
+
