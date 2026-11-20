@@ -166,3 +166,26 @@ export async function watchFirstFrame(page: Page, selector: string): Promise<voi
 export function frames(page: Page): Promise<Frame[]> {
   return page.evaluate(() => (globalThis as { __frames?: Frame[] }).__frames ?? []);
 }
+
+/** What a glass surface paints right now: its fill's opacity, its blur and every element that carries a text shadow (D365, #448: none may). */
+export interface Paint { alpha: number; blur: number; shadowed: string[] }
+
+/** Reads {@link Paint} of the first element matching `selector`: the fill is the computed background colour, the blur is the computed backdrop filter. */
+export function paintOf(page: Page, selector: string): Promise<Paint> {
+  return page.evaluate((sel) => {
+    const root = document.querySelector<HTMLElement>(sel)!;
+    const style = getComputedStyle(root);
+    const m = /rgba?\(([^)]+)\)/.exec(style.backgroundColor);
+    const parts = (m?.[1] ?? "").split(/[ ,/]+/).filter(Boolean).map(Number);
+    const alpha = parts.length > 3 ? parts[3]! : m ? 1 : 0;
+    const blur = parseFloat(/blur\(([\d.]+)px\)/.exec(style.backdropFilter)?.[1] ?? "0") || 0;
+    const shadowed = [root, ...root.querySelectorAll<HTMLElement>("*")].filter((el) => getComputedStyle(el).textShadow !== "none").map((el) => `${el.tagName.toLowerCase()}.${el.className}`);
+    return { alpha, blur, shadowed };
+  }, selector);
+}
+
+/**
+ * Whether a surface must be the solid card over `picture` in `scheme` on the adaptive path: Ink (a dark card) over white and Paper
+ * (a light one) over black cannot hold the line as glass, and a split picture has both. A matching picture stays glass.
+ */
+export const mustBeSolid = (scheme: "ink" | "paper", picture: Picture): boolean => picture === "split" || (scheme === "ink" ? picture === "white" : picture === "black");
