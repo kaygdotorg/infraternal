@@ -411,6 +411,7 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
         Frame::Desktop(Message::Video { sequence: 41, .. })
     ));
 
+    drop(first);
     drop(media);
     let ended = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
         .await

@@ -148,6 +148,10 @@ test("stalled worker handoff stays within one maximum access unit and resumes on
     deliver(22, false);
     deliver(23, true);
     expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23]);
+    f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
+    const tiny = bytes.subarray(0, 1);
+    for (let sequence = 24; sequence <= 1000; sequence++) deliver(sequence, sequence === 24, tiny);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, 24, 25, 26, 27]);
   } finally { f.stream.dispose(); }
 });
 

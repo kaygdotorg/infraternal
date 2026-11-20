@@ -622,31 +622,28 @@ impl Plugin for DesktopServer {
                             if stream != 0 {
                                 if let Frame::Desktop(Message::Attach { session_id, delivery: Delivery::Reliable }) = decoded.frame {
                                     if viewers.contains_key(&stream) || viewers.len() >= WIRE.max_streams { break; }
-                                    match server.attach(session_id, host.as_ref()) {
-                                        Ok(viewer) => {
-                                            // At most 32 small commands (64 bytes each) buffer one socket
-                                            // ingress burst plus independent control, never media/RPC bodies.
-                                            let (tx, rx) = mpsc::channel(32);
-                                            let (stop, stopped) = watch::channel(false);
-                                            let replies = replies.clone();
-                                            let server = server.clone();
-                                            let host = host.clone();
-                                            let id = *session_id;
-                                            let task = workers.spawn(async move {
-                                                // A late Close belongs to this attachment, just as its video does.
-                                                // Keep the reply guarded through the actual socket write.
-                                                let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
-                                                let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
-                                                let closed = server.window_closed_for(&id, host.as_ref());
-                                                let _ = tokio::time::timeout(Duration::from_secs(1), send_viewer_close(&completed, stream, closed, true)).await;
-                                                stream
-                                            });
-                                            viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
-                                        }
-                                        Err(_) => {
-                                            let closed = server.window_closed_for(session_id, host.as_ref());
-                                            send_viewer_close(&replies, stream, closed, false).await;
-                                        }
+                                    if let Ok(viewer) = server.attach(session_id, host.as_ref()) {
+                                        // At most 32 small commands (64 bytes each) buffer one socket
+                                        // ingress burst plus independent control, never media/RPC bodies.
+                                        let (tx, rx) = mpsc::channel(32);
+                                        let (stop, stopped) = watch::channel(false);
+                                        let replies = replies.clone();
+                                        let server = server.clone();
+                                        let host = host.clone();
+                                        let id = *session_id;
+                                        let task = workers.spawn(async move {
+                                            // A late Close belongs to this attachment, just as its video does.
+                                            // Keep the reply guarded through the actual socket write.
+                                            let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
+                                            let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
+                                            let closed = server.window_closed_for(&id, host.as_ref());
+                                            let _ = tokio::time::timeout(Duration::from_secs(1), send_viewer_close(&completed, stream, closed, true)).await;
+                                            stream
+                                        });
+                                        viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
+                                    } else {
+                                        let closed = server.window_closed_for(session_id, host.as_ref());
+                                        send_viewer_close(&replies, stream, closed, false).await;
                                     }
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
                                     viewers.remove(&stream);
