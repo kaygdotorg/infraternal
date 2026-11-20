@@ -53,7 +53,7 @@ use std::{
 };
 
 /// The Linux system base shared by the server and infraternal agent.
-const LINUX_SYSTEM_BASE: &str = "/var/lib/infraternal";
+pub(super) const LINUX_SYSTEM_BASE: &str = "/var/lib/infraternal";
 
 /// The standard private server child when the Linux system base is shared.
 pub(super) const LINUX_COMBINED_SERVER: &str = "/var/lib/infraternal/server";
@@ -188,7 +188,7 @@ pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBu
     }
 }
 
-/// Recognize both root install layouts and keep using an already selected private child.
+/// Select the private child for new installs when the infraternal agent uses the base.
 fn linux_system_data_dir(base: &Path) -> PathBuf {
     // A binary directory can also be part of a server-only release. Look
     // for infraternal agent state or ownership markers instead.
@@ -200,11 +200,12 @@ fn linux_system_data_dir(base: &Path) -> PathBuf {
         ".bootstrap-lock",
         ".promotion-transaction",
         "host-firewall-agent.json",
-        ".server.cutover",
-        "server",
     ]
     .iter()
-    .any(|name| std::fs::symlink_metadata(base.join(name)).is_ok())
+    .any(|name| {
+        std::fs::symlink_metadata(base.join(name))
+            .is_ok_and(|entry| entry.is_dir() || entry.is_file())
+    })
     {
         base.join("server")
     } else {
@@ -612,7 +613,7 @@ mod tests {
         );
     }
 
-    /// Only infraternal agent state or an existing cutover selects the private child.
+    /// A new install selects the private child only when infraternal agent state exists.
     #[test]
     fn combined_system_default_uses_the_server_child() {
         let base = scratch("combined");
@@ -622,7 +623,7 @@ mod tests {
         assert_eq!(linux_system_data_dir(&base), base.join("server"));
         std::fs::remove_dir(base.join("agent")).unwrap();
         std::fs::create_dir(base.join("server")).unwrap();
-        assert_eq!(linux_system_data_dir(&base), base.join("server"));
+        assert_eq!(linux_system_data_dir(&base), base);
         std::fs::remove_dir_all(base).unwrap();
     }
 
