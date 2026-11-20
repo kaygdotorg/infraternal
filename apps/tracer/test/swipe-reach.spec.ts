@@ -10,10 +10,12 @@ import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** Where the captures go: the external evidence directory, never the checkout. */
 const OUT = tracerEvidencePath("swipe-reach");
 /** The docs window used: a long page with neighbours on both sides. */
 const MIDDLE = '.ui-window[data-window-id="d-terminal/multiplexer"]';
 
+/** The mock canvas's test hooks, as `window.__tracerClusters` exposes them. */
 type Api = Record<string, (...args: unknown[]) => unknown>;
 /** Calls one test hook of the mock canvas by name. */
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> =>
