@@ -15,6 +15,7 @@ from agent_fixture import exact, integer, varint
 class BinaryNode:
     """Own one daemon, its private runtime directory and a trusted inherited leg-B socket."""
     def __init__(self, binary, scratch, namespace_pid=None, state_path=None):
+        """Start the daemon with isolated state and one trusted inherited leg-B socket."""
         self.state = Path(state_path) if state_path else Path(tempfile.mkdtemp(prefix="node-", dir=scratch))
         self.sock, peer = socket.socketpair()
         self.sock.settimeout(60)
@@ -51,6 +52,7 @@ class BinaryNode:
         return stream, body[0], body[1:]
 
     def call(self, action, value):
+        """Send one authenticated action and preserve a short refusal reason for the proof log."""
         self.call_id += 1
         encoded = action.encode()
         self.send(0x30, struct.pack("<I", self.call_id) + varint(len(encoded)) + encoded + json.dumps(value, separators=(",", ":")).encode())
@@ -59,7 +61,8 @@ class BinaryNode:
             if (stream, kind) == (0, 0x31):
                 assert struct.unpack("<I", body[:4])[0] == self.call_id
                 if body[4] != 1:
-                    raise RuntimeError("Mesh node action refused")
+                    detail = body[5:].decode("utf-8", "replace")[:256]
+                    raise RuntimeError(f"Mesh node action {action!r} refused: {detail}")
                 return json.loads(body[5:])
 
     def request(self, value):

@@ -1,10 +1,10 @@
 //! Supplies production-schema coordinator snapshots to isolated real-daemon proofs [165,169,216].
 //!
-//! Each JSON line creates or updates two or three test identities and prints the exact
-//! snapshot chunks consumed by production mesh nodes. With three, the first is the server's own
-//! node, and the proof can drive the product's direct-path candidates (#515): `probes` carries
-//! each node's real reply to the candidate identity probe, and `observe` carries the server
-//! node's real presence pages. The fixture feeds both through the same code the server runs
+//! Each JSON line creates or updates two to four test identities and prints the exact
+//! snapshot chunks consumed by production mesh nodes. With three or four, the first is the
+//! server's own node, and the proof can drive the product's direct-path candidates (#515):
+//! `probes` carries each node's real reply to the candidate identity probe, and `observe` carries
+//! the server node's real presence pages. The fixture feeds both through the same code the server runs
 //! (`node_coordination::parse_candidates`, `Store::record_candidates`, `presence::Tracker`,
 //! `presence::publish_reflexive`), so the proof relays bytes and the product decides.
 
@@ -24,7 +24,7 @@ use std::path::PathBuf;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Request {
-    /// The authenticated identities to attach on the first request: two, or three with the
+    /// The authenticated identities to attach on the first request: two, or up to four with the
     /// server's own node first.
     #[serde(default)]
     identities: Option<Vec<Identity>>,
@@ -37,6 +37,9 @@ struct Request {
     /// The server node's raw `mesh.peers {"presence":true}` pages from one poll.
     #[serde(default)]
     observe: Option<Vec<serde_json::Value>>,
+    /// Send a complete snapshot as though an authenticated node reconnected.
+    #[serde(default)]
+    full_snapshot: bool,
     /// The access or enrollment operation to apply.
     mode: String,
     /// Identifies the key rotation that owns each rekey phase.
@@ -50,7 +53,7 @@ struct Request {
     count: Option<u64>,
 }
 /// The dataplane host names the fixture attaches, in identity order; the first is the server.
-const HOSTS: [&str; 3] = ["server", "proof", "peer"];
+const HOSTS: [&str; 4] = ["server", "proof", "peer", "third"];
 /// Adds `count` extra members with valid unique public keys and no private key
 /// or traffic, so tests can measure a larger mesh and trigger real handshakes.
 async fn seed_extra_members(
@@ -140,6 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             endpoints,
             probes,
             observe,
+            full_snapshot,
             mode,
             operation_id,
             candidate_public_key,
@@ -156,10 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if members.is_some() {
                 return Err("already enrolled".into());
             }
-            if !(2..=3).contains(&identities.len()) {
-                return Err("two or three identities required".into());
+            if !(2..=4).contains(&identities.len()) {
+                return Err("two to four identities required".into());
             }
-            if identities.len() == 3 {
+            if identities.len() >= 3 {
                 // The server's own node peers with every member through its control plane, as in production,
                 // so it can observe them even while Access denies the pair (D215, D352).
                 let control_plane = infraternal_plugin_mesh::policy::rules::TrafficPolicy::Ports(
@@ -350,10 +354,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let mut chunks = Vec::new();
         for (index, config) in next.iter().enumerate() {
-            chunks.push(configuration::chunks(
-                applied.as_ref().map(|old| &old[index]),
-                config,
-            )?);
+            // A reconnect receives a complete view even though this fixture process remembers
+            // the configuration it compiled before the node disconnected.
+            let previous = if full_snapshot {
+                None
+            } else {
+                applied.as_ref().map(|old| &old[index])
+            };
+            chunks.push(configuration::chunks(previous, config)?);
         }
         let addresses: Vec<_> = next.iter().map(|config| config.addresses).collect();
         println!(

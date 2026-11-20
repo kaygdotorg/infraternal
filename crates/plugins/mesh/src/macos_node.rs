@@ -1595,8 +1595,14 @@ impl RuntimeState {
     /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
     /// # Errors
     /// Restores the old peer, route and interface MTU state when one update fails.
-    async fn apply(&mut self, config: Config, budgets: PathBudgets) -> io::Result<RuntimeInfo> {
-        self.apply_with_rollback(config, budgets, true).await
+    async fn apply(
+        &mut self,
+        config: Config,
+        budgets: PathBudgets,
+        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
+    ) -> io::Result<RuntimeInfo> {
+        self.apply_with_rollback(config, budgets, true, before)
+            .await
     }
 
     /// Replace a complete authority snapshot without restoring the previous authority on failure.
@@ -1647,7 +1653,9 @@ impl RuntimeState {
         // Full replacement retires the old engine sessions and their walk positions.
         self.handshakes.abort_all();
         self.walks.clear();
-        self.apply_with_rollback(config, budgets, false).await
+        let before = BTreeMap::new();
+        self.apply_with_rollback(config, budgets, false, &before)
+            .await
     }
 
     /// Refresh MTUs without suspending the device or replacing any established peer.
@@ -1708,6 +1716,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
         rollback_on_failure: bool,
+        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1754,7 +1763,7 @@ impl RuntimeState {
         // An authority replacement may have reached this path because the installed keys
         // disagreed with the snapshot. Rebuild from the complete list in that case.
         let peers_applied = if rollback_on_failure {
-            walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
+            walks::update_peers(device, old_config.as_ref(), &config, &admitted, before).await
         } else {
             replace_peers(device, peers).await
         };
