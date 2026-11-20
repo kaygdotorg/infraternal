@@ -9,7 +9,7 @@
 import { expect, test, type Page } from "playwright/test";
 import { personName, startRealServer, type RealServer } from "./server";
 
-test.describe.configure({ mode: "serial" });
+test.describe.configure({ mode: "default" });
 
 const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
 const OFFLINE = "offline or cannot reach";
@@ -32,8 +32,16 @@ async function enrol(page: Page, server: RealServer): Promise<void> {
   await page.locator(".cl-viewport").waitFor();
 }
 
-/** Calls the server refused, on every socket so far. */
-const refusedOn = (server: RealServer): number => server.bridges.reduce((n, b) => n + b.control.filter((f) => f.dir === "down" && f.type === "Result" && f.detail !== "ok").length, 0);
+/** The actions the server refused, on every socket so far. */
+function refusedActions(server: RealServer): string[] {
+  const names: string[] = [];
+  for (const b of server.bridges) {
+    const asked = new Map(b.control.filter((f) => f.dir === "up" && f.type === "Call").map((f) => [f.callId, f.detail]));
+    for (const f of b.control) if (f.dir === "down" && f.type === "Result" && f.detail !== "ok") names.push(String(asked.get(f.callId) ?? "?"));
+  }
+  return names;
+}
+const refusedOn = (server: RealServer): number => refusedActions(server).length;
 /** Windows (terminal streams) attached on the newest open socket. */
 const attachedOn = (server: RealServer): number => [...(server.bridges.filter((b) => !b.closed).at(-1)?.attached.values() ?? [])].flat().length;
 /** Calls the newest socket has sent that the server has not answered yet. */
@@ -62,13 +70,13 @@ for (const total of [8, 16, 32]) {
       const ms = Math.round(performance.now() - since);
       const offlineWindows = await windows(page).filter({ hasText: OFFLINE }).count();
       const refusedResults = refusedOn(server) - refusedBefore;
-      console.log(`${label} n=${total} ${JSON.stringify({ ms, offlineWindows, refusedResults })}`);
-      expect(offlineWindows).toBe(0);
-      expect(refusedResults).toBe(0);
+      console.log(`${label} n=${total} ${JSON.stringify({ ms, offlineWindows, refusedResults, refused: refusedActions(server).slice(refusedBefore) })}`);
+      expect.soft(offlineWindows).toBe(0);
+      expect.soft(refusedResults).toBe(0);
     }
 
-    test("builds the canvas", async () => {
-      test.setTimeout(240_000);
+    test("builds the canvas, reloads it, drops the network; no window is ever offline", async () => {
+      test.setTimeout(480_000);
       while ((await windows(page).count()) < total) {
         const count = await windows(page).count();
         // A person opens windows one at a time; wait for the calls of the last one so the setup itself is not the test.
@@ -80,25 +88,19 @@ for (const total of [8, 16, 32]) {
       // The server keeps the layout; the last window's save is still on its way when its shell attaches, and a reload
       // before it lands would restore one window fewer, which is a different question from this spec's.
       await page.waitForTimeout(3_000);
-    });
 
-    test("a reload restores them all, none offline", async () => {
-      test.setTimeout(240_000);
       const before = refusedOn(server);
       const t0 = performance.now();
       await page.reload();
       await page.locator(".cl-viewport").waitFor();
       await whole("RESTORE-RELOAD", t0, before);
-    });
 
-    test("a network drop reconnects them all, none offline", async () => {
-      test.setTimeout(240_000);
-      const before = refusedOn(server);
+      const beforeDrop = refusedOn(server);
       const sockets = server.bridges.length;
-      const t0 = performance.now();
+      const t1 = performance.now();
       await server.interruptBrowserRoutes(2_000);
       await expect.poll(() => server.bridges.length, { timeout: 60_000 }).toBeGreaterThan(sockets);
-      await whole("RESTORE-DROP", t0, before);
+      await whole("RESTORE-DROP", t1, beforeDrop);
     });
   });
 }
@@ -126,8 +128,8 @@ test.describe("ten new windows within a second", () => {
     await expect.poll(() => attachedOn(server), { timeout: 120_000 }).toBeGreaterThanOrEqual(11);
     const ms = Math.round(performance.now() - t0);
     const offlineWindows = await windows(page).filter({ hasText: OFFLINE }).count();
-    console.log(`RAPID-NEW n=10 ${JSON.stringify({ ms, offlineWindows, refusedResults: refusedOn(server) })}`);
-    expect(offlineWindows).toBe(0);
-    expect(refusedOn(server)).toBe(0);
+    console.log(`RAPID-NEW n=10 ${JSON.stringify({ ms, offlineWindows, refused: refusedActions(server) })}`);
+    expect.soft(offlineWindows).toBe(0);
+    expect.soft(refusedOn(server)).toBe(0);
   });
 });
