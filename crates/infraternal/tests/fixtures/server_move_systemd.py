@@ -88,6 +88,13 @@ def sqlite_values(path, extra=None):
             return db.execute("SELECT value FROM j925_fixture ORDER BY rowid").fetchall()
 
 
+def migration_history(path):
+    """Read the versions and original checksums without altering the live database."""
+    uri = (path / "infraternal.sqlite").as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        return dict(db.execute("SELECT version, checksum FROM _sqlx_migrations"))
+
+
 def copy_snapshot(source, target, selected=None):
     """Copy the stopped fixture, excluding transient sockets."""
     def ignore(folder, names):
@@ -192,9 +199,9 @@ def run_case(workspace, case, combined=False):
         if combined:
             new.chmod(0o700)
 
-    def command(path):
+    def command(path, binary=BIN):
         """Render the product command the real manager will run."""
-        return f'ExecStart="{BIN}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"\n'
+        return f'ExecStart="{binary}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"\n'
 
     pre = root / "pre"
     pre.write_text(
@@ -231,14 +238,25 @@ def run_case(workspace, case, combined=False):
         assert not path.exists(), f"fixture unit already exists: {path}"
     joined = None
     rows = [("source",)]
+    history = None
     try:
-        unit.write_text(before)
+        if case == "dev-upgrade":
+            base_binary = Path(os.environ["D395_DEV_BIN"]).resolve(strict=True)
+            assert base_binary != BIN
+            unit.write_text(template.format(command=command(old, base_binary)))
+        else:
+            unit.write_text(before)
         boot_target.write_text(f"[Unit]\nDescription=D395 isolated target\nWants={server}\n")
         systemctl("daemon-reload")
         systemctl("start", server)
         assert wait_for(lambda: health(port)), "initial server health"
         assert sqlite_values(old, "source") == [("source",)]
+        if case == "dev-upgrade":
+            history = migration_history(old)
+            assert history, "the dev binary recorded no migrations"
         systemctl("stop", server)
+        if history is not None:
+            unit.write_text(before)
         if combined:
             (old / "server-fixture").write_text("server state")
             if case == "failed-recovery":
@@ -432,6 +450,10 @@ def run_case(workspace, case, combined=False):
         if case == "switched-active":
             rows.append(("early candidate",))
         assert sqlite_values(new) == rows
+        if history is not None:
+            upgraded = migration_history(new)
+            assert all(upgraded.get(version) == checksum for version, checksum in history.items())
+            print(f"MIGRATIONS: carried {len(history)} recorded versions into {len(upgraded)} versions", flush=True)
         if case == "switched-active":
             assert copied_database_values(backup, retained=True) == [("source",), ("possible original",)]
         if combined:

@@ -459,6 +459,41 @@ fn combined_move_keeps_agent_paths_and_base_traversal() {
     );
 }
 
+/// A server link into the shared executable bundle must still resolve after cutover.
+#[cfg(target_os = "linux")]
+#[test]
+fn combined_move_preserves_links_into_shared_bundle() {
+    let mut fixture = Install::new();
+    fixture.new = fixture.old.join("server");
+    let bundle = fixture.old.join("bin/web");
+    fs::create_dir_all(&bundle).unwrap();
+    fs::write(bundle.join("index.html"), "bundled web").unwrap();
+    std::os::unix::fs::symlink("bin/web", fixture.old.join("web")).unwrap();
+    let unit = format!(
+        "{} \"--web-root\" \"{}\"\n",
+        unit_text(&fixture.old).trim_end(),
+        fixture.old.join("web").display()
+    );
+    fs::write(&fixture.unit, unit).unwrap();
+    let outcome = fixture.apply(&fixture.old, &Fake::default());
+    if outcome.is_ok() {
+        assert_eq!(
+            fs::read_to_string(fixture.new.join("web/index.html"))
+                .ok()
+                .as_deref(),
+            Some("bundled web")
+        );
+    } else {
+        // Refusal is safe if the unit and original data are still usable.
+        assert_eq!(fs::read_to_string(&fixture.unit).unwrap(), unit);
+        assert_eq!(Install::data(&fixture.old), "original");
+        assert_eq!(
+            fs::read_to_string(fixture.old.join("web/index.html")).unwrap(),
+            "bundled web"
+        );
+    }
+}
+
 /// Planning twice on the standard path leaves the unit and data entries intact.
 #[test]
 fn standard_data_path_needs_no_move() {
