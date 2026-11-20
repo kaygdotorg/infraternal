@@ -130,6 +130,8 @@ struct Fake {
     lose_health_after_ready: Cell<bool>,
     /// Whether the HTTP route can still report healthy.
     unhealthy: Cell<bool>,
+    /// Reject retirement even though startup was confirmed.
+    fail_live: Cell<bool>,
 }
 
 impl Service for Fake {
@@ -178,7 +180,8 @@ impl Service for Fake {
 
     /// Fail a fresh correlated proof after a simulated stop or health loss.
     fn check_live(&self, _path: &Path, _data: &File) -> io::Result<()> {
-        if !self.active()? || self.fail_ready.get() || self.unhealthy.get() {
+        if !self.active()? || self.fail_ready.get() || self.unhealthy.get() || self.fail_live.get()
+        {
             return Err(io::Error::other("moved server is no longer available"));
         }
         Ok(())
@@ -398,6 +401,62 @@ fn review_j912_refuses_a_shared_source_during_planning() {
         "agent state"
     );
     assert!(!fixture.new.exists());
+}
+
+/// A combined host moves only server data into its private child.
+#[test]
+fn combined_move_keeps_agent_paths_and_base_traversal() {
+    let mut fixture = Install::new();
+    fixture.new = fixture.old.join("server");
+    fs::set_permissions(&fixture.old, fs::Permissions::from_mode(0o711)).unwrap();
+    let agent = fixture.old.join("bin");
+    fs::create_dir(&agent).unwrap();
+    let launcher = agent.join("launcher");
+    fs::write(&launcher, "agent binary").unwrap();
+    fs::write(
+        fixture.old.join("host-firewall-server.json"),
+        "server policy",
+    )
+    .unwrap();
+    let agent_id = Identity::of(&File::open(&launcher).unwrap()).unwrap();
+    let base_id = Identity::of(&File::open(&fixture.old).unwrap()).unwrap();
+    let unit = unit_text(&fixture.old).replace("/bin/infraternal", launcher.to_str().unwrap());
+    fs::write(&fixture.unit, unit).unwrap();
+
+    let relocation = fixture.plan(&fixture.old);
+    assert_eq!(relocation.to, fixture.old.join("server"));
+    assert!(
+        relocation.units[0]
+            .after
+            .contains(launcher.to_str().unwrap())
+    );
+    let manager = Fake::default();
+    manager.fail_live.set(true);
+    let Err(error) = fixture.apply(&fixture.old, &manager) else {
+        panic!("retirement succeeded without a fresh health response");
+    };
+    assert!(error.to_string().contains("no longer available"));
+    assert_eq!(Install::data(&fixture.old), "original");
+    manager.fail_live.set(false);
+    let outcome = fixture.apply(&fixture.new, &manager).unwrap();
+    assert!(outcome.leftover.is_none());
+    assert_eq!(Install::data(&fixture.new), "original");
+    assert_eq!(fs::metadata(&fixture.new).unwrap().mode() & 0o777, 0o700);
+    assert!(!fixture.old.join("infraternal.sqlite").exists());
+    assert!(!fixture.new.join("bin").exists());
+    assert_eq!(
+        Identity::of(&File::open(&fixture.old).unwrap()).unwrap(),
+        base_id
+    );
+    assert_eq!(
+        Identity::of(&File::open(&launcher).unwrap()).unwrap(),
+        agent_id
+    );
+    assert_eq!(fs::metadata(&fixture.old).unwrap().mode() & 0o777, 0o711);
+    assert_eq!(
+        fs::read_to_string(fixture.old.join("host-firewall-server.json")).unwrap(),
+        "server policy"
+    );
 }
 
 /// Planning twice on the standard path leaves the unit and data entries intact.

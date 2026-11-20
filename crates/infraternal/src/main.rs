@@ -1668,7 +1668,7 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                 });
             match result {
                 Ok(outcome) => {
-                    install::finish_move(!install_args.system);
+                    install::finish_move(!install_args.system, &args.data);
                     Some((
                         outcome.describe(relocation),
                         relocation_json(relocation, Some(&outcome)),

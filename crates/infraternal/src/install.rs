@@ -104,7 +104,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
                     path.display(),
                     unit,
                     options.name,
-                ) + &link_plan(user)?);
+                ) + &link_plan(user, &args.data)?);
             }
             let firewall = make_firewall_install(args)?;
             return Ok(format!(
@@ -116,7 +116,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
                 path.display(),
                 unit,
                 enable,
-            ) + &link_plan(user)?);
+            ) + &link_plan(user, &args.data)?);
         }
         return Ok(format!(
             "{folders}Would write {}:\n{}\nWould run:\n  {}\n  {}\n",
@@ -124,7 +124,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             unit,
             reload,
             enable
-        ) + &link_plan(user)?);
+        ) + &link_plan(user, &args.data)?);
     }
 
     let systemctl = systemctl_program()?;
@@ -158,7 +158,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     // Last, so a failed install never leaves a link to a service that is not there.
     // A problem here is reported, not fatal: the service itself is already running.
     // Every successful path reaches this line, the firewall ones included (J755).
-    eprintln!("{}", link_note(user));
+    eprintln!("{}", link_note(user, &args.data));
     Ok(match (firewall, removal_report) {
         #[cfg(target_os = "linux")]
         (FirewallPlan::Install(_), _) => firewall_install_confirmation(&path),
@@ -225,8 +225,8 @@ pub fn prepare_move(
 }
 
 /// Publish the convenience link after the moved service is healthy.
-pub fn finish_move(user: bool) {
-    eprintln!("{}", link_note(user));
+pub fn finish_move(user: bool, data: &Path) {
+    eprintln!("{}", link_note(user, data));
 }
 
 /// What a server install does to the host firewall, decided before anything is written.
@@ -330,7 +330,11 @@ fn install_in_order<A, P>(
 ) -> Result<(A, P), InstallError> {
     let write_unit = ensure_server_unit_writable(path, unit, force)?;
     let admitted = admit()?;
-    super::install_paths::create_private_dir(data).map_err(InstallError::Io)?;
+    if cfg!(target_os = "linux") && data == Path::new(super::install_paths::LINUX_COMBINED_SERVER) {
+        super::install_move::create_combined_server_dir(data).map_err(InstallError::Io)?;
+    } else {
+        super::install_paths::create_private_dir(data).map_err(InstallError::Io)?;
+    }
     let published = publish(&admitted)?;
     if write_unit {
         write_atomic(path, unit).map_err(InstallError::Io)?;
@@ -683,9 +687,12 @@ fn link_target(
 }
 
 /// The dry-run line saying where the PATH link would go.
-fn link_plan(user: bool) -> Result<String, InstallError> {
+fn link_plan(user: bool, data: &Path) -> Result<String, InstallError> {
     let (scope, environment, binary) = link_target(user)?;
     Ok(match super::install_paths::path_link(scope, &environment) {
+        Ok(Some(link)) if keep_combined_link(user, data, &link) => {
+            format!("Would keep the shared command at {}\n", link.display())
+        }
         Ok(Some(link)) => format!("Would link {} to {}\n", link.display(), binary.display()),
         Ok(None) => format!(
             "Would print the PATH line for {}\n",
@@ -696,8 +703,13 @@ fn link_plan(user: bool) -> Result<String, InstallError> {
 }
 
 /// Publish the PATH link and describe the result in one sentence for the install output.
-fn link_note(user: bool) -> String {
+fn link_note(user: bool, data: &Path) -> String {
     let result = link_target(user).and_then(|(scope, environment, binary)| {
+        if let Ok(Some(link)) = super::install_paths::path_link(scope, &environment)
+            && keep_combined_link(user, data, &link)
+        {
+            return Ok(format!("Kept the shared command at {}.", link.display()));
+        }
         super::install_paths::link_for_install(scope, &binary, &environment)
             .map(|outcome| outcome.describe(&binary))
             .map_err(|error| InstallError::Io(std::io::Error::other(error.to_string())))
@@ -712,6 +724,14 @@ fn link_note(user: bool) -> String {
         ),
         _ => note,
     }
+}
+
+/// Keep the existing command link on combined hosts where the infraternal agent uses it.
+fn keep_combined_link(user: bool, data: &Path, link: &Path) -> bool {
+    cfg!(target_os = "linux")
+        && !user
+        && data == Path::new(super::install_paths::LINUX_COMBINED_SERVER)
+        && std::fs::symlink_metadata(link).is_ok()
 }
 
 fn validate_name(name: &str) -> Result<(), InstallError> {

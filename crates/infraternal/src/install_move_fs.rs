@@ -44,6 +44,27 @@ impl Identity {
     }
 }
 
+/// Inspect a source entry without following links, pinning the name for retirement.
+#[allow(
+    clippy::unnecessary_cast,
+    reason = "stat device and inode widths vary across supported Unix targets"
+)]
+pub(super) fn entry_identity(dir: &File, name: &OsStr) -> io::Result<Option<Identity>> {
+    match entry(dir, name) {
+        Ok(info) => Ok(Some(Identity {
+            dev: info.st_dev as u64,
+            ino: info.st_ino as u64,
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A stopped server's socket has no durable state to copy or retain.
+pub(super) fn is_socket(dir: &File, name: &OsStr) -> io::Result<bool> {
+    Ok(kind(&entry(dir, name)?) == SFlag::S_IFSOCK)
+}
+
 /// Refuse absolute path traversal through symlinks or writable ancestors.
 /// A directory's owner must be root or the current user.
 pub(super) fn directory(path: &Path, create: bool) -> io::Result<File> {
