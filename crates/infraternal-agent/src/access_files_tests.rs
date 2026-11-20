@@ -319,6 +319,81 @@ fn an_oversized_spool_file_is_not_cut() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// J1013: sshd's effective configuration for an account covers only the
+/// `Match User`/`Group`/`All` blocks. A block on the connection (address,
+/// host, local address or port, routing domain), anywhere in the include
+/// tree, makes the SSH key watch unreadable instead of silently partial.
+#[test]
+fn sshd_match_blocks_on_the_connection_are_not_readable() {
+    let (_, base) = account();
+    let main = base.join("sshd_config");
+    let included = base.join("sshd_config.d");
+    std::fs::create_dir(&included).unwrap();
+    let check = || {
+        sshd_matches_known(
+            &main,
+            &base,
+            0,
+            &mut SshdBudget {
+                files: 64,
+                bytes: 1024 * 1024,
+            },
+        )
+    };
+    std::fs::write(
+        &main,
+        "Include sshd_config.d/*.conf\n#Match Address 10.0.0.0/8\nMatch User alice Group ops\n  X11Forwarding no\nMatch all\n",
+    )
+    .unwrap();
+    std::fs::write(
+        included.join("10-local.conf"),
+        "PasswordAuthentication no\n",
+    )
+    .unwrap();
+    // Not included: wrong suffix, and hidden.
+    std::fs::write(
+        included.join("20-lan.disabled"),
+        "Match Address 10.0.0.0/8\n",
+    )
+    .unwrap();
+    std::fs::write(included.join(".30.conf"), "Match Host *.lan\n").unwrap();
+    check().unwrap();
+    for block in [
+        "Match Address 10.0.0.0/8",
+        "match host *.lan",
+        "Match User alice Address 10.0.0.0/8",
+        "Match LocalAddress 10.0.0.1",
+        "Match LocalPort 2222",
+        "Match RDomain lan",
+        "Match=Address=10.0.0.0/8",
+        "Match User",
+        "Match",
+        "Include /etc/ssh/[ab].conf",
+        "Include sshd_config.d/*/x.conf",
+    ] {
+        std::fs::write(
+            included.join("40-x.conf"),
+            format!("{block}\n  AuthorizedKeysFile .ssh/other_keys\n"),
+        )
+        .unwrap();
+        assert!(check().is_err(), "{block}");
+    }
+    // An include of a missing name, or of nothing, is skipped like sshd does.
+    std::fs::write(
+        included.join("40-x.conf"),
+        "Include missing.conf\nInclude nothing.d/*.conf\n",
+    )
+    .unwrap();
+    check().unwrap();
+    // An include cycle runs out of budget instead of looping.
+    std::fs::write(included.join("40-x.conf"), "Include sshd_config\n").unwrap();
+    assert!(check().is_err());
+    assert!(wildcard(b"*.conf", b"10-local.conf"));
+    assert!(wildcard(b"a?c", b"abc"));
+    assert!(!wildcard(b"*.conf", b"10-local.disabled"));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 /// J322 P2: a rootless agent runs as the account, so a person can rewrite
 /// the record to match their plant. Rootless reports are never "unchanged":
 /// they read "not checked: unverified", with what was found as a hint.

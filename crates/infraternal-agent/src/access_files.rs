@@ -1705,11 +1705,166 @@ fn at_spool(account: &User, spool: &Path, visit: &mut dyn FnMut(String, io::Resu
     }
 }
 
+/// The configuration `sshd -T` reads when given no `-f`.
+const SSHD_CONFIG: &str = "/etc/ssh/sshd_config";
+
+/// What one walk of sshd's configuration tree may still read.
+struct SshdBudget {
+    /// Files still to open, includes counted.
+    files: usize,
+    /// Bytes still to read across them.
+    bytes: usize,
+}
+
+/// Whether `name` matches an sshd `Include` pattern's last component, where
+/// `*` stands for any run of characters and `?` for one, as in glob(3).
+fn wildcard(pattern: &[u8], name: &[u8]) -> bool {
+    match (pattern.split_first(), name.split_first()) {
+        (None, None) => true,
+        (Some((b'*', rest)), _) => {
+            wildcard(rest, name)
+                || name
+                    .split_first()
+                    .is_some_and(|(_, tail)| wildcard(pattern, tail))
+        }
+        (Some((b'?', rest)), Some((_, tail))) => wildcard(rest, tail),
+        (Some((want, rest)), Some((have, tail))) if want == have => wildcard(rest, tail),
+        _ => false,
+    }
+}
+
+/// Fail unless every `Match` block in sshd's configuration selects only by
+/// `User`, `Group` or `All`. `sshd -T -C user=…` evaluates those, but treats
+/// a block on `Address`, `Host`, `LocalAddress` or `RDomain` as not matching
+/// (OpenSSH 10.0 exits 0 and leaves it out), so an `AuthorizedKeysFile` set
+/// inside one would never be watched and a key added there would read
+/// "No changes found" (J1013). Such a configuration is reported as not
+/// readable, which makes the account incomplete.
+///
+/// `Include` is followed like sshd does: a relative path is under `base`
+/// (`/etc/ssh`), and `*`/`?` may appear in the last component only. Files
+/// are opened without blocking and read through that descriptor; links are
+/// followed (some systems link the whole file in). Depth, file count and
+/// bytes are bounded, and running out is an error too.
+fn sshd_matches_known(
+    path: &Path,
+    base: &Path,
+    depth: usize,
+    budget: &mut SshdBudget,
+) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let unknown = |why: &str| Err(io::Error::other(format!("sshd configuration: {why}")));
+    if depth > 8 {
+        return unknown("includes nest too deeply");
+    }
+    let Some(files) = budget.files.checked_sub(1) else {
+        return unknown("too many files");
+    };
+    budget.files = files;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return unknown("not a regular file");
+    }
+    let mut text = String::new();
+    file.take(u64::try_from(budget.bytes).unwrap_or(u64::MAX) + 1)
+        .read_to_string(&mut text)?;
+    let Some(left) = budget.bytes.checked_sub(text.len()) else {
+        return unknown("too large");
+    };
+    budget.bytes = left;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut words = line
+            .split(|c: char| c.is_ascii_whitespace() || c == '=')
+            .filter(|word| !word.is_empty());
+        let Some(keyword) = words.next() else {
+            continue;
+        };
+        if keyword.eq_ignore_ascii_case("match") {
+            let words: Vec<&str> = words.collect();
+            let mut index = 0;
+            while let Some(criterion) = words.get(index) {
+                if criterion.eq_ignore_ascii_case("all") {
+                    index += 1;
+                } else if (criterion.eq_ignore_ascii_case("user")
+                    || criterion.eq_ignore_ascii_case("group"))
+                    && index + 1 < words.len()
+                {
+                    index += 2;
+                } else {
+                    return unknown("a Match block depends on the connection");
+                }
+            }
+            if words.is_empty() {
+                return unknown("an empty Match line");
+            }
+        } else if keyword.eq_ignore_ascii_case("include") {
+            for pattern in words {
+                if pattern.contains(['"', '\\', '[', '{', '~']) {
+                    return unknown("an include pattern this check does not expand");
+                }
+                let pattern = base.join(pattern);
+                let (Some(parent), Some(last)) = (pattern.parent(), pattern.file_name()) else {
+                    return unknown("an include pattern this check does not expand");
+                };
+                if parent.to_string_lossy().contains(['*', '?']) {
+                    return unknown("an include pattern this check does not expand");
+                }
+                let last = last.as_encoded_bytes();
+                if !last.contains(&b'*') && !last.contains(&b'?') {
+                    match sshd_matches_known(&pattern, base, depth + 1, budget) {
+                        // sshd skips an include that matches nothing.
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        result => result?,
+                    }
+                    continue;
+                }
+                let entries = match std::fs::read_dir(parent) {
+                    Ok(entries) => entries,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                for (index, entry) in entries.enumerate() {
+                    if index >= 1024 {
+                        return unknown("an include directory is too large");
+                    }
+                    let entry = entry?;
+                    let name = entry.file_name();
+                    // glob(3) does not match a leading dot with a wildcard.
+                    if name.as_encoded_bytes().first() == Some(&b'.') && last.first() != Some(&b'.')
+                    {
+                        continue;
+                    }
+                    if wildcard(last, name.as_encoded_bytes()) {
+                        sshd_matches_known(&entry.path(), base, depth + 1, budget)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Gets sshd's effective per-account settings as root, with bounded output
 /// and a two-second process deadline. Missing tools or refusals are incomplete;
 /// neither the effective configuration nor diagnostics are ever logged.
 fn sshd_configuration(account: &User) -> io::Result<Vec<u8>> {
     use std::process::{Command, Stdio};
+    sshd_matches_known(
+        Path::new(SSHD_CONFIG),
+        Path::new("/etc/ssh"),
+        0,
+        &mut SshdBudget {
+            files: 64,
+            bytes: 1024 * 1024,
+        },
+    )?;
     let mut child = Command::new("/usr/bin/timeout")
         .args(["--signal=KILL", "2s", "/usr/sbin/sshd", "-T", "-C"])
         .arg(format!("user={}", account.name))
