@@ -713,6 +713,9 @@ def outer(args: argparse.Namespace) -> int:
         row = json.loads(lines[-1]) if lines else {
             "outcome": "FAIL", "error": f"proof emitted no row: {stderr[-4000:]}"
         }
+    if row.get("outcome") != "PASS" and stderr.strip():
+        # The coordinator fixture inherits this stream; retain its short failure reason with the row.
+        row["proof_stderr"] = stderr[-2000:]
     if args.report:
         Path(args.report).write_text(json.dumps(row, indent=2, sort_keys=True) + "\n")
     print(json.dumps(row, sort_keys=True), flush=True)
