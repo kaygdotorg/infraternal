@@ -73,9 +73,9 @@ private var companionInput = FileHandle.standardInput
 private var companionOutput = FileHandle.standardOutput
 
 /// Why an operation failed: `invalid` (malformed or out-of-range request), `permission` (Screen
-/// Recording or Accessibility missing) or `unavailable` (window closed, encoder or capture
-/// failed). The text sent to the caller is generic; details go to standard error.
-enum HelperFailure: Error { case invalid, permission, unavailable }
+/// Recording or Accessibility missing), `gone` (WindowServer confirmed closure) or
+/// `unavailable` (temporary failure). The text sent to the caller stays generic.
+enum HelperFailure: Error { case invalid, permission, gone, unavailable }
 
 /// Connects to the Unix socket named by `--socket PATH` and uses it for all packets.
 ///
@@ -248,7 +248,9 @@ private final class Session {
                 guard CGDisplayIsActive(displayID) != 0 else { throw HelperFailure.unavailable }
                 screen = CGDisplayBounds(displayID)
             }
-            guard geometry?.exists != false else { throw HelperFailure.unavailable }
+            if let geometry, !geometry.exists {
+                throw windowIsGone(id:geometry.id,pid:geometry.pid) ? HelperFailure.gone : HelperFailure.unavailable
+            }
             let ticks = mach_absolute_time()
             var result = state(); result["capture_ticks"] = ticks; result["capture_ns"] = nanos(ticks)
             return (68,result)
@@ -337,7 +339,9 @@ DispatchQueue.global(qos:.userInteractive).async {
                 }
             } catch {
                 let message = error as? HelperFailure == .permission ? "Screen Recording and Accessibility are required." : "The desktop operation is unavailable."
-                try sendPacket(69,try json(["error":message]))
+                var reply = ["error":message]
+                if error as? HelperFailure == .gone { reply["state"] = "gone" }
+                try sendPacket(69,try json(reply))
             }
         }
     } catch {

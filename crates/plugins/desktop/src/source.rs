@@ -41,7 +41,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -57,6 +57,8 @@ pub(super) struct Metadata {
     /// Last video sequence number used. Shared with the worker so a later lane
     /// carries on counting instead of repeating numbers.
     pub sequence: AtomicU64,
+    /// Latches only when the native companion confirms the target window closed.
+    pub gone: AtomicBool,
 }
 /// A session that has been prepared by the server.
 struct Prepared {
@@ -298,6 +300,7 @@ impl SourceBridge {
                     metadata: Arc::new(Metadata {
                         start: Mutex::new(start),
                         sequence: AtomicU64::new(sequence_floor),
+                        gone: AtomicBool::new(false),
                     }),
                     worker: None,
                     stopping: false,
@@ -305,6 +308,9 @@ impl SourceBridge {
             );
         }
         let prepared = state.prepared.get(&id).ok_or(PluginError::Rejected)?;
+        if prepared.metadata.gone.load(Ordering::Acquire) {
+            return Ok(json!({"session_id":id,"state":"gone"}));
+        }
         // An active helper may advance concurrently; raising the floor must
         // never overwrite that newer counter or replay an older sequence.
         prepared
@@ -628,6 +634,7 @@ impl SourceBridge {
             }
             let record = state.prepared.get_mut(&id).ok_or(())?;
             if record.stopping
+                || record.metadata.gone.load(Ordering::Acquire)
                 || record
                     .worker
                     .as_ref()

@@ -114,22 +114,35 @@ pub(super) async fn run(config: Config, mut leg: Leg) -> Outcome {
         Err(error) => return Outcome::failed(error.cleanup()),
     };
     let result = async {
-        let start = leg.metadata.start.lock().map_err(|_| PluginError::Rejected)?.clone();
+        let start = leg
+            .metadata
+            .start
+            .lock()
+            .map_err(|_| PluginError::Rejected)?
+            .clone();
         let opening = serde_json::to_vec(&start).map_err(|_| PluginError::Rejected)?;
         let started: std::io::Result<()> = tokio::select! { biased;
             _ = leg.cancelled.changed() => Ok(()),
             result = async {
-                let (kind, _) = tokio::time::timeout(CONTROL_TIMEOUT, async {
+                let (kind, body) = tokio::time::timeout(CONTROL_TIMEOUT, async {
                     helper.send(Kind::Start, &opening).await?;
                     helper.receive().await
                 }).await.map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))??;
-                if kind != Kind::Geometry { return Err(std::io::ErrorKind::PermissionDenied.into()); }
+                if kind != Kind::Geometry {
+                    if kind == Kind::Error { remember_closed_window(&leg.metadata, &body); }
+                    return Err(std::io::ErrorKind::PermissionDenied.into());
+                }
                 Ok(())
             } => result,
         };
         started.map_err(|_| PluginError::Rejected)?;
-        if *leg.cancelled.borrow() { Ok(()) } else { pump(&mut helper, &mut leg).await }
-    }.await;
+        if *leg.cancelled.borrow() {
+            Ok(())
+        } else {
+            pump(&mut helper, &mut leg).await
+        }
+    }
+    .await;
     let cancelled = *leg.cancelled.borrow();
     let cleanup = helper.stop().await.map_err(|_| PluginError::Rejected);
     Outcome {
@@ -188,7 +201,10 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                         let video = video(&body, &leg.metadata)?;
                         crate::measurement::frame("source_helper_read", &video);
                         send.publish(video).await;
-                    } else if kind == Kind::Error { return Err(PluginError::Rejected); }
+                    } else if kind == Kind::Error {
+                        remember_closed_window(&leg.metadata, &body);
+                        return Err(PluginError::Rejected);
+                    }
                     else if pending.front().is_some_and(|response| response.expected == kind) {
                         crate::measurement::control("source_control_ack", kind);
                         let response = pending.pop_front().ok_or(PluginError::Rejected)?;
@@ -206,6 +222,14 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
         let _ = sender.await;
     }
     result
+}
+
+/// Keeps the companion's permanent closure result across replacement capture lanes.
+/// Generic helper errors and transport failures leave the target eligible to reconnect.
+fn remember_closed_window(metadata: &Metadata, body: &[u8]) {
+    if serde_json::from_slice::<Value>(body).is_ok_and(|reply| reply["state"] == "gone") {
+        metadata.gone.store(true, Ordering::Release);
+    }
 }
 /// Turns the helper's video payload (8-byte capture time, 1-byte keyframe flag,
 /// then the encoded frame) into a [`Video`] with the next sequence number from
@@ -624,6 +648,7 @@ mod mapping_tests {
                 },
             }),
             sequence: std::sync::atomic::AtomicU64::new(0),
+            gone: std::sync::atomic::AtomicBool::new(false),
         };
         let (kind, _) = command(
             &packet(Message::Size {

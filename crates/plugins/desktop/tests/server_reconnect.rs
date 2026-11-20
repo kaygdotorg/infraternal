@@ -44,6 +44,8 @@ struct Node {
     lane: Arc<Lane>,
     opens: AtomicUsize,
     second_lane: Option<Arc<Lane>>,
+    /// Reports the captured Mac window gone on the first re-preparation.
+    closed_during_disconnect: bool,
     floors: Mutex<Vec<u64>>,
     preparations: Mutex<Vec<Start>>,
     prepared: Notify,
@@ -79,6 +81,12 @@ impl NodeHost for Node {
                         .unwrap_or(0),
                 );
                 self.prepared.notify_one();
+                if self.closed_during_disconnect && self.opens.load(Ordering::Relaxed) > 0 {
+                    return Ok(serde_json::to_vec(
+                        &serde_json::json!({"session_id":input["session_id"],"state":"gone"}),
+                    )
+                    .unwrap());
+                }
             }
             Ok(serde_json::to_vec(&serde_json::json!({"session_id":input["session_id"]})).unwrap())
         })
@@ -153,6 +161,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         }),
         opens: AtomicUsize::new(0),
         second_lane: None,
+        closed_during_disconnect: false,
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
         prepared: Notify::new(),
@@ -255,6 +264,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
             media: tokio::sync::Mutex::new(second_rx),
             controls,
         })),
+        closed_during_disconnect: false,
         floors: Mutex::new(Vec::new()),
         opens: AtomicUsize::new(0),
         preparations: Mutex::new(Vec::new()),
@@ -313,4 +323,67 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
         "node process replacement lost the server-held sequence high water"
     );
     assert_eq!(resumed.unwrap().unwrap().sequence, 42);
+}
+
+/// A confirmed native close ends the existing viewer and prevents reuse of its cached picture.
+#[tokio::test]
+async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
+    let (media, rx) = mpsc::channel(4);
+    let (controls, mut received) = mpsc::channel(8);
+    let node = Arc::new(Node {
+        lane: Arc::new(Lane {
+            media: tokio::sync::Mutex::new(rx),
+            controls,
+        }),
+        second_lane: None,
+        closed_during_disconnect: true,
+        opens: AtomicUsize::new(0),
+        floors: Mutex::new(Vec::new()),
+        preparations: Mutex::new(Vec::new()),
+        prepared: Notify::new(),
+    });
+    let server = DesktopServer::new(10);
+    server.configure(true);
+    let id = server
+        .start(
+            node.clone(),
+            Start {
+                target: Target::Window {
+                    window_id: 9,
+                    owner_pid: 42,
+                },
+                size: Size {
+                    width: 960,
+                    height: 600,
+                    canvas_width: 480.0,
+                    canvas_height: 300.0,
+                    backing_scale: 2.0,
+                },
+            },
+            Delivery::Reliable,
+        )
+        .await
+        .unwrap();
+    received.recv().await.unwrap();
+    received.recv().await.unwrap();
+    let mut viewer = server.attach(&id, &Host).unwrap();
+    media.send(video(41)).await.unwrap();
+    assert_eq!(viewer.next().await.unwrap().sequence, 41);
+
+    drop(media);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next()).await;
+    let attached_again = server.attach(&id, &Host).is_ok();
+    let opens = node.opens.load(Ordering::Relaxed);
+    server.configure(false);
+    server.stopped().await;
+
+    assert!(
+        ended.is_ok_and(|result| result.is_err()),
+        "the viewer stayed open"
+    );
+    assert!(!attached_again, "the closed window accepted a new viewer");
+    assert_eq!(
+        opens, 1,
+        "the server reopened a capture lane for a closed window"
+    );
 }

@@ -226,7 +226,11 @@ impl DesktopServer {
                     } => Err(Error::Unavailable),
                     response = tokio::time::timeout(Duration::from_secs(5), worker_host.call("desktop.source.start", &input)) => {
                         response.map_err(|_| Error::Unavailable).and_then(|value| value.map_err(|()| Error::Unavailable))
-                            .and_then(|bytes| validate_prepared(&bytes, id))
+                            .and_then(|bytes| prepared_capture(&bytes, id))
+                            .and_then(|state| match state {
+                                PreparedCapture::Ready => Ok(()),
+                                PreparedCapture::Gone => Err(Error::Unavailable),
+                            })
                     },
                 };
                 let ready = preparation.is_ok();
@@ -693,7 +697,7 @@ async fn stop_source(host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
 /// Repeatedly opens a data lane to the host and relays through
 /// `crate::relay::run`. After a failed lane it waits 200 ms and prepares the
 /// source again, continuing the sequence numbers (`sequence_floor`) and the last
-/// size the viewer asked for. Stops when the session is closed, the host
+/// size the viewer asked for. Stops when the window is confirmed gone, the session is closed, the host
 /// withdraws admission, or sequence numbers run out. There is no timer while a
 /// lane is healthy. `preparation` is the JSON used for the first start.
 async fn capture(
@@ -728,13 +732,17 @@ async fn capture(
                     serde_json::to_value(size).map_err(|_| Error::Invalid)?;
             }
             let preparation = serde_json::to_vec(&preparation).map_err(|_| Error::Invalid)?;
-            let ready = tokio::select! { biased;
+            let prepared = tokio::select! { biased;
                 _ = stopped.changed() => break,
-                response = tokio::time::timeout(Duration::from_secs(5), host.call("desktop.source.start", &preparation)) => response.ok().and_then(Result::ok).is_some_and(|bytes| validate_prepared(&bytes, session.id()).is_ok()),
+                response = tokio::time::timeout(Duration::from_secs(5), host.call("desktop.source.start", &preparation)) => response.ok().and_then(Result::ok).and_then(|bytes| prepared_capture(&bytes, session.id()).ok()),
             };
-            if !ready {
-                tokio::select! { biased; _ = stopped.changed() => break, () = tokio::time::sleep(Duration::from_millis(200)) => {} }
-                continue;
+            match prepared {
+                Some(PreparedCapture::Ready) => {}
+                Some(PreparedCapture::Gone) => break,
+                None => {
+                    tokio::select! { biased; _ = stopped.changed() => break, () = tokio::time::sleep(Duration::from_millis(200)) => {} }
+                    continue;
+                }
             }
         }
         reconnect = true;
@@ -1053,8 +1061,17 @@ struct InventoryPage {
     /// Where to continue, or `None` on the last page.
     cursor: Option<String>,
 }
-/// Checks that the host's reply to `desktop.source.start` names session `id`.
-fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
+/// The source either reserved the capture or confirmed that its original window closed.
+enum PreparedCapture {
+    /// The source can accept a capture lane.
+    Ready,
+    /// This session's window no longer exists.
+    Gone,
+}
+
+/// Reads the source's preparation reply, after confirming it names session `id`.
+/// Older sources acknowledge preparation with the session ID alone.
+fn prepared_capture(bytes: &[u8], id: SessionId) -> Result<PreparedCapture, Error> {
     let value: Value = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
     if value
         .get("session_id")
@@ -1062,7 +1079,11 @@ fn validate_prepared(bytes: &[u8], id: SessionId) -> Result<(), Error> {
         .and_then(|value| uuid::Uuid::parse_str(value).ok())
         .is_some_and(|value| *value.as_bytes() == id)
     {
-        Ok(())
+        if value["state"] == "gone" {
+            Ok(PreparedCapture::Gone)
+        } else {
+            Ok(PreparedCapture::Ready)
+        }
     } else {
         Err(Error::Invalid)
     }

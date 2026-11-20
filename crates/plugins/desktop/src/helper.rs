@@ -757,8 +757,13 @@ fn run(
             };
             if Instant::now() >= reconcile {
                 crate::measurement::record("helper_reconcile_begin", 0, 0, 0);
-                let (_, geometry) = native.call(Kind::Status, b"{}")?;
+                let (kind, geometry) = native.call(Kind::Status, b"{}")?;
                 crate::measurement::record("helper_reconcile_end", 0, 0, 0);
+                if kind == Kind::Error {
+                    // Forward the companion's typed closure before ending the capture.
+                    protocol::write(socket, kind, &geometry)?;
+                    break;
+                }
                 let rect = actual(&geometry)?;
                 if rect != stream.rect {
                     stream.update(stream.size, rect);

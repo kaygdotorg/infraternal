@@ -194,6 +194,15 @@ func windowSnapshot(applicationMetadata: Bool = true, windowID: CGWindowID? = ni
     }
 }
 
+/// Confirms that WindowServer no longer lists this exact window of this process.
+/// An unavailable list is inconclusive and leaves the capture eligible to retry.
+func windowIsGone(id: CGWindowID, pid: pid_t) -> Bool {
+    guard let entries = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else { return false }
+    return !entries.contains {
+        ($0[kCGWindowNumber as String] as? UInt32) == id && ($0[kCGWindowOwnerPID as String] as? pid_t) == pid
+    }
+}
+
 /// Reads a rectangle from `x`, `y`, `width` and `height` numbers in a dictionary.
 /// Throws `HelperFailure.invalid` if a key is missing, a number is not finite, or the size is not
 /// positive.

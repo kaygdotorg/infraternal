@@ -122,6 +122,13 @@ checks a managing desktop for 30 seconds across three canvas sizes, with zero
 native resize requests and zero source frame-size changes. Run it under the Mac
 hardware lock with an owned document; it never changes the window manager.
 
+When WindowServer confirms that a captured window ID and process ID are no
+longer present, the companion adds `state:"gone"` to its generic error reply.
+The source remembers the result for that session and returns it with the
+session ID on re-preparation, so the server retires its viewers and capture.
+Changing the layer, minimizing the window or losing the transport does not
+count as confirmed closure.
+
 Bring the selected app forward before accepted remote input. Local physical
 mouse/keyboard activity pauses injection for 2 seconds; synthetic remote events
 are tagged so they never reset that clock. Show “Controlled from infraternal”

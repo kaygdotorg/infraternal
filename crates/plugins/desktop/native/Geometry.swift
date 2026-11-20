@@ -92,13 +92,15 @@ final class WindowGeometry {
 
     /// Starts following a window.
     ///
-    /// Throws `HelperFailure.permission` when Accessibility access is missing or the window ID and
-    /// process do not match a real window, and `HelperFailure.invalid` for a bad `size`. `size` has
-    /// the keys described at `resize`.
+    /// Refuses missing Accessibility access, a missing window, or an invalid `size`.
+    /// Only a live WindowServer list can confirm that this window and process are gone.
     init(id: UInt32, pid: Int32, size: [String: Any]) throws {
-        guard AXIsProcessTrusted(), let entry = windowSnapshot(applicationMetadata: false).first(where: {
+        guard AXIsProcessTrusted() else { throw HelperFailure.permission }
+        guard let entry = windowSnapshot(applicationMetadata: false).first(where: {
             ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
-        }), let frame = entry["frame"] as? [String: Any] else { throw HelperFailure.permission }
+        }), let frame = entry["frame"] as? [String: Any] else {
+            throw windowIsGone(id:id,pid:pid) ? HelperFailure.gone : HelperFailure.unavailable
+        }
         self.pid = pid; self.id = id; original = try rect(frame); actual = original
         desired = .zero; output = .zero
         let app = AXUIElementCreateApplication(pid)
