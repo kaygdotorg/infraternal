@@ -174,15 +174,23 @@ pub fn requirement(identifier: &str, signer: &Signer) -> io::Result<String> {
     {
         return Err(io::ErrorKind::InvalidInput.into());
     }
-    Ok(match signer {
-        Signer::Team(team) => format!(
-            "identifier \"{identifier}\" and anchor apple generic and certificate leaf[subject.OU] = \"{team}\""
-        ),
-        Signer::Leaf(digest) => {
-            let hex = upper_hex(digest);
-            format!("identifier \"{identifier}\" and certificate leaf = H\"{hex}\"")
+    Ok(format!(
+        "identifier \"{identifier}\" and {}",
+        signed_by(signer)
+    ))
+}
+
+/// The code requirement text for any code signed by `signer`, whatever its
+/// identifier. `infraternal up` checks the capture app with it before it
+/// publishes the bundle beside the root agent.
+#[must_use]
+pub fn signed_by(signer: &Signer) -> String {
+    match signer {
+        Signer::Team(team) => {
+            format!("anchor apple generic and certificate leaf[subject.OU] = \"{team}\"")
         }
-    })
+        Signer::Leaf(digest) => format!("certificate leaf = H\"{}\"", upper_hex(digest)),
+    }
 }
 
 /// What a socket peer must be: code with one signing identifier, signed by
@@ -266,6 +274,28 @@ mod tests {
                 "identifier \"infraternal-desktop-helper\" and certificate leaf = H\"27{}CB\"",
                 "00".repeat(18)
             )
+        );
+    }
+
+    /// The signer-only form `infraternal up` checks the capture app with is
+    /// the identifier form without its identifier clause.
+    #[test]
+    fn signed_by_names_only_the_signer() {
+        let team = Signer::Team("ABCDE12345".into());
+        assert_eq!(
+            signed_by(&team),
+            "anchor apple generic and certificate leaf[subject.OU] = \"ABCDE12345\""
+        );
+        assert_eq!(
+            requirement("infraternal-desktop-helper", &team).unwrap(),
+            format!(
+                "identifier \"infraternal-desktop-helper\" and {}",
+                signed_by(&team)
+            )
+        );
+        assert_eq!(
+            signed_by(&Signer::Leaf([0xab; 20])),
+            format!("certificate leaf = H\"{}\"", "AB".repeat(20))
         );
     }
 

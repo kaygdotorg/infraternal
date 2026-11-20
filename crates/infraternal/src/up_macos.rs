@@ -6,9 +6,11 @@
 //!
 //! A build with app windows also publishes the per-user desktop helper and
 //! the signed capture app beside the service binary, root-owned, when the
-//! release folder `up` runs from holds them. The root service starts that
-//! helper as the console user (D203 C2, #146); root ownership keeps the
-//! person from swapping either one.
+//! release folder `up` runs from holds them. Both must be signed by the same
+//! signer as this binary (the root service admits only such a helper), and
+//! the copies carry no set-id bit or access-control list. The root service
+//! starts that helper as the console user (D203 C2, #146); root ownership
+//! keeps the person from swapping either one.
 use super::{hash_stream, termination};
 /// Data passed to the enrollment client before the system daemon starts.
 pub(super) use infraternal_plugin_mesh::macos_service::MACHINE_DATA as SERVICE_DATA;
@@ -230,16 +232,42 @@ impl Install {
             );
             return Ok(());
         }
-        self.publish(&helper, &bin.join(DESKTOP_HELPER))?;
+        // The root agent admits only a helper from its own signer, so a
+        // build without a certificate would install a helper it then refuses.
+        let Ok(signer) = infraternal_shim::code_identity::own_signer() else {
+            eprintln!(
+                "infraternal: app windows skipped; this infraternal build is not signed with a certificate."
+            );
+            return Ok(());
+        };
+        let destination = bin.join(DESKTOP_HELPER);
+        self.publish(&helper, &destination)?;
+        // Checked on the root-owned copy, which nobody else can change; a
+        // failure rolls the published file back with the rest of the install.
+        verify_signature(
+            &destination,
+            &infraternal_shim::code_identity::requirement(DESKTOP_HELPER, &signer)?,
+        )?;
         self.check_interruption()?;
-        self.capture_app(&app, &bin.join(CAPTURE_APP))
+        self.capture_app(
+            &app,
+            &bin.join(CAPTURE_APP),
+            &infraternal_shim::code_identity::signed_by(&signer),
+        )
     }
 
     /// Copy the capture app bundle with its signature intact, make it root's
-    /// with no group or other write bit, check its signature, then publish it
-    /// under its final name, never over an existing path.
+    /// with no group or other write bit, no set-id bit and no access-control
+    /// list, check that it is signed by `requirement` (this binary's own
+    /// signer), then publish it under its final name, never over an existing
+    /// path.
     #[cfg(feature = "desktop")]
-    fn capture_app(&mut self, source: &Path, destination: &Path) -> io::Result<()> {
+    fn capture_app(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        requirement: &str,
+    ) -> io::Result<()> {
         if existing(destination)?.is_some() {
             return Err(refused(format!(
                 "{} already exists.",
@@ -253,7 +281,13 @@ impl Install {
         let result = (|| {
             // ditto copies the bundle with its extended attributes and
             // signature; chown and chmod then take it away from the person.
-            run_tool("/usr/bin/ditto", &[source.as_os_str(), staging.as_os_str()])?;
+            // Access-control lists are not copied: an entry granting the
+            // person write access would outlive the chown, and the signature
+            // seal does not cover it.
+            run_tool(
+                "/usr/bin/ditto",
+                &["--noacl".as_ref(), source.as_os_str(), staging.as_os_str()],
+            )?;
             run_tool(
                 "/usr/sbin/chown",
                 &[
@@ -263,18 +297,14 @@ impl Install {
                     staging.as_os_str(),
                 ],
             )?;
+            // Root's chown keeps set-id bits, and the signature seal does not
+            // cover file modes: a set-uid bit planted in the release folder
+            // would otherwise become a set-uid root program here.
             run_tool(
                 "/bin/chmod",
-                &["-R".as_ref(), "go-w".as_ref(), staging.as_os_str()],
+                &["-R".as_ref(), "go-w,ug-s".as_ref(), staging.as_os_str()],
             )?;
-            run_tool(
-                "/usr/bin/codesign",
-                &[
-                    "--verify".as_ref(),
-                    "--strict".as_ref(),
-                    staging.as_os_str(),
-                ],
-            )?;
+            verify_signature(&staging, requirement)?;
             fs::rename(&staging, destination)
         })();
         if result.is_err() {
@@ -398,6 +428,22 @@ impl Install {
             }
         }
     }
+}
+
+/// Check that the code at `path` has a valid, strict signature that meets
+/// `requirement` (code requirement language), through `codesign`.
+#[cfg(feature = "desktop")]
+fn verify_signature(path: &Path, requirement: &str) -> io::Result<()> {
+    run_tool(
+        "/usr/bin/codesign",
+        &[
+            "--verify".as_ref(),
+            "--strict".as_ref(),
+            "-R".as_ref(),
+            format!("={requirement}").as_ref(),
+            path.as_os_str(),
+        ],
+    )
 }
 
 /// Run a system tool by absolute path with an empty environment and no
