@@ -81,7 +81,46 @@ def job_plant(account, user, scenario, created):
             cron.write('0 0 1 1 * root unresolved-command $UNSET\n' * 70)
         noisy.chmod(0o644)
         created.append(noisy)
-    if privileged and scenario != 'root-job-parent':
+    if scenario == 'root-job-link-chain':
+        # J1013: root runs a link in a root-owned directory whose middle link
+        # lives in a directory the account owns: /run/<a>-root-link/entry ->
+        # /run/<a>-job-input/scheduled-script -> /run/<a>-root-real/script.
+        # Only the middle directory is the account's way in.
+        real = Path('/run') / (account + '-root-real')
+        real.mkdir(mode=0o755)
+        created.append(real)
+        script = real / 'script'
+        script.write_text('#!/bin/sh\nexit 0\n')
+        script.chmod(0o755)
+        created.append(script)
+        target.unlink()
+        target.symlink_to(script)
+        os.chown(target.parent, user.pw_uid, user.pw_gid)
+        link_dir = Path('/run') / (account + '-root-link')
+        link_dir.mkdir(mode=0o755)
+        created.append(link_dir)
+        entry = link_dir / 'entry'
+        entry.symlink_to(target)
+        created.append(entry)
+        assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target.parent), check=False).returncode == 0
+        assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(script), check=False).returncode != 0
+        path = Path('/etc/cron.d') / account
+        with path.open('x') as cron:
+            cron.write(f'0 0 1 1 * root /bin/sh {entry}\n')
+        created.append(path)
+        path.chmod(0o644)
+        return str(path), privileged
+    if scenario == 'root-job-anacron':
+        # J1013: anacron's table runs its jobs as root. compute01 has no
+        # anacron installed, so this file is inert until it is removed.
+        path = Path('/etc/anacrontab')
+        with path.open('x') as table:
+            table.write(f'SHELL=/bin/sh\n1\t5\t{account}\t/bin/sh {target}\n')
+        created.append(path)
+        path.chmod(0o644)
+        assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
+        return str(path), privileged
+    if privileged and scenario not in ('root-job-parent', 'root-job-envfile-glob'):
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(target), check=False).returncode == 0
     cron_forms = {
         # A bare name found through the file's own PATH line.
@@ -133,6 +172,17 @@ def job_plant(account, user, scenario, created):
             os.chown(target, 0, 0)
             extra = f'EnvironmentFile={environment}\n'
             invocation = '/bin/true'
+        if scenario == 'root-job-envfile-glob':
+            # J1013: the manager reads every match of a wildcard environment
+            # file; one match belongs to the account. The pattern names no
+            # file of its own, so the unit's inputs are unknown.
+            environment = target.parent / '10-account.conf'
+            environment.write_text('FLAG=1\n')
+            os.chown(environment, user.pw_uid, user.pw_gid)
+            created.append(environment)
+            os.chown(target, 0, 0)
+            extra = f'EnvironmentFile=-{target.parent}/*.conf\n'
+            invocation = '/bin/true'
         if scenario == 'root-job-chdir':
             # A launcher changes into a directory before it runs a relative script.
             invocation = f'/usr/bin/env -C {target.parent} /bin/sh ./{target.name}'
@@ -161,6 +211,8 @@ def job_plant(account, user, scenario, created):
         checked = target.parent if scenario == 'root-job-parent' else (unit if scenario in ('root-job-unit', 'root-job-priority-unit') else target)
         if scenario == 'root-job-envfile':
             checked = target.parent / 'environment'
+        if scenario == 'root-job-envfile-glob':
+            checked = target.parent / '10-account.conf'
         assert command('runuser', '-u', account, '--', '/usr/bin/test', '-w', str(checked), check=False).returncode == 0
     if scenario == 'system-timer':
         timer = unit.with_suffix('.timer')
@@ -189,6 +241,8 @@ def prove(binary, scenario="sessions"):
     uid = None
     sudoers = Path("/etc/sudoers.d") / account
     sudoers_created = False
+    sshd_dropin = Path('/etc/ssh/sshd_config.d') / f'zz-{account}.conf'
+    sshd_dropin_created = False
     polkit_dir = Path({'polkit-run': '/run/polkit-1/rules.d',
                        'polkit-local': '/usr/local/share/polkit-1/rules.d',
                        'polkit-policy': '/run/polkit-1/actions'}.get(scenario, '/etc/polkit-1/rules.d'))
@@ -243,7 +297,8 @@ def prove(binary, scenario="sessions"):
                 assert report['state'] == 'not_checked', report
                 if privileged:
                     assert report['reason'] == 'privileged', report
-                    expected = 'target unknown' if scenario == 'root-job-shell-expansion' else 'input writable'
+                    expected = ('target unknown' if scenario in ('root-job-shell-expansion', 'root-job-envfile-glob')
+                                else 'input writable')
                     assert any(label in job and expected in job for job in report.get('jobs', [])), report
                 else:
                     assert report['programs_may_remain'], report
@@ -330,6 +385,25 @@ def prove(binary, scenario="sessions"):
                 assert report['reason'] == 'privileged', report
                 print('POLKIT_REAL_ROOT_PASS', flush=True)
                 return
+            if scenario == 'sshd-match-address':
+                # J1013: an AuthorizedKeysFile inside a Match block on the
+                # connection is invisible to `sshd -T -C user=…`. The block
+                # names only this account and a documentation-only network
+                # (192.0.2.0/24), so no real login on the host changes.
+                assert sshd_dropin.parent.is_dir()
+                with sshd_dropin.open('x') as dropin:
+                    sshd_dropin_created = True
+                    dropin.write(f'Match User {account} Address 192.0.2.0/24\n'
+                                 '    AuthorizedKeysFile .ssh/authorized_keys_lan\n')
+                sshd_dropin.chmod(0o644)
+                command('/usr/sbin/sshd', '-t')
+                reply = control(client, 102, 'terminal.login.revoke', dict(person=str(people[0])))
+                print(json.dumps(dict(scenario=scenario, reply=reply)), flush=True)
+                report = reply['access']['accounts'][0]
+                assert report['state'] == 'not_checked', report
+                assert any('sshd effective configuration' in name for name in report.get('unscanned', [])), report
+                print('SSHD_MATCH_REAL_ROOT_PASS', flush=True)
+                return
             if scenario in ("sudoers", "docker"):
                 if scenario == "sudoers":
                     with sudoers.open("x") as rule:
@@ -402,6 +476,8 @@ def prove(binary, scenario="sessions"):
                 command('systemctl', 'reset-failed', system_unit + '.service', check=False)
             if sudoers_created:
                 sudoers.unlink(missing_ok=True)
+            if sshd_dropin_created:
+                sshd_dropin.unlink(missing_ok=True)
             for trigger in polkit_triggers:
                 trigger.unlink(missing_ok=True)
             if polkit_created:
