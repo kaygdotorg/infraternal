@@ -32,7 +32,7 @@ async function meter(page: Page, cdp: CDPSession, name: string, run: () => Promi
   console.log(`BENCH ${name.padEnd(14)} frames ${JSON.stringify(dist(frames))} | raster ${count("RasterTask")} (${ms("RasterTask").toFixed(0)} ms) paint ${count("Paint")} layerize ${count("Layerize")} drawFrame ${count("DrawFrame")} compositeLayers ${count("CompositeLayers")}`);
 }
 
-test("frame cost per scenario at DPR 2 with the owner's look", async ({ browser }) => {
+test("frame cost per scenario at DPR 2 with the owner's look @perf", async ({ browser }) => {
   test.setTimeout(240_000);
   const context = await browser.newContext({ baseURL: `http://localhost:${process.env.TRACER_TEST_PORT ?? "4621"}`, viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
   const page = await context.newPage();

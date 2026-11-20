@@ -61,6 +61,16 @@ impl Source {
             changed.any |= changed.hostname;
         }
         if let Some(os) = os
+            && let Ok(result) = sqlx::query("UPDATE remote_hosts SET device_os=? WHERE id=? AND device_approved=1 AND revoked_at IS NULL AND device_os IS NOT ?")
+                .bind(os)
+                .bind(id.as_bytes().as_slice())
+                .bind(os)
+                .execute(&mut *tx)
+                .await
+        {
+            changed.any |= result.rows_affected() > 0;
+        }
+        if let Some(os) = os
             && let Ok(result) = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND os IS NOT ? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
                 .bind(os)
                 .bind(id.as_bytes().as_slice())
@@ -74,6 +84,24 @@ impl Source {
             return FactChanges::default();
         }
         changed
+    }
+
+    /// Records the OS the host's infraternal agent named in its Hello (#146, D349).
+    ///
+    /// A host that joined by invitation has no SSH bootstrap row, so this is the
+    /// only place its OS is known; the host list prefers the bootstrap's richer
+    /// name when both exist. `os` is one of the fixed names from
+    /// `infraternal_agent::host_os::reported_os`, never free text from the host.
+    /// A storage failure only leaves the old value; the next link tries again.
+    async fn save_reported_os(&self, id: Uuid, os: &'static str) {
+        let _ = sqlx::query(
+            "UPDATE remote_hosts SET reported_os=? WHERE id=? AND revoked_at IS NULL AND reported_os IS NOT ?",
+        )
+        .bind(os)
+        .bind(id.as_bytes().as_slice())
+        .bind(os)
+        .execute(&self.pool)
+        .await;
     }
 
     /// Publish retained facts and reconcile only when a hostname changes; old hosts may omit the field.
@@ -126,6 +154,9 @@ impl Inventory for Source {
                 );
                 if current != available {
                     available = current;
+                    if current && let Some(os) = actor.reported_os() {
+                        self.save_reported_os(id, os).await;
+                    }
                     self.hosts.5.publish();
                     if current {
                         let facts = channel
@@ -142,6 +173,40 @@ impl Inventory for Source {
                     break;
                 }
             }
+        })
+    }
+    /// Read live facts from the named host's own infraternal agent, never from the server's (#410).
+    /// The host must pass the same authority predicate as `list`; a pending retirement is not a host to read.
+    fn facts<'a>(
+        &'a self,
+        account: &'a str,
+        host_id: &'a str,
+    ) -> Operation<'a, Result<Value, &'static str>> {
+        use infraternal_plugin_remote::inventory::{HOST_OFFLINE, HOST_UNAVAILABLE};
+        Box::pin(async move {
+            let id = Uuid::parse_str(host_id).map_err(|_| HOST_UNAVAILABLE)?;
+            let admitted: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)")
+                .bind(id.as_bytes().as_slice()).bind(account).fetch_optional(&self.pool).await.map_err(|_| HOST_UNAVAILABLE)?;
+            if admitted.is_none() {
+                return Err(HOST_UNAVAILABLE);
+            }
+            if !self.hosts.online(id).await {
+                return Err(HOST_OFFLINE);
+            }
+            let actor = self.hosts.actor(id).await.ok_or(HOST_OFFLINE)?;
+            let reply = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                actor.call(
+                    "host.facts.read".into(),
+                    br#"{"includeLive":true}"#.to_vec(),
+                ),
+            )
+            .await
+            .map_err(|_| HOST_OFFLINE)?
+            .map_err(|_| HOST_OFFLINE)?;
+            // The connection observer retains identity facts. A live panel read
+            // needs no writer transaction or inventory invalidation every second.
+            serde_json::from_slice(&reply).map_err(|_| HOST_UNAVAILABLE)
         })
     }
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
@@ -167,7 +232,7 @@ impl Inventory for Source {
                 .transpose()?;
             // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
             let rows: Vec<AdmittedHostRow> = sqlx::query_as(
-                "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
+                "SELECT h.id,COALESCE(b.address,''),COALESCE(b.os,h.reported_os),h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
             let mut next = if rows.len() > 128 {
                 Some(Uuid::from_slice(&rows[127].0).map_err(|_| ())?.to_string())
@@ -210,9 +275,11 @@ impl Inventory for Source {
 /// A pure data notification source is shared with durable admission and revocation writers.
 pub(crate) type InventoryChanges = Changes;
 
+/// Tests inventory scoping and per-host facts against the real enrollment store.
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Each account sees only its admitted hosts, including offline hosts, while revoked hosts are excluded.
     #[tokio::test]
     async fn admitted_hosts_are_account_scoped_offline_and_revocation_filtered() {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
@@ -220,7 +287,7 @@ mod tests {
         sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('other','Other',0,'fixture','other','Other')").execute(&pool).await.unwrap();
         let foreign = Uuid::from_u128(43);
         sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'other','rootless',1002,100)").bind(foreign.as_bytes().as_slice()).execute(&pool).await.unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?, ?,100,604900)").bind([2u8;32].as_slice()).bind(foreign.as_bytes().as_slice()).bind([3u8;32].as_slice()).bind([4u8;32].as_slice()).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3, ?4,100,604900,(SELECT execution_uid FROM remote_hosts WHERE id=?2))").bind([2u8;32].as_slice()).bind(foreign.as_bytes().as_slice()).bind([3u8;32].as_slice()).bind([4u8;32].as_slice()).execute(&pool).await.unwrap();
         let source = Source {
             pool,
             hosts: RemoteHosts::default(),
@@ -242,6 +309,55 @@ mod tests {
         assert_eq!(
             source.list("owner", None).await.unwrap()["hosts"],
             json!([])
+        );
+    }
+    /// An invitation host has no SSH bootstrap row; the OS its agent named in
+    /// the Hello is what the canvas sees, and a bootstrap name still wins (#146).
+    #[tokio::test]
+    async fn invitation_hosts_list_the_os_their_agent_reported() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool: pool.clone(),
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            Value::Null
+        );
+        source.save_reported_os(host, "macOS").await;
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            "macOS"
+        );
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,os) VALUES(?,'operator@worker','Debian GNU/Linux')").bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            "Debian GNU/Linux"
+        );
+    }
+    /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
+    /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
+    #[tokio::test]
+    async fn host_facts_refuse_foreign_unknown_and_offline_hosts() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let own = host.to_string();
+        assert_eq!(source.facts("owner", &own).await, Err("host offline"));
+        assert_eq!(source.facts("other", &own).await, Err("host unavailable"));
+        assert_eq!(
+            source.facts("owner", &Uuid::from_u128(9).to_string()).await,
+            Err("host unavailable")
+        );
+        assert_eq!(
+            source.facts("owner", "not-a-uuid").await,
+            Err("host unavailable")
         );
     }
     #[tokio::test]
@@ -271,9 +387,11 @@ mod tests {
     }
 }
 
+/// Inventory pages stay bounded with long destinations.
 #[cfg(test)]
 mod pagination_tests {
     use super::*;
+    /// Every host appears on exactly one page, however long its address.
     #[tokio::test]
     async fn long_destinations_stay_bounded_and_all_pages_are_complete() {
         let (_, pool, _) = crate::enrollment::authority::tests::enrolled().await;
@@ -283,7 +401,7 @@ mod pagination_tests {
             let mut fingerprint = vec![0_u8; 32];
             fingerprint[..16].copy_from_slice(id.as_bytes());
             sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)").bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
-            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,zeroblob(32),zeroblob(32),100,604900)").bind(fingerprint).bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,zeroblob(32),zeroblob(32),100,604900,(SELECT execution_uid FROM remote_hosts WHERE id=?2))").bind(fingerprint).bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES(?,?)")
                 .bind(id.as_bytes().as_slice())
                 .bind(format!("user@{}", "x".repeat(1000)))

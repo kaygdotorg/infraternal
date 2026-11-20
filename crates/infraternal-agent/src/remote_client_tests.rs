@@ -1,4 +1,5 @@
 //! Real-QUIC regressions for retained greeting bytes and rootless uid admission [64], #78.
+//! Relay-injection cases use the Linux-only `transport_diagnostics` helpers.
 use super::*;
 use crate::remote_tls::tests::{leaf, root};
 use infraternal_protocol::Frame;
@@ -224,6 +225,7 @@ async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     use tokio::io::AsyncReadExt;
@@ -352,6 +354,7 @@ fn supervisor_identity(
         execution_uid: nix::unistd::Uid::effective().as_raw(),
     }
 }
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore = "supervisor establishment diagnostic; run alone without builds or browsers"]
 async fn supervisor_300ms_quic_and_blocked_udp_fallback() {
@@ -414,6 +417,7 @@ async fn supervisor_300ms_quic_and_blocked_udp_fallback() {
     quic.close(0u32.into(), b"");
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
     use tokio::net::UdpSocket;
@@ -455,10 +459,12 @@ async fn delayed_proxy_keeps_replies_bound_to_the_original_udp_client() {
 }
 
 /// Reports relay consumption so virtual flight times start at known packet arrivals.
+#[cfg(target_os = "linux")]
 struct ObservedProxyInput {
     reader: tokio::io::DuplexStream,
     arrivals: tokio::sync::mpsc::UnboundedSender<()>,
 }
+#[cfg(target_os = "linux")]
 impl tokio::io::AsyncRead for ObservedProxyInput {
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
@@ -476,6 +482,7 @@ impl tokio::io::AsyncRead for ObservedProxyInput {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test(start_paused = true)]
 async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -510,6 +517,7 @@ async fn tcp_proxy_preserves_spacing_between_packets_already_in_flight() {
     assert_eq!(spacing, Duration::from_millis(20));
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn tcp_proxy_flushes_bounded_flood_before_half_close() {
     use tokio::{

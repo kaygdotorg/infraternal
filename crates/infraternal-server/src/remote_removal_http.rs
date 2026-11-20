@@ -43,6 +43,8 @@ pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
         .route("/remote/hosts/actions", post(actions))
         .route("/remote/hosts/remove/start", post(start))
         .route("/remote/hosts/remove/finish", post(finish))
+        .route("/remote/hosts/reauth/start", post(reauth_start))
+        .route("/remote/hosts/reauth/finish", post(reauth_finish))
         .route("/remote/hosts/forget", post(forget))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
@@ -73,16 +75,29 @@ fn authority<'a>(api: &Api, headers: &'a HeaderMap) -> Result<(&'a str, i64), St
     let now = crate::runtime::unix_seconds().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok((token, now))
 }
+/// Admit one bounded owner request, using its existing session read to detect an expired admin window.
 async fn body(
     api: &Api,
     incoming: axum::extract::Request,
+    fresh: bool,
 ) -> Result<(String, i64, Vec<u8>, tokio::sync::OwnedSemaphorePermit), StatusCode> {
     let (parts, body) = incoming.into_parts();
     let (token, now) = authority(api, &parts.headers)?;
-    api.auth
-        .bootstrap_owner(token, now)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
+    let session = api.auth.session(token, now).await.map_err(|error| {
+        if matches!(error, crate::auth::Error::Denied) {
+            StatusCode::UNAUTHORIZED
+        } else {
+            failure(&error)
+        }
+    })?;
+    if !session.owner {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if fresh {
+        session
+            .require_admin_window(now)
+            .map_err(|_| StatusCode::PRECONDITION_REQUIRED)?;
+    }
     let permit = api
         .admission
         .clone()
@@ -93,29 +108,78 @@ async fn body(
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     Ok((token.to_owned(), now, bytes.to_vec(), permit))
 }
+/// Issue a removal review, or ask a signed-in owner to renew expired admin authority.
 async fn start(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
     let input = decode_start(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .start(&token, input.host_id, input.uninstall, now)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
+        .map_err(|error| failure(&error))
 }
+/// Spend the exact host review, rechecking the admin window before any removal.
 async fn finish(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
     let input = decode_finish(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .finish_host(&token, input.host_id, &input.review, now)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
+        .map_err(|error| failure(&error))
+}
+
+/// Preserve safe failure categories without returning database diagnostics or proof contents.
+fn failure(error: &crate::auth::Error) -> StatusCode {
+    match error {
+        crate::auth::Error::Denied | crate::auth::Error::Webauthn => StatusCode::FORBIDDEN,
+        crate::auth::Error::Throttled => StatusCode::TOO_MANY_REQUESTS,
+        crate::auth::Error::Invalid | crate::auth::Error::Json => StatusCode::BAD_REQUEST,
+        _ => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
+/// Prepare a host-bound renewal challenge without needing fresh admin authority.
+async fn reauth_start(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    api.removal
+        .reauth_start(&token, input.host_id, now)
+        .await
+        .map(Json)
+        .map_err(|error| failure(&error))
+}
+
+/// A proof for the pending host-bound renewal; decoding alone grants no authority.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReauthFinish {
+    host_id: Uuid,
+    ceremony: String,
+    proof: Value,
+}
+
+/// Complete a real passkey verification and keep the existing signed-in session.
+async fn reauth_finish(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    let input: ReauthFinish = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    api.removal
+        .reauth_finish(&token, input.host_id, &input.ceremony, input.proof, now)
+        .await
+        .map_err(|error| failure(&error))?;
+    Ok(Json(serde_json::json!({"ok":true})))
 }
 
 /// A Forget selection carries only a host UUID; the transaction derives ownership and state.
@@ -130,7 +194,7 @@ async fn forget(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming).await?;
+    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
     let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .forget_browser(&token, input.host_id, now)

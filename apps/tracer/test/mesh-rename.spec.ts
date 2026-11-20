@@ -47,7 +47,8 @@ async function bringIntoView(page: Page, host: string): Promise<void> {
   }, [at.x + at.width / 2 - vp.width / 2, at.y + at.height / 2 - vp.height / 2]);
   await page.waitForTimeout(600);
 }
-const toast = (page: Page) => page.locator(".ui-toast:not([hidden])");
+/** The front toast. An error stays behind a later notice instead of being replaced (#335), so a second refusal in one test stacks above the first. */
+const toast = (page: Page) => page.locator('.ui-toast[data-front="true"]:not([hidden])');
 
 test("double click on a card's name opens the field; Enter saves it through mesh.node.rename and the card follows", async ({ page }) => {
   await open(page);

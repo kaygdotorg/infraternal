@@ -7,6 +7,7 @@
   "scripts": {
     "build": "bun run build.ts",
     "docs": "bun run docs-build.ts docs-dist",
+    "site": "bun run site-build.ts site-dist",
     "docs:figures": "bun x playwright test -c playwright.figures.config.ts",
     "check": "bun x tsc --project tsconfig.json",
     "test": "bun x playwright test"
@@ -19,8 +20,8 @@
     "@types/bun": "1.4.4",
     "@types/node": "26.6.6",
     "@types/ws": "8.18.2",
-    "playwright": "1.65.0",
+    "playwright": "1.65.1",
     "typescript": "7.0.2",
-    "ws": "8.22.1"
+    "ws": "8.23.0"
   }
 }

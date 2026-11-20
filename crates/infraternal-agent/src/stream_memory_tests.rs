@@ -17,6 +17,8 @@ fn private_kib() -> u64 {
         .sum()
 }
 
+/// Measures the private memory that 200 idle attached relay tasks add, for the
+/// per-stream memory budget. Run by hand on a release build.
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "weighted release measurement of 200 idle relay tasks"]
 async fn terminal_stream_memory_at_200() {
@@ -107,7 +109,8 @@ async fn terminal_stream_memory_at_200() {
             .await
             .unwrap()
             .unwrap();
-        receive.recv().await.unwrap();
+        // Skip each relay's attachment marker (#477) and wait for its first real reply.
+        while matches!(receive.recv().await.unwrap(), Message::Attached(..)) {}
     }
     let after = private_kib();
     println!(

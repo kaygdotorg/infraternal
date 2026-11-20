@@ -11,13 +11,19 @@
 import { mountConfirmTip, type ConfirmTipController } from "../../../../packages/ui/src/tooltip";
 
 /**
+ * What removing a host does, in the order it happens (D219, D273): access is revoked first, then the infraternal agent is
+ * uninstalled. The one sentence every removal surface shows (the card here, the details panel's row and in-panel question).
+ */
+export const REMOVAL_EFFECT = "Revokes its access, then uninstalls the infraternal agent from it.";
+
+/**
  * Ask whether to remove the host called `name`. `anchor` is that host's own row or pill, or `null` to centre the question.
  * `onConfirm` runs only after the person confirms. A centred question hands focus to `returnFocus` when it is dismissed.
  */
 export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
     title: `Remove ${name}?`,
-    effect: "Revoke its access, forget its SSH key and uninstall the infraternal agent.",
+    effect: REMOVAL_EFFECT,
     named: true,
     confirmLabel: "Remove",
     cancelLabel: "Keep",

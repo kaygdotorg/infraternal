@@ -75,6 +75,7 @@ impl ComponentManifestVerifier for FixtureVerifier {
     }
 }
 
+/// Build a signed release fixture for download verification.
 fn signed_fixture(archive: &[u8]) -> (Vec<(String, Vec<u8>)>, String, String) {
     let manifest = ComponentManifest {
         component: "traefik".to_owned(),
@@ -88,10 +89,10 @@ fn signed_fixture(archive: &[u8]) -> (Vec<(String, Vec<u8>)>, String, String) {
                 .to_owned(),
         mirror_path:
             "components/0.1.0/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz".to_owned(),
-        archive_sha256: format!("{:x}", Sha256::digest(archive)),
+        archive_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(archive))),
         archive_size: u64::try_from(archive.len()).expect("archive fixture size"),
         executable: "traefik".to_owned(),
-        executable_sha256: format!("{:x}", Sha256::digest(b"signed executable bytes")),
+        executable_sha256: format!("{:x}", base16ct::HexDisplay(&Sha256::digest(b"signed executable bytes"))),
         executable_size: u64::try_from(b"signed executable bytes".len())
             .expect("executable fixture size"),
         license: "MIT".to_owned(),
@@ -99,7 +100,7 @@ fn signed_fixture(archive: &[u8]) -> (Vec<(String, Vec<u8>)>, String, String) {
     let manifest_bytes = serde_json::to_vec(&manifest).expect("manifest JSON");
     let checksum = format!(
         "{:x}  proxy-traefik-linux-amd64.json\n",
-        Sha256::digest(&manifest_bytes)
+        base16ct::HexDisplay(&Sha256::digest(&manifest_bytes))
     );
     let base = "https://mirror.example/releases/0.1.0/";
     (

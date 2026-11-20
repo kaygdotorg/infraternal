@@ -60,7 +60,7 @@ async fn row(
         .execute(&f.pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(randomblob(32),?,randomblob(32),randomblob(32),unixepoch(),unixepoch()+604800)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(randomblob(32),?1,randomblob(32),randomblob(32),unixepoch(),unixepoch()+604800,(SELECT execution_uid FROM remote_hosts WHERE id=?1))")
         .bind(host.as_bytes().as_slice()).execute(&f.pool).await.unwrap();
     if stale {
         sqlx::query("INSERT INTO remote_bootstrap_retirement_intents(host_id) VALUES(?)")

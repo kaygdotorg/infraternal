@@ -15,7 +15,7 @@ use super::{
 use base64::engine::general_purpose::STANDARD_NO_PAD as FingerprintB64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, net::IpAddr};
+use std::{collections::HashMap, net::IpAddr, time::Duration};
 use uuid::Uuid;
 
 /// A key's lifetime when the request names none (D333: "short by default, for example 24
@@ -520,22 +520,21 @@ impl Auth {
         {
             return Err(Error::Denied);
         }
-        if sqlx::query(
+        let poll_hash: Option<String> = sqlx::query_scalar(
             "UPDATE approvals SET user_id=?,approved_session_hash=? \
-             WHERE code_hash=? AND expires>? AND user_id IS NULL",
+             WHERE code_hash=? AND expires>? AND user_id IS NULL RETURNING token_hash",
         )
         .bind(user)
         .bind(hash(session_token))
         .bind(hash(code))
         .bind(now)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-            != 1
-        {
-            return Err(Error::Denied);
-        }
+        .fetch_optional(&mut *tx)
+        .await?;
+        let poll_hash = poll_hash.ok_or(Error::Denied)?;
         tx.commit().await?;
+        if kind == "join_machine" {
+            self.join_approval_changes.publish(&poll_hash, None);
+        }
         Ok(())
     }
 
@@ -626,6 +625,34 @@ impl Auth {
         .fetch_one(&self.pool)
         .await
         .map_err(Into::into)
+    }
+
+    /// Wait at most one poll period for a known pending machine approval.
+    /// The event is a hint. The caller rereads current durable authority even on timeout.
+    pub(crate) async fn wait_for_device_join(
+        &self,
+        token: &str,
+        now: i64,
+        wait: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait;
+        let Ok(_permit) = self.join_approval_waiters.try_acquire() else {
+            return Ok(());
+        };
+        let poll_hash = hash(token);
+        let mut changes = self.join_approval_changes.subscribe(&poll_hash);
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM approvals WHERE token_hash=? AND expires>? \
+             AND kind='join_machine' AND user_id IS NULL)",
+        )
+        .bind(poll_hash)
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        if pending {
+            let _ = tokio::time::timeout_at(deadline, changes.changed()).await;
+        }
+        Ok(())
     }
 
     /// Read a still-live owner approval without consuming its exact-key recovery receipt.

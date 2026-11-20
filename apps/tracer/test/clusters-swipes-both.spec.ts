@@ -1,7 +1,8 @@
 /**
  * Every swipe moves, on both axes, and a swipe during an animation retargets instead of being dropped (#122, #141).
  * Six consecutive trackpad swipes (a ramp, then a momentum tail) are sent as one stream of wheel events, 330 ms and 50 ms
- * apart. Horizontally: the Settings view, nine windows side by side. Vertically: one column of thirteen windows. Each
+ * apart. Horizontally: nine columns side by side in the Console, made with "New window right" (the Settings view is a grid of rows
+ * now, one row for each component, so it has five stops at most, D212 and #304). Vertically: one column of thirteen windows. Each
  * run must end exactly six windows further, and no swipe may be a no-op.
  */
 import { expect, test, type Page } from "playwright/test";
@@ -35,8 +36,20 @@ for (const gap of [330, 50]) {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
-    await api(page, "flyView", "settings");
+    await api(page, "flyView", "console");
+    // sleep: the fly-in to the Console must end before a window in it is clicked
     await page.waitForTimeout(1500);
+    await page.locator('.cl[data-view="console"] .ui-window .ui-window-body').first().click({ position: { x: 20, y: 40 } });
+    // Each "New window right" adds one column; wait for it before the next one so none is lost to the focus moving.
+    const columns = page.locator('.cl[data-view="console"] .cl-col');
+    for (let want = (await columns.count()) + 1; want <= 9; want++) {
+      await page.keyboard.press("Control+Shift+Enter");
+      await expect(columns).toHaveCount(want);
+    }
+    // The camera follows the newest window; fly away and back so the run is measured from its first column.
+    await api(page, "flyView", "settings");
+    await api(page, "flyView", "console");
+    await expect.poll(async () => ((await api(page, "canvasLock")) as { index: number }).index, { timeout: 5000 }).toBe(0);
     const before = (await api(page, "canvasLock")) as { index: number };
     await swipes(page, "x", 6, gap, { x: 700, y: 450 });
     const after = (await api(page, "canvasLock")) as { index: number };

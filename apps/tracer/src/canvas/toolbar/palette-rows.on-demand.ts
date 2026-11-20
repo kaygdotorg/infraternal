@@ -20,6 +20,18 @@ import { viewKeys } from "./viewlist";
 import { bindingText } from "./shortcuts";
 import { hostEntries } from "./palette-hosts.on-demand";
 
+/**
+ * "Open shell on <host>" for every admitted host the sessions adapter lists, offline and locked ones included (a host never vanishes from a
+ * list because it cannot be reached right now). Keywords ride in the hint so "ssh", "terminal" and "console" find them. The palette lists these
+ * rows with the rest, and the "+" beside the top pill shows only these (D390).
+ */
+export function openShellEntries(cx: Ctx): PaletteEntry[] {
+  return cx.adapters.sessions.hosts().filter((host) => !host.state).map((host) => ({
+    group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`,
+    hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}`,
+  }));
+}
+
 /** Every row the canvas offers, for the state as it is now. */
 export function canvasEntries(cx: Ctx): PaletteEntry[] {
   const { state, views } = cx;
@@ -63,11 +75,7 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
     if (state.activeWin && cx.adapters.docs?.for(state.activeWin.model)) out.push({ group: "Canvas", glyph: "?", icon: ICON.help, label: "Read about this window", hint: `docs · ${bindingText("window-docs")}`, action: "canvas:windowdocs" });
     if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
     out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
-    // Any host's shell by name. Keywords ride in the hint so "ssh", "terminal" and "console" find them.
-    for (const host of cx.adapters.sessions.hosts()) {
-      if (host.state) continue;
-      out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${host.name}`, hint: `terminal · ssh · console${host.online === false ? " · offline" : ""}`, action: `canvas:open:${host.id}` });
-    }
+    out.push(...openShellEntries(cx));
     // Remove, rename and full-access rows for hosts.
     out.push(...hostEntries(cx));
     for (const row of cx.adapters.containers?.rows() ?? []) out.push({ group: "Console", glyph: "›_", icon: ICON.terminal, label: `Open shell on ${row.name}`, hint: "container · terminal · console", action: `canvas:ctr:${row.name}` });

@@ -13,7 +13,9 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
     #[cfg(feature = "cutoff-measure")]
     let _encode = crate::cutoff_measure::Stage::new(new.node, new.version, "compact_encode");
     let Some(old) = old.filter(|old| {
-        old.node == new.node
+        old.version < new.version
+            && old.authority_epoch == new.authority_epoch
+            && old.node == new.node
             && old.local_key == new.local_key
             && old.server == new.server
             && old.addresses == new.addresses
@@ -68,20 +70,19 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
             });
         }
     }
-    let mut parts = configuration::chunks(Some(new), new)?;
-    let part = &mut parts[0];
-    part.from_version = Some(old.version);
+    let mut part = configuration::chunk_header(new, Some(old.version));
+    part.last = true;
     part.access_updates = updates;
     // Negotiation changes representation, never the established body budget.
     // Fragmented edits or large port unions use the original staging encoder.
-    if serde_json::to_vec(part)
+    if serde_json::to_vec(&part)
         .map_err(|_| "Mesh encoding failed.")?
         .len()
         > infraternal_plugin_api::MAX_ACTION_BYTES - 64
     {
         return configuration::chunks(Some(old), new);
     }
-    Ok(parts)
+    Ok(vec![part])
 }
 
 /// Replace rules only for exact, existing, ordered disjoint inclusive ranges.

@@ -14,8 +14,8 @@
 //!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
 //!    other manager's units are still readable.
-//! 3. Read mesh facts from the public snapshot the mesh writes next to the
-//!    runtime state, and the kernel's interface list under `/sys`.
+//! 3. Read mesh facts from the host agent's `--state` snapshot or the embedded
+//!    server snapshot under `<server --data>/mesh`, plus the kernel interface list.
 //!
 //! Headline/exit contract for configured roles (D299/D303). A retained server
 //! database establishes the server role even when its unit is masked/missing.
@@ -64,6 +64,8 @@
 
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::{
     collections::HashSet,
     fs,
@@ -293,6 +295,162 @@ pub fn probe(
     assemble(roots, ids, units)
 }
 
+/// Read the installed system agent's `--state` only from trusted systemd sources.
+///
+/// Root CLI socket discovery uses this instead of ordinary status discovery:
+/// every matching unit file, drop-in directory, and `.conf` drop-in must be
+/// root-owned and protected from group or other writes along its path chain.
+/// An absent unit returns `None`; an unsafe or unreadable source returns a
+/// permission error so callers can refuse instead of choosing a different
+/// socket silently.
+///
+/// # Errors
+///
+/// Returns an I/O error if a unit source cannot be inspected or is unsafe.
+pub fn trusted_system_agent_state(roots: &Roots) -> std::io::Result<Option<PathBuf>> {
+    if !validate_system_unit_sources(roots, "infraternal-agent.service")? {
+        return Ok(None);
+    }
+    let status = probe(roots, &[], &|_, _| Activity::Unknown);
+    Ok(status.units.into_iter().find_map(|(unit, _)| {
+        (unit.scope == Scope::System
+            && unit.kind == Kind::Agent
+            && unit.name == "infraternal-agent.service")
+            .then_some(unit.state)
+            .flatten()
+    }))
+}
+
+/// Check every systemd source that can contribute to one system unit.
+fn validate_system_unit_sources(roots: &Roots, name: &str) -> std::io::Result<bool> {
+    let mut found = false;
+    for directory in &roots.system_units {
+        let unit = directory.join(name);
+        if source_exists(&unit)? {
+            found = true;
+            ensure_root_owned_source(&unit, false)?;
+        }
+
+        let dropins = directory.join(format!("{name}.d"));
+        if !source_exists(&dropins)? {
+            continue;
+        }
+        found = true;
+        ensure_root_owned_source(&dropins, true)?;
+        for entry in fs::read_dir(&dropins)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "conf")
+            {
+                ensure_root_owned_source(&path, false)?;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Say whether a filesystem source exists without following a possible mask symlink.
+fn source_exists(path: &Path) -> std::io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuse a systemd source unless it is a protected root-owned file or directory.
+fn ensure_root_owned_source(path: &Path, directory: bool) -> std::io::Result<()> {
+    if source_path_is_trusted_for(path, Path::new("/"), 0, directory) {
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::PermissionDenied,
+        "system unit source is not root-owned and protected from group or other writes",
+    ))
+}
+
+/// Check a source and both its written and resolved path chains against one owner.
+fn source_path_is_trusted_for(
+    path: &Path,
+    boundary: &Path,
+    expected_owner: u32,
+    directory: bool,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(boundary) = fs::canonicalize(boundary) else {
+            return false;
+        };
+        let Ok(resolved) = fs::canonicalize(path) else {
+            return false;
+        };
+        if !path.is_absolute() || !resolved.starts_with(&boundary) {
+            return false;
+        }
+        let masked = resolved == Path::new("/dev/null");
+        if !trusted_path_chain(path, &boundary, expected_owner, false)
+            || !trusted_path_chain(&resolved, &boundary, expected_owner, masked)
+        {
+            return false;
+        }
+        let Ok(metadata) = fs::metadata(path) else {
+            return false;
+        };
+        if directory {
+            metadata.is_dir()
+        } else {
+            metadata.is_file() || (masked && metadata.file_type().is_char_device())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, boundary, expected_owner, directory);
+        false
+    }
+}
+
+/// Check each path entry up to a trusted boundary for its owner and write mode.
+#[cfg(unix)]
+fn trusted_path_chain(path: &Path, boundary: &Path, expected_owner: u32, masked: bool) -> bool {
+    let mut current = path;
+    loop {
+        let Ok(metadata) = fs::symlink_metadata(current) else {
+            return false;
+        };
+        let symlink = metadata.file_type().is_symlink();
+        let device = masked && current == Path::new("/dev/null");
+        if !source_metadata_is_trusted(
+            metadata.uid(),
+            metadata.mode(),
+            symlink,
+            device,
+            expected_owner,
+        ) {
+            return false;
+        }
+        if current == boundary {
+            return true;
+        }
+        let Some(parent) = current.parent() else {
+            return false;
+        };
+        current = parent;
+    }
+}
+
+/// Check one source entry's owner and write bits, ignoring symlink mode bits.
+#[cfg(unix)]
+fn source_metadata_is_trusted(
+    owner: u32,
+    mode: u32,
+    symlink: bool,
+    masked_device: bool,
+    expected_owner: u32,
+) -> bool {
+    owner == expected_owner && (symlink || masked_device || mode & 0o022 == 0)
+}
+
 /// Assemble component facts after every unit has kept its own observation.
 fn assemble(roots: &Roots, ids: &[String], mut units: Vec<(Unit, Activity)>) -> NodeStatus {
     // A bare host-service mask carries no installed ExecStart or retained data.
@@ -447,26 +605,12 @@ pub fn server_data_directory(roots: &Roots) -> Option<PathBuf> {
     None
 }
 
-/// Classify a unit by its effective `ExecStart`.
-fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
-    // A mask erases ExecStart, but canonical installer names still identify
-    // their configured role. Never guess the role of a masked custom name.
-    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
-        let kind = match name {
-            "infraternal-server.service" => Kind::Server,
-            "infraternal-agent.service" => Kind::Agent,
-            _ => return None,
-        };
-        return Some(Unit {
-            scope,
-            name: name.to_owned(),
-            kind,
-            data: None,
-            state: None,
-            masked: true,
-            query_error: None,
-        });
-    }
+/// The words of a unit's effective `ExecStart`: the unit file, then its
+/// `.conf` drop-ins in file-name order, the last non-empty value winning.
+///
+/// Returns `None` when the unit is unreadable or its command cannot be split
+/// without guessing (see [`exec_words`]).
+fn effective_exec_words(dir: &Path, name: &str) -> Option<Vec<String>> {
     let mut exec: Option<String> = None;
     let mut apply = |text: &str| {
         for line in text.lines() {
@@ -495,7 +639,82 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
             apply(&text);
         }
     }
-    let words = exec.as_deref().and_then(exec_words)?;
+    exec.as_deref().and_then(exec_words)
+}
+
+/// What an installed server unit already records, so a re-run of
+/// `server init` can keep it instead of choosing new folders [#516, D395].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordedServer {
+    /// The absolute `--data` folder, when the unit names one.
+    pub data: Option<PathBuf>,
+    /// The absolute `--web-root` folder, when the unit names one.
+    pub web_root: Option<PathBuf>,
+    /// A RELATIVE `--data` or `--web-root` value the unit holds (a hand edit; the
+    /// installer only writes absolute ones). Never resolved, only reported, so
+    /// `server init` can refuse to replace a unit it cannot reproduce [#516].
+    pub relative: Vec<(String, PathBuf)>,
+}
+
+/// Read the server unit `<name>.service` in `scope`, the one `server init`
+/// would write, and return the folders it records.
+///
+/// System scope looks in the system unit directories in precedence order;
+/// user scope looks in the user's unit directory. Returns `None` when the unit
+/// is missing, masked, not an infraternal server, or unreadable. Relative
+/// recorded paths are dropped: the installer only ever writes absolute ones,
+/// and resolving one would depend on the caller's current directory.
+#[must_use]
+pub fn recorded_server_unit(roots: &Roots, scope: Scope, name: &str) -> Option<RecordedServer> {
+    let file = format!("{name}.service");
+    let directories: Vec<&PathBuf> = match scope {
+        Scope::System => roots.system_units.iter().collect(),
+        Scope::User => roots.user_units.iter().collect(),
+    };
+    let directory = directories
+        .into_iter()
+        .find(|directory| directory.join(&file).exists())?;
+    let unit = read_unit(scope, directory, &file, true)?;
+    if unit.kind != Kind::Server || unit.masked {
+        return None;
+    }
+    let words = effective_exec_words(directory, &file)?;
+    let web_root = option(&words, "--web-root");
+    let relative = [
+        ("--data", unit.data.clone()),
+        ("--web-root", web_root.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, value)| Some((flag.to_owned(), value.filter(|path| path.is_relative())?)))
+    .collect();
+    Some(RecordedServer {
+        data: unit.data.filter(|path| path.is_absolute()),
+        web_root: web_root.filter(|path| path.is_absolute()),
+        relative,
+    })
+}
+
+/// Classify a unit by its effective `ExecStart`.
+fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) -> Option<Unit> {
+    // A mask erases ExecStart, but canonical installer names still identify
+    // their configured role. Never guess the role of a masked custom name.
+    if fs::canonicalize(dir.join(name)).is_ok_and(|path| path == Path::new("/dev/null")) {
+        let kind = match name {
+            "infraternal-server.service" => Kind::Server,
+            "infraternal-agent.service" => Kind::Agent,
+            _ => return None,
+        };
+        return Some(Unit {
+            scope,
+            name: name.to_owned(),
+            kind,
+            data: None,
+            state: None,
+            masked: true,
+            query_error: None,
+        });
+    }
+    let words = effective_exec_words(dir, name)?;
     let program = Path::new(words.first()?);
     if require_infraternal && !is_infraternal_program(program) {
         return None;
@@ -714,6 +933,12 @@ fn peer_count(bytes: &[u8]) -> Option<usize> {
     None
 }
 
+/// Whether an enabled public mesh state is waiting for its first accepted server snapshot.
+fn waiting_for_server_configuration(bytes: &[u8]) -> bool {
+    // State writes these fields first, in this order, so status stays a bounded prefix check instead of parsing all peers.
+    bytes.starts_with(br#"{"enabled":true,"config":null"#)
+}
+
 /// Mesh state: the kernel interface says whether it is up, the snapshot says how many peers.
 fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let link = roots.net_class.join(MESH_INTERFACE).exists();
@@ -721,27 +946,42 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         .iter()
         .filter_map(|(unit, _)| unit.state.clone())
         .collect();
+    dirs.extend(units.iter().filter_map(|(unit, _)| {
+        (unit.kind == Kind::Server)
+            .then(|| unit.data.as_ref().map(|data| data.join("mesh")))
+            .flatten()
+    }));
     dirs.extend(roots.run_dir.clone());
     let mut unreadable = false;
     let mut found = false;
     let mut peers = None;
+    let mut waiting = false;
     for dir in dirs {
         match fs::read(dir.join("mesh-public.json")) {
             Ok(bytes) => {
                 found = true;
                 peers = peer_count(&bytes);
+                waiting = waiting_for_server_configuration(&bytes);
                 break;
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => unreadable = true,
             Err(_) => {}
         }
     }
-    match (link, peers) {
-        (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
-        (true, None) if unreadable => row("mesh", "Running", "peers need root to read"),
-        (true, None) => row("mesh", "Running", "peers unknown"),
-        (false, _) if found => row("mesh", "Stopped", "interface is down"),
-        (false, _) => row("mesh", "Not set up", ""),
+    if waiting {
+        row(
+            "mesh",
+            "Waiting",
+            "No server configuration accepted; check server and infraternal agent compatibility",
+        )
+    } else {
+        match (link, peers) {
+            (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
+            (true, None) if unreadable => row("mesh", "Running", "peers need root to read"),
+            (true, None) => row("mesh", "Running", "peers unknown"),
+            (false, _) if found => row("mesh", "Stopped", "interface is down"),
+            (false, _) => row("mesh", "Not set up", ""),
+        }
     }
 }
 

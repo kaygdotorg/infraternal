@@ -7,6 +7,8 @@ license.workspace = true
 
 [features]
 default = []
+# Public-root TLS clients opt in to the OpenSSL store helper they actually use.
+tls-roots = ["dep:openssl"]
 # Owned plugin operations and providers are opt-in above the terminal channel API.
 native-streams = ["native-wire", "global-work"]
 # Plugins retaining work beyond a socket opt in to synchronous withdrawal and joining.
@@ -18,6 +20,7 @@ placeholders = []
 
 [dependencies]
 bytes = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sqlx = { workspace = true, optional = true }

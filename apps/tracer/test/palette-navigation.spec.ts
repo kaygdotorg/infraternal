@@ -83,6 +83,10 @@ async function expectSelectedVisible(page: Page, expectedIndex?: number): Promis
   return state;
 }
 
+/**
+ * Times 100 arrow presses and 100 filter inputs on the open palette, logs both as METRIC lines and checks the filter's budget.
+ * It leaves the palette unfiltered, so the checks after it start from the whole list.
+ */
 async function measureHandlers(page: Page): Promise<void> {
   const millisecondsPerArrow = await page.evaluate(() => {
     const input = document.querySelector<HTMLInputElement>("#palette-input");
@@ -103,22 +107,30 @@ async function measureHandlers(page: Page): Promise<void> {
     }
     return (performance.now() - started) / 100;
   });
-  const millisecondsPerFilter = await page.evaluate(() => {
+  const measuredFilter = await page.evaluate(() => {
     const input = document.querySelector<HTMLInputElement>("#palette-input");
     if (!input) throw new Error("Palette input is missing");
     const started = performance.now();
+    // Two queries that both match many rows: the palette's theme rows are in the "Colour" group (the old "theme" word now matches one row, and
+    // "theme t" none, which left the palette with no options for the checks that follow).
     for (let press = 0; press < 100; press += 1) {
-      input.value = press % 2 === 0 ? "theme" : "theme t";
+      input.value = press % 2 === 0 ? "colour" : "colour p";
       input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }));
     }
-    return (performance.now() - started) / 100;
+    const elapsed = (performance.now() - started) / 100;
+    const matches = document.querySelectorAll("#palette-results .result").length;
+    // Leave the palette as it was found: unfiltered, so the rest of the test starts from the whole list.
+    input.value = "";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    return { elapsed, matches };
   });
+  expect(measuredFilter.matches, "the benchmark's last query still matches rows, so the filter did real work").toBeGreaterThan(0);
   const load = loadavg().map((value) => value.toFixed(2)).join(",");
   console.log(`ENVIRONMENT machine=${hostname()} cores=${cpus().length} load_1_5_15=${load}`);
   console.log(`METRIC name=palette_arrow_handler_ms_per_press value=${millisecondsPerArrow.toFixed(4)} presses=100 viewport=1440x900`);
-  console.log(`METRIC name=palette_filter_handler_ms_per_input value=${millisecondsPerFilter.toFixed(4)} inputs=100 viewport=1440x900`);
+  console.log(`METRIC name=palette_filter_handler_ms_per_input value=${measuredFilter.elapsed.toFixed(4)} inputs=100 viewport=1440x900`);
   expect(millisecondsPerArrow).toBeGreaterThanOrEqual(0);
-  expect(millisecondsPerFilter).toBeLessThanOrEqual(0.13);
+  expect(measuredFilter.elapsed).toBeLessThanOrEqual(0.13);
 }
 
 async function walkDownAndUp(page: Page): Promise<void> {

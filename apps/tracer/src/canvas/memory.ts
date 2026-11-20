@@ -17,7 +17,6 @@
  */
 import type { Ctx, ViewRec } from "./context";
 import { boxOf } from "./layout/geometry";
-import { endSplit } from "./layout/droplet-handle";
 import type { Backdrop } from "./backdrop";
 
 /** What the canvas does to hold less memory: culling far views, marking windows on screen, and reacting to a hidden page. */
@@ -60,7 +59,6 @@ export function createMemory(cx: Ctx, backdrop: Backdrop | undefined): Memory {
 
   const hide = (): void => {
     hidden = true;
-    endSplit();
     backdrop?.release();
     world.style.willChange = "";
     world.style.visibility = "hidden"; // every layer under the world goes with it

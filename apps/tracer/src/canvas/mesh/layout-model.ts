@@ -17,14 +17,24 @@ import { layoutMesh, type Cluster } from "./layout";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
+/**
+ * What a host card says under its name, in plain words. `restoreSafe === false` means the host runs an infraternal agent that
+ * cannot yet tell which peers a restored server database no longer allows (it predates the authority epoch, #382). The one
+ * thing a person can do about it is update that agent, so the card says "needs an update" and nothing more: the reason
+ * (what could go wrong after a restore) belongs in the operations guide, not in a line that has to fit a card. A host that is
+ * behind already says "not up to date", which is the same advice, and one that is offline cannot be updated until it is back,
+ * so the note is only added to a host that is online.
+ */
 const subOf = (n: WireNode): string => {
   if (n.state === "offline") return "offline";
   if (n.state === "behind") return "not up to date";
   const path = n.path === "relay" ? `via ${n.via ?? "another host"}` : n.path === "direct" ? "direct" : "";
   const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
-  return [path, rtt].filter(Boolean).join(" · ") || "online";
+  const note = n.restoreSafe === false ? "needs an update" : "";
+  return [path, rtt, note].filter(Boolean).join(" · ") || "online";
 };
 
+/** Build a cached, positioned Mesh layout while preserving card identity and stored pin coordinates. */
 export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: () => Readonly<Record<string, { x: number; y: number }>> | undefined): (m: Metrics) => MeshLayout {
   const objects = new Map<string, NodeModel>();
   let cache: { key: string; layout: MeshLayout; pins: unknown } | undefined;
@@ -51,7 +61,7 @@ export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: ()
       const w = p.kind === "host" ? nodes.get(p.id) : undefined;
       const members = p.kind === "tag" ? tags[p.id.slice(4)] ?? [] : [];
       const fields = p.kind === "host" && w
-        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, ...(w.os ? { os: w.os } : {}), ...(!w.address && memberOf.get(w.name)?.length ? { tagList: memberOf.get(w.name)!.map((t) => tagNodeId(t)) } : {}) }
+        ? { label: w.name, detail: w.address ?? (memberOf.get(w.name)?.map((t) => tagNodeId(t)).join(", ") || "no tags"), sub: subOf(w), state: w.state, restoreSafe: w.restoreSafe, ...(w.os ? { os: w.os } : {}), ...(!w.address && memberOf.get(w.name)?.length ? { tagList: memberOf.get(w.name)!.map((t) => tagNodeId(t)) } : {}) }
         : { label: p.id, detail: `${members.length} member${members.length === 1 ? "" : "s"}`, sub: members.slice(0, 3).join(", ") };
       let n = objects.get(p.id);
       if (!n) { n = { id: p.id, kind: p.kind, x: p.x + origin.x, y: p.y + origin.y, ...fields } as NodeModel; objects.set(p.id, n); }

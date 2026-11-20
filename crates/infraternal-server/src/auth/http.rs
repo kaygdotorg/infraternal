@@ -541,18 +541,19 @@ async fn execute(
         "device-redeem" => {
             let b: Token = body(value)?;
             #[cfg(feature = "remote")]
+            if headers
+                .get("prefer")
+                .is_some_and(|value| value == "wait=10")
+            {
+                auth.wait_for_device_join(&b.token, now, std::time::Duration::from_secs(10))
+                    .await?;
+                // Approval, session validity and receipt lifetime are all checked at wake.
+                return redeem_machine_join(auth, invitation_issuer, &b.token, current_time(auth)?)
+                    .await;
+            }
+            #[cfg(feature = "remote")]
             if auth.device_join_approved(&b.token, now).await? {
-                let approval = auth.approved_device_join(&b.token, now).await?;
-                let issuer = invitation_issuer.ok_or(Error::RemoteUnavailable)?;
-                let invitation = issuer
-                    .issue_approved_machine_join(&b.token, approval, now)
-                    .await
-                    .map_err(|status| match status {
-                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Denied,
-                        StatusCode::BAD_REQUEST => Error::Invalid,
-                        _ => Error::RemoteUnavailable,
-                    })?;
-                return Ok(Json(invitation).into_response());
+                return redeem_machine_join(auth, invitation_issuer, &b.token, now).await;
             }
             json!({"api_key":auth.device_redeem(&b.token, now).await?})
         }
@@ -657,6 +658,27 @@ async fn setup_start(auth: &Auth, value: Value, now: i64) -> super::Result<Value
         }
         _ => Err(Error::Invalid),
     }
+}
+
+/// Read current approval and issue the same exact-key receipt for either redeem path.
+#[cfg(feature = "remote")]
+async fn redeem_machine_join(
+    auth: &Auth,
+    issuer: Option<&crate::remote_http::InvitationIssuer>,
+    token: &str,
+    now: i64,
+) -> super::Result<Response> {
+    let approval = auth.approved_device_join(token, now).await?;
+    let issuer = issuer.ok_or(Error::RemoteUnavailable)?;
+    let invitation = issuer
+        .issue_approved_machine_join(token, approval, now)
+        .await
+        .map_err(|status| match status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Error::Denied,
+            StatusCode::BAD_REQUEST => Error::Invalid,
+            _ => Error::RemoteUnavailable,
+        })?;
+    Ok(Json(invitation).into_response())
 }
 
 async fn ingress(

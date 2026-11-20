@@ -7,8 +7,10 @@
  * said". Window identity is `(owner_pid, window_id)` and only lives as long as the window does, which is why an app
  * window on the canvas is never saved with the layout (a restored window id could name a different window).
  *
- * Pure functions, no DOM: unit-tested in `inventory.test.ts`.
+ * App icons are not in the list: a row names its app's icon by content hash (`iconHash`), and `app-icons.ts` fetches each one once.
+ * Parsing and searching stay free of DOM work.
  */
+import { isIconHash } from "./app-icons";
 
 /** What a stream shows: one window of one app, or one whole display. */
 export type AppTarget =
@@ -24,6 +26,10 @@ export interface AppWindowEntry {
   appName: string;
   title: string;
   bundleId?: string;
+  /** The app bundle version. */
+  appVersion?: string;
+  /** The SHA-256 of the app's 64 px icon, when the machine has one; `AppIcons` fetches it by this name. */
+  iconHash?: string;
   /** False for a window that is minimised or hidden on the machine. */
   onScreen: boolean;
   /** Point size on the machine, when it said. */
@@ -83,7 +89,8 @@ const MIN_SIDE = 60;
 /**
  * Shapes the machine's reply into an `Inventory`. Never throws: anything that is not an object gives an empty inventory. A window row is
  * dropped when its ids are missing or out of range, when it is not on layer 0, when it is under 60 points on a side, when it has no app
- * name, or when it repeats an earlier key. Up to 16 displays are kept. Windows are sorted on-screen first, then by app, title and id.
+ * name, or when it repeats an earlier key. Up to 16 displays are kept. A row's `icon` is kept only when it is a content hash.
+ * Windows are sorted on-screen first, then by app, title and id.
  */
 export function parseInventory(value: unknown): Inventory {
   const root = value && typeof value === "object" ? value as Record<string, unknown> : {};
@@ -105,9 +112,11 @@ export function parseInventory(value: unknown): Inventory {
       if (seen.has(key)) continue;
       seen.add(key);
       const bundleId = text(r.bundle_id, 256);
+      const appVersion = text(r.app_version, 128);
       windows.push({
         kind: "window", key, target: { type: "window", windowId, ownerPid }, appName, title: text(r.title)?.trim() ?? "",
-        ...(bundleId ? { bundleId } : {}), onScreen: r.on_screen !== false, ...(size ? { size } : {}),
+        ...(bundleId ? { bundleId } : {}), ...(appVersion ? { appVersion } : {}), ...(isIconHash(r.icon) ? { iconHash: r.icon } : {}),
+        onScreen: r.on_screen !== false, ...(size ? { size } : {}),
       });
     }
   }
@@ -157,7 +166,12 @@ export function matches(entry: Entry, query: string): boolean {
 export function sameInventory(a: Inventory, b: Inventory): boolean {
   if (a.windows.length !== b.windows.length || a.screens.length !== b.screens.length) return false;
   if (a.permissions.screenRecording !== b.permissions.screenRecording || a.permissions.accessibility !== b.permissions.accessibility) return false;
-  return a.windows.every((w, i) => { const o = b.windows[i]!; return w.key === o.key && w.title === o.title && w.appName === o.appName && w.onScreen === o.onScreen; })
+  return a.windows.every((w, i) => {
+    const o = b.windows[i]!;
+    return w.key === o.key && w.title === o.title && w.appName === o.appName && w.bundleId === o.bundleId
+      && w.appVersion === o.appVersion && w.iconHash === o.iconHash
+      && w.onScreen === o.onScreen;
+  })
     && a.screens.every((s, i) => { const o = b.screens[i]!; return s.key === o.key && s.name === o.name; });
 }
 

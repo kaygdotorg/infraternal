@@ -46,6 +46,19 @@ impl NativeChannel {
         Ok(Self::new(send, receive, 0))
     }
 
+    /// Lowers this bound provider stream below terminal output after the
+    /// caller has classified its opening frame and before any provider writes.
+    ///
+    /// # Errors
+    /// Returns an error if the send stream has already been retired.
+    pub async fn prioritize_terminal_output(&self) -> io::Result<()> {
+        self.send
+            .lock()
+            .await
+            .set_priority(-1)
+            .map_err(io::Error::other)
+    }
+
     /// Wraps the two halves with the given writer id.
     fn new(send: quinn::SendStream, receive: quinn::RecvStream, writer_id: u32) -> Self {
         Self {

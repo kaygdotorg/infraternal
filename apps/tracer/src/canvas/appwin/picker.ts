@@ -46,6 +46,8 @@ interface Row {
   /** Lower-cased words the field matches: the machine's name is always part of it, so a machine's name lists the machine. */
   words: string;
   appName?: string;
+  /** The content hash of the app's real icon, when the machine has one. */
+  iconHash?: string;
 }
 
 /** The rows of one machine, in the order they are shown. */
@@ -60,7 +62,7 @@ export function rowsOf(machine: HostEntry, machines: Machines): Row[] {
     rows.push({ id: `${machine.id}/${screen.key}`, choice: { kind: "stream", machine, entry: screen }, mark: "screen", name: screen.name, sub: entryTitle(screen), meta: "", words: `${machine.name} ${screen.name} screen display desktop`.toLowerCase() });
   }
   for (const w of inv?.windows ?? []) {
-    rows.push({ id: `${machine.id}/${w.key}`, choice: { kind: "stream", machine, entry: w }, mark: "app", name: w.appName, sub: entryTitle(w), meta: w.onScreen || !w.title ? "" : "minimised", words: `${machine.name} ${w.appName} ${w.title} ${w.bundleId ?? ""}`.toLowerCase(), appName: w.appName });
+    rows.push({ id: `${machine.id}/${w.key}`, choice: { kind: "stream", machine, entry: w }, mark: "app", name: w.appName, sub: entryTitle(w), meta: w.onScreen || !w.title ? "" : "minimised", words: `${machine.name} ${w.appName} ${w.title} ${w.bundleId ?? ""}`.toLowerCase(), appName: w.appName, ...(w.iconHash ? { iconHash: w.iconHash } : {}) });
   }
   return rows;
 }
@@ -152,10 +154,30 @@ export class Picker {
 
   // ---- drawing ----------------------------------------------------------------------------------------------------
 
+  /**
+   * Renders a row marker: the app's real icon when it is here, else the letter tile. A missing icon is fetched once; its arrival
+   * fires the machines' `onChange`, which repaints the rows with it.
+   */
   private markFor(row: Row): HTMLElement {
     const mark = el("span", "aw-rowmark");
-    if (row.mark === "app") mark.append(entityTile(row.appName ?? row.name));
-    else mark.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${row.mark === "shell" ? ICON.terminal : SCREEN_ICON}</svg>`;
+    if (row.mark === "app") {
+      const url = row.iconHash ? this.machines.icons.url(row.iconHash) : undefined;
+      if (row.iconHash && !url && row.choice.kind === "stream") void this.machines.icons.load(row.choice.machine.id, row.iconHash);
+      mark.dataset.icon = url ? "real" : "tile";
+      if (!url) mark.append(entityTile(row.appName ?? row.name));
+      else {
+        const image = document.createElement("img");
+        image.className = "aw-app-icon";
+        image.alt = "";
+        image.setAttribute("aria-hidden", "true");
+        image.width = 32;
+        image.height = 32;
+        image.decoding = "async";
+        image.src = url;
+        image.addEventListener("error", () => image.replaceWith(entityTile(row.appName ?? row.name)), { once: true });
+        mark.append(image);
+      }
+    } else mark.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${row.mark === "shell" ? ICON.terminal : SCREEN_ICON}</svg>`;
     return mark;
   }
 
@@ -230,11 +252,15 @@ export class Picker {
     this.popover.place();
   }
 
+  /** Brings a drawn row up to date in place: its words, and its real icon once it has arrived. */
   private updateRow(node: HTMLElement, row: Row): void {
     const name = node.querySelector<HTMLElement>(".aw-name"), sub = node.querySelector<HTMLElement>(".aw-sub"), meta = node.querySelector<HTMLElement>(".cl-sx-meta");
     if (name && name.textContent !== row.name) name.textContent = row.name;
     if (sub && sub.textContent !== (row.sub || " ")) sub.textContent = row.sub || " ";
     if (meta && meta.textContent !== row.meta) meta.textContent = row.meta;
+    // An icon that arrived since the row was drawn replaces its letter tile in place.
+    const mark = node.querySelector<HTMLElement>(".aw-rowmark");
+    if (mark?.dataset.icon === "tile" && row.iconHash && this.machines.icons.url(row.iconHash)) mark.replaceWith(this.markFor(row));
   }
 
   /** What a machine says about itself under its rows: still looking, unreachable, or missing a permission and what to do. */

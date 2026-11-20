@@ -286,6 +286,7 @@ async fn recovery_elapsed_restart_retains_only_recorded_progress() {
 }
 
 #[tokio::test]
+/// Verify that recovery completion rechecks its elapsed delay after waiting for the writer.
 async fn recovery_elapsed_completion_rechecks_delay_inside_writer_transaction() {
     let _guard = SERIAL.lock().await;
     let f = fixture_v2().await;
@@ -308,7 +309,9 @@ async fn recovery_elapsed_completion_rechecks_delay_inside_writer_transaction() 
         .await
         .unwrap();
     let software = Software::new();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let result = f
         .auth
         .registration_finish_with_verifier(

@@ -8,7 +8,7 @@
  * - Desktop: "Comfortable" (one third of the canvas, the earlier width, the default), "Wide" (half) or "Full width"
  *   (99% of the canvas).
  *
- * The choice is a device-local preference like the theme and the font, and applies live. A window the person resized by
+ * The choice belongs to the account's canvas look (D352) and applies live on every device. A window the person resized by
  * hand keeps its own width; only windows still at the default follow the setting.
  *
  * The UI size (#283) is a factor on every desktop default: a window is as many times wider as the UI is bigger, so the type
@@ -16,6 +16,7 @@
  * stays the ceiling at every size.
  */
 import { readLocal, writeLocal } from "../../../../packages/ui/src/local-pref";
+import { lookBridge } from "./themes/controller";
 
 /** The phone choices: `full` = exactly the screen width, `edge` = edge to edge with a slice of each neighbour showing, `comfortable` = the screen less the canvas margins. */
 export type PhoneSize = "full" | "edge" | "comfortable";
@@ -38,8 +39,10 @@ const PHONE: readonly string[] = ["full", "edge", "comfortable"];
 /** The values a stored desktop choice may have; anything else is ignored. */
 const DESKTOP: readonly string[] = ["comfortable", "wide", "full"];
 
-/** The person's choices from this browser. A missing or unrecognised stored value gives the default for that device. */
+/** The account's choices from its look, or the isolated browser preference when no canvas look is active. */
 export function readSizes(): WindowSizes {
+  const shared = lookBridge()?.windowSizes();
+  if (shared) return { ...shared };
   const phone = readLocal(KEYS.phone), desktop = readLocal(KEYS.desktop);
   return {
     phone: phone && PHONE.includes(phone) ? (phone as PhoneSize) : DEFAULT_SIZES.phone,
@@ -47,9 +50,11 @@ export function readSizes(): WindowSizes {
   };
 }
 
-/** Saves one choice on this browser and fires `SIZE_EVENT`. */
+/** Saves one choice through the account look when active, then fires `SIZE_EVENT`. */
 export function writeSize<K extends keyof WindowSizes>(kind: K, value: WindowSizes[K]): void {
-  writeLocal(KEYS[kind], value);
+  const bridge = lookBridge();
+  if (bridge) bridge.setWindowSize(kind, value);
+  else writeLocal(KEYS[kind], value);
   window.dispatchEvent(new CustomEvent(SIZE_EVENT));
 }
 

@@ -20,6 +20,7 @@ export interface SettingDef {
 const days = (d: number, min: number, max: number): ValueSpec => ({ kind: "duration", unit: "d", default: d, min, max });
 const minutes = (m: number, min: number, max: number): ValueSpec => ({ kind: "duration", unit: "min", default: m, min, max });
 
+/** Every setting the table names, by id: its title, help, allowed values and search words. */
 export const SETTING_DEFS: Readonly<Record<string, SettingDef>> = Object.fromEntries(([
 { id: "scrollback-lines", title: "Lines Kept", explain: "How many lines each terminal keeps for you to scroll back through.", spec: { kind: "number", unit: "lines", default: 10000, min: 1000, max: 100000 }, keywords: "scrollback history buffer" },
 { id: "multiplexer-offer", title: "Offer To Switch", explain: "Ask, in a new shell, whether to switch to the Infraternal Multiplexer.", spec: { kind: "switch", default: true }, keywords: "multiplexer tmux switch" },
@@ -29,6 +30,7 @@ export const SETTING_DEFS: Readonly<Record<string, SettingDef>> = Object.fromEnt
       { id: "join-code", title: "Join Code Lasts", explain: "How long the short code you type after “up” works.", spec: minutes(10, 1, 30), keywords: "up code join" },
       { id: "install-mode", title: "Install For", explain: "Whether a new machine gets infraternal for the whole system or for one user.", spec: { kind: "choice", options: [{ id: "system", label: "System" }, { id: "user", label: "User" }], default: "system" }, keywords: "install mode root rootless" },
       { id: "sign-in-account", title: "Sign In As", explain: "The account used to sign in to a new machine.", spec: { kind: "choice", options: [{ id: "mine", label: "Mine" }, { id: "root", label: "Root" }], default: "mine" }, keywords: "ssh account user login" },
+      { id: "app-windows", title: "App Windows", explain: "People can open the windows of apps running on their Macs here.", spec: { kind: "switch", default: true }, keywords: "desktop remote screen share mac app window stream" },
       { id: "join-mesh", title: "Join The Mesh", explain: "A new machine joins the mesh as soon as it is added.", spec: { kind: "switch", default: true }, keywords: "mesh automatically" },
 { id: "connection-keys", title: "Connection Keys", explain: "How often every machine swaps the keys that encrypt mesh traffic (WireGuard).", spec: days(7, 1, 30), keywords: "wireguard rotation rotate encryption" },
       { id: "machine-identity", title: "Machine Identity", explain: "How often each machine replaces the key that proves who it is.", spec: days(7, 1, 90), keywords: "identity rotation rotate key" },

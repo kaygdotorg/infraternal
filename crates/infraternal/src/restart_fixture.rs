@@ -8,6 +8,24 @@ use std::{
 #[path = "../../infraternal-server/tests/support/release_signing.rs"]
 mod signing;
 
+/// Keep executable fixtures beneath the effective user's private home root.
+/// Build-artifact ancestors may be group writable; restart admission must keep
+/// refusing those paths even when their final cache directory is private (#509).
+fn image_root() -> PathBuf {
+    use std::os::unix::fs::DirBuilderExt;
+    let home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+        .unwrap()
+        .expect("test account has a home directory")
+        .dir;
+    let parent = home.join(".cache/infraternal-restart-tests");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&parent)
+        .unwrap();
+    parent
+}
+
 /// Private roots for executable admission and short Unix sockets, owned by one test.
 /// Executables stay under the effective user's real home even when the gate puts state in /tmp.
 pub(crate) struct Directory(
@@ -21,17 +39,7 @@ impl Directory {
     /// Allocate unique private roots without relying on shared state or the invoking user's HOME.
     pub(crate) fn new() -> Self {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        let home = nix::unistd::User::from_uid(nix::unistd::Uid::effective())
-            .unwrap()
-            .expect("test account has a home directory")
-            .dir;
-        let parent = home.join(".cache/infraternal-restart-tests");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&parent)
-            .unwrap();
-        let images = nix::unistd::mkdtemp(&parent.join("r-XXXXXX")).unwrap();
+        let images = nix::unistd::mkdtemp(&image_root().join("r-XXXXXX")).unwrap();
         let mut directory = Self(images, PathBuf::new());
         let requested = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT").map(PathBuf::from);
         let sockets = if let Some(root) = requested.filter(|root| {
@@ -71,6 +79,25 @@ impl Drop for Directory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
         let _ = std::fs::remove_dir_all(&self.1);
+    }
+}
+
+/// Both private roots disappear after successful tests and after assertion failures.
+#[test]
+fn directory_removes_roots_on_drop_and_unwind() {
+    for unwind in [false, true] {
+        let directory = Directory::new();
+        let images = directory.0.clone();
+        let sockets = directory.state().to_owned();
+        std::fs::write(images.join("image"), b"fixture").unwrap();
+        std::fs::write(sockets.join("state"), b"fixture").unwrap();
+        let result = std::panic::catch_unwind(move || {
+            let _directory = directory;
+            assert!(!unwind, "fixture panic");
+        });
+        assert_eq!(result.is_err(), unwind);
+        assert!(!images.exists());
+        assert!(!sockets.exists());
     }
 }
 
@@ -171,32 +198,46 @@ pub(crate) fn scratch_root() -> PathBuf {
         .to_owned()
 }
 
-/// A replacement binary for restart tests, together with a freshly signed release manifest
+/// A replacement binary for restart tests, together with freshly signed release metadata
 /// and the throwaway trust file that verifies it.
 ///
-/// The signing key lives only in memory while the fixture is created; the files written next
-/// to the binary (`MANIFEST`, `MANIFEST.sig`, `VERSION`, `fixture.trust`) hold no secret.
+/// The metadata has the shape the release signer Worker publishes (#211 S1): a sorted
+/// `SHA256SUMS` that also lists a nested license notice, its `SHA256SUMS.sig`, and
+/// `VERSION`. The signing key lives only in memory while the fixture is created; the files
+/// written next to the binary (`SHA256SUMS`, `SHA256SUMS.sig`, `VERSION`, `fixture.trust`)
+/// hold no secret.
 pub(crate) struct Signed {
     pub path: PathBuf,
     trust: String,
 }
 impl Signed {
-    /// Writes `bytes` to `path` as an executable and signs a manifest for it, in the same
-    /// folder. The manifest declares an `edge` release named for this platform's artifact.
+    /// Writes `bytes` to `path` as an executable and signs release metadata for it, in the
+    /// same folder. The metadata declares an `edge` release that lists this platform's artifact.
     pub fn new(path: PathBuf, bytes: &[u8]) -> Self {
         // Tests exec this file while sibling tests fork; see `test_executable`.
         crate::test_executable::write(&path, bytes, 0o700);
         let version = b"edge-20261012T000000Z\n";
-        let name = super::artifact_name();
-        let manifest = format!(
-            "infraternal-release-manifest-v1\nversion edge-20261012T000000Z\nchannel edge\n{}  VERSION\n{}  {name}\n",
-            hex(&openssl::sha::sha256(version)),
-            hex(&openssl::sha::sha256(bytes))
-        );
-        let (armor, trust) = signing::sign(manifest.as_bytes());
+        let mut entries = [
+            ("VERSION".to_owned(), hex(&openssl::sha::sha256(version))),
+            (
+                super::artifact_name().to_owned(),
+                hex(&openssl::sha::sha256(bytes)),
+            ),
+            (
+                "licenses/libghostty-vt/README.md".to_owned(),
+                hex(&openssl::sha::sha256(b"notice")),
+            ),
+        ];
+        entries.sort();
+        let mut sums = String::new();
+        for (name, digest) in &entries {
+            use std::fmt::Write;
+            writeln!(sums, "{digest}  {name}").unwrap();
+        }
+        let (armor, trust) = signing::sign(sums.as_bytes());
         let parent = path.parent().unwrap();
-        std::fs::write(parent.join("MANIFEST"), manifest).unwrap();
-        std::fs::write(parent.join("MANIFEST.sig"), armor).unwrap();
+        std::fs::write(parent.join("SHA256SUMS"), sums).unwrap();
+        std::fs::write(parent.join("SHA256SUMS.sig"), armor).unwrap();
         std::fs::write(parent.join("VERSION"), version).unwrap();
         std::fs::write(parent.join("fixture.trust"), &trust).unwrap();
         Self { path, trust }
@@ -213,21 +254,23 @@ impl Signed {
         let trust = std::fs::read_to_string(path.parent().unwrap().join("fixture.trust")).unwrap();
         Self { path, trust }
     }
-    /// Opens the binary the way the restart code does, checking its manifest and signature
+    /// Opens the binary the way the restart code does, checking its signed metadata
     /// against this fixture's trust file.
     pub fn open(&self) -> io::Result<super::Opened> {
         super::Opened::open_with(self.path.clone(), |file, path| self.verify(file, path))
     }
-    /// Re-checks an already open `file` against the manifest next to this fixture's binary.
+    /// Re-checks an already open `file` against the signed metadata next to this fixture's binary.
     pub fn verify_snapshot(&self, file: &File) -> io::Result<()> {
         self.verify(file, &self.path)
     }
+    /// Runs the production metadata check on `file` with this fixture's throwaway trust.
     fn verify(&self, file: &File, path: &Path) -> io::Result<()> {
-        super::verify_metadata(file, path, |file, name, manifest, signature| {
-            infraternal_server::release_manifest::verify_manifest_with_trust(
-                file,
+        super::verify_metadata(file, path, |version, image, name, sums, signature| {
+            infraternal_server::release_verify::verify_identity_with_trust(
+                version,
+                image,
                 name,
-                manifest,
+                sums,
                 signature,
                 &self.trust,
             )
@@ -242,18 +285,29 @@ impl Signed {
 /// fixtures therefore run from this copy (about 60 MB). It is made once per
 /// build of the test executable and shared; each test still signs its own
 /// private copy. A `source` that already is a stripped image is returned as is.
+/// The cache uses the same trusted home ancestry as signed fixtures, so a
+/// group-writable build directory cannot turn a valid self-reload into refusal.
+/// Last-use timestamps include already stripped child images. Lookup, publication,
+/// renewal and pruning share a short directory lock across test processes.
 pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     /// Serializes building the cached image within this test process.
     static BUILDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let cache = image_root().join("stripped");
     if source
         .file_name()
         .is_some_and(|name| name.to_string_lossy().ends_with(".all-stripped"))
     {
+        if source.parent() == Some(cache.as_path()) {
+            let cache_lock = lock_stripped_cache(&cache);
+            File::open(source)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now())
+                .unwrap();
+            cache_lock.unlock().unwrap();
+        }
         return source.to_owned();
     }
-    let target_root = crate::restart_binary::fixture::scratch_root();
-    let cache = target_root.join("restart-test-images");
     std::fs::create_dir_all(&cache).unwrap();
     std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
     // Include source identity so a rebuilt test executable cannot reuse stale fixture bytes.
@@ -281,13 +335,17 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
     let _building = BUILDING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache_lock = lock_stripped_cache(&cache);
     if !image.exists() {
+        // Large copies and strip processes must not queue unrelated builds behind this lock.
+        cache_lock.unlock().unwrap();
         let mut staging_name = image_name;
         staging_name.push(format!(".{}", uuid::Uuid::new_v4().simple()));
         let staging = cache.join(staging_name);
         crate::test_executable::copy(source, &staging, 0o700);
         strip_all(&staging);
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        cache_lock.lock().unwrap();
         match std::fs::hard_link(&staging, &image) {
             Ok(()) => std::fs::remove_file(&staging).unwrap(),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -295,11 +353,149 @@ pub(crate) fn stripped_test_image(source: &Path) -> PathBuf {
             }
             Err(error) => panic!("could not retain the stripped test image: {error}"),
         }
+        prune_stripped_images(&cache, &image, std::time::SystemTime::now());
     }
     let metadata = std::fs::symlink_metadata(&image).unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.mode() & 0o777, 0o700);
+    // A read-only descriptor renews grace without an inheritable executable writer.
+    File::open(&image)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    cache_lock.unlock().unwrap();
     image
+}
+
+/// Lock the stable cache directory inode for lookup, renewal, publication and pruning.
+/// Cache maintenance never removes this directory. Callers release the lock before
+/// copying or stripping an image, and on return so forked children cannot prolong it.
+fn lock_stripped_cache(cache: &Path) -> File {
+    let directory = File::open(cache).unwrap();
+    directory.lock().unwrap();
+    directory
+}
+
+/// Keep the three newest completed images, plus the caller's image and a six-hour grace
+/// period for concurrent test processes. Sweep only after creating an image, so cache hits
+/// stay cheap. Staging copies, symlinks and directories are never eviction candidates.
+/// Cleanup is best effort: another process can remove an entry between listing and unlink.
+fn prune_stripped_images(cache: &Path, current: &Path, now: std::time::SystemTime) {
+    let mut images: Vec<_> = std::fs::read_dir(cache)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "all-stripped" {
+                return None;
+            }
+            let metadata = std::fs::symlink_metadata(&path).ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            Some((metadata.modified().ok()?, path))
+        })
+        .collect();
+    images.sort_unstable_by(|left, right| right.cmp(left));
+    for (modified, path) in images.into_iter().skip(3) {
+        if path != current
+            && now
+                .duration_since(modified)
+                .is_ok_and(|age| age > Duration::from_hours(6))
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Pruning bounds old builds without touching recent concurrent users or unfinished copies.
+#[test]
+fn stripped_cache_prunes_only_stale_completed_images() {
+    use std::os::unix::fs::symlink;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let directory = Directory::new();
+    let cache = &directory.0;
+    let now = UNIX_EPOCH + Duration::from_secs(100_000);
+    let mut images = Vec::new();
+    for index in 0..7 {
+        let path = cache.join(format!("{index}.all-stripped"));
+        let file = File::create(&path).unwrap();
+        file.set_modified(now - Duration::from_secs(30_000 - index * 1_000))
+            .unwrap();
+        images.push(path);
+    }
+    let recent = cache.join("recent.all-stripped");
+    let file = File::create(&recent).unwrap();
+    file.set_modified(now - Duration::from_secs(6 * 60 * 60 - 1))
+        .unwrap();
+    let future = cache.join("future.all-stripped");
+    File::create(&future)
+        .unwrap()
+        .set_modified(now + Duration::from_secs(1))
+        .unwrap();
+    let staging = cache.join("copy.all-stripped.staging");
+    File::create(&staging)
+        .unwrap()
+        .set_modified(SystemTime::UNIX_EPOCH)
+        .unwrap();
+    let link = cache.join("link.all-stripped");
+    symlink(&images[1], &link).unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(|| {
+                barrier.wait();
+                prune_stripped_images(cache, &images[0], now);
+            });
+        }
+    });
+    assert!(images[0].exists(), "the caller's image must survive");
+    for image in &images[1..6] {
+        assert!(!image.exists(), "stale image retained: {}", image.display());
+    }
+    assert!(images[6].exists(), "keep the three newest completed images");
+    assert!(recent.exists());
+    assert!(future.exists());
+    assert!(staging.exists());
+    assert!(std::fs::symlink_metadata(link).unwrap().is_symlink());
+    // More recent images than the count limit must all survive, including the age boundary.
+    let mut active = Vec::new();
+    for index in 0..5 {
+        let path = cache.join(format!("active-{index}.all-stripped"));
+        File::create(&path)
+            .unwrap()
+            .set_modified(now - Duration::from_secs(6 * 60 * 60 - index))
+            .unwrap();
+        active.push(path);
+    }
+    prune_stripped_images(cache, &images[0], now);
+    assert!(active.iter().all(|path| path.exists()));
+}
+
+/// Reusing an old build renews its eviction grace; a tiny system ELF keeps this test cheap.
+#[cfg(target_os = "linux")]
+#[test]
+fn stripped_cache_reuse_renews_grace() {
+    use std::time::UNIX_EPOCH;
+    let directory = Directory::new();
+    let source = directory
+        .0
+        .join(format!("cache-hit-{}", uuid::Uuid::new_v4().simple()));
+    crate::test_executable::copy(Path::new("/bin/true"), &source, 0o700);
+    let image = stripped_test_image(&source);
+    let mut renewed = true;
+    for current in [&source, &image] {
+        File::open(&image)
+            .unwrap()
+            .set_modified(UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(stripped_test_image(current), image);
+        renewed &= std::fs::metadata(&image).unwrap().modified().unwrap() > UNIX_EPOCH;
+    }
+    std::fs::remove_file(image).unwrap();
+    assert!(
+        renewed,
+        "reusing an old image must renew its eviction grace"
+    );
 }
 
 /// Removes all symbols and debug sections from the image at `path`, in place.

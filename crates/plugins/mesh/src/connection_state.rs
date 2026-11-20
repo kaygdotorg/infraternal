@@ -291,6 +291,7 @@ mod tests {
                     ipv6: "fd01::3".parse().expect("IPv6"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound: TrafficPolicy::Ports(
                 numbers
@@ -353,6 +354,7 @@ mod tests {
                             ipv6: "fd01::3".parse().expect("IPv6"),
                         },
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::Ports(
                         granted

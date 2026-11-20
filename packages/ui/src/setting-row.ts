@@ -58,7 +58,7 @@ export interface SettingRow {
 }
 
 /** Counter-clockwise arrow: back to the default. */
-const RESET_ICON = '<path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5"/><path d="M4.5 4.5v4h4"/>';
+export const RESET_ICON = '<path d="M4.5 12a7.5 7.5 0 1 0 2.4-5.5"/><path d="M4.5 4.5v4h4"/>';
 
 /** Gives each row its own element ids, so its label and help can be read out with its field. */
 let serial = 0;

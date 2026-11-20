@@ -123,6 +123,7 @@ async fn proxy_tls_registration_session_split_cookies() {
     registration_session(true).await;
 }
 
+/// Exercise the registration session over the configured TLS fixture with 24-word recovery material.
 async fn registration_session(behind_proxy: bool) {
     let _serial = SERIAL.lock().await;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -238,7 +239,9 @@ async fn registration_session(behind_proxy: bool) {
         "split fields must reuse the browser binding"
     );
     let user = str_field(&start, "user_id");
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let mut software = Software::new();
     software.rp_id = "localhost";
     let dek = rand::random::<[u8; 32]>();

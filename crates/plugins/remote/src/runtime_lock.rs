@@ -28,8 +28,16 @@ pub const LOCK: &str = ".lifetime-lock";
 /// a mode asks for a refresh (76) instead of refusing the mode. Helpers before levels print
 /// nothing and read as 0. Level 1: `inspect`/`retire`; level 2: `sessions`; level 3: `sessions-stop`;
 /// level 4: `sessions-count`; level 5: `enrolled`; level 6: `stage-processes`;
-/// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]).
-pub const LEVEL: &[u8] = b"7\n";
+/// level 7: root's `infraternal up` base may be 0711 ([`traversable_base`]);
+/// level 8: authenticated `takeover-terminals` confirmation records (D368);
+/// level 9: those records identify terminals by their shim, cover host-login sessions and carry the
+/// close unit, terminal name and other-program count (#433). A level-8 helper from an earlier test build
+/// would still answer that mode with the old records, so the level moves and such a cache is refreshed.
+pub const LEVEL: &[u8] = b"9\n";
+
+/// Authenticate terminal records without attaching to or changing their sessions (D368).
+#[path = "takeover_terminals.rs"]
+mod takeover_terminals;
 
 fn refused() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
@@ -137,7 +145,7 @@ pub struct AcquireHold {
 pub static ACQUIRE_HOLD: std::sync::Mutex<Option<AcquireHold>> = std::sync::Mutex::new(None);
 
 /// Takes the runtime lifetime lock for `state`, bound to `host` when given,
-/// under the parent directory's shared admission guard. It may block: on
+/// under the install's shared admission guard (its owner-only guard file). It may block: on
 /// filesystem work, and on the kernel socket dump under its hang-only bound.
 /// So async callers run it off their event loop. With `test-support`, a
 /// pending [`AcquireHold`] for `state` first holds the call until it is
@@ -163,12 +171,22 @@ fn acquire_bound(state: &Path, host: Option<&str>) -> io::Result<File> {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    // Cleanup holds the exclusive parent-directory setup guard. This shared
-    // admission guard prevents starting between lock-file unlink and root retirement.
-    let parent = File::open(state.parent().and_then(Path::parent).ok_or_else(refused)?)?;
-    parent.lock_shared()?;
+    // Cleanup holds the exclusive setup guard. This shared admission guard
+    // prevents starting between lock-file unlink and root retirement. It is
+    // the install's owner-only guard file, never the shared parent directory
+    // that any local account could lock (#399, J569 P1-1). Setup installs
+    // only under a private parent (it refuses any other), so a runtime whose
+    // base sits elsewhere (a development or test directory) has no setup to
+    // wait for and takes no admission lock.
+    let base = state.parent().ok_or_else(refused)?;
+    let _admission = if super::uninstall::private_parent(base) {
+        let guard = super::uninstall::open_setup_guard(base)?;
+        guard.lock_shared()?;
+        Some(guard)
+    } else {
+        None
+    };
     if let Some(host) = host {
-        let base = state.parent().ok_or_else(refused)?;
         let _root = directory(base)?;
         if super::uninstall::public_file(
             &base.join(".bootstrap-owner"),
@@ -716,7 +734,7 @@ fn session_sockets(runtime: &File) -> Result<Vec<(PathBuf, fs::Metadata)>, u8> {
             if metadata.file_type().is_socket()
                 && metadata.uid() == nix::unistd::Uid::effective().as_raw()
             {
-                files.push((entry.path(), metadata));
+                files.push((fs::canonicalize(entry.path()).map_err(|_| 77)?, metadata));
                 if files.len() > 1024 {
                     return Err(77);
                 }
@@ -1060,6 +1078,14 @@ pub fn command(arguments: &mut dyn Iterator<Item = std::ffi::OsString>) -> Optio
         // Session inspection takes no lock and never removes anything.
         if mode == "sessions" {
             return sessions(&runtime);
+        }
+        if mode == "takeover-terminals" {
+            return writeln!(
+                io::stdout(),
+                "{}",
+                takeover_terminals::records(&runtime, base)?
+            )
+            .map_err(|_| 77);
         }
         if mode == "sessions-count" {
             let open = open_sessions(&runtime)?;

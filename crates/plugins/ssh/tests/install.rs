@@ -284,8 +284,14 @@ impl Fixture {
             })
             .unwrap()
     }
+    /// The fixture account's rootless installation base.
     fn base(&self) -> PathBuf {
         self.root.join(".local/share/infraternal")
+    }
+    /// The owner-only file every setup command and a starting infraternal
+    /// agent `flock` (`setup_guard.sh`, #399 J569 P1-1).
+    fn setup_guard_file(&self) -> PathBuf {
+        self.root.join(".local/share/infraternal.bootstrap-guard")
     }
 }
 impl Drop for Fixture {
@@ -709,13 +715,13 @@ async fn commit_signal_retains_journal_until_proof_and_on_cancel() {
             }) => { result.unwrap(); }
         }
         assert!(stage.join("activating").exists());
-        // A starting agent takes a shared lock on the installation's parent
-        // before it binds; admission waiting for proof must not block it (#230).
-        let parent = fixture.base().parent().unwrap().to_owned();
+        // A starting agent takes a shared lock on the installation's guard
+        // file before it binds; admission waiting for proof must not block it (#230).
+        let guard = fixture.setup_guard_file();
         assert!(
             std::process::Command::new("flock")
                 .args(["-s", "-n"])
-                .arg(&parent)
+                .arg(&guard)
                 .arg("true")
                 .status()
                 .unwrap()
@@ -785,11 +791,11 @@ async fn commit_waits_for_a_brief_shared_holder_and_refuses_a_long_one() {
         }
         // The holder takes the same shared lock a starting session takes and
         // keeps it until its stdin closes.
-        let parent = fixture.base().parent().unwrap().to_owned();
-        let inode = std::fs::metadata(&parent).unwrap().ino();
+        let guard = fixture.setup_guard_file();
+        let inode = std::fs::metadata(&guard).unwrap().ino();
         let mut holder = std::process::Command::new("flock")
             .arg("-s")
-            .arg(&parent)
+            .arg(&guard)
             .args(["sh", "-c", "echo ready; exec cat >/dev/null"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -2634,6 +2640,8 @@ async fn installed_infraternal_agent_always_restarts_without_start_limit() {
     transaction.rollback().await.unwrap();
 }
 
+/// A staged shell bridge carries protocol bytes unchanged, and while it is
+/// live no setup command holds the setup guard file.
 #[tokio::test]
 async fn staged_shell_bridge_keeps_protocol_bytes_and_releases_setup_guard() {
     let f = Fixture::new();
@@ -2659,7 +2667,7 @@ async fn staged_shell_bridge_keeps_protocol_bytes_and_releases_setup_guard() {
     assert_eq!(output, frame);
     let mut lock = Command::new("flock");
     assert!(
-        lock.args(["-n", f.base().parent().unwrap().to_str().unwrap(), "true"])
+        lock.args(["-n", f.setup_guard_file().to_str().unwrap(), "true"])
             .status()
             .await
             .unwrap()
@@ -2817,6 +2825,47 @@ async fn one_command_channel_carries_check_verified_upload_and_bridge_bytes() {
     assert_eq!(session.streams.load(std::sync::atomic::Ordering::SeqCst), 1);
     drop(bridge);
     transaction.rollback().await.unwrap();
+}
+
+/// D368: terminal-bearing offers must survive the retained SSH check channel before any upload.
+#[tokio::test]
+async fn duplex_check_carries_terminal_confirmation_records_larger_than_512_bytes() {
+    let fixture = Fixture::new();
+    let session = Local {
+        root: fixture.root.clone(),
+    };
+    let terminals = (1_u128..=40)
+        .map(|id| {
+            format!(
+                "{},726f6f74,62617368,1792195200,7074732f33,0,session-8.scope,{}",
+                uuid::Uuid::from_u128(id).simple(),
+                "a".repeat(64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let record = format!(
+        "INFRATERNAL_CHECK_V1\nLinux\nx86_64\nsystemd\n0\nno\nyes\nyes\nno\nINFRATERNAL_SETUP_INSTALLED {} 64:1234 live ready {terminals}\n",
+        "1".repeat(32)
+    );
+    assert!(record.len() > 4096);
+    let check = format!(
+        "printf %s {}",
+        infraternal_plugin_ssh::transport::shell_quote(&record)
+    );
+    let (output, checked) = Installation::check_channel(&session, &check).await.unwrap();
+    assert_eq!(output.stdout, record.as_bytes());
+    assert!(matches!(
+        infraternal_plugin_ssh::previous_attempt::parse_check_with_absence(&output.stdout)
+            .unwrap()
+            .2,
+        infraternal_plugin_ssh::previous_attempt::Remains::Installed(_)
+    ));
+    assert!(
+        !fixture.base().exists(),
+        "no staging while asking for consent"
+    );
+    drop(checked);
 }
 
 #[tokio::test]
@@ -4348,13 +4397,13 @@ impl infraternal_plugin_ssh::transport::SshTransport for LocalTransport {
 /// `--bootstrap-uninstall <host>` contract (see the comment inside).
 fn with_owner_scoped_uninstall(fixture: &Fixture) {
     // The installed binary's owner-scoped uninstall contract, as the real CLI's
-    // `--bootstrap-uninstall <host>`: take the setup lock on the base's parent
+    // `--bootstrap-uninstall <host>`: take the setup lock on the base's guard file
     // without waiting (the real one refuses after a short wait), and remove only
     // when `.bootstrap-owner` names the host. It finds its install from its own
     // path, never from $HOME.
     let payload = std::fs::read_to_string(&fixture.binary).unwrap().replacen(
         "#!/bin/sh\n",
-        "#!/bin/sh\nif [ \"$1\" = --bootstrap-uninstall ]; then base=$(dirname \"$(dirname \"$0\")\"); exec 8< \"$(dirname \"$base\")\"; flock -n 8 || exit 75; [ \"$(cat \"$base/.bootstrap-owner\")\" = \"$2\" ] || exit 1; home=$(dirname \"$(dirname \"$(dirname \"$base\")\")\"); rm -rf \"$base\" \"$base.bootstrap-cache\" \"$home/.local/bin/infraternal\" \"$home/.config/systemd/user/infraternal-agent.service\"; exit 0; fi\n",
+        "#!/bin/sh\nif [ \"$1\" = --bootstrap-uninstall ]; then base=$(dirname \"$(dirname \"$0\")\"); exec 8< \"$base.bootstrap-guard\"; flock -n 8 || exit 75; [ \"$(cat \"$base/.bootstrap-owner\")\" = \"$2\" ] || exit 1; home=$(dirname \"$(dirname \"$(dirname \"$base\")\")\"); rm -rf \"$base\" \"$base.bootstrap-cache\" \"$home/.local/bin/infraternal\" \"$home/.config/systemd/user/infraternal-agent.service\"; exit 0; fi\n",
         1,
     );
     executable(&fixture.binary, &payload);

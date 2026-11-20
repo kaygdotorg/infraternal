@@ -39,10 +39,15 @@ export interface AuthorityControl {
   dispose(): void;
 }
 
+/** What the authority control needs from its host page: the provisioning service, who may unlock, and what hosts exist. */
 export interface AuthorityOptions {
   service: () => Promise<ProvisioningService>;
   /** Whether the viewer is an administrator, when the client knows; the server enforces it either way. */
   canUnlock?: () => boolean;
+  /** Whether any host other than this server itself exists; see `authority-control.on-demand.ts`. Absent means "yes". */
+  hasRemoteHosts?: () => boolean;
+  /** Tells the control when the set of hosts changes (the list arrives after the page starts); returns a remover. */
+  onHostsChange?: (listener: () => void) => () => void;
 }
 
 /** Waits at most this long for the browser to be idle: the real control's first check is due 1.2 s after the handle. */

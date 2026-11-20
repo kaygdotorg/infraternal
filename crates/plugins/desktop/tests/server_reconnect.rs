@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use bytes::Bytes;
 use infraternal_plugin_api::{
-    Operation, Plugin,
+    Operation, Plugin, ReplySender,
     streams::{NodeHost, WireLane, WireStreamDef},
 };
 use infraternal_plugin_desktop::{
@@ -11,8 +11,9 @@ use infraternal_plugin_desktop::{
     server::DesktopServer,
 };
 use infraternal_protocol::{
-    Frame, decode_frame,
-    desktop::{Delivery, Message},
+    Frame, decode_frame, decode_muxed_frame,
+    desktop::{Delivery, Message, WINDOW_CLOSED},
+    encode_muxed_frame_into,
 };
 use std::sync::{
     Arc, Mutex,
@@ -40,10 +41,13 @@ impl WireLane for Lane {
     }
     fn retire(&self) {}
 }
+/// Simulates the host source before and after its first capture lane ends.
 struct Node {
     lane: Arc<Lane>,
     opens: AtomicUsize,
     second_lane: Option<Arc<Lane>>,
+    /// Reports the captured Mac window gone on the first re-preparation.
+    closed_during_disconnect: bool,
     floors: Mutex<Vec<u64>>,
     preparations: Mutex<Vec<Start>>,
     prepared: Notify,
@@ -79,6 +83,12 @@ impl NodeHost for Node {
                         .unwrap_or(0),
                 );
                 self.prepared.notify_one();
+                if self.closed_during_disconnect && self.opens.load(Ordering::Relaxed) > 0 {
+                    return Ok(serde_json::to_vec(
+                        &serde_json::json!({"session_id":input["session_id"],"state":"gone"}),
+                    )
+                    .unwrap());
+                }
             }
             Ok(serde_json::to_vec(&serde_json::json!({"session_id":input["session_id"]})).unwrap())
         })
@@ -140,8 +150,8 @@ impl infraternal_plugin_api::SocketHost for Host {
     }
 }
 
-// The node fixture retains no metadata across a dropped capture leg: each
-// preparation records precisely what a fresh node process would receive.
+/// Checks that a new source receives the last size forwarded to its predecessor.
+/// The node fixture records each preparation without retaining the old lane's settings.
 #[tokio::test]
 async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initial_size() {
     let (media, rx) = mpsc::channel(4);
@@ -153,6 +163,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         }),
         opens: AtomicUsize::new(0),
         second_lane: None,
+        closed_during_disconnect: false,
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
         prepared: Notify::new(),
@@ -163,6 +174,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         .start(
             node.clone(),
             Start {
+                passive_geometry: false,
                 target: Target::Window {
                     window_id: 9,
                     owner_pid: 42,
@@ -208,10 +220,15 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
     })
     .await
     .unwrap();
-    let restored = node.preparations.lock().unwrap()[1].size;
+    let restored = node.preparations.lock().unwrap()[1].clone();
     server.stop(id, "owner").await.unwrap();
     server.configure(false);
     server.stopped().await;
+    assert!(
+        restored.passive_geometry,
+        "rebuild must wait for fresh viewer resize"
+    );
+    let restored = restored.size;
     assert_eq!(
         (restored.width, restored.height),
         (1920, 1080),
@@ -241,6 +258,7 @@ fn video(sequence: u64) -> Bytes {
     .unwrap();
     Bytes::from(wire)
 }
+/// Checks that the restarted source resumes media above the last delivered sequence.
 #[tokio::test]
 async fn source_restart_receives_the_server_video_floor_and_continues_live_media() {
     let (first, rx) = mpsc::channel(4);
@@ -255,6 +273,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
             media: tokio::sync::Mutex::new(second_rx),
             controls,
         })),
+        closed_during_disconnect: false,
         floors: Mutex::new(Vec::new()),
         opens: AtomicUsize::new(0),
         preparations: Mutex::new(Vec::new()),
@@ -266,6 +285,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
         .start(
             node.clone(),
             Start {
+                passive_geometry: false,
                 target: Target::Window {
                     window_id: 9,
                     owner_pid: 42,
@@ -313,4 +333,119 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
         "node process replacement lost the server-held sequence high water"
     );
     assert_eq!(resumed.unwrap().unwrap().sequence, 42);
+}
+
+/// A confirmed native close ends the existing viewer and prevents reuse of its cached picture.
+#[tokio::test]
+async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
+    let (media, rx) = mpsc::channel(4);
+    let (controls, mut received) = mpsc::channel(8);
+    let node = Arc::new(Node {
+        lane: Arc::new(Lane {
+            media: tokio::sync::Mutex::new(rx),
+            controls,
+        }),
+        second_lane: None,
+        closed_during_disconnect: true,
+        opens: AtomicUsize::new(0),
+        floors: Mutex::new(Vec::new()),
+        preparations: Mutex::new(Vec::new()),
+        prepared: Notify::new(),
+    });
+    let server = DesktopServer::new(10);
+    server.configure(true);
+    let id = server
+        .start(
+            node.clone(),
+            Start {
+                passive_geometry: false,
+                target: Target::Window {
+                    window_id: 9,
+                    owner_pid: 42,
+                },
+                size: Size {
+                    width: 960,
+                    height: 600,
+                    canvas_width: 480.0,
+                    canvas_height: 300.0,
+                    backing_scale: 2.0,
+                },
+            },
+            Delivery::Reliable,
+        )
+        .await
+        .unwrap();
+    received.recv().await.unwrap();
+    received.recv().await.unwrap();
+    let (requests, inbox) = mpsc::channel(8);
+    let (outbox, mut replies) = mpsc::channel(8);
+    let socket = tokio::spawn(server.clone().run(
+        Arc::new(Host),
+        inbox,
+        ReplySender::new(outbox, "desktop", 1),
+        Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicU64::new(0)
+        })),
+    ));
+    let attach = |stream| {
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            stream,
+            &Frame::Desktop(Message::Attach {
+                session_id: &id,
+                delivery: Delivery::Reliable,
+            }),
+            &mut wire,
+        )
+        .unwrap();
+        requests.send(Bytes::from(wire))
+    };
+    attach(1).await.unwrap();
+    media.send(video(41)).await.unwrap();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&first.wire).unwrap().frame,
+        Frame::Desktop(Message::Video { sequence: 41, .. })
+    ));
+
+    drop(first);
+    drop(media);
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&ended.wire).unwrap().frame,
+        Frame::Close {
+            code: WINDOW_CLOSED,
+            ..
+        }
+    ));
+    attach(3).await.unwrap();
+    let reattached = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reattached = decode_muxed_frame(&reattached.wire).unwrap();
+    assert_eq!(reattached.stream_id, 3);
+    assert!(matches!(
+        reattached.frame,
+        Frame::Close {
+            code: WINDOW_CLOSED,
+            ..
+        }
+    ));
+    drop(requests);
+    socket.await.unwrap();
+    let opens = node.opens.load(Ordering::Relaxed);
+    server.configure(false);
+    server.stopped().await;
+
+    assert_eq!(
+        opens, 1,
+        "the server reopened a capture lane for a closed window"
+    );
 }

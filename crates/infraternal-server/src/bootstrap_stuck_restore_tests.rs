@@ -292,7 +292,7 @@ impl Run {
         let scripts = Arc::new(Mutex::new(Vec::new()));
         let reached = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             Arc::new(HostSession {
                 check,
@@ -673,8 +673,13 @@ async fn the_confirmation_wait_does_not_use_up_a_later_command_bound() {
     let deadline = Duration::from_secs(10);
     let run = Run::start_with(&f, &home, check, digest, Stop::Join, Some(deadline));
     let challenge = run.offer().await;
-    // sleep: the person decides after a later command’s entire budget has elapsed.
-    tokio::time::sleep(deadline + Duration::from_secs(1)).await;
+    // Keep SQLite setup and the first offer on a running clock; only the decision wait is virtual.
+    tokio::time::pause();
+    // Advance beyond the first command's budget before starting a fresh command.
+    tokio::time::advance(deadline + Duration::from_secs(1)).await;
+    // Let any timer-driven work from the first command observe its expired deadline.
+    tokio::task::yield_now().await;
+    tokio::time::resume();
     run.confirm(challenge);
     let event = finished(run.batch()).await;
     assert!(!event.message.contains("time limit"), "{}", event.message);

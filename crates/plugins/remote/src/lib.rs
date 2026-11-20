@@ -96,10 +96,19 @@ pub const UNINSTALL: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// The frames between the server and the root relay of a root upgrade (D376).
+/// Plain std, so the SSH plugin's relay adapter uses it without the transport.
+pub mod privilege_relay;
+/// Opening the one-use sealed password of a root upgrade (D274, D376).
+#[cfg(feature = "agent")]
+pub mod privilege_seal;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
+/// Shared wire decoder for the authenticated removal action.
+#[cfg(feature = "agent")]
+pub mod uninstall_request;
 
 /// Report line for a kernel object uninstall leaves in place (#235).
 /// The server's removal reply shares it, so it lives outside the Linux-only

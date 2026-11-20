@@ -388,8 +388,9 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
     const done = getComputedStyle(document.querySelector<SVGElement>("#copy-recovery .is-done")!);
     return { idleFilter: idle.filter, idleScale: new DOMMatrixReadOnly(idle.transform).a, doneFilter: done.filter };
   });
-  expect(copyFilter?.duration).toBe("0.2s");
-  expect(copyDraw).toMatchObject({ duration: "0.26s", delay: "0.05s" });
+  // The tick's morph reads the pop token (--t-pop, 180 ms) and its stroke draw the panel token (--t-panel, 240 ms) after a 50 ms delay (D372).
+  expect(copyFilter?.duration).toBe("0.18s");
+  expect(copyDraw).toMatchObject({ duration: "0.24s", delay: "0.05s" });
   // Both blur endpoints may be sampled just before their last compositor frame.
   // Apply the existing 0.01px settling epsilon to the 2px endpoint as well.
   const idleBlur = /^blur\(([\d.e+-]+)px\)$/.exec(copyMorph.idleFilter)?.[1];
@@ -409,7 +410,7 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
   await expect(page.locator("#copy-recovery")).not.toHaveAttribute("data-done");
   await page.waitForTimeout(230);
   const copyReturn = await sampleAndEvents(page, "copy-feedback-return");
-  expect(copyReturn.events.find((event) => event.selector === "svg.is-done" && event.property === "filter")?.duration).toBe("0.15s, 0.15s, 0.15s");
+  expect(copyReturn.events.find((event) => event.selector === "svg.is-done" && event.property === "filter")?.duration).toBe("0.12s, 0.12s, 0.12s"); // the press token (--t-press, 120 ms), D372
   console.log(`MOTION_AUDIT copy-feedback-return ${JSON.stringify(copyReturn)}`);
 
   // Keep both recovery actions in view so the browser does not scroll and reset
@@ -624,7 +625,9 @@ OffscreenCanvas.prototype.getContext = function(type, ...args) {
       longTasks: window.__motionAudit.longTasks.filter((task) => task.startTime < endAt && task.startTime + task.duration > startAt),
     };
   }, themeStartAt);
-  expect(keyboardTheme.events).toEqual([]);
+  // The terminal's cursor blink (a compositor opacity loop on the cursor layer, D249) restarts when the cursor is placed again after
+  // the theme change; it is decorative and is not a transition of the theme, so it is the one thing allowed to run.
+  expect(keyboardTheme.events.filter((event) => event.selector !== "div.terminal-cursor-layer")).toEqual([]);
   expect(themeTiming.longTasks).toEqual([]);
   console.log(`MOTION_AUDIT keyboard-theme ${JSON.stringify({ ...keyboardTheme, ...themeTiming })}`);
   await page.keyboard.press("Escape");

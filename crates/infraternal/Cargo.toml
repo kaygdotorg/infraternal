@@ -33,8 +33,10 @@ hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 tokio-tungstenite = { workspace = true, optional = true }
-nix = { workspace = true, features = ["resource"] }
+nix = { workspace = true, features = ["resource", "dir"] }
+rustix = { version = "1.1.6", features = ["fs"], optional = true }
 openssl = { workspace = true, optional = true }
+qrcodegen = { version = "1.8.0", optional = true }
 tokio-openssl = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
@@ -44,10 +46,13 @@ infraternal-plugin-host-facts = { path = "../plugins/host-facts", version = "0.1
 infraternal-plugin-mesh = { path = "../plugins/mesh", version = "0.1.0", optional = true }
 infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optional = true }
 
-# Only the terminal QR code of `infraternal up` (#263) is Linux-only; the plugin
-# dependencies above stay on every platform.
-[target.'cfg(target_os = "linux")'.dependencies]
-qrcodegen = { version = "1.8.0", optional = true }
+# Static (musl) builds use mimalloc as the global allocator of the whole binary
+# (#522, owner decision 2026-11-16). musl's own malloc hands freed memory back to
+# the kernel eagerly, which halved GotaTun's throughput. MIT-licensed; builds
+# mimalloc v3 from C with its own defines only. glibc and macOS builds keep the
+# C library's allocator.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false }
 
 [features]
 # App windows are compiled only for an explicit desktop build (#146).
@@ -60,7 +65,7 @@ compact-history = ["process-per-user", "infraternal-shim/compact-history"]
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]
-remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:base64", "dep:futures-util", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:qrcodegen", "dep:tokio-openssl", "dep:tokio-tungstenite", "dep:url", "dep:zeroize"]
+remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-api/tls-roots", "dep:base64", "dep:futures-util", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:qrcodegen", "dep:tokio-openssl", "dep:tokio-tungstenite", "dep:url", "dep:zeroize"]
 # Private SSH session routes need the host runtime even when its operator role is absent.
 ssh = ["plugin-ssh", "dep:infraternal-agent", "dep:tokio", "infraternal-server?/ssh"]
 # Private release profile for the early shim/SSH startup image.
@@ -76,7 +81,7 @@ mesh = ["plugin-mesh"]
 ee = ["infraternal-server?/ee", "infraternal-agent?/ee"]
 plugin-host-facts = ["plugin-agent", "dep:infraternal-plugin-host-facts", "infraternal-agent/plugin-host-facts"]
 plugin-relay = ["dep:infraternal-plugin-relay"]
-plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:tokio"]
+plugin-server = ["dep:infraternal-server", "infraternal-server/cli-plugin", "infraternal-plugin-remote?/server", "dep:infraternal-plugin-mesh", "dep:tokio", "dep:openssl", "dep:rustix"]
 plugin-ssh = ["dep:infraternal-plugin-ssh"]
 # Also compile the hidden commands of components that are not built yet (D299 C5); the
 # D16 one-source tests need them. Off by default: their text costs binary size (D243).

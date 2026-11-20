@@ -99,16 +99,21 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
       return out;
     }
     if (id.startsWith("h:")) {
-      const host = id.slice(2);
-      const entry = cx.adapters.sessions.hosts().find((h) => h.name === host);
+      // A row is keyed by the host's label, or by its id when another admitted host carries the same label (session-tree.on-demand.ts).
+      const key = id.slice(2);
+      const entry = cx.adapters.sessions.hosts().find((h) => h.id === key) ?? cx.adapters.sessions.hosts().find((h) => h.name === key);
+      const host = entry?.name ?? key;
       const out: RowAction[] = [
-        { id: "open", label: "Open shell", icon: OPEN_ICON, run: () => { cx.win.open(host); afterOpen(); } },
+        { id: "open", label: "Open shell", icon: OPEN_ICON, run: () => { cx.win.open(entry && entry.id !== "embedded" ? entry.id : host); afterOpen(); } },
       ];
       if (row.hasAttribute("data-renamable")) out.push({ id: "rename", label: "Rename", icon: SESSION_ICON.rename, run: () => { hooks.rename(id); } });
       out.push(copyName(host));
       const removal = cx.adapters.hostRemoval;
       if (entry && entry.id !== "embedded" && removal?.label()) out.push({
         id: "remove", label: `${removal.label()}…`, icon: SESSION_ICON.end, danger: true,
+        // D385: a left swipe reveals "Remove". The question is the glass confirmation card (D380), not the in-row one, because
+        // removing a host says more than a row can; the row is still listed behind it, so it settles back (`swipeKeeps`).
+        swipe: "left", swipeLabel: "Remove", swipeKeeps: true,
         run: () => removal.remove(entry.id, host, row),
       });
       return out;

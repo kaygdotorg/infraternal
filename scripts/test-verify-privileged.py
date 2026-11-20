@@ -45,6 +45,31 @@ def userns_available():
 class PrivilegedAreas(unittest.TestCase):
     """Trigger the namespace tests only for relevant code paths."""
 
+    def test_namespace_gets_only_host_verified_firewall_tool_paths(self):
+        """The user namespace can trust a firewall tool only after the host checks its fixed path."""
+        root = Path(__file__).resolve().parents[1]
+        with mock.patch.object(p, 'root_owned_executable', return_value=True):
+            trusted = p.sandbox_test_environment(root)
+        self.assertEqual(trusted['INFRATERNAL_TEST_STATE_ROOT'], '/tmp/st')
+        self.assertEqual(trusted[p.TEST_ROOT_OWNED_NFT_ENV].split(':'), list(p.FIREWALL_TOOL_PATHS))
+
+        # Only the paths that pass are listed; a failing iptables frontend is left out.
+        with mock.patch.object(p, 'root_owned_executable', side_effect=lambda path: path == '/usr/sbin/nft'):
+            nft_only = p.sandbox_test_environment(root)
+        self.assertEqual(nft_only[p.TEST_ROOT_OWNED_NFT_ENV], '/usr/sbin/nft')
+
+        with mock.patch.object(p, 'root_owned_executable', return_value=False):
+            untrusted = p.sandbox_test_environment(root)
+        self.assertNotIn(p.TEST_ROOT_OWNED_NFT_ENV, untrusted)
+
+    def test_root_owned_executable_rejects_a_user_owned_file(self):
+        """A mode-755 tool owned by the build user must not earn the test trust marker."""
+        with tempfile.TemporaryDirectory() as directory:
+            tool = Path(directory) / 'nft'
+            tool.write_text('test tool')
+            tool.chmod(0o755)
+            self.assertFalse(p.root_owned_executable(tool))
+
     def test_missing_host_frontend_skips_the_row_without_claiming_coverage(self):
         """An absent absolute-path backend is an environment gap, not a mesh failure."""
         with mock.patch.object(sys, 'argv', ['verify-privileged']), \
@@ -79,6 +104,7 @@ class PrivilegedAreas(unittest.TestCase):
         """Cover production files, fixtures, shared manifests and harmless docs."""
         for path, expected in (
             ('crates/infraternal/src/install.rs', {'install'}),
+            ('crates/plugins/mesh/src/host_firewall.rs', {'mesh'}),
             ('crates/plugins/ssh/src/install/setup_scripts.rs', {'install'}),
             ('crates/plugins/remote/src/uninstall.rs', {'install'}),
             ('crates/plugins/proxy/src/cgroup.rs', {'proxy'}),
@@ -223,6 +249,19 @@ class IgnoredSelection(unittest.TestCase):
         found = p.privileged_ignored(root, 'infraternal-plugin-mesh', 'crates/plugins/mesh')
         for target in ('test:kernel', 'test:proxy_ingress_namespace', 'test:review_retire_ownership'):
             self.assertIn(target, found)
+
+    def test_review_wrappers_keep_their_required_mounts(self):
+        """Private resolver/networkd probes use their wrappers; self-contained route proofs stay in the row."""
+        root = Path(__file__).resolve().parents[1]
+        found = p.privileged_ignored(root, 'infraternal-plugin-mesh', 'crates/plugins/mesh')
+        for name in ('review_j529_failed_cleanup_does_not_cache_previous_success',
+                     'review_j485c_changed_file_invalidates_success'):
+            self.assertNotIn(name, found.get('lib', {}))
+        routes = found['test:restart_route_ownership']
+        self.assertNotIn('review_j529_networkd_reload_recovers_all_peers', routes)
+        self.assertIn('review_j529_repair_does_not_follow_a_reused_interface_name', routes)
+        self.assertIn('fallback_after_unobserved_deletion_repairs_inventory', found['lib'])
+        self.assertNotIn('periodic_recheck_idle_measurement', found['lib'])
 
     def test_mesh_dns_is_default_and_explicit_in_the_privileged_matrix(self):
         """Shipping enables mesh DNS; the namespace matrix enables it only for the DNS target."""

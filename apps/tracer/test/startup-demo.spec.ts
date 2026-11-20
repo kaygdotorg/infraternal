@@ -17,6 +17,11 @@ const QUESTION = "tmux started automatically. Would you like to switch to the In
 const GUARD = '[ -n "$INFRATERNAL_SESSION" ] || exec tmux new-session -s main';
 
 const screen = (page: Page): Promise<string> => page.evaluate(() => (window as unknown as { __tracerTestDouble: { screenText(): string } }).__tracerTestDouble.screenText());
+/**
+ * The newest toast message. A second notice of the same tone reuses the card while the first is still leaving it (#395), so the
+ * card briefly holds both messages and a bare `.ui-toast-message` matches two; the last one is the notice just shown.
+ */
+const front = (page: Page) => page.locator(".ui-toast-message").last();
 const choice = (page: Page, name: string) => page.locator(".ui-toast-icons").getByRole("button", { name, exact: true });
 
 for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
@@ -25,19 +30,19 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
     const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale, hasTouch: size.touch, isMobile: size.touch });
     const page = await context.newPage();
     const errors: string[] = [];
-    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("pageerror", (error) => errors.push(`${error.message}\n${error.stack ?? ""}`)); // with the stack: an intermittent page error was unreadable without it (#443)
     const shot = (label: string) => page.screenshot({ path: `${OUT}/${size.name}-${theme}-${label}.png` });
     try {
       const url = `/?mock=1&proto=clusters&startup-demo=1&fixture=none&bg=none&theme=${theme}`;
       await page.goto(url);
-      await expect(page.locator(".ui-toast-message").last()).toHaveText(QUESTION, { timeout: 30_000 });
+      await expect(page.locator(".ui-toast-message")).toHaveText(QUESTION, { timeout: 30_000 });
       // The question names the three choices, and none of them says "guard".
       for (const name of ["Switch to the Infraternal Multiplexer", "Keep tmux, don't ask again on this host", "About the Infraternal Multiplexer"]) {
         const button = choice(page, name);
         await expect(button).toBeVisible();
         await expect(button).toHaveAttribute("data-tip", name);
       }
-      expect(await page.locator(".ui-toast").last().innerText()).not.toMatch(/guard/i);
+      expect(await page.locator(".ui-toast").innerText()).not.toMatch(/guard/i);
       await page.waitForTimeout(400);
       await shot("question");
 
@@ -49,17 +54,17 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       await page.waitForTimeout(300);
       await shot("confirm");
       await page.locator(".ui-confirm-yes").click();
-      await expect(page.locator(".ui-toast-message").last()).toContainText("Switched. tmux no longer starts in Infraternal terminals");
+      await expect(front(page)).toContainText("Switched. tmux no longer starts in Infraternal terminals");
       await expect.poll(() => screen(page)).toContain("INFRATERNAL_SESSION");
       await page.waitForTimeout(300);
       await shot("switched");
       await page.getByRole("button", { name: "Restore .zshrc", exact: true }).click();
-      await expect(page.locator(".ui-toast-message").last()).toHaveText(".zshrc restored. tmux starts automatically again.");
+      await expect(front(page)).toHaveText(".zshrc restored. tmux starts automatically again.");
       await expect.poll(() => screen(page)).toContain("3:  exec tmux new-session -s main");
 
       // ? opens the docs page and leaves the question up; ✗ closes it for good.
       await page.goto(url);
-      await expect(page.locator(".ui-toast-message").last()).toHaveText(QUESTION, { timeout: 30_000 });
+      await expect(page.locator(".ui-toast-message")).toHaveText(QUESTION, { timeout: 30_000 });
       const [docs] = await Promise.all([context.waitForEvent("page"), choice(page, "About the Infraternal Multiplexer").click()]);
       await docs.waitForLoadState();
       // The page is this server's own (an instance carries the docs for the version it runs), never another site's.
@@ -68,7 +73,7 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
       await docs.setViewportSize({ width: size.width, height: size.height });
       await docs.screenshot({ path: `${OUT}/${size.name}-${theme}-docs.png` });
       await docs.close();
-      await expect(page.locator(".ui-toast-message").last()).toHaveText(QUESTION);
+      await expect(page.locator(".ui-toast-message")).toHaveText(QUESTION);
       await choice(page, "Keep tmux, don't ask again on this host").click();
       await expect(page.locator(".ui-toast")).toBeHidden();
       expect(errors).toEqual([]);

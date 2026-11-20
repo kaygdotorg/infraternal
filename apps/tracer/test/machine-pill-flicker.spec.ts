@@ -133,7 +133,7 @@ test("machine pill stays steady through repeated immediate server closes", async
     expect(liveTransitions).toHaveLength(0);
     expect(liveFrames).toBe(0);
     await expect(windowCard).toHaveAttribute("data-status", "connecting");
-    const toast = page.locator(".ui-toast").last();
+    const toast = page.locator('.ui-toast[data-front="true"]'); // the newest notice; an earlier error may still sit behind it (#335)
     await expect.poll(async () => {
       const visible = await toast.isVisible();
       const message = await toast.locator(".ui-toast-message").textContent();

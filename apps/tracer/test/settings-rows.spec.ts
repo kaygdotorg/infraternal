@@ -24,7 +24,7 @@ const captures = tracerEvidencePath("settings-rows");
 const SIZES = [{ w: 375, h: 667, touch: true, dpr: 3 }, { w: 393, h: 852, touch: true, dpr: 3 }, { w: 1440, h: 900, touch: false, dpr: 2 }] as const;
 /** Each window (Settings in rows of windows, #304), the palette words that open it, and a list that proves the section is the one on screen. */
 const SECTIONS = [
-  { name: "Theme", words: "Appearance › Theme", target: "appearance.theme", list: "Theme" },
+  { name: "Themes", words: "Appearance › Themes", target: "appearance.themes", list: "Colour" },
   { name: "Layout", words: "Appearance › Layout", target: "appearance.layout", list: "Phones" },
 ] as const;
 
@@ -126,7 +126,7 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
       // The whole list decides together, and by the list's width: phones stack the long Window Sizes descriptions under
       // their names; Theme's one-word descriptions stay beside at every width we ship.
       if (section.name === "Layout" && w < 600) for (const r of list.filter((x) => x.list === "Phones")) expect(r.mode, `${r.name}: narrow lists show subtitles`).toBe("stacked");
-      if (section.name === "Theme") for (const r of list.filter((x) => x.list === "Theme")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
+      if (section.name === "Themes") for (const r of list.filter((x) => x.list === "Fonts")) expect(r.mode, `${r.name}: short descriptions stay beside`).toBe("beside");
       // The heading sits the shared gap above the first row: the gap is the heading's own bottom padding.
       const gap = await page.evaluate((listName) => {
         const l = document.querySelector(`.ui-sp-list[aria-label="${listName}"]`)!;

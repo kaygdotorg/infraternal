@@ -18,6 +18,7 @@ fn plural(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count == 1 { one } else { many })
 }
 
+/// Turn public mesh status JSON into a short message and suggested next command.
 fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     let state = value["state"].as_str().ok_or(PluginError::Rejected)?;
     let count = value["peer_count"].as_u64().ok_or(PluginError::Rejected)?;
@@ -29,7 +30,7 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         ),
         "Waiting" => (
             Tone::Attention,
-            "Mesh is on, waiting for this machine to reach its server.".to_owned(),
+            "Waiting for server.".to_owned(),
             vec!["infraternal status"],
         ),
         "Stopping" => (
@@ -57,6 +58,14 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     if let Some(address) = value["addresses"]["ipv6"].as_str() {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         rows.push(("Address", address.to_string()));
+    }
+    if let Some(port) = value.get("udp_port").filter(|port| !port.is_null()) {
+        let port = port
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .filter(|port| *port != 0)
+            .ok_or(PluginError::Rejected)?;
+        rows.push(("UDP listen port", port.to_string()));
     }
     if let Some(policy) = value["default_policy"].as_str() {
         rows.push((
@@ -109,10 +118,26 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         };
         rows.push(("Data plane", format!("{engine}, {reason}")));
     }
+    if let Some(enforcement) = value.get("enforcement").and_then(Value::as_str) {
+        rows.push((
+            "Enforcement",
+            match enforcement {
+                "userspace" => "D164 access rules checked at both userspace TUN edges",
+                "kernel" => "D164 access rules checked by kernel WireGuard",
+                _ => return Err(PluginError::Rejected),
+            }
+            .to_owned(),
+        ));
+    }
     if let Some(detail) = value["proxy_containment"]["detail"].as_str() {
         rows.push(("Proxy", detail.to_owned()));
     }
-    let (tone, message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
+    let guard_missing = render_kernel_guard(&value, &mut rows)?;
+    let (mut tone, mut message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
+    if state == "On" && guard_missing {
+        tone = Tone::Attention;
+        "Mesh is on, but kernel-only protections are missing.".clone_into(&mut message);
+    }
     Ok(Presented {
         tone,
         message,
@@ -120,6 +145,38 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         next: next.into_iter().map(str::to_owned).collect(),
         data: value,
     })
+}
+
+/// Add the kernel guard's exact gaps and tool result to the status rows.
+fn render_kernel_guard(value: &Value, rows: &mut Vec<(&str, String)>) -> Result<bool, PluginError> {
+    let Some(guard) = value.get("kernel_guard").filter(|guard| !guard.is_null()) else {
+        return Ok(false);
+    };
+    let state = guard["state"].as_str().ok_or(PluginError::Rejected)?;
+    let missing = guard["missing"].as_array().ok_or(PluginError::Rejected)?;
+    let missing = missing
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(PluginError::Rejected)?;
+    let detail = guard["detail"].as_str().ok_or(PluginError::Rejected)?;
+    match state {
+        "installed" => {
+            if !missing.is_empty() {
+                return Err(PluginError::Rejected);
+            }
+            rows.push(("Kernel guard", detail.to_owned()));
+            Ok(false)
+        }
+        "pending" | "missing" | "failed" => {
+            rows.push((
+                "Kernel guard",
+                format!("missing: {}; {detail}", missing.join(", ")),
+            ));
+            Ok(true)
+        }
+        _ => Err(PluginError::Rejected),
+    }
 }
 
 /// The Mac node reports no engine health yet, so its status has no health rows.
@@ -223,13 +280,26 @@ fn peers(value: &Value, width: usize) -> Result<Presented, PluginError> {
     peers_at(value, width, now_secs())
 }
 
-/// One peer as a table row, a JSON record, and, when it has no direct path yet, its label and address.
+/// One peer as a table row, a JSON record, and, when it has no direct path yet, what to tell the person.
 struct PeerView {
     cells: Vec<String>,
     record: Value,
-    waiting: Option<(String, String)>,
+    waiting: Option<Waiting>,
 }
 
+/// A peer without a direct path: its label, its mesh address, and whether traffic already went unanswered.
+struct Waiting {
+    label: String,
+    address: String,
+    /// This machine sent the peer packets and got nothing back. Sending more will not help, so the
+    /// hint must not suggest it (#483: on blocked or untraversable networks people were told to ping).
+    unanswered: bool,
+}
+
+/// Turn one `mesh.peers` row into its table cells, its JSON record and, for a peer without a
+/// direct path, the hint data. `now` is the wall clock in seconds, so ages are testable.
+/// # Errors
+/// Refuses a row missing a node id, mesh address, key, counters or a known path value.
 fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
     let node = row["node"].as_u64().ok_or(PluginError::Rejected)?;
     let address: std::net::Ipv4Addr = row["peer"]["addresses"]["ipv4"]
@@ -296,7 +366,11 @@ fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
             endpoint.map_or_else(String::new, |endpoint| endpoint.to_string()),
         ],
         record,
-        waiting: (!direct).then(|| (label, address.to_string())),
+        waiting: (!direct).then(|| Waiting {
+            label,
+            address: address.to_string(),
+            unanswered: sent > 0 && received == 0,
+        }),
     })
 }
 
@@ -327,10 +401,16 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
             waiting.len()
         )
     };
-    // Only offer to set up a path when one is missing, and name the machine.
+    // Only offer to set up a path when one is missing, and name the machine. If traffic already
+    // went unanswered, say so instead of asking for more.
     let next = match waiting.first() {
-        Some((label, address)) if !more => vec![format!(
-            "Send traffic to {label} to set up its direct path, for example: ping {address}"
+        Some(peer) if !more && peer.unanswered => vec![format!(
+            "{} has not answered anything sent to it. A firewall or NAT between the two machines may block direct UDP, and there is no relay to fall back on yet.",
+            peer.label
+        )],
+        Some(peer) if !more => vec![format!(
+            "Send traffic to {} to set up its direct path, for example: ping {}",
+            peer.label, peer.address
         )],
         _ => Vec::new(),
     };
@@ -355,11 +435,22 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
     })
 }
 
+/// Checks that mesh actions produce readable status and peer summaries.
 #[cfg(test)]
+/// Tests the user-facing CLI presentation of Mesh status and peer rows.
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
     use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
+
+    /// A refused node tells the person to wait for a usable server snapshot.
+    #[test]
+    fn refused_node_says_waiting_for_server() {
+        let shown = status(serde_json::json!({"state":"Waiting","peer_count":0}), 100)
+            .expect("waiting status");
+        assert_eq!(shown.message, "Waiting for server.");
+    }
+
     #[test]
     fn status_explains_the_observed_server_transport() {
         for (kind, reason, label, explanation) in [
@@ -460,6 +551,67 @@ mod tests {
             "{shown}"
         );
     }
+
+    /// Human status includes the listener selected after a default-port collision.
+    #[test]
+    fn status_reports_the_udp_listener_port() {
+        let shown = status(
+            serde_json::json!({"state":"On","peer_count":0,"udp_port":49123}),
+            100,
+        )
+        .expect("listener status");
+        assert!(shown.body.contains("49123"), "{}", shown.body);
+        assert!(shown.body.contains("UDP listen port"), "{}", shown.body);
+        assert!(
+            status(
+                serde_json::json!({"state":"On","peer_count":0,"udp_port":0}),
+                100,
+            )
+            .is_err()
+        );
+    }
+
+    /// Status calls out every kernel-only protection when a `GotaTun` guard is unavailable.
+    #[test]
+    fn status_names_missing_kernel_only_protections() {
+        let value = serde_json::json!({
+            "state":"On",
+            "peer_count":1,
+            "enforcement":"userspace",
+            "kernel_guard":{
+                "state":"missing",
+                "missing":[
+                    "mesh-address anti-spoofing on non-mesh interfaces",
+                    "forwarding drops",
+                    "public TCP/80 and TCP/443 gate"
+                ],
+                "detail":"nft at /usr/sbin/nft and iptables-nft at /usr/sbin/iptables-nft were not found"
+            }
+        });
+        let shown = status(value, 160).expect("status");
+        assert!(matches!(shown.tone, Tone::Attention));
+        assert!(
+            shown
+                .message
+                .contains("kernel-only protections are missing")
+        );
+        assert!(shown.body.contains("Enforcement"));
+        assert!(shown.body.contains("userspace TUN edges"));
+        for protection in [
+            "mesh-address anti-spoofing on non-mesh interfaces",
+            "forwarding drops",
+            "public TCP/80 and TCP/443 gate",
+            "/usr/sbin/nft",
+            "/usr/sbin/iptables-nft",
+        ] {
+            assert!(
+                shown.body.contains(protection),
+                "missing {protection}: {}",
+                shown.body
+            );
+        }
+    }
+
     #[test]
     fn legacy_status_remains_readable_and_invalid_link_is_refused() {
         assert!(status(serde_json::json!({"state":"On","peer_count":0}), 80).is_ok());
@@ -516,6 +668,41 @@ mod tests {
         assert!(shown.next[0].contains("10.254.0.4"), "{:?}", shown.next);
         assert!(shown.body.starts_with("PEER"), "{}", shown.body);
         assert!(shown.body.lines().all(|line| line.chars().count() <= 100));
+    }
+
+    /// Sent data and nothing back: the hint explains instead of asking for another ping (#483).
+    #[test]
+    fn an_unanswered_peer_is_not_told_to_send_more() {
+        let mut silent = peer(4, "10.254.0.4", 0);
+        silent["counters"]["received_bytes"] = 0.into();
+        silent["counters"]["sent_bytes"] = 2_220.into();
+        let page = serde_json::json!({"peers": [silent], "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert_eq!(
+            shown.message,
+            "1 peer on the mesh, 1 without a direct path yet."
+        );
+        assert!(
+            shown.next[0].starts_with("10.254.0.4 has not answered"),
+            "{:?}",
+            shown.next
+        );
+        assert!(!shown.next[0].contains("ping"), "{:?}", shown.next);
+    }
+
+    /// Nothing sent yet: a ping is still the step that starts the handshake.
+    #[test]
+    fn a_peer_never_sent_to_still_gets_the_ping_hint() {
+        let mut idle = peer(4, "10.254.0.4", 0);
+        idle["counters"]["received_bytes"] = 0.into();
+        idle["counters"]["sent_bytes"] = 0.into();
+        let page = serde_json::json!({"peers": [idle], "next_cursor": null});
+        let shown = peers_at(&page, 100, 1000).expect("present peers");
+        assert!(
+            shown.next[0].contains("ping 10.254.0.4"),
+            "{:?}",
+            shown.next
+        );
     }
 
     #[test]

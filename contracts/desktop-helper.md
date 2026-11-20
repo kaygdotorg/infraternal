@@ -29,7 +29,7 @@ Monotonic timestamps mark the owned-pixel capture request in the native host clo
 
 | Kind | Direction | Payload |
 | --- | --- | --- |
-| 1 | daemon → helper | List: `{}` |
+| 1 | daemon → helper | List: `{}` or `{known_icons:[{bundle_id,app_version},...]}` (sent by the infraternal agent from its icon store) |
 | 2 | daemon → helper | Start: target (`window` ID + PID, or `screen` display ID), output pixel width/height, canvas width/height and backing scale |
 | 3 | daemon → helper | Resize: output pixel width/height, canvas width/height and backing scale |
 | 4 | daemon → helper | Input: mouse move/button, scroll, physical macOS keycode with modifiers, or printable Unicode `text` scalar |
@@ -58,10 +58,34 @@ including a release after the modifier changes. Composition/IME is deferred.
 
 Window identity is session-scoped `(owner_pid,window_id)`; validate both at
 start. Inventory is a Core Graphics snapshot joined to NSRunningApplication:
-optional bundle ID, app name and title, layer, point frame, on-screen flag.
-Displays are separate whole-screen entries. Permission state is separate from
-missing optional titles. Optional AX meaning can be added without replacing
-identity. Do not persist titles or document paths in logs.
+optional bundle ID, app name, app version and title, layer, point frame,
+on-screen flag. The bundle version is `CFBundleShortVersionString`, then
+`CFBundleVersion`, joined with `+` when both are present. Displays are separate
+whole-screen entries. Permission state is separate from missing optional
+titles. Optional AX meaning can be added without replacing identity. Do not
+persist titles or document paths in logs.
+
+The inventory may add optional `app_icons`, an array of `{bundle_id,
+app_version, png_64}` records. `png_64` is a base64 PNG of the app bundle icon
+(through NSWorkspace) rendered at 64 by 64 pixels, at most 16 KiB decoded; the
+browser draws the same image in picker rows and window pills. The bundle ID
+and version join each image to the matching window rows. A List request may
+include up to 32 `known_icons` keys in the shape `{bundle_id,app_version}`; the
+helper omits those images. The helper trims images when necessary to keep the
+complete reply within the existing 64 KiB message bound; later Lists send the
+rest. These fields are additive: older helpers ignore `known_icons`, and older
+readers can ignore `app_version` and `app_icons`.
+
+Icons never travel in the window list the server reads (#146, D349). The
+infraternal agent checks each PNG (signature, a 64 x 64 `IHDR`, every chunk in
+bounds with a correct CRC, an `IDAT`, a final empty `IEND`, 16 KiB at most),
+names it by its SHA-256, keeps at most 64 in memory, and replaces `app_icons`
+with an `icon` field (64 lowercase hex digits) on each window row whose app it
+holds. `desktop.source.icon {sha256, offset}` returns `{total, data}`: at most
+4 KiB of the PNG, base64, from a 4 KiB-aligned offset. The server's
+`desktop.icon {host_id, sha256}` joins the pieces, checks the total, each
+length, the hash and the PNG again, and returns `{png}`; the browser checks the
+signature, size and hash once more and caches the image by hash.
 
 ## Capture, geometry and control
 
@@ -74,7 +98,8 @@ forced IDR [D200 V2]. Encode at requested output dimensions.
 
 AX uses points. Desired source pixels are canvas size × backing scale; divide
 by the source display’s actual backing scale before setting AX size. Save original point position/size
-once, restore on stop and disconnect unless the desktop owns its geometry. Verify actual size after setting it;
+once. Restore on stop and disconnect when the live window still has the last
+frame applied by the helper. Leave local moves and resizes in place. Verify actual size after setting it;
 refusal or local input in the last 60 seconds means letterbox, with an explicit
 content rectangle. Follow once local input becomes idle [D208 A2]. Input coordinates use
 output pixels and map through that rectangle; bands accept no clicks.
@@ -82,7 +107,7 @@ output pixels and map through that rectangle; bands accept no clicks.
 Managed desktops are detected without a setting [D290]. Before a geometry write,
 inspect process executable names for a known tiling manager; never inspect its
 arguments, configuration or control socket. Independently, one own-window AX
-size notification that differs from our requested size within two monotonic
+size notification that differs from the applied size within two monotonic
 seconds permanently yields that window to the desktop. Move notifications also
 refresh its actual frame. The state lasts for the session, including stop and
 disconnect: no further native resize or original-geometry restoration is allowed.
@@ -96,6 +121,13 @@ are additive; existing readers can ignore them. The signed native regression
 checks a managing desktop for 30 seconds across three canvas sizes, with zero
 native resize requests and zero source frame-size changes. Run it under the Mac
 hardware lock with an owned document; it never changes the window manager.
+
+When WindowServer confirms that a captured window ID and process ID are no
+longer present, the companion adds `state:"gone"` to its generic error reply.
+The source remembers the result for that session and returns it with the
+session ID on re-preparation, so the server retires its viewers and capture.
+Changing the layer, minimizing the window or losing the transport does not
+count as confirmed closure.
 
 Bring the selected app forward before accepted remote input. Local physical
 mouse/keyboard activity pauses injection for 2 seconds; synthetic remote events

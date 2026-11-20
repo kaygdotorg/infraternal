@@ -30,11 +30,58 @@ work begins. Every image is uploaded and included in the signer-generated
 checksums. Public verification still accepts older signed releases without
 session images; an advertised session image must be present and match its
 signed digest.
+
+The Linux host images include the Mesh node, so Add host can enroll a node
+with Mesh traffic available after the coordinator assigns its addresses and
+peers. Linux Mesh enrollment state belongs to its original machine ID. A
+backup of that state can restore the same enrollment on the original
+installation. Another installation must enroll through Add host.
 The build requires `--channel`; there is no default. Use `--channel stable`
 for the workspace version. Both architecture binaries and signed `VERSION`
 carry the same stamped identity.
 The build marks the binaries as release builds: missing public releases and
 verification failures cannot enable the development fallback.
+
+## The macOS binary (#483)
+
+A release can also carry `infraternal-aarch64-darwin`. That is the
+default-feature `infraternal` for Apple silicon Macs, which a Mac runs with
+`infraternal up <server>`. Linux cannot link it: its native dependencies need
+the Apple SDK and `/usr/bin/clang` (#379). So it is built first, on the Mac,
+and then handed to the Linux build:
+
+```sh
+# On the Mac build machine, in the repository's nix shell:
+nix develop -c scripts/release/build-darwin --channel edge /Users/Shared/release-darwin
+# Copy that directory to the Linux release builder, then:
+scripts/release/build --channel edge --darwin /path/to/release-darwin
+```
+
+`build-darwin` stamps a new edge version, or the workspace version for
+`stable`, and checks that the binary links only libraries macOS ships. It signs
+the binary ad hoc with the hardened runtime: no identity and no timestamp, so
+a rebuild of the same tree signs to the same bytes. `BUILD-INFO` records the
+source, toolchain, SDK, size and digest. `build --darwin` takes the release
+version from that directory's `VERSION`, so the Linux and Mac binaries carry
+one identity. It refuses a binary that is not arm64 Mach-O, or that lacks that
+version string. The binary goes into `SHA256SUMS`, and `publish` uploads it,
+so the signer covers it like every other payload. No other key is involved.
+The Mac binary is optional: a bundle built without `--darwin` is Linux-only,
+as before. When a signed manifest lists it, verification downloads it and
+checks its digest. Intel Macs have no binary.
+
+People install it by hand for now, which the one-command join (D311) will
+replace:
+
+```sh
+v=<version>; b=https://builds.infraternal.com/releases/$v
+curl -fsSLO "$b/SHA256SUMS" -O "$b/SHA256SUMS.sig" -O "$b/infraternal-aarch64-darwin"
+ssh-keygen -Y verify -f allowed_signers -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
+shasum -a 256 --ignore-missing -c SHA256SUMS
+chmod +x infraternal-aarch64-darwin && ./infraternal-aarch64-darwin up https://<server>
+```
+
+`allowed_signers` is `release/allowed_signers` from this repository.
 
 The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and
 `RELEASE_CALLER_TOKEN` in the publishing process environment, then runs:
@@ -109,7 +156,9 @@ Only edge builds are being published for now. A stable server reports `no stable
 
 Every existing server defaults to `stable`, including a server running an edge
 binary. The release plugin is removable with the Cargo `release` feature and
-switchable at runtime through `plugins.set_enabled`; it owns no polling task.
+switchable at runtime through `plugins.set_enabled`. Plugin construction starts
+no work; the server's update check (below) is a separate timer that reads the
+plugin's switch and channel before each check.
 Its channel is persisted in `plugin_settings.settings` alongside other server
 feature settings. Descriptor defaults apply until a setting is explicitly saved.
 
@@ -141,6 +190,54 @@ downloaded by this read-only action; payloads still need their own verification.
 No stable release has been published yet. A missing stable pointer reports
 “no stable release yet” and the explicit opt-in command, without requesting
 edge. Network, invalid pointer and signature failures remain failures.
+
+## Update check and staging (#211 S3)
+
+A root server running a pipeline release build (`INFRATERNAL_RELEASE_BUILD=1`)
+checks its channel by itself: about 2 minutes after start, then every 15
+minutes ±20 %, doubling after each failed check up to 6 hours. It is one
+sleeping timer, so it uses no CPU between checks (D81). Other builds, non-root
+servers and non-Linux hosts never start it. Offline or refused checks are
+recorded, not logged as warnings.
+
+A check reads the channel pointer and the release's signed metadata. When the
+release is strictly newer than the running version and on the same channel,
+the server downloads `infraternal-<arch>-musl`, verifies it with the same
+verifier as `restart --binary` (signed `SHA256SUMS`, `SHA256SUMS.sig` and
+`VERSION`) and keeps it in `<data>/updates/staged/`. The same version does
+nothing. An older version or another channel's release is refused; only an
+explicit request (a D295 rollback or a channel switch, coming in S4/S5) may
+stage one, and never without the signature. Staging needs 192 MiB free
+(the 128 MiB image bound plus a 64 MiB reserve) and keeps only one release.
+Interrupted downloads are deleted and start over at the next check. Nothing is
+applied: switching to a staged release is S4.
+
+A `staged/` folder is never trusted as found. Before any use, at every check and
+once when the timer starts, it must be a real directory owned by the server's user
+with no group or other access, and its files must pass the same signed-release
+verification again. Anything else is removed. A staged release is kept only while
+the channel still announces it: when the pointer moves to anything else (a yanked
+build, another version, or nothing), the staged release is removed and the state
+says why. S4 applies only what `Updater::confirm_staged` returns. That call
+re-checks the staged release against the pointer and holds the folder lock until
+the switch is done.
+
+Only faults back off: the network, the disk or a failed verification. A
+refusal (an older or another channel's release) is recorded as `refused` and
+keeps the normal 15-minute pace, and so is "updates are off". An explicit stage
+(a D295 rollback or a channel switch) is recorded as `hold`. Periodic checks
+leave a held release alone until it is applied or cancelled.
+
+`<data>/updates/` is `0700` and owned by the server's user; `state.json` (0600)
+records the running version, channel, newest verified release, staged release,
+last and next check, last error, refusal, hold, the last removed release and
+why, and the failure count. It lives outside the database so that a D295
+database restore does not erase it. Owners read it with the
+`release.update.status` action, and the `release.update` topic sends
+`{"type":"update","update":{…}}` whenever it changes. The status also has
+`mode`, which is `auto` or `off`, and `reason`, which says plainly why updates
+are off on this host: not a Linux server, a development build, the server not
+running as root, the release plugin switched off, or no valid channel set.
 
 # Add-host payloads
 
@@ -247,5 +344,7 @@ bucket or Worker.
   pointer version and selected channel. Missing stable never requests edge.
 - Release actions belong to a removable runtime-switchable plugin; construction
   starts no network or polling work, and disable cancels in-flight socket work.
+  The update timer (#211 S3) starts only in root release builds, sleeps between
+  checks and skips checks while the plugin is disabled.
 - The channel CLI/API slice adds no UI; UI approval and screenshot review stay
   with the owner’s separate UI work.

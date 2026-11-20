@@ -283,9 +283,7 @@ impl RemoteBackend {
             return Err(unavailable());
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         if let Some(host_id) = self
             .existing_host(&authority.owner, address, lookup, retire)
@@ -571,9 +569,7 @@ impl RemoteBackend {
             }
         };
         if !self.issuer.ready() {
-            return Err(Failure::install(
-                "Set up or unlock host connections with an administrator passkey before adding a host.",
-            ));
+            return Err(Failure::authority_locked());
         }
         let (mode, uid) = match target.mode {
             InstallMode::Rootless => (Mode::Rootless, check.uid),
@@ -998,9 +994,7 @@ impl Backend for RemoteBackend {
                 ));
             }
             if !self.issuer.ready() {
-                return Err(Failure::install(
-                    "Set up or unlock host connections with an administrator passkey before adding a host.",
-                ));
+                return Err(Failure::authority_locked());
             }
             let uid = match target.mode {
                 InstallMode::Rootless => check.uid,
@@ -1265,9 +1259,7 @@ fn decide_stuck_install(facts: &StuckFacts) -> Result<StuckInstall, Failure> {
         return Ok(StuckInstall::Finish);
     }
     if !facts.ca_ready {
-        return Err(Failure::install(
-            "Set up or unlock host connections with an administrator passkey before adding a host.",
-        ));
+        return Err(Failure::authority_locked());
     }
     Ok(StuckInstall::Replace)
 }
@@ -1905,6 +1897,79 @@ mod tests {
         opens: Arc<AtomicUsize>,
         refuse_key_payload_upload: bool,
     }
+    /// Holds invitation delivery after publication so concurrent admission stays overlapped.
+    struct InvitationGate {
+        /// Reports at most one arrival per test batch through a bounded channel.
+        arrivals: tokio::sync::mpsc::Sender<usize>,
+        /// Keeps the invitation setup step pending until the test releases all batches.
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+    impl InvitationGate {
+        /// Reports this batch's invitation, then waits for the test to release setup.
+        async fn hold(&self, batch: usize) {
+            self.arrivals
+                .send(batch)
+                .await
+                .expect("invitation test stopped observing arrivals");
+            let mut release = self.release.clone();
+            tokio::time::timeout(TEST_HANG_BOUND, async {
+                while !*release.borrow_and_update() {
+                    release
+                        .changed()
+                        .await
+                        .expect("invitation test dropped its release signal");
+                }
+            })
+            .await
+            .expect("invitation test did not release setup within its hang bound");
+        }
+    }
+    /// Wraps the ordinary fixture transport to hold invitation setup for one batch.
+    struct GatedSniff {
+        sniff: Sniff,
+        gate: Arc<InvitationGate>,
+        batch: usize,
+    }
+    impl SshTransport for GatedSniff {
+        fn open(
+            &self,
+            destination: Destination,
+            credentials: Credentials,
+            evidence: MeshEvidence,
+        ) -> Operation<'_, Arc<dyn SshSession>> {
+            Box::pin(async move {
+                let session = self.sniff.open(destination, credentials, evidence).await?;
+                Ok(Arc::new(GatedSession {
+                    session,
+                    gate: self.gate.clone(),
+                    batch: self.batch,
+                }) as Arc<dyn SshSession>)
+            })
+        }
+    }
+    /// Holds invitation stdin until the concurrency test releases its batch.
+    struct GatedSession {
+        session: Arc<dyn SshSession>,
+        gate: Arc<InvitationGate>,
+        batch: usize,
+    }
+    impl SshSession for GatedSession {
+        fn trust_lookup(&self) -> Option<String> {
+            self.session.trust_lookup()
+        }
+
+        fn run<'a>(&'a self, script: &'a str, input: Input<'a>) -> Operation<'a, CommandOutput> {
+            let session = self.session.clone();
+            let gate = self.gate.clone();
+            let batch = self.batch;
+            Box::pin(async move {
+                if matches!(input, Input::Bytes(_)) {
+                    gate.hold(batch).await;
+                }
+                session.run(script, input).await
+            })
+        }
+    }
     impl SshTransport for Sniff {
         fn open(
             &self,
@@ -2031,6 +2096,44 @@ mod tests {
             })
         }
     }
+    /// The file add-host fixtures upload in place of the infraternal agent binary.
+    ///
+    /// The scripted transports never run it, and no check compares its bytes, so a small
+    /// tracked file stands in. Using the test executable instead (about 400 MB) made every
+    /// fixture hash and copy that much under the product's 30 s command bounds, which is
+    /// what failed these tests on a loaded host (#509).
+    fn fixture_payload() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")
+    }
+    /// No add-host fixture may upload the test executable as its payload (#509).
+    ///
+    /// Cost, not behaviour, is what this guards: a fixture that names the running test binary
+    /// makes the runner hash and copy hundreds of megabytes per test, so a handful of parallel
+    /// tests miss the runner's command bounds on a busy host. Every payload comes from
+    /// `fixture_payload`.
+    #[test]
+    fn fixtures_never_upload_the_test_executable_as_the_payload() {
+        // Split so this guard does not match its own text.
+        let needle = concat!("current", "_exe()");
+        for (name, source) in [
+            ("bootstrap_remote.rs", include_str!("bootstrap_remote.rs")),
+            (
+                "bootstrap_stuck_restore_tests.rs",
+                include_str!("bootstrap_stuck_restore_tests.rs"),
+            ),
+            (
+                "bootstrap_takeover_tests.rs",
+                include_str!("bootstrap_takeover_tests.rs"),
+            ),
+        ] {
+            assert!(
+                !source
+                    .lines()
+                    .any(|line| line.contains(needle) && line.contains("let binary")),
+                "{name} uploads the test executable; use fixture_payload()"
+            );
+        }
+    }
     struct Fixture {
         backend: Arc<RemoteBackend>,
         pool: sqlx::SqlitePool,
@@ -2094,24 +2197,43 @@ mod tests {
     fn start(f: &Fixture, owner: &str) -> Batch {
         start_backend(f, owner, f.backend.clone())
     }
+    /// Starts a fixture batch using the supplied backend and ordinary setup refusal.
     fn start_backend(f: &Fixture, owner: &str, backend: Arc<dyn Backend>) -> Batch {
-        start_backend_with_payload_refusal(f, owner, backend, false)
+        start_backend_with_payload_refusal(f, owner, backend, false, None)
     }
+    /// Starts a fixture batch that refuses the staged SSH key payload upload.
     fn start_backend_refusing_key_payload_upload(f: &Fixture, owner: &str) -> Batch {
-        start_backend_with_payload_refusal(f, owner, f.backend.clone(), true)
+        start_backend_with_payload_refusal(f, owner, f.backend.clone(), true, None)
     }
+    /// Starts one batch whose issued invitation waits until the test releases its gate.
+    fn start_with_invitation_gate(
+        f: &Fixture,
+        owner: &str,
+        batch: usize,
+        gate: Arc<InvitationGate>,
+    ) -> Batch {
+        start_backend_with_payload_refusal(f, owner, f.backend.clone(), false, Some((gate, batch)))
+    }
+    /// Starts a fixture runner, optionally holding a published invitation for a concurrency test.
     fn start_backend_with_payload_refusal(
         f: &Fixture,
         owner: &str,
         backend: Arc<dyn Backend>,
         refuse_key_payload_upload: bool,
+        invitation_gate: Option<(Arc<InvitationGate>, usize)>,
     ) -> Batch {
-        let fixture_payload = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let fixture_payload = fixture_payload();
+        let sniff = Sniff {
+            opens: f.opens.clone(),
+            refuse_key_payload_upload,
+        };
+        let transport: Arc<dyn SshTransport> = if let Some((gate, batch)) = invitation_gate {
+            Arc::new(GatedSniff { sniff, gate, batch })
+        } else {
+            Arc::new(sniff)
+        };
         let runner = Bootstrap::new(
-            Arc::new(Sniff {
-                opens: f.opens.clone(),
-                refuse_key_payload_upload,
-            }),
+            transport,
             backend,
             BinaryPaths {
                 x86_64: fixture_payload.clone(),
@@ -2178,6 +2300,8 @@ mod tests {
         .await
         .expect("invitation was not committed within the test hang bound");
     }
+    /// Automatic cleanup acts only on the exact failed setup record of this
+    /// server's host: another owner, account or mode is refused.
     #[tokio::test]
     async fn automatic_cleanup_requires_the_exact_failed_server_host_binding() {
         let f = fixture(true).await;
@@ -2245,6 +2369,13 @@ mod tests {
                 .await
                 .unwrap()
         );
+        // Since D376 the database refuses this flip outside an enrolled
+        // promotion; drop that guard here to model a host row of another
+        // mode, which the binding check below must still refuse.
+        sqlx::query("DROP TRIGGER remote_hosts_mode_write_once")
+            .execute(&f.pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE remote_hosts SET mode='rootful',execution_uid=0 WHERE id=?")
             .bind(f.prior.as_bytes().as_slice())
             .execute(&f.pool)
@@ -2589,6 +2720,8 @@ mod tests {
         assert!(!revoked, "a running setup must keep its host");
     }
 
+    /// Replacing an old install that left a journal re-issues that host's identity instead of
+    /// adding a second host record for the same machine.
     #[tokio::test]
     async fn replacing_a_journaled_old_install_reissues_its_identity_without_a_duplicate_host() {
         let f = fixture(true).await;
@@ -2618,7 +2751,7 @@ mod tests {
             digest,
             scripts: scripts.clone(),
         });
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             transport,
             f.backend.clone(),
@@ -2724,7 +2857,7 @@ mod tests {
     /// Run add-host against a scripted stuck upgrade, confirming any offered action.
     async fn run_stuck(f: &Fixture, check: Vec<u8>) -> (Vec<Event>, Vec<String>) {
         let scripts = Arc::new(Mutex::new(Vec::new()));
-        let binary = std::env::current_exe().unwrap();
+        let binary = fixture_payload();
         let runner = Bootstrap::new(
             Arc::new(RejoinSession {
                 check,
@@ -2872,6 +3005,7 @@ mod tests {
         assert_eq!(issued, 1, "one invitation for a new host id");
     }
 
+    /// A locked CA refuses re-enrollment with the `authority_locked` kind before anything on the host changes.
     #[tokio::test]
     async fn a_locked_ca_refuses_reenrollment_before_anything_changes() {
         let f = fixture(false).await;
@@ -2885,6 +3019,11 @@ mod tests {
             failed.message.contains("administrator passkey"),
             "{}",
             failed.message
+        );
+        // The page offers its own Unlock only for this kind (#510); it must not depend on the sentence.
+        assert_eq!(
+            failed.failure.as_ref().map(|failure| failure.kind),
+            Some(infraternal_plugin_ssh::model::FailureKind::AuthorityLocked)
         );
         assert!(events.iter().all(|event| event.leftovers.is_none()));
         assert_eq!(mutating(&scripts), Vec::<&str>::new());
@@ -3269,11 +3408,42 @@ mod tests {
         );
     }
 
+    /// Holds one invitation open while all same-destination competitors reach admission.
     #[tokio::test]
     async fn breakit2_concurrent_same_destination_issues_only_one_invitation() {
         let f = fixture(true).await;
-        let batches: Vec<_> = (0..8).map(|_| start(&f, "owner")).collect();
+        // At most one invitation can be reported by each of these eight batches.
+        let (arrivals, mut arrived) = tokio::sync::mpsc::channel(8);
+        let (release, release_signal) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(InvitationGate {
+            arrivals,
+            release: release_signal,
+        });
+        let batches: Vec<_> = (0..8)
+            .map(|batch| start_with_invitation_gate(&f, "owner", batch, gate.clone()))
+            .collect();
+        let first_invitation = tokio::time::timeout(TEST_HANG_BOUND, arrived.recv())
+            .await
+            .expect("no invitation was published within the test hang bound")
+            .expect("all invitation reporters closed before publishing");
+        assert!(first_invitation < batches.len());
+        let second_invitation = tokio::time::timeout(TEST_HANG_BOUND, async {
+            tokio::select! {
+                _ = futures_util::future::join_all(batches.iter().enumerate().filter_map(|(batch, started)| {
+                    (batch != first_invitation).then_some(finished(started))
+                })) => false,
+                extra = arrived.recv() => extra.is_some(),
+            }
+        })
+        .await
+        .expect("same-destination competitors did not reach a terminal event");
+        // Release even after observing a duplicate so every fixture task can clean up.
+        release.send_replace(true);
         let events = futures_util::future::join_all(batches.iter().map(finished)).await;
+        assert!(
+            !second_invitation,
+            "a second invitation was published while the first attempt remained reserved"
+        );
         assert_eq!(
             events
                 .iter()

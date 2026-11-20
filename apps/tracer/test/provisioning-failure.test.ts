@@ -106,23 +106,87 @@ test("a Take over offer reaches the wizard only in its exact shape", () => {
     const events: BootstrapEvent[] = [];
     new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
     const install = "c10909d16e8147a3b0f2e5d4c3b2a190";
+    const terminal = { account: "root", program: "bash", since: 1792195200 };
+    const close_challenge = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
     const offers: Array<[string, unknown]> = [
       ["unrecognized_install", { install, live: true }],
       ["unrecognized_install", { install: install.toUpperCase(), live: true }],
       ["unrecognized_install", { install: install.slice(1), live: true }],
       ["unrecognized_install", { install, live: "yes" }],
       ["install", { install, live: false }],
+      ["unrecognized_install", { install, live: true, terminals: [terminal], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, program: "bash\n" }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, since: 0 }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: "unknown" }],
+      ["unrecognized_install", { install, live: true, terminals: [terminal] }],
+      ["unrecognized_install", { install, live: true, terminals: [terminal], close_challenge: "00000000-0000-0000-0000-000000000000" }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, tty: "pts/3", others: 2 }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, tty: "tty1" }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, others: -1 }], close_challenge }],
+      ["unrecognized_install", { install, live: true, terminals: [{ ...terminal, others: 1.5 }], close_challenge }],
     ];
     offers.forEach(([kind, takeover], index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
       failure: { kind, message: "x", log_tail: [], takeover } }) })));
-    expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined]);
+    expect(events.map((event) => event.failure?.takeover)).toEqual([{ install, live: true }, undefined, undefined, undefined, undefined, { install, live: true, terminals: [terminal], close_challenge }, undefined, undefined, undefined, undefined, undefined,
+      { install, live: true, terminals: [{ ...terminal, tty: "pts/3", others: 2 }], close_challenge }, undefined, undefined, undefined]);
     // The offer pauses its attempt like leftovers do: its challenge reaches the wizard (D359).
     const leftovers = { challenge: "1b4e28ba-2fa1-41d2-883f-0016d3cca427", mode: "root", findings: ["x"] };
-    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 9, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 20, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
       failure: { kind: "unrecognized_install", message: "x", log_tail: [], takeover: { install, live: false } }, leftovers }) }));
-    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 10, target: "host", attempt: 1, step: "check", message: "plain", elapsed_ms: 1,
+    socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: 21, target: "host", attempt: 1, step: "check", message: "plain", elapsed_ms: 1,
       failure: { kind: "unrecognized_install", message: "x", log_tail: [] }, leftovers }) }));
     expect(events.at(-2)?.leftovers?.challenge).toBe(leftovers.challenge);
     expect(events.at(-1)?.leftovers).toBeUndefined();
+  } finally { globalThis.WebSocket = original; }
+});
+
+/** D368 (#433): a Start fresh offer lists the stuck setup's own terminals only with its own challenge. */
+test("a Start fresh offer carries the terminals it closes", () => {
+  const previous = globalThis.WebSocket;
+  let socket: EventTarget;
+  class Socket extends EventTarget {
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    const terminal = { account: "root", program: "bash", since: 1792195200, tty: "pts/0", others: 0 };
+    const close_challenge = "1b4e28ba-2fa1-41d2-883f-0016d3cca427";
+    const offers: unknown[] = [
+      { terminals: [terminal], close_challenge },
+      { terminals: [terminal] },
+      { terminals: [terminal], close_challenge: "00000000-0000-0000-0000-000000000000" },
+      { terminals: [], close_challenge },
+      { terminals: [{ ...terminal, tty: "tty1" }], close_challenge },
+    ];
+    offers.forEach((closes, index) => socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: index + 1, target: "host", attempt: 1, step: "check", message: "offer", elapsed_ms: 1,
+      failure: { kind: "stale_previous_attempt", message: "x", log_tail: [], closes } }) })));
+    expect(events.map((event) => event.failure?.closes)).toEqual([{ terminals: [terminal], close_challenge }, undefined, undefined, undefined, undefined]);
+  } finally {
+    globalThis.WebSocket = previous;
+  }
+});
+
+/** #433 P3: retain only a byte-sized integer status, so takeover copy can distinguish manager failures. */
+test("takeover exit statuses survive the decoder only as valid bytes", () => {
+  const original = globalThis.WebSocket;
+  let socket: EventTarget;
+  /** A socket stand-in that delivers fixture events to the production decoder. */
+  class Socket extends EventTarget {
+    /** Keep the socket available so each case can deliver its public failure record. */
+    constructor() { super(); socket = this; }
+  }
+  globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+  try {
+    const events: BootstrapEvent[] = [];
+    new ProvisioningRun({ onEvent: (event) => events.push(event) }, { url: "ws://localhost/bootstrap" });
+    for (const status of [0, 79, 80, 81, 255, -1, 256, 80.5, "80", null]) {
+      socket!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ sequence: events.length + 1, target: "host", attempt: 1, step: "failed", message: "Take over stopped", elapsed_ms: 1,
+        failure: { kind: "unrecognized_install", message: "x", log_tail: [], exit_status: status } }) }));
+      const failure = events.at(-1)?.failure;
+      if (typeof status === "number" && Number.isInteger(status) && status >= 0 && status <= 255) expect(failure).toHaveProperty("exit_status", status);
+      else expect(failure).not.toHaveProperty("exit_status");
+    }
   } finally { globalThis.WebSocket = original; }
 });

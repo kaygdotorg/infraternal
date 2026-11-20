@@ -9,9 +9,9 @@ autobins = false
 [features]
 default = []
 # Native source admission is opt-in and does not pull in the server runtime.
-source = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "desktop", "dep:infraternal-protocol", "dep:bytes", "dep:uuid"]
+source = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "desktop", "dep:infraternal-protocol", "dep:bytes", "dep:uuid", "dep:base64", "dep:sha2"]
 # Reuse the authenticated transport engines already selected by the owner [D198,D232].
-server = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "infraternal-plugin-api/socket-host", "dep:infraternal-plugin-api", "dep:infraternal-protocol", "dep:tokio", "dep:quinn", "dep:bytes", "dep:uuid"]
+server = ["infraternal-protocol/desktop", "infraternal-plugin-api/native-streams", "infraternal-plugin-api/socket-host", "dep:infraternal-plugin-api", "dep:infraternal-protocol", "dep:tokio", "dep:quinn", "dep:bytes", "dep:uuid", "dep:base64", "dep:sha2"]
 # The standalone helper binary uses Tokio's default multi-thread runtime; without
 # naming it here the crate only builds when another workspace member unifies it.
 desktop = ["dep:infraternal-plugin-api", "dep:nix", "dep:tokio", "tokio/rt-multi-thread", "dep:screencapturekit"]
@@ -26,6 +26,9 @@ serde_json.workspace = true
 infraternal-plugin-api = { workspace = true, optional = true }
 nix = { workspace = true, optional = true, features = ["event"] }
 tokio = { workspace = true, optional = true }
+# App icons: base64 on the wire, named by SHA-256 (#146, D349).
+base64 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 screencapturekit = { version = "=11.1.2", default-features = false, features = ["macos_14_2"], optional = true }
@@ -43,6 +46,8 @@ required-features = ["desktop"]
 [dev-dependencies]
 # The socket publication test watches the runtime directory (Linux inotify).
 nix = { workspace = true, features = ["event", "inotify"] }
+# Paused time keeps marker-retry tests deterministic without wall-clock sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 infraternal-agent = { path = "../../infraternal-agent", version = "0.1.0", default-features = false, features = ["remote", "native-streams"] }
 quinn.workspace = true
 # Real mutual-TLS fixtures generate identities in memory; no test key is stored.

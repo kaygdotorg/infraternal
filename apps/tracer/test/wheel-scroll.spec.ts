@@ -17,6 +17,7 @@ const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
+/** The keys page's window. Its address is `reference/keys` since the docs got sections and nested addresses (#311, D317); it was `keys`. */
 const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
@@ -95,10 +96,11 @@ for (const size of SIZES) {
 
       // ---- a sideways gesture over the same page is the canvas's: it moves to the neighbouring window ----------------------------
       await page.waitForTimeout(400);
-      // The Keys page is the last stop of the Docs view, so a sideways gesture can only go back; go whichever way there is room.
-      const { stops } = (await api(page, "canvasLock")) as { stops: number };
-      await page.mouse.wheel(index >= stops - 1 ? -300 : 300, 0);
-      await expect.poll(() => stopIndex(page)).not.toBe(index);
+      // Observed on the nightly (#443): the keys page's stop is index 12 of the Docs view's 13 pages, the last one, so a gesture to the
+      // right has no neighbour to go to. The gesture goes the other way when the right one stays put, and either must move the canvas.
+      await page.mouse.wheel(300, 0);
+      const moved = await expect.poll(() => stopIndex(page), { timeout: 1500 }).not.toBe(index).then(() => true, () => false);
+      if (!moved) { await page.mouse.wheel(-300, 0); await expect.poll(() => stopIndex(page)).not.toBe(index); }
       await page.waitForTimeout(600);
       // The router's cost per wheel event over page content (logged for the record, not asserted: speed is measured in the
       // performance harness, not in a functional test).

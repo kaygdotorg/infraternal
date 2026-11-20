@@ -214,7 +214,7 @@
   font: var(--fw-title) var(--ui-size-button)/1 var(--font-face);
   letter-spacing: var(--ui-tracking);
   cursor: pointer;
-  transition: transform var(--t-press) var(--ease-out), opacity var(--t-pop) ease;
+  transition: transform var(--t-press) var(--ease-out), opacity var(--t-pop) var(--ease-out);
 }
 .auth-primary:active { transform: scale(var(--ui-press-scale-soft)); }
 .auth-primary[disabled] { transform: none; opacity: 0.35; cursor: default; }
@@ -280,7 +280,7 @@
 .auth-welcome { text-align: center; }
 .welcome-copy { max-width: 100%; text-align: center; }
 .welcome-copy h1 { margin: 0 0 0.875rem; font-size: clamp(1.25rem, 6vw, 4rem); font-weight: var(--fw-title); letter-spacing: -0.04em; line-height: 1.05; }
-.welcome-copy p { margin: 0; color: var(--fg-2); animation: auth-welcome-caption 240ms 900ms var(--ease-out) both; }
+.welcome-copy p { margin: 0; color: var(--fg-2); animation: auth-welcome-caption 240ms 60ms var(--ease-out) both; }
 .auth-welcome[data-no-motion] .welcome-copy p { animation: none; }
 @keyframes auth-welcome-caption { from { opacity: 0; transform: translateX(0.625rem); } }
 

@@ -60,7 +60,7 @@ export function installSessionScenes(env: { cx: Ctx; inventory: MockInventory; /
       manager("edge-arm");
       later(() => cx.stage.querySelector<HTMLElement>(".cl-sx-row[data-id='apt-watch'] .cl-sx-act.is-end")?.click(), settle + 380);
     } },
-    { title: "Splits", hint: "right, then down · the droplet", run() {
+    { title: "Splits", hint: "right, then down · a fade", run() {
       reset();
       const rec = winOf("build-01");
       if (!rec) return;

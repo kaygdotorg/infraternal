@@ -29,6 +29,12 @@ init (systemd / openrc / runit / s6 / fallback)
          └─ $SHELL
 ```
 
+On Linux, a system server that shares `/var/lib/infraternal` with the
+infraternal agent puts its state in the private `server/` child [395].
+The shared base retains the infraternal agent's install paths and traversal.
+The systemd start job owns migration and verifies the new server before it
+retires the recorded originals. [Server CLI and recovery](CLI.md)
+
 ## Plugin anatomy [15][16]
 
 | Part   | Language   | Does |
@@ -43,7 +49,7 @@ and UI adapters come from that definition.
 ## Repo layout (target)
 
 ```
-crates/        server, agent, shim, protocol, plugin-api, plugins/*
+crates/        server, db (SQLite access, D379), agent, shim, protocol, plugin-api, plugins/*
 apps/website   infraternal.com (SvelteKit static)
 apps/docs      docs at /docs (Astro Starlight)
 apps/web       the product UI (SvelteKit, embedded in the server binary)

@@ -228,9 +228,18 @@ async fn mux_greeting_omits_cached_native_provider_capabilities() {
     let (bulk, bulk_rx) = mpsc::channel(1);
     drop(bulk);
     let (written, mut frames) = mpsc::unbounded_channel();
-    writer(&Capture(written), bulk_rx, None, true, false, false, 64)
-        .await
-        .unwrap();
+    writer(
+        &Capture(written),
+        bulk_rx,
+        None,
+        None,
+        true,
+        false,
+        false,
+        64,
+    )
+    .await
+    .unwrap();
     let bytes = frames.recv().await.unwrap();
     let greeting = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
     assert!(
@@ -265,6 +274,7 @@ async fn control_precedes_bulk_without_reordering_snapshot_notice() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,
@@ -404,6 +414,7 @@ async fn census_and_open_result_share_fifo_order() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,
@@ -535,6 +546,8 @@ async fn the_unhealthy_handoff_case_survives_concurrent_spawns() {
     );
 }
 
+/// A replay's geometry is fixed when the replay starts, ahead of a queued
+/// Resize and of output that arrives later.
 #[tokio::test]
 async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     use infraternal_shim::frame::MULTI_WRITER;
@@ -593,6 +606,11 @@ async fn replay_geometry_is_frozen_before_queued_resize_and_delayed_output() {
     let (mut commands, receiver) = session_commands::channel();
     let (tx, mut messages) = mpsc::channel(8);
     let relay = tokio::spawn(terminal(path, id, 2, 0, 0, receiver, tx));
+    // A relay first announces its attachment to the writer (#477).
+    assert!(matches!(
+        messages.recv().await,
+        Some(Message::Attached(2, ..))
+    ));
     assert!(matches!(
         messages.recv().await,
         Some(Message::Shim(2, Shim::InputAck(0)))
@@ -647,6 +665,7 @@ async fn fixture_drops_output_left_over_from_the_previous_terminal() {
             &Capture(written),
             bulk_rx,
             Some(control_rx),
+            None,
             false,
             false,
             false,

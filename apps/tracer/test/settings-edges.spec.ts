@@ -18,7 +18,7 @@ const captures = tracerEvidencePath("settings-edges");
 const SIZES = [{ w: 1440, h: 900, touch: false, dpr: 2 }, { w: 393, h: 852, touch: true, dpr: 3 }] as const;
 /** Window id without `s-` (Settings in rows of windows, #304), the palette words that open it. The old Appearance, Toolbar and Shortcuts sections are now blocks inside Theme, Typing and Layout. */
 const SECTIONS = [
-  { id: "appearance-theme", words: "Appearance › Theme" },
+  { id: "appearance-themes", words: "Appearance › Themes" },
   { id: "appearance-layout", words: "Appearance › Layout" },
   { id: "terminal-hosts", words: "Terminal › Hosts" },
   { id: "terminal-typing", words: "Terminal › Typing" },
@@ -30,7 +30,7 @@ const SECTIONS = [
 
 /** The row types each window must show, so a window that renders nothing cannot pass. */
 const EXPECTED: Record<string, string[]> = {
-  "appearance-theme": ["tabs"], "appearance-layout": [], "terminal-hosts": ["switch", "status"], "terminal-typing": ["toolbar", "shortcut"],
+  "appearance-themes": ["tabs"], "appearance-layout": [], "terminal-hosts": ["switch", "status"], "terminal-typing": ["toolbar", "shortcut"],
   "you-devices": ["device"], "you-profile": ["status"], "you-passkeys": ["fact"], "about-version": ["fact"],
 };
 

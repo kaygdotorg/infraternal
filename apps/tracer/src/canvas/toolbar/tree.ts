@@ -23,6 +23,7 @@ export interface TreeModule {
   dispose(): void;
 }
 
+/** Builds the sidebar tree for one canvas and keeps it current as views, windows, hosts and the CA lock change; returns its `render` and `dispose`. */
 export function createTree(cx: Ctx): TreeModule {
   const { core, stage, signal, views, state } = cx;
   const inv = cx.adapters.inventory;
@@ -69,7 +70,7 @@ export function createTree(cx: Ctx): TreeModule {
     if (!leavesOf) { loadLeaves(); return all; }
     // Console lists the sessions of its hosts, not only the ones that have a window (D178).
     const leaves = leavesOf(cx);
-    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${leaves.filter((l) => !l.heading).length}`, leaves } : sec));
+    return all.map((sec) => (sec.id === "view:console" ? { ...sec, meta: `${leaves.filter((l) => !l.heading && !l.id.startsWith("u:")).length}`, leaves } : sec));
   };
   const current = (): string => {
     const w = state.activeWin;
@@ -77,6 +78,13 @@ export function createTree(cx: Ctx): TreeModule {
   };
   let queued = false;
   let stale = false;
+  /**
+   * What the tree was last drawn from (the sections and the active leaf, as text). A change event that leaves it the same, such as the
+   * host list or the lock reporting the hosts it already had, draws nothing: a redraw replaces every row, so it took the keyboard focus from
+   * the row a menu had just given it back to and closed a revealed swipe under the person's finger (#443; since #500 these events arrive
+   * right after the sidebar opens).
+   */
+  let drawn = "";
   /** A host's name is being edited in the tree: it is not rebuilt under the person's hands (it is, once they are done). */
   let editing = false;
   /** A second tap on a host's name renames it; the sidebar on a phone therefore waits this long before it closes. */
@@ -108,8 +116,14 @@ export function createTree(cx: Ctx): TreeModule {
       if (editing) return;
       stale = false;
       loadRows();
-      treeMenu = core.setHostTree(sections(), current(), (picked) => {
+      const sectionList = sections();
+      const signature = JSON.stringify([sectionList, current()]);
+      if (treeMenu && signature === drawn && stage.querySelector("#tree")?.firstElementChild) return;
+      drawn = signature;
+      treeMenu = core.setHostTree(sectionList, current(), (picked) => {
         // A component leaf of Settings (#304) opens the first window of its row; a group leaf is the window's own id.
+        // The inline "Unlock host connections" row under a locked host runs the passkey unlock; it opens no window.
+        if (picked.startsWith("u:")) { void cx.adapters.authority?.unlock(); chosen(picked); return; }
         const id = picked.startsWith("st:") ? outline?.rows().find((row) => `st:${row.id}` === picked)?.groups[0]?.windowId ?? picked : picked;
         if (id.startsWith("s:")) {
           const [host, sid] = id.slice(2).split("/");
@@ -137,6 +151,11 @@ export function createTree(cx: Ctx): TreeModule {
   };
   const shown = sidebar ? new MutationObserver(() => { if (stale && !sidebar.hidden) render(); }) : undefined;
   if (sidebar) shown!.observe(sidebar, { attributes: true, attributeFilter: ["hidden"] });
+  // The host list and the lock decide which hosts the Console lists and what each says (#500): a host that joins, goes offline or
+  // is unlocked changes its row, and the tree draws it without waiting for a layout change.
+  const offHostsChange = cx.adapters.sessions.onChange(render);
+  const offLockChange = cx.adapters.authority?.onChange(render);
+  signal.addEventListener("abort", () => { offHostsChange(); offLockChange?.(); }, { once: true });
   const tree = stage.querySelector<HTMLElement>("#tree");
   tree?.addEventListener("click", (e) => {
     const head = (e.target as Element).closest(".bm-head");
