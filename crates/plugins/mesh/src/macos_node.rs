@@ -490,7 +490,7 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-pub use crate::enrolment::Enrolment;
+pub use crate::enrolment::{Enrolment, MachineBindingError};
 
 /// Apply the binding rule to saved state; `true` means the key must rotate.
 ///
@@ -2130,12 +2130,30 @@ fn valid_rotation_request(operation_id: &str, sequence: u64) -> bool {
 }
 
 impl Node {
+    /// Refuse a state folder bound to another Mac before the remote connection supervisor starts.
+    ///
+    /// A folder that does not exist yet, or has no binding, has nothing to refuse.
+    /// # Errors
+    /// `PermissionDenied` carrying a [`MachineBindingError`] for a foreign or unreadable identity.
+    pub fn check_enrolled_machine(state_directory: &Path) -> io::Result<()> {
+        match fs::symlink_metadata(state_directory) {
+            Ok(_) => crate::macos_machine::check(state_directory, crate::macos_machine::fingerprint()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Restore accepted public intent, clean only old utun routes, and resume before coordinator dialing.
     ///
     /// State that another enrolment issued is discarded first (see [`reconcile`]).
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        // An enrolled node belongs to one Mac: refuse a copied folder before any system change,
+        // and record the binding on the first start (#221).
+        if enrolment.is_some() {
+            crate::macos_machine::bind(state_directory, crate::macos_machine::fingerprint())?;
+        }
         #[cfg(feature = "mesh-dns")]
         crate::dns_integration::DnsIntegration::default().remove()?;
         let path = state_directory.join(PUBLIC_STATE);

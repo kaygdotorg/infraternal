@@ -81,6 +81,9 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+#[cfg(any(all(feature = "agent", target_os = "macos"), all(test, target_os = "linux")))]
+mod macos_machine;
+
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub use macos_node as node;
 
