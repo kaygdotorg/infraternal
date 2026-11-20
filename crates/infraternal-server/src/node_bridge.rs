@@ -32,6 +32,9 @@ impl NodeChannel for NodeBridge {
     fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.actor.changes()
     }
+    fn agent_restarts(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        self.server.then(|| self.actor.restarts())
+    }
     fn route_peer(
         &self,
         address: std::net::SocketAddr,

@@ -461,13 +461,13 @@ impl Removal {
             .await?;
         // Retirement's trigger creates a cleanup obligation. Forget deliberately cancels it,
         // along with the uninstall outbox and unfinished-bootstrap intent, after recording history.
-        for table in [
-            "remote_host_removals",
-            "remote_login_cleanup",
-            "remote_host_bootstrap",
-            "remote_bootstrap_retirement_intents",
+        for statement in [
+            "DELETE FROM remote_host_removals WHERE host_id=?",
+            "DELETE FROM remote_login_cleanup WHERE host_id=?",
+            "DELETE FROM remote_host_bootstrap WHERE host_id=?",
+            "DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=?",
         ] {
-            sqlx::query(&format!("DELETE FROM {table} WHERE host_id=?"))
+            sqlx::query(statement)
                 .bind(entry.host.as_bytes().as_slice())
                 .execute(&mut *tx)
                 .await?;

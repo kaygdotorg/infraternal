@@ -90,6 +90,7 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
     #[cfg(feature = "remote")]
     let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
     let (changes, notice) = watch::channel(());
+    let (restarts, restart_notice) = watch::channel(());
     let (inventory, _snapshot) = watch::channel(SessionInventoryState::Pending);
     tokio::spawn(run_actor(
         Source::Fixture {
@@ -100,6 +101,7 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
         #[cfg(feature = "remote")]
         cleanup_rx,
         changes,
+        restarts,
         inventory.clone(),
     ));
     let agent = EmbeddedAgent {
@@ -107,6 +109,7 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
         #[cfg(feature = "remote")]
         cleanup,
         changes: notice,
+        restarts: restart_notice,
         next_attachment_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         session_inventory: inventory,
         reported_os: tokio::sync::watch::channel(None).0,

@@ -2,7 +2,7 @@ use std::pin::Pin;
 
 use futures::task::*;
 use log::trace;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 
 use crate::Error;
 
@@ -75,9 +75,19 @@ pub struct SshRead<R> {
 }
 
 impl<R: AsyncRead + AsyncWrite> SshRead<R> {
-    pub fn split(self) -> (SshRead<tokio::io::ReadHalf<R>>, tokio::io::WriteHalf<R>) {
+    /// Split the transport and buffer small encrypted packets across the prefix and body reads.
+    pub fn split(
+        self,
+    ) -> (
+        BufReader<SshRead<tokio::io::ReadHalf<R>>>,
+        tokio::io::WriteHalf<R>,
+    ) {
+        // Read ahead only enough for interactive traffic. Larger body reads can
+        // bypass an empty buffer. The unread bytes stay encrypted across rekeys.
+        const PACKET_READ_AHEAD: usize = 256;
         let (r, w) = tokio::io::split(self.r);
-        (SshRead { id: self.id, r }, w)
+        let reader = BufReader::with_capacity(PACKET_READ_AHEAD, SshRead { id: self.id, r });
+        (reader, w)
     }
 }
 

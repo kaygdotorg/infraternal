@@ -89,8 +89,6 @@ fn post(server: &str, path: &str, origin: &str, cookie: Option<&str>, body: &Val
     (status, cookies, value)
 }
 
-// aes-gcm 0.10's nonce type is built through the older generic-array API.
-#[allow(deprecated)]
 /// Encrypt a data-encryption key using the same key-wrap envelope as setup.
 fn wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Value {
     let salt: [u8; 32] = random();
@@ -100,7 +98,7 @@ fn wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Value {
     Hkdf::<Sha256>::new(Some(&salt), ikm).expand(&aad, &mut key).unwrap();
     let ct = Aes256Gcm::new_from_slice(&key)
         .unwrap()
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: dek, aad: &aad })
+        .encrypt(&Nonce::from(nonce), Payload { msg: dek, aad: &aad })
         .unwrap();
     json!({"salt": B64.encode(salt), "nonce": B64.encode(nonce), "ciphertext": B64.encode(ct)})
 }
@@ -159,7 +157,8 @@ pub fn register(args: &Args) {
     let user = start["user_id"].as_str().unwrap_or_else(|| die("no user_id")).to_owned();
     let pk = &start["options"]["publicKey"];
     let key = SigningKey::from_slice(&random::<32>()).unwrap();
-    let point = key.verifying_key().to_encoded_point(false);
+    // The COSE key below needs both coordinates from the uncompressed point.
+    let point = key.verifying_key().to_sec1_point(false);
     let cred_id: [u8; 32] = random();
     let prf_secret: [u8; 32] = random();
     // PRF: HMAC-SHA256 over SHA-256("WebAuthn PRF\0" || salt), as an authenticator's hmac-secret.
@@ -168,7 +167,7 @@ pub fn register(args: &Args) {
     input.extend_from_slice(&salt);
     let prf = {
         use hkdf::hmac::{Hmac, Mac};
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&prf_secret).unwrap();
+        let mut mac = <Hmac<Sha256> as hkdf::hmac::KeyInit>::new_from_slice(&prf_secret).unwrap();
         mac.update(&Sha256::digest(&input));
         mac.finalize().into_bytes().to_vec()
     };

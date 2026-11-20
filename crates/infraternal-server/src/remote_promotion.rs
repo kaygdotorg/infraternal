@@ -255,6 +255,7 @@ fn unique_violation(error: &sqlx::Error) -> bool {
 impl EnrollmentStore {
     /// Open a promotion of `host` for the session `session_hash`.
     ///
+    /// SQL fragments are fixed, and every value from the caller is bound.
     /// The authority check and the insert are one statement (R7): the session
     /// must be unlocked, inside its admin window, belong to the host's owner,
     /// who must be the server owner (the only "host admin" until roles
@@ -286,7 +287,7 @@ impl EnrollmentStore {
              {BEGIN_ALLOWED} AND NOT {} AND NOT {UNINSTALL_PENDING}",
             locked("h.id", "?3", "?6")
         );
-        let inserted = sqlx::query(&sql)
+        let inserted = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(attempt.as_bytes().as_slice())
             .bind(method.word())
             .bind(method.account())
@@ -333,7 +334,7 @@ impl EnrollmentStore {
         // use (`?1`–`?3`, `?5`, `?7`) are bound to NULL.
         let sql = format!("SELECT NOT {UNINSTALL_PENDING} {BEGIN_ALLOWED}");
         let unused = None::<i64>;
-        let allowed: Option<bool> = sqlx::query_scalar(&sql)
+        let allowed: Option<bool> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(unused)
             .bind(unused)
             .bind(unused)
@@ -418,7 +419,7 @@ impl EnrollmentStore {
                 "?3"
             )
         );
-        let row: Option<(Vec<u8>, String)> = sqlx::query_as(&sql)
+        let row: Option<(Vec<u8>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(i64::from(typed))
             .bind(attempt.as_bytes().as_slice())
             .bind(now)

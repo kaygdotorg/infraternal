@@ -204,9 +204,19 @@ impl Release {
         ];
         let version_name = version;
         let version = format!("{version}\n").into_bytes();
-        let mut sums = format!("{:x}  VERSION\n", Sha256::digest(&version)).into_bytes();
+        let mut sums = format!(
+            "{:x}  VERSION\n",
+            base16ct::HexDisplay(&Sha256::digest(&version))
+        )
+        .into_bytes();
         for (name, bytes) in &full_payloads {
-            sums.extend_from_slice(format!("{:x}  {name}\n", Sha256::digest(bytes)).as_bytes());
+            sums.extend_from_slice(
+                format!(
+                    "{:x}  {name}\n",
+                    base16ct::HexDisplay(&Sha256::digest(bytes))
+                )
+                .as_bytes(),
+            );
         }
         let session_files = if sessions {
             vec![
@@ -217,11 +227,21 @@ impl Release {
             Vec::new()
         };
         for (name, bytes) in &session_files {
-            sums.extend_from_slice(format!("{:x}  {name}\n", Sha256::digest(bytes)).as_bytes());
+            sums.extend_from_slice(
+                format!(
+                    "{:x}  {name}\n",
+                    base16ct::HexDisplay(&Sha256::digest(bytes))
+                )
+                .as_bytes(),
+            );
         }
         for index in 0..extra {
             sums.extend_from_slice(
-                format!("{:x}  fixture-{index:04}\n", Sha256::digest([])).as_bytes(),
+                format!(
+                    "{:x}  fixture-{index:04}\n",
+                    base16ct::HexDisplay(&Sha256::digest([]))
+                )
+                .as_bytes(),
             );
         }
         let sums_file = root.join("SHA256SUMS");

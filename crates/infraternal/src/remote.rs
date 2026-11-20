@@ -108,6 +108,10 @@ fn decode_candidate_key(encoded: &str) -> io::Result<Zeroizing<Vec<u8>>> {
     Ok(decoded)
 }
 
+/// Public startup refusal for a key that cannot prove its enrolled identity.
+const IDENTITY_MISMATCH: &str =
+    "This machine's saved private key does not match its enrollment certificate.";
+
 const PENDING_JOIN_KEY: &str = "join-key.pk8";
 
 /// Why a join step failed, in the classes a caller acts on.
@@ -129,6 +133,8 @@ pub(crate) enum Failure {
     Upgrade,
     /// The upgraded route did not send a valid app-level challenge.
     Challenge,
+    /// The saved private key differs from the key certified at enrollment.
+    IdentityMismatch,
 }
 
 impl std::fmt::Display for Failure {
@@ -139,6 +145,7 @@ impl std::fmt::Display for Failure {
             Self::Connect => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
             Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
             Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
+            Self::IdentityMismatch => IDENTITY_MISMATCH,
             Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
@@ -791,6 +798,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
         Some(Failure::Challenge) => {
             "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
         }
+        Some(Failure::IdentityMismatch) => IDENTITY_MISMATCH,
         Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
@@ -997,16 +1005,22 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
                 .map_err(|_| refused())?,
         )
     };
+    let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
+        .map_err(|_| refused())?;
+    let key_der = Zeroizing::new(B64.decode(&stored.key_der).map_err(|_| refused())?);
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    // A mismatched pair can never reconnect. Check it before starting the
+    // supervisor, so the service reports the local problem immediately.
+    if !certificate
+        .public_key()
+        .map_err(|_| refused())?
+        .public_eq(&key)
+    {
+        return Err(Failure::IdentityMismatch.error(io::ErrorKind::PermissionDenied));
+    }
     let identity = RemoteIdentity {
         host_id: stored.host_id,
-        identity: Identity {
-            certificate: X509::from_der(
-                &B64.decode(&stored.certificate_der).map_err(|_| refused())?,
-            )
-            .map_err(|_| refused())?,
-            key: PKey::private_key_from_pkcs8(&B64.decode(&stored.key_der).map_err(|_| refused())?)
-                .map_err(|_| refused())?,
-        },
+        identity: Identity { certificate, key },
         roots: vec![
             X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
                 .map_err(|_| refused())?,

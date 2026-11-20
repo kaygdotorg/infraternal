@@ -2017,6 +2017,7 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
     }
     let (_commands, receiver) = mpsc::channel(1);
     let (changes, _notice) = watch::channel(());
+    let (restarts, _restart_notice) = watch::channel(());
     let (inventory, _snapshot) = watch::channel(SessionInventoryState::Pending);
     let actor = tokio::spawn(run_actor(
         Source::Fixture {
@@ -2027,6 +2028,7 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
         #[cfg(feature = "remote")]
         mpsc::unbounded_channel().1,
         changes,
+        restarts,
         inventory,
     ));
     let first = observed.recv().await.unwrap();
@@ -2035,6 +2037,65 @@ async fn greeted_links_that_die_young_escalate_the_actor_retry_delay() {
     actor.await.unwrap();
     assert_eq!(second.duration_since(first), RECONNECT_FLOOR * 2);
     assert_eq!(third.duration_since(second), RECONNECT_FLOOR * 4);
+}
+
+/// The embedded actor reports a replacement process after its first connection is lost.
+#[tokio::test(start_paused = true)]
+async fn embedded_actor_notifies_when_the_infraternal_agent_reconnects() {
+    use tokio::io::AsyncWriteExt;
+
+    let (first, mut first_peer) = connection();
+    let (second, _second_peer) = connection();
+    let (attempts, _observed_attempts) = mpsc::unbounded_channel();
+    let (_commands, receiver) = mpsc::channel(1);
+    let (changes, mut connected) = watch::channel(());
+    let (restarts, mut restart_notice) = watch::channel(());
+    let (inventory, _snapshot) = watch::channel(SessionInventoryState::Pending);
+    let actor = tokio::spawn(run_actor(
+        Source::Fixture {
+            connections: std::collections::VecDeque::from([first, second]),
+            attempts,
+        },
+        receiver,
+        #[cfg(feature = "remote")]
+        mpsc::unbounded_channel().1,
+        changes,
+        restarts,
+        inventory,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(1), connected.changed())
+        .await
+        .expect("first infraternal agent connection starts")
+        .expect("connection observer remains connected");
+    assert!(
+        !restart_notice
+            .has_changed()
+            .expect("restart observer remains connected"),
+        "the initial connection is not a replacement"
+    );
+
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Close {
+            code: 1006,
+            reason: "fixture infraternal agent stopped",
+        },
+        &mut wire,
+    )
+    .expect("encode the first process closing");
+    first_peer
+        .write_all(&wire)
+        .await
+        .expect("close the first process connection");
+
+    tokio::time::timeout(Duration::from_secs(1), restart_notice.changed())
+        .await
+        .expect("replacement notification arrives")
+        .expect("restart observer remains connected");
+    actor.abort();
+    let _ = actor.await;
 }
 
 #[path = "embedded_path_tests.rs"]
