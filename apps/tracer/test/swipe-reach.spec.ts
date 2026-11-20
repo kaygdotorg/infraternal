@@ -45,11 +45,25 @@ async function open(page: Page): Promise<void> {
   expect(lock.index).toBeLessThan(lock.stops - 1);
 }
 
-/** Flies the camera to the middle window and lets it settle. */
+/** The canvas stop of the multiplexer page in the Docs view: the keys page is the last stop (12), this one is nearer the start. */
+const MIDDLE_STOP = 3;
+
+/**
+ * Brings the canvas to the middle window with the keyboard's one-window steps (Ctrl+Shift+[ and ]), which update the canvas stop.
+ * (`activateWindow` does not move a locked Docs canvas.) Fails if the middle window is not then on screen.
+ */
 async function fly(page: Page): Promise<void> {
-  await api(page, "activateWindow", "d-terminal/multiplexer");
-  // sleep: the camera flies to the window; no event marks the end
-  await page.waitForTimeout(1300);
+  for (let i = 0; i < 16 && (await stopIndex(page)) !== MIDDLE_STOP; i++) {
+    await page.keyboard.press((await stopIndex(page)) > MIDDLE_STOP ? "Control+Shift+[" : "Control+Shift+]");
+    // sleep: the camera flies one window; no event marks the end
+    await page.waitForTimeout(450);
+  }
+  // sleep: the camera spring settles; no event marks the end
+  await page.waitForTimeout(800);
+  expect(await stopIndex(page)).toBe(MIDDLE_STOP);
+  const box = (await page.locator(MIDDLE).boundingBox())!;
+  expect(box.x + box.width / 2, "the middle window is on screen").toBeGreaterThan(0);
+  expect(box.x + box.width / 2).toBeLessThan(1440);
 }
 
 /** A trackpad-shaped sideways swipe: pixel steps a frame apart, then a decaying momentum tail. */
