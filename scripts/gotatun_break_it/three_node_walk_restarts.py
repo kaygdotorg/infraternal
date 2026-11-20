@@ -229,7 +229,25 @@ def wait_for_direct(
     missing = sorted(set(
         f"{source}->{target}" for source in MEMBERS for target in MEMBERS if source != target
     ) - set(first_seen))
-    raise TimeoutError(f"direct endpoints did not settle within {timeout:.1f}s: {missing}")
+    endpoint_state: dict[str, dict[str, str | None]] = {}
+    for source in MEMBERS:
+        rows = peer_rows(nodes[source])
+        for target in MEMBERS:
+            if target == source:
+                continue
+            name = f"{source}->{target}"
+            if name not in missing:
+                continue
+            row = rows.get(addresses[target])
+            actual = None if row is None else row.get("counters", {}).get("endpoint")
+            endpoint_state[name] = {
+                "actual": actual if isinstance(actual, str) else None,
+                "expected": expected_endpoint(source, target, topology, ports),
+            }
+    raise TimeoutError(
+        f"direct endpoints did not settle within {timeout:.1f}s: {missing}; "
+        f"current endpoints: {endpoint_state}"
+    )
 
 
 def assert_no_idle_handshakes(nodes: dict[str, BinaryNode]) -> None:
