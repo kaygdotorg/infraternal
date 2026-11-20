@@ -13,7 +13,7 @@ use infraternal_plugin_ssh::{
     model::{Destination, Failure, FailureKind, MeshEvidence},
     openssh::OpenSsh,
     transport::{ConfirmationAuthority, Credentials, Operation, SshTransport},
-    trust::TrustedOpenSsh,
+    trust::{TrustedOpenSsh, forget_pin},
 };
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
@@ -251,6 +251,26 @@ fn the_pin(root: &Path) -> (std::path::PathBuf, String) {
     let path = files.pop().unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     (path, text)
+}
+
+/// Publish and forget a pin at the SHA-256 filename used before the digest upgrade.
+#[tokio::test]
+async fn host_pin_keeps_its_legacy_filename() {
+    let scratch = common::scratch();
+    let root = scratch.join(format!("legacy-{}", uuid::Uuid::new_v4().simple()));
+    let (trust, destination) = rig(&root);
+    let (challenge, fingerprint) = observe(&trust, &destination).await;
+    trust
+        .confirm_host_key(destination, &challenge, &fingerprint, &Authority(true))
+        .await
+        .unwrap();
+
+    let pins = root.join("pins");
+    let legacy = pins.join("cdb5436ce243eeb9093e94e66284552ccefddc3fc8e8602769df0463be144ee2.pub");
+    assert_eq!(the_pin(&root).0, legacy);
+    forget_pin(&pins, "repeat.invalid").unwrap();
+    assert!(!legacy.exists());
+    std::fs::remove_dir_all(&root).unwrap();
 }
 
 /// A repeat answers "trusted" only while the pin it wrote is still there: a pin that was forgotten stays refused.

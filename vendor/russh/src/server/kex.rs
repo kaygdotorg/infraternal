@@ -174,6 +174,7 @@ impl ServerKex {
 
                     return Ok(KexProgress::Done {
                         server_host_certificate: None,
+                        agent_session_binding: None,
                         newkeys,
                         server_host_key: None,
                     });
@@ -251,8 +252,6 @@ impl ServerKex {
 
                 if names.ignore_guessed {
                     self.discarded_guess = true;
-                    // Ignore the next packet if (1) it follows and (2) it's not the correct guess.
-                    debug!("ignoring guessed kex");
                     names.ignore_guessed = false;
                     self.state = ServerKexState::WaitingForDhInit { names, kex };
                     return Ok(KexProgress::NeedsReply {
@@ -420,6 +419,7 @@ impl ServerKex {
                 debug!("new keys received");
                 Ok(KexProgress::Done {
                     server_host_certificate: None,
+                    agent_session_binding: None,
                     newkeys,
                     server_host_key: None,
                 })

@@ -117,7 +117,7 @@ def write_fake_tools(bin_dir: Path) -> Path:
 
             if args == ["version"]:
                 record({"command": "version", "executable": sys.argv[0]})
-                print("0.17.0")
+                print("0.17.1")
                 raise SystemExit(0)
 
             if not args or args[0] != "build":

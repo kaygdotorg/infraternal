@@ -1,6 +1,6 @@
 //! Random capabilities, hashed storage and bounded off-executor Argon2 recovery checks.
 use super::{B64, Engine, Error, Result};
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use sha2::{Digest, Sha256};
 
 pub(crate) fn random() -> String {
@@ -46,17 +46,17 @@ pub(super) async fn recovery_hash_fixture(words: String) -> Result<String> {
     let permit = ARGON_SLOTS.acquire().await.map_err(|_| Error::Invalid)?;
     hash_with_permit(words, permit).await
 }
+/// Hash an admitted verifier off the async executor with a fresh 128-bit salt.
 async fn hash_with_permit(
     words: String,
     permit: tokio::sync::SemaphorePermit<'static>,
 ) -> Result<String> {
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let salt =
-            SaltString::encode_b64(&rand::random::<[u8; 16]>()).map_err(|_| Error::Invalid)?;
+        let salt = rand::random::<[u8; 16]>();
         Argon2::default()
-            .hash_password(words.as_bytes(), &salt)
-            .map(|v| v.to_string())
+            .hash_password_with_salt(words.as_bytes(), &salt)
+            .map(|hash: PasswordHash| hash.to_string())
             .map_err(|_| Error::Invalid)
     })
     .await
@@ -104,6 +104,7 @@ pub(super) fn valid_secret(secret: &str) -> Result<()> {
     Ok(())
 }
 
+/// Checks that existing recovery verifier hashes remain usable.
 #[cfg(test)]
 mod verifier_tests {
     use super::*;
@@ -138,6 +139,23 @@ mod verifier_tests {
         ));
         drop(slots);
         assert!(fixture.await.unwrap().is_ok());
+    }
+
+    /// Previously persisted 0.5 PHC verifiers remain valid after the library upgrade.
+    #[tokio::test]
+    async fn legacy_phc_verifier_accepts_only_its_original_secret() {
+        let _guard = super::super::tests::SERIAL.lock().await;
+        // Public all-zero bytes and a public salt exercise persistence without real credentials.
+        let stored = "$argon2id$v=19$m=19456,t=2,p=1$cHVibGljIHRlc3Qgc2FsdA$RJzrBDHss/p8ABiDXO8jxIfUSvRAPW1Hdm9yclCypDE".to_owned();
+        assert!(
+            verify_secret(B64.encode([0u8; 32]), stored.clone())
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            verify_secret(B64.encode([1u8; 32]), stored).await,
+            Err(Error::Denied)
+        ));
     }
 
     #[tokio::test]

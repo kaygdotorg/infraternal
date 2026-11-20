@@ -27,6 +27,7 @@ fn original_migration_metadata_and_checksums_are_unchanged() {
     }
 }
 
+/// Keep quoted SQL values and identifiers intact when compacting migration text.
 #[tokio::test]
 async fn quoted_text_and_comment_looking_literals_keep_their_values() {
     let pool = database().await;
@@ -44,7 +45,7 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
         let sql = format!(
             "-- header\n  SELECT '{literal}' AS result; -- it's a comment with \"quotes\n-- footer\n"
         );
-        let actual: String = sqlx::query_scalar(&compact_sql::compact(&sql))
+        let actual: String = sqlx::query_scalar(sqlx::AssertSqlSafe(compact_sql::compact(&sql)))
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -57,10 +58,16 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
         "coalesce ( NULL , 4 )",
     ] {
         let sql = format!("SELECT {expression}; -- trailing\n");
-        let original: i64 = sqlx::query_scalar(&sql).fetch_one(&pool).await.unwrap();
         let compact = compact_sql::compact(&sql);
+        let original: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(compact_sql::compact(&compact), compact);
-        let actual: i64 = sqlx::query_scalar(&compact).fetch_one(&pool).await.unwrap();
+        let actual: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(compact))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(actual, original);
     }
     for name in ["name", "--name", "a\n-- quoted name\nb", "a'b"] {
@@ -69,7 +76,7 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
             let escaped = name.replace(close, &format!("{close}{close}"));
             let sql =
                 format!("/* ' \"\n-- in block\n*/\n SELECT 'value' AS {quote}{escaped}{close};\n");
-            let row = sqlx::query(&compact_sql::compact(&sql))
+            let row = sqlx::query(sqlx::AssertSqlSafe(compact_sql::compact(&sql)))
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -79,7 +86,8 @@ async fn quoted_text_and_comment_looking_literals_keep_their_values() {
     }
 }
 
-async fn pragma(pool: &SqlitePool, statement: &str, name: &str) -> Vec<Vec<Value>> {
+/// Read a fixed schema-introspection statement for a named table or index.
+async fn pragma(pool: &SqlitePool, statement: &'static str, name: &str) -> Vec<Vec<Value>> {
     sqlx::query(statement)
         .bind(name)
         .fetch_all(pool)
@@ -103,6 +111,7 @@ async fn pragma(pool: &SqlitePool, statement: &str, name: &str) -> Vec<Vec<Value
         .collect()
 }
 
+/// Compare the compact and original migrations on fresh databases, including schema metadata.
 #[tokio::test]
 async fn fresh_schemas_defaults_indexes_and_foreign_keys_match_original_sql() {
     let before = database().await;
@@ -115,7 +124,7 @@ async fn fresh_schemas_defaults_indexes_and_foreign_keys_match_original_sql() {
     let b: Vec<(String, String, String)> = sqlx::query_as(objects).fetch_all(&after).await.unwrap();
     assert_eq!(a, b);
     for (kind, name, _) in a {
-        let checks: &[&str] = match kind.as_str() {
+        let checks: &[&'static str] = match kind.as_str() {
             "table" => &[
                 "SELECT * FROM pragma_table_xinfo(?)",
                 "SELECT * FROM pragma_foreign_key_list(?)",

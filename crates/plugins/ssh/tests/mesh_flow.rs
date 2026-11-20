@@ -33,10 +33,11 @@ struct Server {
 #[allow(clippy::unused_async_trait_impl)]
 impl server::Handler for Server {
     type Error = russh::Error;
+    /// Accept the verified fixture key so the test can focus on receive-window behavior.
     async fn auth_publickey(
         &mut self,
         _: &str,
-        _: &russh::keys::PublicKey,
+        _: server::VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }

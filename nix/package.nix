@@ -14,11 +14,11 @@ let
     then (builtins.fromTOML (builtins.readFile ../Cargo.toml)).workspace.package.version
     else releaseVersion;
   # Same tarball and checksum table as scripts/auth-toolchain (D213, D328).
-  zigArchive = (import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; }).archive;
-  zig = runCommand "infraternal-zig-0.17.0" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
+  zigToolchain = import ./zig.nix { inherit lib stdenv fetchurl runCommand xz; };
+  zig = runCommand "infraternal-zig-${zigToolchain.version}" { nativeBuildInputs = [ xz python3 util-linux ]; } ''
     ${lowerBuildPriority}
     mkdir -p "$out"
-    tar -xJf ${zigArchive} --strip-components=1 -C "$out"
+    tar -xJf ${zigToolchain.archive} --strip-components=1 -C "$out"
     # Keep the checksum-pinned compiler executable unchanged. Its build runner
     # must discover the Nix build host through an existing ELF, then pass that
     # resolved target explicitly to native generators. Cross targets keep the
@@ -134,7 +134,9 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-PSBZH4iSSZJJSTImCUk4ayupmor08VwHXfXHR/vh7i4=";
+    # Refresh this hash when either Bun input changes: a cached fixed output
+    # can otherwise retain an older dependency tree without rebuilding it.
+    outputHash = "sha256-r6aHNw0NsOimex8a0vkKs7Ki7mIXe1liDZPGQx/R8oQ=";
     dontFixup = true;
   };
   rustupShim = writeShellScriptBin "rustup" ''
