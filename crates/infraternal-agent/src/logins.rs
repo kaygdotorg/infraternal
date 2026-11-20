@@ -1559,8 +1559,10 @@ fn loginctl() -> tokio::process::Command {
 
 /// Fixed root-owned tools for account revocation and its access probes.
 /// `busctl` supplies typed manager paths and argv, without executing job text. The
-/// original and canonical parent chains must both be protected, including
-/// symlink parents. An untrusted first candidate is refused, never skipped.
+/// original and canonical parent chains must both be protected, and so must
+/// the directories holding every link on the way between them, or whoever
+/// can repoint a middle link chooses what root runs (J1013). An untrusted
+/// first candidate is refused, never skipped.
 /// Callers fail closed when none exists; executing `/` also always fails.
 pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt as _;
@@ -1595,11 +1597,18 @@ pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
             Err(_) => return None,
         };
         let metadata = std::fs::metadata(&canonical).ok()?;
+        let links = crate::access_jobs::links_on_the_way(&candidate)?;
         let protected = candidate
             .parent()
             .into_iter()
             .flat_map(Path::ancestors)
             .chain(canonical.parent().into_iter().flat_map(Path::ancestors))
+            .chain(
+                links
+                    .iter()
+                    .filter_map(|link| link.parent())
+                    .flat_map(Path::ancestors),
+            )
             .all(|parent| {
                 std::fs::metadata(parent).is_ok_and(|meta| {
                     meta.is_dir()

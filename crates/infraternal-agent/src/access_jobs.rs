@@ -343,7 +343,7 @@ const LINK_HOPS: usize = 40;
 /// probe (J1013). Resolution is physical, so `..` after a link steps out of
 /// its target. A name that does not exist ends the walk; too many links or
 /// an unreadable entry is `None`.
-fn links_on_the_way(path: &Path) -> Option<Vec<PathBuf>> {
+pub(crate) fn links_on_the_way(path: &Path) -> Option<Vec<PathBuf>> {
     use std::ffi::OsString;
     use std::path::Component;
     let mut links = Vec::new();
