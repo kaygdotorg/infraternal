@@ -21,6 +21,9 @@ pub(crate) fn writable(account: &User, paths: &[PathBuf]) -> Option<BTreeSet<usi
     }
     let groups = crate::access_privilege::account_groups(account)?;
     let shell = crate::logins::account_tool("sh")?;
+    if !kernel_test(&shell) {
+        return None;
+    }
     let setpriv = crate::logins::account_tool("setpriv")?;
     let groups = groups
         .iter()
@@ -80,6 +83,18 @@ pub(crate) fn writable(account: &User, paths: &[PathBuf]) -> Option<BTreeSet<usi
     Some(found)
 }
 
+/// Whether this shell's `[ -w ]` asks the kernel. dash and bash call
+/// `faccessat`, which honours ACLs and read-only mounts; busybox works the
+/// answer out from mode bits itself and ignores ACLs, so a root script with
+/// `user:alice:rwx` would read as not writable (J1013). Such a host's
+/// answer is unknown, never "not writable". `shell` is the canonical path
+/// [`crate::logins::account_tool`] returns.
+fn kernel_test(shell: &std::path::Path) -> bool {
+    shell
+        .file_name()
+        .is_some_and(|name| name != "busybox" && name != "toybox")
+}
+
 #[cfg(test)]
 mod tests {
     //! This test asks the real kernel, never a mode-bit imitation.
@@ -95,6 +110,21 @@ mod tests {
     }
 
     use std::os::unix::{fs::PermissionsExt as _, net::UnixListener};
+
+    /// A multi-call shell computes `-w` from mode bits, so it never answers.
+    #[test]
+    fn only_a_shell_that_asks_the_kernel_answers() {
+        for shell in [
+            "/usr/bin/dash",
+            "/usr/bin/bash",
+            "/nix/store/x-bash/bin/bash",
+        ] {
+            assert!(kernel_test(std::path::Path::new(shell)), "{shell}");
+        }
+        for shell in ["/bin/busybox", "/usr/bin/toybox"] {
+            assert!(!kernel_test(std::path::Path::new(shell)), "{shell}");
+        }
+    }
 
     /// Host-root proof of group and named-user ACL access for an ordinary uid.
     #[test]
