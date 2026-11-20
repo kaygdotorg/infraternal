@@ -1,9 +1,10 @@
 /** Exercises viewer/control ownership through public stream operations without a decoder or DOM renderer [D208,D232]. */
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
-import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
+import { MAX_VIDEO_BYTES, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { AppStream, parseStatus, type StreamOptions } from "./stream";
+import type { FromWorker, ToWorker } from "./worker-protocol";
 import type { ControlState } from "./status";
 
 const originals = new Map<string, PropertyDescriptor | undefined>();
@@ -36,7 +37,13 @@ async function fixture(deferControl = false, onControl: (control: ControlState) 
   const frames: Array<{ id: number; frame: WireFrame }> = [];
   const actions: string[] = [];
   const closed: number[] = [];
-  const worker = { postMessage() {}, terminate() {}, onerror: null as ((event: Event) => void) | null };
+  const chunks: Extract<ToWorker, { t: "chunk" }>[] = [];
+  const worker = {
+    postMessage(message: ToWorker) { if (message.t === "chunk") chunks.push(message); },
+    terminate() {},
+    onerror: null as ((event: Event) => void) | null,
+    onmessage: null as ((event: { data: FromWorker }) => void) | null,
+  };
   const connection: StreamOptions["connection"] = {
     isWelcomed: true, onWelcome: () => () => undefined,
     async call(action, input) {
@@ -59,7 +66,7 @@ async function fixture(deferControl = false, onControl: (control: ControlState) 
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, shapes, frames, actions, closed, handlers, worker, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, shapes, frames, actions, closed, handlers, worker, chunks, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
 
 interface BindingProbe {
@@ -101,6 +108,29 @@ test("server Close unregisters its app-window handler before disposal", async ()
     // MuxConnection dispatches Close to the registered handler; only
     // closeStream removes that handler from the page's shared stream table.
     expect([...f.handlers.keys()]).toEqual([]);
+  } finally { f.stream.dispose(); }
+});
+
+/** A worker that never runs cannot accumulate access units, even across a socket reconnect. */
+test("stalled worker handoff stays within one maximum access unit and resumes on a keyframe", async () => {
+  const f = await fixture();
+  try {
+    const viewer = f.handlers.get(1)!;
+    const bytes = new Uint8Array(MAX_VIDEO_BYTES);
+    const deliver = (sequence: number, keyframe: boolean, payload = bytes) => viewer.onFrame({
+      type: "Desktop", message: { kind: "video", sequence: BigInt(sequence), captureNs: 0n, keyframe, bytes: payload },
+    }, new Uint8Array(), 0);
+    deliver(1, true);
+    for (let sequence = 2; sequence <= 20; sequence++) deliver(sequence, false, bytes.subarray(0, 1));
+    viewer.onDisconnected();
+    viewer.onWelcome(true);
+    deliver(21, true);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1]);
+    f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
+    expect(f.frames.some(({ frame }) => frame.type === "Desktop" && frame.message.kind === "repair")).toBe(true);
+    deliver(22, false);
+    deliver(23, true);
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23]);
   } finally { f.stream.dispose(); }
 });
 
