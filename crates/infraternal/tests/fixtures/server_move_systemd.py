@@ -30,6 +30,7 @@ CASES = (
     "source-removed", "receipt-with-journal", "receipt-without-journal",
     "boot-target", "concurrent-start", "failed-recovery", "nested-metadata",
 )
+COMBINED_RETIREMENT = ("backup-created", "entry-renamed", "entry-removed")
 
 
 def systemctl(*args, check=True, deadline=45):
@@ -87,28 +88,57 @@ def sqlite_values(path, extra=None):
             return db.execute("SELECT value FROM j925_fixture ORDER BY rowid").fetchall()
 
 
-def copy_snapshot(source, target):
+def migration_history(path):
+    """Read the versions and original checksums without altering the live database."""
+    uri = (path / "infraternal.sqlite").as_uri() + "?mode=ro"
+    with contextlib.closing(sqlite3.connect(uri, uri=True)) as db:
+        return dict(db.execute("SELECT version, checksum FROM _sqlx_migrations"))
+
+
+def copy_snapshot(source, target, selected=None):
     """Copy the stopped fixture, excluding transient sockets."""
     def ignore(folder, names):
         """Ignore exactly socket entries."""
-        return [name for name in names if stat.S_ISSOCK((Path(folder) / name).lstat().st_mode)]
+        return [name for name in names
+                if stat.S_ISSOCK((Path(folder) / name).lstat().st_mode)
+                or (selected is not None and Path(folder) == source and source / name not in selected)]
 
     shutil.copytree(source, target, symlinks=True, ignore=ignore)
 
 
 
-def copied_backup_values(backup):
-    """Check SQLite using writable copies, including any retained WAL."""
-    with tempfile.TemporaryDirectory(dir=backup.parent) as scratch:
+def copied_database_values(source, *, retained=False):
+    """Read a stopped SQLite snapshot without checkpointing its original WAL."""
+    with tempfile.TemporaryDirectory(dir=source.parent) as scratch:
         copy = Path(scratch)
-        for file in backup.glob("infraternal.sqlite*"):
-            assert not file.stat().st_mode & 0o222, file
+        for file in source.glob("infraternal.sqlite*"):
+            if retained:
+                assert not file.stat().st_mode & 0o222, file
             dest = copy / file.name
             shutil.copyfile(file, dest)
             dest.chmod(0o600)
         with contextlib.closing(sqlite3.connect(copy / "infraternal.sqlite")) as db:
             assert db.execute("PRAGMA quick_check").fetchone() == ("ok",)
             return db.execute("SELECT value FROM j925_fixture ORDER BY rowid").fetchall()
+
+def leave_committed_wal(path):
+    """Exit a fixture writer before SQLite closes and checkpoints its sidecars."""
+    subprocess.run(
+        [sys.executable, "-c", """
+import os
+import sqlite3
+import sys
+
+db = sqlite3.connect(sys.argv[1])
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("INSERT INTO j925_fixture VALUES ('wal-only')")
+db.commit()
+os._exit(0)
+""", str(path / "infraternal.sqlite")],
+        check=True,
+    )
+    assert (path / "infraternal.sqlite-wal").exists()
+    assert (path / "infraternal.sqlite-shm").exists()
 
 def release_fifo(path):
     """Signal a waiting pre-start without blocking if its reader has exited."""
@@ -123,11 +153,12 @@ def release_fifo(path):
     return True
 
 
-def run_case(workspace, case):
+def run_case(workspace, case, combined=False):
     """Construct one on-disk frontier, then recover through real systemctl."""
-    root = workspace / case
+    label = f"combined-{case}" if combined else case
+    root = workspace / label
     root.mkdir(mode=0o700)
-    prefix = f"d395-{os.getpid()}-{case}"
+    prefix = f"d395-{os.getpid()}-{label}"
     server = f"{prefix}.service"
     target = f"{prefix}.target"
     unit = UNITS / server
@@ -144,11 +175,39 @@ def run_case(workspace, case):
     listener = f"127.0.0.1:{port}"
     timer = time.monotonic()
     old.mkdir(mode=0o700)
+    if combined:
+        old.chmod(0o711)
+        new, backup = old / "server", old / ".server.moved-test"
+        control = old / ".server.cutover"
+        work = old / ".infraternal-move-server"
+        stage = work / "data"
+        agent = old / "agent"
+        agent.mkdir(mode=0o700)
+        (agent / "state").write_text("agent state")
+        base_id, agent_id = identity(old), identity(agent / "state")
+    frontier = "ready" if case in COMBINED_RETIREMENT else case
     control.mkdir(mode=0o700)
+    if case == "shared-link":
+        bundle = old / "bin/web"
+        bundle.mkdir(parents=True)
+        (bundle / "index.html").write_text("bundled web")
+        (old / "web").symlink_to("bin/web")
 
-    def command(path):
+    def originals():
+        """List the stopped server entries, excluding the separate infraternal agent and cutover paths."""
+        return [p for p in old.iterdir()
+                if p.name not in ("agent", control.name, work.name, new.name) and not p.is_socket()]
+
+    def snapshot():
+        """Publish the fixture's stopped snapshot as the real staging code would."""
+        copy_snapshot(old, new, originals() if combined else None)
+        if combined:
+            new.chmod(0o700)
+
+    def command(path, binary=BIN):
         """Render the product command the real manager will run."""
-        return f'ExecStart="{BIN}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"\n'
+        web = f' "--web-root" "{path / "web"}"' if case == "shared-link" else ""
+        return f'ExecStart="{binary}" "server" "--listen" "{listener}" "--data" "{path}" "--behind-proxy" "--trusted-proxy" "127.0.0.1"{web}\n'
 
     pre = root / "pre"
     pre.write_text(
@@ -184,14 +243,31 @@ def run_case(workspace, case):
     for path in [unit, boot_target, drop_dir]:
         assert not path.exists(), f"fixture unit already exists: {path}"
     joined = None
+    rows = [("source",)]
+    history = None
     try:
-        unit.write_text(before)
+        if case == "dev-upgrade":
+            base_binary = Path(os.environ["D395_DEV_BIN"]).resolve(strict=True)
+            assert base_binary != BIN
+            unit.write_text(template.format(command=command(old, base_binary)))
+        else:
+            unit.write_text(before)
         boot_target.write_text(f"[Unit]\nDescription=D395 isolated target\nWants={server}\n")
         systemctl("daemon-reload")
         systemctl("start", server)
         assert wait_for(lambda: health(port)), "initial server health"
         assert sqlite_values(old, "source") == [("source",)]
+        if case == "dev-upgrade":
+            history = migration_history(old)
+            assert history, "the dev binary recorded no migrations"
         systemctl("stop", server)
+        if history is not None:
+            unit.write_text(before)
+        if combined:
+            (old / "server-fixture").write_text("server state")
+            if case == "failed-recovery":
+                leave_committed_wal(old)
+                rows.append(("wal-only",))
         metadata = {}
         if case == "nested-metadata":
             acl = struct.pack("<I", 2) + b"".join(
@@ -232,13 +308,15 @@ def run_case(workspace, case):
         if case == "initial-partial-record":
             work.mkdir(mode=0o700)
             (work / "journal.next").touch(mode=0o600)
-        elif case in journals or case == "destination-drift":
+        elif frontier in journals or case == "destination-drift":
             work.mkdir(mode=0o700)
             journal = dict(
                 **{name: plan[name] for name in ("from", "to", "unit", "units", "effective", "legacy_target")},
                 source=identity(old), target=None, database=None, staging=str(stage), staged=None,
                 backup=str(backup), backup_action="Remove", ready=False, was_running=True,
             )
+            if combined:
+                journal["original_entries"] = {p.name: identity(p) for p in originals()}
             if case in ("unrecorded-stage", "partial-stage", "destination-drift"):
                 stage.mkdir(mode=0o700)
                 if case != "unrecorded-stage":
@@ -249,24 +327,39 @@ def run_case(workspace, case):
                 new.mkdir(mode=0o700)
                 (new / "unrelated").write_text("preserve this")
             if case in ("published-rename", "published-exchange"):
-                copy_snapshot(old, new)
+                snapshot()
                 journal["staged"] = identity(new)
                 if case == "published-exchange":
                     stage.mkdir(mode=0o700)
                     (stage / "host-firewall-server.json").write_text("{}")
                     (new / "host-firewall-server.json").write_text("{}")
                     journal["target"] = identity(stage)
-            if case in CASES[8:]:
-                copy_snapshot(old, new)
+            if frontier in CASES[8:]:
+                snapshot()
                 journal["target"] = identity(new)
                 if case != "published-recorded":
                     journal["database"] = identity(new / "infraternal.sqlite")
-            if case in CASES[11:18] or case == "failed-recovery":
+            if frontier in CASES[11:18] or case == "failed-recovery":
                 unit.write_text(after)
-            if case in CASES[13:18]:
+            if frontier in CASES[13:18]:
                 journal["ready"] = True
+            if case in COMBINED_RETIREMENT:
+                backup.mkdir(mode=0o700)
+                if case in ("entry-renamed", "entry-removed"):
+                    journal["backup_identity"] = identity(backup)
+                    names = ("server-fixture",) if case == "entry-renamed" else journal["original_entries"]
+                    for name in names:
+                        (old / name).rename(backup / name)
+                if case == "entry-removed":
+                    (backup / "server-fixture").unlink()
             if case in ("source-renamed", "source-removed", "receipt-with-journal", "receipt-without-journal"):
-                old.rename(backup)
+                if combined:
+                    backup.mkdir(mode=0o700)
+                    journal["backup_identity"] = identity(backup)
+                    for name in journal["original_entries"]:
+                        (old / name).rename(backup / name)
+                else:
+                    old.rename(backup)
                 if case != "source-renamed":
                     shutil.rmtree(backup)
             if case in ("receipt-with-journal", "receipt-without-journal"):
@@ -346,11 +439,13 @@ def run_case(workspace, case):
             systemctl("start", server)
         elif case == "failed-recovery":
             assert result.returncode != 0 and not health(port), result
-            assert sqlite_values(old) == sqlite_values(new) == [("source",)]
+            assert copied_database_values(old) == copied_database_values(new) == rows
+            if combined:
+                assert {p.name: identity(p) for p in originals()} == journal["original_entries"]
             (root / "fail-start").unlink()
             systemctl("reset-failed", server)
             systemctl("start", server)
-            assert copied_backup_values(backup) == [("source",)]
+            assert copied_database_values(backup, retained=True) == rows
         else:
             assert result.returncode == 0, result
         if case in ("boot-target", "receipt-without-journal"):
@@ -358,11 +453,27 @@ def run_case(workspace, case):
             assert wait_for(lambda: health(port))
             systemctl("start", server)
         assert health(port), "start answered before its server was ready"
-        rows = [("source",), ("early candidate",)] if case == "switched-active" else [("source",)]
-        assert sqlite_values(new) == rows
         if case == "switched-active":
-            assert copied_backup_values(backup) == [("source",), ("possible original",)]
-        assert not old.exists() and not work.exists()
+            rows.append(("early candidate",))
+        assert sqlite_values(new) == rows
+        if history is not None:
+            upgraded = migration_history(new)
+            assert all(upgraded.get(version) == checksum for version, checksum in history.items())
+            print(f"MIGRATIONS: carried {len(history)} recorded versions into {len(upgraded)} versions", flush=True)
+        if case == "switched-active":
+            assert copied_database_values(backup, retained=True) == [("source",), ("possible original",)]
+        if combined:
+            assert identity(old) == base_id and stat.S_IMODE(old.stat().st_mode) == 0o711
+            assert identity(agent / "state") == agent_id
+            assert (agent / "state").read_text() == "agent state"
+            assert not (new / "agent").exists() and not (old / "infraternal.sqlite").exists()
+            assert (new / "server-fixture").read_text() == "server state"
+            assert not (old / "server-fixture").exists()
+            assert stat.S_IMODE(new.stat().st_mode) == 0o700 and new.stat().st_uid == os.getuid()
+            assert backup.exists() == (case in ("switched", "switched-active", "failed-recovery"))
+        else:
+            assert not old.exists()
+        assert not work.exists()
         assert json.loads((control / "receipt.json").read_text())["Ready"]["database"] == identity(new / "infraternal.sqlite")
         if case == "nested-metadata":
             for relative, (mode, uid, gid, attributes) in metadata.items():
@@ -375,7 +486,13 @@ def run_case(workspace, case):
         systemctl("start", server)
         assert systemctl("show", "-p", "MainPID", "--value", server).stdout.strip() == pid
         assert health(port)
-        print(f"CASE {case} completed systemctl_exit={result.returncode} elapsed={time.monotonic()-timer:.2f}s", flush=True)
+        if case == "shared-link":
+            assert (new / "web").readlink() == Path("../bin/web")
+            assert (new / "web/index.html").read_text() == "bundled web"
+            assert not (old / "web").is_symlink()
+            systemctl("restart", server)
+            assert wait_for(lambda: health(port)) and sqlite_values(new) == rows
+        print(f"CASE {label} completed systemctl_exit={result.returncode} elapsed={time.monotonic()-timer:.2f}s", flush=True)
     except Exception:
         subprocess.run(["journalctl", "--user", "--quiet", "--no-pager", "-n", "12", "--user-unit", server], check=False)
         raise
@@ -490,10 +607,13 @@ def cli_admission(workspace):
 if __name__ == "__main__":
     failed = []
     with tempfile.TemporaryDirectory(prefix="d395-", dir=os.environ["XDG_RUNTIME_DIR"]) as workspace:
-        for scenario in sys.argv[1:] or (*CASES, "cli-admission", "staging-refusal", "destination-drift"):
+        for scenario in sys.argv[1:] or (*CASES, *(f"combined-{case}" for case in (*CASES, *COMBINED_RETIREMENT)),
+                                         "combined-shared-link", "cli-admission", "staging-refusal", "destination-drift"):
             try:
                 if scenario == "cli-admission":
                     cli_admission(Path(workspace))
+                elif scenario.startswith("combined-"):
+                    run_case(Path(workspace), scenario.removeprefix("combined-"), combined=True)
                 else:
                     run_case(Path(workspace), scenario)
             except Exception:
