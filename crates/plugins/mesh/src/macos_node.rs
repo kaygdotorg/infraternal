@@ -4602,6 +4602,48 @@ mod tests {
         assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
     }
 
+    /// Rewrite the recorded fingerprint, as a folder copied from another Mac would carry.
+    fn forge_machine_record(directory: &TestDirectory) {
+        let path = directory.join(crate::macos_machine::MACHINE_FILE);
+        std::fs::remove_file(&path).expect("remove record");
+        std::fs::write(&path, format!("{{\"machine\":{:?}}}", [7u8; 32])).expect("forge record");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .expect("mode");
+    }
+
+    #[test]
+    fn an_enrolled_restore_binds_this_mac_and_refuses_a_folder_from_another() {
+        let directory = test_directory();
+        let current = enrolment(b"coordinator B");
+        write_key(&directory);
+
+        Node::restore(&directory.0, Some(&current)).expect("first start binds");
+        assert!(directory.join(crate::macos_machine::MACHINE_FILE).is_file());
+        Node::restore(&directory.0, Some(&current)).expect("same Mac restores");
+        Node::check_enrolled_machine(&directory.0).expect("same Mac passes the pre-start check");
+
+        forge_machine_record(&directory);
+        let key = std::fs::read(directory.join(crate::macos_key::KEY_FILE)).expect("key");
+        for error in [
+            Node::restore(&directory.0, Some(&current)).err().expect("restore refused"),
+            Node::check_enrolled_machine(&directory.0).expect_err("pre-start check refused"),
+        ] {
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(matches!(
+                error.get_ref().and_then(|inner| inner.downcast_ref::<MachineBindingError>()),
+                Some(MachineBindingError::ForeignMachine)
+            ));
+        }
+        // The refusal changes nothing: the key and the record stay as they were.
+        assert_eq!(std::fs::read(directory.join(crate::macos_key::KEY_FILE)).expect("key"), key);
+    }
+
+    #[test]
+    fn this_mac_reports_a_stable_hardware_fingerprint() {
+        let first = crate::macos_machine::fingerprint().expect("hardware identity");
+        assert_eq!(Some(first), crate::macos_machine::fingerprint());
+    }
+
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();
