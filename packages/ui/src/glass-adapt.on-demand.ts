@@ -172,8 +172,8 @@ function crossFade(surface: HTMLElement, change: () => void): void {
 function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, theme: Theme): void {
   crossFade(surface, () => {
     surface.style.setProperty(GLASS_ADAPT_VARS.overlay, `rgb(${hexToRgb(glassTint(theme)).join(" ")} / ${sol.alpha})`);
-    // A solid card carries no blur; a glass one takes the level's own (the property is removed, so the rule's default applies).
-    if (sol.solid) surface.style.setProperty(GLASS_ADAPT_VARS.blur, "0px"); else surface.style.removeProperty(GLASS_ADAPT_VARS.blur);
+    // The answer, for the rules that drop the blur of a solid card and keep a glass card's own (see `installGlassRules`).
+    surface.dataset.glassAnswer = sol.solid ? "solid" : "glass";
     for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
   });
 }
@@ -181,7 +181,7 @@ function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, 
 /** Removes what {@link writeSolution} wrote, which puts the surface back on the static floor. */
 function clearSolution(surface: HTMLElement): void {
   surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
-  surface.style.removeProperty(GLASS_ADAPT_VARS.blur);
+  delete surface.dataset.glassAnswer;
   for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
 }
 

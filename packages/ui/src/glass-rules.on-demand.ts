@@ -138,12 +138,12 @@ export function installGlassRules(): void {
   glassSheetKey = key;
   glassSheetLook = look;
   const tint = hexToRgb(glassTint(active)).join(" ");
-  // A solid answer is the opaque tint with no blur. The floor reads the blur through `--ui-glass-adapt-blur`, so a tracker that
-  // finds the card solid (or glass again) changes it on the surface alone; the colours work the same way.
+  // A solid answer is the opaque tint with no blur. The blur is switched by the surface's `data-glass-answer` (written by the
+  // trackers in `glass-adapt.on-demand.ts`), not by a custom property: a glass answer must leave the card's own blur alone
+  // (the palette sets its own), which a property that the floor defaults to 0 could not do.
   const write = (sol: GlassSolution, level: number, fallback?: GlassSolution): string => {
     const own = `--overlay: ${fallback ? `var(${GLASS_ADAPT_VARS.overlay}, rgb(${tint} / ${sol.alpha}))` : `rgb(${tint} / ${sol.alpha})`};`;
-    const blur = `${sol.solid ? 0 : (CARD_LEVELS[level]?.blur ?? 0)}px`;
-    const blurRule = fallback ? ` --ui-overlay-blur: var(${GLASS_ADAPT_VARS.blur}, ${blur});` : sol.solid ? ` --ui-overlay-blur: ${blur};` : "";
+    const blurRule = !fallback && sol.solid ? " --ui-overlay-blur: 0px;" : "";
     return own + blurRule + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
   };
   const css: string[] = [];
@@ -158,6 +158,8 @@ export function installGlassRules(): void {
     // On the surface itself: `glass-under.on-demand.ts` marks the surface it finds over a picture or a terminal.
     const floor = glassFloor(active, Number(level));
     css.push(`:root[data-card="${name}"] :is(${TINT_USERS})[data-glass-under] { ${write(floor, Number(level), floor)} }`);
+    // Solid means no blur: on the floor until a tracker answers with glass, and whenever a tracker answers solid.
+    css.push(`:root[data-card="${name}"] :is(${TINT_USERS})${floor.solid ? '[data-glass-under]:not([data-glass-answer="glass"])' : '[data-glass-answer="solid"]'} { --ui-overlay-blur: 0px; }`);
   }
   if (!glassSheet) {
     glassSheet = new CSSStyleSheet();
