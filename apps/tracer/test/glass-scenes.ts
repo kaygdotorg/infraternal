@@ -175,9 +175,11 @@ export function paintOf(page: Page, selector: string): Promise<Paint> {
   return page.evaluate((sel) => {
     const root = document.querySelector<HTMLElement>(sel)!;
     const style = getComputedStyle(root);
-    const m = /rgba?\(([^)]+)\)/.exec(style.backgroundColor);
-    const parts = (m?.[1] ?? "").split(/[ ,/]+/).filter(Boolean).map(Number);
-    const alpha = parts.length > 3 ? parts[3]! : m ? 1 : 0;
+    // The fill's opacity as the browser composites it: a colour mixed in another space (the palette's) serialises as `oklab(...)`, so it is painted and read back.
+    const probe = new OffscreenCanvas(1, 1).getContext("2d", { willReadFrequently: true })!;
+    probe.fillStyle = style.backgroundColor;
+    probe.fillRect(0, 0, 1, 1);
+    const alpha = Number((probe.getImageData(0, 0, 1, 1).data[3]! / 255).toFixed(2));
     const blur = parseFloat(/blur\(([\d.]+)px\)/.exec(style.backdropFilter)?.[1] ?? "0") || 0;
     const shadowed = [root, ...root.querySelectorAll<HTMLElement>("*")].filter((el) => getComputedStyle(el).textShadow !== "none").map((el) => `${el.tagName.toLowerCase()}.${el.className}`);
     return { alpha, blur, shadowed };
@@ -186,6 +188,7 @@ export function paintOf(page: Page, selector: string): Promise<Paint> {
 
 /**
  * Whether a surface must be the solid card over `picture` in `scheme` on the adaptive path: Ink (a dark card) over white and Paper
- * (a light one) over black cannot hold the line as glass, and a split picture has both. A matching picture stays glass.
+ * (a light one) over black cannot hold the line as glass. A small card over a split picture sees only the half it sits on, so
+ * the split says nothing here (the unit audit covers it through the full range).
  */
-export const mustBeSolid = (scheme: "ink" | "paper", picture: Picture): boolean => picture === "split" || (scheme === "ink" ? picture === "white" : picture === "black");
+export const mustBeSolid = (scheme: "ink" | "paper", picture: Picture): boolean => scheme === "ink" ? picture === "white" : picture === "black";
