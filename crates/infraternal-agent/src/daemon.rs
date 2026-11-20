@@ -64,7 +64,7 @@ use tokio::{
 /// Give the PTY program a short render head start while leaving time in D375's
 /// 120 Hz flood budget for capture, delivery and paint. Later PTY output is
 /// still relayed in order from the snapshot cursor.
-const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(3);
+const KEY_REPAINT_GRACE: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// Wait for a relay operation while its active repaint still has time to finish.
 ///

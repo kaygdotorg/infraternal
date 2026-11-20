@@ -689,7 +689,7 @@ async fn key_repaint_leaves_time_in_the_frame_after_pty_echo_grace() {
     let echo_start = u64::from(BULK_CREDIT) + STARVING_OUTPUT as u64;
     let cursor = echo_start + 6;
     let early = tokio::time::timeout(
-        Duration::from_millis(2),
+        Duration::from_millis(1),
         fixture.reader.read(&mut fixture.peer),
     )
     .await;
@@ -706,7 +706,7 @@ async fn key_repaint_leaves_time_in_the_frame_after_pty_echo_grace() {
         tokio::task::yield_now().await;
         let requested = matches!(
             tokio::time::timeout(
-                Duration::from_millis(3),
+                Duration::from_millis(4),
                 fixture.reader.read(&mut fixture.peer)
             )
             .await,
