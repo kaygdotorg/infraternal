@@ -130,16 +130,22 @@ test("the popover opens within 200 ms and closes within 130 ms; the keyboard is 
     await expect(page.locator(".cl-sx-pop")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator(".cl-sx-pop")).toHaveCount(0);
-    const durations = await page.evaluate(async () => {
-      const button = document.querySelectorAll<HTMLButtonElement>("[data-action='sessions']")[1]!;
-      button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
-      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-      const open = document.querySelector(".cl-sx-pop")!.getAnimations().map((a) => (a.effect as KeyframeEffect).getTiming().duration);
-      button.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
-      await new Promise((done) => requestAnimationFrame(done));
-      const close = document.querySelector(".cl-sx-pop")?.getAnimations().map((a) => (a.effect as KeyframeEffect).getTiming().duration) ?? [];
-      return { open, close };
-    });
+    // A real mouse click, not a script's: the Escape above was a key, and since #427 a change no trusted press caused follows
+    // the last press, so a synthetic click here would read as keyboard-triggered and open with no animation at all.
+    const button = page.locator("[data-action='sessions']").nth(1);
+    /** The durations of the popover's animations `frames` frames after the next click reached the window. */
+    const afterNextClick = (frames: number) => page.evaluate((n) => new Promise<unknown[]>((done) => {
+      window.addEventListener("click", async () => {
+        for (let i = 0; i < n; i++) await new Promise((next) => requestAnimationFrame(next));
+        done(document.querySelector(".cl-sx-pop")?.getAnimations().map((a) => (a.effect as KeyframeEffect).getTiming().duration) ?? []);
+      }, { once: true, capture: true });
+    }), frames);
+    const opening = afterNextClick(2);
+    await button.click();
+    const open = await opening;
+    const closing = afterNextClick(1);
+    await button.click();
+    const durations = { open, close: await closing };
     expect(durations.open).toEqual([200]);
     expect(durations.close.at(-1)).toBe(130);
     await page.waitForTimeout(250);
@@ -177,14 +183,17 @@ test("the close toast teaches once per sign-in, in the first five sign-ins only"
       await page.evaluate(() => {
         const w = window as unknown as { __toasts: string[] };
         w.__toasts = [];
-        // The toast host is one element that is revealed and re-filled, so a show is "revealed" or "text changed while shown".
-        const host = document.querySelector(".ui-toast") as HTMLElement;
-        let was = !host.hidden, last = "";
-        new MutationObserver(() => {
-          const now = !host.hidden, text = host.querySelector(".ui-toast-message")?.textContent ?? "";
-          if (now && text && (!was || text !== last)) w.__toasts.push(text);
-          was = now; last = text;
-        }).observe(host, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["hidden"] });
+        // Each toast is its own card, made when it is shown and removed when it goes (#335), so a show is a message element
+        // this observer has not seen yet. Cards of one tone may also be reused with a new text, so a changed text counts too.
+        const texts = new Map<Element, string>();
+        const scan = (): void => {
+          for (const message of document.querySelectorAll(".ui-toast-message")) {
+            const text = message.textContent ?? "";
+            if (text && texts.get(message) !== text) w.__toasts.push(text);
+            texts.set(message, text);
+          }
+        };
+        new MutationObserver(scan).observe(document.body, { childList: true, subtree: true, characterData: true });
       });
       const seen = (): Promise<string[]> => page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts);
       await windowOf(page, "build-01").locator("[data-action='close']").click();

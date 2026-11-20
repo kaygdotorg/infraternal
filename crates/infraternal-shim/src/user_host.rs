@@ -2041,6 +2041,7 @@ mod tests {
         drop(session);
         fs::remove_dir_all(state).unwrap();
     }
+    /// A bulk read turn advances the ring by at most 16 KiB, yields, and only reports end of output after the last byte.
     #[test]
     fn bulk_turn_advances_sixteen_kib_and_yields_before_the_rest() {
         let state = crate::fixture_state::fixture_state();
@@ -2053,6 +2054,13 @@ mod tests {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         reader.set_nonblocking(true).unwrap();
         writer.write_all(&vec![b'q'; 65536]).unwrap();
+        // End the stream with shutdown(2), not only by dropping the writer.
+        // Sibling tests fork children (the PTY spawn tests); a child that has
+        // not yet exec'd still holds a copy of this descriptor, and a socket
+        // is not at EOF while any copy is open. Under load that left the final
+        // read at WouldBlock and `drained` false (#553). `shutdown` ends the
+        // connection itself, whatever descriptor copies exist.
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
         drop(writer);
         session.pty.master = std::fs::File::from(std::os::fd::OwnedFd::from(reader));
         session
