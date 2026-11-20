@@ -26,12 +26,15 @@ export async function recordPanStall(page: Page) {
   const port = Number(process.env.TRACER_TEST_PORT ?? "4621");
   const file = resolve(process.env.INFRATERNAL_PERF_DIR ?? tracerEvidencePath("perf"), `${port}.jsonl`);
   await open(page);
-  // The stall lives in a script of its own, so a long-animation-frame entry can name it.
-  await page.addScriptTag({ content: `
+  // The stall lives in a script served from its own URL, so a long-animation-frame entry can name it. It used to be an inline script
+  // tagged with `//# sourceURL=perf-spec-stall.js`; Chromium reports a script by its URL, and a bare file name in a source-URL comment is
+  // not one, so Chromium 159 listed no script at all for the 211 ms frame (empty `scripts`).
+  await page.context().route("**/perf-spec-stall.js", (route) => route.fulfill({ contentType: "text/javascript", body: `
     window.__stall = false;
     function perfSpecStall() { const end = performance.now() + 200; while (performance.now() < end) { /* busy */ } }
     document.querySelector(".cl-viewport").addEventListener("wheel", () => { if (window.__stall) { window.__stall = false; requestAnimationFrame(perfSpecStall); } }, { capture: true });
-    //# sourceURL=perf-spec-stall.js` });
+  ` }));
+  await page.addScriptTag({ url: "/perf-spec-stall.js" });
   await page.evaluate(() => new Promise<void>((done) => {
     const target = document.querySelector(".cl-viewport")!;
     const start = performance.now();
@@ -45,9 +48,13 @@ export async function recordPanStall(page: Page) {
   }));
   await page.waitForTimeout(1200);
   const sid = (await hud(page).call((h) => { h.finish(); h.flush(); return h.state().sid; }));
-  await expect.poll(async () => (await readFile(file, "utf8").catch(() => "")).includes(sid), { timeout: 8000 }).toBe(true);
-  const lines = (await readFile(file, "utf8")).trim().split("\n").map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.sid === sid);
-  const incidents = lines.filter((l) => l.t === "incident" && l.kind === "freeze" && l.activity === "pan") as unknown as Array<Incident & { page: string }>;
+  // The session record is written when the page starts, so its sid is in the file long before the flushed incident arrives; waiting for the
+  // sid alone read the file before the incident was posted and found none in about one run in four. Wait for the pan freeze itself.
+  const read = async (): Promise<Array<Record<string, unknown>>> => (await readFile(file, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l.sid === sid);
+  const isPanFreeze = (l: Record<string, unknown>): boolean => l.t === "incident" && l.kind === "freeze" && l.activity === "pan";
+  await expect.poll(async () => (await read()).some(isPanFreeze), { timeout: 8000 }).toBe(true).catch(() => undefined); // no incident: the spec's own length check reports it
+  const lines = await read();
+  const incidents = lines.filter(isPanFreeze) as unknown as Array<Incident & { page: string }>;
   console.log("PERF-INCIDENT", JSON.stringify(incidents[0]));
   return { sessionRecorded: lines.some((line) => line.t === "session"), incidents };
 }

@@ -867,7 +867,7 @@ const SETTINGS_WINDOWS = {
   appearance: ["s-appearance-themes", "s-appearance-layout"],
   terminal: ["s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-terminal-multiplexer"],
   you: ["s-you-profile", "s-you-passkeys", "s-you-recovery", "s-you-apps", "s-you-devices"],
-  machines: ["s-machines-new-machines", "s-machines-updates"],
+  machines: ["s-machines-new-machines", "s-machines-updates", "s-machines-app-windows"],
   mesh: ["s-mesh-keys", "s-mesh-names", "s-mesh-access", "s-mesh-connections"],
   sharing: ["s-sharing-published-services", "s-sharing-certificates"],
   about: ["s-about-version", "s-about-licences"],

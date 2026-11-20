@@ -365,7 +365,7 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
     accepted_input_bytes: number;
     output_sequence: string;
   };
-  // The probe's own key list (it leaves out e and s), so the expected text cannot drift from what it types.
+  // The probe's own key list (it leaves out e and s since db9ed5dfa), so the expected text cannot drift from what it types.
   const probeKeys = KEY_SET;
   const expectedProbeText = Array.from({ length: probeCount }, (_, index) => probeKeys[index % probeKeys.length]).join("");
   expect(probeState.echoed_text).toBe(expectedProbeText);
