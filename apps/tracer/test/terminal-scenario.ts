@@ -1,6 +1,7 @@
 /** Shared access, input and resume scenario; performance budgets are enforced only by the perf-VM suite (#314). */
 import { writeFile } from "node:fs/promises";
 import { expect as baseExpect, test, type Page, type TestInfo } from "playwright/test";
+import { KEY_SET } from "../src/perf-probe.on-demand";
 
 // A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
 const expect = baseExpect.configure({ timeout: 30_000 });
@@ -354,7 +355,8 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
     accepted_input_bytes: number;
     output_sequence: string;
   };
-  const probeKeys = "abcdefghijklmnopqrstuvwxyz0123456789";
+  // The probe's own key list (it leaves out e and s since db9ed5dfa), so the expected text cannot drift from what it types.
+  const probeKeys = KEY_SET;
   const expectedProbeText = Array.from({ length: probeCount }, (_, index) => probeKeys[index % probeKeys.length]).join("");
   expect(probeState.echoed_text).toBe(expectedProbeText);
   expect(probeState.accepted_input_bytes).toBe(probeCount);

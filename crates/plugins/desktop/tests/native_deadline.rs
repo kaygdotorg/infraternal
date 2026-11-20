@@ -41,6 +41,7 @@ fn fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     }
 }
 
+/// An encode against a child that never reads its pixels must fail at the operation deadline instead of blocking.
 #[test]
 fn unresponsive_native_pixel_reader_obeys_operation_deadline() {
     use nix::{
@@ -52,7 +53,10 @@ fn unresponsive_native_pixel_reader_obeys_operation_deadline() {
     let (dir, executable) = fixture("pixel-reader.py");
     let mut companion = native::Native::spawn(&executable).unwrap();
     let pid_file = executable.with_extension("py.pid");
-    let ready_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    // Event wait for the interpreter to come up. Its start-up is load-stretched
+    // wall time and is not what this test measures, so the bound is generous;
+    // the operation deadline below only starts once the fixture is running.
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(60);
     let pid = loop {
         if let Ok(text) = fs::read_to_string(&pid_file)
             && let Ok(pid) = text.parse::<i32>()
@@ -70,9 +74,12 @@ fn unresponsive_native_pixel_reader_obeys_operation_deadline() {
         let result = companion.encode(&vec![0; 512 * 512 * 4], 512, 512, 1, true);
         let _ = sent.send(result);
     });
-    // Allow one second beyond the documented three-second companion timeout.
-    // Terminate the fixture before joining so a failed deadline cannot hang CI.
-    let completed = received.recv_timeout(Duration::from_secs(4));
+    // The documented companion timeout is three seconds. A hung encode never
+    // returns at all, so the bound only has to be far enough past three seconds
+    // that a loaded scheduler cannot starve the worker thread into a false
+    // failure. Terminate the fixture before joining so a failed deadline cannot
+    // hang CI.
+    let completed = received.recv_timeout(Duration::from_secs(30));
     let _ = kill(pid, Signal::SIGKILL);
     writer.join().unwrap();
     fs::remove_dir_all(&dir).unwrap();

@@ -19,6 +19,7 @@ from agent_fixture import Binary, cleanup, control, detach, fixture_state, selec
 
 
 def main():
+    """Run the live rootless revocation flow and report process-exit evidence."""
     assert os.geteuid() != 0, 'this fixture requires an own-account rootless daemon'
     root = fixture_state('revoke')
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -58,15 +59,19 @@ def main():
             command = f'trap "" HUP TERM; printf "%s\\n" "$$" > {shlex.quote(str(descendant))}; exec sleep 600'
             client.input(f"setsid sh -c {shlex.quote(command)} </dev/null >/dev/null 2>&1 &\n".encode())
             terminal_marker(client, 'review-descendant-started')
-            deadline = time.monotonic() + 5
+            # The process publishes its PID asynchronously; the client hang bound is a stall guard, not a startup SLA.
+            deadline = time.monotonic() + client.sock.gettimeout()
             while not descendant.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
+            assert descendant.exists(), 'detached descendant did not publish its PID before the fixture hang bound'
             foreground = root / 'foreground.pid'
             command = f'printf "%s\\n" "$$" > {shlex.quote(str(foreground))}; exec sleep 600'
             client.input(f"sh -c {shlex.quote(command)}\n".encode())
-            deadline = time.monotonic() + 5
+            # This shell writes the PID before replacing itself with the foreground job.
+            deadline = time.monotonic() + client.sock.gettimeout()
             while not foreground.exists() and time.monotonic() < deadline:
                 time.sleep(.01)
+            assert foreground.exists(), 'foreground job did not publish its PID before the fixture hang bound'
             extra_pins = [os.pidfd_open(int(path.read_text().strip())) for path in (extra, descendant, foreground)]
             detach(client)
             client.kill()

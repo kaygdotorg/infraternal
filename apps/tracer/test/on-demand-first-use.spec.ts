@@ -21,6 +21,12 @@ const probe = <T>(page: Page, fn: (p: Probe) => T): Promise<T> =>
   page.evaluate((source) => (new Function("p", `return (${source})(p)`) as (p: unknown) => T)((window as unknown as { __tracerClusters: unknown }).__tracerClusters), fn.toString());
 
 const dist = process.env.TRACER_DIST ?? "dist";
+/**
+ * A string only the split module's chunk contains: the glide `SPLIT_GLIDE` of split.on-demand.ts as the bundler writes it.
+ * (The old marker, `dataset.split`, went with the droplet in #484.) Change it together with that constant; a miss fails
+ * loudly in `chunkWith`.
+ */
+const SPLIT_MARKER = "visualDuration:0.15";
 /** The one chunk of the build that contains `marker`. */
 function chunkWith(marker: string): string {
   const hits = readdirSync(dist).filter((name) => /^chunk-[0-9a-z]{8}\.js$/.test(name) && readFileSync(`${dist}/${name}`, "utf8").includes(marker));
@@ -46,7 +52,7 @@ async function open(page: Page, scene: number): Promise<void> {
 
 test("a split asked for before its module has arrived lands when it does", async ({ page }) => {
   test.setTimeout(60_000);
-  const held = await hold(page, chunkWith("dataset.split"));
+  const held = await hold(page, chunkWith(SPLIT_MARKER));
   await open(page, 1);
   await page.evaluate(() => (window as unknown as { __tracerClusters: { flyView(id: string): void } }).__tracerClusters.flyView("console"));
   await page.waitForTimeout(1500);
@@ -121,7 +127,7 @@ test("a view's label still flies to the view before the pointer module has arriv
 
 test("the modules are fetched by the page itself when it is idle, without anyone asking", async ({ page }) => {
   test.setTimeout(60_000);
-  const markers = { split: "dataset.split", "palette rows": "Unlink team layout to edit", "view pointer": "cl-summary-pick", "authority control": "Unlock host connections" };
+  const markers = { split: SPLIT_MARKER, "palette rows": "Unlink team layout to edit", "view pointer": "cl-summary-pick", "authority control": "CA root expired" };
   const files = Object.fromEntries(Object.entries(markers).map(([name, marker]) => [name, chunkWith(marker)]));
   await open(page, 1);
   const seen = await page.evaluate(() => performance.getEntriesByType("resource").map((e) => ({ name: e.name.split("/").at(-1)!, start: Math.round(e.startTime), end: Math.round((e as PerformanceResourceTiming).responseEnd) })));
