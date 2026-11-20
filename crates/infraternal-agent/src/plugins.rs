@@ -193,21 +193,38 @@ pub(crate) fn registry_at_with_mesh_state(
     }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
-        let runtime = desktop_source_runtime().map_err(|_| PluginError::Rejected)?;
         let executable = std::env::current_exe().map_err(|_| PluginError::Rejected)?;
-        let helper = executable
-            .parent()
-            .ok_or(PluginError::Rejected)?
-            .join("infraternal-desktop-helper");
+        let folder = executable.parent().ok_or(PluginError::Rejected)?;
+        let helper = folder.join("infraternal-desktop-helper");
+        let root = nix::unistd::Uid::effective().is_root();
+        let runtime = if root {
+            std::path::PathBuf::from(infraternal_plugin_desktop::cross_user::BASE)
+        } else {
+            desktop_source_runtime().map_err(|_| PluginError::Rejected)?
+        };
         // Construction retains trusted metadata only; desktop.up is the explicit
         // per-node component switch, and known Attach is the sole capture opener.
-        registry.register(Box::new(
-            infraternal_plugin_desktop::source::SourceBridge::new(
-                runtime,
-                helper,
-                infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
-            ),
-        ))?;
+        let bridge = infraternal_plugin_desktop::source::SourceBridge::new(
+            runtime,
+            helper,
+            infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS,
+        );
+        let bridge = if root {
+            // No leg exists yet, so any per-leg folder there is a killed
+            // daemon's leftover (D203 C2).
+            if let Err(error) = infraternal_plugin_desktop::cross_user::sweep_base(
+                std::path::Path::new(infraternal_plugin_desktop::cross_user::BASE),
+            ) {
+                eprintln!(
+                    "Infraternal app windows: stale helper folders were not removed ({:?})",
+                    error.kind()
+                );
+            }
+            bridge.with_cross_user(desktop_console_user(folder))
+        } else {
+            bridge
+        };
+        registry.register(Box::new(bridge))?;
     }
     #[cfg(not(any(
         all(feature = "remote", target_os = "linux"),
@@ -684,6 +701,41 @@ fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static 
 /// Exact private handoff decoder shared with parser fuzzing; parsing grants no authority.
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall_request;
+
+/// How the root agent starts and admits the console user's desktop helper
+/// (D203 C2, #146): the shim's `__desktop-user` placement entry, and a peer
+/// check that requires the helper's signing identifier from this agent's own
+/// signer. The capture app is the signed bundle installed next to the agent.
+///
+/// An agent with no signing certificate (ad hoc or unsigned) has no signer to
+/// compare with. It still registers app windows, but every helper it starts
+/// is refused at admission, so nothing is ever trusted without a signature.
+#[cfg(all(feature = "desktop", target_os = "macos"))]
+fn desktop_console_user(
+    folder: &std::path::Path,
+) -> infraternal_plugin_desktop::cross_user::CrossUser {
+    use infraternal_shim::code_identity::PeerRequirement;
+    use std::sync::Arc;
+    let verify: infraternal_plugin_desktop::cross_user::VerifyPeer =
+        match PeerRequirement::for_identifier("infraternal-desktop-helper") {
+            Ok(requirement) => {
+                Arc::new(move |socket: std::os::fd::BorrowedFd<'_>| requirement.verify(&socket))
+            }
+            Err(error) => {
+                eprintln!(
+                    "Infraternal app windows: this infraternal agent has no signing certificate ({error}); its desktop helpers will be refused"
+                );
+                Arc::new(|_: std::os::fd::BorrowedFd<'_>| {
+                    Err(std::io::ErrorKind::PermissionDenied.into())
+                })
+            }
+        };
+    infraternal_plugin_desktop::cross_user::CrossUser::new(
+        Arc::new(infraternal_shim::desktop_user::command),
+        verify,
+        folder.join("InfraternalCaptureHelper.app/Contents/MacOS/InfraternalCaptureHelper"),
+    )
+}
 
 /// Names a private desktop runtime with room for source sockets under Darwin's 104-byte limit.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
