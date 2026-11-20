@@ -79,3 +79,26 @@ test("icon transfers run one at a time and disposal skips queued work", async ()
   expect(await c).toBeUndefined();
   expect(calls).toEqual([first, second]);
 });
+
+/** A blocked icon reply leaves space for at most 64 distinct pending hashes. */
+test("a busy picker bounds pending icon loads and shares a queued request", async () => {
+  let finish!: (reply: Record<string, unknown>) => void;
+  const reply = new Promise<Record<string, unknown>>((resolve) => { finish = resolve; });
+  let calls = 0;
+  const icons = new AppIcons(() => {
+    calls++;
+    return reply;
+  });
+  const hashes = Array.from({ length: 65 }, (_, index) => index.toString(16).padStart(64, "0"));
+  const queued = hashes.slice(0, 64).map((hash) => icons.load("mac", hash));
+
+  expect(icons.load("mac", hashes[63]!)).toBe(queued[63]!);
+  const overflow = icons.load("mac", hashes[64]!);
+  expect(await Promise.race([overflow, Promise.resolve("queued")])).toBeUndefined();
+  expect(calls).toBe(1);
+  icons.dispose();
+  finish({ png: "" });
+
+  expect(await Promise.all(queued)).toEqual(Array(64).fill(undefined));
+  expect(calls).toBe(1);
+});
