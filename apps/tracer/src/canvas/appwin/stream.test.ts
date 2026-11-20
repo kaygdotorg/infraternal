@@ -118,7 +118,7 @@ test("authoritative window retirement after reconnect clears the viewer and work
   try {
     const viewer = f.handlers.get(1)!;
     f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
-    viewer.onDisconnected();
+    viewer.onDisconnected(false);
     viewer.onWelcome(true);
     viewer.onFrame({ type: "Close", code: 4410, reason: "window closed" }, new Uint8Array(), 0);
     f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
@@ -139,7 +139,7 @@ test("stalled worker handoff stays within one maximum access unit and resumes on
     }, new Uint8Array(), 0);
     deliver(1, true);
     for (let sequence = 2; sequence <= 20; sequence++) deliver(sequence, false, bytes.subarray(0, 1));
-    viewer.onDisconnected();
+    viewer.onDisconnected(false);
     viewer.onWelcome(true);
     deliver(21, true);
     expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1]);
