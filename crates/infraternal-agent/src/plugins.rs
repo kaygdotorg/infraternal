@@ -672,7 +672,7 @@ pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall
 /// Names a private desktop runtime with room for source sockets under Darwin's 104-byte limit.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 fn desktop_source_runtime() -> std::io::Result<std::path::PathBuf> {
-    let parent = infraternal_shim::runtime_dir::darwin_user_temp_dir()
+    let parent = infraternal_shim::session_shell::darwin_user_temp_dir()
         .ok_or(std::io::ErrorKind::NotFound)?;
     infraternal_plugin_desktop::socket::validate_runtime(&parent)?;
     Ok(parent.join("ifd"))

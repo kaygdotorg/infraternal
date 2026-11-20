@@ -40,7 +40,7 @@ use std::{
     ffi::{CString, OsStr, OsString},
     io,
     os::unix::{
-        ffi::OsStrExt as _,
+        ffi::{OsStrExt as _, OsStringExt as _},
         fs::{FileTypeExt as _, MetadataExt as _},
         process::CommandExt as _,
     },
@@ -291,7 +291,7 @@ fn prepare(request: &Request) -> io::Result<Command> {
         .env("LOGNAME", &user.name)
         .env("SHELL", &shell)
         .env("PATH", PATH);
-    if let Some(directory) = crate::runtime_dir::darwin_user_temp_dir() {
+    if let Some(directory) = darwin_user_temp_dir() {
         command.env("TMPDIR", directory);
     }
     if placed && let Some(socket) = agent_socket(user.uid) {
@@ -397,6 +397,22 @@ fn classify(through_asuser: bool, uid: Uid, audit_user: u32, flags: u64) -> io::
         ));
     }
     Ok(own && flags & GRAPHIC_ACCESS != 0)
+}
+
+/// Returns Darwin's per-user temporary directory without consulting HOME or TMPDIR.
+///
+/// Login shells use it directly. Socket callers should verify it belongs to the
+/// current user and keep their endpoint name short enough for Darwin.
+#[must_use]
+pub fn darwin_user_temp_dir() -> Option<PathBuf> {
+    // <unistd.h>: _CS_DARWIN_USER_TEMP_DIR.
+    const USER_TEMP_DIR: nix::libc::c_int = 65537;
+    let mut buffer = [0_u8; 1024];
+    // SAFETY: confstr writes at most `buffer.len()` bytes, NUL included.
+    let length =
+        unsafe { nix::libc::confstr(USER_TEMP_DIR, buffer.as_mut_ptr().cast(), buffer.len()) };
+    (length > 1 && length <= buffer.len())
+        .then(|| PathBuf::from(OsString::from_vec(buffer[..length - 1].to_vec())))
 }
 
 /// The placed bootstrap's ssh-agent socket, when it is a socket the account owns.
