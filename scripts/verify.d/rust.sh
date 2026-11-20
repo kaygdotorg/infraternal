@@ -234,21 +234,22 @@ rust_check_cli_plugin_compile_out() {
     return "$failed"
 }
 
-# The "release feature sets" row (#530). Lints every package and feature
-# selection scripts/package-release ships, with warnings as errors. The clippy
-# row only sees the workspace's default features and the static builds row
-# only the default `infraternal`, so the host payload (no mesh, server or
-# desktop) went uncompiled until the release build failed on dev 6fe482d1e.
-# Linting for the build host is enough: the release targets differ only by
-# architecture, and no code here is conditional on it. Every set runs even
-# after one fails, so one log shows them all.
+# The "release feature sets" row (#530) checks each shipping feature graph.
+# The workspace Clippy row unifies features and missed a Linux host compile
+# failure on dev 6fe482d1e. Keep warnings fatal for the Linux release sets.
+# The macOS checks catch missing optional dependencies on the build host.
+# The native recipe builds and checks both Mach-O images before signing.
+# Run every set even after a failure so one log shows them all.
 rust_check_release_feature_sets() {
     local failed=0
     local release_server_cargo_args release_host_cargo_args release_session_cargo_args
+    local release_macos_host_cargo_args release_macos_helper_cargo_args
     source scripts/release/feature-sets || return 1
     cargo clippy --locked "${release_server_cargo_args[@]}" -- -D warnings || failed=1
     cargo clippy --locked "${release_host_cargo_args[@]}" -- -D warnings || failed=1
     cargo clippy --locked "${release_session_cargo_args[@]}" -- -D warnings || failed=1
+    cargo check --locked "${release_macos_host_cargo_args[@]}" || failed=1
+    cargo check --locked "${release_macos_helper_cargo_args[@]}" || failed=1
     return "$failed"
 }
 
