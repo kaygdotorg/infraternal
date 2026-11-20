@@ -52,12 +52,13 @@ if [[ -n "${INFRATERNAL_ZIG:-}" ]]; then
 else
     curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
         "https://ziglang.org/download/$version/$archive" -o "$staging/zig.tar.xz"
-    # macOS has shasum but no sha256sum outside the nix shell.
-    if command -v sha256sum >/dev/null; then
-        printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | sha256sum --check --status
+    # macOS ships a BSD sha256sum without --check (#554): compare the digest ourselves.
+    if [[ "$(uname -s)" = Darwin ]] || ! command -v sha256sum >/dev/null; then
+        actual="$(shasum -a 256 "$staging/zig.tar.xz")"
     else
-        printf '%s  %s\n' "$checksum" "$staging/zig.tar.xz" | shasum -a 256 --check --status
+        actual="$(sha256sum "$staging/zig.tar.xz")"
     fi
+    [[ "${actual%% *}" = "$checksum" ]] || { printf 'zig archive checksum mismatch\n' >&2; exit 1; }
     tar -xJf "$staging/zig.tar.xz" --strip-components=1 -C "$staging"
     rm "$staging/zig.tar.xz"
 fi
