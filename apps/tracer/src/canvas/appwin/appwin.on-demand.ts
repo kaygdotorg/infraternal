@@ -155,7 +155,12 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
     bindingFor(rec) {
       const m = rec.model;
       if (!m.stream || !m.hostId) return undefined;
-      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target: m.stream.target, machine: m.host, app: m.stream.appName, ...(m.stream.aspect ? { aspect: m.stream.aspect } : {}) });
+      const target = m.stream.target;
+      const hash = target.type === "window"
+        ? machines.state(m.hostId)?.inventory?.windows.find((entry) => entry.target.windowId === target.windowId && entry.target.ownerPid === target.ownerPid)?.iconHash
+        : undefined;
+      const icon = hash ? machines.icons.load(m.hostId, hash) : undefined;
+      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target, machine: m.host, app: m.stream.appName, ...(icon ? { icon } : {}), ...(m.stream.aspect ? { aspect: m.stream.aspect } : {}) });
     },
     async report() {
       const out: Array<{ id: string; state: string; control: string; stats: unknown }> = [];

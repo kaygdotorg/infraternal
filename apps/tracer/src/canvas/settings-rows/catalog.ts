@@ -88,6 +88,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
   { id: "machines", title: "Machines", icon: "machines", admin: true, groups: [
     { id: "new-machines", title: "New Machines", docs: { page: "reference/keys", heading: "add-link-lasts" }, settings: ["add-link", "join-code", "install-mode", "sign-in-account", "join-mesh"] },
     { id: "updates", title: "Updates" },
+    { id: "app-windows", title: "App Windows", settings: ["app-windows"] },
   ] },
   { id: "mesh", title: "Mesh", icon: "mesh", admin: true, groups: [
     { id: "keys", title: "Keys", docs: { page: "reference/keys", heading: "connection-keys" }, settings: ["connection-keys", "machine-identity", "renewal-window"] },

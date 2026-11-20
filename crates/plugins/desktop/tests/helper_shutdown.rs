@@ -128,6 +128,7 @@ while True:
         sent.send(result).unwrap();
     });
     let start = protocol::Start {
+        passive_geometry: false,
         target: protocol::Target::Screen { display_id: 1 },
         size: protocol::Size {
             width: 512,

@@ -27,7 +27,9 @@ use zeroize::{Zeroize, Zeroizing};
 struct StoredIdentity {
     host_id: uuid::Uuid,
     execution_uid: u32,
-    /// Legacy direct endpoint; migrated identities use only `public_origin`.
+    /// The server's direct QUIC listener from the invitation, dialled before
+    /// the HTTPS origin (#146). Dropped from legacy 7443 identities, which had
+    /// no public origin to fall back to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<std::net::SocketAddr>,
     server_name: String,
@@ -284,7 +286,7 @@ async fn join_with_key_inner(
     let stored = StoredIdentity {
         host_id: invitation.host_id,
         execution_uid: uid,
-        endpoint: None,
+        endpoint: invitation.endpoint,
         server_name,
         public_origin: Some(public_origin),
         https_der: invitation.https_der,
@@ -964,9 +966,9 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
         stored.public_origin = Some(canonical);
         stored.https_der = None;
         stored.https_system_roots = true;
-        changed = true;
-    }
-    if stored.endpoint.take().is_some() {
+        // The legacy 7443 address is filtered in the networks that motivated
+        // #291; an identity enrolled with a public origin keeps its endpoint.
+        stored.endpoint = None;
         changed = true;
     }
     if changed {
@@ -974,6 +976,35 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
         replace(data, &bytes, Some(&snapshot))?;
     }
     Ok(stored)
+}
+
+/// The address to dial for the direct QUIC link, or `None` to use only HTTPS.
+///
+/// The server hands out its listener address, which is `0.0.0.0:<port>` (or
+/// `[::]`) when it listens on every address; that means "the public origin's
+/// host, this port". The name is looked up once per agent start. A failed
+/// lookup only skips the direct dial: the HTTPS origin still links (#146).
+async fn direct_endpoint(
+    endpoint: Option<std::net::SocketAddr>,
+    public_origin: &str,
+) -> Option<std::net::SocketAddr> {
+    let endpoint = endpoint?;
+    if !endpoint.ip().is_unspecified() {
+        return Some(endpoint);
+    }
+    let host = url::Url::parse(public_origin).ok()?.host_str()?.to_owned();
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), endpoint.port())),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .next()
 }
 
 /// Run the remote client from the stored identity in `data`.
@@ -1010,7 +1041,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
             X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
                 .map_err(|_| refused())?,
         ],
-        endpoint: stored.endpoint,
+        endpoint: direct_endpoint(stored.endpoint, &public_origin).await,
         server_name: stored.server_name.clone(),
         public_origin: Some(public_origin),
         https_root,

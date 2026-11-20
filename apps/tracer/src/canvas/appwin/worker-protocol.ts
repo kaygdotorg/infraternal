@@ -24,6 +24,8 @@ export type ToWorker =
 
 /** Worker to main thread. */
 export type FromWorker =
+  /** Returns credit for one chunk once the worker has handled it, even if decoding dropped it. */
+  | { t: "admitted"; bytes: number }
   /** The first picture of an attach reached the surface. */
   | { t: "first"; width: number; height: number }
   /** The decoded picture changed size (the machine followed a resize, or the window letterboxed). */

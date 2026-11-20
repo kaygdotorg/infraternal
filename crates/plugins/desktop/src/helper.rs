@@ -438,6 +438,7 @@ mod startup_recovery_tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
 
+    /// Repairs a missing startup keyframe before forwarding native video.
     #[test]
     fn delta_before_startup_keyframe_requests_repair_before_delivery() {
         let root = std::env::temp_dir().join(format!(
@@ -456,6 +457,7 @@ mod startup_recovery_tests {
             .expect("make scripted companion executable");
 
         let start = Start {
+            passive_geometry: false,
             target: protocol::Target::Screen { display_id: 1 },
             size: Size {
                 width: 64,
@@ -757,8 +759,13 @@ fn run(
             };
             if Instant::now() >= reconcile {
                 crate::measurement::record("helper_reconcile_begin", 0, 0, 0);
-                let (_, geometry) = native.call(Kind::Status, b"{}")?;
+                let (kind, geometry) = native.call(Kind::Status, b"{}")?;
                 crate::measurement::record("helper_reconcile_end", 0, 0, 0);
+                if kind == Kind::Error {
+                    // Forward the companion's typed closure before ending the capture.
+                    protocol::write(socket, kind, &geometry)?;
+                    break;
+                }
                 let rect = actual(&geometry)?;
                 if rect != stream.rect {
                     stream.update(stream.size, rect);
@@ -770,14 +777,21 @@ fn run(
             let had_frame = frame.is_ok();
             match frame {
                 Ok(frame) => {
-                    let frame = frame?;
+                    let frame = match frame {
+                        Ok(frame) => frame,
+                        Err(error) => return surface_failure(socket, native, error),
+                    };
                     crate::measurement::helper_frame("helper_socket_begin", &frame);
                     protocol::write(socket, Kind::Video, &frame)?;
                     crate::measurement::helper_frame("helper_socket_end", &frame);
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    return Err(io::Error::other("Desktop capture stopped."));
+                    return surface_failure(
+                        socket,
+                        native,
+                        io::Error::other("Desktop capture stopped."),
+                    );
                 }
             }
             // Window following still reconciles at its existing deadline. An
@@ -795,6 +809,18 @@ fn run(
     let _ = native.call(Kind::Stop, b"{}");
     stream.take();
     result
+}
+
+/// Checks for permanent window closure before tearing down a failed surface.
+fn surface_failure(
+    socket: &mut UnixStream,
+    native: &mut Native,
+    error: io::Error,
+) -> io::Result<()> {
+    if let Ok((Kind::Error, body)) = native.call(Kind::Status, br#"{"check_window":true}"#) {
+        protocol::write(socket, Kind::Error, &body)?;
+    }
+    Err(error)
 }
 
 /// Answers a keyframe or congestion request by setting the matching flag on the

@@ -112,6 +112,7 @@ async fn retired_doubt_never_confirms_a_replacement_link_mid_replay() {
         restarts: restart_notice,
         next_attachment_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         session_inventory: inventory,
+        reported_os: tokio::sync::watch::channel(None).0,
     };
     let attachment = agent.attach(SESSION, 0, 0, STREAM).await.unwrap();
     let (_input, mut output) = attachment.split();

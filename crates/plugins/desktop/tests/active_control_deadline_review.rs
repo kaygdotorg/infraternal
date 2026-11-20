@@ -139,6 +139,7 @@ async fn active_helper_silent_status_retires_after_control_deadline() {
         .prepare(
             id,
             Start {
+                passive_geometry: false,
                 target: Target::Screen { display_id: 1 },
                 size: Size {
                     width: 960,

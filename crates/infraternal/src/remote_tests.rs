@@ -370,8 +370,9 @@ fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
     assert!(enrolled.0.public_eq(&key));
 }
 
+/// An invitation keeps the D168 name, the public origin and the server's direct QUIC endpoint on the wire.
 #[test]
-fn public_origin_invitation_preserves_d168_name_without_a_legacy_endpoint() {
+fn public_origin_invitation_preserves_d168_name_and_its_direct_endpoint() {
     let invitation = JoinInvitation {
         host_id: uuid::Uuid::from_u128(1),
         mode: Mode::Rootless,
@@ -388,7 +389,8 @@ fn public_origin_invitation_preserves_d168_name_without_a_legacy_endpoint() {
     let wire = serde_json::to_value(invitation).unwrap();
     assert_eq!(wire["public_origin"], "https://ssh.kayg.org");
     assert_eq!(wire["server_name"], "ssh.internal");
-    assert!(wire.get("endpoint").is_none());
+    // The direct QUIC listener travels too: app-window lanes need it (#146).
+    assert_eq!(wire["endpoint"], "10.69.69.89:7443");
 }
 
 #[test]
@@ -893,4 +895,48 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
     let (_, current) = load_snapshot(&data).unwrap();
     replace(&data, &renewed, Some(&current)).unwrap();
+}
+
+/// An identity enrolled with a public origin keeps its direct QUIC endpoint
+/// through the start-up migration; only legacy 7443 identities lose it (#146).
+#[test]
+fn origin_identities_keep_their_direct_endpoint() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let current = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: Some("10.69.69.89:45681".parse().unwrap()),
+        server_name: "ssh.internal".into(),
+        public_origin: Some("https://ssh.kayg.org".into()),
+        https_der: None,
+        https_system_roots: true,
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
+    };
+    publish(
+        &data,
+        serialize_identity_document(&current).unwrap().as_slice(),
+    )
+    .unwrap();
+    let migrated = migrate_identity(&data).unwrap();
+    assert_eq!(migrated.endpoint, current.endpoint);
+}
+
+/// A listener bound to every address means "the public origin's host, this port".
+#[tokio::test]
+async fn an_unspecified_listener_dials_the_origin_host() {
+    let any = Some("0.0.0.0:45681".parse().unwrap());
+    assert_eq!(
+        direct_endpoint(any, "https://127.0.0.1").await,
+        Some("127.0.0.1:45681".parse().unwrap())
+    );
+    let fixed = Some("10.0.0.5:45681".parse().unwrap());
+    assert_eq!(direct_endpoint(fixed, "https://ssh.kayg.org").await, fixed);
+    assert_eq!(direct_endpoint(None, "https://ssh.kayg.org").await, None);
 }

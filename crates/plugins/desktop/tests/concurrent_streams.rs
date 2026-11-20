@@ -202,8 +202,10 @@ impl SocketHost for Socket {
     }
 }
 
+/// Gives each concurrent capture its own window target.
 fn start(index: usize) -> Start {
     Start {
+        passive_geometry: false,
         target: Target::Window {
             window_id: u32::try_from(index + 1).unwrap(),
             owner_pid: 123,
