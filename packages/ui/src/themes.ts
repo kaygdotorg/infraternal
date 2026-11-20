@@ -160,8 +160,6 @@ export function mix(left: string, right: string, amount: number): string {
 
 export interface OverlayMaterial {
   overlay: string;
-  /** The tint at 0.9: a soft halo behind text on the material, so contrast comes from the halo and not from more tint. */
-  halo: string;
   /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
   overlayPanel: string;
   overlaySolid: string;
@@ -210,7 +208,7 @@ export const levelOpacity = (active: Theme, level: number): number => {
 };
 
 /**
- * The floating-card material of one level for a theme: the tint (kept close to the palette on dark themes), its halo,
+ * The floating-card material of one level for a theme: the tint (kept close to the palette on dark themes),
  * the shadows, and `surface`, the alpha composite over the page colour that the contrast audit measures cards against.
  * The text colours that go with the tint's opacity come from {@link glassFor}.
  */
@@ -218,7 +216,7 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
   const tinted = glassTint(active);
   // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
   // behind must visibly show through, softly blurred. Secondary text over the busiest terminal
-  // state stays above 4.5:1 (a text shadow carries it at the thin levels, never more tint).
+  // state stays above 4.5:1 through the glass solver (D365), which falls back to the theme's solid surface, never to a glow behind the text.
   const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
   const opacity = active.dark ? glass.dark : glass.light;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
@@ -229,7 +227,6 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
-    halo: `rgb(${rgb(tinted)} / 1)`,
     overlayPanel: `rgb(${rgb(tinted)} / ${opacity})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
@@ -261,12 +258,12 @@ function installLevelRules(): void {
   if (levelRules || typeof CSSStyleSheet === "undefined") return;
   levelRules = true;
   const css: string[] = [];
-  // The card tint (`--overlay`, `--ui-overlay-halo`) depends on theme and level. It is set on the elements that read it,
+  // The card tint (`--overlay`) depends on theme and level. It is set on the elements that read it,
   // not on the root, so a theme or level change restyles those few elements and not every element of the page.
   for (const [id, active] of Object.entries(THEMES)) {
     for (const level of Object.keys(CARD_LEVELS)) {
       const m = overlayMaterial(active, Number(level));
-      css.push(`:where(:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"]) :where(${TINT_USERS}) { --overlay: ${m.overlay}; --ui-overlay-halo: ${m.halo}; }`);
+      css.push(`:where(:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"]) :where(${TINT_USERS}) { --overlay: ${m.overlay}; }`);
       css.push(`:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"] .keybar button::after { --overlay: ${m.overlay}; }`);
     }
   }

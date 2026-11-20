@@ -34,8 +34,7 @@ export const nominalOpacity = (active: Theme, level: number): number => lookTint
  * How much of a glass card's area a single block of one of the terminal's own colours is assumed to cover, at most (20%).
  * A card blurs what is behind it, so a block shows as its average: a status line, a few highlighted rows or a progress
  * bar are a small share of a popover. This is a bound chosen on measured trade-offs, not a law: over a whole card of
- * a bright colour (inverse video, a full-screen pager) the approved thin levels cannot hold 4.5:1 and the glass's own
- * text halo carries what it can. Raising it to 30% raises 8 of 30 theme and level pairs, 50% raises 16 and puts Clear on
+ * a bright colour (inverse video, a full-screen pager) the approved thin levels cannot hold 4.5:1 and the card turns solid. Raising it to 30% raises 8 of 30 theme and level pairs, 50% raises 16 and puts Clear on
  * Frosted's opacity on ink, mocha, rosepine, nord and dracula (the sweep is in the audit's note and on #448). The audit
  * (`glass-contrast.test.ts`) holds every theme and level over every one of its 18 terminal colours up to this bound.
  */
