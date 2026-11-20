@@ -111,6 +111,22 @@ test("server Close unregisters its app-window handler before disposal", async ()
   } finally { f.stream.dispose(); }
 });
 
+/** A confirmed native close must retire a reattached viewer even when its cached picture was live. */
+test("authoritative window retirement after reconnect clears the viewer and worker", async () => {
+  const f = await fixture();
+  try {
+    const viewer = f.handlers.get(1)!;
+    f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
+    viewer.onDisconnected();
+    viewer.onWelcome(true);
+    viewer.onFrame({ type: "Close", code: 4410, reason: "window closed" }, new Uint8Array(), 0);
+    f.worker.onmessage?.({ data: { t: "first", width: 64, height: 48 } });
+    expect(f.stream.current.kind).toBe("closed");
+    expect(f.handlers.size).toBe(0);
+    expect(f.actions).not.toContain("desktop.windows");
+  } finally { f.stream.dispose(); }
+});
+
 /** A worker that never runs cannot accumulate access units, even across a socket reconnect. */
 test("stalled worker handoff stays within one maximum access unit and resumes on a keyframe", async () => {
   const f = await fixture();

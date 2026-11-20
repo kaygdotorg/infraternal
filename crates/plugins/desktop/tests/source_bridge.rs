@@ -27,6 +27,7 @@ fn replay_repairs_coalesce_at_the_source_interval() {
 
 fn start() -> Start {
     Start {
+        passive_geometry: false,
         target: Target::Screen { display_id: 1 },
         size: Size {
             width: 960,

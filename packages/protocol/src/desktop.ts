@@ -21,6 +21,8 @@ export const DESKTOP_VIDEO = 16n;
  * 4 MiB minus 42 bytes. The Rust codec enforces the same bound.
  */
 export const MAX_VIDEO_BYTES = 4 * 1024 * 1024 - 42;
+/** Viewer Close code for an authoritative native window retirement. */
+export const WINDOW_CLOSED = 4410;
 /**
  * One input event from the viewer to the host screen (carried by an `input` message).
  * - `release`: let go of every key and button the host believes is held.

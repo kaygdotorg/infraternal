@@ -86,7 +86,11 @@ final class WindowGeometry {
     /// Number of resize requests sent, for diagnostics.
     private var resizeRequests = 0
     /// False once the window has gone.
-    var exists = true
+    private(set) var exists = true
+    /// Sticky once WindowServer or the matched AX window confirms destruction.
+    private(set) var closed = false
+    /// A rebuilt source follows native geometry until a fresh viewer Size grants ownership.
+    private var resizeEnabled: Bool
     /// Frames where clicks may go: the window and its overlapping popups. Gaps between them are excluded.
     private var interactive: [CGRect] = []
 
@@ -94,7 +98,7 @@ final class WindowGeometry {
     ///
     /// Refuses missing Accessibility access, a missing window, or an invalid `size`.
     /// Only a live WindowServer list can confirm that this window and process are gone.
-    init(id: UInt32, pid: Int32, size: [String: Any]) throws {
+    init(id: UInt32, pid: Int32, size: [String: Any], passive: Bool) throws {
         guard AXIsProcessTrusted() else { throw HelperFailure.permission }
         guard let entry = windowSnapshot(applicationMetadata: false).first(where: {
             ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
@@ -102,7 +106,7 @@ final class WindowGeometry {
             throw windowIsGone(id:id,pid:pid) ? HelperFailure.gone : HelperFailure.unavailable
         }
         self.pid = pid; self.id = id; original = try rect(frame); actual = original
-        desired = .zero; output = .zero
+        desired = .zero; output = .zero; resizeEnabled = !passive
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         let candidates = axValue(app, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
@@ -116,12 +120,16 @@ final class WindowGeometry {
         }
         window = matches.count == 1 ? matches.first : nil
         if let window { AXUIElementSetMessagingTimeout(window,0.025) }
-        try resize(size)
+        try setOutput(size)
         var created: AXObserver?
-        if AXObserverCreate(pid, { _, _, _, context in
+        if AXObserverCreate(pid, { _, _, notification, context in
             guard let context else { return }
             let geometry = Unmanaged<WindowGeometry>.fromOpaque(context).takeUnretainedValue()
-            geometry.follow()
+            if notification as String == kAXUIElementDestroyedNotification as String {
+                geometry.markClosed()
+            } else {
+                geometry.follow()
+            }
         }, &created) == .success, let created {
             observer = created
             let context = Unmanaged.passUnretained(self).toOpaque()
@@ -129,7 +137,7 @@ final class WindowGeometry {
                 _ = AXObserverAddNotification(created, app, name as CFString, context)
             }
             if let window {
-                for name in [kAXMovedNotification, kAXResizedNotification] {
+                for name in [kAXMovedNotification, kAXResizedNotification, kAXUIElementDestroyedNotification] {
                     _ = AXObserverAddNotification(created, window, name as CFString, context)
                 }
             }
@@ -148,12 +156,18 @@ final class WindowGeometry {
     /// finite and greater than 0; `width` and `height` are output pixels. Throws
     /// `HelperFailure.invalid` otherwise.
     func resize(_ size: [String: Any]) throws {
+        try setOutput(size, activateResize: true)
+    }
+
+    /// Configures encoder dimensions and updates the capture rectangle at the current native frame.
+    private func setOutput(_ size: [String: Any], activateResize: Bool = false) throws {
         guard let cw = size["canvas_width"] as? Double, let ch = size["canvas_height"] as? Double,
               let scale = size["backing_scale"] as? Double,
               let w = size["width"] as? Double, let h = size["height"] as? Double,
               [cw,ch,scale,w,h].allSatisfy({ $0.isFinite && $0 > 0 }) else { throw HelperFailure.invalid }
         // The request describes output pixels (canvas × requested scale). AX takes
         // host points: divide by the actual display density, never an untrusted hint.
+        if activateResize { resizeEnabled = true }
         let hostScale = backingScale(actual)
         desired = CGSize(width: w / hostScale, height: h / hostScale)
         output = CGSize(width: w, height: h)
@@ -168,7 +182,8 @@ final class WindowGeometry {
         exists = windowSnapshot(applicationMetadata: false, windowID: id).contains {
             ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid
         }
-        if !exists { interactive = []; reason = "closed" }
+        if !exists { interactive = [] }
+        if closed { exists = false }
     }
 
     /// Re-reads the window's state, decides whether to resize it and recomputes `captureRect`,
@@ -178,10 +193,22 @@ final class WindowGeometry {
     /// A resize is requested at most once per new size, never while a tiling manager is present and
     /// not within 60 seconds of local keyboard or mouse use.
     func follow() {
+        if closed { return }
         let snapshot = windowSnapshot(applicationMetadata: false)
         guard let selected = snapshot.first(where: { ($0["window_id"] as? UInt32) == id && ($0["owner_pid"] as? Int32) == pid }),
               let raw = selected["frame"] as? [String: Any], let cgFrame = try? rect(raw) else {
-            exists = false; interactive = []; reason = "closed"; return
+            if windowIsGone(id:id,pid:pid) { markClosed() }
+            else { exists = false; interactive = []; reason = "unavailable" }
+            return
+        }
+        if let window, (selected["on_screen"] as? Bool) == false {
+            // WindowServer may retain a closed window while the capture filter owns
+            // its surface. Test the exact matched AX element, not its visibility.
+            var role: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .invalidUIElement {
+                markClosed()
+                return
+            }
         }
         exists = true
         if let window, let f = axFrame(window) { actual = f } else { actual = cgFrame }
@@ -190,7 +217,8 @@ final class WindowGeometry {
         let now = ProcessInfo.processInfo.systemUptime
         ownership.detectManager(WindowManagerPresence.current(at: now))
         ownership.observe(actual.size, at: now)
-        if ownership.managed { reason = "managed" }
+        if !resizeEnabled { reason = "native" }
+        else if ownership.managed { reason = "managed" }
         else if localIdleSeconds() < 60 { reason = "local_input" }
         else if let window {
             var settable = DarwinBoolean(false)
@@ -223,6 +251,11 @@ final class WindowGeometry {
         content = CGRect(x: (output.width - size.width)/2, y: (output.height - size.height)/2, width: size.width, height: size.height)
     }
 
+    /// Retires the exact matched target. Hide and minimize never call this.
+    private func markClosed() {
+        closed = true; exists = false; interactive = []; reason = "closed"
+    }
+
     /// Undoes our most recent geometry change while the Mac still has the frame we applied.
     ///
     /// Read AX again at teardown because a user can move, resize or close a window before the
@@ -230,7 +263,7 @@ final class WindowGeometry {
     /// Returns `false` if we tried to restore our frame but the app refused.
     func restore() -> Bool {
         ownership.detectManager(WindowManagerPresence.current(at: ProcessInfo.processInfo.systemUptime))
-        guard !ownership.managed, let window, let applied = lastAppliedFrame,
+        guard !closed, !ownership.managed, let window, let applied = lastAppliedFrame,
               let current = axFrame(window), sameWindowFrame(current, applied) else { return true }
         lastAppliedFrame = nil
         var size = original.size; var point = original.origin

@@ -33,13 +33,13 @@ use infraternal_plugin_api::{
 };
 use infraternal_protocol::{
     Frame, decode_muxed_frame,
-    desktop::{Delivery, Message},
+    desktop::{Delivery, Message, WINDOW_CLOSED},
     encode_frame_into, encode_muxed_frame_into,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -138,6 +138,8 @@ struct State {
     /// Maximum number of sessions, counting ones still shutting down.
     limit: usize,
     records: HashMap<SessionId, Record>,
+    /// Recent native closures, bounded independently of live capture capacity.
+    closed_windows: VecDeque<(SessionId, Arc<dyn NodeHost>)>,
 }
 /// The desktop plugin for the server. Cloning is cheap and shares all state.
 ///
@@ -158,6 +160,7 @@ impl DesktopServer {
                 enabled: false,
                 limit,
                 records: HashMap::new(),
+                closed_windows: VecDeque::new(),
             })),
         }
     }
@@ -202,7 +205,23 @@ impl DesktopServer {
             if !state.enabled || !host.permits() {
                 return Err(Error::Unavailable);
             }
-            state.records.retain(|_, record| !record.worker.finished());
+            // Finished closures lose their capture slot but keep a bounded
+            // receipt for viewers returning on a new socket.
+            let mut closed = std::mem::take(&mut state.closed_windows);
+            let limit = state.limit;
+            state.records.retain(|id, record| {
+                if !record.worker.finished() {
+                    return true;
+                }
+                if record.session.window_closed() && limit != 0 {
+                    if closed.len() == limit {
+                        closed.pop_front();
+                    }
+                    closed.push_back((*id, record.host.clone()));
+                }
+                false
+            });
+            state.closed_windows = closed;
             // Attachment withdrawal is immediate, but native cleanup may still
             // be running. Keep its resource reservation until the worker ends.
             if state.records.len() >= state.limit {
@@ -317,6 +336,24 @@ impl DesktopServer {
     ) -> Result<crate::session::Viewer, Error> {
         self.registry
             .attach_authorized(id, host.user_id().to_owned(), host.authority())
+    }
+    /// Reads a terminal reason only for the live owner of the original capture.
+    fn window_closed_for(&self, id: &SessionId, socket: &dyn SocketHost) -> bool {
+        if !socket.authority().permits() {
+            return false;
+        }
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        let owns = |node: &dyn NodeHost| node.owner_id() == socket.user_id() && node.permits();
+        state
+            .records
+            .get(id)
+            .is_some_and(|record| record.session.window_closed() && owns(record.host.as_ref()))
+            || state
+                .closed_windows
+                .iter()
+                .any(|(closed, node)| closed == id && owns(node.as_ref()))
     }
     /// Runs one browser action and returns its JSON result.
     ///
@@ -592,18 +629,24 @@ impl Plugin for DesktopServer {
                                             let (tx, rx) = mpsc::channel(32);
                                             let (stop, stopped) = watch::channel(false);
                                             let replies = replies.clone();
+                                            let server = server.clone();
+                                            let host = host.clone();
+                                            let id = *session_id;
                                             let task = workers.spawn(async move {
                                                 // A late Close belongs to this attachment, just as its video does.
                                                 // Keep the reply guarded through the actual socket write.
                                                 let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
                                                 let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
-                                                let mut closed = Vec::new();
-                                                if encode_muxed_frame_into(stream, &Frame::Close { code: 4404, reason: "viewer ended" }, &mut closed).is_ok() { let _ = tokio::time::timeout(Duration::from_secs(1), completed.send_and_wait(Bytes::from(closed))).await; }
+                                                let closed = server.window_closed_for(&id, host.as_ref());
+                                                let _ = tokio::time::timeout(Duration::from_secs(1), send_viewer_close(&completed, stream, closed, true)).await;
                                                 stream
                                             });
                                             viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
                                         }
-                                        Err(_) => { send_viewer_close(&replies, stream).await; }
+                                        Err(_) => {
+                                            let closed = server.window_closed_for(session_id, host.as_ref());
+                                            send_viewer_close(&replies, stream, closed, false).await;
+                                        }
                                     }
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
                                     viewers.remove(&stream);
@@ -613,7 +656,7 @@ impl Plugin for DesktopServer {
                                     }
                                     if wire.len() > 64 || !matches!(decoded.frame, Frame::Desktop(Message::Input(_) | Message::Size { .. } | Message::Repair { .. }))
                                         || sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
-                                } else { send_viewer_close(&replies, stream).await; }
+                                } else { send_viewer_close(&replies, stream, false, false).await; }
                                 continue;
                             }
                             let Frame::Call { action_id, input_json, .. } = decoded.frame else { break; };
@@ -697,7 +740,7 @@ async fn stop_source(host: &dyn NodeHost, id: SessionId) -> Result<(), Error> {
 /// Repeatedly opens a data lane to the host and relays through
 /// `crate::relay::run`. After a failed lane it waits 200 ms and prepares the
 /// source again, continuing the sequence numbers (`sequence_floor`) and the last
-/// size the viewer asked for. Stops when the window is confirmed gone, the session is closed, the host
+/// output size the viewer asked for. Native geometry is passive until a fresh Size. Stops when the window is confirmed gone, the session is closed, the host
 /// withdraws admission, or sequence numbers run out. There is no timer while a
 /// lane is healthy. `preparation` is the JSON used for the first start.
 async fn capture(
@@ -727,6 +770,7 @@ async fn capture(
                 break;
             }
             preparation["sequence_floor"] = json!(floor);
+            preparation["start"]["passive_geometry"] = json!(true);
             if let Some(size) = session.last_forwarded_size() {
                 preparation["start"]["size"] =
                     serde_json::to_value(size).map_err(|_| Error::Invalid)?;
@@ -738,7 +782,10 @@ async fn capture(
             };
             match prepared {
                 Some(PreparedCapture::Ready) => {}
-                Some(PreparedCapture::Gone) => break,
+                Some(PreparedCapture::Gone) => {
+                    session.close_window();
+                    break;
+                }
                 None => {
                     tokio::select! { biased; _ = stopped.changed() => break, () = tokio::time::sleep(Duration::from_millis(200)) => {} }
                     continue;
@@ -964,20 +1011,22 @@ enum ViewerCommand {
         oneshot::Sender<Result<(), Error>>,
     ),
 }
-/// Tells the browser that `stream` has no viewer (close code 4403). Best effort.
-async fn send_viewer_close(replies: &ReplySender, stream: u32) {
+/// Retires a viewer, preserving native window closure when the source confirmed it.
+async fn send_viewer_close(replies: &ReplySender, stream: u32, closed: bool, attached: bool) {
+    let (code, reason) = if closed {
+        (WINDOW_CLOSED, "window closed")
+    } else if attached {
+        (4404, "viewer ended")
+    } else {
+        (4403, "viewer unavailable")
+    };
     let mut wire = Vec::new();
-    if encode_muxed_frame_into(
-        stream,
-        &Frame::Close {
-            code: 4403,
-            reason: "viewer unavailable",
-        },
-        &mut wire,
-    )
-    .is_ok()
-    {
-        let _ = replies.send(Bytes::from(wire)).await;
+    if encode_muxed_frame_into(stream, &Frame::Close { code, reason }, &mut wire).is_ok() {
+        if attached {
+            let _ = replies.send_and_wait(Bytes::from(wire)).await;
+        } else {
+            let _ = replies.send(Bytes::from(wire)).await;
+        }
     }
 }
 /// The task behind one attached viewer: forwards commands from the browser to

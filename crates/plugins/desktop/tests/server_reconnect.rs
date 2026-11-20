@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use bytes::Bytes;
 use infraternal_plugin_api::{
-    Operation, Plugin,
+    Operation, Plugin, ReplySender,
     streams::{NodeHost, WireLane, WireStreamDef},
 };
 use infraternal_plugin_desktop::{
@@ -11,8 +11,9 @@ use infraternal_plugin_desktop::{
     server::DesktopServer,
 };
 use infraternal_protocol::{
-    Frame, decode_frame,
-    desktop::{Delivery, Message},
+    Frame, decode_frame, decode_muxed_frame,
+    desktop::{Delivery, Message, WINDOW_CLOSED},
+    encode_muxed_frame_into,
 };
 use std::sync::{
     Arc, Mutex,
@@ -173,6 +174,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         .start(
             node.clone(),
             Start {
+                passive_geometry: false,
                 target: Target::Window {
                     window_id: 9,
                     owner_pid: 42,
@@ -218,10 +220,15 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
     })
     .await
     .unwrap();
-    let restored = node.preparations.lock().unwrap()[1].size;
+    let restored = node.preparations.lock().unwrap()[1].clone();
     server.stop(id, "owner").await.unwrap();
     server.configure(false);
     server.stopped().await;
+    assert!(
+        restored.passive_geometry,
+        "rebuild must wait for fresh viewer resize"
+    );
+    let restored = restored.size;
     assert_eq!(
         (restored.width, restored.height),
         (1920, 1080),
@@ -278,6 +285,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
         .start(
             node.clone(),
             Start {
+                passive_geometry: false,
                 target: Target::Window {
                     window_id: 9,
                     owner_pid: 42,
@@ -350,6 +358,7 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
         .start(
             node.clone(),
             Start {
+                passive_geometry: false,
                 target: Target::Window {
                     window_id: 9,
                     owner_pid: 42,
@@ -368,22 +377,72 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
         .unwrap();
     received.recv().await.unwrap();
     received.recv().await.unwrap();
-    let mut viewer = server.attach(&id, &Host).unwrap();
+    let (requests, inbox) = mpsc::channel(8);
+    let (outbox, mut replies) = mpsc::channel(8);
+    let socket = tokio::spawn(server.clone().run(
+        Arc::new(Host),
+        inbox,
+        ReplySender::new(outbox, "desktop", 1),
+        Arc::new(std::array::from_fn(|_| {
+            std::sync::atomic::AtomicU64::new(0)
+        })),
+    ));
+    let attach = |stream| {
+        let mut wire = Vec::new();
+        encode_muxed_frame_into(
+            stream,
+            &Frame::Desktop(Message::Attach {
+                session_id: &id,
+                delivery: Delivery::Reliable,
+            }),
+            &mut wire,
+        )
+        .unwrap();
+        requests.send(Bytes::from(wire))
+    };
+    attach(1).await.unwrap();
     media.send(video(41)).await.unwrap();
-    assert_eq!(viewer.next().await.unwrap().sequence, 41);
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&first.wire).unwrap().frame,
+        Frame::Desktop(Message::Video { sequence: 41, .. })
+    ));
 
     drop(media);
-    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), viewer.next()).await;
-    let attached_again = server.attach(&id, &Host).is_ok();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        decode_muxed_frame(&ended.wire).unwrap().frame,
+        Frame::Close {
+            code: WINDOW_CLOSED,
+            ..
+        }
+    ));
+    attach(3).await.unwrap();
+    let reattached = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let reattached = decode_muxed_frame(&reattached.wire).unwrap();
+    assert_eq!(reattached.stream_id, 3);
+    assert!(matches!(
+        reattached.frame,
+        Frame::Close {
+            code: WINDOW_CLOSED,
+            ..
+        }
+    ));
+    drop(requests);
+    socket.await.unwrap();
     let opens = node.opens.load(Ordering::Relaxed);
     server.configure(false);
     server.stopped().await;
 
-    assert!(
-        ended.is_ok_and(|result| result.is_err()),
-        "the viewer stayed open"
-    );
-    assert!(!attached_again, "the closed window accepted a new viewer");
     assert_eq!(
         opens, 1,
         "the server reopened a capture lane for a closed window"

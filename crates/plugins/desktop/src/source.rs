@@ -265,6 +265,7 @@ impl SourceBridge {
         sequence_floor: u64,
     ) -> Result<Value, PluginError> {
         start.validate().map_err(|_| PluginError::Rejected)?;
+        let passive_geometry = start.passive_geometry;
         if id.is_nil() || sequence_floor == u64::MAX {
             return Err(PluginError::Rejected);
         }
@@ -310,6 +311,14 @@ impl SourceBridge {
         let prepared = state.prepared.get(&id).ok_or(PluginError::Rejected)?;
         if prepared.metadata.gone.load(Ordering::Acquire) {
             return Ok(json!({"session_id":id,"state":"gone"}));
+        }
+        if passive_geometry {
+            prepared
+                .metadata
+                .start
+                .lock()
+                .map_err(|_| PluginError::Rejected)?
+                .passive_geometry = true;
         }
         // An active helper may advance concurrently; raising the floor must
         // never overwrite that newer counter or replay an older sequence.

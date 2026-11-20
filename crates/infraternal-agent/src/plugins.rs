@@ -669,7 +669,6 @@ fn retire_kernel_state(state: &std::path::Path) -> std::io::Result<Vec<&'static 
 #[cfg(all(feature = "remote", target_os = "linux"))]
 pub use infraternal_plugin_remote::uninstall::decode_request as decode_uninstall_request;
 
-
 /// Names a private desktop runtime with room for source sockets under Darwin's 104-byte limit.
 #[cfg(all(feature = "desktop", target_os = "macos"))]
 fn desktop_source_runtime() -> std::io::Result<std::path::PathBuf> {

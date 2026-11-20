@@ -6,6 +6,7 @@ use std::{future::Future, task::Poll};
 
 fn start() -> Start {
     Start {
+        passive_geometry: false,
         target: Target::Screen { display_id: 1 },
         size: Size {
             width: 960,

@@ -106,6 +106,7 @@ impl NodeHost for Host {
 }
 fn request() -> Start {
     Start {
+        passive_geometry: false,
         target: Target::Window {
             window_id: 9,
             owner_pid: 42,

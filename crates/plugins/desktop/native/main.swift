@@ -218,7 +218,7 @@ private final class Session {
                     surfacePending = true
                 } else if type == "window" {
                     guard let id = target["window_id"] as? UInt32, let pid = target["owner_pid"] as? Int32 else { throw HelperFailure.invalid }
-                    geometry = try WindowGeometry(id:id,pid:pid,size:size)
+                    geometry = try WindowGeometry(id:id,pid:pid,size:size,passive:body["passive_geometry"] as? Bool == true)
                 } else if type == "screen" {
                     guard let id = target["display_id"] as? UInt32, CGDisplayIsActive(id) != 0 else { throw HelperFailure.invalid }
                     displayID = id; screen = CGDisplayBounds(id)
@@ -231,11 +231,13 @@ private final class Session {
                 return (66,state())
             } catch { _ = stop(); throw error }
         case 3:
+            if geometry?.closed == true { throw HelperFailure.gone }
             guard geometry?.exists != false, geometry != nil || screen != nil, let w = body["width"] as? Int, let h = body["height"] as? Int else { throw HelperFailure.invalid }
             try geometry?.resize(body); output = CGSize(width:w,height:h)
             if encoderMode { try encoder.configure(width:w,height:h) }
             return (66,state())
         case 4:
+            if geometry?.closed == true { throw HelperFailure.gone }
             if let displayID {
                 guard CGDisplayIsActive(displayID) != 0 else { throw HelperFailure.unavailable }
                 screen = CGDisplayBounds(displayID)
@@ -248,8 +250,9 @@ private final class Session {
                 guard CGDisplayIsActive(displayID) != 0 else { throw HelperFailure.unavailable }
                 screen = CGDisplayBounds(displayID)
             }
-            if let geometry, !geometry.exists {
-                throw windowIsGone(id:geometry.id,pid:geometry.pid) ? HelperFailure.gone : HelperFailure.unavailable
+            if let geometry {
+                if body["check_window"] as? Bool == true { geometry.follow() }
+                if geometry.closed { throw HelperFailure.gone }
             }
             let ticks = mach_absolute_time()
             var result = state(); result["capture_ticks"] = ticks; result["capture_ns"] = nanos(ticks)

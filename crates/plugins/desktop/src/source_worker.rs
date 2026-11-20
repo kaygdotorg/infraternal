@@ -635,6 +635,7 @@ mod mapping_tests {
     fn a_click_right_after_a_size_maps_to_that_size() {
         let metadata = Metadata {
             start: std::sync::Mutex::new(protocol::Start {
+                passive_geometry: false,
                 target: protocol::Target::Window {
                     window_id: 7,
                     owner_pid: 70,
