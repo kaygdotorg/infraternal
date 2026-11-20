@@ -211,9 +211,11 @@ added). **Not yet proven end to end:** the palette pick in the Mac flow did not 
 the Mac lock (other jobs held it for hours), so a dark Mac run still reports `theme-looks-dark` FAIL. That is the honest result,
 not a pass; the pick needs one interactive look at the Mac palette.
 
-## Known limit: locked CA and the ghost pane (J752, #510)
+## Locked CA on a fresh load (J970, #510, re-measured 2026-11-20)
 
-While QA1's host CA is locked, a fresh load can stay on one never-connecting "SSH shell" pane of the server's own host (its key
-bar hides the toolbar and the views pill; the QA host is not listed). Every phase after sign-in then reports missing controls.
-Seen on 2026-11-15 after a run that opened a shell on the server's own host through the palette. The `unlock` phase is meant to
-clear it but needs the palette, which this pane hides. A run that starts there fails honestly; a human has to unlock once.
+Restarting QA1's server locks its host CA until one passkey tap. A fresh load then shows the stored shell window of the QA host
+with its old prompt and a green dot, a toast "The server restarted. Confirm your passkey once to reconnect your hosts." with an
+Unlock button, and a dot on the sidebar button. The toolbar and palette keep working; the palette offers "Unlock host
+connections" and lists "Open shell on <host>" marked offline. No ghost pane takes focus (the J752 sighting was not
+reproduced). `check --phases locked` records this; `check --phases unlock` clears it. Desktop Chromium could not be checked: the
+QA account's passkey lives only in the simulator.
