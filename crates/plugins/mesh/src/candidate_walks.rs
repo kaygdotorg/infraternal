@@ -441,9 +441,10 @@ mod tests {
     /// J988 review: only a handshake younger than [`SILENT`] keeps an authenticated address, and
     /// the age is the engine's own monotonic one, so no clock is compared across machines.
     #[test]
-    fn engine_endpoint_keeps_the_confirmed_address_only_while_the_handshake_is_younger_than_silent() {
+    fn engine_endpoint_keeps_the_confirmed_address_only_while_the_handshake_is_younger_than_silent()
+    {
         let learned = at("10.9.0.44:10254");
-        let just_inside = SILENT - Duration::from_millis(1);
+        let just_inside = Duration::from_millis(179_999);
         assert_eq!(
             engine_endpoint(Some(learned), Some(learned), Some(just_inside)).live_confirmed,
             Some(learned)
@@ -485,7 +486,12 @@ mod tests {
         let wanted = BTreeMap::from([(key, peer.clone())]);
         let now = Instant::now();
         assert_eq!(
-            walks.start(wanted.clone(), &BTreeMap::from([(key, alive)]), &before, now),
+            walks.start(
+                wanted.clone(),
+                &BTreeMap::from([(key, alive)]),
+                &before,
+                now
+            ),
             Vec::<Started>::new()
         );
         // Still alive: an unrelated refresh starts nothing.
@@ -525,10 +531,8 @@ mod tests {
                 endpoint: Some(stale),
             },
         )]);
-        let before = BTreeMap::from([(
-            key,
-            engine_endpoint(Some(stale), Some(stale), Some(SILENT)),
-        )]);
+        let before =
+            BTreeMap::from([(key, engine_endpoint(Some(stale), Some(stale), Some(SILENT)))]);
         walks.start(
             BTreeMap::from([(key, peer.clone())]),
             &observed,
