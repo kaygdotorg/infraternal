@@ -1,7 +1,7 @@
 # The Cargo package and feature selections of every executable the release
 # bundle ships (#530). Source this file; it only defines arrays.
 #
-# scripts/package-release builds exactly these, and scripts/verify compiles
+# The platform release recipes build these, and scripts/verify compiles
 # each of them in its "release feature sets" row. Keeping one list means a
 # feature set the release builds can never again be one the gate never
 # compiled: dev 6fe482d1e passed every gate but failed to build the host
@@ -14,5 +14,9 @@
 release_server_cargo_args=(--package infraternal --features desktop)
 # The removable-component host payload: no mesh, server or desktop code.
 release_host_cargo_args=(--package infraternal --no-default-features --features plugin-host-facts,remote,ssh)
+# The macOS host includes desktop capture support.
+release_macos_host_cargo_args=(--package infraternal --no-default-features --features remote,desktop --bin infraternal)
+# The macOS Rust capture helper is a separate executable.
+release_macos_helper_cargo_args=(--package infraternal-plugin-desktop --no-default-features --features desktop --bin infraternal-desktop-helper)
 # The early executable keeps only the verified shim and SSH bridge.
 release_session_cargo_args=(--package infraternal-session)
