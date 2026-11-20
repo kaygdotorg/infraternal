@@ -114,7 +114,10 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
             .fetch_one(&f.auth.pool)
             .await
             .unwrap();
-    assert!(pending, "only the original host receipt can complete cleanup");
+    assert!(
+        pending,
+        "only the original host receipt can complete cleanup"
+    );
     crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
         .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
         .await
