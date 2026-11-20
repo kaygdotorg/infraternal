@@ -241,12 +241,35 @@ fn enrollment_restore_preserves_matching_state_and_retires_a_changed_key() {
         .record_routes(&["10.254.0.3".parse().unwrap()].into_iter().collect())
         .unwrap();
     store.write_private_key(&[17; 32]).unwrap();
+    store
+        .record_engine(crate::node::EngineKind::GotaTun)
+        .unwrap();
+    store
+        .save_rotation_secret(&RotationSecret {
+            operation_id: "00000000-0000-4000-8000-000000000221".into(),
+            sequence: 1,
+            previous: [17; 32],
+            candidate: [19; 32],
+            commit_requested: false,
+            completed: false,
+        })
+        .unwrap();
+    let rotation_path = directory.0.join("mesh-key-rotation.bin");
+    let key_path = directory.0.join("mesh-private-key");
+    for path in [&rotation_path, &key_path] {
+        assert_eq!(fs::symlink_metadata(path).unwrap().mode() & 0o777, 0o600);
+    }
     drop(store);
 
     Node::prepare_enrolled_restore(&directory.0, enrolled()).unwrap();
     let (store, same) = Store::open(&directory.0).unwrap();
     assert_eq!(same.config, state.config);
     assert!(store.read_private_key().unwrap().is_some());
+    assert!(store.rotation_secret().unwrap().is_some());
+    assert_eq!(
+        store.recorded_engine().unwrap(),
+        Some(crate::node::EngineKind::GotaTun)
+    );
     assert_eq!(store.route_inventory().unwrap().len(), 1);
     drop(store);
 
@@ -256,7 +279,15 @@ fn enrollment_restore_preserves_matching_state_and_retires_a_changed_key() {
     assert!(!fresh.enabled);
     assert!(fresh.config.is_none());
     assert!(store.read_private_key().unwrap().is_none());
+    assert!(store.rotation_secret().unwrap().is_none());
+    assert!(store.recorded_engine().unwrap().is_none());
     assert!(store.route_inventory().unwrap().is_empty());
+    for path in [&rotation_path, &key_path] {
+        assert_eq!(
+            fs::symlink_metadata(path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 }
 
 /// An unbound directory with a key alone must retire it before claiming the enrollment.
