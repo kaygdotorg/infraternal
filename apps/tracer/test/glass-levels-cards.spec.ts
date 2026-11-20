@@ -13,13 +13,18 @@ import { LEVELS, openDenseConsole, SIZES, startRemovalFromPalette, THEMES } from
 /** The fill opacity each look must give a floating card (the built-in looks' tint, D338). */
 const TINT: Record<(typeof LEVELS)[number], number> = { solid: 1, tinted: 0.75, frosted: 0.5 };
 
-/** The opacity (0 to 1) of the background colour of the first element matching `selector`. */
+/**
+ * The opacity (0 to 1) of the background colour of the first element matching `selector`. A computed colour is written either
+ * `rgb(r g b / a)` (and `color(srgb r g b / a)`) or, when the browser keeps the comma form, `rgba(r, g, b, a)`; both are read, and a
+ * colour with no alpha is opaque. (The comma form used to read as 1, which hid a card painted at 0.7.)
+ */
 async function fillAlpha(page: Page, selector: string): Promise<number> {
   return await page.evaluate((sel) => {
     const colour = getComputedStyle(document.querySelector(sel)!).backgroundColor;
-    const slash = /\/\s*([\d.]+%?)\s*\)/.exec(colour)?.[1];
-    if (slash === undefined) return 1;
-    return slash.endsWith("%") ? Number(slash.slice(0, -1)) / 100 : Number(slash);
+    const inside = /\(([^)]*)\)/.exec(colour)?.[1] ?? "";
+    const alpha = inside.includes("/") ? inside.split("/")[1]!.trim() : inside.split(",").length === 4 ? inside.split(",")[3]!.trim() : undefined;
+    if (alpha === undefined) return 1;
+    return alpha.endsWith("%") ? Number(alpha.slice(0, -1)) / 100 : Number(alpha);
   }, selector);
 }
 
