@@ -4617,6 +4617,12 @@ mod tests {
     fn an_enrolled_restore_binds_this_mac_and_refuses_a_folder_from_another() {
         let directory = test_directory();
         let current = enrolment(b"coordinator B");
+        // A disabled node: an enabled one would need root to open its utun.
+        write_public_state(
+            &directory.join(PUBLIC_STATE),
+            &bound_state(Some(current.clone())),
+        )
+        .expect("write state");
         write_key(&directory);
 
         Node::restore(&directory.0, Some(&current)).expect("first start binds");
@@ -4633,14 +4639,12 @@ mod tests {
             Node::check_enrolled_machine(&directory.0).expect_err("pre-start check refused"),
         ] {
             assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
-            assert!(
-                matches!(
+            assert!(matches!(
                     error.get_ref().and_then(
                         |inner| inner.downcast_ref::<crate::enrolment::MachineBindingError>()
                     ),
                     Some(crate::enrolment::MachineBindingError::ForeignMachine)
-                )
-            );
+                ));
         }
         // The refusal changes nothing: the key and the record stay as they were.
         assert_eq!(
