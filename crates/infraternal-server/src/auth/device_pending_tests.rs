@@ -34,6 +34,7 @@ fn join() -> Value {
     })
 }
 
+/// A standard CLI sign-in request for tests sharing the public approval budget.
 fn sign_in() -> Value {
     json!({"device": "cli", "scopes": ["hosts:read"]})
 }

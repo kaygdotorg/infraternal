@@ -553,6 +553,7 @@ async fn issue_invitation(
     Ok(invitation)
 }
 
+/// Publish the host and exact-key receipt together for a live owner approval.
 async fn issue_approved_machine_join(
     api: Api,
     poll_token: &str,

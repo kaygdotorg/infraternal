@@ -796,6 +796,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
     }
 }
 
+/// Redeem a machine invitation over HTTPS using its pinned trust when provided.
 async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
     let url = url::Url::parse(url).map_err(|_| refused())?;
     if url.scheme() != "https"

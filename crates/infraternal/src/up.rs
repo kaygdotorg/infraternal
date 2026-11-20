@@ -827,6 +827,7 @@ fn print_approval(
     Ok(())
 }
 
+/// Start machine approval and check the server returned the expected capability shapes.
 async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> {
     let response = post_json(server, "/auth/device-start", body, None, REQUEST_TIMEOUT).await?;
     if response.status != StatusCode::OK {

@@ -440,6 +440,7 @@ fn require_root() -> io::Result<()> {
     }
 }
 
+/// Require a root-owned executable whose directory and loaded libraries are trusted.
 fn trusted_executable(path: &Path) -> io::Result<PathBuf> {
     let path = fs::canonicalize(path)?;
     let metadata = fs::symlink_metadata(&path)?;

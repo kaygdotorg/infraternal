@@ -1153,6 +1153,7 @@ fn map_redemption_network_failure(failure: NetworkFailure) -> Failure {
     }
 }
 
+/// Bound a sign-in request and distinguish timeouts after sending the body.
 async fn post_json_with_timeout(
     server: &Url,
     path: &'static str,
