@@ -249,15 +249,38 @@ const HARMLESS_ACTIONS: &[&str] = &[
     "org.freedesktop.login1.set-self-linger",
 ];
 
+/// Whether one `annotation:` line of an approved action keeps its grant
+/// inside the approved set. polkit authorizes every action an
+/// `org.freedesktop.policykit.imply` annotation names along with the action
+/// itself, so an approved id that implies anything else hands out that other
+/// action too. `org.freedesktop.policykit.exec.path` makes `pkexec` run the
+/// named program as root under the action's defaults. Only an implication of
+/// further approved ids is accepted; every other annotation, including one
+/// this reader does not know, extends the grant (#355).
+fn annotation_stays_approved(annotation: &str) -> bool {
+    annotation
+        .strip_prefix("org.freedesktop.policykit.imply ->")
+        .is_some_and(|ids| {
+            let mut ids = ids.split_ascii_whitespace().peekable();
+            ids.peek().is_some() && ids.all(|id| HARMLESS_ACTIONS.contains(&id))
+        })
+}
+
 /// Read effective .policy defaults through polkit's own XML parser. Every
 /// action must have exactly one of each scope; unknown formats fail closed.
-/// Only the exact approved action ids may retain a stock yes default.
+/// Only the exact approved action ids may retain a stock yes default, and an
+/// approved action that keeps one must not reach any other action or program
+/// through its annotations (see [`annotation_stays_approved`]).
 fn action_defaults_allow_or_unknown(text: &str) -> bool {
     let mut action = None;
     let mut scopes = 0u8;
+    // Whether the current action's yes rests on the approved list, and
+    // whether one of its annotations reaches past that list.
+    let mut approved_yes = false;
+    let mut extends = false;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         if !line.starts_with(char::is_whitespace) {
-            if action.is_some() && scopes != 7 {
+            if action.is_some() && (scopes != 7 || (approved_yes && extends)) {
                 return true;
             }
             let Some(id) = line.strip_suffix(':') else {
@@ -272,6 +295,8 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             }
             action = Some(id);
             scopes = 0;
+            approved_yes = false;
+            extends = false;
         } else if let Some(rest) = line.trim_start().strip_prefix("implicit ") {
             let Some((scope, value)) = rest.split_once(':') else {
                 return true;
@@ -287,13 +312,20 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             }
             match value.trim() {
                 "no" | "auth_self" | "auth_self_keep" | "auth_admin" | "auth_admin_keep" => {}
-                "yes" if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) => {}
+                "yes" if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) => {
+                    approved_yes = true;
+                }
                 _ => return true,
             }
             scopes |= bit;
+        } else if let Some(rest) = line.trim_start().strip_prefix("annotation:") {
+            if action.is_none() {
+                return true;
+            }
+            extends |= !annotation_stays_approved(rest.trim());
         }
     }
-    action.is_none() || scopes != 7
+    action.is_none() || scopes != 7 || (approved_yes && extends)
 }
 
 /// Check all current and legacy polkit roots. Unfamiliar executable policy is
@@ -419,6 +451,49 @@ mod tests {
             );
             assert!(action_defaults_allow_or_unknown(&text), "{id}");
         }
+    }
+
+    /// An approved yes action may imply only other approved ids: polkit
+    /// grants what it implies, and `pkexec` runs an action's `exec.path`
+    /// program as root. Any other annotation on it fails closed, while the
+    /// same annotation on an action without a yes grants nothing.
+    #[test]
+    fn approved_actions_cannot_reach_other_actions_or_programs() {
+        let approved = |annotation: &str| {
+            format!(
+                "org.freedesktop.login1.chvt:\n  description:       Change Session\n  implicit any:      auth_admin_keep\n  implicit inactive: yes\n  implicit active:   yes\n{annotation}"
+            )
+        };
+        assert!(!action_defaults_allow_or_unknown(&approved("")));
+        assert!(!action_defaults_allow_or_unknown(&approved(
+            "  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-delay-sleep org.freedesktop.login1.inhibit-block-idle\n"
+        )));
+        for annotation in [
+            "  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.systemd1.manage-units\n",
+            "  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-block-idle org.freedesktop.systemd1.manage-units\n",
+            "  annotation:        org.freedesktop.policykit.imply ->\n",
+            "  annotation:        org.freedesktop.policykit.exec.path -> /bin/sh\n",
+            "  annotation:        org.freedesktop.policykit.exec.allow_gui -> true\n",
+            "  annotation:        unknown\n",
+        ] {
+            assert!(
+                action_defaults_allow_or_unknown(&approved(annotation)),
+                "{annotation}"
+            );
+            // The next action's header closes this one, which must still fail.
+            assert!(
+                action_defaults_allow_or_unknown(&format!(
+                    "{}local.denied:\n  implicit any: no\n  implicit inactive: no\n  implicit active: no\n",
+                    approved(annotation)
+                )),
+                "{annotation}"
+            );
+        }
+        let denied = "local.admin:\n  implicit any: auth_admin\n  implicit inactive: auth_admin\n  implicit active: auth_admin_keep\n  annotation:        org.freedesktop.policykit.exec.path -> /usr/bin/update-alternatives\n";
+        assert!(!action_defaults_allow_or_unknown(denied));
+        assert!(action_defaults_allow_or_unknown(
+            "  annotation:        org.freedesktop.policykit.imply -> local.admin\n"
+        ));
     }
 
     /// Real host policy goes through the same parser as planted action defaults.
