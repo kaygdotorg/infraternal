@@ -262,8 +262,26 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
             let kind = meta.file_type();
             kind.is_socket() || kind.is_char_device() || kind.is_block_device()
         });
-        for path in [input, canonical] {
-            for (depth, parent) in path.ancestors().enumerate().skip(usize::from(special)) {
+        // Every link on the way from the input to its target is a place the
+        // account could repoint, not only the first and the last name.
+        let Some(links) = links_on_the_way(existing) else {
+            observed.privileged = true;
+            add(
+                observed,
+                &format!("Root-run job: {name} (target unavailable)"),
+            );
+            return;
+        };
+        let chain = [
+            (input, usize::from(special)),
+            (canonical, usize::from(special)),
+        ]
+        .into_iter()
+        // A link itself is followed by the write probe, so only the
+        // directories holding it count; its target is the next step.
+        .chain(links.into_iter().map(|link| (link, 1)));
+        for (path, skip) in chain {
+            for (depth, parent) in path.ancestors().enumerate().skip(skip) {
                 if depth >= 64 {
                     observed.privileged = true;
                     add(
@@ -312,6 +330,67 @@ fn root_job(observed: &mut Observation, name: String, inputs: Option<Vec<PathBuf
     observed
         .root_inputs
         .push((name, paths.into_iter().collect()));
+}
+
+/// Most symbolic links followed while resolving one root input, as in the
+/// kernel's own limit.
+const LINK_HOPS: usize = 40;
+
+/// Every symbolic link met while resolving `path`, named by where the link
+/// itself lives. `canonicalize` gives only the final target, so a middle
+/// link (`/usr/local/bin/backup -> /srv/app/bin/backup -> /usr/bin/restic`)
+/// would hide a directory the account can write (`/srv/app/bin`) from the
+/// probe (J1013). Resolution is physical, so `..` after a link steps out of
+/// its target. A name that does not exist ends the walk; too many links or
+/// an unreadable entry is `None`.
+fn links_on_the_way(path: &Path) -> Option<Vec<PathBuf>> {
+    use std::ffi::OsString;
+    use std::path::Component;
+    let mut links = Vec::new();
+    let mut resolved = PathBuf::from("/");
+    // Components still to walk, in reverse so the next one is last.
+    let mut rest: Vec<OsString> = Vec::new();
+    let push = |rest: &mut Vec<OsString>, path: &Path| {
+        let parts: Vec<OsString> = path
+            .components()
+            .filter_map(|part| match part {
+                Component::Normal(name) => Some(name.to_owned()),
+                Component::ParentDir => Some(OsString::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+            })
+            .collect();
+        rest.extend(parts.into_iter().rev());
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    push(&mut rest, path);
+    let mut hops = 0;
+    while let Some(part) = rest.pop() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&part);
+        match fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                hops += 1;
+                if hops > LINK_HOPS {
+                    return None;
+                }
+                let target = fs::read_link(&next).ok()?;
+                links.push(next);
+                if target.is_absolute() {
+                    resolved = PathBuf::from("/");
+                }
+                push(&mut rest, &target);
+            }
+            Ok(_) => resolved = next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return None,
+        }
+    }
+    Some(links)
 }
 
 /// Check all direct root inputs in one downgraded child, each distinct path
@@ -943,6 +1022,42 @@ mod tests {
         let mut missing = Observation::empty();
         root_table(&mut missing, &root.join("absent"), |_| 3);
         assert!(missing.complete && missing.root_inputs.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J1013: a link in the middle of a chain is a place the account can
+    /// repoint. Its directory must be probed, not only the input's and the
+    /// final target's ancestors.
+    #[test]
+    fn every_link_on_the_way_is_probed() {
+        let root = nix::unistd::mkdtemp("/tmp/rvlnk-XXXXXX").unwrap();
+        let (bin, app, real) = (root.join("bin"), root.join("app"), root.join("real"));
+        for dir in [&bin, &app, &real] {
+            fs::create_dir(dir).unwrap();
+        }
+        fs::write(real.join("tool"), "#!/bin/sh\n").unwrap();
+        // bin/backup -> app/backup -> ../real/tool (relative, through `..`)
+        std::os::unix::fs::symlink(app.join("backup"), bin.join("backup")).unwrap();
+        std::os::unix::fs::symlink("../real/tool", app.join("backup")).unwrap();
+        assert_eq!(
+            links_on_the_way(&bin.join("backup")).unwrap(),
+            vec![bin.join("backup"), app.join("backup")]
+        );
+        let mut observed = Observation::empty();
+        root_job(
+            &mut observed,
+            "job".to_owned(),
+            Some(vec![bin.join("backup")]),
+        );
+        let inputs = &observed.root_inputs[0].1;
+        for expected in [&bin, &app, &real, &real.join("tool")] {
+            assert!(inputs.contains(expected), "{expected:?}: {inputs:?}");
+        }
+        // A loop is never resolved.
+        std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
+        std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
+        assert!(links_on_the_way(&root.join("loop-a")).is_none());
+        assert!(links_on_the_way(Path::new("relative")).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
