@@ -4,8 +4,11 @@ import type { TerminalClient, TerminalHooks, TerminalTraceHop } from "./terminal
 /** The parser state used to skip terminal escape sequences before matching painted screen characters. */
 type VisibleOutputState = "text" | "escape" | "csi" | "string" | "string-escape";
 
-/** Distinct adjacent keys stay out of `yes !` output so a stale screen cannot finish the next sample. */
-const KEY_SET = "abcdfghijklmnopqrtuvwxz0123456789";
+/**
+ * The characters the probe types, in order (and again from the start past the end). Distinct adjacent keys stay out of `yes !` output so a stale
+ * screen cannot finish the next sample, so `e` and `s` are left out; the browser checks import this list to know the text the probe must echo.
+ */
+export const KEY_SET = "abcdfghijklmnopqrtuvwxz0123456789";
 /** The most keys one run may send. */
 const MAX_PROBE_KEYS = 5_000;
 /** The minimum deadline for a key run, including quiet links with a few slow echoes. */
