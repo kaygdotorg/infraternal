@@ -474,7 +474,7 @@ fn combined_move_preserves_links_into_shared_bundle() {
         unit_text(&fixture.old).trim_end(),
         fixture.old.join("web").display()
     );
-    fs::write(&fixture.unit, unit).unwrap();
+    fs::write(&fixture.unit, &unit).unwrap();
     let outcome = fixture.apply(&fixture.old, &Fake::default());
     if outcome.is_ok() {
         assert_eq!(
