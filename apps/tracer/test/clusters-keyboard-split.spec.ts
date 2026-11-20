@@ -31,7 +31,8 @@ test("a key press splits at once, and holding it splits once with short frames",
   });
   // One and a half seconds of the same page with no key held: the frame gaps it shows on this machine right now are the noise the held key
   // is compared with. A shared build host (the nightly runs two shards beside other jobs) drops frames on its own, so a fixed count is not a fair bound.
-  await page.waitForTimeout(1500); // sleep: sample the idle frame gaps
+  // sleep: sample the idle frame gaps
+  await page.waitForTimeout(1500);
   const idle = await page.evaluate(() => {
     const w = window as unknown as { __gaps: number[] };
     return { late: w.__gaps.filter((g) => g > 25).length, max: Math.max(0, ...w.__gaps), ms: w.__gaps.reduce((a, b) => a + b, 0) };
