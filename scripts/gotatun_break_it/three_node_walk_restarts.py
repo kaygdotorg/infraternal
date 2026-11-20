@@ -186,6 +186,61 @@ def stop_pingers(pingers: list[tuple[proof.Pinger, float, str, str]]) -> None:
         pinger.stop()
 
 
+def start_packet_capture(
+    namespace: str,
+    interface: str,
+    path: Path,
+) -> tuple[subprocess.Popen[bytes], Path]:
+    """Capture one namespace's UDP traffic for the optional underlay-change diagnosis."""
+    log_path = path.with_suffix(path.suffix + ".log")
+    with log_path.open("wb") as log:
+        process = subprocess.Popen(
+            [
+                "ip", "netns", "exec", namespace, "tcpdump", "-U", "-nn", "-tt",
+                "-i", interface, "-w", str(path), "udp",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=log,
+            start_new_session=True,
+        )
+    time.sleep(0.05)
+    if process.poll() is not None:
+        raise RuntimeError(f"UDP capture did not start in {namespace}: {log_path.read_text()}")
+    return process, path
+
+
+def stop_packet_captures(
+    captures: list[tuple[str, subprocess.Popen[bytes], Path]],
+) -> dict[str, dict[str, Any]]:
+    """Stop only the capture process groups and summarize their packet receipts."""
+    receipts: dict[str, dict[str, Any]] = {}
+    for name, process, path in captures:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGINT)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        decoded = subprocess.run(
+            ["tcpdump", "-nn", "-tt", "-r", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        log_path = path.with_suffix(path.suffix + ".log")
+        receipts[name] = {
+            "pcap": str(path),
+            "tcpdump_log": str(log_path),
+            "decode_exit": decoded.returncode,
+            "packets": decoded.stdout.splitlines(),
+            "decode_stderr": decoded.stderr.strip(),
+            "capture_log": log_path.read_text().strip(),
+        }
+    return receipts
+
+
 def require_first_replies(
     pingers: list[tuple[proof.Pinger, float, str, str]],
     timeout: float,
@@ -346,6 +401,7 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
     pingers: list[tuple[proof.Pinger, float, str, str]] = []
     coordinator: CoordinatorFixture | None = None
     server: ServerProcessFixture | None = None
+    captures: list[tuple[str, subprocess.Popen[bytes], Path]] = []
     row: dict[str, Any] = {
         "scenario": "three-node-candidate-walk-restarts",
         "recovery_bound_seconds": RECOVERY_BOUND_SECONDS,
@@ -440,6 +496,17 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         }
         old_address = topology.node_address["C"]
         new_address = "10.9.0.44"
+        if os.environ.get("J967_CAPTURE_UNDERLAY") == "1":
+            capture_root = Path(scratch)
+            for name, namespace, interface in (
+                ("C", "node-c", "eth0"),
+                ("S", "node-s", "wan"),
+                ("router", "rs", "wan"),
+            ):
+                process, path = start_packet_capture(
+                    namespace, interface, capture_root / f"underlay-{name}.pcap"
+                )
+                captures.append((name, process, path))
         proof.ns("node-c", "ip", "addr", "add", f"{new_address}/24", "dev", "eth0")
         for router in topology.routers["C"]:
             router.inside.pop(old_address, None)
@@ -479,6 +546,9 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         row["router_conntrack_after_underlay_change"] = proof.ns(
             "rs", "conntrack", "-L", "-p", "udp", check=False
         ).splitlines()
+        if captures:
+            row["underlay_packet_capture"] = stop_packet_captures(captures)
+            captures.clear()
 
         stale_probe = dict(probes[MEMBERS.index("C")])
         stale_probe["lan"] = [f"10.9.0.45:{ports['C']}"]
@@ -526,6 +596,8 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         row["error"] = f"{type(error).__name__}: {error}"
         return row
     finally:
+        if captures:
+            row["underlay_packet_capture"] = stop_packet_captures(captures)
         stop_pingers(pingers)
         if server is not None:
             try:
