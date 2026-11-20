@@ -1,7 +1,7 @@
-//! Private session images have no logging callbacks; omit their unused formatters (D243).
-//! Parser checks and returned initialization/resize errors remain with the pinned engine.
+//! Callback-free logger for private session images that never install a C log callback.
 const std = @import("std");
 
+/// Discards engine log messages so unused formatting code is removed from the session image.
 pub fn logFn(
     comptime _: std.log.Level,
     comptime _: @TypeOf(.EnumLiteral),

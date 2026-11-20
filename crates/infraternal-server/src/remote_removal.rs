@@ -4,6 +4,8 @@
 //! admin window that a sign-in tap opens (D333, D339): the dry run returns a single-use review
 //! bound to the session, the host and the uninstall choice for `REVIEW_SECONDS`. With an API
 //! key, the action route issues its own review token (D28, D333).
+//! D369 Forget archives an unreachable retirement and cancels its pending cleanup without touching the machine.
+//! Forget deletes the removal row; its details survive only in `mesh_audit.detail_json`.
 use crate::{auth::Auth, enrollment::EnrollmentStore, remote_runtime::RemoteHosts};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
@@ -37,6 +39,7 @@ enum RemovalAuthority {
     /// completed in the same transaction as the removal.
     ApiKey { key_hash: String, audit_id: i64 },
 }
+/// Shared host-removal authority, bounded reviews and session-bound renewal challenges.
 #[derive(Clone)]
 pub(crate) struct Removal {
     auth: Auth,
@@ -45,12 +48,15 @@ pub(crate) struct Removal {
     hosts: RemoteHosts,
     trust: PathBuf,
     pending: Arc<Mutex<HashMap<String, Pending>>>,
+    /// Renewal ceremonies belong to one session and host, separate from removal reviews (#498).
+    taps: Arc<Mutex<HashMap<String, Pending>>>,
     admission: Arc<Semaphore>,
 }
 impl Removal {
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+    /// Share the server identity, enrollment and host-delivery state across removal requests.
     pub(crate) fn new(
         auth: Auth,
         pool: SqlitePool,
@@ -65,8 +71,90 @@ impl Removal {
             hosts,
             trust,
             pending: Arc::default(),
+            taps: Arc::default(),
             admission: Arc::new(Semaphore::new(8)),
         }
+    }
+    /// Ask this host's owner for a passkey to renew the browser admin window (#498).
+    pub(crate) async fn reauth_start(
+        &self,
+        token: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let user = self.auth.bootstrap_owner(token, now).await?;
+        if !self.auth.bootstrap_host(&user, host).await {
+            return Err(crate::auth::Error::Denied);
+        }
+        let mut taps = self.taps.lock().await;
+        taps.retain(|_, entry| entry.expires > now);
+        if taps.len() >= 1024 {
+            return Err(crate::auth::Error::Denied);
+        }
+        let mut start = self.auth.login_start(&user, now).await?;
+        // Identity verification needs no account-key secret or PRF extension in mobile browsers.
+        start["options"]["publicKey"]
+            .as_object_mut()
+            .ok_or(crate::auth::Error::Invalid)?
+            .remove("extensions");
+        let id = start["ceremony"]
+            .as_str()
+            .ok_or(crate::auth::Error::Invalid)?
+            .to_owned();
+        taps.insert(
+            id,
+            Pending {
+                hash: crate::auth::hash(token),
+                user,
+                host,
+                uninstall: true,
+                expires: now
+                    .checked_add(REVIEW_SECONDS)
+                    .ok_or(crate::auth::Error::Denied)?,
+            },
+        );
+        Ok(start)
+    }
+
+    /// Spend only the selected host's ceremony and renew the same live owner session.
+    /// This grants ordinary admin authority, never a per-action tap or a new login.
+    pub(crate) async fn reauth_finish(
+        &self,
+        token: &str,
+        host: Uuid,
+        ceremony: &str,
+        proof: Value,
+        now: i64,
+    ) -> Result<(), crate::auth::Error> {
+        let hash = crate::auth::hash(token);
+        let entry = {
+            let mut taps = self.taps.lock().await;
+            let entry = taps.get(ceremony).ok_or(crate::auth::Error::Denied)?;
+            if entry.hash != hash || entry.host != host {
+                return Err(crate::auth::Error::Denied);
+            }
+            taps.remove(ceremony).ok_or(crate::auth::Error::Denied)?
+        };
+        let verified = self.auth.verify_passkey(ceremony, proof, now).await?;
+        let live_now = verified.verified_at().max(now);
+        if entry.expires <= live_now
+            || verified.expires() <= live_now
+            || verified.user() != entry.user
+        {
+            return Err(crate::auth::Error::Denied);
+        }
+        // Recheck registration, host and owner authority in the write. Clear any older
+        // per-action grant: renewing `fresh` must never make that grant usable again.
+        let changed = sqlx::query("UPDATE sessions SET fresh=MAX(?,unixepoch()),tap_action=NULL,tap_spent=1 WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>MAX(?,unixepoch()) AND ?>MAX(?,unixepoch()) AND EXISTS(SELECT 1 FROM users WHERE id=sessions.user_id AND owner=1) AND EXISTS(SELECT 1 FROM passkeys WHERE user_id=sessions.user_id AND id=?) AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=sessions.user_id AND revoked_at IS NULL)")
+            .bind(live_now).bind(hash).bind(&entry.user).bind(live_now)
+            .bind(entry.expires.min(verified.expires()))
+            .bind(live_now)
+            .bind(verified.credential()).bind(host.as_bytes().as_slice())
+            .execute(&self.pool).await?.rows_affected();
+        if changed != 1 {
+            return Err(crate::auth::Error::Denied);
+        }
+        Ok(())
     }
     pub(crate) async fn start(
         &self,
@@ -126,6 +214,7 @@ impl Removal {
         }
         self.finish(token, id, now).await
     }
+    /// Complete a reviewed removal for a browser session: look the review up by its token, then publish it under one permit.
     async fn finish(&self, token: &str, id: &str, now: i64) -> Result<Value, crate::auth::Error> {
         let hash = crate::auth::hash(token);
         let entry = {
@@ -138,11 +227,7 @@ impl Removal {
         if entry.expires <= now {
             return Err(crate::auth::Error::Denied);
         }
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| crate::auth::Error::Denied)?;
+        let permit = admit(&self.admission)?;
         let service = self.clone();
         // Once verified, disconnecting HTTP must not abandon an accepted uninstall
         // halfway through revocation. No recurring worker or secret is retained.
@@ -188,11 +273,7 @@ impl Removal {
         audit_id: i64,
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
-        let permit = self
-            .admission
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| crate::auth::Error::Denied)?;
+        let permit = admit(&self.admission)?;
         let entry = Pending {
             hash: String::new(),
             user: person.to_owned(),
@@ -212,6 +293,205 @@ impl Removal {
         })
         .await
         .map_err(|_| crate::auth::Error::Denied)?
+    }
+
+    /// Forget a retired-unreachable host in the browser's existing admin window (D369).
+    /// No command is sent to the machine; its denial tombstone remains permanently.
+    pub(crate) async fn forget_browser(
+        &self,
+        token: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let session = self.auth.fresh_session(token, now).await?;
+        self.finish_forget(
+            Pending {
+                hash: crate::auth::hash(token),
+                user: session.user_id,
+                host,
+                uninstall: true,
+                expires: now
+                    .checked_add(REVIEW_SECONDS)
+                    .ok_or(crate::auth::Error::Denied)?,
+            },
+            RemovalAuthority::AdminWindow,
+            now,
+        )
+        .await
+    }
+
+    /// Review an owner's expired pending removal without changing its audit or delivery state.
+    pub(crate) async fn review_forget_with_key(
+        &self,
+        person: &str,
+        host: Uuid,
+    ) -> Result<Value, crate::auth::Error> {
+        let now = crate::runtime::unix_seconds().map_err(|_| crate::auth::Error::Denied)?;
+        let mut tx = self.pool.begin().await?;
+        let (name, _) = Self::forget_record(&mut tx, person, host, now).await?;
+        let name = display_name(&name);
+        Ok(
+            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it."}),
+        )
+    }
+
+    /// Apply an API-reviewed Forget, rechecking the live hosts:write key in the writer transaction.
+    pub(crate) async fn forget_with_key(
+        &self,
+        key_hash: &str,
+        person: &str,
+        host: Uuid,
+        audit_id: i64,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        self.finish_forget(
+            Pending {
+                hash: String::new(),
+                user: person.to_owned(),
+                host,
+                uninstall: true,
+                expires: now
+                    .checked_add(REVIEW_SECONDS)
+                    .ok_or(crate::auth::Error::Denied)?,
+            },
+            RemovalAuthority::ApiKey {
+                key_hash: key_hash.to_owned(),
+                audit_id,
+            },
+            now,
+        )
+        .await
+    }
+
+    /// Snapshot cleanup and any removal details only while this owner's host is retired-unreachable.
+    /// Inventory also shows abandoned setups without a removal row, so that row is optional here too.
+    /// An ineligible selection is Invalid, distinct from a Denied session or key authority check.
+    async fn forget_record(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        person: &str,
+        host: Uuid,
+        now: i64,
+    ) -> Result<(String, String), crate::auth::Error> {
+        sqlx::query_as(
+            "SELECT COALESCE(h.hostname,b.address,lower(hex(h.id))),
+             json_object('owner_id',h.owner_id,'removal_owner_id',r.owner_id,
+                         'cleanup_person_id',q.person_id,'cleanup_confirmed',q.confirmed,
+                         'requested_at',r.requested_at,'uninstall',r.uninstall,
+                         'host_cleanup',r.host_cleanup,'completed_at',r.completed_at,'retained',r.retained)
+             FROM remote_hosts h JOIN users u ON u.id=h.owner_id
+             JOIN remote_login_cleanup q ON q.host_id=h.id
+             LEFT JOIN remote_host_removals r ON r.host_id=h.id
+             LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id
+             WHERE h.id=? AND h.owner_id=? AND u.owner=1 AND h.revoked_at IS NULL AND q.confirmed=0
+             AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)
+             AND NOT EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id
+                            AND c.revoked_at IS NULL AND c.not_after>MAX(?,unixepoch()))",
+        )
+            .bind(host.as_bytes().as_slice()).bind(person).bind(now)
+            .fetch_optional(&mut **tx).await?.ok_or(crate::auth::Error::Invalid)
+    }
+
+    /// Keep the shared bounded admission until commit publication, even if the caller disconnects.
+    async fn finish_forget(
+        &self,
+        entry: Pending,
+        authority: RemovalAuthority,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let permit = admit(&self.admission)?;
+        let service = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            service.forget_publish(entry, authority, now).await
+        })
+        .await
+        .map_err(|_| crate::auth::Error::Denied)?
+    }
+
+    /// Archive the removal and stop pending delivery atomically, retaining certificate denial history.
+    /// Authority and expiry are checked after the writer lock, so a stale review cannot forget a live host.
+    async fn forget_publish(
+        &self,
+        entry: Pending,
+        authority: RemovalAuthority,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE remote_hosts SET revoked_at=revoked_at WHERE id=?")
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        let live = now.max(crate::runtime::unix_seconds().map_err(|_| crate::auth::Error::Denied)?);
+        if entry.expires <= live {
+            return Err(crate::auth::Error::Denied);
+        }
+        match &authority {
+            RemovalAuthority::AdminWindow => {
+                if !infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    &entry.hash,
+                    &entry.user,
+                    now,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
+                )
+                .await?
+                {
+                    return Err(crate::auth::Error::Denied);
+                }
+            }
+            RemovalAuthority::ApiKey { key_hash, .. } => {
+                let person = self
+                    .auth
+                    .api_authorize_key_hash_tx(&mut tx, key_hash, "hosts:write", None)
+                    .await?;
+                if person.as_deref() != Some(entry.user.as_str()) {
+                    // Preserve the key clock and any key-expiry tombstone, as removal does.
+                    tx.commit().await?;
+                    return Err(crate::auth::Error::Denied);
+                }
+            }
+        }
+        let (name, detail) = Self::forget_record(&mut tx, &entry.user, entry.host, live).await?;
+        sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'remote.host.forget',?,0,?,?)")
+            .bind(&entry.user).bind(entry.host.to_string()).bind(live).bind(detail).execute(&mut *tx).await?;
+        sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,?) WHERE id=?")
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        // Retirement's trigger creates a cleanup obligation. Forget deliberately cancels it,
+        // along with the uninstall outbox and unfinished-bootstrap intent, after recording history.
+        for statement in [
+            "DELETE FROM remote_host_removals WHERE host_id=?",
+            "DELETE FROM remote_login_cleanup WHERE host_id=?",
+            "DELETE FROM remote_host_bootstrap WHERE host_id=?",
+            "DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=?",
+        ] {
+            sqlx::query(statement)
+                .bind(entry.host.as_bytes().as_slice())
+                .execute(&mut *tx)
+                .await?;
+        }
+        if let RemovalAuthority::ApiKey { key_hash, audit_id } = &authority {
+            let updated = sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result='forgotten' WHERE id=? AND key_id=? AND person_id=? AND action_id='remote.host.forget' AND target_id=? AND state='pending'")
+                .bind(live).bind(audit_id).bind(key_hash).bind(&entry.user).bind(entry.host.to_string()).execute(&mut *tx).await?;
+            if updated.rows_affected() != 1 {
+                return Err(crate::auth::Error::Denied);
+            }
+        }
+        let _fence = self
+            .store
+            .1
+            .quiesce(entry.host)
+            .await
+            .map_err(|_| crate::auth::Error::Denied)?;
+        tx.commit().await?;
+        self.store.1.tombstoned(entry.host);
+        self.store.publish_revoked_authority().await;
+        self.store.2.publish();
+        Ok(
+            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here. The machine itself was not changed.",display_name(&name))}),
+        )
     }
 
     /// Persist verified denial and return pending instead of retaining admission
@@ -272,8 +552,8 @@ impl Removal {
                 Some(*audit_id)
             }
         };
-        // A coordinates row means infraternal setup installed this host; only
-        // then does a known installation exist to remove by hand (#235).
+        // SSH setup records coordinates. A device-approved install instead
+        // records its origin on the host row and must have redeemed its join.
         let bootstrap: Option<Option<String>> =
             sqlx::query_scalar("SELECT trust_lookup FROM remote_host_bootstrap WHERE host_id=?")
                 .bind(entry.host.as_bytes().as_slice())
@@ -281,10 +561,70 @@ impl Removal {
                 .await?;
         let installed_by_setup = bootstrap.is_some();
         let lookup = bootstrap.flatten();
-        let (mode, name): (String, String) = sqlx::query_as("SELECT h.mode,COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?")
-            .bind(entry.host.as_bytes().as_slice())
-            .fetch_one(&mut *tx)
-            .await?;
+        let (mode, name, mac_recovery): (String, String, bool) = sqlx::query_as(
+            "SELECT h.mode,COALESCE(b.address,lower(hex(h.id))),
+             h.device_approved=1 AND h.mode='rootful'
+                 AND (h.device_os IS NULL OR h.device_os='macOS')
+                 AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)
+             FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        let host = entry.host.simple().to_string();
+        let installation = if installed_by_setup {
+            Some(Installation::Bootstrap(&host))
+        } else {
+            mac_recovery.then_some(Installation::Mac(&host))
+        };
+        // A host's id is the durable key for its one removal request. A repeat
+        // observes that outbox entry under the writer lock, preserving the
+        // original uninstall choice and avoiding another cleanup attempt.
+        let existing_cleanup: Option<String> = sqlx::query_scalar(
+            "SELECT r.host_cleanup FROM remote_host_removals r
+             JOIN remote_login_cleanup q ON q.host_id=r.host_id AND q.person_id=r.owner_id
+             WHERE r.host_id=? AND r.owner_id=? AND r.uninstall=1
+               AND r.host_cleanup='pending' AND q.confirmed=0",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .bind(&entry.user)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(cleanup) = existing_cleanup {
+            if let Some(audit_id) = audit_id {
+                let updated = sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result=? WHERE id=? AND state='pending'")
+                    .bind(live)
+                    .bind(if Uuid::parse_str(&entry.user).is_ok() {
+                        "revoked, cleanup pending"
+                    } else {
+                        "removed"
+                    })
+                    .bind(audit_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                if updated != 1 {
+                    return Err(crate::auth::Error::Denied);
+                }
+            }
+            tx.commit().await?;
+            let (message, manual) = outcome(
+                &cleanup,
+                &mode,
+                display_name(&name),
+                &[],
+                installation,
+                true,
+            );
+            return Ok(json!({
+                "host_id": entry.host,
+                "state": "pending",
+                "host_cleanup": cleanup,
+                "message": message,
+                "manual": manual,
+                "left": [],
+            }));
+        }
         // Record the authorized request before the node effect; the same writer
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
@@ -358,7 +698,6 @@ impl Removal {
             .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let installation = installed_by_setup.then(|| entry.host.simple().to_string());
         // A connected host answers through the outbox within about a second of
         // the cut (#409). Wait for that, after the commit and so outside the
         // writer lock, so the result can say what happened and which kernel
@@ -377,7 +716,7 @@ impl Removal {
                     &mode,
                     display_name(&name),
                     &left,
-                    installation.as_deref(),
+                    installation,
                     false,
                 );
                 return Ok(
@@ -390,7 +729,7 @@ impl Removal {
             &mode,
             display_name(&name),
             &left,
-            installation.as_deref(),
+            installation,
             pending,
         );
         Ok(
@@ -398,21 +737,35 @@ impl Removal {
         )
     }
 }
+/// The local installation whose own executable recognizes the host receipt.
+#[derive(Clone, Copy)]
+enum Installation<'a> {
+    /// SSH bootstrap uses the canonical launcher for its recorded mode.
+    Bootstrap(&'a str),
+    /// A Mac checks its launchd installation and can recover without its PATH link.
+    Mac(&'a str),
+}
+
 /// Describe removal once, distinguishing pending cleanup from completed retirement.
 /// Pending responses keep the ownership-checked manual command available.
 /// A command ends the text verbatim so copying it cannot include sentence punctuation.
 ///
-/// `installation` is the host id when infraternal setup installed the host:
-/// only then are there commands, because only then is there an installation
-/// whose ownership the host can check.
+/// `installation` is the host id for a managed install with a local ownership check.
 fn outcome(
     cleanup: &str,
     mode: &str,
     name: &str,
     left: &[&str],
-    installation: Option<&str>,
+    installation: Option<Installation<'_>>,
     pending: bool,
 ) -> (String, Option<String>) {
+    // Hosts that enrolled before platform facts were retained can be offline
+    // today. The command is explicitly for macOS and checks ownership locally.
+    let account = match installation {
+        Some(Installation::Mac(_)) => "on macOS as root",
+        _ if mode == "rootful" => "as root",
+        _ => "as the account it was added with",
+    };
     if pending {
         let (detail, manual) = match cleanup {
             "requested" => {
@@ -428,8 +781,7 @@ fn outcome(
             // The outbox asks the host when it next connects (#409). Hand over
             // the manual command too, for a machine that never comes back.
             "pending" if installation.is_some() => {
-                let commands = manual_uninstall(mode, installation.unwrap_or_default());
-                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                let commands = manual_uninstall(mode, installation);
                 (format!("its infraternal agent uninstalls itself as soon as it connects. If it never does, remove it there {account} by running: {commands}"), Some(commands))
             }
             _ if installation.is_none() => (
@@ -437,8 +789,7 @@ fn outcome(
                 None,
             ),
             _ => {
-                let commands = manual_uninstall(mode, installation.unwrap_or_default());
-                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                let commands = manual_uninstall(mode, installation);
                 (format!("infraternal is still installed on it, so remove it there {account} by running: {commands}"), Some(commands))
             }
         };
@@ -473,12 +824,7 @@ fn outcome(
         // Say plainly that the machine still runs it, and how to remove it
         // there while automatic cleanup remains unconfirmed (#235).
         _ => {
-            let commands = manual_uninstall(mode, installation.unwrap_or_default());
-            let account = if mode == "rootful" {
-                "as root"
-            } else {
-                "as the account it was added with"
-            };
+            let commands = manual_uninstall(mode, installation);
             (
                 format!(
                     "{name} was removed here, but infraternal is still installed on it. Remove it there {account} by running: {commands}"
@@ -576,6 +922,19 @@ pub(crate) async fn request_uninstall(
         UninstallReply::Refused | UninstallReply::Lost => ("unreachable", Vec::new()),
     }
 }
+/// Take one of the removal service's bounded work permits, or say the service is busy.
+///
+/// Running out of permits is "try again in a moment" (`Throttled`, 429), never `Denied`: a 403 tells the browser the
+/// person lacks authority and sends them to refresh the host list, which is the wrong advice for a busy server (#519).
+fn admit(
+    admission: &Arc<Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, crate::auth::Error> {
+    admission
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| crate::auth::Error::Throttled)
+}
+
 /// The machine part of a stored `account@machine` address, as people name the host.
 fn display_name(address: &str) -> &str {
     address
@@ -591,13 +950,24 @@ fn display_name(address: &str) -> &str {
 /// installation recorded them, in either packet-filter frontend; the server's
 /// CA and a joined node's data stay. It stops at its first failure. No
 /// names are deleted directly.
-fn manual_uninstall(mode: &str, host: &str) -> String {
-    if mode == "rootful" {
-        format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
-    } else {
-        format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
+fn manual_uninstall(mode: &str, installation: Option<Installation<'_>>) -> String {
+    match installation {
+        Some(Installation::Mac(host)) => format!(
+            "'/Library/Application Support/infraternal/bin/infraternal' --bootstrap-uninstall {host}"
+        ),
+        Some(Installation::Bootstrap(host)) if mode == "rootful" => {
+            format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
+        }
+        Some(Installation::Bootstrap(host)) => {
+            format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
+        }
+        None => String::new(),
     }
 }
+/// The removal service reports a full admission as busy, not as refused (#519).
+#[cfg(test)]
+#[path = "remote_removal_admission_tests.rs"]
+mod admission_tests;
 #[cfg(test)]
 #[path = "remote_removal_review_tests.rs"]
 mod review_tests;

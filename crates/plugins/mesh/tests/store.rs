@@ -25,6 +25,7 @@ fn key(id: u64) -> PublicKey {
     key[..8].copy_from_slice(&id.to_le_bytes());
     PublicKey(key)
 }
+/// A peer key replacement keeps that host's identity and address allocation across restart.
 #[tokio::test]
 async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     let pool = pool().await;
@@ -78,6 +79,51 @@ async fn key_replacement_preserves_identity_and_addresses_after_restart() {
     let after = Store::new(pool.clone()).config(node).await.unwrap();
     assert_eq!(before.addresses, after.addresses);
     assert!(after.version > before.version);
+}
+
+/// Keep one authority epoch across every store handle in a server process.
+#[tokio::test]
+async fn mesh_authority_epoch_is_shared_by_store_handles_in_one_process() {
+    let pool = pool().await;
+    let first = Store::new(pool.clone());
+    let (server, _) = first.attach("server", key(1), None, true).await.unwrap();
+    let before = first.config(server).await.unwrap();
+    let first_epoch = before
+        .authority_epoch
+        .clone()
+        .expect("server snapshot must carry its authority epoch");
+
+    let same_process = first.config(server).await.unwrap();
+    assert_eq!(
+        same_process.authority_epoch.as_deref(),
+        Some(first_epoch.as_str()),
+        "one server process must keep its authority epoch stable"
+    );
+
+    let second_handle = Store::new(pool.clone());
+    let second_snapshot = second_handle.config(server).await.unwrap();
+    let second_epoch = second_snapshot
+        .authority_epoch
+        .as_deref()
+        .expect("every server snapshot must carry its process authority epoch");
+    assert_eq!(
+        second_epoch, first_epoch,
+        "separate Store handles in one server process must share one authority"
+    );
+    let persisted_epoch: String =
+        sqlx::query_scalar("SELECT authority_epoch FROM mesh_state WHERE singleton=1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        persisted_epoch, first_epoch,
+        "the process authority must be committed before its snapshot is published"
+    );
+    assert_eq!(
+        second_snapshot.authority_epoch.as_deref(),
+        Some(first_epoch.as_str())
+    );
+    assert_eq!(second_snapshot.version, before.version);
 }
 
 #[tokio::test]

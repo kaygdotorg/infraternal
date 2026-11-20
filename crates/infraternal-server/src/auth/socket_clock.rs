@@ -24,9 +24,9 @@ pub(crate) struct FrozenSocketTime {
 }
 
 impl FrozenSocketTime {
-    // Call from a start_paused test: the runtime's timer epoch and clock then
+    // Call with time already paused: the runtime's timer epoch and clock then
     // share an exact origin, without sub-millisecond rounding at boundaries.
-    /// Freezes the paused Tokio clock until the value is dropped. Needs a `start_paused` test.
+    /// Holds the already-paused Tokio clock still until the value is dropped.
     pub(crate) async fn new() -> Self {
         let (release, wait) = mpsc::channel::<ClockMessage>();
         let (started, ready) = tokio::sync::oneshot::channel();

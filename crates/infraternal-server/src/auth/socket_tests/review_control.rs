@@ -1,13 +1,12 @@
 //! Independent shared-socket control progress check while a Mesh writer waits on SQLite [D11, D41, #108].
 use super::*;
 
+/// Control frames remain responsive while a real SQLite writer is held.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_pending_mesh_write_keeps_control_dispatch_available() {
     let _guard = SERIAL.lock().await;
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite data must not contend with compiler artifacts on the build disk.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-control-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -150,14 +149,12 @@ async fn review_pending_mesh_write_keeps_control_dispatch_available() {
     );
 }
 
-/// Multiple waiting writers must leave SQLite slots for shared control authority.
+/// Keep shared control authority available while Mesh writers wait on SQLite.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_mesh_writers_preserve_authority_pool_capacity() {
     let _guard = SERIAL.lock().await;
-    let root = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || std::path::PathBuf::from("target"),
-        std::path::PathBuf::from,
-    );
+    // Live SQLite data must not contend with compiler artifacts on the build disk.
+    let root = std::env::temp_dir();
     let path = root.join(format!("mesh-control-{}.sqlite", Uuid::new_v4()));
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
@@ -238,14 +235,15 @@ async fn pending_mesh_writers_preserve_authority_pool_capacity() {
     );
     for socket in &mut sockets {
         let wire = read_client_frame(socket).await;
-        assert!(matches!(
-            decode_muxed_frame(&wire).unwrap().frame,
+        let frame = decode_muxed_frame(&wire).unwrap().frame;
+        match frame {
             Frame::Result {
                 call_id: 91,
                 ok: true,
                 ..
-            }
-        ));
+            } => {}
+            other => panic!("expected successful mesh.tag.create result, received {other:?}"),
+        }
         socket.close(None).await.unwrap();
     }
     server.abort();

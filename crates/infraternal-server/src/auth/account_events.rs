@@ -224,6 +224,7 @@ impl Drop for AccountSubscription {
     }
 }
 
+/// Verify commit publication and subscription teardown across cancellation.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,14 +267,11 @@ mod tests {
         assert!(!replacement.recovery_completed());
     }
 
+    /// Cancellation preserves committed notifications on both account sources.
     #[tokio::test]
     async fn cancelled_commit_waiter_still_commits_and_wakes_both_account_sources() {
-        let root = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(
-                || std::path::PathBuf::from("target"),
-                std::path::PathBuf::from,
-            )
-            .join("account-event-commit");
+        // Exercise real journal commits independently of compiler artifact I/O.
+        let root = std::env::temp_dir().join("account-event-commit");
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join(format!("{}.sqlite", uuid::Uuid::new_v4()));
         let options = sqlx::sqlite::SqliteConnectOptions::new()

@@ -48,6 +48,11 @@ class FakeForgejo:
         """Start an HTTP server on a free loopback port."""
         self.issues, self.comments, self.assets, self.requests = {}, {}, {}, []
         self.drop_next_create = False
+        # Who the fake says wrote what, and who the token belongs to (the browser suite trusts only its own account).
+        self.login = 'forgejo-bot'
+        # `deny(method, path)` returns an HTTP status to refuse a request with, like a token without the needed scope, or None.
+        self.deny = None
+        self.author = self.login
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -63,6 +68,10 @@ class FakeForgejo:
                 """Issue state, open-issue listing and comment listing."""
                 fake.requests.append(('GET', self.path, self.headers.get('Authorization')))
                 path = self.path.split('?')[0]
+                if fake.deny and (status := fake.deny('GET', path)):
+                    return self.reply({'message': 'token does not have at least one of required scope(s): [read:user]'}, status)
+                if path == '/api/v1/user':
+                    return self.reply({'login': fake.login})
                 if m := re.fullmatch(r'/api/v1/repos/[^/]+/[^/]+/issues/(\d+)/comments', path):
                     return self.reply([c for c in fake.comments.values() if c['issue'] == int(m[1])])
                 if m := re.fullmatch(r'/api/v1/repos/[^/]+/[^/]+/issues/(\d+)', path):
@@ -75,9 +84,11 @@ class FakeForgejo:
                 """Create issues and comments, and accept attachments."""
                 data = self.rfile.read(int(self.headers['Content-Length']))
                 fake.requests.append(('POST', self.path, self.headers.get('Authorization')))
+                if fake.deny and (status := fake.deny('POST', self.path.split('?')[0])):
+                    return self.reply({'message': 'token does not have at least one of required scope(s): [write:issue]'}, status)
                 if self.path.endswith('/issues'):
                     number = 345 + len(fake.issues)
-                    fake.issues[number] = dict(json.loads(data), number=number, state='open')
+                    fake.issues[number] = dict(json.loads(data), number=number, state='open', user={'login': fake.author})
                     if fake.drop_next_create:
                         fake.drop_next_create = False
                         self.close_connection = True
@@ -86,7 +97,7 @@ class FakeForgejo:
                     return self.reply(fake.issues[number], 201)
                 if m := re.search(r'/issues/(\d+)/comments$', self.path):
                     comment = 900 + len(fake.comments)
-                    fake.comments[comment] = dict(json.loads(data), id=comment, issue=int(m[1]))
+                    fake.comments[comment] = dict(json.loads(data), id=comment, issue=int(m[1]), user={'login': fake.author})
                     return self.reply(fake.comments[comment], 201)
                 if m := re.search(r'/issues/comments/(\d+)/assets$', self.path):
                     fake.assets.setdefault(int(m[1]), []).append(data)

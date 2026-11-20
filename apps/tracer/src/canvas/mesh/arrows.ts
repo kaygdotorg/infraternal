@@ -13,6 +13,7 @@
  * from in at most 180 ms, ease-out, no overshoot. Only path data and the head transform change; no layout is touched.
  */
 import type { Pt, Rect } from "../layout/geometry";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 /** The geometry types, re-exported for the mesh modules. */
 export type { Pt, Rect };
 
@@ -153,7 +154,7 @@ export class Arrow {
     this.pressing = undefined;
     if (matchMedia("(prefers-reduced-motion: reduce)").matches || typeof this.head.animate !== "function") return;
     this.head.style.transformOrigin = `${this.tip.x}px ${this.tip.y}px`;
-    this.pressing = this.head.animate([{ transform: "scale(1)" }, { transform: "scale(0.92)" }, { transform: "scale(1)" }], { duration: 120, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+    this.pressing = this.head.animate([{ transform: "scale(1)" }, { transform: "scale(0.92)" }, { transform: "scale(1)" }], { duration: 120, easing: EASE_OUT });
   }
   /** Stops a press in flight (an arrow taken from the pool starts at rest). */
   rest(): void { this.pressing?.cancel(); this.pressing = undefined; }

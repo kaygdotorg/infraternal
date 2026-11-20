@@ -1,6 +1,15 @@
 # License, advisory, source, and duplicate-version policy for the Rust graph.
 [advisories]
 version = 2
+# Time-limited exceptions. cargo-deny has no native expiry, so each entry states its date and
+# the owner must remove it (or renew it with a fresh analysis) by then.
+# Added 2026-11-17; remove or reassess by 2026-11-24 (#532).
+# russh-util 0.52.0 needs chrono for its wasm32 clock; our native builds do not
+# compile that path. Keep this one unmaintained advisory scoped until an upstream
+# fix or an owner-approved wasm clock removes the remaining dependency.
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "#532: russh-util wasm32 clock still requires chrono; reassess by 2026-11-24" },
+]
 
 [bans]
 multiple-versions = "warn"

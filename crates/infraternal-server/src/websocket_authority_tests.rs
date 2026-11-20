@@ -387,6 +387,145 @@ mod cap_review_r3 {
         );
         assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
     }
+    /// The first admitted checks and the checks queued behind them all make
+    /// progress when a long store stall clears within their shared budget.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_storm_serves_all_waiting_callers_after_release() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let held = state.pool.acquire().await.unwrap();
+        let places = state.authority_read_monitor();
+        let mut storm: Vec<_> = (0..32)
+            .map(|_| {
+                Some(Box::pin(read_expiry(
+                    &state,
+                    &user,
+                    "cap-review-r3",
+                    false,
+                    AUTHORITY_WAIT,
+                )))
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            for read in &mut storm {
+                assert!(read.as_mut().unwrap().as_mut().now_or_never().is_none());
+            }
+            assert_eq!(places(), AUTHORITY_READS);
+            tokio::time::advance(Duration::from_millis(1)).await;
+        }
+        drop(held);
+        let guard = std::time::Instant::now();
+        let mut finished = 0;
+        while finished < storm.len() {
+            assert!(
+                guard.elapsed() < Duration::from_secs(30),
+                "store work did not drain after release"
+            );
+            assert!(
+                started.elapsed() < AUTHORITY_WAIT,
+                "{finished} checks finished"
+            );
+            for (index, slot) in storm.iter_mut().enumerate() {
+                if let Some(read) = slot
+                    && let Some(result) = read.as_mut().now_or_never()
+                {
+                    assert!(result.is_ok(), "caller {index}: {result:?}");
+                    *slot = None;
+                    finished += 1;
+                }
+            }
+            // Give the real SQLite worker time to drain each admitted batch.
+            // Move the runtime clock when the remaining checks are in backoff.
+            if places() == 0 {
+                tokio::time::advance(Duration::from_millis(1)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(places(), 0);
+    }
+
+    /// A retry admitted in the last few milliseconds of the socket budget
+    /// keeps the original cutoff even when the newly admitted read stalls.
+    #[tokio::test(start_paused = true)]
+    async fn last_admitted_read_ends_at_the_original_cutoff() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let state = state.with_authority_read_timeout(Duration::from_millis(990));
+        let held = state.pool.acquire().await.unwrap();
+        let places = state.authority_read_monitor();
+        let admission = state
+            .authority
+            .reads
+            .acquire_many(u32::try_from(AUTHORITY_READS).unwrap())
+            .await
+            .unwrap();
+        let mut read = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+
+        assert!(read.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(991)).await;
+        assert!(read.as_mut().now_or_never().is_none());
+        drop(admission);
+        assert_eq!(places(), 0);
+        tokio::time::advance(AUTHORITY_RETRY_PAUSE + Duration::from_millis(1)).await;
+        assert!(read.as_mut().now_or_never().is_none());
+        assert_eq!(places(), 1, "the final attempt must admit a new read");
+
+        // Tokio timers have millisecond granularity. Advance one tick past
+        // the overall cutoff and require the caller to return on that poll.
+        tokio::time::advance(Duration::from_millis(4)).await;
+        assert!(matches!(
+            read.as_mut().now_or_never(),
+            Some(Err(AuthorityMiss::Unavailable))
+        ));
+        assert_eq!(places(), 1, "the admitted read must drain independently");
+        drop(held);
+    }
+
+    /// Model descheduling between permitting a retry and arming its backoff.
+    #[tokio::test(start_paused = true)]
+    async fn j943_backoff_cannot_extend_cutoff_after_descheduling() {
+        let _clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let mut state = state.with_authority_read_timeout(Duration::from_millis(989));
+        state.yield_before_authority_backoff = true;
+        let admission = state
+            .authority
+            .reads
+            .acquire_many(u32::try_from(AUTHORITY_READS).unwrap())
+            .await
+            .unwrap();
+        let mut read = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        assert!(read.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_millis(991)).await;
+        assert!(read.as_mut().now_or_never().is_none()); // Yield after the guard.
+        tokio::time::advance(Duration::from_millis(7)).await;
+        assert!(read.as_mut().now_or_never().is_none()); // Arm backoff at t=998 ms.
+        tokio::time::advance(Duration::from_millis(3)).await;
+        drop(admission);
+        assert!(
+            matches!(
+                read.as_mut().now_or_never(),
+                Some(Err(AuthorityMiss::Unavailable))
+            ),
+            "retry backoff was still pending at t=1001 ms"
+        );
+        assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+    }
+
     /// Disconnect and shutdown both drop the enclosing read future. Cancelling
     /// while queued must release nothing; cancelling a query must detach it.
     #[tokio::test(start_paused = true)]
@@ -409,7 +548,16 @@ mod cap_review_r3 {
             assert!(read.as_mut().now_or_never().is_none());
         }
         assert_eq!(state.authority.reads.available_permits(), 0);
+        // Enter retry handling. Four callers wait for their missed reads and
+        // the rest back off after timing out in the admission queue.
+        tokio::time::advance(AUTHORITY_READ_TIMEOUT + Duration::from_millis(1)).await;
+        for read in &mut storm {
+            assert!(read.as_mut().now_or_never().is_none());
+        }
         drop(storm);
+        assert_eq!(state.authority.reads.available_permits(), 0);
+        assert_eq!(Arc::strong_count(&state.authority), AUTHORITY_READS + 1);
+        tokio::time::advance(AUTHORITY_WAIT).await;
         assert_eq!(state.authority.reads.available_permits(), 0);
         drop(held);
         drop(clock);
@@ -618,6 +766,79 @@ mod cap_review_r3 {
         tokio::time::advance(AUTHORITY_RETRY_PAUSE).await;
         assert!(matches!(read.await, Err(AuthorityMiss::Refused)));
         assert_eq!(state.authority.reads.available_permits(), AUTHORITY_READS);
+        drop(clock);
+    }
+
+    /// One caller stalled through several attempt deadlines holds one place,
+    /// not all four (#525). Its retries wait for the SELECT it already queued
+    /// instead of queueing more behind it, so another socket still gets a
+    /// place during the stall, and once the store answers both callers read
+    /// a fresh answer. Before the fix the stalled caller took every place in
+    /// six attempts and the other caller could not even queue its read.
+    /// Runtime time only moves while no SELECT is in flight, so the outcome
+    /// does not depend on how fast the host runs the SQLite worker.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_caller_holds_one_place_and_leaves_the_rest_to_others() {
+        let clock = FrozenSocketTime::new().await;
+        let (state, user) = fixture().await;
+        let places = || AUTHORITY_READS - state.authority.reads.available_permits();
+        let held = state.pool.acquire().await.unwrap();
+        let mut stalled = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        // 300 ms of stall in 5 ms steps: six attempt deadlines and their pauses.
+        let mut most = 0;
+        for _ in 0..60 {
+            assert!(stalled.as_mut().now_or_never().is_none());
+            most = most.max(places());
+            tokio::time::advance(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            most, 1,
+            "one stalled caller held {most} of the {AUTHORITY_READS} authority places"
+        );
+        let mut other = Box::pin(read_expiry(
+            &state,
+            &user,
+            "cap-review-r3",
+            false,
+            AUTHORITY_WAIT,
+        ));
+        assert!(other.as_mut().now_or_never().is_none());
+        assert_eq!(
+            places(),
+            2,
+            "another socket could not queue its read behind the stalled caller"
+        );
+        drop(held);
+        let (mut first, mut second) = (None, None);
+        let started = std::time::Instant::now();
+        while first.is_none() || second.is_none() {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "the reads never answered after the stall"
+            );
+            if first.is_none() {
+                first = stalled.as_mut().now_or_never();
+            }
+            if second.is_none() {
+                second = other.as_mut().now_or_never();
+            }
+            // A held place is a SELECT on the worker thread: give it real time.
+            // With none held, the callers are in their retry pause.
+            if places() == 0 {
+                tokio::time::advance(Duration::from_millis(1)).await;
+            } else {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert!(matches!(first, Some(Ok(_))), "{first:?}");
+        assert!(matches!(second, Some(Ok(_))), "{second:?}");
+        assert_eq!(places(), 0);
         drop(clock);
     }
 

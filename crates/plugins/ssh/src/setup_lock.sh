@@ -57,6 +57,8 @@ start_setup_lease() {
  [ ! -L "$stage" ] && [ "$stage" -ef "/proc/$lease_pid/fd/7" ] || exit 73
  exec 7<&-
 }
+# Stop the proved lease holder, then acquire the transaction's journal flock.
+# Callers hold the parent guard and have validated the exact transaction.
 retire_setup_lease() {
  if [ -e "$stage/lease" ] || [ -L "$stage/lease" ]; then
   [ -f "$stage/lease" ] && [ ! -L "$stage/lease" ] && [ -O "$stage/lease" ] || exit 71
@@ -67,9 +69,15 @@ retire_setup_lease() {
   read -r lease_pid lease_birth extra < "$stage/lease"
   [ -z "$extra" ] || exit 71
   case "$lease_pid:$lease_birth" in *[!0-9:]*|:*|*:) exit 71;; esac
+  # PID/birth and the exact descriptor authorize signalling, not liveness:
+  # an exited lease keeps its /proc stat until reaped but has no descriptors.
+  # It may also exit between these checks and kill. In both cases only the
+  # journal flock below decides whether retirement is complete (#439).
   if [ -r "/proc/$lease_pid/stat" ] && read_lease_birth "$lease_pid" && [ "$lease_actual_birth" = "$lease_birth" ]; then
-   [ ! -L "$stage" ] && [ "$stage" -ef "/proc/$lease_pid/fd/7" ] || exit 73
-   kill "$lease_pid" || exit 73
+   [ ! -L "$stage" ] || exit 73
+   if [ "$stage" -ef "/proc/$lease_pid/fd/7" ]; then
+    kill "$lease_pid" 2>/dev/null || :
+   fi
   fi
  fi
  if [ -d "$stage" ] && [ ! -L "$stage" ]; then

@@ -12,6 +12,15 @@ with tempfile.TemporaryDirectory(prefix='package-', dir=scratch) as work:
     bundle = Path(work) / 'release'
     subprocess.run(['scripts/package-release', str(bundle), 'x86_64', '--built'], check=True)
     subprocess.run(['sha256sum', '--check', 'SHA256SUMS'], cwd=bundle, check=True)
+    subprocess.run(
+        [
+            'python3',
+            'scripts/test-vt-release-notices.py',
+            '--binary',
+            str(target / 'x86_64-unknown-linux-musl/release/infraternal'),
+        ],
+        check=True,
+    )
     assert (bundle / 'infraternal').read_bytes() == (target / 'x86_64-unknown-linux-musl/release/infraternal').read_bytes()
     for arch in ('x86_64', 'aarch64'):
         assert (bundle / f'infraternal-{arch}-musl').read_bytes() == (target / f'bootstrap/{arch}-unknown-linux-musl/release/infraternal').read_bytes()

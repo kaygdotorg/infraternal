@@ -664,15 +664,13 @@ fn run_tcp_worker(
 
 /// The mesh DNS server of one node.
 ///
-/// It listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address only, with separate
+/// By default it listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address, with separate
 /// `mesh-dns-udp` and `mesh-dns-tcp` workers. TCP clients have bounded connection state and share
 /// the UDP source-privacy rules. Queries from another source receive the same NXDOMAIN as an
 /// absent name (see [`response`]). Names can be replaced while it runs; each query sees a whole
 /// snapshot, never a half-updated one. Dropping the resolver stops both workers and waits for them.
 pub struct Resolver {
     address: Ipv4Addr,
-    #[cfg(target_os = "linux")]
-    system_port: bool,
     records: Arc<RwLock<Records>>,
     udp_shutdown: UnixStream,
     tcp_shutdown: UnixStream,
@@ -691,10 +689,36 @@ impl Resolver {
         Self::bind_records(config.addresses.ipv4, records, false)
     }
 
+    /// Serves the snapshot through already-bound UDP and TCP sockets, taking ownership of both.
+    ///
+    /// Callers may bind each protocol to port zero and read its assigned destination before
+    /// handing it over. Ports may differ; both sockets must use the snapshot's mesh IPv4 address.
+    /// No socket is closed and rebound, so a concurrent listener cannot steal a reserved port.
+    /// This constructor does not add the optional standard-port listeners.
+    ///
+    /// # Errors
+    /// Rejects invalid records or socket addresses that differ from the snapshot's address,
+    /// and reports failures configuring the listener or starting either worker.
+    pub fn from_sockets(
+        config: &Config,
+        socket: UdpSocket,
+        listener: TcpListener,
+    ) -> io::Result<Self> {
+        let records = Records::from_config(config)?;
+        let address = IpAddr::V4(config.addresses.ipv4);
+        if socket.local_addr()?.ip() != address || listener.local_addr()?.ip() != address {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DNS sockets must bind the configured mesh IPv4 address",
+            ));
+        }
+        Self::serve_sockets(records, socket, listener, None)
+    }
+
     /// Starts serving one node snapshot and, on root Linux nodes, also claims port 53 when free.
     ///
-    /// Port 53 is optional because systemd-resolved accepts the high port directly. The extra
-    /// listener is only needed by `NetworkManager`'s dnsmasq split-DNS forwarding.
+    /// Port 53 is optional because host DNS forwarding can target [`DNS_PORT`] directly. A root
+    /// Linux node also offers it as a compatibility listener when the address and port are free.
     /// # Errors
     /// Fails if the high mesh DNS port cannot be bound or the snapshot is invalid.
     pub fn bind_for_node(config: &Config) -> io::Result<Self> {
@@ -721,12 +745,6 @@ impl Resolver {
         self.address
     }
 
-    /// Reports whether the node also owns the standard DNS port on its mesh address.
-    #[cfg(target_os = "linux")]
-    pub(crate) const fn has_system_port(&self) -> bool {
-        self.system_port
-    }
-
     /// Binds the UDP and TCP sockets and starts independent protocol workers.
     ///
     /// UDP gets its own poll loop. TCP state is capped by global and per-source connection count,
@@ -740,7 +758,6 @@ impl Resolver {
     ) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddr::from((address, DNS_PORT)))?;
         let listener = TcpListener::bind(SocketAddr::from((address, DNS_PORT)))?;
-        listener.set_nonblocking(true)?;
         #[cfg(target_os = "linux")]
         let system_pair = if try_system_port {
             match (
@@ -762,8 +779,18 @@ impl Resolver {
             let _ = try_system_port;
             None::<(UdpSocket, TcpListener)>
         };
-        #[cfg(target_os = "linux")]
-        let system_port = system_pair.is_some();
+        Self::serve_sockets(initial, socket, listener, system_pair)
+    }
+
+    /// Starts workers with continuous ownership of all bound sockets and joins them on shutdown.
+    fn serve_sockets(
+        initial: Records,
+        socket: UdpSocket,
+        listener: TcpListener,
+        system_pair: Option<(UdpSocket, TcpListener)>,
+    ) -> io::Result<Self> {
+        let address = initial.local_address;
+        listener.set_nonblocking(true)?;
         let mut worker_sockets = vec![socket];
         let mut worker_listeners = vec![listener];
         if let Some((system_socket, system_listener)) = system_pair {
@@ -791,8 +818,6 @@ impl Resolver {
         };
         Ok(Self {
             address,
-            #[cfg(target_os = "linux")]
-            system_port,
             records,
             udp_shutdown,
             tcp_shutdown,
@@ -832,7 +857,7 @@ impl Resolver {
     }
 }
 
-/// Root Linux nodes try port 53 for `NetworkManager`; other nodes stay high-port-only.
+/// Root Linux nodes also offer the optional port 53 compatibility listener.
 #[cfg(target_os = "linux")]
 fn system_port_for_node() -> bool {
     nix::unistd::Uid::effective().is_root()

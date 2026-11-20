@@ -734,10 +734,10 @@ test("details popover tabs: the selected capsule glides (does not jump) and the 
   expect(end).toBeGreaterThan(start + 20);
   // At least two frames sit strictly between the start and the end: a glide, not a jump.
   expect(samples.filter((value) => value > start + 1 && value < end - 1).length).toBeGreaterThanOrEqual(2);
-  // Arrow keys move it without animation.
+  // Arrow keys move it without animation. The popover has two tabs since D385 (Machine, Connection), and the arrows wrap, so from Connection the right arrow lands on Machine.
   await page.locator(".canvas-popover .ui-tab[data-tab='connection']").focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".canvas-popover .ui-tab[data-tab='session']")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".canvas-popover .ui-tab[data-tab='machine']")).toHaveAttribute("aria-selected", "true");
   expect(await page.locator(".ui-tabs-capsule").evaluate((node) => node.style.transition)).toBe("none");
 });
 
@@ -883,7 +883,8 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   expect(900 - (b.y + b.height)).toBeGreaterThanOrEqual(224);
   expect(Math.abs(b.y + b.height / 2 - 450)).toBeLessThan(1);
   const sizes: number[] = [b.height];
-  for (const [query, expectRows] of [["ink", 1], ["theme", 10], ["zzzz", 0]] as const) {
+  // "dark" is the hint of every dark colour row: the rows are in the group Colour since D322, so the word "theme" no longer finds them.
+  for (const [query, expectRows] of [["ink", 1], ["dark", 10], ["zzzz", 0]] as const) {
     await page.locator("#palette-input").fill(query);
     await page.waitForTimeout(60);
     b = await box();
@@ -899,9 +900,9 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   expect(empty).toBeLessThan(none);
   expect(one).toBeLessThan(200);
   // The selected row keeps its inset highlight.
-  await page.locator("#palette-input").fill("theme");
+  await page.locator("#palette-input").fill("dark");
   const inset = await page.locator(".result[aria-selected='true']").first().evaluate((node) => getComputedStyle(node, "::before").top);
-  expect(parseFloat(inset)).toBeCloseTo(3 * (await uiFactor(page)), 1);
+  expect(parseFloat(inset)).toBeCloseTo(4 * (await uiFactor(page)), 1); // the highlight's inset is 0.25rem (4 px at a 16 px root): 96f06e7d1 (D372) rounded the old 3 px spacing to 4 px
   await page.keyboard.press("Escape");
 });
 
@@ -929,14 +930,14 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   await page.keyboard.type("thm", { delay: 0 });
   await expect(page.locator("#palette-input")).toHaveValue("thm");
   expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).pointerEvents)).not.toBe("none");
-  await page.locator("#palette-input").fill("theme");
+  await page.locator("#palette-input").fill("dark");
   const before = await page.locator(".result[aria-selected='true']").getAttribute("data-action");
   await page.keyboard.press("ArrowDown");
   expect(await page.locator(".result[aria-selected='true']").getAttribute("data-action")).not.toBe(before);
   const transitions = await page.evaluate(() => [...document.querySelectorAll(".result")].slice(0, 4).map((row) => getComputedStyle(row, "::before").transitionDuration));
   expect(transitions.every((duration) => duration === "0s")).toBe(true);
-  // The key-triggered open is short (about 180 ms) and the pointer one longer.
-  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0.18s");
+  // Keyboard opens instantly (#427): the key-triggered open has no transition (keyboard-instant.spec.ts samples the frames).
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).transitionDuration)).toBe("0s");
 });
 
 // ---- text behind glass is never legible through it --------------------------------------------

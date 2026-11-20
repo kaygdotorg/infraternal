@@ -1,0 +1,11 @@
+--- lib/common.sh.before
++++ lib/common.sh.after
+@@ -94,7 +94,7 @@
+     local nspid=$1; shift
+     local sb
+     sb=$(mktemp -d "$H2H_RUN/sb.XXXXXX")
+-    nsenter -t "$nspid" -n unshare --mount --propagation private -- /bin/sh -c '
++    exec nsenter -t "$nspid" -n unshare --mount --propagation private -- /bin/sh -c '
+         set -e
+         sb=$1; shift
+         for d in etc var; do

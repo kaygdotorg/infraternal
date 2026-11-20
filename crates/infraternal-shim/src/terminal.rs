@@ -92,6 +92,16 @@ impl Terminal {
         self.engine.state_difference(&other.engine)
             + usize::from(self.pending != other.pending || self.dimensions != other.dimensions)
     }
+    /// Counts how far the screen a viewer would see differs from this one.
+    ///
+    /// Zero means the active screens match cell for cell, including size,
+    /// cursor and soft-wrap flags. Tests use it to compare what a viewer
+    /// rebuilt from the bytes the shim sent against the shim's own engine.
+    /// Unlike `research_state_difference`, it is available in every build.
+    #[cfg(test)]
+    pub(crate) fn screen_difference(&self, other: &Self) -> usize {
+        self.engine.difference(&other.engine)
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();
@@ -385,9 +395,10 @@ impl Terminal {
             self.pending.capacity(),
         ))
     }
-    /// Read only native row-count metadata; compressed backing stays cold.
+    /// Read native row-count metadata while compressed backing stays cold.
+    /// Unsupported keys and other live getter failures remain visible to callers.
     #[cfg(feature = "process-per-user")]
-    pub(super) fn retained_history_rows(&self) -> usize {
+    pub(super) fn retained_history_rows(&self) -> io::Result<usize> {
         self.engine.history_rows()
     }
     /// A clean or still-pending rebuild cannot certify faithful state. Keep
@@ -492,6 +503,12 @@ mod measurements;
 #[cfg(test)]
 #[path = "../tests/unit/snapshot_fidelity.rs"]
 mod fidelity;
+
+/// Program modes and input flags survive both the faithful and the
+/// approximate repaint (#524).
+#[cfg(test)]
+#[path = "../tests/unit/approximate_modes.rs"]
+mod approximate_modes;
 
 #[cfg(test)]
 #[path = "../tests/unit/resize_recovery.rs"]

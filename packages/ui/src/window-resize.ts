@@ -24,6 +24,7 @@
  */
 import type { WindowCard } from "./window-card";
 import { Spring } from "./spring";
+import { EASE_OUT } from "./motion";
 
 /** An edge or corner handle: compass points, "n" for north (top). */
 export type ResizeEdge = "n" | "e" | "s" | "w" | "ne" | "nw" | "se" | "sw";
@@ -135,7 +136,7 @@ export function settleResize(apply: (frame: ResizeFrame) => void, from: ResizeFr
     const l = (a: number, b: number): number => a + (b - a) * p;
     if (p === 1) { apply(to); done(); return; }
     apply({ width: l(from.width, to.width), height: l(from.height, to.height), top: l(from.top, to.top), shiftX: l(from.shiftX, to.shiftX) });
-  }, { visualDuration: 0.42 });
+  }, { visualDuration: 0.28 });
   spring.set(1);
   return () => { cancelled = true; spring.set(spring.value, true); };
 }
@@ -267,12 +268,12 @@ export function attachWindowResize(card: WindowCard, host: WindowResizeHost): Wi
     // it settles back when the handles appear. Composited transform only, no fill.
     if (!reduced.matches) {
       press.cue = root.animate([{ transform: "none" }, { transform: "scale(0.985)" }],
-        { duration: HOLD_MS, delay: 120, easing: "cubic-bezier(0.23, 1, 0.32, 1)", fill: "forwards" });
+        { duration: HOLD_MS, delay: 120, easing: EASE_OUT, fill: "forwards" });
     }
     press.timer = window.setTimeout(() => {
       hold = undefined;
       press.cue?.cancel();
-      if (!reduced.matches) root.animate([{ transform: "scale(0.985)" }, { transform: "none" }], { duration: 220, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+      if (!reduced.matches) root.animate([{ transform: "scale(0.985)" }, { transform: "none" }], { duration: 220, easing: EASE_OUT });
       navigator.vibrate?.(8);
       swallowClick = true;
       setTouchMode(true);

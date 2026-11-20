@@ -1,7 +1,9 @@
 /// Role: deterministic managed-desktop backoff, unmanaged resizing and aspect-fit regressions [D290].
 import Foundation
 
+/// Exercises resize ownership and fitted geometry without a WindowServer session.
 @main struct WindowOwnershipTests {
+    /// Runs the cases with fixed point sizes and simulated monotonic time.
     static func main() {
         let tiled = CGSize(width: 1920, height: 1080)
         let canvas = CGSize(width: 800, height: 600)
@@ -29,6 +31,22 @@ import Foundation
         delayed.observe(canvas, at: 0.1)
         delayed.observe(tiled, at: 2)
         precondition(delayed.managed, "the boundary belongs to the observation window")
+        // An app may apply only part of a request because its window cannot exceed the screen.
+        // That constrained result must remain ours to restore, rather than latching managed mode.
+        let constrained = CGSize(width: 800, height: 650)
+        let tallCanvas = CGSize(width: 800, height: 900)
+        var constrainedWindow = WindowResizeOwnership()
+        precondition(constrainedWindow.attempt(tallCanvas, actual: tiled, at: 0))
+        constrainedWindow.applied(constrained)
+        constrainedWindow.observe(constrained, at: 0.1)
+        precondition(!constrainedWindow.managed, "an app-constrained resize must still restore on stop")
+        constrainedWindow.observe(tiled, at: 0.2)
+        precondition(constrainedWindow.managed, "an external undo of the applied constrained size still yields")
+        var immediatelyUndone = WindowResizeOwnership()
+        precondition(immediatelyUndone.attempt(canvas, actual: tiled, at: 0))
+        immediatelyUndone.applied(tiled)
+        immediatelyUndone.observe(tiled, at: 0.1)
+        precondition(immediatelyUndone.managed, "an unchanged immediate read cannot hide a coalesced undo")
         var ordinary = WindowResizeOwnership()
         precondition(!ordinary.attempt(canvas, actual: canvas, at: 0))
         precondition(ordinary.attempt(canvas, actual: tiled, at: 1))
@@ -52,6 +70,6 @@ import Foundation
         precondition(mappedPoint(x: 400, y: 74, source: source, output: canvas) == nil)
         precondition(tilingManagerExecutables.isSuperset(of: ["OmniWM", "yabai", "AeroSpace", "Amethyst", "paneru", "glide"]))
         precondition(!tilingManagerExecutables.contains("TextEdit"))
-        print("PASS managed=300 undone=300 coalesced=1 boundary=1 unmanaged=2 invalid=4 aspect_fit=3")
+        print("PASS managed=300 undone=300 coalesced=1 boundary=1 unmanaged=2 invalid=4 constrained=3 aspect_fit=3")
     }
 }

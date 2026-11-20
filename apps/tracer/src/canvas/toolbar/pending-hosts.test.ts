@@ -14,3 +14,19 @@ test("denied hosts remain listed as pending or retired-unreachable", () => {
     expect(entries[0]?.action).toBeUndefined();
   }
 });
+
+/** Only the owner-capable adapter offers Forget, and only for an unreachable retirement. */
+test("forget is offered only for retired-unreachable hosts to their owner", () => {
+  for (const state of ["pending", "retired-unreachable"]) {
+    for (const owner of [false, true]) {
+      const cx = { adapters: { sessions: { hosts: () => [{ id: "11111111-2222-3333-4444-555555555555", name: "worker", state }] }, hostRemoval: { label: () => owner ? "Remove host" : undefined, forget: () => {} } }, views: new Map() } as unknown as Ctx;
+      const entries = hostEntries(cx);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]?.action).toBe(owner && state === "retired-unreachable" ? "canvas:forgethost:11111111-2222-3333-4444-555555555555" : undefined);
+      if (owner && state === "retired-unreachable") {
+        expect(entries[0]?.glyph).toBe("×");
+        expect(entries[0]?.hint).toBe("unreachable");
+      }
+    }
+  }
+});

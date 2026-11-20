@@ -12,6 +12,7 @@ fn bounded_terminal(history: usize, host: &std::sync::Arc<HostBudget>) -> Termin
     terminal
 }
 
+/// Preserves history rows that a taller, wider resize moves onto the screen.
 #[test]
 fn taller_widening_keeps_history_rows_that_move_onto_the_screen() {
     const HISTORY: usize = 64 * 1024;
@@ -32,7 +33,7 @@ fn taller_widening_keeps_history_rows_that_move_onto_the_screen() {
         reference.process(chunk);
     }
 
-    let available_history = bounded.retained_history_rows();
+    let available_history = bounded.retained_history_rows().unwrap();
     let needed_history = usize::from(ROWS - 24);
     assert!(
         available_history >= needed_history,

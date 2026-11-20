@@ -12,6 +12,7 @@ struct Fixture {
 }
 
 impl Fixture {
+    /// Generate an ephemeral signing key and a signed checksum fixture.
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("proxy-signature-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).expect("create fixture directory");
@@ -33,7 +34,7 @@ impl Fixture {
         );
         let sums = format!(
             "{:x}  fixture.json\n",
-            Sha256::digest(b"signed component manifest")
+            base16ct::HexDisplay(&Sha256::digest(b"signed component manifest"))
         )
         .into_bytes();
         let sums_path = root.join("SHA256SUMS");

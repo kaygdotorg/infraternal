@@ -12,7 +12,7 @@
    machine is catching up with a resize, or when an app refuses a size. */
 .aw-stage { position: absolute; inset: 0; display: grid; outline: none; cursor: default; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .aw-stage:focus, .aw-stage:focus-visible { outline: none; }
-.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity 200ms var(--ease-out, ease-out), filter 200ms var(--ease-out, ease-out); }
+.aw-surface { grid-area: 1 / 1; width: 100%; height: 100%; object-fit: contain; transition: opacity var(--t-pop) var(--ease-out, ease-out), filter var(--t-pop) var(--ease-out, ease-out); }
 /* Nothing true to show: the picture goes. Only a memory of one (paused, reconnecting): it stays, dimmed. The dim is
    told by the pill's dot and mark; the picture only has to read as "not live" and stay a picture.
    Fading alone is not enough: a fade pulls the picture toward the card, which is the window's own colour. On the dark
@@ -25,7 +25,7 @@
 :root[data-scheme="light"] .aw-stage { --aw-dim-opacity: 0.72; --aw-dim-saturate: 0.35; }
 
 /* The state card is the "No access" card's twin: same position, same type, same rhythm (message, 24 px, action). */
-.aw-card { z-index: 1; transition: opacity 200ms var(--ease-out, ease-out); }
+.aw-card { z-index: var(--z-content); transition: opacity var(--t-pop) var(--ease-out, ease-out); }
 .aw-card[data-shown="false"] { opacity: 0; pointer-events: none; }
 .aw-card .cl-noaccess-hint { max-width: 38ch; }
 .aw-mark { display: grid; place-items: center; width: 22px; height: 22px; margin-bottom: 4px; color: var(--fg-3); }
@@ -35,11 +35,11 @@
 /* The pill's small mark (window-body.ts `paintPillMark`): control, view only or paused, 14 px like the connection dot beside
    it. Nothing about control or state is drawn over the picture. Its colour follows the quiet scale: the one thing the
    person is doing (controlling) is the full text colour, everything else is secondary. */
-.aw-pillmark { position: relative; z-index: 1; display: inline-grid; flex: none; place-items: center; width: 0.875rem; height: 0.875rem; color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
+.aw-pillmark { position: relative; z-index: var(--z-content); display: inline-grid; flex: none; place-items: center; width: var(--ui-icon-sm); height: var(--ui-icon-sm); color: var(--fg-2); animation: aw-in 180ms var(--ease-out, ease-out); }
 .aw-pillmark[data-kind="controlled"] { color: var(--fg); }
 .aw-pillmark svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
 @keyframes aw-in { from { opacity: 0; } }
-@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity 120ms linear; } }
+@media (prefers-reduced-motion: reduce) { .aw-pillmark { animation: none; } .aw-surface, .aw-card { transition: opacity var(--t-press) var(--ease-out); } }
 /* An app's or a screen's pill reads title first (the text that tells two windows of one app apart), and the quiet part,
    the machine and the app, gives way before the title does: it shrinks far faster than the title, so the title is cut only
    once nothing else is left to cut. */
@@ -55,10 +55,21 @@
 .aw-list { padding: 8px; }
 .aw-eyebrow { display: flex; align-items: center; gap: 6px; }
 .aw-eyebrow .ui-host-mark { width: 12px; height: 12px; flex: none; }
-.aw-row { cursor: default; }
+/* Keep the app mark beside the primary label, rather than centring it between the label and its subtitle. The shared
+   row still supplies its columns and touch target; these two tracks make their alignment independent of text metrics. */
+.aw-row { cursor: default; grid-template-rows: auto auto; align-content: center; row-gap: 1px; }
+.aw-row > .cl-sx-text { display: contents; }
+.aw-row > .aw-rowmark { grid-column: 1; grid-row: 1; }
+.aw-row .aw-name { grid-column: 2; grid-row: 1; }
+.aw-row .aw-sub { grid-column: 2; grid-row: 2; }
+.aw-row > .cl-sx-meta { grid-column: 3; grid-row: 1 / 3; }
 .aw-row[data-kbd] { background: var(--hover); }
 .aw-rowmark { display: grid; place-items: center; width: 18px; height: 18px; color: var(--fg-2); font-size: 12px; }
 .aw-rowmark svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.aw-rowmark > .aw-app-icon { width: 18px; height: 18px; object-fit: contain; }
+/* App windows keep their app mark in the pill on fine pointers, where other host marks are hidden. */
+.ui-window[data-kind="app"] .ui-window-mark { display: grid; }
+.ui-window-mark > .aw-app-pill-icon { width: 100%; height: 100%; object-fit: contain; }
 .aw-note { display: flex; align-items: flex-start; gap: 8px; margin: 6px 8px 2px; }
 .aw-note.cl-sx-state { justify-content: center; padding: 14px 8px; }
 .aw-perm svg { flex: none; width: 14px; height: 14px; margin-top: 2px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }

@@ -1,5 +1,6 @@
 /** Independent #244 retained-typing lifetime and consent controls; all input is synthetic. */
 import { expect, test } from "bun:test";
+import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
 import type { ToastMessage } from "../../../packages/ui/src/toast";
 import type { WireFrame } from "../../../packages/protocol/src/codec";
@@ -36,6 +37,8 @@ function fixture() {
   };
   const client = Object.assign(Object.create(TerminalClient.prototype), {
     synchronizedOutput: { reset() {}, dispose() {} },
+    // The constructor builds this private field, and Object.create skips it; a real scanner keeps the OSC 52 path honest (#440).
+    clipboardWrites: new Osc52Scanner(),
     parsedOutputVersion: 0,
     closed: false, attachmentConfirmed: false, inputNeedsResend: false, retainedInput: undefined,
     inputQueue: queue, inputScratch: new Uint8Array(16 * 1024),
@@ -163,13 +166,15 @@ test("review: window disposal clears held input and rejects a stale resend actio
   let noticeDisposed = 0;
   let streamClosed = 0;
   Object.assign(f.client, {
-    cancelStreamRetry() {}, pendingLinkRows: new Map(), forcedLinkRows: new Map(),
+    cancelStreamRetry() {}, pendingLinkRows: new Map(), forcedLinkRows: new Map(), glassListeners: new Set(),
     disposeTouch() {}, pauseTerminal() {}, offRoundTrip() {},
     resizeObserver: { disconnect() {} },
     config: { host: { removeEventListener() {} } },
     terminal: { dispose() {} },
     conn: { streamAttached() {}, closeStream() { streamClosed += 1; } },
     inputResendNotice: { dispose() { noticeDisposed += 1; } },
+    // The keyboard fit the watcher left on the shared screen; disposal hands the screen back (#510).
+    screen: { style: { height: "516px", transform: "translateY(0px)" } },
   });
   try {
     globals.window = { removeEventListener() {} };
@@ -181,6 +186,9 @@ test("review: window disposal clears held input and rejects a stale resend actio
     expect(f.queue.length).toBe(0);
     expect(noticeDisposed).toBe(1);
     expect(streamClosed).toBe(1);
+    const screen = (f.client as unknown as { screen: { style: { height: string; transform: string } } }).screen;
+    expect(screen.style.height).toBe("");
+    expect(screen.style.transform).toBe("");
     staleAction.onSelect();
     expect(f.sent).toHaveLength(0);
   } finally {

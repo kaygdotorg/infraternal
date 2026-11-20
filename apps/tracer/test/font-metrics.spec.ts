@@ -64,9 +64,12 @@ for (const font of FONTS) for (const dpr of font.id === DEFAULT_FONT_ID ? [1, 2,
           if (bar[i] === accent[0] && bar[i + 1] === accent[1] && bar[i + 2] === accent[2]) barMin = Math.min(barMin, (i / 4) % Math.ceil(cellWidth));
         }
         // The measurements are only meaningful if Maple itself (not a fallback) painted the canvas.
+        // The product writes every family quoted (`fontStack`), but the browser serializes a computed `font-family` without quotes when the name is
+        // a plain identifier (`Iosevka, "Nerd Symbols"`, but `"Victor Mono"`), so the quotes are dropped before comparing.
+        const first = (stack: string): string => stack.split(",")[0]!.trim().replaceAll('"', "");
         const mapleLoaded = [...document.fonts].some((face) => face.family.replaceAll('"', "") === family && face.status === "loaded" && face.style === "normal")
-          && window.__tracerTestDouble!.rendererMetrics()!.fontFamily.startsWith(`"${family}"`)
-          && getComputedStyle(document.documentElement).fontFamily.startsWith(`"${family}"`);
+          && first(window.__tracerTestDouble!.rendererMetrics()!.fontFamily) === family
+          && first(getComputedStyle(document.documentElement).fontFamily) === family;
         return { mapleLoaded, cursorX: metrics.cursorX, renderCursorX: metrics.renderCursorX, cellWidth: metrics.cellWidth, natural: metrics.naturalCellWidth, cursorLeft, lastInk, inkAfter, barMin, dpr: devicePixelRatio, cellWidthPx: cellWidth };
       }, font.family);
       const bench = await page.evaluate(() => window.__tracerTestDouble?.benchmarkFullRedraw(30));

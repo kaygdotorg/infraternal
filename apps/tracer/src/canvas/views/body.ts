@@ -14,9 +14,9 @@ export const isTerminal = (rec: WinRec): boolean => rec.model.kind === "terminal
 
 /** True for windows that take the person's keys and pointer: a terminal, and an app window or a screen (D208). The input lock can hold only these. */
 export const isInteractive = (rec: WinRec): boolean => isTerminal(rec) || rec.model.kind === "app" || rec.model.kind === "screen";
-/** Policy for the view's terminal-exit callback, extracted so clean exits can be tested without a browser canvas. */
+/** D357 closes every normal shell exit (0..255); negative statuses name signals and preserve the final screen. Host setup keeps its window until its own result arrives. */
 export function shouldCloseWindowAfterExit(status: number, setupPending: boolean): boolean {
-  return status === 0 && !setupPending;
+  return status >= 0 && !setupPending;
 }
 
 /**
@@ -38,7 +38,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     const binding = cx.adapters.sessions.bind(m, { view: rec.owner.view.id, ...(cx.adapters.inventory ? { showSessions: (event?: MouseEvent) => {
       // The header's existing manager owns lazy loading, host selection and focus.
       const anchor = rec.card.root.querySelector<HTMLButtonElement>('[data-action="sessions"]');
-      cx.sessionUi?.toggleManager(rec, anchor, event?.detail === 0 ? "keyboard" : "pointer");
+      cx.sessionUi?.toggleManager(rec, anchor);
     } } : {}), connectionChanged: () => {
       paintLink(rec, false, undefined);
       cx.sessionUi?.paint(rec);
@@ -49,7 +49,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     }, exited: (status) => {
       const setupPending = rec.setup?.isPending() ?? false;
       if (shouldCloseWindowAfterExit(status, setupPending)) cx.win.close(rec);
-    }, refused: (message, action) => cx.sessionUi?.refused(rec, message, action) ?? false, unreachable: (message) => cx.sessionUi?.unreachable(rec, message) });
+    }, refused: (message, action, calm) => cx.sessionUi?.refused(rec, message, action, calm) ?? false, unreachable: (message) => cx.sessionUi?.unreachable(rec, message) });
     rec.binding = binding;
     if (binding.connected === false) paintLink(rec, false, undefined);
     binding.mount(body);

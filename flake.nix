@@ -48,8 +48,9 @@
           # scripts/auth-toolchain copies it into the target directory instead
           # of downloading the same tarball again.
           zig = pkgs.callPackage ./nix/zig.nix { };
-        in {
-          default = pkgs.mkShell {
+        in let
+          # Reuse one pinned base environment and add only a lane's extra tools.
+          mkDevShell = extraPackages: pkgs.mkShell {
             INFRATERNAL_ZIG = zig.unpacked;
             packages = [
               rust rustupShim
@@ -58,6 +59,7 @@
               pkgs.nodejs_26           # JavaScript CLI shebangs in type checks
               pkgs.vim                 # Real-editor terminal repaint fixture
               pkgs.openssh             # Release-signature and SSH key fixtures
+              pkgs.minisign            # Verify signed libghostty-vt source archives
               pkgs.python3             # release and fixture scripts
               pkgs.gnumake pkgs.perl   # vendored OpenSSL build drivers
               pkgs.gcc                 # host-side build scripts and proc macros
@@ -65,7 +67,7 @@
               pkgs.git pkgs.cacert
               pkgs.ripgrep              # release bundle ELF validation
               pkgs.sccache             # opt-in shared compiler cache, see shellHook
-            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            ] ++ extraPackages ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
               pkgs.file pkgs.binutils  # static-binary linkage checks (file, readelf)
               pkgs.util-linux          # prlimit for the key-memory check
             ];
@@ -82,6 +84,11 @@
               fi
             '';
           };
+        in {
+          default = mkDevShell [ ];
+          # The research kit builds a Go helper and tmux's yacc parser. Keep
+          # those pinned tools out of the default shell to avoid widening it.
+          head-to-head-kit = mkDevShell [ pkgs.go pkgs.bison ];
         });
     };
 }

@@ -358,6 +358,7 @@ mod tests {
 
     #[cfg(all(feature = "remote", target_os = "linux"))]
     #[test]
+    /// Keep the enrollment server origin positional in the `up` command.
     fn up_accepts_a_server_as_its_positional_argument() {
         let registry = registry().expect("action registry");
         let matches = build(&registry)
@@ -371,6 +372,34 @@ mod tests {
                 .get_one::<String>("server")
                 .map(String::as_str),
             Some("https://mesh.example.org")
+        );
+    }
+
+    /// Let a system install preserve extra SSH and administration paths from its command line.
+    #[cfg(all(feature = "remote", feature = "plugin-mesh", target_os = "linux"))]
+    #[test]
+    fn up_accepts_repeated_host_firewall_allow_rules() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "up",
+                "https://mesh.example.org",
+                "--host-firewall-allow",
+                "wt0,10.69.69.0/24,tcp,22",
+                "--host-firewall-allow",
+                "eth0,10.69.0.99,tcp,7011",
+            ])
+            .expect("typed host firewall rules");
+        let selected = selected(&matches);
+        assert_eq!(
+            selected
+                .matches
+                .get_many::<String>("host_firewall_allow")
+                .expect("repeated host rules")
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["wt0,10.69.69.0/24,tcp,22", "eth0,10.69.0.99,tcp,7011"]
         );
     }
 
@@ -400,6 +429,7 @@ mod tests {
         );
     }
 
+    /// Hosted command syntax preserves the shared action identity and server selection.
     #[test]
     #[cfg(feature = "remote")]
     fn server_action_commands_use_the_shared_action_definitions() {
@@ -414,6 +444,11 @@ mod tests {
             (
                 &["hosts", "remove"][..],
                 "remote.host.remove",
+                Some("00000000-0000-0000-0000-000000000001"),
+            ),
+            (
+                &["hosts", "forget"][..],
+                "remote.host.forget",
                 Some("00000000-0000-0000-0000-000000000001"),
             ),
             (&["sessions", "list"][..], "sessions.list", None),
@@ -463,6 +498,27 @@ mod tests {
         assert_eq!(selected(&matches).path, ["status"]);
         assert_eq!(hosted.id, "server.status");
         assert!(!hosted.fresh_passkey);
+    }
+
+    /// Forget shares the hosted dry-run and explicit-confirmation flags (D369).
+    #[test]
+    #[cfg(feature = "remote")]
+    fn hosts_forget_takes_dry_run_and_yes_flags() {
+        let registry = registry().expect("action registry");
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "hosts",
+                "forget",
+                "00000000-0000-0000-0000-000000000001",
+                "--dry-run",
+                "--yes",
+            ])
+            .expect("hosts forget");
+        let command = selected(&matches);
+        assert_eq!(command.path, ["hosts", "forget"]);
+        assert!(command.matches.get_flag("dry_run"));
+        assert!(command.matches.get_flag("yes"));
     }
 
     /// D333 keeps the dry run of a key-driven removal: `--dry-run` reaches the shared input.
@@ -757,6 +813,7 @@ mod tests {
         );
     }
 
+    /// Parse the server init confirmation, host-policy and listener options.
     #[test]
     #[cfg(feature = "plugin-server")]
     fn server_init_parses_confirmation_plan_and_server_configuration() {
@@ -768,6 +825,7 @@ mod tests {
                 "init",
                 "--listen",
                 "127.0.0.1:7443",
+                "--host-firewall-off",
                 "--dry-run",
                 "--json",
             ])
@@ -775,6 +833,7 @@ mod tests {
         let command = selected(&matches);
         assert_eq!(command.path, ["server", "init"]);
         assert!(command.matches.get_flag("dry_run"));
+        assert!(command.matches.get_flag("host_firewall_off"));
         assert_eq!(
             command
                 .matches
@@ -909,6 +968,67 @@ mod backmerge_tests {
                 CliHandler::ServerRestart
             );
         }
+    }
+
+    /// Parse an explicit previous-build rollback and require its replacement binary.
+    #[cfg(feature = "plugin-server")]
+    #[test]
+    fn restart_accepts_rollback_only_with_previous_binary() {
+        let registry = registry().unwrap();
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "server",
+                "restart",
+                "--binary",
+                "/verified/previous",
+                "--rollback",
+            ])
+            .unwrap();
+        assert!(selected(&matches).matches.get_flag("rollback"));
+
+        let error = build(&registry)
+            .try_get_matches_from(["infraternal", "server", "restart", "--rollback"])
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+    }
+
+    /// The server exposes its active Mesh identity through an owner-only status command.
+    #[cfg(all(feature = "plugin-server", feature = "remote"))]
+    #[test]
+    fn server_mesh_status_is_a_read_only_local_command() {
+        let registry = registry().unwrap();
+        let matches = build(&registry)
+            .try_get_matches_from([
+                "infraternal",
+                "server",
+                "mesh",
+                "status",
+                "--data",
+                "/private/server",
+                "--json",
+            ])
+            .unwrap();
+
+        assert_eq!(selected(&matches).path, ["server", "mesh", "status"]);
+        assert_eq!(
+            registry
+                .find(&["server", "mesh", "status"])
+                .unwrap()
+                .action
+                .cli_handler,
+            CliHandler::ServerMeshStatus
+        );
+        assert_eq!(
+            selected(&matches)
+                .matches
+                .get_one::<String>("data")
+                .map(String::as_str),
+            Some("/private/server")
+        );
     }
 
     #[test]

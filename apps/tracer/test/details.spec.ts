@@ -20,15 +20,16 @@ test("a click on the pill opens the popover, with plain names and a subtitle for
   await expect(popover(page)).toBeVisible();
   await expect(popover(page).locator(".canvas-popover-title")).toHaveText("NixOS");
   await expect(popover(page).locator(".canvas-popover-sub")).toContainText("nix-cache");
-  await expect(popover(page).locator(".ui-tab")).toHaveText(["Host", "Connection", "Session"]);
-  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Address" })).toBeVisible();
+  await expect(popover(page).locator(".ui-tab")).toHaveText(["Machine", "Connection"]); // D385: exactly two tabs
+  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Address" })).toHaveCount(0); // the address moved to Connection
   await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Kernel" })).toHaveCount(1); // D126 default fact, shown without the extended switch
   await popover(page).locator(".ui-tab", { hasText: "Connection" }).click();
   const delay = popover(page).locator(".ui-kv-row", { hasText: "Connection delay" });
   await expect(delay.locator(".ui-kv-hint")).toHaveText("Round-trip time to the server");
   await expect(delay.locator(".ui-kv-value")).toContainText("ms");
+  await expect(popover(page).locator(".ui-kv-key").filter({ hasText: "Address" })).toBeVisible();
   // Every value copies on click.
-  await popover(page).locator(".ui-tab", { hasText: "Host" }).click();
+  await popover(page).locator(".ui-tab", { hasText: "Machine" }).click();
   await popover(page).locator(".ui-kv-value").first().click();
   await expect(popover(page).locator(".ui-kv-cell[data-copied]")).toHaveCount(1);
   // The pill toggles it.

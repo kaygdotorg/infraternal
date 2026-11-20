@@ -124,7 +124,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
   };
 
   const choose = (choice: Choice, how: PopoverSource): void => {
-    picker?.close(how);
+    picker?.close();
     if (choice.kind === "shell") cx.win.open(choice.machine.id);
     else open(choice.machine, choice.entry);
   };
@@ -132,7 +132,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
   const part: AppWindowsPart = {
     machines,
     togglePicker(anchor, source, query) {
-      if (picker) { picker.close(source); return; }
+      if (picker) { picker.close(); return; }
       picker = new Picker(cx, machines, anchor, source, choose, () => { picker = undefined; }, query);
     },
     paletteEntries() {
@@ -155,7 +155,12 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
     bindingFor(rec) {
       const m = rec.model;
       if (!m.stream || !m.hostId) return undefined;
-      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target: m.stream.target, machine: m.host, app: m.stream.appName, ...(m.stream.aspect ? { aspect: m.stream.aspect } : {}) });
+      const target = m.stream.target;
+      const hash = target.type === "window"
+        ? machines.state(m.hostId)?.inventory?.windows.find((entry) => entry.target.windowId === target.windowId && entry.target.ownerPid === target.ownerPid)?.iconHash
+        : undefined;
+      const icon = hash ? machines.icons.load(m.hostId, hash) : undefined;
+      return new AppBinding(cx, rec, { connection: adapter.connection, hostId: m.hostId, target, machine: m.host, app: m.stream.appName, ...(icon ? { icon } : {}), ...(m.stream.aspect ? { aspect: m.stream.aspect } : {}) });
     },
     async report() {
       const out: Array<{ id: string; state: string; control: string; stats: unknown }> = [];
@@ -173,7 +178,7 @@ export function createAppWindowsPart(cx: Ctx, adapter: AppWindowsAdapter): AppWi
       }
       return out;
     },
-    dispose() { offChange(); offHosts(); picker?.close("keyboard"); machines.dispose(); },
+    dispose() { offChange(); offHosts(); picker?.close(); machines.dispose(); },
   };
   // Preview builds expose the counters to the browser checks and the frame-time measurements; production builds do not.
   if (typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__) Object.assign(window, { __appwin: part, __appwinCx: cx });

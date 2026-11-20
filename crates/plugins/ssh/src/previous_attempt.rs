@@ -1,6 +1,6 @@
 //! Rechecks earlier host provisioning ownership and liveness before explicit recovery [17][139], #169.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt::Write as _};
 
 use crate::{
     install::Installation,
@@ -51,6 +51,9 @@ use crate::{
 // names and empty directories belong to this legacy fresh-install receipt.
 pub(crate) const INSPECT: &str = include_str!("previous_attempt.sh");
 
+/// Maximum public check output, including at most 1024 bounded terminal confirmation records (D368).
+pub(crate) const MAX_CHECK_OUTPUT: usize = 512 * 1024;
+
 /// Nonsecret coordinates bind confirmation to exactly the directory observed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviousAttempt {
@@ -70,6 +73,9 @@ pub struct PreviousAttempt {
     /// A restore that finds nothing moved leaves it on the host, and the
     /// set-aside refuses to start once it is there (#305, J202 P2).
     cancel: Option<uuid::Uuid>,
+    /// D368 (#433): the stuck first install's own open terminals, authenticated by the host. Start fresh
+    /// lists them and closes them only after the person confirms; the record sent back binds them.
+    terminals: Vec<TakeoverTerminal>,
 }
 
 /// A stuck install an earlier attempt set aside, as Check found it (#305 P2-1).
@@ -165,15 +171,200 @@ pub struct FinishedInstall {
     pub live: bool,
     /// Whether the host may take it over.
     pub takeover: Takeover,
+    /// Authenticated terminal records reviewed before any scope is stopped (D368).
+    pub terminals: Vec<TakeoverTerminal>,
+}
+
+/// A terminal shown on the Take over confirmation, with a private fingerprint binding its close unit.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TakeoverTerminal {
+    /// The terminal's canonical session id, never a service name supplied by the host.
+    #[serde(skip)]
+    id: uuid::Uuid,
+    /// The account running the foreground program.
+    pub account: String,
+    /// The foreground executable's short name, never its arguments.
+    pub program: String,
+    /// When the authenticated shim opened this terminal, in Unix seconds.
+    pub since: u64,
+    /// The terminal's `pts/<n>` name, which tells rows of the same account and program apart (#433 P3-2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tty: Option<String>,
+    /// How many other programs run in this terminal besides the named one, its shell and
+    /// background jobs included; Take over closes them too (#433 P3-1).
+    pub others: u32,
+    /// The unit whose stop closes it: the terminal's own `infraternal-session-<id>.scope`, or the
+    /// logind `session-<n>.scope` of the host login its shim runs in (#433 P1). Several terminals of
+    /// one login share it.
+    #[serde(skip)]
+    unit: String,
+    /// Binds socket, shim, close unit and every process in it across the confirmation.
+    #[serde(skip)]
+    fingerprint: String,
+}
+
+impl TakeoverTerminal {
+    /// Decode one bounded comma-separated terminal record
+    /// (`<id>,<account>,<program>,<since>,<tty>,<others>,<unit>,<fingerprint>`, names hex-encoded);
+    /// names cannot contain shell syntax.
+    fn parse(record: &str) -> Result<Self, Failure> {
+        let fields: Vec<_> = record.split(',').collect();
+        let [id, account, program, since, tty, others, unit, fingerprint] = fields.as_slice()
+        else {
+            return Err(refused());
+        };
+        let id = canonical_id(id)?;
+        let account = decode_terminal_name(account)?;
+        let program = decode_terminal_name(program)?;
+        if fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(refused());
+        }
+        if since.is_empty()
+            || since.starts_with('0')
+            || !since.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(refused());
+        }
+        let since = since.parse::<u64>().map_err(|_| refused())?;
+        if since == 0 || since > 253_402_300_799 {
+            return Err(refused());
+        }
+        let tty = match decode_terminal_name(tty)?.as_str() {
+            "-" => None,
+            name => {
+                let index = name.strip_prefix("pts/").ok_or_else(refused)?;
+                if index.is_empty()
+                    || index.len() > 7
+                    || (index.len() > 1 && index.starts_with('0'))
+                    || !index.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    return Err(refused());
+                }
+                Some(name.to_owned())
+            }
+        };
+        if others.is_empty()
+            || others.len() > 4
+            || (others.len() > 1 && others.starts_with('0'))
+            || !others.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(refused());
+        }
+        let others = others.parse::<u32>().map_err(|_| refused())?;
+        if others > 1024 {
+            return Err(refused());
+        }
+        let own = format!("infraternal-session-{}.scope", id.simple());
+        let login = unit
+            .strip_prefix("session-")
+            .and_then(|rest| rest.strip_suffix(".scope"))
+            .is_some_and(|session| {
+                !session.is_empty()
+                    && session.len() <= 32
+                    && session.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            });
+        if *unit != own && !login {
+            return Err(refused());
+        }
+        Ok(Self {
+            id,
+            account,
+            program,
+            since,
+            tty,
+            others,
+            unit: (*unit).into(),
+            fingerprint: (*fingerprint).into(),
+        })
+    }
+
+    /// Reproduce the exact host record, including its close unit and fingerprint.
+    fn record(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{}",
+            self.id.simple(),
+            encode_terminal_name(&self.account),
+            encode_terminal_name(&self.program),
+            self.since,
+            encode_terminal_name(self.tty.as_deref().unwrap_or("-")),
+            self.others,
+            self.unit,
+            self.fingerprint
+        )
+    }
+
+    /// The row's text in the Take over confirmation's Details.
+    fn finding(&self) -> String {
+        self.finding_for("Take over")
+    }
+
+    /// The row's text in a confirmation's Details: account, program, terminal and the other programs,
+    /// and the `action` that closes it.
+    fn finding_for(&self, action: &str) -> String {
+        let mut text = format!("An open terminal: {}, {}", self.account, self.program);
+        if let Some(tty) = &self.tty {
+            let _ = write!(text, " on {tty}");
+        }
+        match self.others {
+            0 => {}
+            1 => text.push_str(" and 1 other program"),
+            others => {
+                let _ = write!(text, " and {others} other programs");
+            }
+        }
+        let _ = write!(text, "; {action} closes it");
+        text
+    }
+}
+
+/// Decode a printable public name while keeping the host's fixed records free of shell syntax.
+fn decode_terminal_name(record: &str) -> Result<String, Failure> {
+    if record.is_empty()
+        || record.len() > 128
+        || !record.len().is_multiple_of(2)
+        || !record
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(refused());
+    }
+    let bytes = record
+        .as_bytes()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).map_err(|_| refused())?, 16)
+                .map_err(|_| refused())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let name = String::from_utf8(bytes).map_err(|_| refused())?;
+    if name.chars().any(char::is_control) {
+        return Err(refused());
+    }
+    Ok(name)
+}
+
+/// Reproduce the safe transport encoding of one public terminal name.
+fn encode_terminal_name(name: &str) -> String {
+    let mut record = String::with_capacity(name.len() * 2);
+    for byte in name.as_bytes() {
+        let _ = write!(record, "{byte:02x}");
+    }
+    record
 }
 
 /// Whether a finished install may be taken over, as the host proved it (D359).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Takeover {
     /// Root's own install, every part proven infraternal's, and used by
-    /// nothing but its agent: Take over may be offered.
+    /// its infraternal agent and authenticated own session scopes: Take over may be offered.
     Ready,
-    /// Proven infraternal's, but an open terminal or another process uses it.
+    /// Another holder uses it, or a terminal cannot be safely attributed to its own scope.
     Busy,
     /// Not provably infraternal's, or not root's: never offered.
     Unproven,
@@ -186,8 +377,8 @@ pub enum Takeover {
 pub fn parse_check_with_absence(
     bytes: &[u8],
 ) -> Result<(Check, Option<PreviousAttempt>, Remains), Failure> {
-    // The check lines plus an upgrade record with two host names stay below 1 KiB.
-    if bytes.len() > 1024 {
+    // Ordinary checks stay below 1 KiB; D368 adds bounded terminal records.
+    if bytes.len() > MAX_CHECK_OUTPUT {
         return Err(refused());
     }
     let end = bytes
@@ -216,10 +407,23 @@ pub fn parse_check_with_absence(
 /// `<host> <dev:ino> <live|idle> <ready|busy|unproven>`, exactly (D359).
 fn parse_installed(record: &str) -> Result<FinishedInstall, Failure> {
     let fields: Vec<&str> = record.split(' ').collect();
-    let [host, identity, live, takeover] = fields.as_slice() else {
+    let [host, identity, live, takeover, terminal_records @ ..] = fields.as_slice() else {
         return Err(refused());
     };
+    if terminal_records.len() > 1024 {
+        return Err(refused());
+    }
+    let terminals = terminal_records
+        .iter()
+        .map(|record| TakeoverTerminal::parse(record))
+        .collect::<Result<Vec<_>, _>>()?;
+    if terminals.windows(2).any(|pair| pair[0].id >= pair[1].id)
+        || (!terminals.is_empty() && *takeover != "ready")
+    {
+        return Err(refused());
+    }
     Ok(FinishedInstall {
+        terminals,
         host: canonical_id(host)?,
         identity: parse_identity(identity)?,
         live: parse_liveness(live)?,
@@ -268,15 +472,37 @@ pub const INSTALLED_ELSEWHERE: &str = "This machine already has an infraternal a
 /// The Take over offer's own words: what was found and what Take over does (D359).
 pub const TAKEOVER_OFFER: &str = "This machine already has an infraternal agent from an earlier setup that isn't one of this server's hosts. Take it over to set it up here.";
 
-/// The refusal for a finished install that something still uses (D359).
-/// It holds before the stop (nothing touched) and after it (the agent was put
-/// back as it was found), so it never claims that nothing changed (J342 P3-4).
-pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, and something is using it right now, such as an open terminal. It was left as it was found. Close it, then try again.";
+/// The check or Take over could not prove that only this install's terminals used it, before any
+/// terminal closed (D359, #433 P2). This includes ambiguous helper attribution, not just known holders.
+pub const TAKEOVER_BUSY: &str = "This machine has an infraternal agent from an earlier setup, but Take over could not confirm that only its own terminals were using it. No terminal was closed, and the old install's files were kept. Try again.";
+
+/// The refusal when the final holder check could not prove the old install unused after every terminal the
+/// person confirmed (host exit 74, #433 P2). The host leaves 74 only once all their units stopped;
+/// a unit that would not stop is [`TAKEOVER_CLOSE_UNFINISHED`]. The install is put back; closed
+/// terminals cannot be.
+pub const TAKEOVER_BUSY_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, but could not confirm that the old infraternal agent was no longer in use. The old install's files were kept, and those terminals stay closed. Try again.";
+
+/// The refusal when a confirmed terminal's unit could not be confirmed stopped after Take over
+/// began closing (host exit 79, #433 P3-1, J462). Some confirmed terminals may be closed and the
+/// rest may still be open; no other program is to blame, and the install is put back.
+pub const TAKEOVER_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Take over stopped. Some terminals may already be closed; any that closed stay closed. The old install was put back as it was. Try again.";
+
+/// A service-manager operation failed before Take over closed any terminal (host exit 80, #433 P3).
+/// Unlike 73, this status is not evidence of an unexpected holder.
+pub const TAKEOVER_MANAGER_FAILED: &str = "The host's service manager could not stop or update the old infraternal agent's service, so Take over stopped. No terminal was closed. The old install's files were kept. Try again.";
+
+/// Disabling the old service or reloading the manager failed after every confirmed terminal stopped
+/// (host exit 81, #433 P3). Closed terminals cannot be reopened by restoring the install.
+pub const TAKEOVER_MANAGER_FAILED_AFTER_CLOSE: &str = "Take over closed the terminals you confirmed, but the host's service manager could not finish updating the old infraternal agent's service. The old install's files were kept, and those terminals stay closed. Try again.";
+
+/// The refusal when the install or its terminals changed between review and confirmation (host exit
+/// 75). Every 75 happens before any terminal is closed (#433 P2).
+pub const TAKEOVER_CHANGED: &str = "This install or its open terminals changed since you reviewed them, so no terminal was closed and the old install was left as it was found. Try again to review it before taking over.";
 
 impl FinishedInstall {
     /// The exact record the host compares before it changes anything.
     fn record(&self) -> String {
-        format!(
+        let mut record = format!(
             "INFRATERNAL_SETUP_INSTALLED {} {} {} {}",
             self.host.simple(),
             self.identity,
@@ -286,7 +512,12 @@ impl FinishedInstall {
                 Takeover::Busy => "busy",
                 Takeover::Unproven => "unproven",
             }
-        )
+        );
+        for terminal in &self.terminals {
+            record.push(' ');
+            record.push_str(&terminal.record());
+        }
+        record
     }
 
     /// The refusal when Take over is not offered: in use ([`TAKEOVER_BUSY`]),
@@ -303,7 +534,8 @@ impl FinishedInstall {
     /// The paused step that offers Take over and names the old install (D359).
     #[must_use]
     pub(crate) fn takeover_failure(&self, mode: InstallMode) -> Failure {
-        let mut failure = installed_elsewhere(mode).with_takeover(self.host, self.live);
+        let mut failure =
+            installed_elsewhere(mode).with_takeover(self.host, self.live, self.terminals.clone());
         failure.message = TAKEOVER_OFFER;
         failure
     }
@@ -311,7 +543,7 @@ impl FinishedInstall {
     /// What confirming Take over does, for the confirmation's Details.
     #[must_use]
     pub(crate) fn takeover_findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
-        Leftovers {
+        let mut leftovers = Leftovers {
             challenge,
             mode,
             findings: vec![
@@ -327,7 +559,11 @@ impl FinishedInstall {
                     "It is set aside, put back if setup fails, and deleted once this machine has joined",
                 ),
             ],
+        };
+        for terminal in &self.terminals {
+            leftovers.findings.push(Cow::Owned(terminal.finding()));
         }
+        leftovers
     }
 
     /// This install as the attempt that takes it over with `token` sees it:
@@ -349,6 +585,7 @@ impl FinishedInstall {
             }),
             live: self.live,
             cancel: None,
+            terminals: Vec::new(),
         }
     }
 
@@ -365,24 +602,52 @@ impl FinishedInstall {
         token: uuid::Uuid,
     ) -> Result<(), Failure> {
         target.validate()?;
+        let record = format!("{}\n", self.record());
+        // A long terminal list travels over stdin, never the operating system's single-argument limit.
         let body = format!(
-            "{}\n{}\n{INSPECT}\ntake_over_finished_install {} {}\n",
+            "{}\n{}\n{INSPECT}\nIFS= read -r takeover_record\ntake_over_finished_install \"$takeover_record\" {}\n",
             crate::install::SETUP_LOCK,
             crate::install::RUNTIME_CLEANUP,
-            crate::transport::shell_quote(&self.record()),
             token.simple()
         );
         session
             .run(
                 &Installation::script_for(target.mode, self.host, token, &body),
-                Input::Empty,
+                Input::Bytes(record.as_bytes()),
             )
             .await
             .map_err(classify)
             .map_err(|mut error| {
-                if error.exit_status == Some(73) {
-                    error.kind = FailureKind::UnrecognizedInstall;
-                    error.message = TAKEOVER_BUSY;
+                match error.exit_status {
+                    Some(73) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_BUSY;
+                    }
+                    Some(80) => {
+                        // Cached clients drop exit_status; the generic kind keeps their headline truthful.
+                        error.kind = FailureKind::Install;
+                        error.failed_step = Some(crate::model::InstallStep::Install);
+                        error.message = TAKEOVER_MANAGER_FAILED;
+                    }
+                    Some(81) => {
+                        // Cached clients drop exit_status; the generic kind keeps their headline truthful.
+                        error.kind = FailureKind::Install;
+                        error.failed_step = Some(crate::model::InstallStep::Install);
+                        error.message = TAKEOVER_MANAGER_FAILED_AFTER_CLOSE;
+                    }
+                    Some(79) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_CLOSE_UNFINISHED;
+                    }
+                    Some(74) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_BUSY_AFTER_CLOSE;
+                    }
+                    Some(75) => {
+                        error.kind = FailureKind::UnrecognizedInstall;
+                        error.message = TAKEOVER_CHANGED;
+                    }
+                    _ => {}
                 }
                 error
             })?;
@@ -430,6 +695,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if let ["INFRATERNAL_SETUP_SET_ASIDE", record @ ..] = fields.as_slice() {
         return parse_set_aside(record).map(Some);
     }
+    let mut terminal_records: &[&str] = &[];
     let (host, transaction, identity, sockets, lease_owner, enrolled, live) =
         match fields.as_slice() {
             [
@@ -438,7 +704,11 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
                 transaction,
                 identity,
                 sockets,
-            ] => (*host, *transaction, *identity, *sockets, None, None, false),
+                records @ ..,
+            ] => {
+                terminal_records = records;
+                (*host, *transaction, *identity, *sockets, None, None, false)
+            }
             [
                 "INFRATERNAL_SETUP_UPGRADE",
                 host,
@@ -473,6 +743,16 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
     if sockets > 1024 {
         return Err(refused());
     }
+    let terminals = terminal_records
+        .iter()
+        .map(|record| TakeoverTerminal::parse(record))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Each listed terminal serves one of the counted sockets, in canonical id order.
+    if terminals.len() > usize::from(sockets)
+        || terminals.windows(2).any(|pair| pair[0].id >= pair[1].id)
+    {
+        return Err(refused());
+    }
     Ok(Some(PreviousAttempt {
         host,
         transaction,
@@ -483,6 +763,7 @@ fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
         set_aside: None,
         live,
         cancel: None,
+        terminals,
     }))
 }
 
@@ -513,6 +794,7 @@ fn parse_set_aside(record: &[&str]) -> Result<PreviousAttempt, Failure> {
         enrolled: None,
         live: false,
         cancel: None,
+        terminals: Vec::new(),
         set_aside: Some(SetAside {
             kind,
             machine: parse_machine(machine)?,
@@ -694,11 +976,15 @@ impl PreviousAttempt {
                     }),
                     reenroll && self.live,
                 )
-        } else {
+        } else if self.terminals.is_empty() {
             failure
+        } else {
+            failure.with_closing_terminals(self.terminals.clone())
         }
     }
 
+    /// What Start fresh removes, for its confirmation's Details: the journal, what is still live
+    /// and, for a stuck first install, each of its own open terminals that it closes (D368).
     #[must_use]
     pub fn findings(&self, mode: InstallMode, challenge: uuid::Uuid) -> Leftovers {
         let upgrade = self.lease_owner.is_some();
@@ -719,6 +1005,13 @@ impl PreviousAttempt {
                 // An upgrade journal counts only sessions a live shim serves.
                 // A Replace keeps them: the new agent adopts them (D337, D13).
                 match (upgrade, self.sockets) {
+                    // Every socket is one of the listed terminals (D368, #433).
+                    (false, open)
+                        if !self.terminals.is_empty()
+                            && usize::from(open) == self.terminals.len() =>
+                    {
+                        Cow::Borrowed("No other live setup found")
+                    }
                     (false, 0) => Cow::Borrowed("No live setup found"),
                     (false, _) => Cow::Borrowed("Local sockets with no listener"),
                     (true, 0) => Cow::Borrowed("No open terminal sessions"),
@@ -727,8 +1020,21 @@ impl PreviousAttempt {
                         Cow::Owned(format!("{open} open terminal sessions will carry over"))
                     }
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(
+                self.terminals
+                    .iter()
+                    .map(|terminal| Cow::Owned(terminal.finding_for("Start fresh"))),
+            )
+            .collect(),
         }
+    }
+
+    /// The stuck first install's own open terminals that Start fresh closes (D368, #433).
+    #[must_use]
+    pub(crate) fn terminals(&self) -> &[TakeoverTerminal] {
+        &self.terminals
     }
 
     /// Whether Check found an install an earlier attempt set aside, and which
@@ -979,33 +1285,69 @@ impl PreviousAttempt {
                 .upgrade_action(session, target, "replace_stuck_install")
                 .await;
         }
-        let expected = format!(
+        let mut expected = format!(
             "INFRATERNAL_SETUP_STALE {} {} {} {}",
             self.host.simple(),
             self.transaction.simple(),
             self.identity,
             self.sockets
         );
+        for terminal in &self.terminals {
+            expected.push(' ');
+            expected.push_str(&terminal.record());
+        }
+        expected.push('\n');
         // Revalidate listeners after ownership reads, immediately before removal.
-        // The exact observed record already contains the root identity; reuse its
-        // penultimate field rather than allocating another formatted shell argument.
+        // The exact observed record already contains the root identity: its fourth
+        // field, `<dev:ino>`. Counted by position, because terminal records (D368)
+        // may follow the socket count.
+        // The record travels over stdin: with terminal records (D368) it can
+        // exceed the operating system's single-argument limit.
         let body = format!(
-            "{setup_lock}\n{}\n{INSPECT}\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = {} ] || exit 75\nidentity=${{observed% *}}\nidentity=${{identity##* }}\nnot_live\nstop_activated_agent\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
+            "{setup_lock}\n{}\n{INSPECT}\nIFS= read -r expected\nsetup_guard\nobserved=$(inspect_previous)\n[ \"$observed\" = \"$expected\" ] || exit 75\nset -- $observed\nidentity=$4\nnot_live\nstop_activated_agent\nretire_control_socket\nfor entry in \"$base/sessions\"/*.sock \"$base/sessions/sessions\"/*.sock; do\n    [ \"$entry\" != \"$base/sessions/plugins.sock\" ] || continue\n    [ ! -S \"$entry\" ] || rm -- \"$entry\"\ndone\n{}\n{}",
             crate::install::RUNTIME_CLEANUP,
-            crate::transport::shell_quote(&expected),
             crate::install::FRESH_CLEANUP,
             crate::install::ROLLBACK_TRANSACTION
         );
+        let closes = !self.terminals.is_empty();
         session
             .run(
                 &Installation::script_for(target.mode, self.host, self.transaction, &body),
-                Input::Empty,
+                Input::Bytes(expected.as_bytes()),
             )
             .await
-            .map_err(classify)?;
+            .map_err(classify)
+            .map_err(|mut error| {
+                // Only a Start fresh that lists terminals can close one (#433 P2).
+                match (closes, error.exit_status) {
+                    (true, Some(73)) => error.message = START_FRESH_BUSY,
+                    (_, Some(74)) => error.message = START_FRESH_BUSY_AFTER_CLOSE,
+                    (_, Some(79)) => error.message = START_FRESH_CLOSE_UNFINISHED,
+                    (true, Some(75)) => error.message = START_FRESH_CHANGED,
+                    _ => {}
+                }
+                error
+            })?;
         Ok(())
     }
 }
+
+/// Start fresh with listed terminals, refused before any terminal closed: something besides the
+/// earlier setup's own terminals still uses it (#433, D368).
+pub const START_FRESH_BUSY: &str = "Something besides the earlier setup's own terminals is still using it, such as a program that runs from its folder. No terminal was closed and nothing was removed. Stop that program, then try again.";
+
+/// Start fresh closed every confirmed terminal, then something else still used the earlier setup
+/// (host exit 74, left only once all their units stopped). Nothing was removed; closed terminals
+/// cannot be reopened.
+pub const START_FRESH_BUSY_AFTER_CLOSE: &str = "Start fresh closed the terminals you confirmed, then found something else still using the earlier setup, such as a program that runs from its folder. Nothing was removed, and those terminals stay closed. Stop that program, then try again.";
+
+/// A confirmed terminal's unit would not stop during Start fresh (host exit 79, #433 P3-1): some may be
+/// closed and the rest may still be open; nothing was removed.
+pub const START_FRESH_CLOSE_UNFINISHED: &str = "A terminal you confirmed would not close, so Start fresh stopped. Some terminals may already be closed; any that closed stay closed. Nothing was removed. Try again.";
+
+/// The earlier setup or its terminals changed between review and confirmation (host exit 75);
+/// every 75 happens before any terminal is closed.
+pub const START_FRESH_CHANGED: &str = "The earlier setup or its open terminals changed since you reviewed them, so no terminal was closed and nothing was removed. Try again to review it.";
 
 /// Installer-owned statuses are fixed vocabulary; remote output remains withheld.
 #[must_use]
@@ -1186,6 +1528,252 @@ mod tests {
             uuid::Uuid::from_u128(7),
             "the token names the set-aside"
         );
+    }
+
+    /// D368: a terminal-bearing offer carries exactly the reviewed metadata back to the host.
+    #[test]
+    fn terminal_takeover_record_names_what_confirmation_will_close() {
+        let terminal = format!(
+            "{},726f6f74,62617368,1792195200,7074732f33,2,session-8.scope,{}",
+            "3".repeat(32),
+            "a".repeat(64)
+        );
+        let line = format!("{} 64:1234 live ready {terminal}", "1".repeat(32));
+        let installed = parse_installed(&line).unwrap();
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
+        let offer = serde_json::to_value(installed.takeover_failure(InstallMode::Root)).unwrap();
+        let shown = &offer["takeover"]["terminals"][0];
+        assert_eq!(shown["account"], "root");
+        assert_eq!(shown["program"], "bash");
+        assert_eq!(shown["since"], 1_792_195_200_u64);
+        assert_eq!(shown["tty"], "pts/3");
+        assert_eq!(shown["others"], 2);
+        assert!(
+            shown.get("unit").is_none(),
+            "the close unit stays between server and host"
+        );
+        let findings = installed.takeover_findings(InstallMode::Root, uuid::Uuid::nil());
+        assert!(findings.findings.iter().any(|line| line
+            == "An open terminal: root, bash on pts/3 and 2 other programs; Take over closes it"));
+        for invalid in [
+            terminal.replace("726f6f74", "bad name"),
+            terminal.replace("62617368", "$(id)"),
+            terminal.replace("7074732f33", "7474793031"),
+            terminal.replace(",2,", ",02,"),
+            terminal.replace(",2,", ",-1,"),
+            terminal.replace(",2,", ",1025,"),
+            terminal.replace("session-8.scope", "sshd.service"),
+            terminal.replace("session-8.scope", "session-8 x.scope"),
+            terminal.replace(
+                "session-8.scope",
+                &format!("infraternal-session-{}.scope", "4".repeat(32)),
+            ),
+            terminal.replace(",session-8.scope", ""),
+            format!("{terminal} {terminal}"),
+        ] {
+            assert!(
+                parse_installed(&format!("{} 64:1234 live ready {invalid}", "1".repeat(32)))
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    /// #433: the old layout's own scope still parses, with no terminal name when the kernel had none.
+    #[test]
+    fn an_old_layout_terminal_record_closes_its_own_scope() {
+        let id = "3".repeat(32);
+        let terminal = format!(
+            "{id},726f6f74,62617368,1792195200,2d,0,infraternal-session-{id}.scope,{}",
+            "b".repeat(64)
+        );
+        let line = format!("{} 64:1234 idle ready {terminal}", "1".repeat(32));
+        let installed = parse_installed(&line).unwrap();
+        assert_eq!(
+            installed.record(),
+            format!("INFRATERNAL_SETUP_INSTALLED {line}")
+        );
+        assert_eq!(installed.terminals[0].tty, None);
+        assert_eq!(
+            installed.terminals[0].finding(),
+            "An open terminal: root, bash; Take over closes it"
+        );
+    }
+
+    /// #433 P2: no refusal claims a closed terminal unless one was closed.
+    #[test]
+    fn only_the_refusal_after_closing_mentions_closed_terminals() {
+        assert!(
+            !TAKEOVER_BUSY.contains("closed the")
+                && TAKEOVER_BUSY.contains("No terminal was closed")
+        );
+        assert!(
+            TAKEOVER_CHANGED.contains("no terminal was closed")
+                && !TAKEOVER_CHANGED.contains("stay closed")
+        );
+        assert!(TAKEOVER_BUSY_AFTER_CLOSE.contains("stay closed"));
+    }
+
+    /// #433 (J205c legacy1): a first install that crashed while activating, with one of its own
+    /// old-layout terminals still open, is offered Start fresh listing that terminal; the record
+    /// sent back binds it, and only the terminal-aware challenge can confirm.
+    #[test]
+    fn a_stuck_first_install_lists_the_terminal_start_fresh_closes() {
+        let id = "fe710269164440088a7513c35c6b41d8";
+        let terminal = format!(
+            "{id},726f6f74,62617368,1792195200,7074732f30,0,infraternal-session-{id}.scope,{}",
+            "c".repeat(64)
+        );
+        let line = format!(
+            "INFRATERNAL_SETUP_STALE {} {} 64:1234 1 {terminal}\n",
+            "1".repeat(32),
+            "2".repeat(32)
+        );
+        let previous = parse(line.as_bytes()).unwrap().unwrap();
+        assert_eq!(previous.terminals().len(), 1);
+        let findings = previous
+            .findings(InstallMode::Root, uuid::Uuid::nil())
+            .findings;
+        assert!(
+            findings
+                .iter()
+                .any(|line| line == "No other live setup found")
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|line| line == "An open terminal: root, bash on pts/0; Start fresh closes it")
+        );
+        let challenge = uuid::Uuid::from_u128(7);
+        let offer = previous
+            .stuck_failure(false)
+            .with_terminal_confirmation(challenge);
+        assert_eq!(offer.terminal_confirmation(), Some(challenge));
+        let shown = serde_json::to_value(&offer).unwrap();
+        assert_eq!(shown["closes"]["terminals"][0]["program"], "bash");
+        assert_eq!(shown["closes"]["close_challenge"], challenge.to_string());
+        // More terminals than live sockets, or out of order, is not a record the host writes.
+        for invalid in [
+            line.replace(" 1 ", " 0 "),
+            line.replace('\n', &format!(" {terminal}\n")),
+        ] {
+            assert!(parse(invalid.as_bytes()).is_err(), "{invalid}");
+        }
+        // Without terminals nothing changes: no list, no terminal challenge.
+        let plain = parse(
+            format!(
+                "INFRATERNAL_SETUP_STALE {} {} 64:1234 0\n",
+                "1".repeat(32),
+                "2".repeat(32)
+            )
+            .as_bytes(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            plain
+                .stuck_failure(false)
+                .with_terminal_confirmation(challenge)
+                .terminal_confirmation()
+                .is_none()
+        );
+    }
+
+    /// #433 P2 for Start fresh: only the refusal after closing mentions closed terminals.
+    #[test]
+    fn start_fresh_refusals_mention_closed_terminals_only_after_closing() {
+        assert!(START_FRESH_BUSY.contains("No terminal was closed"));
+        assert!(START_FRESH_CHANGED.contains("no terminal was closed"));
+        assert!(START_FRESH_BUSY_AFTER_CLOSE.contains("stay closed"));
+    }
+
+    /// #433 P3: a failed terminal stop does not establish whether that unit stopped, so the copy
+    /// allows either outcome without blaming another program.
+    #[test]
+    fn an_unfinished_close_does_not_guess_which_terminals_remain_open() {
+        for text in [TAKEOVER_CLOSE_UNFINISHED, START_FRESH_CLOSE_UNFINISHED] {
+            assert!(
+                text.contains("Some terminals may already be closed"),
+                "{text}"
+            );
+            assert!(
+                !text.contains("closed the terminals you confirmed"),
+                "{text}"
+            );
+            assert!(!text.contains("program"), "{text}");
+        }
+    }
+
+    /// Return one host status without executing a remote script, to test the public failure mapping.
+    struct HostExit(u8);
+
+    impl SshSession for HostExit {
+        /// Model the transport's fixed exit status; no host prose is trusted.
+        fn run<'a>(
+            &'a self,
+            _: &'a str,
+            _: Input<'a>,
+        ) -> crate::transport::Operation<'a, crate::transport::CommandOutput> {
+            Box::pin(async {
+                let mut error = Failure::install("fixture");
+                error.exit_status = Some(self.0);
+                Err(error)
+            })
+        }
+    }
+
+    /// #433 P3: each takeover status selects truthful UI copy and preserves its diagnostic code.
+    #[tokio::test]
+    async fn takeover_failures_distinguish_holders_terminals_and_manager_operations() {
+        let installed = parse_installed(&format!("{} 64:1234 live ready", "a".repeat(32))).unwrap();
+        let target = Target {
+            id: "fixture".into(),
+            address: crate::model::TargetAddress::Manual("root@fixture".into()),
+            credential: None,
+            mode: InstallMode::Root,
+            root_consent: true,
+        };
+        for (status, message) in [
+            (73, TAKEOVER_BUSY),
+            (74, TAKEOVER_BUSY_AFTER_CLOSE),
+            (75, TAKEOVER_CHANGED),
+            (79, TAKEOVER_CLOSE_UNFINISHED),
+            (80, TAKEOVER_MANAGER_FAILED),
+            (81, TAKEOVER_MANAGER_FAILED_AFTER_CLOSE),
+        ] {
+            let error = installed
+                .take_over(&HostExit(status), &target, uuid::Uuid::from_u128(7))
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.exit_status, Some(status));
+            assert_eq!(
+                error.kind,
+                if matches!(status, 80 | 81) {
+                    FailureKind::Install
+                } else {
+                    FailureKind::UnrecognizedInstall
+                }
+            );
+            assert_eq!(error.message, message);
+            if matches!(status, 80 | 81) {
+                let wire = serde_json::to_value(&error).unwrap();
+                assert_eq!(wire["kind"], "install");
+                assert_eq!(wire["failed_step"], "install");
+                assert_eq!(wire["exit_status"], status);
+                assert_eq!(wire["message"], message);
+            }
+        }
+        assert!(TAKEOVER_MANAGER_FAILED.contains("No terminal was closed"));
+        assert!(TAKEOVER_MANAGER_FAILED_AFTER_CLOSE.contains("those terminals stay closed"));
+        for text in [TAKEOVER_MANAGER_FAILED, TAKEOVER_MANAGER_FAILED_AFTER_CLOSE] {
+            assert!(text.contains("service manager"));
+            assert!(!text.contains("something else"));
+            assert!(!text.contains("still open"));
+        }
     }
 
     /// A set-aside install's record offers Put it back, and names which restore

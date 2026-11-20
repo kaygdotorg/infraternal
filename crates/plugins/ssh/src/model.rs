@@ -204,6 +204,12 @@ pub enum FailureKind {
     /// help, so the person picks another account or root (#394).
     #[serde(rename = "no_account")]
     NoAccount,
+    /// The server's certificate authority is locked (after a restart, or before
+    /// first-run setup finished), so no host can be added yet. Nothing was
+    /// changed on the host. The page answers with the passkey unlock it already
+    /// has, then retries; it must not guess this from the message wording.
+    #[serde(rename = "authority_locked")]
+    AuthorityLocked,
 }
 
 /// Public, bounded findings from a host-local ownership check; paths belong in Details.
@@ -301,6 +307,19 @@ struct FailureIds {
     refusal: Option<Refusal>,
     /// A finished install of another server that this attempt offers to take over (D359).
     takeover: Option<TakeoverOffer>,
+    /// The terminals a Start fresh of a stuck first install closes once confirmed (D368, #433).
+    closes: Option<TerminalClose>,
+}
+
+/// The open terminals a Start fresh confirmation lists and closes (D368, #433): a first install that
+/// crashed while activating can leave one of its own terminals running.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TerminalClose {
+    /// Each terminal that confirmation will close.
+    terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    /// Only a UI that shows these terminals receives and submits this challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    close_challenge: Option<uuid::Uuid>,
 }
 
 /// The staging check that refused with exit 71 (#394, J314 P2-1). The host
@@ -346,6 +365,11 @@ pub(crate) struct TakeoverOffer {
     /// The old install's id, as 32 lowercase hex characters.
     install: String,
     live: bool,
+    /// Each terminal that confirmation will close (D368).
+    terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    /// Only a UI that understands terminal closure receives and submits this challenge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    close_challenge: Option<uuid::Uuid>,
 }
 
 /// Host-local lease metadata parsed from the fixed setup-check record.
@@ -401,6 +425,9 @@ impl Serialize for Failure {
         }
         if let Some(takeover) = self.ids.as_deref().and_then(|ids| ids.takeover.as_ref()) {
             state.serialize_field("takeover", takeover)?;
+        }
+        if let Some(closes) = self.ids.as_deref().and_then(|ids| ids.closes.as_ref()) {
+            state.serialize_field("closes", closes)?;
         }
         if let Some(failed_step) = self.failed_step {
             state.serialize_field("failed_step", &failed_step)?;
@@ -515,12 +542,60 @@ impl Failure {
     /// Offer to take over the finished install of another server whose id is
     /// `install`, and say whether its agent runs (D359).
     #[must_use]
-    pub(crate) fn with_takeover(mut self, install: uuid::Uuid, live: bool) -> Self {
+    pub(crate) fn with_takeover(
+        mut self,
+        install: uuid::Uuid,
+        live: bool,
+        terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    ) -> Self {
         self.ids.get_or_insert_with(Box::default).takeover = Some(TakeoverOffer {
             install: install.simple().to_string(),
             live,
+            terminals,
+            close_challenge: None,
         });
         self
+    }
+
+    /// List the stuck first install's own open terminals, which its Start fresh closes (D368, #433).
+    #[must_use]
+    pub(crate) fn with_closing_terminals(
+        mut self,
+        terminals: Vec<crate::previous_attempt::TakeoverTerminal>,
+    ) -> Self {
+        self.ids.get_or_insert_with(Box::default).closes = Some(TerminalClose {
+            terminals,
+            close_challenge: None,
+        });
+        self
+    }
+
+    /// Bind terminal closure to its own confirmation, so cached UIs cannot use generic cleanup consent.
+    #[must_use]
+    pub(crate) fn with_terminal_confirmation(mut self, challenge: uuid::Uuid) -> Self {
+        if let Some(ids) = self.ids.as_deref_mut() {
+            if let Some(offer) = ids.takeover.as_mut()
+                && !offer.terminals.is_empty()
+            {
+                offer.close_challenge = Some(challenge);
+            }
+            if let Some(closes) = ids.closes.as_mut()
+                && !closes.terminals.is_empty()
+            {
+                closes.close_challenge = Some(challenge);
+            }
+        }
+        self
+    }
+
+    /// The terminal-aware confirmation challenge, absent for ordinary cleanup and terminal-free takeover.
+    #[must_use]
+    pub(crate) fn terminal_confirmation(&self) -> Option<uuid::Uuid> {
+        let ids = self.ids.as_deref()?;
+        ids.takeover
+            .as_ref()
+            .and_then(|offer| offer.close_challenge)
+            .or_else(|| ids.closes.as_ref()?.close_challenge)
     }
 
     /// Mark the lock as an install an earlier add-host set aside and did not put back.
@@ -722,6 +797,7 @@ impl Failure {
             FailureKind::UnrecognizedInstall => "unrecognized-install",
             FailureKind::UnprovenFiles => "unproven-files",
             FailureKind::NoAccount => "no-account",
+            FailureKind::AuthorityLocked => "authority-locked",
             FailureKind::Unsupported => "unsupported",
             FailureKind::StalePreviousAttempt => "leftovers",
             FailureKind::SetupRunning => "setup-running",
@@ -866,7 +942,16 @@ impl Failure {
     pub fn install(message: &'static str) -> Self {
         Self::new(FailureKind::Install, message)
     }
+    /// The certificate authority is locked or not set up: nothing can be added
+    /// until an administrator confirms with a passkey (see [`FailureKind::AuthorityLocked`]).
+    #[must_use]
+    pub fn authority_locked() -> Self {
+        Self::new(FailureKind::AuthorityLocked, AUTHORITY_LOCKED)
+    }
 }
+/// The sentence for [`FailureKind::AuthorityLocked`].
+pub const AUTHORITY_LOCKED: &str =
+    "Set up or unlock host connections with an administrator passkey before adding a host.";
 /// Exit 71 outside the read-only check: a staging step met files at the setup
 /// location that it cannot prove are this setup's own, and changed nothing.
 pub const UNPROVEN_FILES: &str = "Setup found infraternal files on this machine that it can't prove belong to this setup, so it changed nothing.";

@@ -22,6 +22,8 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 /// no peers.
 fn config() -> Config {
     Config {
+        authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: Some(NodeId(1)),
         node: NodeId(1),

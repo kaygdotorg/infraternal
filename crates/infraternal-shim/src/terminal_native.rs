@@ -1,19 +1,37 @@
 //! Audited libghostty-vt FFI ownership and bounded snapshot buffer boundary [40][94].
 #![allow(unsafe_code)]
 use std::{ffi::c_void, io, ptr::NonNull};
-/// Creation options laid out as the native library's C structure expects.
-/// `max_scrollback` is the history byte budget.
+/// Result values frozen by the libghostty-vt 1.0 C ABI.
+const GHOSTTY_SUCCESS: i32 = 0;
+/// Allocation failed inside the native library.
+const GHOSTTY_OUT_OF_MEMORY: i32 = -1;
+/// A required value or terminal dimension was invalid.
+const GHOSTTY_INVALID_VALUE: i32 = -2;
+/// The stable API does not know this key or this build omitted its feature.
+const GHOSTTY_UNSUPPORTED: i32 = -8;
+/// Mode and value layout used by libghostty-vt's typed mode getter.
 #[repr(C)]
-struct Options {
-    cols: u16,
-    rows: u16,
-    max_scrollback: usize,
+#[cfg(all(test, feature = "process-per-user"))]
+struct TerminalModeConfig {
+    /// The packed mode number and ANSI flag queried through the C API.
+    mode: u16,
+    /// The mode value written by the native getter.
+    value: bool,
 }
+/// C option 28 configures the primary screen's scrollback byte cap.
+const TERMINAL_OPT_SCROLLBACK_MAX_BYTES: i32 = 28;
+/// C data 15 reports the number of rows currently retained in scrollback.
+#[cfg(any(test, feature = "process-per-user"))]
+const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
+/// C data 37 reads one mode into `TerminalModeConfig`.
+#[cfg(all(test, feature = "process-per-user"))]
+const TERMINAL_DATA_MODE: i32 = 37;
 unsafe extern "C" {
     fn ghostty_terminal_new(
         allocator: *const c_void,
         out: *mut *mut c_void,
-        options: Options,
+        cols: u16,
+        rows: u16,
     ) -> i32;
     fn ghostty_terminal_free(terminal: *mut c_void);
     fn ghostty_terminal_vt_write(terminal: *mut c_void, data: *const u8, len: usize);
@@ -24,12 +42,12 @@ unsafe extern "C" {
         width: u32,
         height: u32,
     ) -> i32;
+    /// Sets one typed terminal option; the option selects the pointed-to type.
+    fn ghostty_terminal_set(terminal: *mut c_void, option: i32, value: *const c_void) -> i32;
     #[cfg(test)]
     fn infraternal_vt_compare(a: *mut c_void, b: *mut c_void, strict: bool) -> usize;
-    #[cfg(all(test, feature = "process-per-user"))]
-    fn ghostty_terminal_mode_get(terminal: *mut c_void, tag: u16, out: *mut bool) -> i32;
     #[cfg(any(test, feature = "process-per-user"))]
-    fn ghostty_terminal_get(terminal: *mut c_void, tag: i32, out: *mut c_void) -> i32;
+    fn ghostty_terminal_get(terminal: *mut c_void, data: i32, out: *mut c_void) -> i32;
     /// Writes an approximate repaint into the buffer; returns its length, which the
     /// caller must check against the buffer size.
     fn infraternal_vt_approximate(terminal: *mut c_void, data: *mut u8, len: usize) -> usize;
@@ -47,6 +65,29 @@ unsafe extern "C" {
     /// arithmetic; creates no terminal.
     #[cfg(feature = "process-per-user")]
     fn infraternal_vt_screen_pages(cols: u16, rows: u16, page_len: *mut usize) -> usize;
+}
+/// Maps the stable C result enum to the Rust error kind used by callers.
+fn result_error(operation: &str, result: i32) -> io::Error {
+    let kind = match result {
+        GHOSTTY_OUT_OF_MEMORY => io::ErrorKind::OutOfMemory,
+        GHOSTTY_INVALID_VALUE => io::ErrorKind::InvalidInput,
+        GHOSTTY_UNSUPPORTED => io::ErrorKind::Unsupported,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, format!("libghostty-vt {operation} failed: {result}"))
+}
+/// Read a `usize` value from the stable data getter without hiding API errors.
+#[cfg(any(test, feature = "process-per-user"))]
+fn read_size_t_data(handle: NonNull<c_void>, data: i32) -> io::Result<usize> {
+    let mut value = 0usize;
+    // SAFETY: the live handle is borrowed for this synchronous query, and the
+    // stable key's documented output is one usize written to this valid slot.
+    let result = unsafe { ghostty_terminal_get(handle.as_ptr(), data, (&raw mut value).cast()) };
+    if result == GHOSTTY_SUCCESS {
+        Ok(value)
+    } else {
+        Err(result_error("data getter", result))
+    }
 }
 /// Sizes a shared-host terminal's floor for one `cols` x `rows` screen, at
 /// the page shape of the native build [#205].
@@ -100,17 +141,24 @@ pub(super) struct Engine(
     #[cfg(feature = "process-per-user")] Option<Box<crate::terminal_memory::Memory>>,
 );
 impl Engine {
+    /// Reports whether synchronized output mode is active in the native parser.
+    /// Used by process-per-user tests to pin the stable mode getter contract.
     #[cfg(all(test, feature = "process-per-user"))]
     pub(super) fn synchronized_output(&self) -> io::Result<bool> {
         let handle = self.0.ok_or_else(|| io::Error::other("retired VT"))?;
-        let mut value = false;
-        // SAFETY: the live handle and bool output remain valid synchronously.
-        // ModeTag is packed u16: low 15 bits are the mode, ANSI flag is clear.
-        let result = unsafe { ghostty_terminal_mode_get(handle.as_ptr(), 2026, &raw mut value) };
-        if result == 0 {
-            Ok(value)
+        let mut mode = TerminalModeConfig {
+            mode: 2026,
+            value: false,
+        };
+        // SAFETY: the live handle and C-layout mode struct remain valid for this
+        // synchronous getter; 2026 is the DEC synchronized-output mode.
+        let result = unsafe {
+            ghostty_terminal_get(handle.as_ptr(), TERMINAL_DATA_MODE, (&raw mut mode).cast())
+        };
+        if result == GHOSTTY_SUCCESS {
+            Ok(mode.value)
         } else {
-            Err(io::Error::other("native mode query failed"))
+            Err(result_error("mode query", result))
         }
     }
     /// A shared-host engine whose reservation is derived from its history
@@ -181,38 +229,33 @@ impl Engine {
         let allocator = std::ptr::null();
         #[cfg(feature = "process-per-user")]
         let allocator = memory.abi();
-        // SAFETY: null selects Ghostty's allocator. Options matches its C ABI;
-        // out is writable and a successful call transfers unique ownership.
+        // SAFETY: null selects the native allocator; out is writable, and a
+        // successful call transfers unique ownership of the opaque handle.
+        let result = unsafe { ghostty_terminal_new(allocator, &raw mut raw, cols, rows) };
+        if result != GHOSTTY_SUCCESS {
+            return Err(result_error("terminal creation", result));
+        }
+        let handle = NonNull::new(raw)
+            .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))?;
+        // libghostty-vt 1.0 keeps the history limit separate from creation.
+        // Set the existing byte budget before processing any VT input.
         let result = unsafe {
-            ghostty_terminal_new(
-                allocator,
-                &raw mut raw,
-                Options {
-                    cols,
-                    rows,
-                    max_scrollback: bytes,
-                },
+            ghostty_terminal_set(
+                handle.as_ptr(),
+                TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+                (&raw const bytes).cast(),
             )
         };
-        if result != 0 {
-            return Err(io::Error::new(
-                if result == -2 {
-                    io::ErrorKind::InvalidInput
-                } else {
-                    io::ErrorKind::Other
-                },
-                format!("Ghostty initialization failed: {result}"),
-            ));
+        if result != GHOSTTY_SUCCESS {
+            // SAFETY: creation succeeded and this path still owns the handle.
+            unsafe { ghostty_terminal_free(handle.as_ptr()) };
+            return Err(result_error("scrollback configuration", result));
         }
-        NonNull::new(raw)
-            .map(|handle| {
-                Self(
-                    Some(handle),
-                    #[cfg(feature = "process-per-user")]
-                    Some(memory),
-                )
-            })
-            .ok_or_else(|| io::Error::other("Ghostty returned a null terminal"))
+        Ok(Self(
+            Some(handle),
+            #[cfg(feature = "process-per-user")]
+            Some(memory),
+        ))
     }
     /// (Shared host.) `(bytes in use, peak bytes, refused)` from the memory accountant:
     /// current native allocation, its high-water mark, and whether any allocation
@@ -293,7 +336,7 @@ impl Engine {
             reserve_screens(memory, cols, rows);
         }
         let result = unsafe { ghostty_terminal_resize(handle.as_ptr(), cols, rows, 0, 0) };
-        if result == 0 {
+        if result == GHOSTTY_SUCCESS {
             Ok(())
         } else {
             self.0 = None;
@@ -301,14 +344,7 @@ impl Engine {
             {
                 self.1 = None;
             }
-            Err(io::Error::new(
-                if result == -2 {
-                    io::ErrorKind::InvalidInput
-                } else {
-                    io::ErrorKind::Other
-                },
-                format!("Ghostty resize failed: {result}"),
-            ))
+            Err(result_error("resize", result))
         }
     }
     #[cfg(test)]
@@ -328,18 +364,13 @@ impl Engine {
         // SAFETY: read-only oracle borrows live handles synchronously and retains nothing.
         unsafe { infraternal_vt_compare(left.as_ptr(), right.as_ptr(), true) }
     }
-    /// Number of rows of scrollback currently retained, from native metadata only.
-    /// Zero if retired.
+    /// Read the retained scrollback rows from native metadata without inflating
+    /// compressed backing pages. A retired handle reports zero; live getter
+    /// failures retain their stable C API error kind.
     #[cfg(any(test, feature = "process-per-user"))]
-    pub fn history_rows(&self) -> usize {
-        let Some(handle) = self.0 else { return 0 };
-        let mut rows: usize = 0;
-        // SAFETY: tag 15 in the pinned C ABI writes a usize to this valid out
-        // pointer; the live terminal is borrowed for this synchronous query.
-        unsafe {
-            ghostty_terminal_get(handle.as_ptr(), 15, (&raw mut rows).cast());
-        }
-        rows
+    pub fn history_rows(&self) -> io::Result<usize> {
+        let Some(handle) = self.0 else { return Ok(0) };
+        read_size_t_data(handle, TERMINAL_DATA_SCROLLBACK_ROWS)
     }
     /// Writes a bounded, visible-screen-only repaint into `data` and returns its
     /// length, or 0 if retired or it does not fit. Clipped content is rolled back to
@@ -386,6 +417,21 @@ impl Drop for Engine {
         // SAFETY: this is the unique owner; destruction runs exactly once and
         // there are no callbacks or outstanding grid references in Rust.
         unsafe { ghostty_terminal_free(handle.as_ptr()) }
+    }
+}
+
+#[cfg(test)]
+mod c_api_tests {
+    //! Tests for stable terminal metadata results and opaque handle ownership.
+    use super::*;
+
+    /// An unknown terminal data key stays distinguishable from an empty value.
+    #[test]
+    fn unsupported_terminal_data_is_reported_as_unsupported() {
+        let engine = Engine::new(80, 24, 4096).expect("create terminal");
+        let handle = engine.0.expect("live terminal handle");
+        let error = read_size_t_data(handle, i32::MAX).expect_err("unknown key is unsupported");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
     }
 }
 

@@ -39,15 +39,17 @@ def bundle(destination, binary, key, version, overlay=b""):
     (destination / "VERSION").write_text(version + "\n")
     (destination / "web").mkdir()
     (destination / "web/index.html").write_text("<title>infraternal staging fixture</title>\n")
-    entries = [(hashlib.sha256((destination / name).read_bytes()).hexdigest(), name) for name in
-               ("VERSION", "infraternal-x86_64-musl", "infraternal-aarch64-musl")]
-    (destination / "MANIFEST").write_text("infraternal-release-manifest-v1\nversion " + version +
-        "\nchannel edge\n" + "".join(digest + "  " + name + "\n" for digest, name in entries))
-    command(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", "infraternal-release", str(destination / "MANIFEST")],
+    # Signed metadata in the release signer's format (#211 S1): a sorted SHA256SUMS of the
+    # release files and its OpenSSH signature SHA256SUMS.sig, here by the staging key.
+    (destination / "SHA256SUMS").write_text("".join(
+        hashlib.sha256((destination / name).read_bytes()).hexdigest() + "  " + name + "\n"
+        for name in sorted(("VERSION", "infraternal", "infraternal-x86_64-musl", "infraternal-aarch64-musl"))))
+    command(["ssh-keygen", "-Y", "sign", "-f", str(key), "-n", "infraternal-release", str(destination / "SHA256SUMS")],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    (destination / "SHA256SUMS").write_text("".join(hashlib.sha256(file.read_bytes()).hexdigest() + "  " +
+    # The build host's own unsigned list covers every other bundle file (web assets included).
+    (destination / "BUILDSUMS").write_text("".join(hashlib.sha256(file.read_bytes()).hexdigest() + "  " +
         str(file.relative_to(destination)) + "\n" for file in sorted(destination.rglob("*"))
-        if file.is_file() and file.name not in {"SHA256SUMS", "MANIFEST", "MANIFEST.sig"}))
+        if file.is_file() and file.name not in {"BUILDSUMS", "SHA256SUMS", "SHA256SUMS.sig"}))
 
 
 def main():

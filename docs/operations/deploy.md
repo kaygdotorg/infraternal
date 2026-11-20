@@ -114,8 +114,8 @@ copy during export, which is immediately zeroized. Kernel socket buffers carry
 the bounded transfer frame and cannot be zeroized or excluded with userspace
 mapping advice. These protections do not remove those residual copies.
 
-A replacement now requires the hardened signed MANIFEST, signature and VERSION
-beside its executable. The immutable verified image is probed before shutdown;
+A replacement now requires the release's signed `SHA256SUMS`, `SHA256SUMS.sig`
+and `VERSION` beside its executable. The immutable verified image is probed before shutdown;
 late exec refusal recovers the retained current image with an independent CA
 handoff. See [safe replacement](replacement.md) for admission, recovery and
 platform qualifications. A successful exec with an invalid handoff still serves
@@ -181,9 +181,65 @@ COMMIT;
 A migration that rewrites or drops data cannot be rewound this way; its pull
 request must say so and name the backup to restore.
 
+## Restoring an older Mesh authority
+
+Each server process creates a fresh Mesh authority UUID. Before publishing a
+snapshot, it commits that UUID to `mesh_state`; if the write fails, it sends no
+snapshot. After restoring any database backup, start the server normally. Its
+new process UUID makes enrolled nodes fence the previous peer set before they
+apply the restored snapshot, even when the backup was taken after the epoch
+column was added.
+
+A database restore also restores the Mesh membership from the time of that
+backup. It can therefore re-authorize a node that was removed afterwards. The
+new authority epoch retires peers left on enrolled nodes, but it cannot infer
+removals that are absent from the restored database. Before allowing infraternal
+agents to reconnect, compare the restored Mesh inventory with removals made
+since the backup and remove those nodes again. Keep agent connectivity blocked
+until that reconciliation is complete. For nodes whose card says `needs an update` (their infraternal agent predates epoch support),
+do not assume the old local peer set was replaced; upgrade them to epoch support
+or keep their mesh traffic blocked until their local Mesh state is reset and
+they are re-enrolled.
+
+Nodes keep their last-known rules while the server is unreachable (D166). When a
+restarted server reconnects, nodes briefly reapply the full snapshot under the
+new authority. No manual SQL reset is needed.
+
 Migration `0029_remote_host_hostname` (#236) adds the retained hostname column
 and replaces existing UUID-shaped Mesh placeholders with audited unnamed
 labels. A deliberate rewind across it restores the pre-migration database
 backup; do not remove its bookkeeping row and run the older binary against the
 rewritten names. The deploy script's automatic health-check rollback already
 restores the database copy it took before migration.
+
+## The server's Mesh identity and its host
+
+The server's own Mesh node keeps its private key in the data directory, under
+`mesh/` (#489). Each start also copies it to `/run/infraternal`, so a previous
+build started during a rollback finds the same identity (D295).
+
+The identity is tied to its host (D392). Next to the key, `mesh/.mesh-host-binding`
+holds a hash of `/etc/machine-id`, never the ID itself. If the data directory is
+copied or restored onto another machine, the server refuses to start and logs
+two recovery commands:
+
+- The server moved for good and the old machine's server is stopped: remove
+  `mesh/.mesh-host-binding` to keep the identity. The next start binds it to the
+  new machine.
+- The directory is a copy: remove `mesh/` to give the copy its own identity.
+  Its peers then learn a new key.
+
+A host without a persistent machine ID records no binding. That covers a
+missing or empty `/etc/machine-id`, the value `uninitialized`, a malformed ID,
+and a transient ID that systemd mounts over the file at every boot on a
+read-only root. Such a host starts with a warning, so a reboot that changes the
+ID never refuses start. It does refuse an identity that was already bound to a
+machine, because it cannot tell the original from a copy. The fix is to make
+the machine ID persistent (`systemd-machine-id-setup`, with `--commit` for a
+transient ID), or, when no other machine runs that identity, to remove
+`mesh/.mesh-host-binding`.
+
+**Limit:** the check compares machine IDs. A virtual machine cloned together
+with its `/etc/machine-id` looks like the same host and is not detected. Give
+every clone a new machine ID (empty `/etc/machine-id` in the template, or run
+`systemd-machine-id-setup` on the clone) before its server starts.

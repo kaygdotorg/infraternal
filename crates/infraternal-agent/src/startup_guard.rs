@@ -178,8 +178,12 @@ fn contents(file: &File) -> io::Result<String> {
     Ok(text)
 }
 
+/// Return the lowercase SHA-256 fingerprint used by the startup trust check.
 fn fingerprint(text: &str) -> String {
-    format!("{:x}", Sha256::digest(text.as_bytes()))
+    format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(text.as_bytes()))
+    )
 }
 
 fn propose(home: &Path, path: &str, multiplexer: &str) -> io::Result<Option<Proposal>> {

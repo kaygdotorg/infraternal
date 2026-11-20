@@ -19,6 +19,12 @@ pub trait NodeChannel: Send + Sync {
     // Notifications exist only with the optional socket host runtime.
     #[cfg(feature = "socket-host")]
     fn changes(&self) -> tokio::sync::watch::Receiver<()>;
+    /// Observe a new infraternal agent process behind a long-lived node channel.
+    /// Plugins with process-owned credentials can reinitialize them after restart.
+    #[cfg(feature = "socket-host")]
+    fn agent_restarts(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        None
+    }
     fn call(&self, action: &str, input: Vec<u8>) -> PluginOperation<'_, Vec<u8>>;
     /// Lease an alternative source address for this admitted peer. The host
     /// supplies its existing logical tuple and identity; plugins supply routing only.

@@ -1,35 +1,44 @@
 //! Implements local-owner restart requests and same-PID exec without transporting the CA over a named socket [168][217], #154.
 
-use crate::cli::output::Exit;
+use crate::cli::output::{CommandResult, CommandState, Exit, emit};
+use base64::Engine as _;
 use std::{
     ffi::CString,
+    fs::OpenOptions,
     io::{self, Read, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt},
+        fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    net::UnixStream,
     signal::unix::{SignalKind, signal},
 };
 
+/// Select the replacement image and whether the current build must hand Mesh state back first.
 #[derive(Debug, clap::Args)]
 pub(crate) struct Options {
     /// Replacement executable (root-owned handoff-capable builds can retain CA unlock).
     #[arg(long)]
     pub binary: Option<PathBuf>,
+    /// Return persistent mesh state to the selected previous build before it starts.
+    #[arg(long, requires = "binary")]
+    pub rollback: bool,
 }
 
 const MAX_PATH: usize = 4096;
+/// Caps the public Mesh state document read for a server fingerprint.
+const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024;
 
-/// The private control endpoint: its socket, path and reload signal.
+/// The private control endpoint: its socket, server data root, and reload signal.
 pub(crate) struct Control {
-    listener: UnixListener,
-    path: PathBuf,
+    socket: crate::server_control::Socket,
+    /// Trusted data root used to find the durable Mesh directory during rollback.
+    data: PathBuf,
     reload: tokio::signal::unix::Signal,
     clock_health: std::sync::Arc<infraternal_server::clock_health::ClockHealth>,
 }
@@ -58,48 +67,9 @@ impl Control {
             Some(&mask),
             None,
         )?;
-        let directory = data.join("restart");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory)?;
-        let parent = std::fs::symlink_metadata(data)?;
-        if !parent.is_dir()
-            || parent.uid() != nix::unistd::Uid::effective().as_raw()
-            || parent.mode() & 0o022 != 0
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        let metadata = std::fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir()
-            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        let path = directory.join("control.sock");
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_socket()
-                    || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-                {
-                    return Err(io::ErrorKind::PermissionDenied.into());
-                }
-                // Never steal a live server's restart endpoint. A pathname left
-                // by a completed exec or abrupt stop has no listener.
-                if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-                    return Err(io::ErrorKind::AddrInUse.into());
-                }
-                std::fs::remove_file(&path)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let listener = UnixListener::bind(&path)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
-            listener,
-            path,
+            socket: crate::server_control::Socket::bind(data)?,
+            data: data.to_owned(),
             reload,
             clock_health,
         })
@@ -135,12 +105,12 @@ impl Control {
                         }
                     }
                 },
-                accepted = self.listener.accept() => accepted?.0,
+                accepted = self.socket.listener.accept() => accepted?.0,
             };
             let peer = socket.peer_cred().ok();
             if peer
                 .as_ref()
-                .is_none_or(|peer| peer.uid() != nix::unistd::Uid::effective().as_raw())
+                .is_none_or(|peer| !crate::server_control::same_account(peer))
             {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
@@ -151,7 +121,17 @@ impl Control {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             };
-            let ControlRequest::Restart { binary, reload } = request else {
+            #[cfg(target_os = "linux")]
+            if matches!(request, ControlRequest::Database) {
+                let _ = crate::server_control::send_database(&mut socket, &self.data).await;
+                continue;
+            }
+            let ControlRequest::Restart {
+                binary,
+                reload,
+                rollback,
+            } = request
+            else {
                 let sent = send_status(&mut socket, source, &self.clock_health).await;
                 if sent.is_ok() {
                     record_request("status", peer.as_ref(), None, "replied");
@@ -170,11 +150,38 @@ impl Control {
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
             };
-            let Ok(replacement) = Replacement::new(opened, source) else {
+            let Ok(mut replacement) = Replacement::new(opened, source) else {
                 record_request("socket", peer.as_ref(), Some(&binary), "refused");
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
             };
+            // Any restart into a named binary may start a build that reads only the legacy runtime
+            // path, so every one mirrors Mesh state there once writers stop (J595 P1). Only an
+            // explicit rollback makes a failed mirror refuse the restart.
+            if !reload {
+                match infraternal_agent::sessions::state_path(None) {
+                    Ok(volatile) => {
+                        replacement.mesh_handoff = Some((self.data.join("mesh"), volatile));
+                    }
+                    Err(error) if rollback => {
+                        record_request("socket", peer.as_ref(), Some(&binary), "refused");
+                        let _ = socket.write_all(b"REFUSED\n").await;
+                        tracing::warn!(error_kind = ?error.kind(), "server rollback Mesh path unavailable");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(error_kind = ?error.kind(), "server restart Mesh runtime path unavailable; the next build may not find the Mesh identity");
+                    }
+                }
+            }
+            if rollback {
+                let Ok(reply) = socket.into_std() else {
+                    record_request("socket", peer.as_ref(), Some(&binary), "refused");
+                    continue;
+                };
+                replacement.rollback_reply = Some(reply);
+                return Ok(replacement);
+            }
             let reply = if replacement.input.is_some() {
                 b"RESTARTING\n".as_slice()
             } else {
@@ -200,12 +207,6 @@ impl Control {
         }
     }
 }
-impl Drop for Control {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 /// Send the clock-aware trust snapshot through the private owner socket.
 async fn send_status(
     socket: &mut UnixStream,
@@ -224,18 +225,34 @@ async fn send_status(
     socket.write_all(&payload).await
 }
 
-/// What the private control endpoint can be asked: status, or a restart into a binary.
+/// Read-only queries and restart or rollback requests for the private endpoint.
 enum ControlRequest {
+    /// Public CA status.
     Status,
-    Restart { binary: PathBuf, reload: bool },
+    /// The live SQLite handle used during install relocation.
+    #[cfg(target_os = "linux")]
+    Database,
+    /// Replace this process with a verified binary.
+    Restart {
+        binary: PathBuf,
+        reload: bool,
+        rollback: bool,
+    },
 }
 
 /// Read one length-prefixed control request from `socket`.
 async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
-    let length = usize::from(socket.read_u16().await?);
+    let raw_length = socket.read_u16().await?;
+    let rollback = raw_length & 0x8000 != 0;
+    let length = usize::from(raw_length & 0x7fff);
     if length == 0 {
+        if rollback {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         return match socket.read_u8().await? {
             1 => Ok(ControlRequest::Status),
+            #[cfg(target_os = "linux")]
+            2 => Ok(ControlRequest::Database),
             _ => Err(io::ErrorKind::InvalidInput.into()),
         };
     }
@@ -246,9 +263,13 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
     socket.read_exact(&mut bytes).await?;
     let path = PathBuf::from(String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidInput)?);
     if path == Path::new(".") {
+        if rollback {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         return current_binary().map(|binary| ControlRequest::Restart {
             binary,
             reload: true,
+            rollback: false,
         });
     }
     if !path.is_absolute() {
@@ -257,6 +278,7 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
     Ok(ControlRequest::Restart {
         binary: path,
         reload: false,
+        rollback,
     })
 }
 
@@ -291,6 +313,145 @@ pub(crate) fn query_ca_status(data: &Path) -> io::Result<infraternal_server::ca_
     serde_json::from_slice(&payload).map_err(io::Error::other)
 }
 
+/// Prove the server process is answering and print its active public Mesh fingerprint.
+///
+/// The private same-UID control socket confirms that a server is running. The data file is only
+/// used to read the public key that the active build loads; when both supported state roots are
+/// present, their identities must agree before the command reports success.
+pub(crate) fn mesh_status(data: &Path, json: bool) -> std::process::ExitCode {
+    match query_mesh_fingerprint(data) {
+        Ok(fingerprint) => emit(
+            CommandResult::new(
+                "server mesh status",
+                CommandState::Running,
+                "The running server's Mesh identity is available.",
+                serde_json::json!({
+                    "running": true,
+                    "public_key_fingerprint": fingerprint,
+                }),
+            )
+            .with_body(format!("Fingerprint: {fingerprint}")),
+            json,
+            Exit::Ok,
+        ),
+        Err(error) => super::report_failure_as(
+            "server mesh status",
+            "The running server's Mesh identity could not be verified.",
+            format!(
+                "The private control or public state read failed ({:?}).",
+                error.kind()
+            ),
+            json,
+            if error.kind() == io::ErrorKind::PermissionDenied {
+                Exit::NotAllowed
+            } else if error.kind() == io::ErrorKind::NotFound {
+                Exit::NotFound
+            } else {
+                Exit::Failed
+            },
+        ),
+    }
+}
+
+/// Read the one public Mesh key that belongs to the responding server process.
+/// # Errors
+/// Refuses a stopped server, unsafe state path, conflicting copies, or malformed public identity.
+fn query_mesh_fingerprint(data: &Path) -> io::Result<String> {
+    // This same-account request must succeed before a state file can be described as running.
+    let _server_status = query_ca_status(data)?;
+    let uid = nix::unistd::Uid::effective().as_raw();
+    let key = select_server_mesh_key(
+        &data.join("mesh"),
+        infraternal_agent::sessions::state_path(None),
+        uid,
+    )?;
+    let fingerprint = openssl::sha::sha256(&key);
+    Ok(format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(fingerprint)
+    ))
+}
+
+/// Choose one public Mesh key only after resolving both supported state locations.
+/// # Errors
+/// Refuses an unresolved runtime path, unsafe or malformed state, or conflicting identities.
+fn select_server_mesh_key(
+    durable_directory: &Path,
+    runtime_path: io::Result<PathBuf>,
+    uid: u32,
+) -> io::Result<[u8; 32]> {
+    let durable = public_mesh_key(durable_directory, uid)?;
+    // Reporting a durable key alone could misidentify a live server when its runtime path failed
+    // to resolve, so preserve that error instead of treating it as an absent runtime copy.
+    let runtime_path = runtime_path?;
+    let runtime = if runtime_path == durable_directory {
+        None
+    } else {
+        public_mesh_key(&runtime_path, uid)?
+    };
+    match (durable, runtime) {
+        (Some(durable), Some(runtime)) if durable == runtime => Ok(durable),
+        (Some(_), Some(_)) => Err(io::ErrorKind::InvalidData.into()),
+        (Some(key), None) | (None, Some(key)) => Ok(key),
+        (None, None) => Err(io::ErrorKind::NotFound.into()),
+    }
+}
+
+/// Read one private-directory public state document without following or accepting linked files.
+/// # Errors
+/// Refuses unsafe ownership, modes, links, an oversized document, or an invalid public key.
+fn public_mesh_key(directory: &Path, uid: u32) -> io::Result<Option<[u8; 32]>> {
+    let directory_metadata = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !directory_metadata.is_dir()
+        || directory_metadata.uid() != uid
+        || directory_metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+
+    let path = directory.join("mesh-public.json");
+    let mut options = OpenOptions::new();
+    let flags = nix::fcntl::OFlag::O_NOFOLLOW
+        | nix::fcntl::OFlag::O_CLOEXEC
+        | nix::fcntl::OFlag::O_NONBLOCK;
+    options.read(true).custom_flags(flags.bits());
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o7777 != 0o600
+    {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let max_public_state_bytes =
+        usize::try_from(MAX_PUBLIC_STATE_BYTES).map_err(|_| io::ErrorKind::InvalidData)?;
+    let mut bytes = Vec::with_capacity(max_public_state_bytes);
+    file.take(MAX_PUBLIC_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_public_state_bytes {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let state: serde_json::Value = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let local_key = state
+        .get("config")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("local_key"))
+        .filter(|local_key| !local_key.is_null())
+        .ok_or(io::ErrorKind::NotFound)?;
+    serde_json::from_value(local_key.clone())
+        .map(Some)
+        .map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
 fn current_binary() -> io::Result<PathBuf> {
     let running = std::env::current_exe()?;
     if running.as_os_str().as_bytes().ends_with(b" (deleted)")
@@ -317,7 +478,20 @@ fn executable(binary: &Path) -> io::Result<()> {
     crate::restart_binary::Opened::open(binary.to_owned()).map(|_| ())
 }
 
-pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bool> {
+/// Ask the running server to restart into an optional binary over its private control socket.
+///
+/// A rollback request must name its previous binary so the server can hand Mesh state back before
+/// that image starts. The receiver validates and opens the image; this request only sends its path.
+/// # Errors
+/// Reports an invalid rollback request, an unsafe path, a missing socket, or a failed frame write.
+pub(crate) async fn request(
+    data: &Path,
+    binary: Option<&Path>,
+    rollback: bool,
+) -> io::Result<bool> {
+    if rollback && binary.is_none() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     // An omitted path means the server's own executable, not the CLI's binary.
     // The single-byte sentinel is expanded by the receiver before validation.
     let path = binary
@@ -339,8 +513,12 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bo
     let bytes = path
         .as_ref()
         .map_or(b".".as_slice(), |path| path.as_os_str().as_encoded_bytes());
+    let length = u16::try_from(bytes.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    if bytes.len() > MAX_PATH {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
     socket
-        .write_u16(u16::try_from(bytes.len()).map_err(|_| io::ErrorKind::InvalidInput)?)
+        .write_u16(length | if rollback { 0x8000 } else { 0 })
         .await?;
     socket.write_all(bytes).await?;
     let mut response = Vec::new();
@@ -352,16 +530,29 @@ pub(crate) async fn request(data: &Path, binary: Option<&Path>) -> io::Result<bo
     }
 }
 
+/// Holds the selected image and its recovery input until the restart decision is final.
+/// Every restart into a named binary mirrors Mesh state to the legacy path once writers stop; a
+/// rollback is acknowledged only after that mirror is complete.
 pub(crate) struct Replacement {
     binary: crate::restart_binary::Opened,
     input: Option<std::os::unix::net::UnixStream>,
     recovery: crate::restart_binary::Opened,
     recovery_input: Option<std::os::unix::net::UnixStream>,
+    /// Durable and legacy Mesh directories to mirror after quiescence, when a binary was named.
+    mesh_handoff: Option<(PathBuf, PathBuf)>,
+    /// Deferred reply to an explicit rollback request, sent only after the mirror finished.
+    rollback_reply: Option<std::os::unix::net::UnixStream>,
 }
 impl Replacement {
+    /// Describe whether the selected image can receive a warm CA handoff.
     fn outcome(&self) -> &'static str {
         if self.input.is_some() { "warm" } else { "cold" }
     }
+    /// Prepare the requested executable and pin the current image for recovery.
+    ///
+    /// Both images and any warm-start input stay open until the selected image is executed.
+    /// # Errors
+    /// Returns an error if the current image cannot be opened for recovery.
     pub(crate) fn new(
         binary: crate::restart_binary::Opened,
         source: Option<&dyn infraternal_server::ca::CaKeySource>,
@@ -383,8 +574,69 @@ impl Replacement {
             input,
             recovery,
             recovery_input,
+            mesh_handoff: None,
+            rollback_reply: None,
         })
     }
+
+    /// Mirror Mesh state to the legacy path once writers stop, before another image starts.
+    ///
+    /// For an explicit rollback a failed mirror refuses the older image and recovers this build.
+    /// For any other named binary a failure is logged and the restart continues: the durable copy
+    /// is untouched, and a newer build reads it directly.
+    /// # Errors
+    /// Returns the recovery exec error when a rollback is refused or its requester disconnected.
+    fn handoff_after_quiescence(mut self) -> Result<Self, io::Error> {
+        let rollback = self.rollback_reply.is_some();
+        let result = self
+            .mesh_handoff
+            .take()
+            .map_or(Ok(()), |(durable, volatile)| {
+                infraternal_server::embedded_mesh_state::rollback_handoff(&durable, &volatile)
+            });
+        if let Err(error) = result {
+            if !rollback {
+                tracing::warn!(error_kind = ?error.kind(), "server restart Mesh mirror failed; a previous build started next may not find the Mesh identity");
+                return Ok(self);
+            }
+            tracing::warn!(error_kind = ?error.kind(), "server rollback Mesh handoff refused");
+            let _ = self.reply_rollback(b"REFUSED\n");
+            return Err(self.exec_recovery_only());
+        }
+        if rollback {
+            if let Err(error) = self.reply_rollback(b"RESTARTING\n") {
+                tracing::warn!(error_kind = ?error.kind(), "server rollback requester disconnected");
+                return Err(self.exec_recovery_only());
+            }
+            tracing::info!(
+                outcome = "rollback_mesh_handoff_complete",
+                "server_restart_request"
+            );
+        }
+        Ok(self)
+    }
+
+    /// Send the deferred reply only after the writer-quiesced handoff has finished.
+    /// # Errors
+    /// Returns a socket configuration or write error so the caller can recover this image.
+    fn reply_rollback(&mut self, reply: &[u8]) -> io::Result<()> {
+        let Some(mut socket) = self.rollback_reply.take() else {
+            return Ok(());
+        };
+        socket.set_nonblocking(false)?;
+        socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+        socket.write_all(reply)?;
+        socket.shutdown(std::net::Shutdown::Write)
+    }
+
+    /// Restart only this image after rollback refusal, without ever executing the older image.
+    fn exec_recovery_only(mut self) -> io::Error {
+        drop(self.input.take());
+        let error = execute_image(&self.recovery, self.recovery_input.as_ref());
+        drop(self.recovery_input.take());
+        error
+    }
+
     pub(crate) fn exec(self) -> io::Error {
         let error = execute_image(&self.binary, self.input.as_ref());
         drop(self.input);
@@ -395,6 +647,9 @@ impl Replacement {
     }
 }
 
+/// Replace this process with the checked `binary`, passing the same arguments
+/// and environment and `input` (or `/dev/null`) as stdin. Only returns when the
+/// kernel refused the exec, with the reason, so the caller can recover.
 fn execute_image(
     binary: &crate::restart_binary::Opened,
     input: Option<&std::os::unix::net::UnixStream>,
@@ -436,6 +691,13 @@ fn execute_image(
         // Execute exactly the checked inode; no pathname lookup occurs after
         // exporting the CA. O_CLOEXEC closes this fd in the successor.
         queue_reload()?;
+        // The new image records its launcher's transparent-huge-page policy
+        // at startup and gives it to the shells it starts. Hand it the policy
+        // this server was started with, not the opt-out the mesh engine took
+        // for this process; a refused exec gets the opt-out back (#522).
+        #[cfg(target_os = "linux")]
+        infraternal_shim::with_launcher_thp(|| binary.image.execute(&argv, &environment))?;
+        #[cfg(not(target_os = "linux"))]
         binary.image.execute(&argv, &environment)?;
         Ok(())
     };
@@ -454,7 +716,7 @@ pub(crate) fn run(
     match crate::block_on(runtime, async {
         tokio::time::timeout(
             Duration::from_secs(5),
-            request(data, options.binary.as_deref()),
+            request(data, options.binary.as_deref(), options.rollback),
         )
         .await
     }) {
@@ -462,7 +724,9 @@ pub(crate) fn run(
             json,
             infraternal_plugin_remote::RESTART.id,
             "requested",
-            if warm {
+            if options.rollback {
+                "Server rollback requested with mesh state handoff"
+            } else if warm {
                 "Server replacement requested with CA handoff"
             } else {
                 "Server replacement requested cold (CA locked)"
@@ -486,6 +750,14 @@ pub(crate) fn replace(
     json: bool,
 ) -> std::process::ExitCode {
     shutdown_runtime(runtime);
+    let replacement = match replacement.handoff_after_quiescence() {
+        Ok(replacement) => replacement,
+        Err(error) => {
+            tracing::error!(error_kind = ?error.kind(), outcome = "rollback_refused_recovery_failed", json,
+                "previous server build was not started because its Mesh handoff failed");
+            return super::run_invocation();
+        }
+    };
     let target = replacement.binary.path.clone();
     let error = replacement.exec();
     tracing::error!(target = ?target, error_kind = ?error.kind(), outcome = "recovering_in_process", json, "replacement and recovery exec refused; resuming current code");

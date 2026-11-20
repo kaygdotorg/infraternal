@@ -188,11 +188,37 @@ fn observe_failure(observer: Option<&FailureObserver<'_>>, stage: &'static str, 
     }
 }
 
+/// Derive the Linux Mesh binding from the local certificate and pinned coordinator.
+#[cfg(all(feature = "mesh", target_os = "linux"))]
+fn mesh_enrolment_for(
+    identity: &RemoteIdentity,
+) -> io::Result<infraternal_plugin_mesh::node::Enrolment> {
+    let coordinator = identity.roots.first().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "enrolled identity has no coordinator CA",
+        )
+    })?;
+    let coordinator = coordinator.to_der().map_err(io::Error::other)?;
+    let key = identity
+        .identity
+        .key
+        .public_key_to_der()
+        .map_err(io::Error::other)?;
+    Ok(infraternal_plugin_mesh::node::Enrolment::new(
+        &coordinator,
+        &identity.host_id.simple().to_string(),
+        &key,
+    ))
+}
+
+/// Reuse the service across reconnects, carrying the enrollment into Linux Mesh startup.
 async fn ensure_service(
     service: &Mutex<Option<crate::plugin_control::Service>>,
     state: &std::path::Path,
     installation: Option<&crate::plugins::Installation>,
     #[cfg(target_os = "linux")] lifetime: &Mutex<Option<std::sync::Arc<std::fs::File>>>,
+    #[cfg(all(feature = "mesh", target_os = "linux"))] identity: &RemoteIdentity,
     #[cfg(any(test, feature = "native-streams"))] supplied: Option<crate::plugin_control::Registry>,
 ) -> io::Result<crate::plugin_control::Registry> {
     let mut local = service.lock().await;
@@ -219,6 +245,8 @@ async fn ensure_service(
                     state,
                     installation,
                     &mut *lifetime.lock().await,
+                    #[cfg(all(feature = "mesh", target_os = "linux"))]
+                    mesh_enrolment_for(identity)?,
                 )
                 .await,
             )?;
@@ -252,6 +280,16 @@ async fn run_inner(
 ) -> io::Result<()> {
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    if let Ok(path) = crate::sessions::state_path(state.clone()) {
+        // Check the machine binding before transport, including recovery, so the link
+        // supervisor cannot turn a persistent configuration error into reconnects.
+        tokio::task::spawn_blocking(move || {
+            infraternal_plugin_mesh::node::Node::check_enrolled_machine(&path)
+        })
+        .await
+        .map_err(io::Error::other)??;
     }
     // A link cancellation cannot cancel synchronous plugin/kernel work. Keep
     // its sole owner and local listener across watchdog resets; only a closed
@@ -305,6 +343,8 @@ async fn run_inner(
                 installation,
                 #[cfg(target_os = "linux")]
                 lifetime,
+                #[cfg(all(feature = "mesh", target_os = "linux"))]
+                identity,
                 #[cfg(any(test, feature = "native-streams"))]
                 supplied,
             )
@@ -512,7 +552,7 @@ fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protoc
     infraternal_protocol::Frame::Hello {
         version: 1,
         caps: daemon::hello_capabilities(true, renewal, identity_rotation),
-        client_info: "infraternal agent",
+        client_info: crate::host_os::CLIENT_INFO,
     }
 }
 

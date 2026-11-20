@@ -177,6 +177,42 @@ test("Settings, Account has the row; it asks, then signs out", async ({ page }) 
   await reloadStaysSignedOut(page);
 });
 
+test("signing out while the terminal is still connecting opens no connection afterwards and leaves no terminal behind", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  // The terminal cannot finish opening until its WebAssembly module arrives. Hold that one request until the person has
+  // signed out, then let it through: the terminal client completes AFTER sign-out, the order a slow link produces.
+  let release!: () => void;
+  const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+  await page.route(/\.wasm$/, async (route) => { await gate; await route.continue(); });
+  // Count every WebSocket the page constructs, in the page itself: the constructor call is the event, so a socket whose handshake
+  // is refused (no cookie to present after sign-out) or that dies young still counts. "No connection after sign-out" is the property.
+  await page.addInitScript(() => {
+    const counter = window as unknown as { __wsConstructed: number };
+    counter.__wsConstructed = 0;
+    const Native = window.WebSocket;
+    window.WebSocket = new Proxy(Native, { construct(target, args: [string | URL, (string | string[])?]) { counter.__wsConstructed++; return Reflect.construct(target, args); } });
+  });
+  const constructed = () => page.evaluate(() => (window as unknown as { __wsConstructed: number }).__wsConstructed);
+  const live = trackSockets(page);
+  const hook = () => page.evaluate(() => (window as unknown as { __tracerTestDouble?: unknown }).__tracerTestDouble !== undefined);
+  await open(page);
+  expect(await hook(), "the terminal is still connecting").toBe(false);
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("sign out");
+  await page.keyboard.press("Enter");
+  await confirm(page).getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 10_000 });
+  const atSignOut = await constructed();
+  release();
+  // The terminal is cancelled before it is built, and the page says so (a test double marker). Whether a built-and-closed client
+  // opens a socket before it dies depends on timing, so the marker is what the spec requires; the socket count, the open
+  // connections and the test hook are then checked as well.
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.lateTerminal ?? "none"), { timeout: 20_000, message: "the late terminal is cancelled before it is built" }).toBe("cancelled");
+  expect(await constructed(), "no WebSocket is constructed after sign-out").toBe(atSignOut);
+  expect(await live(), "no connection is left open after sign-out").toBe(0);
+  expect(await hook(), "no live terminal is left behind the sign-in screen").toBe(false);
+});
+
 test("a sign-out the server could not complete says so and leaves the person signed in", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await open(page);
@@ -253,6 +289,56 @@ for (const theme of ["ink", "paper"]) {
     await page.screenshot({ path: resolve(OUT, `signed-out-desktop-${theme}.png`) });
   });
 }
+
+test("a session check that answers 401 right after setup goes to sign-in, not to a server-name error", async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  const context = page.context();
+  await context.request.post("/__mock/reset");
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true },
+  });
+  await page.goto("/?mock=1");
+  const token = (await (await context.request.get("/__mock/setup-token")).json() as { setup_token: string }).setup_token;
+  await page.locator("#setup-token").fill(token);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator("#setup-username").fill("expired_test");
+  await page.locator("#setup-display-name").fill("Expired test");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await page.locator(".auth-check").click();
+  // The cookie stops being valid between the ceremony and the first screen (another sign-in elsewhere, a restart of the server).
+  await page.route("**/auth/session", (route) => route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: "authorization failed" }) }));
+  await page.getByRole("button", { name: "Open infraternal" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome back" })).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Your session ended")).toBeVisible();
+  await expect(page.getByText("Could not read this server")).toHaveCount(0);
+});
+
+test("a page loaded in another browser context does not end this context's session", async ({ browser, baseURL }) => {
+  const mine = await browser.newContext({ baseURL: baseURL! });
+  const stray = await browser.newContext({ baseURL: baseURL! });
+  const origin = new URL(baseURL!).origin;
+  // The real sign-in cookie (what the ceremonies hand out), not a preview one: a preview page recovers from a stale cookie by
+  // itself, a signed-in page on the real cookie does not, so it is the one a stray request ends.
+  const status = async () => (await mine.request.post("/auth/session", { data: {}, headers: { origin } })).status();
+  try {
+    await mine.request.post("/__mock/reset");
+    expect((await mine.request.post("/__mock/open-terminal")).ok()).toBe(true);
+    expect(await status(), "signed in before the other context loads").toBe(200);
+    // Another test, another tab or a probe on the same double: a plain preview page load, which hands out its own session.
+    const other = await stray.newPage();
+    await other.goto("/?mock=1&proto=clusters&scene=3&theme=ink");
+    await expect(other.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    expect(await status(), "this context is still signed in").toBe(200);
+  } finally {
+    await mine.request.post("/__mock/reset");
+    await mine.close();
+    await stray.close();
+  }
+});
 
 test("the product canvas on the real cookie: sign out from the palette, a reload stays signed out", async ({ page }) => {
   test.setTimeout(120_000);
@@ -336,24 +422,21 @@ test("D245: signing out removes the account's data from every storage area; sign
     localStorage.setItem("infraternal.canvas.someone-else", "{}");
     localStorage.setItem("tracer.sessions.someone-else", "[]");
   });
-  // Make a layout change and let the 300 ms coalescing save land, then see what the account owns.
-  // The product canvas finishes opening its windows a moment after the first one appears.
-  await page.waitForTimeout(3000);
-  const windows = await page.locator(".ui-window").count();
-  await page.locator(".ui-window").first().locator("[data-action='split-right']").click();
-  await expect(page.locator(".ui-window")).toHaveCount(windows + 1);
-  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).some((k) => k.startsWith("infraternal.canvas.") && !k.endsWith("someone-else")))).toBe(true);
+  // Since D312 the server holds the only saved layout and this build writes no account key into the browser, so the keys
+  // to clear are the ones an EARLIER build left on this device (its layout document, session list and tab pointer). Seed
+  // them under the real account id, which only the session endpoint tells the page, and prove sign-out still sweeps them.
+  const id = await page.evaluate(async () => ((await (await fetch("/auth/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { user_id: string }).user_id);
+  expect(id).toMatch(/\S/);
+  await page.evaluate((account) => {
+    localStorage.setItem(`infraternal.canvas.${account}`, JSON.stringify({ format: "infraternal.canvas", version: 1, views: [] }));
+    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
+    localStorage.setItem("tracer.user-id", account);
+    sessionStorage.setItem(`tracer.session.${account}`, "s1");
+  }, id);
   const before = await storageSnapshot(page);
   const own = (snap: typeof before) => [...Object.keys(snap.local), ...Object.keys(snap.session)].filter((k) => ACCOUNT_KEY.test(k) && !k.endsWith("someone-else"));
   expect(own(before).some((k) => k.startsWith("infraternal.canvas."))).toBe(true);
-  const canvasBytes = Object.entries(before.local).filter(([k]) => k.startsWith("infraternal.canvas.")).reduce((n, [, v]) => n + v.length, 0);
-  console.log(`layout document: ${canvasBytes} bytes; keys: ${own(before).join(", ")}`);
-  // The mock host keeps no session list or tab pointer; seed what a real host's session leaves for this account.
-  const id = own(before).find((k) => k.startsWith("infraternal.canvas."))!.slice("infraternal.canvas.".length);
-  await page.evaluate((account) => {
-    localStorage.setItem(`tracer.sessions.${account}`, JSON.stringify([{ host: "h", id: "s1", name: "build", pinned: false, frecency: 1 }]));
-    sessionStorage.setItem(`tracer.session.${account}`, "s1");
-  }, id);
+  console.log(`keys: ${own(before).join(", ")}`);
 
   await page.keyboard.press("Control+Shift+K");
   await page.locator("#palette-input").fill("sign out");
@@ -368,7 +451,15 @@ test("D245: signing out removes the account's data from every storage area; sign
   expect(after.local["tracer.theme"]).toBe("mocha");
   expect(after.local["infraternal.canvas.someone-else"]).toBe("{}");
   expect(after.local["tracer.sessions.someone-else"]).toBe("[]");
-  expect(after.caches).toEqual([]);
+  // The only cache is the offline worker's (offline.worker.ts): public app-shell files, fetched without credentials, shared by every
+  // account. Nothing of the account may be in it: only the page itself and script, style, font and wasm files without a query.
+  expect(after.caches.filter((name) => name !== "infraternal-drawing-v1")).toEqual([]);
+  const cached = await page.evaluate(async () => (await (await caches.open("infraternal-drawing-v1")).keys()).map((request) => new URL(request.url)).map((url) => ({ path: url.pathname, query: url.search })));
+  for (const entry of cached) {
+    expect(entry.query, `cached ${entry.path} has no query`).toBe("");
+    expect(entry.path === "/" || /\.(?:js|css|woff2|wasm)$/.test(entry.path), `cached ${entry.path} is a public app-shell file`).toBe(true);
+    expect(entry.path.includes(id), `cached ${entry.path} does not name the account`).toBe(false);
+  }
   expect(after.databases).toEqual([]);
   expect(after.cookies).toBe("");
   // Nothing mentions the signed-out account id anywhere in what is left.

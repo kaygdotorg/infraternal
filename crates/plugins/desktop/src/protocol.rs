@@ -236,6 +236,9 @@ impl Size {
 pub struct Start {
     pub target: Target,
     pub size: Size,
+    /// Rebuilds capture without writing the remembered output size into native window geometry.
+    #[serde(default)]
+    pub passive_geometry: bool,
 }
 impl Start {
     /// Checks the size and that the target ids are non-zero (and the process id positive).

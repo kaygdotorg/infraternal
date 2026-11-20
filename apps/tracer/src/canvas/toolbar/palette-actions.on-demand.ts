@@ -4,6 +4,7 @@ import { beginRename } from "../mesh/rename.on-demand";
 import type { ViewId } from "../model/types";
 import { isTerminal } from "../views/body";
 import { onDemand } from "../../on-demand";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 
 /** Flies to a Settings window (canvas-locked, snapped to its column). */
 export async function openSettings(cx: Ctx, section: string, source?: string): Promise<void> {
@@ -28,7 +29,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   const [, kind, value] = (detail?.action ?? "").split(":");
   // Focus can change while the chunk loads; a closed selection must never redirect to another window.
   const active = selected?.owner.wins.get(selected.model.id) === selected ? selected : undefined;
-  if (kind === "view" && value) { if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView(value as ViewId)); else cx.nav.flyView(value as ViewId); }
+  if (kind === "view" && value) { cx.nav.flyView(value as ViewId); }
   else if (kind === "overview") cx.nav.showOverview();
   else if (kind === "settings") void openSettings(cx, value ?? "appearance", detail?.source);
   else if (kind === "windowdocs") { if (active) void onDemand(() => import("../windows/docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, active); }); }
@@ -43,10 +44,11 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     const rec = [...views.values()].flatMap((c) => [...c.wins.values()]).find((w) => w.model.id === value);
     if (rec) { cx.win.setActive(rec); cx.nav.focusWindow(rec); }
   }
-  else if (kind === "removehost" && value) {
+  else if ((kind === "removehost" || kind === "forgethost") && value) {
     const host = cx.adapters.sessions.hosts().find((entry) => entry.id === value);
     // Started from the palette, the question is about a host and not about the focused window, so it is centred (TASTE: a confirmation belongs to what it acts on).
-    if (host) cx.adapters.hostRemoval?.remove(host.id, host.name, null, () => {
+    const operation = kind === "forgethost" ? cx.adapters.hostRemoval?.forget : cx.adapters.hostRemoval?.remove;
+    if (host && (kind !== "forgethost" || host.state === "retired-unreachable")) operation?.(host.id, host.name, null, () => {
       // Escape or Keep goes back to the terminal the palette was opened from (not on a phone, where focus would raise the keyboard).
       if (!matchMedia("(pointer: coarse)").matches) active?.binding?.focus();
     });
@@ -54,7 +56,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "rename" && value) {
     // Goes to the Mesh view, where the host's card opens its name field as soon as the card is on screen.
     const host = decodeURIComponent(value);
-    if (detail?.source === "keyboard") cx.camera.keyFlight(() => cx.nav.flyView("mesh")); else cx.nav.flyView("mesh");
+    cx.nav.flyView("mesh");
     beginRename(cx, host);
   }
   else if (kind === "access" && value) {
@@ -67,7 +69,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
     cx.nav.focusWindow(rec);
     cx.details?.close(true);
     window.setTimeout(() => {
-      cx.details?.toggle(rec, "keyboard");
+      cx.details?.toggle(rec, triggeredByKeyboard() ? "keyboard" : "pointer");
       const t0 = performance.now();
       const press = (): void => {
         const row = [...document.querySelectorAll<HTMLElement>(".canvas-popover .ui-kv-row")].find((r) => r.textContent?.includes("Access level"));
@@ -85,7 +87,7 @@ export function dispatchCanvasAction(cx: Ctx, detail: CanvasAction, selected: Wi
   else if (kind === "session" && value) { const [host, sid] = value.split("/"); if (host && sid) cx.win.openSession(host, sid); }
   else if (kind === "sessions") {
     const anchor = active?.card.header.querySelector<HTMLButtonElement>("[data-action='sessions']");
-    if (active) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor, "pointer"), 60);
+    if (active) window.setTimeout(() => cx.sessionUi?.toggleManager(active, anchor), 60);
   }
   else if (kind === "ctr" && value && cx.adapters.containers) cx.win.open(cx.adapters.containers.host, value);
 }

@@ -141,6 +141,22 @@ pub(crate) const ATTACH_UNOWNED: CloseReason = CloseReason::new(
     "unowned_session_attach",
     "the account has no such terminal session",
 );
+/// The account already has as many live connections as the server allows (`websocket::new_connection`).
+/// It gets its own words because the person can act on them: closing a tab they no longer need frees a
+/// connection. A bare refusal left the page blank, with nothing to say why (#523).
+pub(crate) const CONNECTION_LIMIT: CloseReason = CloseReason::new(
+    "auth_resume_refusal",
+    "account_connection_limit",
+    "this account has too many open connections",
+);
+/// A newer tab of the same account took this hidden tab's socket because the account was at its connection limit
+/// (`account_sockets`, owner decision B on #523). Not a failure: the page pauses and connects again when the person
+/// comes back to it, and it must not reconnect while it stays hidden, or it would take another tab's place.
+pub(crate) const TAKEN_OVER: CloseReason = CloseReason::new(
+    "account_connection_takeover",
+    "account_connection_takeover",
+    "another tab of this account is using this connection",
+);
 /// The server refused to resume a connection.
 pub(crate) const RESUME_REFUSED: CloseReason = CloseReason::new(
     "auth_resume_refusal",

@@ -1,9 +1,14 @@
 /** Owns Ghostty rendering, leg-A mux frames, bounded stream queues, and resumable input. */
+import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
+import { exitStatusText } from "./canvas/status";
 import { keysIn } from "./input-keys";
-import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
+import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
+import { Osc52Scanner } from "./osc52";
+import { readProgramCopy } from "./program-copy";
+import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
@@ -12,6 +17,8 @@ import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../pac
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
 import { terminalTouch } from "./terminal-touch";
+import { selectionColors, THEMES } from "../../../packages/ui/src/themes";
+import { installWrapAwareSelection, type SelectableTerminal } from "./terminal-wrap-selection";
 import { pulseActivity } from "./perf-activity";
 import { PredictiveEcho, type PredictionPosition, type PredictiveEchoState } from "./predictive-echo";
 import { CLOSE_SESSION_GONE, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -21,7 +28,10 @@ import { captureFocusIntent } from "../../../packages/ui/src/focus-intent";
 import type { TerminalLink, TerminalLinkController, TerminalLinkRow } from "./terminal-links.on-demand";
 import { SynchronizedOutput } from "./synchronized-output";
 
-const INITIAL_CREDIT = 1024 * 1024;
+/** How many terminals have been made on this page; names each one's remote-copy notice. */
+let remoteCopyCount = 0;
+/** The relay keeps 64 KiB of this opening grant for a key-triggered repaint. */
+const INITIAL_CREDIT = 1024 * 1024 + 64 * 1024;
 const INPUT_QUEUE_LIMIT = 1024 * 1024;
 const INPUT_RESUME_GUARD = 16 * 1024;
 const INPUT_FRAME_LIMIT = 16 * 1024;
@@ -37,6 +47,8 @@ const TERMINAL_FONT_SIZE_MAX = 24;
 const THEME_HISTORY_PROBE_ROWS = 10_000;
 const THEME_HISTORY_INDEXED_COLUMN = "theme-history-00000 | ".length;
 const THEME_HISTORY_TRUECOLOR_COLUMN = THEME_HISTORY_INDEXED_COLUMN + 4;
+/** The selection colours of the default (ink) terminal theme, used until the screen hands the terminal its theme. */
+const INK_SELECTION = selectionColors(THEMES.ink!);
 const ANSI_THEME_KEYS = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
   "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
@@ -57,6 +69,7 @@ interface GhosttyActivityControls {
     remeasureFont(): void;
     resize(cols: number, rows: number): void;
     getMetrics(): { width: number; height: number; baseline: number };
+    getCanvas(): HTMLCanvasElement;
     setCursorBlink(enabled: boolean): void;
     setTheme(theme: ITheme): void;
     renderLine(line: unknown[], y: number, cols: number, lineOffset?: number, backgroundAlreadyPainted?: boolean): void;
@@ -73,7 +86,7 @@ interface GhosttyActivityControls {
 /** How a terminal reports to the window that shows it: attach, output, disconnects, exit, refusals and session ids. All optional. */
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
-  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction) => boolean;
+  onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction, calm: boolean) => boolean;
   /** Only a public session id; writer/resume capabilities remain in memory. */
   onSessionCreated?: (sessionId: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
@@ -108,7 +121,8 @@ export interface TerminalHooks {
   onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
-  onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint) => void;
+  /** Called after bytes paint; the kind lets paint probes reset when a full screen replaces raw output. */
+  onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint, kind?: "output" | "snapshot") => void;
 }
 
 export type InputModifierState = "off" | "armed" | "locked";
@@ -147,7 +161,23 @@ export type TerminalTraceHop =
   | "paint"
   | "prediction";
 
+/**
+ * Thrown by {@link TerminalClient.open} when its `isCurrent` check says the session that asked for the terminal has ended
+ * (sign-out, a revoked session) before the client was built. Nothing was constructed and no connection was opened, so the
+ * caller only has to stop; it is not a failure to report to the person.
+ */
+export class TerminalOpenCancelled extends Error {
+  /** Takes no arguments: the message is fixed and the name lets callers tell this from a failure. */
+  constructor() { super("The terminal was not opened: its session ended first."); this.name = "TerminalOpenCancelled"; }
+}
+
+/** Everything {@link TerminalClient.open} needs to build one terminal: its host element, theme, font, hooks and callbacks. */
 export interface TerminalConfig {
+  /**
+   * Asked once the font and the WebAssembly module are ready and before anything is constructed, because building the client
+   * opens its connection. When it answers false, `open` rejects with {@link TerminalOpenCancelled}. Absent means always current.
+   */
+  isCurrent?: () => boolean;
   /** The owning window still wants initial desktop focus when initialization finishes. */
   shouldFocusOnOpen?: () => boolean;
   /** Readable label for refusal guidance; hostId remains the routing authority. */
@@ -351,6 +381,12 @@ export class TerminalClient {
   private suppressTerminalResponses = false;
   // Allocate only when output is scanned; a reset before the first write has no query state.
   private terminalQueries: TerminalQueries | undefined;
+  /** Reads clipboard writes (OSC 52) out of live output; replayed output goes through it without acting (#440). */
+  private readonly clipboardWrites = new Osc52Scanner();
+  /** This window's own notice surface for remote copies, made on first use and disposed with the client. */
+  private remoteCopyNotice: ToastController | undefined;
+  /** Identifies this window's remote-copy notice, so two windows' notices stay separate on the shared toast. */
+  private readonly remoteCopyKey = `remote-copy-${++remoteCopyCount}`;
   private parserReplies: string[] | undefined;
   private parserReplyLength = 0;
   private renderIdleTimer = 0;
@@ -379,7 +415,14 @@ export class TerminalClient {
   private inputModifiers: InputModifiers = { ctrl: "off", alt: "off" };
   private readonly prediction: PredictiveEcho | undefined;
   private lastSize = { cols: 80, rows: 24, pxW: 0, pxH: 0 };
-  private readonly onViewportChange = (): void => this.syncVisualViewport();
+  /**
+   * Whether the grid has been fitted to its host at least once. Until then `lastSize` is only the constructor's
+   * default, and reporting it would resize the shared session to 80x24 and back on every attach. The host then
+   * treats the reattach as a size change and repaints approximately instead of replaying (#521).
+   */
+  private sizeFitted = false;
+  /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
+  private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
   private readonly onBlinkInput = (): void => this.restartCursorBlink();
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
@@ -406,6 +449,11 @@ export class TerminalClient {
     const rendererFocus = terminal.focus;
     terminal.focus = () => {};
     try { terminal.open(config.host); } finally { terminal.focus = rendererFocus; }
+    // Mouse selection copies a soft-wrapped word whole and puts no newline where the program printed none (#426).
+    installWrapAwareSelection(terminal as unknown as SelectableTerminal, config.host, {
+      canvas: () => this.ghostty.renderer?.getCanvas(),
+      metrics: () => this.cellMetrics(),
+    });
     // Keep Ghostty's scrollbar drag handler, but let the on-demand controller own link scanning and activation.
     (terminal as unknown as { linkDetector?: unknown }).linkDetector = undefined;
     const write = terminal.write.bind(terminal);
@@ -414,7 +462,15 @@ export class TerminalClient {
       write(data, callback);
     };
     // Phones wait for a real tap before opening the keyboard (D191).
-    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal());
+    this.disposeTouch = terminalTouch(config.host, terminal, () => this.cellMetrics(), () => this.scheduleFit(), () => this.wakeTerminal(),
+      // A finger selects and copies text (#426); the code for it loads when the first finger touches the terminal.
+      () => onDemand(() => import("./terminal-touch-select.on-demand")).then(({ createTouchSelection }) => createTouchSelection({
+        terminal: terminal as unknown as SelectableTerminal,
+        host: config.host,
+        canvas: () => this.ghostty.renderer?.getCanvas(),
+        metrics: () => this.cellMetrics(),
+        wake: () => this.wakeTerminal(),
+      })));
     this.pauseTerminal(); // Ghostty opens with one live loop; the client owns its activity window.
     this.terminal.options.scrollback = config.scrollbackLimit ?? 10_000;
     this.prediction = config.predictiveEcho === true
@@ -441,8 +497,7 @@ export class TerminalClient {
       this.scheduleFit();
     });
     this.resizeObserver.observe(config.host);
-    window.visualViewport?.addEventListener("resize", this.onViewportChange);
-    window.visualViewport?.addEventListener("scroll", this.onViewportChange);
+    this.stopKeyboardWatch = watchKeyboard(() => this.syncVisualViewport());
     this.terminal.onResize(({ cols, rows }) => {
       // The grid is readable from the page (specs, and anyone judging that a line did not rewrap).
       config.host.dataset.cols = String(cols); config.host.dataset.rows = String(rows);
@@ -539,6 +594,9 @@ export class TerminalClient {
       // task so dozens of initializations cannot hold queued socket replies in
       // one microtask batch (#245); the first window pays only one task turn.
       await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+      // Last chance to stop without a trace: the constructor below opens the connection, and after a sign-out that is a
+      // connection nobody is entitled to make.
+      if (config.isCurrent && !config.isCurrent()) throw new TerminalOpenCancelled();
       const terminal = TerminalClient.createRenderer(font, config);
       const client = new TerminalClient(config, terminal, font);
       // Weights go in before the first measurement so the grid is measured from the face it draws.
@@ -546,6 +604,7 @@ export class TerminalClient {
       client.remeasureFont();
       client.keepLigaturesOff();
       client.installCursorLayerHook();
+      client.registerGlass();
       client.loadStyledFaces();
       // An already opened terminal has paid the same first-renderer cost. Also
       // supersede an optional warm-up still waiting for resources on this font.
@@ -561,6 +620,7 @@ export class TerminalClient {
     }
   }
 
+  /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
       fontFamily: fontStack(font),
@@ -573,7 +633,8 @@ export class TerminalClient {
         foreground: "#e6e7e9",
         cursor: "#c8ceff",
         cursorAccent: "#101113",
-        selectionBackground: "#44485c",
+        selectionBackground: INK_SELECTION.background,
+        selectionForeground: INK_SELECTION.foreground,
       },
     });
   }
@@ -716,6 +777,11 @@ export class TerminalClient {
   readScreenText(): string {
     const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
     return terminalBufferText(this.terminal, maxRows);
+  }
+
+  /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
+  readSelectionText(): string {
+    return this.terminal.getSelection();
   }
 
   /** Replays test-double output in a second Ghostty instance for differential checks. */
@@ -958,6 +1024,8 @@ export class TerminalClient {
     this.pendingLinkRows.clear();
     this.forcedLinkRows.clear();
     this.disposeTouch();
+    this.unregisterGlass?.();
+    this.glassListeners.clear();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
@@ -974,9 +1042,15 @@ export class TerminalClient {
     this.offRoundTrip();
     this.prediction?.dispose();
     this.resizeObserver.disconnect();
-    window.visualViewport?.removeEventListener("resize", this.onViewportChange);
-    window.visualViewport?.removeEventListener("scroll", this.onViewportChange);
+    this.stopKeyboardWatch?.();
+    // The watcher may be the only thing that would have undone the keyboard-sized height it put on the shared screen. A window
+    // that ends with the keyboard up (a shell that exits) then left the screen short for good: a band under the page.
+    // Any terminal still open re-fits within one trigger (focus change, viewport event or its settle re-read).
+    this.screen.style.height = "";
+    this.screen.style.transform = "";
     this.inputResendNotice?.dispose();
+    this.remoteCopyNotice?.dispose();
+    this.clipboardWrites.reset();
     this.inputQueue.clear();
     this.retainedInput?.fill(0);
     this.retainedInput = undefined;
@@ -1034,6 +1108,11 @@ export class TerminalClient {
     };
   }
 
+  /**
+   * Handles one frame for this terminal's stream: acknowledgments, output and repaints for the screen, terminal
+   * notices (reconnects, replay fences, approximate screens, exits), liveness pings and stream closes. A frame that
+   * breaks the wire contract fails the connection, which then reconnects.
+   */
   private handleTerminalFrame(frame: WireFrame, message: Uint8Array, receivedAt: number): void {
     if (!this.attached) {
       this.protocolFailure("server sent terminal data before AttachTerm");
@@ -1090,8 +1169,14 @@ export class TerminalClient {
             if (this.config.status.textContent === LINK_DOUBT_STATUS) this.setStatus("");
             this.config.hooks?.onLinkDoubt?.(false);
           } else if (notice.type === "terminal.snapshot" && notice.approximate === true) {
-            this.setStatus("Reconnected. The screen may be slightly out of date.");
-            this.config.hooks?.onApproximate?.();
+            // Only a repaint that completes a reattach follows a reconnect. On a live,
+            // confirmed attachment an approximate repaint is the host skipping flood
+            // output for a key (D381) or a credit catch-up: the session never dropped,
+            // so saying "Reconnected" would be untrue (#477).
+            if (!this.attachmentConfirmed) {
+              this.setStatus("Reconnected. The screen may be slightly out of date.");
+              this.config.hooks?.onApproximate?.();
+            }
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
@@ -1194,11 +1279,17 @@ export class TerminalClient {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
         const refusal = terminalRefusal(error, this.config.hostName);
-        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action)) this.setStatus(refusal.message);
+        if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action, refusal.calm === true)) this.setStatus(refusal.message);
       }
     });
   }
 
+  /**
+   * Sends AttachTerm for this window's session once nothing older is still being painted, so `lastOutSeq` names
+   * exactly what the screen shows. Grants the initial output credit and reports the grid size, but only once the
+   * grid has been fitted: the constructor's 80x24 default is no viewer's size (#521). Safe to call repeatedly; it
+   * returns early until every precondition holds.
+   */
   private tryAttach(): void {
     if (!this.attachRequested || !this.sessionId || this.attached || this.closed || this.exitReported || this.sessionGone || !this.conn.isOpen) return;
     if (this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
@@ -1214,7 +1305,8 @@ export class TerminalClient {
     });
     this.creditAvailable = INITIAL_CREDIT;
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
-    this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
+    // An unfitted default is not this viewer's size; the first fit reports the real one (#521).
+    if (this.sizeFitted) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
     this.setStatus("Catching up…");
     this.hasAttached = true;
     this.wakeTerminal();
@@ -1375,6 +1467,7 @@ export class TerminalClient {
     this.pendingWriteSynchronizedBatch = false;
     this.prediction?.resetForSnapshot();
     this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
     this.synchronizedOutput.reset();
     this.synchronizedOutputBatchPending = false;
     this.terminal.reset();
@@ -1511,6 +1604,7 @@ export class TerminalClient {
     return this.inputResendNotice?.focusAction() ?? false;
   }
 
+  /** Offers to send the typing that was saved offline again, or to discard it. */
   private showInputResendNotice(): void {
     this.inputResendNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
     const focusShortcut = bindingLabel("focus-resend-actions") || "Ctrl+Shift+Space";
@@ -1525,6 +1619,67 @@ export class TerminalClient {
       secondaryAction: { label: "Discard", onSelect: () => this.discardRetainedInput() },
     });
     this.inputResendNoticeVisible = true;
+  }
+
+  /**
+   * Whether a copy that a program asked for may go to the clipboard without a tap. This is the one place that decides
+   * it, so a later policy (a setting, an allow-list, "only shortly after typing") changes here and nowhere else.
+   * Today: only the terminal that has the focus, on a visible page, and only while Settings allows program copies
+   * (`program-copy.ts`, on by default). Any other window, or every window when the setting is off, offers the copy instead.
+   */
+  private mayCopyWithoutTap(): boolean {
+    return readProgramCopy() && document.visibilityState === "visible" && this.config.host.contains(document.activeElement);
+  }
+
+  /**
+   * Shows a remote-copy notice in this window, under this window's own key. It rides the edge of the window that is
+   * farther from the cursor, so it never covers the line the person is typing on: the bottom edge while the cursor is
+   * in the top half, the top edge otherwise.
+   */
+  private showCopyNotice(notice: Omit<ToastMessage, "key">): void {
+    if (this.closed) return;
+    this.remoteCopyNotice ??= mountToast(this.config.host.parentElement ?? this.config.host, { placement: "parent" });
+    const cursorRow = this.terminal.buffer.active.cursorY;
+    this.remoteCopyNotice.setEdge(cursorRow >= this.terminal.rows / 2 ? "top" : "bottom");
+    this.remoteCopyNotice.show({ ...notice, key: this.remoteCopyKey });
+  }
+
+  /**
+   * A program in the terminal asked to copy `text` (OSC 52). In the focused terminal it goes to the clipboard at once
+   * and a notice says so, so the clipboard is never replaced silently. Anywhere else, or when the browser refuses a
+   * write that no gesture backs (always in Safari), the text waits behind a "Copy" action that names this window; the
+   * tap on it is the gesture. A write that a program started never uses the focus-moving legacy fallback.
+   */
+  private remoteCopy(text: string): void {
+    if (this.closed) return;
+    if (!this.mayCopyWithoutTap()) { this.offerCopy(text); return; }
+    void writeClipboard(text, { legacy: false }).then((ok) => {
+      if (ok) this.showCopyNotice({ message: "Copied from the terminal", duration: 1800 });
+      else this.offerCopy(text);
+    });
+  }
+
+  /**
+   * Holds `text` behind a "Copy" action for 15 seconds. The message names the window by its host ("From build-01"),
+   * cut to 11 characters, so it stays on one line beside the action on a phone.
+   */
+  private offerCopy(text: string): void {
+    const name = this.config.hostName?.trim();
+    const from = name ? (name.length > 11 ? `${name.slice(0, 11)}…` : name) : undefined;
+    this.showCopyNotice({
+      message: from ? `From ${from}` : "Text to copy",
+      icon: CLIPBOARD,
+      duration: 15000,
+      dismissible: true,
+      action: {
+        label: "Copy",
+        onSelect: () => {
+          void writeClipboard(text).then((done) => this.showCopyNotice(done
+            ? { message: "Copied from the terminal", duration: 1800 }
+            : { message: "Couldn't copy. Select the text instead.", tone: "error" }));
+        },
+      },
+    });
   }
 
   private encoderIntoScratch(data: string): Uint8Array | undefined {
@@ -1567,16 +1722,28 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /**
+   * Takes a host repaint (Snapshot) valid at output offset `sequence`. It must not go backwards, and it may use only
+   * the credit already free on this stream plus the credit held by the queued output it replaces. It supersedes queued
+   * raw output and is painted on the next drain. The stale-screen note (D309) is settled only as far as the repaint
+   * carries output past the replay fence, because a repaint is the host's picture, not the program redrawing (#521).
+   */
   private acceptSnapshot(sequence: bigint, bytes: Uint8Array): void {
     performance.mark(`sw:snapshot:${this.streamId}`);
     performance.mark(`sw:snapshot:${this.streamId}`);
-    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable) {
+    // A replacement may borrow the credit in queued raw bytes: accepting it
+    // drops that tail (and any pending Snapshot), while an active write returns
+    // its credit when its paint callback finishes. Keep the transaction within
+    // the bytes being replaced plus the credit already free on this stream.
+    const replaceable = this.outputQueue.length + (this.pendingSnapshot?.bytes.byteLength ?? 0);
+    if (sequence < this.receivedOutSeq || bytes.byteLength > this.creditAvailable + replaceable) {
       this.protocolFailure("server sent a stale snapshot or exceeded output credit");
       return;
     }
     this.creditAvailable -= bytes.byteLength;
     this.receivedOutSeq = sequence;
-    this.staleWatch?.reset();
+    // A repaint with no output past the replay fence is not the program redrawing (D309, #521).
+    this.staleWatch?.repainted(sequence);
 
     // A snapshot replaces the parser's prior mode state before later live bytes are scanned.
     this.synchronizedOutput.reset();
@@ -1594,6 +1761,7 @@ export class TerminalClient {
     this.drainOutput();
   }
 
+  /** Drain queued terminal writes in order, returning each frame's credit after its render callback paints it. */
   private drainOutput(): void {
     this.wakeTerminal();
     if (this.synchronizedOutput.holdsPaint) return;
@@ -1634,7 +1802,7 @@ export class TerminalClient {
         this.releaseReplayResponsesAfterPaint();
         this.snapshotWriteInFlight = false;
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
-        this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq);
+        this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq, "snapshot");
         snapshot.bytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
         this.drainOutput();
@@ -1643,6 +1811,12 @@ export class TerminalClient {
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
       this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
+      // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
+      // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
+      // task that reset it, means a frame shows the old screen or the new one, never neither. The render loop then
+      // finds no dirty rows, so a repaint costs one full draw either way.
+      this.repaintAll();
       return;
     }
 
@@ -1724,11 +1898,16 @@ export class TerminalClient {
           for (const segment of regions!) {
             const length = Math.min(segment.byteLength, consumed - hookOffset);
             if (length <= 0) break;
-            this.config.hooks?.onPaintedOutput?.(segment.subarray(0, length), paintedAt, writeSequence + BigInt(hookOffset));
+            this.config.hooks?.onPaintedOutput?.(
+              segment.subarray(0, length),
+              paintedAt,
+              writeSequence + BigInt(hookOffset),
+              "output",
+            );
             hookOffset += length;
           }
         } else {
-          this.config.hooks?.onPaintedOutput?.(region!.subarray(0, consumed), paintedAt, writeSequence);
+          this.config.hooks?.onPaintedOutput?.(region!.subarray(0, consumed), paintedAt, writeSequence, "output");
         }
         this.outputQueue.consume(consumed);
         this.outputWriteLength = 0;
@@ -1796,6 +1975,7 @@ export class TerminalClient {
    * Keyboard callbacks run in later tasks and always use the unchanged typing path.
    */
   private writeQueryResponses(bytes: Uint8Array, offset: bigint, callback?: () => void): void {
+    this.clipboardWrites.scan(bytes, (text) => this.remoteCopy(text), () => this.showCopyNotice({ message: "That copy was too large for the clipboard", tone: "error", duration: 6000 }));
     if (!this.conn.terminalQueryReplies) { this.terminal.write(bytes, callback); return; }
     this.linkRowsArmed = true;
     this.terminal.writeSlices(bytes, (writeSlice) => {
@@ -1826,6 +2006,8 @@ export class TerminalClient {
   private writeSuppressingTerminalResponses(bytes: Uint8Array, callback?: () => void, queryOffset?: bigint): void {
     const previous = this.suppressTerminalResponses;
     this.suppressTerminalResponses = true;
+    // Replayed bytes are old output: a copy in them must not rewrite what the person copied since.
+    this.clipboardWrites.scan(bytes, undefined);
     if (queryOffset !== undefined) (this.terminalQueries ??= new TerminalQueries()).scan(bytes, queryOffset, () => undefined);
     try {
       this.terminal.write(bytes, callback);
@@ -1866,7 +2048,7 @@ export class TerminalClient {
     if (!exit || exit.retired || this.exitReported || this.lastOutSeq < exit.finalSeq || this.outputWriteInFlight || this.snapshotWriteInFlight || this.pendingSnapshot || this.outputQueue.length > 0) return;
     this.exitReported = true;
     this.cancelStreamRetry();
-    this.setStatus(exit.status === 0 ? "Shell exited." : `Shell exited with status ${exit.status}. Open a new shell to continue.`);
+    this.setStatus(exitStatusText(exit.status));
     this.config.hooks?.onExited?.(exit.status);
   }
 
@@ -1887,6 +2069,12 @@ export class TerminalClient {
     this.setStatus(message);
   }
 
+  /**
+   * Fits the grid to the host element on the next animation frame: whole cells of the current metrics, at least
+   * 20x6. A changed size resizes the terminal, whose resize event reports it to the host. The first fit also marks the
+   * size as real, and reports it directly when the grid already had it, so the attach never sends a default (#521).
+   * Coalesces repeated calls and does nothing while the window is closed, suspended or frozen.
+   */
   private scheduleFit(): void {
     if (this.fitQueued || this.closed || this.suspended || this.frozen) return;
     this.fitQueued = true;
@@ -1900,9 +2088,16 @@ export class TerminalClient {
       const metrics = this.cellMetrics();
       const cols = clamp(Math.floor(width / metrics.width), 20, 0xffff);
       const rows = clamp(Math.floor(height / metrics.height), 6, 0xffff);
+      const first = !this.sizeFitted;
+      this.sizeFitted = true;
       if (this.terminal.cols !== cols || this.terminal.rows !== rows) {
         this.wakeTerminal();
         this.terminal.resize(cols, rows);
+      } else if (first && this.attached) {
+        // The grid already had the fitted size, so no resize event follows: report it here, once.
+        const rect = this.config.host.getBoundingClientRect();
+        this.lastSize = { cols, rows, pxW: toU16(rect.width), pxH: toU16(rect.height) };
+        this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
       }
     });
   }
@@ -2132,6 +2327,10 @@ export class TerminalClient {
     this.wakeTerminal();
   }
 
+  /**
+   * Draws every row of the current terminal state into the canvas now, in this task. A no-op while the renderer is
+   * silenced (frozen or released surface) or a synchronized-output batch holds paint, through the render wrapper.
+   */
   private repaintAll(): void {
     const renderer = this.ghostty.renderer;
     const buffer = this.terminal.wasmTerm;
@@ -2370,6 +2569,31 @@ export class TerminalClient {
     if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
+  /** Glass cards open over this screen, each called after a render pass (glass-under.on-demand.ts); empty almost always. */
+  private readonly glassListeners = new Set<() => void>();
+  /** Takes this screen out of the glass registry (see {@link registerGlass}). */
+  private unregisterGlass: (() => void) | undefined;
+
+  /**
+   * Lets glass cards read what this screen shows under them (`packages/ui/src/glass-under.on-demand.ts`): the registry holds the host,
+   * a card over it subscribes to render passes only while it is open, and nothing here runs otherwise.
+   */
+  private registerGlass(): void {
+    // The registry and the reader are on-demand chunks (`glass-under.on-demand.ts`, `terminal-glass.on-demand.ts`): nothing of the
+    // glass is on the first paint. The screen is registered once both are here; a screen disposed before that is never registered.
+    let stop: (() => void) | undefined;
+    let gone = false;
+    this.unregisterGlass = () => { gone = true; stop?.(); };
+    void Promise.all([onDemand(() => import("../../../packages/ui/src/glass-under.on-demand")), onDemand(() => import("./terminal-glass.on-demand"))]).then(([under, glass]) => {
+      if (gone) return;
+      stop = under.registerGlassGrid({
+        element: this.config.host,
+        subscribe: (listener) => { this.glassListeners.add(listener); return () => { this.glassListeners.delete(listener); }; },
+        read: (rect, base) => glass.readGlassCells(this.terminal, this.ghostty.renderer, rect, base),
+      });
+    });
+  }
+
   /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */
   private installCursorLayerHook(): void {
     const renderer = this.ghostty.renderer;
@@ -2387,6 +2611,7 @@ export class TerminalClient {
       if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
       this.syncCursorLayer();
+      for (const listener of this.glassListeners) listener();
     };
   }
 
@@ -2547,11 +2772,12 @@ export class TerminalClient {
     return position !== undefined && position.visible && !position.alternate && position.viewportY === 0;
   }
 
+  /** Fits the screen to the visible area while the keyboard is up, and back to full height when it is not (see keyboard-viewport.ts). */
   private syncVisualViewport(): void {
     const viewport = window.visualViewport;
     if (!viewport) return;
     this.wakeTerminal();
-    const keyboardOpen = viewport.height < window.innerHeight - 120;
+    const keyboardOpen = keyboardIsOpen();
     this.screen.style.height = keyboardOpen ? `${viewport.height}px` : "";
     this.screen.style.transform = keyboardOpen ? `translateY(${viewport.offsetTop}px)` : "";
     this.scheduleFit();

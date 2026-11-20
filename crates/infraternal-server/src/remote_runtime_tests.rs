@@ -171,6 +171,20 @@ struct RecoveryTlsFixture {
     expired: Identity,
     csr_der: Vec<u8>,
     pool: sqlx::SqlitePool,
+    /// The listener refuses recovery while its sampled wall clock is stale.
+    clock: std::sync::Arc<crate::clock_health::ClockHealth>,
+}
+
+/// Wait until the listener's sampler has three stable clock observations again.
+async fn wait_for_healthy_clock(clock: &crate::clock_health::ClockHealth) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !clock.is_healthy() {
+            // sleep: poll the clock sampler's real health state while leaving it time to observe.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("server clock did not become healthy");
 }
 
 /// Issue a host identity that has already expired, and return it with its key.
@@ -198,7 +212,7 @@ async fn expired_identity(
         .execute(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
         .bind(previous.record.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(previous.record.issuer_fingerprint.as_slice())
@@ -253,12 +267,14 @@ fn recovery_challenge_request(
 
 /// Recover over the real TLS listener with the registered key, and return the new certificate.
 async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X509 {
+    wait_for_healthy_clock(&fixture.clock).await;
     let recovery_tls =
         remote_tls::recovery_client_config(std::slice::from_ref(&fixture.root)).unwrap();
     let recovery = remote_tls::dial_recovery(fixture.address, "localhost", &recovery_tls)
         .await
         .unwrap();
     let challenge_request = recovery_challenge_request(fixture);
+    wait_for_healthy_clock(&fixture.clock).await;
     write_recovery_request(&recovery.channel, &challenge_request).await;
     let response = infraternal_plugin_remote::remote_recovery::read_response(&recovery.channel)
         .await
@@ -269,6 +285,7 @@ async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X
     else {
         panic!("eligible host did not receive a proof challenge");
     };
+    wait_for_healthy_clock(&fixture.clock).await;
     let infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
         predecessor_fingerprint,
         request_id,
@@ -313,6 +330,7 @@ async fn recover_over_tls_with_registered_key(fixture: &RecoveryTlsFixture) -> X
 
 /// Repeating a completed recovery returns the same certificate and never a second one.
 async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recovered: &X509) {
+    wait_for_healthy_clock(&fixture.clock).await;
     let challenge_request = recovery_challenge_request(fixture);
     let recovery_tls =
         remote_tls::recovery_client_config(std::slice::from_ref(&fixture.root)).unwrap();
@@ -321,15 +339,27 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
     let retry = remote_tls::dial_recovery(fixture.address, "localhost", &recovery_tls)
         .await
         .unwrap();
+    wait_for_healthy_clock(&fixture.clock).await;
     write_recovery_request(&retry.channel, &challenge_request).await;
+    let response = infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
+        .await
+        .unwrap();
+    let response_kind = match &response {
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. } => {
+            "challenge"
+        }
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Certificate { .. } => {
+            "certificate"
+        }
+        infraternal_plugin_remote::remote_recovery::RecoveryResponse::Denied => "denied",
+    };
     assert!(
         matches!(
-            infraternal_plugin_remote::remote_recovery::read_response(&retry.channel)
-                .await
-                .unwrap(),
+            response,
             infraternal_plugin_remote::remote_recovery::RecoveryResponse::Challenge { .. }
         ),
-        "a recovery start must not disclose an issued leaf without proof of possession"
+        "a recovery start must not disclose an issued leaf without proof of possession; response={response_kind}, clock_healthy={}",
+        fixture.clock.is_healthy()
     );
 
     let infraternal_plugin_remote::remote_recovery::RecoveryRequest::Challenge {
@@ -410,15 +440,7 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     let (expired, csr_der) = expired_identity(&pool, host, material, current_time).await;
     let clock = std::sync::Arc::new(crate::clock_health::ClockHealth::default());
     clock.start_monitor();
-    // The clock turns healthy after three stable 1 s samples; wait for that, not a fixed time.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !clock.is_healthy() {
-            // sleep: `ClockHealth` has no change notification; poll its 1 s sampler within the bound.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
+    wait_for_healthy_clock(&clock).await;
     let hosts = RemoteHosts::from_source(Some(source_for_hosts));
     let listeners = RemoteListeners::start_with_recovery(
         "127.0.0.1:0".parse().unwrap(),
@@ -427,7 +449,7 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         EnrollmentStore::new(pool.clone()),
         hosts.clone(),
         source,
-        clock,
+        clock.clone(),
     )
     .await
     .unwrap();
@@ -438,6 +460,7 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
         expired,
         csr_der,
         pool,
+        clock,
     };
 
     let ordinary =
@@ -1157,3 +1180,92 @@ async fn late_native_detach_after_peer_stop_keeps_the_control_connection() {
 
 #[path = "remote_ping_flood_tests.rs"]
 mod ping_flood;
+
+/// A promotion closes host terminal admission until its final census and handover finish.
+#[tokio::test]
+async fn promotion_blocks_new_terminal_admission_until_its_guard_drops() {
+    let hosts = RemoteHosts::default();
+    let host = Uuid::from_u128(0x522);
+
+    let promotion = hosts.block_terminal_opens(host).await.unwrap();
+    assert!(hosts.admit_terminal_open(host).is_err());
+
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+}
+
+/// D393: only the promotion guard's bit reads as "being upgraded", and it ends with the guard.
+///
+/// A full open counter and a poisoned admission map are refused too, but as `Unavailable`: a broken
+/// map must not tell every person that every host is being upgraded.
+#[tokio::test]
+async fn only_the_promotion_guard_refuses_as_upgrading() {
+    let hosts = RemoteHosts::default();
+    let host = Uuid::from_u128(0x524);
+    let promotion = hosts.block_terminal_opens(host).await.unwrap();
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Upgrading)
+    );
+    assert!(hosts.admit_terminal_open(Uuid::from_u128(0x525)).is_ok());
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+
+    let full = hosts.terminal_admission(host).unwrap();
+    full.state.store(OPEN_COUNT_MASK, AtomicOrdering::Release);
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
+    full.state.store(0, AtomicOrdering::Release);
+
+    let map = std::sync::Arc::clone(&hosts.8);
+    let poisoned = std::thread::spawn(move || {
+        let _held = map.lock().unwrap();
+        panic!("poison the admission map on purpose");
+    })
+    .join();
+    assert!(poisoned.is_err());
+    assert_eq!(
+        hosts.admit_terminal_open(host).err(),
+        Some(AdmissionRefused::Unavailable)
+    );
+}
+
+/// A promotion waits for open sessions admitted before it closed the host gate.
+#[tokio::test]
+async fn promotion_waits_for_an_admitted_terminal_open_to_finish() {
+    let hosts = std::sync::Arc::new(RemoteHosts::default());
+    let host = Uuid::from_u128(0x523);
+    let in_flight = hosts.admit_terminal_open(host).unwrap();
+    let promotion_hosts = std::sync::Arc::clone(&hosts);
+    let (ready, mut promotion_ready) = tokio::sync::oneshot::channel();
+    let promotion = tokio::spawn(async move {
+        let guard = promotion_hosts.block_terminal_opens(host).await.unwrap();
+        let _ = ready.send(());
+        guard
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if hosts.admit_terminal_open(host).is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!promotion.is_finished());
+    assert!(promotion_ready.try_recv().is_err());
+
+    drop(in_flight);
+    tokio::time::timeout(Duration::from_secs(5), &mut promotion_ready)
+        .await
+        .unwrap()
+        .unwrap();
+    let promotion = promotion.await.unwrap();
+    assert!(hosts.admit_terminal_open(host).is_err());
+    drop(promotion);
+    assert!(hosts.admit_terminal_open(host).is_ok());
+}

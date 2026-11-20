@@ -15,6 +15,20 @@ import tomllib
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
+LICENSE_NOTICE_PATHS = (
+    'licenses/libghostty-vt/README.md',
+    'licenses/libghostty-vt/Unicode-3.0.txt',
+    'licenses/libghostty-vt/aro-MIT.txt',
+    'licenses/libghostty-vt/highway-Apache-2.0.txt',
+    'licenses/libghostty-vt/highway-BSD-3-Clause.txt',
+    'licenses/libghostty-vt/libghostty-vt-MIT.txt',
+    'licenses/libghostty-vt/simdutf-Apache-2.0.txt',
+    'licenses/libghostty-vt/simdutf-MIT.txt',
+    'licenses/libghostty-vt/translate_c-MIT.txt',
+    'licenses/libghostty-vt/uucode-MIT.txt',
+    'licenses/libghostty-vt/wuffs-Apache-2.0.txt',
+    'licenses/libghostty-vt/wuffs-MIT.txt',
+)
 
 class ReleaseScripts(unittest.TestCase):
     def test_version_grammar_and_explicit_build_channel(self):
@@ -24,6 +38,7 @@ class ReleaseScripts(unittest.TestCase):
             repo = Path(directory)
             shutil.copytree(ROOT / 'scripts/release', repo / 'scripts/release')
             shutil.copy(ROOT / 'Cargo.toml', repo / 'Cargo.toml')
+            shutil.copytree(ROOT / 'licenses/libghostty-vt', repo / 'licenses/libghostty-vt')
             (repo / 'scripts/release/traefik_component.py').write_text('''import argparse, hashlib, json
 from pathlib import Path
 p=argparse.ArgumentParser(); p.add_argument("--release-version", required=True); p.add_argument("--os", required=True); p.add_argument("--arch", required=True); p.add_argument("--output", type=Path, required=True); a=p.parse_args()
@@ -38,6 +53,12 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
             ):
                 script = repo / 'scripts' / name
                 script.write_text(body)
+                if name == 'package-release':
+                    script.write_text(script.read_text().replace(
+                        'mkdir -p "$1"\n',
+                        'mkdir -p "$1/licenses/libghostty-vt"\n'
+                        'cp -R "$(dirname -- "$0")/../licenses/libghostty-vt/." "$1/licenses/libghostty-vt/"\n',
+                    ))
                 script.chmod(0o755)
             env = dict(os.environ, CARGO_TARGET_DIR=str(repo / 'target'))
             def build(*args):
@@ -68,14 +89,53 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                     self.assertTrue((bundle / f'proxy-traefik-{os_name}-{arch}.json').is_file())
                     self.assertTrue((bundle / relative).is_file())
                 checksums = (bundle / 'SHA256SUMS').read_text().splitlines()
-                self.assertEqual({line.split()[1] for line in checksums}, {p.name for p in bundle.iterdir() if p.is_file() and p.name != 'SHA256SUMS'})
+                self.assertEqual(
+                    {line.split()[1] for line in checksums},
+                    {
+                        str(p.relative_to(bundle)) for p in bundle.rglob('*')
+                        if p.is_file() and p.name != 'SHA256SUMS' and p.relative_to(bundle).parts[0] != 'components'
+                    },
+                )
+                self.assertTrue(set(LICENSE_NOTICE_PATHS).issubset({line.split()[1] for line in checksums}))
                 self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
                 if channel == 'stable':
                     self.assertNotEqual(build('--channel',channel).returncode, 0)
+            self.darwin_bundle(repo, build, stable)
             for version in ('1.2','1.2.3-rc1','edge-20261011t071500Z','edge-20261011T071500z','../1.2.3','1.2.3\n'):
                 for name in ('publish','verify'):
                     result = subprocess.run([str(repo / 'scripts/release' / name),version],env=env,text=True,capture_output=True)
                     self.assertEqual(result.returncode,2,result.stderr)
+
+    def darwin_bundle(self, repo, build, stable):
+        """--darwin adds the Mac binary under its own stamped version, and refuses a wrong one (#483)."""
+        header = bytes.fromhex('cffaedfe0c000001')
+        def darwin(name, version, body=None):
+            directory = repo / name
+            directory.mkdir()
+            (directory / 'VERSION').write_text(version + '\n')
+            (directory / 'infraternal-aarch64-darwin').write_bytes(body if body is not None else header + b'\0' * 24 + version.encode())
+            return str(directory)
+        version = 'edge-20261110T010203Z'
+        result = build('--channel', 'edge', '--darwin', darwin('mac-edge', version))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundle = repo / 'target/releases' / version
+        self.assertEqual((bundle / 'infraternal-x86_64-musl').read_text(), version + '\n', 'Linux payloads take the Mac build version')
+        self.assertEqual((bundle / 'infraternal-aarch64-darwin').read_bytes(), (repo / 'mac-edge/infraternal-aarch64-darwin').read_bytes())
+        self.assertIn('infraternal-aarch64-darwin', {line.split()[1] for line in (bundle / 'SHA256SUMS').read_text().splitlines()})
+        self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
+        refusals = (
+            ('stable', darwin('mac-stable-edge', 'edge-20261110T010204Z')),
+            ('edge', darwin('mac-edge-stable', stable)),
+            ('edge', darwin('mac-elf', 'edge-20261110T010205Z', b'\x7fELF' + b'\0' * 60 + b'edge-20261110T010205Z')),
+            ('edge', darwin('mac-unstamped', 'edge-20261110T010206Z', header + b'\0' * 24 + b'edge-20261110T010207Z')),
+            ('edge', darwin('mac-bad-version', '../1.2.3')),
+            ('edge', str(repo / 'mac-missing')),
+        )
+        for channel, directory in refusals:
+            with self.subTest(channel=channel, directory=directory):
+                result = build('--channel', channel, '--darwin', directory)
+                self.assertNotEqual(result.returncode, 0, directory)
+        self.assertEqual(build('--channel', 'edge', '--other', darwin('mac-flag', 'edge-20261110T010208Z')).returncode, 2)
 
     def test_scripts_exist(self):
         for name in ('build', 'publish', 'verify'):
@@ -110,6 +170,13 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
     def test_signed_session_images_are_verified(self):
         self.local_publication('0.1.0', verification_only=True)
 
+    def test_signed_macos_binary_is_published_and_verified(self):
+        """A bundle built with --darwin publishes the Mac binary under the signed manifest (#483)."""
+        self.local_publication('edge-20261110T010203Z', include_darwin=True)
+
+    def test_signed_macos_binary_is_checked_on_verification(self):
+        self.local_publication('0.1.0', verification_only=True, include_darwin=True)
+
     def test_older_signed_releases_without_session_images_are_verified(self):
         self.local_publication('0.1.0', include_sessions=False, verification_only=True)
 
@@ -118,7 +185,11 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
             with self.subTest(architecture=arch):
                 self.local_publication('0.1.0', missing_session=arch)
 
-    def local_publication(self, version, include_sessions=True, verification_only=False, missing_session=None):
+    def test_new_publication_requires_all_engine_and_dependency_notices_before_upload(self):
+        """Reject a new signed bundle before any network request if one notice is absent."""
+        self.local_publication('0.1.0', missing_license=LICENSE_NOTICE_PATHS[1])
+
+    def local_publication(self, version, include_sessions=True, verification_only=False, missing_session=None, missing_license=None, include_darwin=False):
         scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-pipeline/target'))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -139,6 +210,12 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                 for arch in ('x86_64', 'aarch64'):
                     name = f'infraternal-{arch}-session-musl'
                     files[name] = ('synthetic ' + name).encode()
+            if include_darwin:
+                files['infraternal-aarch64-darwin'] = b'synthetic infraternal-aarch64-darwin'
+            if not verification_only:
+                for name in LICENSE_NOTICE_PATHS:
+                    if name != missing_license:
+                        files[name] = (ROOT / name).read_bytes()
             component_archives = {}
             for os_name, arch in [('linux', 'amd64'), ('linux', 'arm64'), ('darwin', 'amd64'), ('darwin', 'arm64')]:
                 filename = f'traefik_v3.7.17_{os_name}_{arch}.tar.gz'
@@ -157,7 +234,9 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                 component_archives[relative] = payload
             files["VERSION"] = (version + "\n").encode()
             for name, body in files.items():
-                (bundle / name).write_bytes(body)
+                path = bundle / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(body)
             for relative, body in component_archives.items():
                 path = bundle / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,6 +314,11 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                     self.assertNotEqual(run('publish').returncode, 0)
                     self.assertFalse(requests, "an incomplete new bundle must fail before network work")
                     return
+                if missing_license:
+                    result = run('publish')
+                    self.assertNotEqual(result.returncode, 0, "an incomplete notice bundle must not be published")
+                    self.assertFalse(requests, "an incomplete notice bundle must fail before network work")
+                    return
                 if verification_only:
                     store.update({version + '/' + name: body for name, body in files.items()})
                     sign_store()
@@ -248,6 +332,15 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                             store[version + '/' + name] = files[name]
                         del store[version + '/infraternal-aarch64-session-musl']
                         self.assertNotEqual(run('verify').returncode, 0)
+                        store[version + '/infraternal-aarch64-session-musl'] = files['infraternal-aarch64-session-musl']
+                        sign_store()
+                    if include_darwin:
+                        name = version + '/infraternal-aarch64-darwin'
+                        self.assertEqual(run('verify').returncode, 0)
+                        store[name] = b'tampered'
+                        self.assertNotEqual(run('verify').returncode, 0, 'a changed signed Mac binary must fail verification')
+                        del store[name]
+                        self.assertNotEqual(run('verify').returncode, 0, 'an advertised Mac binary must be downloadable')
                     return
                 (bundle / "VERSION").write_bytes(b"999.999.999\n")
                 self.assertNotEqual(run('publish').returncode, 0)
@@ -261,10 +354,29 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                 puts = {path.split(f'/releases/{version}/', 1)[-1] for method, path in requests if method == 'PUT'}
                 self.assertEqual(len(puts), len(files) + len(component_archives))
                 self.assertEqual(puts, set(files) | set(component_archives))
+                signed_names = {line.split()[1] for line in store[version + '/SHA256SUMS'].decode().splitlines()}
+                self.assertTrue(set(LICENSE_NOTICE_PATHS).issubset(signed_names), "signed release manifest omits engine or dependency notices")
+                published_names = {
+                    key[len(version) + 1:] for key in store
+                    if key.startswith(version + '/') and key not in (version + '/SHA256SUMS', version + '/SHA256SUMS.sig')
+                }
+                self.assertTrue(set(LICENSE_NOTICE_PATHS).issubset(published_names), "published release objects omit engine or dependency notices")
+                downloaded_names = {
+                    path.split(f'/releases/{version}/', 1)[-1]
+                    for method, path in requests if method == 'GET' and f'/releases/{version}/' in path
+                }
+                self.assertTrue(set(LICENSE_NOTICE_PATHS).issubset(downloaded_names), "public verification did not download every signed notice")
                 before = len(requests)
                 self.assertNotEqual(run('publish').returncode, 0)
                 self.assertFalse(any(r[0] in ('PUT', 'POST') for r in requests[before:]))
                 self.assertEqual(run('verify').returncode, 0)
+                missing_notice = LICENSE_NOTICE_PATHS[1]
+                notice_key = f'{version}/{missing_notice}'
+                notice_body = store.pop(notice_key)
+                self.assertNotEqual(run('verify').returncode, 0, "public verification must fail if a signed notice is missing")
+                store[notice_key] = b'tampered notice'
+                self.assertNotEqual(run('verify').returncode, 0, "public verification must fail if a signed notice is changed")
+                store[notice_key] = notice_body
                 store[version + '/infraternal-aarch64-musl'] = b'tampered'
                 self.assertNotEqual(run('verify').returncode, 0)
                 self.assertNotEqual(run('verify', '999.999.999').returncode, 0)

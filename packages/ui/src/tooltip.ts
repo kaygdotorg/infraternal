@@ -31,12 +31,13 @@
  * Labels are read live, so a control whose aria-label changes (copy → "Copied")
  * updates an open tooltip through `refreshTip`.
  */
-import { attachGlassBed } from "./glass-bed";
+import { confirmBox, type Box } from "./confirm-bounds";
+import { markMotion } from "./input-source";
+import { EASE_OUT } from "./motion";
 
 const DELAY = 400, WARM = 300, GRACE = 80, LONG_PRESS = 500, SLOP = 10;
 const POP = 160, SWAP = 140, SHIFT = 10, TRAVEL = 200, OUT = 100;
 const GAP = 8, MARGIN = 8;
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 
 type Side = "top" | "bottom";
 /** Optional layout for one point-anchored tooltip: a clamped two-line preview (a long link). Every other tooltip shows its whole label. */
@@ -57,9 +58,9 @@ const temporaryTips = new WeakMap<HTMLElement, { previous: string | undefined; t
 
 /** The tooltip and confirmation styles, installed once by `buildStyleOnly`. */
 const STYLE = `
-.tip-pos { position: fixed; left: 0; top: 0; z-index: 1002; pointer-events: none; will-change: transform; }
+.tip-pos { position: fixed; left: 0; top: 0; z-index: calc(var(--z-tooltip) + 2); pointer-events: none; will-change: transform; }
 .tip, .tip-sizer { position: relative; box-sizing: border-box; padding: 0.375rem 0.625rem; border-radius: var(--r-sm); width: max-content; max-width: min(17.5rem, calc(100vw - 2 * ${MARGIN}px)); overflow: hidden;
-  font: var(--fw-label, 500) var(--text-secondary, 0.75rem)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
+  font: var(--fw-label, 500) var(--text-secondary)/1.2 var(--font-ui, "Maple Mono NF", ui-monospace, monospace); letter-spacing: 0; }
 .tip-label.is-leaving { position: absolute; left: 0.625rem; top: 0.375rem; white-space: nowrap; }
 .tip-arrow { position: absolute; left: 0; width: 0.5rem; height: 0.5rem; margin-left: -0.25rem; transform-origin: center;
   background: var(--overlay, var(--fg)); border-radius: 1.5px; }
@@ -67,9 +68,9 @@ const STYLE = `
    and cap are never restated as pixel constants that drift when a token changes. Its own class keeps the .tip element unique in the page. */
 .tip-pos.tip-measure { visibility: hidden; will-change: auto; }
 [data-tip], button[aria-label], a[aria-label] { -webkit-touch-callout: none; }
-.ui-confirm-tip { position: fixed; z-index: 1001; display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
-  border-radius: 0.875rem; opacity: 0; transform: scale(0.96); pointer-events: none;
-  transition: opacity 150ms ease-out, transform 180ms var(--ease-out); }
+.ui-confirm-tip { position: fixed; z-index: calc(var(--z-tooltip) + 1); display: grid; width: max-content; max-width: min(21.25rem, calc(100vw - 1.5rem)); gap: 0.75rem; padding: 0.875rem 0.875rem 0.75rem;
+  border-radius: var(--r-md); opacity: 0; transform: scale(0.96); pointer-events: none;
+  transition: opacity calc(var(--t-press) * var(--ui-motion-scale, 1)) ease-out, transform calc(var(--t-pop) * var(--ui-motion-scale, 1)) var(--ease-out); }
 .ui-confirm-tip[hidden] { display: none !important; }
 .ui-confirm-tip[data-open="true"] { opacity: 1; transform: none; pointer-events: auto; }
 .ui-confirm-tip-arrow { position: absolute; left: var(--ui-confirm-tail, 50%); width: 0.625rem; height: 0.625rem; margin-left: -0.3125rem; background: inherit;
@@ -77,21 +78,22 @@ const STYLE = `
 .ui-confirm-tip[data-side="bottom"] .ui-confirm-tip-arrow { top: -0.3125rem; border-right: 0; border-bottom: 0; clip-path: polygon(0 0, 100% 0, 0 100%); }
 .ui-confirm-tip[data-side="top"] .ui-confirm-tip-arrow { bottom: -0.3125rem; border-top: 0; border-left: 0; clip-path: polygon(0 100%, 100% 100%, 100% 0); }
 .ui-confirm-tip-text { display: grid; gap: 0.1875rem; }
-.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body, 0.8125rem)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
-.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary, 0.75rem)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-message { margin: 0; color: var(--fg); font: 500 var(--text-body)/1.45 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
+.ui-confirm-tip-detail { margin: 0; white-space: pre-line; overflow-wrap: anywhere; color: var(--fg-2); font: 450 var(--text-secondary)/1.5 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; }
 .ui-confirm-tip-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.375rem; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button { display: inline-grid; width: 1.75rem; height: 1.75rem; place-items: center; padding: 0; border: 0; border-radius: var(--r-pill); background: transparent;
   color: var(--fg-2); cursor: pointer;
-  transition: transform 120ms var(--ease-out), background-color 120ms ease, color 120ms ease; }
+  transition: transform var(--t-press) var(--ease-out), background-color var(--t-press) ease, color var(--t-press) ease; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:active { transform: scale(0.97); }
 :is(.ui-confirm-tip, .ui-confirm-bar) button:focus { outline: none; }
 :root[data-focus-ring="on"] :is(.ui-confirm-tip, .ui-confirm-bar) button:focus-visible { outline: 2px solid color-mix(in oklab, var(--fg) 55%, transparent); outline-offset: 2px; }
 @media (hover: hover) and (pointer: fine) { :is(.ui-confirm-tip, .ui-confirm-bar) button:not(.ui-confirm-yes):hover { background: var(--hover); color: var(--fg); } }
-/* The overlay material gives its text a soft halo in the tint colour (styles.css), meant for text that sits straight on
-   a busy terminal. The confirmation is a near-opaque card of its own, where the halo is only a dark smear around the
-   glyphs (it read as blurred text on the confirm button and the grey effect line), so nothing inside it takes one. */
-.ui-confirm-tip, .ui-confirm-tip * { text-shadow: none; }
+/* The confirmation is the shared floating-card glass (D380, reversing #391's opaque card): the same overlay material and
+   blur as every other card, with nothing under it to hide the page. Its text is readable through the shared glass contrast
+   guarantee (D365, #448), including the overlay material's soft halo, so the card sets no material of its own. The buttons'
+   own text keeps no halo: on the filled confirm button it only smears the glyphs. */
+.ui-confirm-tip button { text-shadow: none; }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes { background: var(--fg); color: var(--bg); }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
@@ -105,7 +107,7 @@ const STYLE = `
   .ui-confirm-tip[data-stack][data-named] button { width: 100%; }
 }
 /* Named actions: the buttons carry their words. */
-.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary, 0.75rem)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
+.ui-confirm-tip[data-named] button { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 0; max-width: 100%; overflow: hidden; padding: 0 0.75rem; font: 500 var(--text-secondary)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); letter-spacing: 0; white-space: nowrap; }
 /* A label that still does not fit (a long host name) is cut with an ellipsis inside its button, never run past the card's edge. */
 .ui-confirm-tip[data-named] button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Two named actions sit side by side and share the row; the dismissal is a real button with a quiet flat fill, not loose text. */
@@ -119,7 +121,7 @@ const STYLE = `
   :is(.ui-confirm-tip, .ui-confirm-bar) button { width: 2.75rem; height: 2.75rem; }
   :is(.ui-confirm-tip, .ui-confirm-bar) button svg { width: 1.125rem; height: 1.125rem; }
 }
-@media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity 120ms ease; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .ui-confirm-tip { transition: opacity var(--t-press) ease; transform: none; } }
 `;
 
 function build() {
@@ -274,8 +276,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   actions.append(cancel, confirm);
   tip.append(arrow, text, actions);
   document.body.append(tip);
-  // A confirmation's own blur fades at its small box's edges and lets the page show through; the bed under it keeps text unreadable.
-  const bed = attachGlassBed(tip);
 
   anchor.setAttribute("aria-expanded", "true");
   anchor.setAttribute("aria-controls", tip.id);
@@ -285,32 +285,49 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   let controller: ConfirmTipController | undefined;
   const place = (): void => {
     if (tip.hidden) return;
-    const bound = options.boundary?.getBoundingClientRect();
+    // A card about something inside a window stays inside that window and the viewport, with the same 9 px inset (confirm-bounds.ts;
+    // TASTE: overlays stay inside the window they belong to; D385: on a phone it is inset, never edge to edge). The caller may name
+    // another boundary. A window too small for the card falls back to the viewport, so the card is never cut off.
+    const boundEl = options.boundary ?? (centred ? null : anchor.closest<HTMLElement>(".ui-window"));
+    const winRect = boundEl?.getBoundingClientRect();
+    // A window's header holds its own controls (pill, actions): the card sits below it, never over it. When what is left under the
+    // header is too short for the card, confirmBox hands the card to the viewport, where it opens on the anchor's free side.
+    const head = boundEl?.matches(".ui-window") ? boundEl.querySelector<HTMLElement>(".ui-window-head")?.getBoundingClientRect() : undefined;
+    const win = winRect ? { left: winRect.left, top: Math.max(winRect.top, head?.bottom ?? winRect.top), right: winRect.right, bottom: winRect.bottom } : undefined;
+    const view = { width: innerWidth, height: innerHeight };
+    /** Sizes the card to the box (its width follows the box) and measures it; the height is layout size, since the open animation scales the card. */
+    const fit = (box: Box): { width: number; height: number } => {
+      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps the card compact; only a narrower box shrinks it.
+      tip.style.maxWidth = "";
+      tip.style.maxHeight = "";
+      tip.style.overflowY = "";
+      const room = Math.max(160, Math.floor(box.right - box.left));
+      if (tip.offsetWidth > room) tip.style.maxWidth = `${room}px`;
+      return { width: tip.offsetWidth, height: tip.offsetHeight };
+    };
+    let box = confirmBox(win, view, 0);
+    let size = fit(box);
+    // The box is re-chosen once the card's height is known: a window too short for it hands the card to the viewport.
+    const roomy = confirmBox(win, view, size.height);
+    if (roomy.left !== box.left || roomy.top !== box.top || roomy.right !== box.right || roomy.bottom !== box.bottom) { box = roomy; size = fit(box); }
+    // A viewport shorter than the card itself is the only case left that cannot fit: the card then scrolls inside the box.
+    if (size.height > box.bottom - box.top) { tip.style.maxHeight = `${box.bottom - box.top}px`; tip.style.overflowY = "auto"; size = { width: size.width, height: box.bottom - box.top }; }
+    const { width, height } = size;
     if (centred) {
-      // Centred in the boundary (or the viewport); `data-side="center"` hides the tail.
-      // The stylesheet's own cap (21.25rem, and the viewport minus its margins) keeps it as compact as an anchored card; only a
-      // narrower boundary (a phone window) shrinks it further.
-      if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-      const w = tip.offsetWidth, h = tip.offsetHeight;
-      tip.style.left = `${Math.max(9, (bound ? bound.left + bound.width / 2 : innerWidth / 2) - w / 2)}px`;
-      tip.style.top = `${Math.max(9, (bound ? bound.top + bound.height / 2 : innerHeight / 2) - h / 2)}px`;
+      // Centred in the box; `data-side="center"` hides the tail.
+      tip.style.left = `${Math.max(box.left, (box.left + box.right) / 2 - width / 2)}px`;
+      tip.style.top = `${Math.max(box.top, (box.top + box.bottom) / 2 - height / 2)}px`;
       tip.style.transformOrigin = "50% 50%";
       tip.dataset.side = "center";
-      bed.sync();
       return;
     }
     const anchorRect = anchor.getBoundingClientRect();
-    // A narrow card (a phone window) is narrower than the tip's own cap: the tip never outgrows its 9 px insets.
-    if (bound) tip.style.maxWidth = `${Math.max(160, Math.floor(bound.width - 18))}px`;
-    // Layout size: the open animation scales the tip, and a scaled rect would misplace it.
-    const width = tip.offsetWidth;
-    const height = tip.offsetHeight;
-    const minX = bound ? bound.left + 9 : 12, maxX = (bound ? bound.right - 9 : innerWidth - 12) - width;
-    const minY = bound ? bound.top + 9 : 12, maxY = (bound ? bound.bottom - 9 : innerHeight - 12) - height;
+    const minX = box.left, maxX = box.right - width;
+    const minY = box.top, maxY = box.bottom - height;
     const left = Math.max(minX, Math.min(maxX, anchorRect.left + anchorRect.width / 2 - width / 2));
-    const below = (bound ? bound.bottom : innerHeight) - anchorRect.bottom;
-    const side = below >= height + 18 || below >= anchorRect.top - (bound?.top ?? 0) ? "bottom" : "top";
-    const top = Math.max(minY, Math.min(Math.max(minY, maxY), side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
+    const below = box.bottom - anchorRect.bottom;
+    const side = below >= height + 18 || below >= anchorRect.top - box.top ? "bottom" : "top";
+    const top = Math.max(minY, Math.min(maxY, side === "bottom" ? anchorRect.bottom + 8 : anchorRect.top - height - 8));
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
     const tail = Math.max(16, Math.min(width - 16, anchorRect.left + anchorRect.width / 2 - left));
@@ -318,7 +335,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
     // Grow from the tail, so the popover visibly comes out of its trigger.
     tip.style.transformOrigin = `${tail}px ${side === "bottom" ? "0%" : "100%"}`;
     tip.dataset.side = side;
-    bed.sync();
   };
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key !== "Escape") return;
@@ -344,14 +360,14 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
       cleanup();
       anchor.setAttribute("aria-expanded", "false");
       anchor.removeAttribute("aria-controls");
+      markMotion(tip);
       tip.dataset.open = "false";
-      bed.setOpen(false);
       if (restoreFocus) {
         if (centred && options.returnFocus) options.returnFocus();
         else { const returnTo = centred ? previouslyFocused : anchor; if (returnTo?.isConnected) returnTo.focus({ preventScroll: true }); }
       }
       if (activeConfirmTip === controller) activeConfirmTip = undefined;
-      window.setTimeout(() => { tip.remove(); bed.dispose(); }, 190);
+      window.setTimeout(() => { tip.remove(); }, 190);
     },
   };
   controller = instance;
@@ -366,8 +382,9 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   place();
   requestAnimationFrame(() => {
     if (closing || !tip.isConnected) return;
+    // Opened with a key (palette, then Enter on a row that asks): the question appears whole. Read here, where it flips (#427).
+    markMotion(tip);
     tip.dataset.open = "true";
-    bed.setOpen(true);
     cancel.focus({ preventScroll: true });
   });
   return instance;
@@ -437,7 +454,7 @@ function place(el: HTMLElement, animateMove: boolean): number {
   const x = Math.max(MARGIN, Math.min(cx - w / 2, innerWidth - MARGIN - w));
   const y = Math.max(MARGIN, Math.min(side === "top" ? r.top - GAP - h : r.bottom + GAP, innerHeight - MARGIN - h));
   const prev = new DOMMatrix(getComputedStyle(pos).transform).m41;
-  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE}` : "none";
+  pos.style.transition = animateMove && !reduced() ? `transform ${TRAVEL}ms ${EASE_OUT}` : "none";
   pos.style.transform = `translate(${x}px, ${y}px)`;
   surface.style.width = `${w}px`;
   // The arrow follows the anchor, but never leaves the surface when a shift moved the surface off-centre.
@@ -450,20 +467,22 @@ function place(el: HTMLElement, animateMove: boolean): number {
   return x >= prev ? 1 : -1;
 }
 
+/** Swaps the tooltip's text for `text`, sliding in the direction `dir` (0 for no slide, and no slide under reduced motion). */
 function setLabel(text: string, dir: number) {
   const old = surface.querySelector<HTMLElement>(".tip-label:not(.is-leaving)")!;
   if (old.textContent === text) return;
   if (dir === 0 || reduced() || !shown) { old.textContent = text; return; }
   // Slide: the old label leaves against the travel, the new one arrives with it.
   old.classList.add("is-leaving");
-  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE, fill: "forwards" }).onfinish = () => old.remove();
+  old.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: `translateX(${-dir * SHIFT}px)` }], { duration: SWAP, easing: EASE_OUT, fill: "forwards" }).onfinish = () => old.remove();
   const next = document.createElement("span");
   next.className = "tip-label";
   next.textContent = text;
   surface.appendChild(next);
-  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE });
+  next.animate([{ opacity: 0, transform: `translateX(${dir * SHIFT}px)` }, { opacity: 1, transform: "none" }], { duration: SWAP, easing: EASE_OUT });
 }
 
+/** Shows the tooltip for `el`, popping in or appearing instantly; `pointCall` marks a label tied to a point, not to the element. */
 function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!pos) build();
   clearTimeout(closeTimer); clearTimeout(openTimer);
@@ -478,13 +497,14 @@ function show(el: HTMLElement, how: "pop" | "instant", pointCall = false) {
   if (!shown && how === "pop") {
     const from = reduced() ? { opacity: 0 } : { opacity: 0, transform: "scale(0.94)" };
     const to = reduced() ? { opacity: 1 } : { opacity: 1, transform: "scale(1)" };
-    surface.animate([from, to], { duration: POP, easing: EASE });
-    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE });
+    surface.animate([from, to], { duration: POP, easing: EASE_OUT });
+    arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: POP, easing: EASE_OUT });
   }
   shown = true;
   watch();
 }
 
+/** Hides the tooltip, skipping the exit animation when `instant` is true. */
 function hide(instant = false) {
   clearTimeout(openTimer); clearTimeout(closeTimer);
   if (!shown) {
@@ -497,7 +517,7 @@ function hide(instant = false) {
   current = null;
   warmUntil = performance.now() + WARM;
   if (instant) { pos.style.visibility = "hidden"; return; }
-  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
+  pos.animate([{ opacity: 1 }, { opacity: 0 }], { duration: OUT, easing: EASE_OUT }).onfinish = () => { if (!shown) pos.style.visibility = "hidden"; };
 }
 
 const warm = () => shown || performance.now() < warmUntil;
@@ -528,7 +548,7 @@ export function refreshTip(el: HTMLElement, animate = false) {
   if (!(shown && current === el)) return;
   if (!animate || reduced()) { place(el, false); setLabel(labelOf(el), 0); return; }
   const dir = place(el, true);
-  surface.style.transition = `width ${TRAVEL}ms ${EASE}`;
+  surface.style.transition = `width ${TRAVEL}ms ${EASE_OUT}`;
   window.setTimeout(() => { surface.style.transition = ""; }, TRAVEL + 40);
   setLabel(labelOf(el), dir);
 }

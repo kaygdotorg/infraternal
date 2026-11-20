@@ -79,6 +79,7 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
                     ipv6: format!("fd01::{id}").parse().unwrap(),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound,
             outbound: TrafficPolicy::None,
@@ -94,6 +95,8 @@ fn configuration(granted_ports: &[u16]) -> Config {
 /// Builds one node's snapshot with the requested peer port grants.
 fn configuration_with(grants: &[(u8, &[u16])]) -> Config {
     Config {
+        authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(1),

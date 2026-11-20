@@ -1,5 +1,6 @@
-//! Build the pinned libghostty-vt archive and our read-only snapshot adapter [7][20][94].
+//! Build the signed libghostty-vt archive and bounded state adapter [7][20][94].
 use std::{env, path::PathBuf, process::Command};
+/// Builds the pinned native terminal archive and emits its Rust link settings.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     // Linux and macOS shims own terminal state through the same pinned engine
@@ -13,24 +14,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for path in [
         "build.rs",
         "native/snapshot.zig",
-        "native/session_log.zig",
         "native/memory.zig",
         "native/history.zig",
+        "native/session_log.zig",
         "../../scripts/build-vt",
+        "../../scripts/patch-libghostty-vt.py",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
     println!("cargo:rerun-if-env-changed=TARGET");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PROCESS_PER_USER");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_COMPACT_HISTORY");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SESSION_IMAGE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VT_TEST_INPUT");
     let status = Command::new(root.join("../../scripts/build-vt"))
         .arg(&output)
         .status()?;
     if !status.success() {
         return Err("pinned libghostty-vt build failed".into());
     }
+    // The release installs a static archive and shared library side by side.
+    // A static-only search directory prevents macOS from resolving `-l` to
+    // the shared library, which omits our private snapshot adapter exports.
     println!(
-        "cargo:rustc-link-search=native={}/native/lib",
+        "cargo:rustc-link-search=native={}/native/static-link",
         output.display()
     );
     println!("cargo:rustc-link-lib=static=ghostty-vt");

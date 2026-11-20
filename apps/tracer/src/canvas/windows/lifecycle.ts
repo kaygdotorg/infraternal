@@ -10,13 +10,14 @@
  *   Split right in a stacked column makes a group: the window's column halves and the windows around it span both
  *   halves, so nothing else moves (layout/grid.ts holds the rules). A new window opens a full-size window beside it
  *   (`right`, after its whole group) or under it (`below`, which grows the column). Every action opens a new shell on
- *   the same host, no prompt. Splits play the droplet in their direction and the other windows glide (FLIP) on a mouse
- *   action. Keyboard actions are instant. Splits are windows in the one structure: no nesting.
+ *   the same host, no prompt. A mouse split fades the new window in (150 ms) while sizes snap and moved windows glide (FLIP,
+ *   150 ms). Keyboard actions are instant. Splits are windows in the one structure: no nesting.
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
 import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
+import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { clamp } from "../camera/camera";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -31,6 +32,7 @@ import { loadSplit, splitReady } from "./split-handle";
 import { iconFor } from "../views/icons";
 import { isTerminal, makeBody } from "../views/body";
 import { SCALE_REST, restAt } from "../springs";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** The window lifecycle API of the canvas: make, open, close, split, step. Each member is described on its own line. */
 export interface WindowsModule {
@@ -51,15 +53,15 @@ export interface WindowsModule {
   /**
    * Divides a terminal window's own space into two windows (D212): `down` halves its height, `right` halves its
    * width. A new shell takes the other half. Works in a stacked column too: the windows around it span the new half.
-   * `instant`: no motion at all (a keyboard action); the layout and the focus land in the same frame.
+   * Started by a key (its chord or a palette row) it has no motion at all: the layout and the focus land in the same frame.
    */
-  split(rec: WinRec, direction: "down" | "right", instant?: boolean): Promise<boolean>;
+  split(rec: WinRec, direction: "down" | "right"): Promise<boolean>;
   /**
    * Opens a new full-size window next to a terminal window (D212): `right` in a new column of the same width, `below`
    * under it, which grows the column and leaves the others as they were. Opening never divides anything. With
    * `session`, the window shows that existing session of the host (the session manager's "beside") instead of a shell.
    */
-  newWindow(rec: WinRec, side: "right" | "below", instant?: boolean, session?: string): Promise<void>;
+  newWindow(rec: WinRec, side: "right" | "below", session?: string): Promise<void>;
   /** Points a terminal window at another session of its host; the old one keeps running (detached). */
   attach(rec: WinRec, sessionId: string): void;
   /** Brings a window's name and screen in line with its session in the inventory (a rename, a run again). */
@@ -85,13 +87,13 @@ export interface WindowsModule {
   /** Every window of the current view in reading order (column by column, top to bottom). */
   flat(): WinRec[];
   /** Makes the next (1) or previous (-1) window of the current view active and brings it into view. */
-  step(dir: number, instant?: boolean): void;
+  step(dir: number): void;
   /**
    * Makes the nearest window of the current view in a direction active and brings it into view (D222: ⌥⌘ arrows on a
    * Mac, Ctrl+Shift+arrows elsewhere). "Nearest" weighs distance along the direction twice as much as sideways offset,
    * so a window straight above or below beats one further along but offset. Nothing happens when no window lies that way.
    */
-  move(dir: "left" | "right" | "up" | "down", instant?: boolean): void;
+  move(dir: "left" | "right" | "up" | "down"): void;
 }
 
 /** Makes the lifecycle for the canvas `cx`. */
@@ -100,7 +102,7 @@ export function createWindows(cx: Ctx): WindowsModule {
 
   /** `opaque`: the window's content is there from the first frame (a session already exists); only its size springs. */
   const enterAnimation = (rec: WinRec, opaque = false): void => {
-    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160 }); return; }
+    if (reduced.matches) { rec.card.root.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT }); return; }
     const root = rec.card.root;
     const spring = new Spring(1, (p) => {
       if (p === 0) { root.style.transform = ""; root.style.opacity = ""; root.style.transformOrigin = ""; return; }
@@ -108,7 +110,7 @@ export function createWindows(cx: Ctx): WindowsModule {
       root.style.transform = `scale(${1 - 0.06 * p})`;
       root.style.opacity = opaque ? "" : String(clamp(1 - p * 1.4, 0, 1));
       cx.invalidate();
-    }, { visualDuration: 0.5 });
+    }, { visualDuration: 0.28 });
     // p scales the window by 6 % and fades it: it rests when the scale is within 0.0005 (p about 0.008).
     restAt(spring, SCALE_REST / 0.06);
     spring.set(0);
@@ -125,8 +127,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     c.empty?.remove(); delete c.empty;
     cx.view.geometry(c);
     cx.view.settle(c.view.id);
-    flip.play(before);
-    if (!silent) enterAnimation(rec, opaque);
+    // A window opened by a key (a chord or a palette row) is simply there: the others do not slide aside and it does not swell in (#427).
+    const byKey = triggeredByKeyboard();
+    if (!byKey) flip.play(before);
+    if (!silent && !byKey) enterAnimation(rec, opaque);
     cx.tree.render();
     cx.invalidate();
     return rec;
@@ -165,7 +169,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     void loadSplit(cx).then((m) => { if (c.wins.get(above.model.id) === above && !c.wins.has(at.model.id)) { void m.splitInto(above, "down", at.model); done(); } }, () => undefined);
   };
 
-  const close = (rec: WinRec, instant = false): void => {
+  const close = (rec: WinRec, instant = triggeredByKeyboard()): void => {
     if (rec.closing && !instant) return;
     // The card stays in the view until its exit animation finishes. Withdraw it
     // from target reuse immediately, so a quick reopen creates a fresh window.
@@ -229,9 +233,10 @@ export function createWindows(cx: Ctx): WindowsModule {
       cx.view.geometry(c);
       cx.view.paintEmpty(c);
       cx.view.settle(c.view.id);
-      // Neighbours close the gap without overshoot (a critically damped spring): no value passes its final place. A keyboard
-      // close moves nothing on screen with a motion: the layout is simply the new one.
-      if (!instant) flip.play(before, true, { visualDuration: 0.38 });
+      // Neighbours close the gap without overshoot (the ease-out curve): no value passes its final place. A keyboard
+      // close moves nothing on screen with a motion: the layout is simply the new one. The reflow follows the 100 ms
+      // exit below, so 200 ms here keeps the whole close within 300 ms (#471).
+      if (!instant) flip.play(before, true, { visualDuration: 0.2 });
       for (const w of c.wins.values()) w.binding?.refit();
       cx.tree.render();
       // The view's stops changed: the camera re-snaps (canvas lock) to the nearest one that still exists.
@@ -240,11 +245,13 @@ export function createWindows(cx: Ctx): WindowsModule {
     };
     if (reduced.matches || instant) { finish(); return; }
     root.style.pointerEvents = "none";
+    // The exit is quicker than any entrance: on the ease-out curve the window is 90 % gone in about 35 ms, so the
+    // reflow that follows starts almost at once.
     const spring = new Spring(0, (p) => {
       root.style.transform = `scale(${1 - 0.04 * p})`;
       root.style.opacity = String(1 - p);
       if (p >= 1) finish();
-    }, { visualDuration: 0.22 });
+    }, { visualDuration: 0.1 });
     restAt(spring, SCALE_REST);
     spring.set(1);
   };
@@ -259,8 +266,8 @@ export function createWindows(cx: Ctx): WindowsModule {
 
   // Splitting and opening beside live in their own module (split.on-demand.ts, D188): warmed when the canvas is up, started in the
   // same task when it has arrived, and fetched on the first press when it has not.
-  const split = async (rec: WinRec, direction: "down" | "right", instant = false): Promise<boolean> => (splitReady() ?? await loadSplit(cx)).split(rec, direction, instant);
-  const newWindow = async (rec: WinRec, side: "right" | "below", instant = false, session?: string): Promise<void> => (splitReady() ?? await loadSplit(cx)).newWindow(rec, side, instant, session);
+  const split = async (rec: WinRec, direction: "down" | "right"): Promise<boolean> => (splitReady() ?? await loadSplit(cx)).split(rec, direction);
+  const newWindow = async (rec: WinRec, side: "right" | "below", session?: string): Promise<void> => (splitReady() ?? await loadSplit(cx)).newWindow(rec, side, session);
 
   /** Makes the window's model, title and body agree with its session in the inventory. */
   const syncSession = (rec: WinRec, force = false): void => {
@@ -325,8 +332,10 @@ export function createWindows(cx: Ctx): WindowsModule {
     return rec;
   };
 
+  /** The small "this is the window" swell. A key never plays it (#427): the person asked for the window and is looking at it. */
   const pulse = (rec: WinRec): void => {
-    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 360, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+    if (triggeredByKeyboard()) return;
+    rec.card.root.animate([{ transform: "scale(1)" }, { transform: "scale(1.012)" }, { transform: "scale(1)" }], { duration: 240, easing: EASE_OUT });
   };
 
   /**
@@ -388,15 +397,16 @@ export function createWindows(cx: Ctx): WindowsModule {
       if (painted) cx.pill.paint();
     },
     openSession, open, openFlow, pulse, flat,
-    step(dir, instant = false) {
+    step(dir) {
       const list = flat();
       if (!list.length) return;
       const at = state.activeWin ? list.indexOf(state.activeWin) : -1;
       const next = list[clamp((at < 0 ? (dir > 0 ? -1 : list.length) : at) + dir, 0, list.length - 1)]!;
       setActive(cx, next);
-      cx.nav.focusWindow(next, instant, true);
+      cx.nav.focusWindow(next, triggeredByKeyboard(), true);
     },
-    move(dir, instant = false) {
+    move(dir) {
+      const instant = triggeredByKeyboard();
       const list = flat();
       const from = state.activeWin;
       // Nothing is active yet (a click in a gap cleared it): a move activates the first window, or the last one going back.

@@ -21,3 +21,5 @@ This API supplies the Rust carry state needed by D128. Whole-host replacement
 also requires exact native terminal state, retained input/output state, every
 PTY/listener/viewer descriptor, child ownership and the commit transaction.
 Adoption remains an owner decision after measurements and review on #205.
+
+These historical probe dependencies are frozen on purpose so the recorded measurements remain reproducible (#538, 2026-11-18).

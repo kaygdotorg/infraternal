@@ -7,11 +7,13 @@
 
 use std::{
     io::{Read, Write},
+    os::fd::AsFd,
     os::unix::{fs::PermissionsExt, net::UnixListener, process::CommandExt},
     process::{Command, Output, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
+use nix::poll::{PollFd, PollFlags, poll};
 use serde_json::{Value, json};
 
 const BIN: &str = env!("CARGO_BIN_EXE_infraternal");
@@ -53,17 +55,6 @@ fn one_envelope(args: &[&str], output: &Output) -> Value {
     );
     serde_json::from_str(lines[0])
         .unwrap_or_else(|_| panic!("{args:?}: not JSON: {:.200}", lines[0]))
-}
-
-fn wait(child: &mut std::process::Child, limit: Duration) -> std::process::ExitStatus {
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            return status;
-        }
-        assert!(started.elapsed() < limit, "still running");
-        std::thread::sleep(Duration::from_millis(20));
-    }
 }
 
 /// A local stand-in for the infraternal agent's plugin socket: one connection per reply, each
@@ -235,6 +226,7 @@ fn three_pages_preserve_order_and_only_the_final_cursor() {
 
 // ---- Ctrl-C (D303/D305: 130 through the shell) -----------------------------------------
 
+/// Interrupt the CLI while its JSON result is blocked, and require at most one valid line.
 #[test]
 fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
     // The interrupt handler writes its envelope with no regard to what the main thread is in the
@@ -245,16 +237,24 @@ fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
     // The smallest pipe the kernel allows; the skill envelope for `server init` is ~5 KiB.
     let resized = nix::fcntl::fcntl(&writer, nix::fcntl::FcntlArg::F_SETPIPE_SZ(4096)).unwrap();
     assert!(resized >= 4096);
-    let mut child = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    command
         .args(["skill", "server", "init", "--json"])
         .env("HOME", &home)
         .stdin(Stdio::null())
         .stdout(writer)
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    // Let it fill the pipe and block on the rest of its one line.
-    std::thread::sleep(Duration::from_millis(800));
+        .stderr(Stdio::null());
+    // A package run started in the background inherits SIG_IGN. This fixture
+    // represents a foreground command, so restore the normal child signal state.
+    infraternal_shim::prepare_child(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    // Observing output proves startup completed. The four-KiB pipe cannot hold
+    // the whole envelope, so the writer remains blocked while the interrupt lands.
+    let mut ready = [PollFd::new(reader.as_fd(), PollFlags::POLLIN)];
+    assert_eq!(poll(&mut ready, 5000_u16).unwrap(), 1, "no CLI output");
+    let mut prefix = [0_u8; 1];
+    reader.read_exact(&mut prefix).unwrap();
     assert!(
         child.try_wait().unwrap().is_none(),
         "the envelope fit in 4 KiB; use a bigger one"
@@ -266,10 +266,9 @@ fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
             .unwrap()
             .success()
     );
-    std::thread::sleep(Duration::from_millis(200));
-    let mut out = String::new();
+    let mut out = String::from(char::from(prefix[0]));
     reader.read_to_string(&mut out).unwrap();
-    let _ = wait(&mut child, Duration::from_secs(5));
+    child.wait().unwrap();
     for line in out.lines() {
         assert!(
             serde_json::from_str::<Value>(line).is_ok(),
@@ -281,6 +280,7 @@ fn ctrl_c_while_the_result_is_being_written_never_leaves_a_broken_line() {
     assert!(out.lines().count() <= 1, "two envelopes: {out:.300}");
 }
 
+/// Interrupt the CLI only after its request proves it has reached the waiting state.
 #[test]
 fn ctrl_c_in_a_script_loop_stops_the_loop() {
     // `_exit(130)` makes the shell believe the command handled Ctrl-C itself, so a loop in the
@@ -289,29 +289,47 @@ fn ctrl_c_in_a_script_loop_stops_the_loop() {
     let home = home("sigint-loop");
     let state = private_state(&home);
     // Accepts the call and never answers, so `mesh status` waits.
-    let _listener = UnixListener::bind(state.join("plugins.sock")).unwrap();
+    let listener = UnixListener::bind(state.join("plugins.sock")).unwrap();
     let script = format!(
         "{BIN} --json mesh status --state {} >/dev/null; echo carried-on",
         state.display()
     );
-    let mut child = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .args(["-c", &script])
         .env("HOME", &home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
+        .process_group(0);
+    // A background package runner can pass SIG_IGN to the shell. Model a
+    // foreground script so its shell and CLI receive the group interrupt.
+    infraternal_shim::prepare_child(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let group = nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap());
+    // Receiving the request proves the CLI has started and installed its handler.
+    let mut incoming = [PollFd::new(listener.as_fd(), PollFlags::POLLIN)];
+    assert_eq!(poll(&mut incoming, 5000_u16).unwrap(), 1, "no CLI request");
+    let (mut request, _) = listener.accept().unwrap();
+    request
+        .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(800));
+    request.read_exact(&mut [0_u8; 1]).unwrap();
     // Ctrl-C at a terminal signals the whole foreground group: the shell and the CLI.
-    let group = i32::try_from(child.id()).unwrap();
-    nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(group),
-        nix::sys::signal::Signal::SIGINT,
-    )
-    .unwrap();
-    let status = wait(&mut child, Duration::from_secs(5));
+    nix::sys::signal::killpg(group, nix::sys::signal::Signal::SIGINT).unwrap();
+    // The shell closes its output only after it exits; this bounds completion
+    // without polling or relying on a startup delay.
+    let mut completed = [PollFd::new(
+        child.stdout.as_ref().unwrap().as_fd(),
+        PollFlags::POLLHUP,
+    )];
+    assert_eq!(
+        poll(&mut completed, 5000_u16).unwrap(),
+        1,
+        "still running after SIGINT"
+    );
+    let status = child.wait().unwrap();
     let mut out = String::new();
     child
         .stdout

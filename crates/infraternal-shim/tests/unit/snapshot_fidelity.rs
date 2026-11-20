@@ -318,19 +318,16 @@ fn fidelity_spacer_head_attributes() {
 }
 
 #[test]
-fn fidelity_orphaned_spacer_head() {
-    // Region scrolling leaves an independent continuation flag on a blank
-    // row. Without a nonprinting row-flag setter the bounded painter must
-    // reject it, even though the visible spacer head can be reconstructed.
-    let error = check_replay(
+/// Checks that an orphaned spacer head survives scrolling, later writes, and resize replay.
+fn fidelity_orphaned_spacer_head_after_region_scroll_replays() {
+    // The 1.0 grid keeps the orphaned spacer head representable through VT.
+    // Check immediate state, future writes, and geometry changes together.
+    replay(
         "spacer-head-after-region-scroll",
         "\x1b[1;12H界\x1b[2;4r\x1b[4;1H\n".as_bytes(),
-        None,
         12,
         5,
-    )
-    .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    );
 }
 
 #[test]
@@ -502,32 +499,12 @@ fn fidelity_iso_protection_does_not_keep_rep_scratch() {
 }
 
 #[test]
-fn fidelity_charset_mapped_wide_space_is_explicitly_rejected() {
+/// Checks that shifted character sets preserve wide text through continuation and resize replay.
+fn fidelity_charset_shifted_wide_text_replays() {
+    // This 1.0 input is fully represented by the bounded painter; verify the
+    // continuation and resize behavior instead of preserving an old rejection.
     let prefix = "\x1b*0\x1bN界".as_bytes();
-    let mut a = reset_terminal(12, 5).unwrap();
-    a.process(prefix);
-    match a.snapshot() {
-        Ok(snapshot) => {
-            let mut b = reset_terminal(12, 5).unwrap();
-            b.process(&snapshot);
-            assert_eq!(
-                a.engine.state_difference(&b.engine),
-                0,
-                "charset-mapped wide-space state"
-            );
-            panic!("bounded painter must explicitly reject unconstructed wide-space metadata");
-        }
-        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
-    }
-    let mut control = reset_terminal(12, 5).unwrap();
-    control.process(prefix);
-    a.process(b"Z");
-    control.process(b"Z");
-    assert_eq!(
-        a.engine.state_difference(&control.engine),
-        0,
-        "rejection leaves source intact"
-    );
+    replay("charset-shifted-wide-text", prefix, 12, 5);
 }
 
 #[test]
@@ -550,16 +527,17 @@ fn fidelity_inherited_protection_off_mode_is_explicitly_rejected() {
     );
 }
 
+/// Ensures restoring a bounded history tail adds no synthetic padding rows.
 #[test]
 fn fidelity_snapshot_history_tail_contains_no_padding_rows() {
     for lines in [7, 1005] {
         let mut source = reset_terminal(12, 5).unwrap();
         source.process(&b"line\r\n".repeat(lines));
-        let expected = source.engine.history_rows().min(256);
+        let expected = source.engine.history_rows().unwrap().min(256);
         let mut restored = reset_terminal(12, 5).unwrap();
         restored.process(&source.snapshot().unwrap());
         assert_eq!(
-            restored.engine.history_rows(),
+            restored.engine.history_rows().unwrap(),
             expected,
             "retained tail must not append blank padding to history"
         );
@@ -657,3 +635,36 @@ fn fidelity_mouse_effective_fields_follow_order_independently_of_booleans() {
 #[cfg(test)]
 #[path = "fresh_captures.rs"]
 mod fresh_captures;
+
+/// An approximate repaint keeps the scroll region, so output after it scrolls the same rows in the viewer as on the
+/// host (#477).
+///
+/// Under a flood the shared host's memory budget makes every repaint approximate, including each D381 key repaint.
+/// The repaint begins with RIS, which resets the margins; without restoring them, a program that keeps its status or
+/// input line outside a scroll region (here a token on row 1, flood output scrolling rows 2..24) had that line scrolled
+/// off in the browser by the very next lines of output, while the host still showed it.
+#[test]
+fn approximate_repaint_keeps_the_scroll_region_for_later_output() {
+    let mut host = reset_terminal(80, 24).unwrap();
+    host.process(b"\x1b[2J\x1b[2r\x1b[1;1H<K000001>\x1b[24;1H");
+    for _ in 0..30 {
+        host.process(b"y\r\n");
+    }
+    let repaint = host.approximate_snapshot();
+    let mut viewer = reset_terminal(80, 24).unwrap();
+    viewer.process(&repaint);
+    assert_eq!(
+        host.engine.difference(&viewer.engine),
+        0,
+        "the repaint shows the host's screen"
+    );
+    for _ in 0..30 {
+        host.process(b"y\r\n");
+        viewer.process(b"y\r\n");
+    }
+    assert_eq!(
+        host.engine.difference(&viewer.engine),
+        0,
+        "later output must scroll only the host's scroll region in the viewer"
+    );
+}

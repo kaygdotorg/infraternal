@@ -42,7 +42,7 @@ pub mod remote_tls;
 #[cfg(feature = "native-streams")]
 pub mod wire_datagrams;
 
-/// Remove one enrolled host: in the browser with its own passkey assertion, or with a
+/// Remove one enrolled host: inside the browser's admin window (D339), or with a
 /// `hosts:write` API key inside its scope and no further tap (D333). Always dry-run first.
 pub const REMOVE: ActionDef = ActionDef {
     id: "remote.host.remove",
@@ -64,6 +64,20 @@ pub const REMOVE: ActionDef = ActionDef {
     api_scope: Some("hosts:write"),
     fresh_passkey: false,
 };
+/// Forget only an owner's retired-unreachable host, keeping audit and machine state (D369).
+/// Like removal, hosts:write calls require a dry run and no additional passkey tap.
+pub const FORGET: ActionDef = ActionDef {
+    id: "remote.host.forget",
+    summary: "Forget a retired-unreachable host without changing the machine.",
+    instructions: &[
+        "Select an owned retired-unreachable host using its ID from the server inventory.",
+        "Run with dry_run first, then confirm with the review token to forget the host.",
+        "Forget removes the list entry and pending cleanup, keeps the audit record, and does not touch the machine or uninstall infraternal from it.",
+    ],
+    input: SchemaRef("remote.host.forget"),
+    output: SchemaRef("remote.host.forgotten"),
+    ..REMOVE
+};
 /// Internal node handoff; only an authenticated server can request its exact installation.
 pub const UNINSTALL: ActionDef = ActionDef {
     id: "remote.host.uninstall",
@@ -82,10 +96,19 @@ pub const UNINSTALL: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// The frames between the server and the root relay of a root upgrade (D376).
+/// Plain std, so the SSH plugin's relay adapter uses it without the transport.
+pub mod privilege_relay;
+/// Opening the one-use sealed password of a root upgrade (D274, D376).
+#[cfg(feature = "agent")]
+pub mod privilege_seal;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod runtime_lock;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod uninstall;
+/// Shared wire decoder for the authenticated removal action.
+#[cfg(feature = "agent")]
+pub mod uninstall_request;
 
 /// Report line for a kernel object uninstall leaves in place (#235).
 /// The server's removal reply shares it, so it lives outside the Linux-only
@@ -216,6 +239,7 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         BOOTSTRAP_CA,
         CA_ADMINISTRATORS,
         REMOVE,
+        FORGET,
     ],
     // Settings retain the source declarations; these adapters have no socket dispatcher.
     settings: Some(SchemaRef(

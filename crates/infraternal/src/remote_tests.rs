@@ -77,6 +77,7 @@ async fn oversized_or_invalid_invitation_fails_before_local_state_is_created() {
     }
 }
 
+/// An infraternal agent only loads an identity from its own private regular file.
 #[tokio::test]
 async fn local_identity_load_refuses_symlink_and_shared_file() {
     let directory = Directory::new();
@@ -93,6 +94,51 @@ async fn local_identity_load_refuses_symlink_and_shared_file() {
     assert_eq!(
         run(&data, None).await.unwrap_err().to_string(),
         "remote infraternal agent operation refused"
+    );
+}
+
+/// Restart refuses an enrolled certificate whose saved private key no longer matches.
+#[tokio::test]
+async fn restart_refuses_a_mismatched_enrolled_key_before_connecting() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let state = directory.0.join("runtime");
+    let enrolled = self_signed(&PKey::generate_ed25519().unwrap());
+    let replacement = PKey::generate_ed25519().unwrap();
+    let stored = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: None,
+        server_name: "localhost".into(),
+        public_origin: Some("https://localhost:1".into()),
+        https_der: None,
+        https_system_roots: false,
+        ca_der: B64.encode(enrolled.to_der().unwrap()),
+        certificate_der: B64.encode(enrolled.to_der().unwrap()),
+        key_der: B64.encode(replacement.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
+    };
+    let document = serialize_identity_document(&stored).unwrap();
+    publish(&data, &document).unwrap();
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        Box::pin(run(&data, Some(state.clone()))),
+    )
+    .await
+    .expect("restart should refuse the mismatch without trying to connect")
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        public_error(&error),
+        "This machine's saved private key does not match its enrollment certificate."
+    );
+    assert!(!state.exists());
+    let identity_unchanged = std::fs::read(data.join("identity.json")).unwrap() == *document;
+    assert!(
+        identity_unchanged,
+        "refusal must leave the saved identity in place"
     );
 }
 
@@ -324,8 +370,9 @@ fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
     assert!(enrolled.0.public_eq(&key));
 }
 
+/// An invitation keeps the D168 name, the public origin and the server's direct QUIC endpoint on the wire.
 #[test]
-fn public_origin_invitation_preserves_d168_name_without_a_legacy_endpoint() {
+fn public_origin_invitation_preserves_d168_name_and_its_direct_endpoint() {
     let invitation = JoinInvitation {
         host_id: uuid::Uuid::from_u128(1),
         mode: Mode::Rootless,
@@ -342,7 +389,8 @@ fn public_origin_invitation_preserves_d168_name_without_a_legacy_endpoint() {
     let wire = serde_json::to_value(invitation).unwrap();
     assert_eq!(wire["public_origin"], "https://ssh.kayg.org");
     assert_eq!(wire["server_name"], "ssh.internal");
-    assert!(wire.get("endpoint").is_none());
+    // The direct QUIC listener travels too: app-window lanes need it (#146).
+    assert_eq!(wire["endpoint"], "10.69.69.89:7443");
 }
 
 #[test]
@@ -430,6 +478,121 @@ fn self_signed(key: &PKey<openssl::pkey::Private>) -> X509 {
         .unwrap();
     certificate.sign(key, MessageDigest::null()).unwrap();
     certificate.build()
+}
+
+/// Build a disposable CA certificate that OpenSSL can accept when an environment path is trusted.
+fn environment_ca(key: &PKey<openssl::pkey::Private>) -> X509 {
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    let name = openssl::x509::X509NameBuilder::new().unwrap().build();
+    certificate.set_subject_name(&name).unwrap();
+    certificate.set_issuer_name(&name).unwrap();
+    certificate.set_pubkey(key).unwrap();
+    certificate
+        .set_not_before(&openssl::asn1::Asn1Time::from_unix(1_700_000_000).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&openssl::asn1::Asn1Time::from_unix(2_000_000_000).unwrap())
+        .unwrap();
+    certificate
+        .append_extension(
+            openssl::x509::extension::BasicConstraints::new()
+                .critical()
+                .ca()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    certificate.sign(key, MessageDigest::null()).unwrap();
+    certificate.build()
+}
+
+/// Prove environment-selected roots cannot widen the system-root TLS connector's trust store.
+#[test]
+fn system_https_connector_rejects_environment_selected_roots() {
+    let directory = Directory::new();
+    let key = PKey::generate_ed25519().unwrap();
+    let certificate = environment_ca(&key);
+    let certificate_path = directory.0.join("environment-ca.pem");
+    std::fs::write(&certificate_path, certificate.to_pem().unwrap()).unwrap();
+    let hash_dir = directory.0.join("hash-dir");
+    std::fs::create_dir(&hash_dir).unwrap();
+    std::fs::write(
+        hash_dir.join(format!("{:08x}.0", certificate.subject_name_hash())),
+        certificate.to_pem().unwrap(),
+    )
+    .unwrap();
+
+    let mut results = Vec::new();
+    for (variable, path) in [
+        ("SSL_CERT_FILE", certificate_path.clone()),
+        ("SSL_CERT_DIR", hash_dir),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "remote::tests::environment_root_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env_remove("SSL_CERT_FILE")
+            .env_remove("SSL_CERT_DIR")
+            .env(variable, path);
+        let output = child.output().unwrap();
+        results.push((
+            variable,
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        ));
+    }
+    assert!(
+        results.iter().all(|(_, passed, _)| *passed),
+        "environment-selected roots were trusted:\n{}",
+        results
+            .iter()
+            .map(|(variable, _, output)| format!("{variable}:\n{output}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Verify the connector's final store in a child with one attacker-controlled OpenSSL path.
+#[test]
+#[ignore = "child of system_https_connector_rejects_environment_selected_roots"]
+fn environment_root_probe() {
+    let certificate_path = std::env::var_os("SSL_CERT_FILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::fs::read_dir(std::env::var_os("SSL_CERT_DIR")?)
+                .ok()?
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| path.extension().is_some_and(|extension| extension == "0"))
+        })
+        .expect("the child has one explicit test CA path");
+    let certificate = X509::from_pem(&std::fs::read(certificate_path).unwrap()).unwrap();
+    let connector = outbound_tls_connector(None).unwrap();
+    let ssl = connector
+        .configure()
+        .unwrap()
+        .into_ssl("environment-root.invalid")
+        .unwrap();
+    let store = ssl.ssl_context().cert_store();
+    let mut context = openssl::x509::X509StoreContext::new().unwrap();
+    let chain = openssl::stack::Stack::new().unwrap();
+    let accepted = context
+        .init(
+            store,
+            &certificate,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
+        .unwrap_or(false);
+    assert!(
+        !accepted,
+        "the OpenSSL environment path widened public HTTPS trust"
+    );
 }
 
 /// SSH setup copies the host's enrolled identity into its transaction before
@@ -732,4 +895,48 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 1);
     let (_, current) = load_snapshot(&data).unwrap();
     replace(&data, &renewed, Some(&current)).unwrap();
+}
+
+/// An identity enrolled with a public origin keeps its direct QUIC endpoint
+/// through the start-up migration; only legacy 7443 identities lose it (#146).
+#[test]
+fn origin_identities_keep_their_direct_endpoint() {
+    let directory = Directory::new();
+    let data = directory.0.join("data");
+    let key = PKey::generate_ed25519().unwrap();
+    let ca = self_signed(&key);
+    let current = StoredIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        endpoint: Some("10.69.69.89:45681".parse().unwrap()),
+        server_name: "ssh.internal".into(),
+        public_origin: Some("https://ssh.kayg.org".into()),
+        https_der: None,
+        https_system_roots: true,
+        ca_der: B64.encode(ca.to_der().unwrap()),
+        certificate_der: B64.encode(ca.to_der().unwrap()),
+        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        identity_rotation: None,
+        completed_identity_rotation: None,
+    };
+    publish(
+        &data,
+        serialize_identity_document(&current).unwrap().as_slice(),
+    )
+    .unwrap();
+    let migrated = migrate_identity(&data).unwrap();
+    assert_eq!(migrated.endpoint, current.endpoint);
+}
+
+/// A listener bound to every address means "the public origin's host, this port".
+#[tokio::test]
+async fn an_unspecified_listener_dials_the_origin_host() {
+    let any = Some("0.0.0.0:45681".parse().unwrap());
+    assert_eq!(
+        direct_endpoint(any, "https://127.0.0.1").await,
+        Some("127.0.0.1:45681".parse().unwrap())
+    );
+    let fixed = Some("10.0.0.5:45681".parse().unwrap());
+    assert_eq!(direct_endpoint(fixed, "https://ssh.kayg.org").await, fixed);
+    assert_eq!(direct_endpoint(None, "https://ssh.kayg.org").await, None);
 }

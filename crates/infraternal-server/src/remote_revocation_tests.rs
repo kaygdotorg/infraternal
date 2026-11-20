@@ -154,6 +154,7 @@ async fn revocation_must_cancel_input_on_existing_tls_transport() {
     );
 }
 
+/// Expired certificates cannot open a new terminal attachment on a live transport.
 #[tokio::test]
 async fn expired_identity_must_refuse_new_attachment_on_existing_transport() {
     let (store, pool, _host, fingerprint, _listeners, actor, peer, _observed) =
@@ -170,9 +171,12 @@ async fn expired_identity_must_refuse_new_attachment_on_existing_transport() {
     .await
     .unwrap()
     .unwrap();
+    // The schema requires an exact seven-day interval, so keep both bounds on
+    // the same integer-second snapshot instead of crossing an epoch boundary.
+    let expired_at = now().unwrap();
     sqlx::query("UPDATE remote_certificates SET not_before=?, not_after=? WHERE fingerprint=?")
-        .bind(now().unwrap() - 604_801)
-        .bind(now().unwrap() - 1)
+        .bind(expired_at - 604_801)
+        .bind(expired_at - 1)
         .bind(fingerprint.as_slice())
         .execute(&pool)
         .await
@@ -291,7 +295,7 @@ async fn guard_bookkeeping_at_1000_hosts() {
             .bind(host.as_bytes().as_slice()).bind(instant).execute(&mut *transaction).await.unwrap();
         // Placeholder public fingerprints isolate guard allocations after a
         // trusted admission boundary; crypto/ledger storage is not this metric.
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after) VALUES(?,?,?,?,?,?)")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
             .bind(fingerprint.as_slice()).bind(host.as_bytes().as_slice()).bind([9u8;32].as_slice()).bind([3u8;32].as_slice())
             .bind(instant).bind(instant+604_800).execute(&mut *transaction).await.unwrap();
     }

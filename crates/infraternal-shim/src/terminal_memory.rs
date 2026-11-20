@@ -209,16 +209,19 @@ impl Drop for HostFloor {
     }
 }
 
-/// The allocator function table in the layout the native library expects. Its
-/// four entries are allocate, resize (used only for the fit query), remap
-/// (always refuses) and free.
+/// The allocator function table in libghostty-vt 1.0's stable C layout. The
+/// four callbacks are followed by four reserved pointers, which must stay null.
 #[repr(C)]
 struct Vtable {
     alloc: unsafe extern "C" fn(*mut c_void, usize, u8, usize) -> *mut c_void,
     resize: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> bool,
     remap: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> *mut c_void,
     free: unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize),
+    /// Reserved by the stable C ABI; null slots keep the table forward-compatible.
+    reserved: [*mut c_void; 4],
 }
+/// The shared table is immutable, and all reserved pointer slots are null.
+unsafe impl Sync for Vtable {}
 /// The allocator handle passed to the native library: a context pointer and the
 /// function table. It is boxed with the `Memory` so the pointers stay valid.
 #[repr(C)]
@@ -749,6 +752,7 @@ static VTABLE: Vtable = Vtable {
     resize,
     remap,
     free: release,
+    reserved: [std::ptr::null_mut(); 4],
 };
 impl Drop for Memory {
     fn drop(&mut self) {
@@ -774,6 +778,17 @@ impl Drop for Memory {
 mod tests {
     //! Logical byte caps and allocation-list integrity, without timing assertions.
     use super::*;
+
+    /// The 1.0 allocator ABI reserves four trailing pointers for future hooks.
+    #[test]
+    fn allocator_vtable_includes_stable_reserved_slots() {
+        assert_eq!(
+            std::mem::size_of::<Vtable>(),
+            8 * std::mem::size_of::<usize>()
+        );
+        assert!(VTABLE.reserved.iter().all(|slot| slot.is_null()));
+    }
+
     #[test]
     fn allocation_budget_includes_overhead_and_refusal_is_recoverable() {
         let memory = Memory::new(16384);

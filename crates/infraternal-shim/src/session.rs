@@ -1,4 +1,8 @@
 //! Single-threaded bounded PTY/socket pump; replay precedes live output at one cursor.
+//!
+//! A fresh input Ack may pass only whole, unstarted raw Output frames so a
+//! credit-starved relay can request its repaint. A partially written frame and
+//! every non-Ack control fence retain their original order.
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
@@ -155,6 +159,10 @@ enum InputReply {
     Ack,
     State,
 }
+/// One connection to this shim (a viewer through the agent, an owner or a
+/// cleanup link): its socket, decoder and queued output, the writer it types
+/// as, how far its output cursor has got, and the one request (raw read or
+/// Snapshot) waiting to be served.
 // Attachment, shared selection, exit delivery and cleanup are independent states.
 // Keep their valid combinations compact rather than imposing exclusive phases.
 #[allow(clippy::struct_excessive_bools)]
@@ -178,7 +186,45 @@ struct Peer {
     exited_sent: bool,
     stopping: bool,
     request: Option<Request>,
+    /// True from a `ReadFrom` that started a raw replay of bytes already
+    /// written until this viewer's next `Resize` or input. Raw bytes are only
+    /// right at the size they were written for, and a viewer reports its size
+    /// just after attaching, before it types. If that size differs from the
+    /// session's (once a viewer has ever sized it), the viewer gets a Snapshot
+    /// of the engine instead (#521).
+    replay_awaits_size: bool,
 }
+/// Gives up the session size once the writer that owns it has no attached
+/// peer left (D74 as amended by the owner on 2026-11-16, #521).
+///
+/// D74 lets the device that typed last keep the session's size, but only
+/// while it is attached. A tab that reopens after that device left reports
+/// its size right after attaching. Clearing the owner here lets that
+/// `Resize` apply through the same path as a new session's first viewer, so
+/// the reopened tab gets the shim's screen reflowed to its own size instead
+/// of a replay laid out for a size it does not have (and the approximate
+/// repaint fits it exactly, rows included).
+///
+/// Call it as soon as a departure is observed, after marking that peer detached,
+/// or after removing peers. It walks the remaining attached peers once, so
+/// the attach and same-size resize paths cost nothing more. A link that
+/// still carries the owner's writer (an already attached replacement after a
+/// reconnect, or a shared link of the same writer) keeps the size. Nothing
+/// is resized here: the size changes only when a viewer next reports one or
+/// types, as D74 says ("the next device that reports a size takes it").
+fn release_size_of_departed_typist<'a>(
+    peers: impl IntoIterator<Item = &'a Peer>,
+    cursors: &mut Inputs,
+) {
+    if let Some(owner) = cursors.active_writer
+        && !peers
+            .into_iter()
+            .any(|p| p.attached && p.writer == Some(owner))
+    {
+        cursors.active_writer = None;
+    }
+}
+
 impl Peer {
     #[cfg(feature = "process-per-user")]
     fn buffer_bytes(&self) -> usize {
@@ -247,6 +293,31 @@ impl Peer {
         frame.encode_into(&mut self.pending)?;
         self.written = 0;
         Ok(())
+    }
+    /// Queue the current input reply, moving it ahead of only an unstarted raw Output.
+    fn queue_input_reply(&mut self, written: u64, accepted: u64) -> io::Result<bool> {
+        let Some(reply) = self.input_reply else {
+            return Ok(false);
+        };
+        let frame = match reply {
+            InputReply::State => Frame::InputState(written, accepted),
+            InputReply::Ack => Frame::InputAck(written),
+        };
+        let queued = if self.pending.is_empty() {
+            self.queue(&frame)?;
+            true
+        } else {
+            crate::frame::insert_input_reply_before_unstarted_output(
+                &mut self.pending,
+                self.written,
+                &frame,
+            )?
+        };
+        if queued {
+            self.input_reply = None;
+            self.ack_queued = written;
+        }
+        Ok(queued)
     }
     fn snapshot(&mut self, terminal: &impl SessionTerminal, head: u64) -> io::Result<()> {
         match terminal.snapshot() {
@@ -390,6 +461,87 @@ impl Peer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod input_ack_order_tests {
+    //! Checks that input replies can pass only wholly unstarted raw output.
+    use super::*;
+
+    /// A minimal subscribed peer with a live Unix socket pair.
+    fn peer() -> (Peer, UnixStream) {
+        let (stream, client) = UnixStream::pair().unwrap();
+        let peer = Peer {
+            stream,
+            decoder: Decoder::default(),
+            trailing: Vec::new(),
+            deferred: None,
+            attached: true,
+            caps: SEQUENCED_INPUT,
+            input_reply: Some(InputReply::Ack),
+            writer: Some(0),
+            shared_writer: false,
+            ack_queued: 0,
+            size: (80, 24, 0, 0),
+            cursor: Some(0),
+            pending: Vec::new(),
+            written: 0,
+            exited_sent: false,
+            stopping: false,
+            request: None,
+            replay_awaits_size: false,
+        };
+        (peer, client)
+    }
+
+    /// Keep a fresh Ack before a wholly unsent flood frame and retain both exact wire frames.
+    #[test]
+    fn ack_passes_an_unstarted_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+
+        assert!(peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(
+            Decoder::default().feed(&peer.pending).unwrap(),
+            vec![Frame::InputAck(5), output]
+        );
+        assert_eq!(peer.ack_queued, 5);
+        assert!(peer.input_reply.is_none());
+    }
+
+    /// Keep route-liveness state from waiting behind a wholly unstarted flood frame.
+    #[test]
+    fn state_reply_passes_an_unstarted_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+        peer.input_reply = Some(InputReply::State);
+
+        assert!(peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(
+            Decoder::default().feed(&peer.pending).unwrap(),
+            vec![Frame::InputState(5, 5), output]
+        );
+        assert_eq!(peer.ack_queued, 5);
+        assert!(peer.input_reply.is_none());
+    }
+
+    /// Keep a partially sent frame ahead of its Ack so the stream remains decodable.
+    #[test]
+    fn ack_waits_for_a_partially_written_output_frame() {
+        let (mut peer, _client) = peer();
+        let output = Frame::Output(0, b"flood".to_vec());
+        peer.pending = output.encode().unwrap();
+        peer.written = 1;
+        let before = peer.pending.clone();
+
+        assert!(!peer.queue_input_reply(5, 5).unwrap());
+        assert_eq!(peer.pending, before);
+        assert!(matches!(peer.input_reply, Some(InputReply::Ack)));
+        assert_eq!(peer.ack_queued, 0);
+    }
+}
+
 fn private_dir(path: &Path) -> io::Result<()> {
     match DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
@@ -525,6 +677,9 @@ impl ChildSignals {
     }
 }
 
+/// Creates the session's private rendezvous socket under the runtime state
+/// directory (the configured one, the root runtime directory, or the
+/// account's private runtime directory) and returns it with its path.
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -537,19 +692,8 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
             "/run/infraternal"
         })
     } else {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .ok_or_else(|| io::Error::other("rootless shim requires XDG_RUNTIME_DIR"))?;
-        let runtime = PathBuf::from(runtime);
-        let metadata = fs::symlink_metadata(&runtime)?;
-        if !metadata.is_dir()
-            || metadata.uid() != Uid::effective().as_raw()
-            || metadata.mode() & 0o777 != 0o700
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid runtime directory",
-            ));
-        }
+        // The same lookup as the agent, so both name one directory (macOS has no XDG_RUNTIME_DIR).
+        let runtime = crate::runtime_dir::user_runtime_dir()?;
         runtime.join("infraternal")
     };
     private_dir(&state)?;
@@ -653,6 +797,10 @@ pub fn run_with_prestarted_login(
     run_configured(config, retention, group, Some(pty))
 }
 
+/// The shim's main loop once its PTY exists (prestarted or not), with the
+/// selected output retention: accepts peers, moves PTY output into the engine,
+/// the ring and each peer's cursor, feeds peer frames to `handle`, and serves
+/// each peer's pending request when its queue drains.
 fn run_configured(
     mut config: Config,
     retention: Duration,
@@ -801,12 +949,13 @@ fn run_configured(
         // fresh inputs cannot repeatedly consume it; duplicates need no space.
         let oldest = peers.iter().filter_map(|p| p.deferred).min();
         let mut retired = Vec::new();
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             if p.deferred.is_none() && p.trailing.is_empty() {
                 continue;
             }
             let mut trailing = std::mem::take(&mut p.trailing);
-            match consume_peer(
+            if let Ok((false, used)) = consume_peer(
                 &trailing,
                 p,
                 &mut pty,
@@ -819,15 +968,21 @@ fn run_configured(
                 oldest.is_some() && p.deferred != oldest,
                 &mut next_deferred,
             ) {
-                Ok((false, used)) => {
-                    trailing.drain(..used);
-                    p.trailing = trailing;
-                }
-                Ok((true, _)) | Err(_) => retired.push(index),
+                trailing.drain(..used);
+                p.trailing = trailing;
+            } else {
+                retired.push(index);
+                // Buffered frames obey the same departure ordering as
+                // socket reads: the next peer must see the owner leave.
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
             }
         }
-        for index in retired.into_iter().rev() {
-            peers.remove(index);
+        if !retired.is_empty() {
+            for index in retired.into_iter().rev() {
+                peers.remove(index);
+            }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
         if peers.iter().filter_map(|p| p.deferred).min() != oldest {
             // Successful admission (or malformed-peer removal) advances the
@@ -850,15 +1005,9 @@ fn run_configured(
             {
                 p.input_reply = Some(InputReply::Ack);
             }
-            if p.pending.is_empty()
-                && let Some(reply) = p.input_reply.take()
-            {
+            if p.input_reply.is_some() {
                 let state = cursors.get(p.writer)?;
-                p.ack_queued = state.written;
-                p.queue(&match reply {
-                    InputReply::State => Frame::InputState(state.written, state.accepted),
-                    InputReply::Ack => Frame::InputAck(state.written),
-                })?;
+                p.queue_input_reply(state.written, state.accepted)?;
             }
             if p.pending.is_empty()
                 && let Some(request) = p.request.take()
@@ -1105,6 +1254,7 @@ fn run_configured(
                             exited_sent: false,
                             stopping: false,
                             request: None,
+                            replay_awaits_size: false,
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
@@ -1197,12 +1347,10 @@ fn run_configured(
         }
 
         let mut disconnects = [false; MAX_PEERS];
-        for (index, p) in peers.iter_mut().enumerate() {
+        for index in 0..peers.len() {
+            let p = &mut peers[index];
             let flags = ready.3[index];
             let mut disconnect = flags.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL);
-            if flags.contains(PollFlags::POLLOUT) && p.flush().is_err() {
-                disconnect = true;
-            }
             if p.deferred.is_some() && flags.contains(PollFlags::POLLHUP) {
                 disconnect = true;
             }
@@ -1233,7 +1381,22 @@ fn run_configured(
                     Err(_) => disconnect = true,
                 }
             }
+            if flags.contains(PollFlags::POLLOUT) && !disconnect {
+                if p.input_reply.is_some() {
+                    let state = cursors.get(p.writer)?;
+                    p.queue_input_reply(state.written, state.accepted)?;
+                }
+                if p.flush().is_err() {
+                    disconnect = true;
+                }
+            }
             disconnects[index] = disconnect;
+            if disconnect {
+                // Keep readiness indices stable until removal, but settle this
+                // departure before a later peer can report its size (D74).
+                p.attached = false;
+                release_size_of_departed_typist(&peers, &mut cursors);
+            }
         }
         // Coexisting ordinary/shared sockets use the same durable input cursor.
         // Replacement stays within a mode, including legacy writer zero. Decide
@@ -1252,10 +1415,13 @@ fn run_configured(
                 });
             disconnects[index] |= duplicate;
         }
-        for index in (0..peers.len()).rev() {
-            if disconnects[index] {
-                peers.remove(index);
+        if disconnects.contains(&true) {
+            for index in (0..peers.len()).rev() {
+                if disconnects[index] {
+                    peers.remove(index);
+                }
             }
+            release_size_of_departed_typist(&peers, &mut cursors);
         }
     }
 }
@@ -1362,6 +1528,11 @@ fn consume_peer(
     Ok((acknowledged_exit, used))
 }
 
+/// Applies one frame from peer `p` to the session: input, resizes, replay
+/// and Snapshot requests, writer selection, signals and exit. Returns true
+/// once the peer has acknowledged the exit and may be dropped. A raw replay
+/// is only served at the size it was written for; a viewer that reports
+/// another size right after attaching gets a Snapshot instead (#521).
 fn handle<'a>(
     frame: impl Into<FrameRef<'a>>,
     p: &mut Peer,
@@ -1421,6 +1592,9 @@ fn handle<'a>(
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
+        // Typing means this peer is past its attach (browsers report their
+        // size before any input), so a later Resize is a live one (#521).
+        p.replay_awaits_size = false;
         trace_host!(
             InputQueued,
             config.session,
@@ -1439,6 +1613,7 @@ fn handle<'a>(
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
+                    cursors.viewer_sized = true;
                 }
             }
         }
@@ -1504,24 +1679,53 @@ fn handle<'a>(
             }
             p.size = (cols, rows, px_w, px_h);
             cursors.request_resize(p.writer, p.size)?;
+            // This viewer has just attached and is reporting its size. Its raw
+            // replay was written at the session's size, so if the viewer has
+            // another one, whatever part of it has already gone out lands on
+            // the wrong rows; a live viewer's own resize instead reflows its
+            // screen locally and needs no repaint (#521).
+            let session_size = (config.cols, config.rows);
+            let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
+                && cursors.viewer_sized
+                && (cols, rows) != session_size;
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
                 let applied = p.resize(pty, terminal, ring, config)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
+                    cursors.viewer_sized = true;
                 }
+            }
+            // If the size applied, the engine has reflowed to this viewer and
+            // its repaint fits exactly. If it is only staged (the writer that
+            // owns the geometry is still attached, D74; a departed one gave it
+            // up in `release_size_of_departed_typist`), the repaint keeps the session's
+            // size with absolute positions: that fits a viewer at least as
+            // large, but piles up in the last column of a smaller one. D74
+            // leaves smaller viewers to scaling, which the client does not do
+            // yet, so they keep the raw replay as before.
+            let applied_here = (config.cols, config.rows) == (cols, rows);
+            let fits = cols >= session_size.0 && rows >= session_size.1;
+            if replay_wrong_size && (applied_here || fits) {
+                p.request = Some(Request::Snapshot);
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
             // A new peer or a later request can replace the resize's queued
             // repaint. Lost native state must still be announced, even when
             // raw bytes cover this viewer's cursor; byte retention alone does
-            // not cover state after historical resizes or omitted output.
-            p.request = Some(if terminal.requires_approximation() {
-                Request::Snapshot
-            } else {
+            // not cover omitted output. Raw bytes are laid out for the size
+            // they were written at: the viewer's Resize right after this
+            // decides whether they still fit it (#521). Bytes from before an
+            // earlier resize are still replayed raw, because a repaint here
+            // would be approximate for every shell session, on every reload.
+            let raw = !terminal.requires_approximation();
+            p.request = Some(if raw {
                 Request::Read(seq)
+            } else {
+                Request::Snapshot
             });
+            p.replay_awaits_size = raw && seq < ring.head();
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,
@@ -1592,6 +1796,10 @@ fn invalid_request() -> io::Error {
 #[cfg(test)]
 #[path = "../tests/unit/session_resize.rs"]
 mod resize_checks;
+/// A reopened viewer sees the shim's screen, not bytes laid out for another width (#521).
+#[cfg(test)]
+#[path = "../tests/unit/resume_geometry.rs"]
+mod resume_geometry_checks;
 
 #[cfg(test)]
 mod readiness_marker_checks {

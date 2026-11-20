@@ -84,6 +84,9 @@ mod protocol_tests;
 pub mod socket;
 
 #[cfg(any(feature = "source", feature = "server"))]
+/// Bounded app bundle icon extraction for desktop inventory responses.
+pub mod app_icons;
+#[cfg(any(feature = "source", feature = "server"))]
 /// Splitting video access units into datagram fragments and putting them back together.
 pub mod datagram;
 #[cfg(any(

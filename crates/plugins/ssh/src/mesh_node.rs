@@ -742,6 +742,7 @@ struct ListenerKey {
     node: u64,
     addresses: Vec<IpAddr>,
     interface: String,
+    userspace_filter: bool,
     certificate: Vec<u8>,
 }
 
@@ -753,6 +754,7 @@ fn listener_key(view: Option<&MeshView>, want: &Desired) -> Option<ListenerKey> 
         node: view.node,
         addresses: view.addresses.clone(),
         interface: view.interface.clone(),
+        userspace_filter: view.userspace_filter,
         certificate: certificate.to_bytes().unwrap_or_default(),
     })
 }
@@ -819,7 +821,8 @@ async fn supervise(
                 config.certificates = vec![certificate];
                 let config = Arc::new(config);
                 for address in view.addresses.iter().copied() {
-                    if let Some(port) = bind(address, view.interface.clone()).await
+                    if let Some(port) =
+                        bind(address, view.interface.clone(), view.userspace_filter).await
                         && let Some(task) = accept(&shared, &port, view.node, &config)
                     {
                         running.push((port, task));
@@ -863,14 +866,25 @@ impl infraternal_plugin_api::stop_hook::Stop for Lifecycle {
 }
 
 /// Bind one mesh address on TCP/22 (exact bind or owned redirect).
-async fn bind(address: IpAddr, interface: String) -> Option<MeshPort> {
-    // Binding may install an nft redirect: blocking work, off the reactor.
+async fn bind(address: IpAddr, interface: String, userspace_filter: bool) -> Option<MeshPort> {
+    // Binding may install a kernel redirect or publish a userspace port; keep it off the reactor.
     // The supervisor stopped every port it held before binding again, so an
     // owned table for this address is a previous run's leftover.
-    tokio::task::spawn_blocking(move || MeshPort::bind_after_restart(address, &interface).ok())
-        .await
-        .ok()
-        .flatten()
+    match tokio::task::spawn_blocking(move || {
+        MeshPort::bind_after_restart_with_filter(address, &interface, userspace_filter)
+    })
+    .await
+    {
+        Ok(Ok(port)) => Some(port),
+        Ok(Err(error)) => {
+            eprintln!("Mesh SSH listener was not started: {error}");
+            None
+        }
+        Err(error) => {
+            eprintln!("Mesh SSH listener worker failed: {error}");
+            None
+        }
+    }
 }
 
 /// Serve one bound listener until it is stopped.

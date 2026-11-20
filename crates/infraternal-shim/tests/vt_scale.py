@@ -18,9 +18,19 @@ def send(peer,kind,body=b''):
     peer.sendall(struct.pack('<I',len(body)+1)+bytes([kind])+body)
 
 
-def run(binary,count):
+def summarize_rss(session_pids, baseline_by_pid, current_by_pid):
+    """Summarize per-session RSS without counting a shared owner twice."""
+    owners = set(session_pids)
+    total_rss = sum(current_by_pid[pid] for pid in owners)
+    growth = sum(current_by_pid[pid] - baseline_by_pid[pid] for pid in owners)
+    growth_per_session = growth / len(session_pids) if session_pids else 0.0
+    return len(owners), total_rss, growth, growth_per_session
+
+
+def run(binary,count,memory_only=False):
+    """Measure RSS and snapshots; memory-only mode skips the snapshot work."""
     state=Path(f'target/vt-scale-{os.getpid()}');state.mkdir(mode=0o700)
-    c=Binary(binary.resolve(),state); peers=[]; pids=[]; ids=[]
+    c=Binary(binary.resolve(),state); peers=[]; pids=[]; ids=[]; baseline_by_pid={}
     print(f'scale start: sessions={count} CPUs={os.cpu_count()} load={os.getloadavg()}',flush=True)
     try:
         for _ in range(count):
@@ -30,7 +40,11 @@ def run(binary,count):
             # Local requests use the real shim, avoiding a benchmark-only engine.
             peer=socket.socket(socket.AF_UNIX);peer.settimeout(30)
             peer.connect(str(state/'sessions'/(identity.hex+'.sock')))
-            kind,hello=read(peer);assert kind==1;pids.append(struct.unpack('<I',hello[26:30])[0])
+            kind,hello=read(peer);assert kind==1
+            pid=struct.unpack('<I',hello[26:30])[0]
+            pids.append(pid)
+            if pid not in baseline_by_pid:
+                baseline_by_pid[pid]=rss(pid)
             send(peer,2,struct.pack('<Q',0));send(peer,0x13,struct.pack('<Q',0))
             # Existing output can precede the setup marker; only printable
             # benchmark summaries leave the fixture socket.
@@ -41,9 +55,13 @@ def run(binary,count):
                 kind,body=read(peer);assert kind==0x11,'setup must remain raw';tail.extend(body[8:]);del tail[:-1024]
             peers.append(peer)
         time.sleep(.1)
-        residents=[rss(pid) for pid in pids]
-        proportional=[next(int(line.split()[1]) for line in Path(f'/proc/{pid}/smaps_rollup').read_text().splitlines() if line.startswith('Pss:')) for pid in pids]
-        print(f'scale full 200x60/history+8MiB ring: shim_RSS_sum_KiB={sum(residents)} per_session_min_KiB={min(residents)} max_KiB={max(residents)} shim_PSS_sum_KiB={sum(proportional)} daemon_RSS_KiB={rss(c.child.pid)} load={os.getloadavg()}',flush=True)
+        owners=set(pids)
+        current_by_pid={pid:rss(pid) for pid in owners}
+        owner_count,total_rss,rss_growth,growth_per_session=summarize_rss(pids,baseline_by_pid,current_by_pid)
+        proportional=[next(int(line.split()[1]) for line in Path(f'/proc/{pid}/smaps_rollup').read_text().splitlines() if line.startswith('Pss:')) for pid in owners]
+        print(f'scale full 200x60/history+8MiB ring: sessions={count} owners={owner_count} shim_RSS_sum_KiB={total_rss} shim_RSS_growth_KiB={rss_growth} shim_RSS_growth_per_session_KiB={growth_per_session:.1f} shim_PSS_sum_KiB={sum(proportional)} daemon_RSS_KiB={rss(c.child.pid)} load={os.getloadavg()}',flush=True)
+        if memory_only:
+            return
         serial=[];sizes=[]
         for peer in peers:
             start=time.perf_counter_ns();send(peer,0x14)
@@ -71,5 +89,5 @@ def run(binary,count):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('--binary',type=Path,required=True);p.add_argument('--sessions',type=int,default=128)
-    a=p.parse_args();run(a.binary,a.sessions)
+    p=argparse.ArgumentParser();p.add_argument('--binary',type=Path,required=True);p.add_argument('--sessions',type=int,default=128);p.add_argument('--memory-only',action='store_true')
+    a=p.parse_args();run(a.binary,a.sessions,a.memory_only)

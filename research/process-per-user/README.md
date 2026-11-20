@@ -631,3 +631,5 @@ bash research/process-per-user/run-matrix.sh \
 - Audit unsafe descriptor ownership, malformed ancillary data, failed startup,
   peer replacement/deferred inputs, ring eviction, resize and final exit.
 - Keep ASLR and production defaults; independent review precedes adoption.
+
+These historical probe dependencies are frozen on purpose so the recorded measurements remain reproducible (#538, 2026-11-18).

@@ -8,7 +8,7 @@ import { spots, winId } from "./model";
 
 /** Where each of the old Settings sections went (⌘K, the person's card and the core screen still ask for them by name). */
 export const LEGACY: Readonly<Record<string, string>> = {
-  appearance: "appearance.theme", windows: "appearance.layout", hosts: "terminal.hosts", toolbar: "terminal.typing", shortcuts: "terminal.typing",
+  appearance: "appearance.themes", windows: "appearance.layout", hosts: "terminal.hosts", toolbar: "terminal.typing", shortcuts: "terminal.typing",
   about: "about.version", account: "you.profile", devices: "you.devices", grants: "mesh.access", users: "you.profile", discovery: "machines.new-machines",
 };
 

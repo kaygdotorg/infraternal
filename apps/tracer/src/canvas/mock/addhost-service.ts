@@ -30,7 +30,11 @@ export function createMockProvisioning(options: { savedKey: boolean; authority?:
   return {
     ...real,
     authorityStatus: async () => ({ initialized: options.authority !== "fresh", locked: isLocked(), roots }),
-    unlockAuthority: async () => { try { sessionStorage.setItem(UNLOCKED_KEY, "1"); } catch { /* the double stays locked */ } },
+    // The double's authority unlocks with the page's, as a real server's does for every client once it is unlocked.
+    unlockAuthority: async () => {
+      try { sessionStorage.setItem(UNLOCKED_KEY, "1"); } catch { /* the double stays locked */ }
+      await fetch("/__mock/bootstrap/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ caLocked: false }) }).catch(() => undefined);
+    },
     async savedKey() {
       return options.savedKey ? { label: "work laptop key", unwrap: async () => "mock-saved-key-text" } : undefined;
     },

@@ -22,9 +22,9 @@ import type { HostEntry } from "../sessions/adapter";
 import { ICON } from "../views/icons";
 import { entryTitle, matches, type Entry } from "./inventory";
 import { canStream, type Machines } from "./machines";
+import { EASE_OUT } from "../../../../../packages/ui/src/motion";
 
 /** The ease-out curve for rows that glide to a new place. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** Icon paths (a display) for screen rows. */
 const SCREEN_ICON = '<rect x="3" y="4.5" width="18" height="12.5" rx="2.5"/><path d="M8.5 20.5h7M12 17v3.5"/>';
 /** The padlock drawn beside a missing-permission note. */
@@ -46,6 +46,8 @@ interface Row {
   /** Lower-cased words the field matches: the machine's name is always part of it, so a machine's name lists the machine. */
   words: string;
   appName?: string;
+  /** The content hash of the app's real icon, when the machine has one. */
+  iconHash?: string;
 }
 
 /** The rows of one machine, in the order they are shown. */
@@ -60,7 +62,7 @@ export function rowsOf(machine: HostEntry, machines: Machines): Row[] {
     rows.push({ id: `${machine.id}/${screen.key}`, choice: { kind: "stream", machine, entry: screen }, mark: "screen", name: screen.name, sub: entryTitle(screen), meta: "", words: `${machine.name} ${screen.name} screen display desktop`.toLowerCase() });
   }
   for (const w of inv?.windows ?? []) {
-    rows.push({ id: `${machine.id}/${w.key}`, choice: { kind: "stream", machine, entry: w }, mark: "app", name: w.appName, sub: entryTitle(w), meta: w.onScreen || !w.title ? "" : "minimised", words: `${machine.name} ${w.appName} ${w.title} ${w.bundleId ?? ""}`.toLowerCase(), appName: w.appName });
+    rows.push({ id: `${machine.id}/${w.key}`, choice: { kind: "stream", machine, entry: w }, mark: "app", name: w.appName, sub: entryTitle(w), meta: w.onScreen || !w.title ? "" : "minimised", words: `${machine.name} ${w.appName} ${w.title} ${w.bundleId ?? ""}`.toLowerCase(), appName: w.appName, ...(w.iconHash ? { iconHash: w.iconHash } : {}) });
   }
   return rows;
 }
@@ -86,11 +88,12 @@ export class Picker {
   private active: string | undefined;
   private query = "";
 
+  /** Opens the New window popover under `anchor`. `source` only decides where focus goes; the popover reads the input source itself for its motion. */
   constructor(private readonly cx: Ctx, private readonly machines: Machines, anchor: HTMLElement, source: PopoverSource, private readonly choose: (choice: Choice, how: PopoverSource) => void, onClosed: () => void, initialQuery = "") {
     const { stage } = cx;
     this.popover = openAnchoredPopover({ stage, anchor, label: "New window", className: "cl-sx-pop aw-pop", align: "start", maxWidth: 400,
       // On a phone the key tray (and the canvas row it carries) sits at the foot of the screen: the card stops above it.
-      bottomLimit: () => { const tray = stage.querySelector<HTMLElement>("#keybar"); return tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top - 8 : undefined; } }, source, () => { this.dispose(); onClosed(); });
+      bottomLimit: () => { const tray = stage.querySelector<HTMLElement>("#keybar"); return tray && getComputedStyle(tray).display !== "none" ? tray.getBoundingClientRect().top - 8 : undefined; } }, () => { this.dispose(); onClosed(); });
     const root = this.popover.root;
     root.innerHTML = `<header class="cl-sx-head aw-head"><span class="cl-sx-logo"><svg viewBox="0 0 24 24" aria-hidden="true">${ICONS.search}</svg></span><input class="aw-search" type="text" role="combobox" aria-expanded="true" aria-autocomplete="list" aria-controls="aw-list" placeholder="Search windows and machines" spellcheck="false" autocomplete="off" aria-label="Search windows and machines"></header><div class="cl-sx-scroll aw-list" id="aw-list" role="listbox" aria-label="Windows you can open"></div>`;
     this.input = root.querySelector<HTMLInputElement>(".aw-search")!;
@@ -105,7 +108,7 @@ export class Picker {
       if (found) this.choose(found.choice, e.detail === 0 ? "keyboard" : "pointer");
     });
     // The canvas moving under it ends it: the card belongs to the screen position it opened at.
-    cx.viewport.addEventListener("wheel", () => this.popover.close("pointer"), { passive: true, signal: this.life.signal });
+    cx.viewport.addEventListener("wheel", () => this.popover.close(), { passive: true, signal: this.life.signal });
     const off = machines.onChange(() => this.render());
     this.life.signal.addEventListener("abort", off, { once: true });
     this.stopPoll = machines.poll();
@@ -115,7 +118,7 @@ export class Picker {
   }
 
   /** Closes the popover; `source` says whether the pointer or the keyboard caused it, so focus returns sensibly. */
-  close(source: PopoverSource): void { this.popover.close(source); }
+  close(): void { this.popover.close(); }
   private dispose(): void { this.life.abort(); this.stopPoll(); }
 
   private find(id: string): Row | undefined { return this.all().find((r) => r.id === id); }
@@ -151,10 +154,30 @@ export class Picker {
 
   // ---- drawing ----------------------------------------------------------------------------------------------------
 
+  /**
+   * Renders a row marker: the app's real icon when it is here, else the letter tile. A missing icon is fetched once; its arrival
+   * fires the machines' `onChange`, which repaints the rows with it.
+   */
   private markFor(row: Row): HTMLElement {
     const mark = el("span", "aw-rowmark");
-    if (row.mark === "app") mark.append(entityTile(row.appName ?? row.name));
-    else mark.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${row.mark === "shell" ? ICON.terminal : SCREEN_ICON}</svg>`;
+    if (row.mark === "app") {
+      const url = row.iconHash ? this.machines.icons.url(row.iconHash) : undefined;
+      if (row.iconHash && !url && row.choice.kind === "stream") void this.machines.icons.load(row.choice.machine.id, row.iconHash);
+      mark.dataset.icon = url ? "real" : "tile";
+      if (!url) mark.append(entityTile(row.appName ?? row.name));
+      else {
+        const image = document.createElement("img");
+        image.className = "aw-app-icon";
+        image.alt = "";
+        image.setAttribute("aria-hidden", "true");
+        image.width = 32;
+        image.height = 32;
+        image.decoding = "async";
+        image.src = url;
+        image.addEventListener("error", () => image.replaceWith(entityTile(row.appName ?? row.name)), { once: true });
+        mark.append(image);
+      }
+    } else mark.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${row.mark === "shell" ? ICON.terminal : SCREEN_ICON}</svg>`;
     return mark;
   }
 
@@ -220,7 +243,7 @@ export class Picker {
         const was = before.get(id);
         if (was === undefined) continue;
         const dy = was - node.getBoundingClientRect().top;
-        if (Math.abs(dy) > 1) node.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 240, easing: EASE });
+        if (Math.abs(dy) > 1) node.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 240, easing: EASE_OUT });
       }
     }
     const ids = this.visibleIds();
@@ -229,11 +252,15 @@ export class Picker {
     this.popover.place();
   }
 
+  /** Brings a drawn row up to date in place: its words, and its real icon once it has arrived. */
   private updateRow(node: HTMLElement, row: Row): void {
     const name = node.querySelector<HTMLElement>(".aw-name"), sub = node.querySelector<HTMLElement>(".aw-sub"), meta = node.querySelector<HTMLElement>(".cl-sx-meta");
     if (name && name.textContent !== row.name) name.textContent = row.name;
     if (sub && sub.textContent !== (row.sub || " ")) sub.textContent = row.sub || " ";
     if (meta && meta.textContent !== row.meta) meta.textContent = row.meta;
+    // An icon that arrived since the row was drawn replaces its letter tile in place.
+    const mark = node.querySelector<HTMLElement>(".aw-rowmark");
+    if (mark?.dataset.icon === "tile" && row.iconHash && this.machines.icons.url(row.iconHash)) mark.replaceWith(this.markFor(row));
   }
 
   /** What a machine says about itself under its rows: still looking, unreachable, or missing a permission and what to do. */

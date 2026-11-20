@@ -9,6 +9,7 @@ fn parsed(arguments: &[&str]) -> super::super::ServerArgs {
     crate::server_args(crate::cli::command_tree::selected(&matches).matches).unwrap()
 }
 
+/// Keep the remote listener explicit and require its CA override to have a listener.
 #[test]
 fn remote_activation_is_explicit_and_ca_override_requires_listener() {
     let args = parsed(&["infraternal", "server", "--listen", "127.0.0.1:4701"]);
@@ -40,6 +41,178 @@ fn remote_activation_is_explicit_and_ca_override_requires_listener() {
         args.remote.remote_ca_dir.unwrap(),
         PathBuf::from("/unused/private/ca")
     );
+}
+
+/// Build the prod-shaped host rules from server flags and typed admin entries.
+#[test]
+fn server_flags_accept_host_firewall_interfaces_and_admin_rules() {
+    let matches = crate::cli::command_tree::build(&crate::cli::actions::registry().unwrap())
+        .try_get_matches_from([
+            "infraternal",
+            "server",
+            "--listen",
+            "10.69.0.89:7011",
+            "--behind-proxy",
+            "--trusted-proxy",
+            "10.69.0.99",
+            "--remote-listen",
+            "10.69.69.89:7443",
+            "--host-firewall-listen-interface",
+            "eth0",
+            "--host-firewall-remote-interface",
+            "wt0",
+            "--host-firewall-remote-source",
+            "10.69.69.0/24",
+            "--host-firewall-accept-interface",
+            "wt0",
+            "--host-firewall-allow",
+            "eth0,*,udp,51820",
+            "--host-firewall-allow",
+            "wt0,10.69.69.0/24,tcp,22",
+            "--host-firewall-allow",
+            "eth0,10.69.0.99,tcp,7012",
+            "--host-firewall-allow",
+            "wt0,10.69.69.99,tcp,7011",
+            "--host-firewall-allow",
+            "wt0,10.69.69.0/24,tcp,7443",
+            "--host-firewall-allow",
+            "wt0,10.69.69.0/24,udp,7443",
+        ])
+        .expect("server firewall options parse");
+    let selected = crate::cli::command_tree::selected(&matches);
+
+    assert_eq!(
+        selected
+            .matches
+            .get_one::<String>("host_firewall_listen_interface")
+            .map(String::as_str),
+        Some("eth0")
+    );
+    assert_eq!(
+        selected
+            .matches
+            .get_many::<String>("host_firewall_allow")
+            .expect("extra firewall rules")
+            .count(),
+        6
+    );
+    assert_eq!(
+        selected
+            .matches
+            .get_one::<String>("host_firewall_remote_interface")
+            .map(String::as_str),
+        Some("wt0")
+    );
+    assert_eq!(
+        selected
+            .matches
+            .get_many::<String>("host_firewall_remote_source")
+            .expect("remote listener source")
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["10.69.69.0/24"]
+    );
+    assert_eq!(
+        selected
+            .matches
+            .get_many::<String>("host_firewall_accept_interface")
+            .expect("preserved broad interface")
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["wt0"]
+    );
+}
+
+/// Recreate every current production input allowance from server flags alone.
+#[test]
+fn server_flags_render_the_prod_host_policy() {
+    let args = parsed(&[
+        "infraternal",
+        "server",
+        "--listen",
+        "10.69.0.89:7011",
+        "--behind-proxy",
+        "--trusted-proxy",
+        "10.69.0.99",
+        "--remote-listen",
+        "10.69.69.89:7443",
+        "--host-firewall-listen-interface",
+        "eth0",
+        "--host-firewall-remote-interface",
+        "wt0",
+        "--host-firewall-remote-source",
+        "10.69.69.0/24",
+        "--host-firewall-accept-interface",
+        "wt0",
+        "--host-firewall-allow",
+        "eth0,*,udp,51820",
+        "--host-firewall-allow",
+        "wt0,10.69.69.0/24,tcp,22",
+        "--host-firewall-allow",
+        "wt0,10.69.69.99,tcp,7011",
+        "--host-firewall-allow",
+        "eth0,10.69.0.99,tcp,7011",
+        "--host-firewall-allow",
+        "eth0,10.69.0.99,tcp,7012",
+        "--host-firewall-allow",
+        "wt0,10.69.69.0/24,tcp,7443",
+        "--host-firewall-allow",
+        "wt0,10.69.69.0/24,udp,7443",
+    ]);
+    let policy = crate::host_firewall_policy(&args).expect("valid production policy flags");
+    let rules = infraternal_plugin_mesh::host_firewall::render(&policy)
+        .expect("default-drop production host policy");
+
+    assert_eq!(
+        rules,
+        concat!(
+            "table inet infraternal_host {\n",
+            "    chain input {\n",
+            "        type filter hook input priority filter - 10; policy drop;\n",
+            "        iifname \"wt0\" accept\n",
+            "        iifname \"lo\" accept\n",
+            "        ct state invalid drop\n",
+            "        ct state established,related accept\n",
+            "        ip protocol icmp accept\n",
+            "        meta l4proto ipv6-icmp accept\n",
+            "        ip6 saddr fe80::/10 udp sport 547 udp dport 546 accept\n",
+            "        iifname \"eth0\" udp dport 51820 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 22 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.99 tcp dport 7011 accept\n",
+            "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7011 accept\n",
+            "        iifname \"eth0\" ip saddr 10.69.0.99 tcp dport 7012 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 7443 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7443 accept\n",
+            "        iifname \"eth0\" ip saddr 10.69.0.99 ip daddr 10.69.0.89 tcp dport 7011 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 tcp dport 7443 accept\n",
+            "        iifname \"wt0\" ip saddr 10.69.69.0/24 ip daddr 10.69.69.89 udp dport 7443 accept\n",
+            "    }\n",
+            "}\n",
+        )
+    );
+}
+
+/// Build the remote listener's interface and peer restrictions from its own flags.
+#[test]
+fn remote_listener_flags_become_host_input_rules() {
+    let args = parsed(&[
+        "infraternal",
+        "server",
+        "--remote-listen",
+        "0.0.0.0:7444",
+        "--host-firewall-remote-interface",
+        "wt0",
+        "--host-firewall-remote-source",
+        "10.69.69.0/24",
+        "--host-firewall-allow",
+        "*,*,tcp,22",
+    ]);
+    let policy = crate::host_firewall_policy(&args).expect("valid remote listener settings");
+    let rules = infraternal_plugin_mesh::host_firewall::render(&policy)
+        .expect("valid remote listener policy");
+
+    assert!(rules.contains("iifname \"wt0\" ip saddr 10.69.69.0/24 tcp dport 7444 accept"));
+    assert!(rules.contains("iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7444 accept"));
 }
 
 #[test]

@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { routeWithLatency } from './latency-route.mjs';
+import { responseHeaders } from './response-headers.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 if (!process.argv[2]) throw new Error('provide the production tracer dist directory');
@@ -70,7 +71,7 @@ try {
       child.stdin.write(JSON.stringify({ path, headers: request.headers(), body: request.postDataJSON() }) + '\n');
       response = JSON.parse((await lines.next()).value);
     }
-    await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers),
+    await route.fulfill({ status: response.status, headers: responseHeaders(response.headers),
       body: JSON.stringify(response.body) });
   });
   // This fixture verifies auth only. Close terminal sockets locally rather than dialing a host.

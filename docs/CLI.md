@@ -85,6 +85,79 @@ by an installed system service, including its effective drop-ins. If no system
 service records a path, they use `./data`. A setup-token command that cannot
 read its selected directory prints one line with the matching `sudo` command.
 
+`server init` never depends on the directory it runs in (D395). When the
+unit it would write already exists, init keeps that unit's `--web-root` (or
+its absence), so a re-run on an unchanged install plans the same unit and
+changes nothing, even with `--force`. `--system` also reuses the data folder
+an installed system server records under another name, as before. The
+server's data folder is
+`$XDG_STATE_HOME/infraternal` (else `~/.local/state/infraternal`) per user on
+Linux, `/var/lib/infraternal` system-wide on Linux (D229), and
+`~/Library/Application Support/infraternal` or
+`/Library/Application Support/infraternal` on macOS. When the Linux system
+install shares its base with an infraternal agent, the default is
+`/var/lib/infraternal/server`, mode 0700 and owned by the server account.
+The shared base keeps its traversal permissions, and the infraternal agent
+keeps its paths and the existing system command link. An empty or relative
+`XDG_STATE_HOME` is ignored, as the XDG specification says. Without
+`--web-root`, a fresh install uses the `web/` folder beside the `infraternal`
+binary (the release bundle layout) when it exists, and otherwise leaves the
+flag out. A relative `--data` or `--web-root` is refused, and the error names
+the absolute path to pass instead. `--system` needs root, except with
+`--dry-run`; without `--system`, init installs a per-user service, for root
+too. A real install creates a missing data folder with mode 0700.
+`--dry-run` prints the resolved `Data folder` and `Web folder` as absolute
+paths. The rules live in `crates/infraternal/src/install_paths.rs`.
+
+An existing install moves to the standard folder too (D395, amended
+2026-11-15). When the unit records a different `--data` and you do not pass
+`--data`, `server init` moves the server data (database with its WAL and
+SHM files, identity, SSH trust and the mesh key) and rewrites the associated
+`ExecStart` paths in the unit and its drop-ins. Pass
+`--data <current folder>` to keep a folder where it is. `--dry-run` prints the
+move first: the two folders, the method, and the unit files it rewrites.
+The move stops the service and copies its data into a private staging folder.
+It syncs the copy, verifies file contents and metadata, publishes the checked
+firewall policy, and then switches the unit and its drop-ins. The effective
+`ExecStart` is switched last. The old path remains available until the new
+server answers its health check and the main process reported by systemd confirms
+the open database's path, device and inode over the private control socket.
+A fresh challenge ties the HTTP response to that same process.
+Across filesystems, or after an unconfirmed startup, init keeps a dated,
+read-only backup and prints its location. Otherwise,
+init reopens the configured destination and renews the database and HTTP proof
+just before removing the original. An inconclusive check leaves the original
+available, possibly at the recorded backup path.
+
+After confirmation, init loads recovery hooks on the server unit, stops the
+original service, records the request, and asks systemd to start the server.
+The systemd job continues if the CLI exits. The next start, including after
+reboot, can process a recorded request even if the CLI never submitted its
+start. The pre-start hook prepares and selects the destination. The post-start
+hook verifies it before systemd reports a successful start. A failure surfaces
+as a failed start and leaves the request available for retry. The private journal
+records the data paths and identities, staging and backup locations, and
+complete unit set. If the moved server
+may have accepted writes, recovery keeps both trees and retries the selected
+destination. On a combined host that stored server data directly in the
+shared base, the same systemd job copies only the server entries into the
+private child. The journal tracks each original server entry so recovery can
+resume retirement after a partial cleanup. Reserved install paths and the
+host firewall policy files stay in the shared base. Other moves that would
+take over a shared base are refused before stopping the service. Init also
+refuses a destination with unrelated files or a concurrent configuration change, such as a new listen
+port, even with `--force`. Use the existing
+service flags for relocation and apply changes separately.
+
+Relocation is a no-op for an install already at its standard folder, such as
+a combined system server in `/var/lib/infraternal/server`. Ordinary
+`server init` still reconciles the service and firewall. Relocation leaves sockets in `/run`
+alone. The server's updater (#211) is meant to call the same move while
+the service is stopped; `server restart --binary` keeps the service running
+and never moves the folder. On macOS, `server init` does not install a
+launchd service yet, so there is no macOS server install to move; the move
+itself works there the same way.
+
 ## Generated skills
 
 `infraternal skill` lists the public, working actions registered in this build.

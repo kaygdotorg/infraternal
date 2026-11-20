@@ -58,11 +58,11 @@ import {
   type StartTarget,
   type TargetView,
 } from "./provisioning-client";
+import { EASE_OUT } from "../../../packages/ui/src/motion";
 
 /** Where the mock server serves the discovery data. */
 const FIXTURES_URL = "/__mock/proto/addhost";
 /** The strong ease-out curve used for the wizard's motion. */
-const EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 /** The name shown for each discovery source. */
 const SOURCE_LABELS: Record<HostSource, string> = {
   netbird: "NetBird",
@@ -209,6 +209,10 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private alive = true;
     private finished = false;
 
+    /**
+     * Builds the card and its first step. `startEmpty` opens on the empty state, `animate` plays the card's
+     * entrance (ease-out, under 300 ms; off under reduced motion), and `review` replays a recorded run.
+     */
     constructor(startEmpty: boolean, animate: boolean, review?: Review) {
       this.win = canvas.openFlowWindow({ title: "Add hosts", icon: svg(ICON.plus, "is-line") });
       this.card = this.win.card.root;
@@ -243,7 +247,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.float.style.opacity = String(clamped);
         this.float.style.transform = `translateY(${(1 - value) * 12}px) scale(${0.97 + value * 0.03})`;
         scrim.style.opacity = String(clamped);
-      }, { visualDuration: 0.32 });
+      }, { visualDuration: 0.26 });
       if (review?.failures.length) {
         this.run = review.run;
         this.jobs = review.failures.map((failure) => ({
@@ -287,6 +291,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       if (next === "discovery") this.focusField();
     }
 
+    /** Replaces the footer's buttons with `markup` and gives the new buttons the production button geometry. */
     private setFoot(markup: string): void {
       this.foot.innerHTML = markup;
       // Fixture buttons use the same primitive and instance geometry as production.
@@ -295,7 +300,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         button.dataset.button = button.classList.contains("ah-primary") ? "primary" : "secondary";
       }
       this.foot.hidden = markup === "";
-      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE });
+      if (!reducedMotion() && markup) this.foot.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: EASE_OUT });
     }
 
     private hero(icon: string, tone = ""): string {
@@ -439,7 +444,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         const wasHidden = row.hidden;
         row.hidden = !match && !isSelected;
         if (match && !isSelected) visible++;
-        if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE });
+        if (wasHidden && !row.hidden && !reducedMotion()) row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 160, easing: EASE_OUT });
       }
       const candidate = page.querySelector<HTMLElement>(".ah-candidate")!;
       const offer = !!target && !exact && visible === 0;
@@ -468,6 +473,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       else this.startInstall(false);
     }
 
+    /** Draws the credentials page: one secret field for the hosts that need a key or password. */
     private renderCredentials(page: HTMLElement): void {
       const needing = this.selected.filter((host) => host.credentialRequired);
       const names = needing.map((host) => `${host.user}@${host.id}`);
@@ -480,7 +486,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
             <span class="ah-option-text"><span>Paste a key or password</span><span class="ah-option-hint">Encrypted with your passkey.</span></span></label>
         </div>
         <div class="ah-reveal" data-open="false"><div class="ah-reveal-in">
-          <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" aria-label="SSH key or password" placeholder="Paste a private key or password" tabindex="-1"></textarea>
+          <textarea class="ah-secret" rows="3" spellcheck="false" autocomplete="off" autocapitalize="none" autocorrect="off" aria-label="SSH key or password" placeholder="Paste a private key or password" tabindex="-1"></textarea>
         </div></div>`;
       this.setFoot(`<button class="ah-secondary" type="button" data-ah="back">Back</button><button class="ah-primary" type="button" data-ah="credentials"><span>Continue</span></button>`);
     }
@@ -632,6 +638,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     }
 
     // ── The result: this window becomes the first host's terminal window ─────
+    /** Ends the run: this window becomes the first added host's terminal window, and `failed` lists the hosts that did not make it. */
     private finish(done: AddHostFixture[], failed: Failure[]): void {
       const [first, ...rest] = done;
       if (!first) return;
@@ -646,7 +653,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
         this.win.becomeHost(canvasHostOf(first, this.asRoot));
         card.root.classList.remove("ah");
         if (!this.asRoot && first.rootAvailable) addRootPill(card, first);
-        if (!reduce) for (const child of card.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE });
+        if (!reduce) for (const child of card.pill.children) child.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: EASE_OUT });
         // The rest of the batch gets windows right after this one, in order, in the same tick as
         // this window's header change, so the sidebar tree gets all its new rows in one rebuild.
         // The canvas lays them out and pans to the first with its own pan animation.
@@ -661,9 +668,9 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       if (reduce) { swapHeader(); done2(); }
       else {
         const scrim = this.stageEl.querySelector<HTMLElement>(".ah-scrim")!;
-        this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px) scale(0.98)" }], { duration: 200, easing: EASE, fill: "forwards" });
-        scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: EASE, fill: "forwards" }).onfinish = done2;
-        fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE, fill: "forwards" }));
+        this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(-6px) scale(0.98)" }], { duration: 200, easing: EASE_OUT, fill: "forwards" });
+        scrim.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 280, easing: EASE_OUT, fill: "forwards" }).onfinish = done2;
+        fades = [...card.pill.children].map((child) => child.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 140, easing: EASE_OUT, fill: "forwards" }));
         void (fades[0]?.finished ?? Promise.resolve()).then(swapHeader);
       }
       // A batch with failures keeps its connection: Review retries on it, and closing it
@@ -697,6 +704,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.card.removeEventListener("keydown", this.onKeyDown);
     }
 
+    /** Closes the wizard: marks it no longer alive, then clears its timers and closes its run. */
     close(): void {
       this.alive = false;
       this.clearTimers();
@@ -707,8 +715,8 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       this.resize.disconnect();
       const remove = (): void => { this.win.remove(); };
       if (reducedMotion()) { remove(); return; }
-      this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE, fill: "forwards" });
-      this.card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 60, easing: EASE, fill: "forwards" }).onfinish = remove;
+      this.float.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateY(6px) scale(0.98)" }], { duration: 160, easing: EASE_OUT, fill: "forwards" });
+      this.card.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 200, delay: 60, easing: EASE_OUT, fill: "forwards" }).onfinish = remove;
     }
 
     focus(): void {

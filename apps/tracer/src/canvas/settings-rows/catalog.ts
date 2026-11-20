@@ -31,13 +31,14 @@ export interface GroupData { facts?: FactGroupDef[]; keys?: KeyDef[] }
 
 /**
  * An existing Settings panel reused unchanged inside a window (its id is the old section id). `only` keeps just the blocks
- * of the panel whose heading is listed, so one panel can fill several windows (the Appearance panel is Theme, Font and Size).
+ * of the panel whose heading is listed, so one panel can fill several windows.
  */
-export type PanelId = "appearance" | "windows" | "hosts" | "toolbar" | "shortcuts" | "account" | "about" | "devices";
+export type PanelId = "windows" | "hosts" | "toolbar" | "shortcuts" | "account" | "about" | "devices";
 
 /** The docs heading a window's "?" opens (`docs/docs-adapter.ts`). Absent on a group: no page yet. */
 export type { DocsLink };
 
+/** Describes a group of settings rows and the panel that owns them. */
 export interface GroupDef {
   id: string;
   title: string;
@@ -49,6 +50,8 @@ export interface GroupDef {
   panel?: PanelId | readonly PanelId[];
   /** Keeps just the blocks of the panels whose heading is listed, so one panel can fill several windows. */
   only?: string[];
+  /** The Appearance Themes window (D322, #323): the strip of theme cards and the controls that edit the selected theme (`canvas/themes/editor.on-demand.ts`). */
+  themes?: boolean;
   docs?: DocsLink;
 }
 
@@ -62,11 +65,11 @@ export interface ComponentDef {
 }
 
 
+/** Maps product setting windows to their shared row groups. */
 export const SETTINGS_MAP: readonly ComponentDef[] = [
   { id: "appearance", title: "Appearance", icon: "appearance", groups: [
-    { id: "theme", title: "Theme", panel: "appearance", only: ["Theme", "Background", "Card transparency", "Window transparency"] },
-    { id: "font", title: "Font", panel: "appearance", only: ["Font"] },
-    { id: "size", title: "Size", panel: "appearance", only: ["UI size"] },
+    // A theme holds Colour, backgrounds, tint, blur, grain, font and UI size, so one window edits all of them (D322, D338): the Font and Size windows are part of it.
+    { id: "themes", title: "Themes", themes: true },
     { id: "layout", title: "Layout", panel: "windows" },
   ] },
   { id: "terminal", title: "Terminal", icon: "terminal", groups: [
@@ -85,6 +88,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
   { id: "machines", title: "Machines", icon: "machines", admin: true, groups: [
     { id: "new-machines", title: "New Machines", docs: { page: "reference/keys", heading: "add-link-lasts" }, settings: ["add-link", "join-code", "install-mode", "sign-in-account", "join-mesh"] },
     { id: "updates", title: "Updates" },
+    { id: "app-windows", title: "App Windows", settings: ["app-windows"] },
   ] },
   { id: "mesh", title: "Mesh", icon: "mesh", admin: true, groups: [
     { id: "keys", title: "Keys", docs: { page: "reference/keys", heading: "connection-keys" }, settings: ["connection-keys", "machine-identity", "renewal-window"] },

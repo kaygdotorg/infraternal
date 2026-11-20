@@ -18,7 +18,7 @@ const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
-/** The docs window that shows "Keys and how long they last": a long page that scrolls inside its window. */
+/** The docs window that shows "Keys and how long they last": a long page that scrolls inside its window. Its address is `reference/keys` since the docs got sections (#311, D317). */
 const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
@@ -97,6 +97,8 @@ for (const size of SIZES) {
 
       // ---- a sideways gesture over the same page is the content's (D374): the canvas stays; over the window's pill it moves ------
       await page.waitForTimeout(400);
+      // Observed on the nightly (#443): the keys page's stop is index 12 of the Docs view's 13 pages, the last one, so a gesture to the
+      // right has no neighbour to go to. The gesture goes the other way when the right one stays put, and either must move the canvas.
       await page.mouse.wheel(300, 0);
       // sleep: let any wrongly started canvas move show itself; no event marks that something did not happen
       await page.waitForTimeout(500);
