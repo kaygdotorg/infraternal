@@ -230,7 +230,9 @@ fn absent() -> bool {
     })
 }
 
-/// Exact login1 actions approved as harmless for this root-route check (#355).
+/// Exact login1 actions approved as harmless for this root-route check (#355),
+/// in every session scope. The D382 console power actions are approved
+/// separately, for an active session only ([`CONSOLE_POWER_ACTIONS`]).
 /// Inhibition and self-linger affect session lifetime, and chvt selects a virtual
 /// terminal; none permits executing arbitrary code as root. Session teardown
 /// separately handles linger (D353). No prefix match or other yes grant is safe.
@@ -249,6 +251,41 @@ const HARMLESS_ACTIONS: &[&str] = &[
     "org.freedesktop.login1.set-self-linger",
 ];
 
+/// D382 (owner, 2026-11-10): the console power actions stock Linux grants
+/// an active local console session. They reboot, power off, suspend or
+/// hibernate the machine, or choose what the next boot starts; none writes
+/// a file the account chooses or runs a command, so they do not count as
+/// admin powers. Exactly these 12 ids, and only their `implicit active`
+/// default: a `yes` for any other session, or for any other id (halt, the
+/// `-ignore-inhibit` variants, and every other grant), still counts.
+const CONSOLE_POWER_ACTIONS: &[&str] = &[
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.reboot-multiple-sessions",
+    "org.freedesktop.login1.power-off",
+    "org.freedesktop.login1.power-off-multiple-sessions",
+    "org.freedesktop.login1.suspend",
+    "org.freedesktop.login1.suspend-multiple-sessions",
+    "org.freedesktop.login1.hibernate",
+    "org.freedesktop.login1.hibernate-multiple-sessions",
+    "org.freedesktop.login1.set-reboot-parameter",
+    "org.freedesktop.login1.set-reboot-to-boot-loader-entry",
+    "org.freedesktop.login1.set-reboot-to-boot-loader-menu",
+    "org.freedesktop.login1.set-reboot-to-firmware-setup",
+];
+
+/// Actions an approved action may imply without being approved itself.
+/// Stock `reboot` and `power-off` imply setting the message logind sends to
+/// logged-in terminals before it shuts down: text shown to people, never a
+/// file or a command. Its own defaults are still read like any action's.
+const IMPLIED_ONLY: &[&str] = &["org.freedesktop.login1.set-wall-message"];
+
+/// Whether a `yes` (or `auth_self`) default for `scope` of action `id` is
+/// approved: the harmless login1 ids in every scope, the D382 console power
+/// ids for an active session only.
+fn approved(id: &str, scope: &str) -> bool {
+    HARMLESS_ACTIONS.contains(&id) || (scope == "active" && CONSOLE_POWER_ACTIONS.contains(&id))
+}
+
 /// Whether one `annotation:` line of an approved action keeps its grant
 /// inside the approved set. polkit authorizes every action an
 /// `org.freedesktop.policykit.imply` annotation names along with the action
@@ -262,13 +299,19 @@ fn annotation_stays_approved(annotation: &str) -> bool {
         .strip_prefix("org.freedesktop.policykit.imply ->")
         .is_some_and(|ids| {
             let mut ids = ids.split_ascii_whitespace().peekable();
-            ids.peek().is_some() && ids.all(|id| HARMLESS_ACTIONS.contains(&id))
+            ids.peek().is_some()
+                && ids.all(|id| {
+                    HARMLESS_ACTIONS.contains(&id)
+                        || CONSOLE_POWER_ACTIONS.contains(&id)
+                        || IMPLIED_ONLY.contains(&id)
+                })
         })
 }
 
 /// Read effective .policy defaults through polkit's own XML parser. Every
 /// action must have exactly one of each scope; unknown formats fail closed.
-/// Only the exact approved action ids may retain a stock yes default, and an
+/// Only the exact approved action ids may retain a stock yes default (see
+/// [`approved`]), and an
 /// approved action that keeps one must not reach any other action or program
 /// through its annotations (see [`annotation_stays_approved`]).
 fn action_defaults_allow_or_unknown(text: &str) -> bool {
@@ -317,7 +360,7 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             match value.trim() {
                 "no" | "auth_admin" | "auth_admin_keep" => {}
                 "yes" | "auth_self" | "auth_self_keep"
-                    if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) =>
+                    if action.is_some_and(|id| approved(id, scope)) =>
                 {
                     approved_yes = true;
                 }
@@ -508,6 +551,96 @@ mod tests {
         ));
     }
 
+    /// D382: a stock polkitd host comes out clean. This is `pkaction
+    /// --verbose` from a stock Debian 13 host (polkitd 126, systemd 257),
+    /// whose login1 policy grants an active session the 12 console power
+    /// actions and the harmless inhibit, chvt and self-linger ids.
+    const STOCK_DEBIAN13: &str = include_str!("testdata/pkaction-debian13.txt");
+
+    /// D382: the stock action set is clean, each console power id is ignored
+    /// for an active session only, and every other yes still counts.
+    #[test]
+    fn console_power_actions_are_ignored_and_every_other_grant_counts() {
+        assert!(!action_defaults_allow_or_unknown(STOCK_DEBIAN13));
+        assert_eq!(CONSOLE_POWER_ACTIONS.len(), 12);
+        let defaults = |id: &str, any: &str, inactive: &str, active: &str| {
+            format!(
+                "{id}:\n  implicit any:      {any}\n  implicit inactive: {inactive}\n  implicit active:   {active}\n"
+            )
+        };
+        for id in CONSOLE_POWER_ACTIONS {
+            assert!(
+                !action_defaults_allow_or_unknown(&defaults(
+                    id,
+                    "auth_admin_keep",
+                    "auth_admin_keep",
+                    "yes"
+                )),
+                "{id}"
+            );
+            // Away from the console, the same id is a grant.
+            for (any, inactive) in [("yes", "auth_admin_keep"), ("auth_admin_keep", "yes")] {
+                assert!(
+                    action_defaults_allow_or_unknown(&defaults(id, any, inactive, "yes")),
+                    "{id} any {any} inactive {inactive}"
+                );
+            }
+        }
+        for id in [
+            "org.freedesktop.login1.halt",
+            "org.freedesktop.login1.reboot-ignore-inhibit",
+            "org.freedesktop.login1.power-off-ignore-inhibit",
+            "org.freedesktop.login1.set-wall-message",
+            "org.freedesktop.login1.set-user-linger",
+            "org.freedesktop.login1.reboot-extra",
+            "org.freedesktop.systemd1.manage-units",
+            "org.freedesktop.NetworkManager.settings.modify.system",
+        ] {
+            assert!(
+                action_defaults_allow_or_unknown(&defaults(
+                    id,
+                    "auth_admin_keep",
+                    "auth_admin_keep",
+                    "yes"
+                )),
+                "{id}"
+            );
+        }
+        // Any other yes in the stock set itself still flags it, and so does
+        // an approved console action that reaches a non-approved one.
+        let units = "org.freedesktop.systemd1.manage-units:";
+        let at = STOCK_DEBIAN13.find(units).unwrap();
+        let end = at + STOCK_DEBIAN13[at..].find("implicit active:").unwrap();
+        let line_end = end + STOCK_DEBIAN13[end..].find('\n').unwrap();
+        let granted = format!(
+            "{}implicit active:   yes{}",
+            &STOCK_DEBIAN13[..end],
+            &STOCK_DEBIAN13[line_end..]
+        );
+        assert!(action_defaults_allow_or_unknown(&granted));
+        // Stock halt (auth_admin only) implies the same wall message: an
+        // annotation on an action without a yes grants nothing, so only the
+        // approved reboot reaching manage-units may flag.
+        let wall = "imply -> org.freedesktop.login1.set-wall-message";
+        let units = "imply -> org.freedesktop.systemd1.manage-units";
+        let reboot = STOCK_DEBIAN13
+            .find("\norg.freedesktop.login1.reboot:\n")
+            .unwrap();
+        let halt = STOCK_DEBIAN13
+            .find("\norg.freedesktop.login1.halt:\n")
+            .unwrap();
+        let reaching = |from: usize| {
+            let at = from + STOCK_DEBIAN13[from..].find(wall).unwrap();
+            format!(
+                "{}{units}{}",
+                &STOCK_DEBIAN13[..at],
+                &STOCK_DEBIAN13[at + wall.len()..]
+            )
+        };
+        assert!(action_defaults_allow_or_unknown(&reaching(reboot)));
+        assert!(!action_defaults_allow_or_unknown(&reaching(halt)));
+    }
+
     /// Real host policy goes through the same parser as planted action defaults.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires real host root and the installed polkit policy"]
@@ -523,6 +656,20 @@ mod tests {
                 ],
             )
             .unwrap();
+            assert!(!action_defaults_allow_or_unknown(&text));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// D382 on a real host: the whole installed action set of a stock
+    /// polkitd host (no extra policy packages) reads as no grant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires real host root and a stock polkit action set"]
+    async fn real_stock_action_set_is_clean() {
+        assert!(nix::unistd::Uid::effective().is_root());
+        tokio::task::spawn_blocking(|| {
+            let text = crate::access_privilege::host_output("pkaction", &["--verbose"]).unwrap();
             assert!(!action_defaults_allow_or_unknown(&text));
         })
         .await
