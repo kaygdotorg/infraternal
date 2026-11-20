@@ -9,8 +9,10 @@
  */
 import { expect, test, type Page } from "playwright/test";
 
+/** A realistic long machine name: compute01's own, 28 characters. */
 const LONG_NAME = "infraternal-dev-01-compute01";
 
+/** Opens the preview at the given size with the test double answering `LONG_NAME` as "this host", once the capsule is shown. */
 async function openWithName(page: Page, width: number, height: number): Promise<void> {
   await page.setViewportSize({ width, height });
   await page.context().request.post("/__mock/reset");

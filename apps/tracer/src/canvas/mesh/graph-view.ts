@@ -43,6 +43,10 @@ export interface GraphViewModule {
   stats(): ({ level: string } & ReturnType<GraphController["stats"]>) | undefined;
 }
 
+/**
+ * Builds the Mesh graph view: the cards and arrows of the hosts and who can reach whom, with the confirmations that edit an arrow.
+ * `cx` is the shared canvas context and `source` the mesh data and its edits; the returned module is driven by the canvas.
+ */
 export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const { signal, camera, state, views } = cx;
   const cam = camera.cam;

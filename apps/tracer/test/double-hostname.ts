@@ -6,4 +6,6 @@
  * tree: a long machine name (compute01's is 28 characters) widened the pill past its panel and made layout specs fail on one
  * build host and pass on another. Keep it short.
  */
+
+/** The short, fixed name the test double reports as "this host". */
 export const DOUBLE_HOSTNAME = "test-host";
