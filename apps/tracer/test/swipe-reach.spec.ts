@@ -29,8 +29,15 @@ async function open(page: Page): Promise<void> {
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   // sleep: the mock canvas finishes its first layout; no event marks it
   await page.waitForTimeout(1200);
-  await fly(page);
+  // The Docs view is not the opening view: open the page through the palette, which brings its window onto the canvas.
+  await page.keyboard.press("Control+Shift+K");
+  await expect(page.locator("#palette-input")).toBeFocused();
+  await page.keyboard.type("multiplexer");
+  const result = page.locator(".palette .result", { hasText: "The Infraternal Multiplexer" }).first();
+  await expect(result).toBeVisible({ timeout: 15_000 });
+  await result.click();
   await expect(page.locator(`${MIDDLE} .dr-page h1`)).toBeVisible({ timeout: 15_000 });
+  await fly(page);
   const lock = (await api(page, "canvasLock")) as { index: number; stops: number };
   expect(lock.index, "the window has neighbours on both sides").toBeGreaterThan(0);
   expect(lock.index).toBeLessThan(lock.stops - 1);
