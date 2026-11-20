@@ -77,6 +77,9 @@ for (const total of [8, 16, 32]) {
         await expect(windows(page)).toHaveCount(count + 1);
       }
       await expect.poll(() => attachedOn(server), { timeout: 60_000 }).toBeGreaterThanOrEqual(total - 1);
+      // The server keeps the layout; the last window's save is still on its way when its shell attaches, and a reload
+      // before it lands would restore one window fewer, which is a different question from this spec's.
+      await page.waitForTimeout(3_000);
     });
 
     test("a reload restores them all, none offline", async () => {
