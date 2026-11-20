@@ -1,11 +1,13 @@
-/** Unchanged sign-in, prediction, resume and first-paint budgets, run under perf-run on the perf VM (#314). */
+/** Sign-in, prediction, reconnect and first-paint budgets, run under perf-run on the perf VM (#314, D375). */
 import { expect, test } from "playwright/test";
+import { FRAME_MS } from "../test/latency-targets";
 import { terminalScenario } from "../test/terminal-scenario";
 
 test("first run, passkey login, terminal resume, and the latency probe", async ({ page }, info) => {
   const metrics = await terminalScenario(page, info, { performanceSamples: true });
   expect.soft(metrics.returningSigninP99).toBeLessThanOrEqual(metrics.returningSigninBudgetMs);
-  expect.soft(metrics.predictedP99).toBeLessThanOrEqual(17);
+  // D375: a predicted letter is on screen within one 120 Hz frame.
+  expect.soft(metrics.predictedP99).toBeLessThanOrEqual(FRAME_MS);
   expect.soft(metrics.resumeP99).toBeLessThanOrEqual(metrics.resumeBudgetMs);
 });
 
