@@ -390,6 +390,28 @@ class Reporter(unittest.TestCase):
         self.partial_night([{'kind': 'begin', 'total': 5}, {'kind': 'test', 'file': 'ok.spec.ts', 'title': 't', 'outcome': 'expected'}], head='b' * 40)
         self.assertFalse([c for c in self.forgejo.comments.values() if 'passes again' in c['body']])
 
+    def test_done_line_counts_files_and_tests_apart(self):
+        """The first night's "152 passing, 22 failing" were spec files against a plan of 1719 tests (#443): the closing line names both units."""
+        lines = [
+            {'kind': 'begin', 'shard': 1, 'of': 1, 'total': 4, 'tests': [
+                {'id': 0, 'file': 'a.spec.ts', 'title': 'one'}, {'id': 1, 'file': 'a.spec.ts', 'title': 'two'},
+                {'id': 2, 'file': 'b.spec.ts', 'title': 'three'}, {'id': 3, 'file': 'c.spec.ts', 'title': 'four'}]},
+            {'kind': 'test', 'shard': 1, 'of': 1, 'id': 0, 'file': 'a.spec.ts', 'title': 'one', 'outcome': 'expected'},
+            {'kind': 'test', 'shard': 1, 'of': 1, 'id': 1, 'file': 'a.spec.ts', 'title': 'two', 'outcome': 'unexpected', 'error': 'boom'},
+            {'kind': 'test', 'shard': 1, 'of': 1, 'id': 2, 'file': 'b.spec.ts', 'title': 'three', 'outcome': 'expected'},
+            {'kind': 'test', 'shard': 1, 'of': 1, 'id': 3, 'file': 'c.spec.ts', 'title': 'four', 'outcome': 'skipped'},
+            {'kind': 'shard', 'shard': 1, 'of': 1, 'exit': 1, 'files': ['a.spec.ts', 'b.spec.ts', 'c.spec.ts']},
+        ]
+        (self.results / 'results.json').unlink(missing_ok=True)
+        (self.results / 'results.jsonl').write_text('\n'.join(json.dumps(line) for line in lines) + '\n')
+        (self.results / 'meta.json').write_text(json.dumps({'head': 'a' * 40, 'shards': [{'shard': 1, 'of': 1, 'exit': 1, 'files': ['a.spec.ts', 'b.spec.ts', 'c.spec.ts']}]}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            suite.report(self.forgejo.api, 'kayg/infraternal', TOKEN, self.results, RUN_NAME, login=self.forgejo.login)
+        done = next(line for line in out.getvalue().splitlines() if line.startswith('BROWSER_REPORT_DONE'))
+        self.assertIn('failing=1 passing=1', done)
+        self.assertIn('(failing and passing count spec files) tests_passed=2 tests_failed=1 tests_not_run=1 tests_planned=4', done)
+
     def test_partial_spec_plan_is_not_reported_green(self):
         """A completed test cannot fix a spec whose other planned test never finished."""
         self.night(**{'partial.spec.ts': ['unexpected']})

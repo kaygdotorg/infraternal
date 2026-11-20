@@ -47,7 +47,7 @@ for (const size of SIZES) {
       await page.locator("#sidebar-toggle").click();
       await expect(page.locator('#tree[data-rows="ready"]')).toHaveCount(1);
       expect(await fontPx(page, "#tree .bm-leaf .bm-label"), "a session name").toBeCloseTo(size.touch ? 15 : 13, 1);
-      expect(await fontPx(page, "#tree .bm-subhead .bm-label"), "a host heading is a caption").toBeCloseTo(size.touch ? 13 : 12, 1);
+      expect(await fontPx(page, "#tree .bm-subhead .bm-label"), "a host heading reads the secondary text size: the body size on a phone (D383, #499), the caption size on a desktop").toBeCloseTo(size.touch ? 15 : 12, 1);
     });
   });
 }

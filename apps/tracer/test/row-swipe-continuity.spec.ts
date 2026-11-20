@@ -97,7 +97,9 @@ test.describe("the right swipe is continuous", () => {
 
   test("a short right swipe reveals Open beside and springs open from the finger's speed", async ({ page }) => {
     await open(page, 393, 852);
-    const { frames } = await dragAndSample(page, ID, 70);
+    // A release reveals the button from a pull of more than half its width. At the phone body size (15 px, D383) "Open beside" is wider
+    // than the 72 px minimum, so the 70 px pull this spec used to make now springs shut; 110 px is a short pull again.
+    const { frames } = await dragAndSample(page, ID, 110);
     expect(frames.at(-1)!.x).toBeGreaterThan(30);
     await expect(page.locator(`.bm-row:has([data-id="${ID}"])[data-swiped='right']`)).toHaveCount(1);
   });

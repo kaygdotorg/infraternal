@@ -35,6 +35,7 @@ the build or the suite could not run at all. Exit status of `report`: 0 when
 every issue and comment was filed, 1 when a request failed.
 """
 import argparse
+import collections
 import datetime
 import functools
 import hashlib
@@ -1079,7 +1080,13 @@ def report(base, repo, token, results, run_name, runs_root=BROWSER_RUNS, suite_t
         except OSError as error:
             errors += 1
             print(f'report FAILED timeout note: {type(error).__name__}: {error}', flush=True)
-    print(f'BROWSER_REPORT_DONE failing={len(failing)} passing={len(passing)} request_errors={errors} head={head}', flush=True)
+    # `failing` and `passing` count spec FILES, not tests. The first night read "152 passing, 22 failing" against a plan of 1719 tests and
+    # looked like a run that stopped early (#443); say both units, so the line cannot be misread.
+    tests = [item for item in merged.get('tests', []) if isinstance(item, dict)]
+    states = collections.Counter(item.get('state') for item in tests)
+    by_test = (f' (failing and passing count spec files) tests_passed={states["passed"]} tests_failed={states["failed"]} '
+               f'tests_not_run={states["not_run"]} tests_planned={merged.get("planned_tests")}') if tests else ''
+    print(f'BROWSER_REPORT_DONE failing={len(failing)} passing={len(passing)} request_errors={errors} head={head}{by_test}', flush=True)
     return errors
 
 

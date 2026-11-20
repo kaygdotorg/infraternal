@@ -290,6 +290,13 @@ export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", blur: "--
 /** The adaptive chunk once it has loaded (it carries the rules writer); `undefined` until then. */
 let rulesModule: typeof import("./glass-adapt.on-demand") | undefined;
 /**
+ * Set once the rules chunk has been requested, whether it is still loading, loaded or failed. Each `applyTheme` calls
+ * {@link glassRules}, so without this flag a pending or dead chunk would be requested again on every theme change, and a
+ * failure would be logged once per call. Only the contrast layer depends on the chunk: the theme's own colours are written by
+ * `applyTheme` itself and stay on screen, so a failure is logged once and never retried.
+ */
+let rulesRequested = false;
+/**
  * Puts the glass contrast rules (D365) in place for the theme and card level last applied. The solver that works them out is in
  * an on-demand chunk (`glass-rules.on-demand.ts`, loaded together with the adaptive code of `glass-adapt.on-demand.ts`, which uses
  * the same solver and re-exports it), so the critical path carries no contrast arithmetic: the chunk is
@@ -298,16 +305,29 @@ let rulesModule: typeof import("./glass-adapt.on-demand") | undefined;
  */
 function glassRules(): void {
   if (rulesModule) rulesModule.installGlassRules();
-  else void import("./glass-adapt.on-demand").then((m) => { rulesModule = m; m.installGlassRules(); });
+  else if (!rulesRequested) {
+    // `catch` covers both a failed chunk load and an error thrown by the first `installGlassRules`; either way the theme's own
+    // colours are already on the root, so the page stays usable and the rejection is reported here rather than left unhandled.
+    rulesRequested = true;
+    void import("./glass-adapt.on-demand")
+      .then((m) => { rulesModule = m; m.installGlassRules(); })
+      .catch((error: unknown) => console.warn("infraternal: glass contrast rules did not load; theme colours stay in place", error));
+  }
 }
 
 /** Whether the watcher that finds what is under glass surfaces (`glass-under.on-demand.ts`) has been requested. */
 let watcherRequested = false;
-/** Requests the glass watcher once; it is an on-demand chunk like the rules, and scans the surfaces already on the page when it starts. */
+/**
+ * Requests the glass watcher once; it is an on-demand chunk like the rules, and scans the surfaces already on the page when it starts.
+ * A failed load is logged once and not retried: without the watcher a glass surface keeps the static floor (`data-glass-under` is
+ * never set), which is correct over anything, just less adaptive.
+ */
 function glassWatcher(): void {
   if (watcherRequested || typeof document === "undefined") return;
   watcherRequested = true;
-  void import("./glass-under.on-demand").then((m) => m.watchGlassSurfaces());
+  void import("./glass-under.on-demand")
+    .then((m) => m.watchGlassSurfaces())
+    .catch((error: unknown) => console.warn("infraternal: glass surface watcher did not load; glass uses its static floor", error));
 }
 
 /** The theme and card level `applyTheme` last applied; the sampler reads them to solve for what it sees. */

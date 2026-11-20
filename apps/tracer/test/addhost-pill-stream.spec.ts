@@ -20,6 +20,12 @@ async function addHost(page: Page, name: string, theme = "ink"): Promise<void> {
   await page.locator(".ah-float").getByRole("button", { name: "Continue", exact: true }).click();
 }
 
+/**
+ * The setup explanation popover of `host`. Found by its `aria-label` attribute, not by accessible name: since #391 the
+ * confirmation names itself by its title through `aria-labelledby`, which wins over `aria-label` in the name computation.
+ */
+const setupTip = (page: Page, host: string) => page.locator(`[role="dialog"][aria-label="Setup of ${host}"]`);
+
 const pillOf = (page: Page, name: string) => page.locator(".ui-window-pill", { hasText: name }).first();
 const arcs = (page: Page) => page.locator(".ui-window .ui-setup-ring .ui-setup-fill").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.state));
 
@@ -31,10 +37,10 @@ test("a failure after the prompt is explained in the pill, and Try again finishe
   expect(await arcs(page)).toEqual(["done", "failed", "pending", "pending"]);
   await expect(page.locator('.ui-window .ui-setup-ring[data-phase="tick"]')).toHaveCount(0);
   // The wizard's own "ready" toast would contradict the failure: it is not shown.
-  await expect(page.locator(".ui-toast")).not.toContainText(/ready|added/i);
+  await expect(page.locator(".ui-toast").filter({ hasText: /ready|added/i })).toHaveCount(0); // (`not.toContainText` fails on a page with no toast at all)
 
   await pillOf(page, "instant-fail.lab").click();
-  const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+  const tip = setupTip(page, "instant-fail.lab");
   await expect(tip).toBeVisible();
   await expect(tip).toContainText("couldn't join this server");
   await expect(tip).toContainText("Your other sessions keep working.");
@@ -45,7 +51,8 @@ test("a failure after the prompt is explained in the pill, and Try again finishe
   await page.waitForSelector(".ui-window .ui-setup-ring", { state: "detached", timeout: 20_000 });
   const mark = pillOf(page, "instant-fail.lab").locator(".ui-window-mark");
   await expect(mark.locator("svg")).toHaveCount(1);
-  expect(await mark.evaluate((el) => getComputedStyle(el.querySelector("svg")!).opacity)).toBe("1");
+  // The system icon crossfades in as the ring leaves, so its opacity is read until it settles, not once at the moment the ring is gone.
+  await expect.poll(() => mark.evaluate((el) => getComputedStyle(el.querySelector("svg")!).opacity)).toBe("1");
 });
 
 test("a host that sets up cleanly goes circle, tick, system icon, and typing is never blocked", async ({ page }) => {
@@ -75,7 +82,7 @@ test("reduced motion: the failure and the retry still show, with no flight", asy
   await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
   expect(await page.locator(".ui-setup-fly").count()).toBe(0);
   await pillOf(page, "instant-fail.lab").click();
-  await page.getByRole("dialog", { name: "Setup of instant-fail.lab" }).getByRole("button", { name: "Try again" }).click();
+  await setupTip(page, "instant-fail.lab").getByRole("button", { name: "Try again" }).click();
   await page.waitForSelector(".ui-window .ui-setup-ring", { state: "detached", timeout: 20_000 });
 });
 
@@ -101,7 +108,7 @@ for (const [width, height] of [[1440, 900], [393, 852], [375, 667]] as const) {
       await addHost(page, "instant-fail.lab", theme);
       await expect(page.locator('.ui-window .ui-setup-fill[data-state="failed"]')).toHaveCount(1, { timeout: 30_000 });
       await pillOf(page, "instant-fail.lab").click();
-      const tip = page.getByRole("dialog", { name: "Setup of instant-fail.lab" });
+      const tip = setupTip(page, "instant-fail.lab");
       await expect(tip).toBeVisible();
       await expect(tip.getByRole("button", { name: "Try again", disabled: false })).toHaveCount(0);
       await expect(tip).toContainText("retry limit");

@@ -32,7 +32,8 @@ describe("the look's tint is where the solver starts", () => {
 
 describe("D365 raises the look's fill only where 4.5:1 needs it", () => {
   for (const [id, theme] of Object.entries(THEMES)) {
-    for (const tint of [0.5, 0.75, 1]) {
+    // Below 50% the look is thin: 25% is what the browser check (J980) showed holding, 10% is the floor of the look slider.
+    for (const tint of [0.1, 0.25, 0.5, 0.75, 1]) {
       test(`${id} at a ${tint * 100}% look: never below the look's fill, and the floor never exceeds the ceiling`, () => {
         withLook(String(tint));
         const themed = glassFor(theme, 2), floor = glassFloor(theme, 2);
@@ -41,11 +42,13 @@ describe("D365 raises the look's fill only where 4.5:1 needs it", () => {
         expect(floor.alpha).toBeGreaterThanOrEqual(themed.alpha - 1e-9);
       });
     }
-    test(`${id}: where the themed set holds at the look's own fill it keeps it exactly`, () => {
-      withLook("0.75");
-      const themed = glassFor(theme, 2);
-      // Solved from the look's tint, a solution that is not raised is the tint itself: nothing of D365's own opacity leaks in.
-      if (!themed.raised) expect(themed.alpha).toBe(0.75);
-    });
+    for (const tint of [0.1, 0.25, 0.75]) {
+      test(`${id} at a ${tint * 100}% look: where the themed set holds at the look's own fill it keeps it exactly`, () => {
+        withLook(String(tint));
+        const themed = glassFor(theme, 2);
+        // Solved from the look's tint, a solution that is not raised is the tint itself: nothing of D365's own opacity leaks in.
+        if (!themed.raised) expect(themed.alpha).toBe(tint);
+      });
+    }
   }
 });
