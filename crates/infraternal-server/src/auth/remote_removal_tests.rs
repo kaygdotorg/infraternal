@@ -108,8 +108,15 @@ async fn reviewed_removal_revokes_offline_host_and_cannot_replay() {
             .is_err(),
         "a new request must not replace the pending uninstall with a retained install"
     );
-    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
-    store.confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
+    let pending: bool =
+        sqlx::query_scalar("SELECT confirmed=0 FROM remote_login_cleanup WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+    assert!(pending, "only the original host receipt can complete cleanup");
+    crate::enrollment::EnrollmentStore::new(f.auth.pool.clone())
+        .confirm_login_cleanup(host, Uuid::parse_str(&f.user).unwrap())
         .await
         .unwrap();
     assert!(!live(&f, host).await);
