@@ -345,11 +345,54 @@ impl Input {
     }
 }
 
+/// The most `known_icons` keys a List request may carry (#146, D349).
+pub const MAX_KNOWN_ICONS: usize = 32;
+/// The longest bundle identifier or app version a known-icon key may name.
+const MAX_ICON_KEY_TEXT: usize = 255;
+
+/// A window-list request: `{}`, or the app icons the infraternal agent
+/// already holds, so the helper can leave their images out of its reply.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct List {
+    #[serde(default)]
+    known_icons: Vec<KnownIcon>,
+}
+
+/// One icon the infraternal agent already holds, named as the helper names it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KnownIcon {
+    bundle_id: String,
+    app_version: String,
+}
+
+impl List {
+    /// At most [`MAX_KNOWN_ICONS`] keys, each with short, non-empty, printable text.
+    fn validate(&self) -> io::Result<()> {
+        let text = |value: &str| {
+            !value.is_empty()
+                && value.len() <= MAX_ICON_KEY_TEXT
+                && !value.chars().any(char::is_control)
+        };
+        if self.known_icons.len() <= MAX_KNOWN_ICONS
+            && self
+                .known_icons
+                .iter()
+                .all(|key| text(&key.bundle_id) && text(&key.app_version))
+        {
+            Ok(())
+        } else {
+            Err(invalid())
+        }
+    }
+}
+
 /// Validate commands before any native side effect.
 ///
 /// `payload` must be a JSON object shaped for `kind`: [`Start`], [`Size`],
-/// [`Input`], `{"active": bool}` for control, or `{}` for the argument-less
-/// requests. Reply kinds and video are never valid commands.
+/// [`Input`], `{"active": bool}` for control, `{}` or `{"known_icons": [...]}`
+/// for a window list, or `{}` for the other argument-less requests. Reply kinds and video are never valid commands.
 /// # Errors
 /// Refuses response kinds as requests and invalid/malformed control bodies.
 pub fn validate_command(kind: Kind, payload: &[u8]) -> io::Result<()> {
@@ -378,12 +421,10 @@ pub fn validate_command(kind: Kind, payload: &[u8]) -> io::Result<()> {
         Kind::Input => serde_json::from_slice::<Input>(payload)
             .map_err(|_| invalid())?
             .validate()?,
-        Kind::List
-        | Kind::Stop
-        | Kind::Status
-        | Kind::Keyframe
-        | Kind::ReleaseInput
-        | Kind::Congested => {
+        Kind::List => serde_json::from_slice::<List>(payload)
+            .map_err(|_| invalid())?
+            .validate()?,
+        Kind::Stop | Kind::Status | Kind::Keyframe | Kind::ReleaseInput | Kind::Congested => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Empty {}

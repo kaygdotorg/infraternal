@@ -33,7 +33,7 @@ pub const MAX_ICON_PNG_BYTES: usize = 16 * 1024;
 pub const ICON_CHUNK_BYTES: usize = 4 * 1024;
 /// The most icon identities the agent tells the helper it already holds; the
 /// helper reads at most this many.
-pub const MAX_KNOWN_ICON_KEYS: usize = 32;
+pub const MAX_KNOWN_ICON_KEYS: usize = crate::protocol::MAX_KNOWN_ICONS;
 /// The most icons the agent keeps (at most 1 MiB of PNG).
 #[cfg(feature = "source")]
 const MAX_STORED_ICONS: usize = 64;

@@ -119,3 +119,41 @@ fn additive_repair_and_release_commands_are_strict_empty_objects() {
         }
     }
 }
+
+/// A List names the icons the agent already holds (#146, D349). The agent sends
+/// this from its second inventory on, so refusing it left every later window
+/// list unanswered; anything beyond the documented shape is still refused.
+#[test]
+fn list_accepts_known_icons_within_bounds_only() {
+    let key = r#"{"bundle_id":"com.apple.TextEdit","app_version":"1.19+1"}"#;
+    validate_command(Kind::List, b"{}").unwrap();
+    validate_command(
+        Kind::List,
+        format!(r#"{{"known_icons":[{key}]}}"#).as_bytes(),
+    )
+    .unwrap();
+    let full = vec![key; MAX_KNOWN_ICONS].join(",");
+    validate_command(
+        Kind::List,
+        format!(r#"{{"known_icons":[{full}]}}"#).as_bytes(),
+    )
+    .unwrap();
+    let over = vec![key; MAX_KNOWN_ICONS + 1].join(",");
+    for refused in [
+        format!(r#"{{"known_icons":[{over}]}}"#),
+        r#"{"known_icons":[{"bundle_id":"","app_version":"1"}]}"#.to_owned(),
+        r#"{"known_icons":[{"bundle_id":"a\u0000b","app_version":"1"}]}"#.to_owned(),
+        r#"{"known_icons":[{"bundle_id":"a","app_version":"1","png_64":"x"}]}"#.to_owned(),
+        r#"{"known_icons":{}}"#.to_owned(),
+        r#"{"other":1}"#.to_owned(),
+        "[]".to_owned(),
+    ] {
+        assert_eq!(
+            validate_command(Kind::List, refused.as_bytes())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData,
+            "{refused}"
+        );
+    }
+}
