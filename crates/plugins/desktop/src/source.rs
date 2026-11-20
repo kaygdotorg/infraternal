@@ -229,6 +229,7 @@ impl SourceBridge {
             config: Config {
                 runtime,
                 executable,
+                cross_user: None,
             },
             lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
@@ -241,6 +242,17 @@ impl SourceBridge {
                 icons: IconStore::default(),
             }),
         }))
+    }
+    /// Makes a root agent start every helper as the console user and admit
+    /// it through the cross-user checks (D203 C2, #146). `runtime` should then
+    /// be [`crate::cross_user::BASE`]. Call before the bridge is registered;
+    /// a bridge that is already shared keeps its same-user path.
+    #[must_use]
+    pub fn with_cross_user(mut self, cross_user: crate::cross_user::CrossUser) -> Self {
+        if let Some(inner) = Arc::get_mut(&mut self.0) {
+            inner.config.cross_user = Some(cross_user);
+        }
+        self
     }
     /// Registers session `id` for `start` and returns its current size and
     /// sequence as JSON. Starts no helper.
