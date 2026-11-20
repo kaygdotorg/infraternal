@@ -604,6 +604,7 @@ export class TerminalClient {
       client.remeasureFont();
       client.keepLigaturesOff();
       client.installCursorLayerHook();
+      client.registerGlass();
       client.loadStyledFaces();
       // An already opened terminal has paid the same first-renderer cost. Also
       // supersede an optional warm-up still waiting for resources on this font.
@@ -1023,6 +1024,8 @@ export class TerminalClient {
     this.pendingLinkRows.clear();
     this.forcedLinkRows.clear();
     this.disposeTouch();
+    this.unregisterGlass?.();
+    this.glassListeners.clear();
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
@@ -2566,6 +2569,31 @@ export class TerminalClient {
     if (!hidden && cursor.visible && this.terminal.viewportY === 0) renderer.renderCursor(cursor.x, cursor.y, line);
   }
 
+  /** Glass cards open over this screen, each called after a render pass (glass-under.on-demand.ts); empty almost always. */
+  private readonly glassListeners = new Set<() => void>();
+  /** Takes this screen out of the glass registry (see {@link registerGlass}). */
+  private unregisterGlass: (() => void) | undefined;
+
+  /**
+   * Lets glass cards read what this screen shows under them (`packages/ui/src/glass-under.on-demand.ts`): the registry holds the host,
+   * a card over it subscribes to render passes only while it is open, and nothing here runs otherwise.
+   */
+  private registerGlass(): void {
+    // The registry and the reader are on-demand chunks (`glass-under.on-demand.ts`, `terminal-glass.on-demand.ts`): nothing of the
+    // glass is on the first paint. The screen is registered once both are here; a screen disposed before that is never registered.
+    let stop: (() => void) | undefined;
+    let gone = false;
+    this.unregisterGlass = () => { gone = true; stop?.(); };
+    void Promise.all([onDemand(() => import("../../../packages/ui/src/glass-under.on-demand")), onDemand(() => import("./terminal-glass.on-demand"))]).then(([under, glass]) => {
+      if (gone) return;
+      stop = under.registerGlassGrid({
+        element: this.config.host,
+        subscribe: (listener) => { this.glassListeners.add(listener); return () => { this.glassListeners.delete(listener); }; },
+        read: (rect, base) => glass.readGlassCells(this.terminal, this.ghostty.renderer, rect, base),
+      });
+    });
+  }
+
   /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */
   private installCursorLayerHook(): void {
     const renderer = this.ghostty.renderer;
@@ -2583,6 +2611,7 @@ export class TerminalClient {
       if (changedRows) this.queueLinkRows(changedRows.rows, changedRows.force);
       this.renderPasses += 1;
       this.syncCursorLayer();
+      for (const listener of this.glassListeners) listener();
     };
   }
 

@@ -20,7 +20,7 @@
  * closing, an action refusing, the socket dropping.
  */
 import type { MuxConnection, StreamHandler } from "../../connection";
-import type { VideoInput } from "../../../../../packages/protocol/src/desktop";
+import { MAX_VIDEO_BYTES, WINDOW_CLOSED, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { parseInventory, type AppTarget } from "./inventory";
 import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
@@ -30,6 +30,8 @@ import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 
 /** `no-preference` lets the browser pick hardware decoding where it has it (the choice is the browser's, not ours). */
 const HARDWARE: HardwareAcceleration = "no-preference";
+/** Maximum transferred units awaiting acknowledgement from this stream's worker. */
+const MAX_HANDOFF_UNITS = 4;
 /** How many times a start waits for a lost connection and goes again. */
 const MAX_START_TRIES = 6;
 /** A desktop window releases its worker and surface after this long off screen. A phone does it at once (memory). */
@@ -166,6 +168,12 @@ export class AppStream {
   private pushedSize: StreamSize | undefined;
   /** When a size-only lease was last refused; throttles only size-only attempts, never the person's own control. */
   private leaseRefusedAt = -Infinity;
+  /** Credits remain charged until the worker handles each transferred buffer, even across reconnects. */
+  private handoffUnits = 0;
+  private handoffBytes = 0;
+  /** Indicates a dropped reference. Only a keyframe can resume delivery. */
+  private waitingForHandoffKeyframe = false;
+  private lastHandoffSequence = 0n;
   private shapeTimer = 0;
   private shapeBusy = false;
   private lastShape: number | undefined;
@@ -290,10 +298,11 @@ export class AppStream {
 
   // ---- the viewer on the socket -----------------------------------------------------------------------------------
 
+  /** Attaches the viewer and renews its control lease after a dropped connection. */
   private attach(): void {
     if (this.streamId !== undefined || !this.session || this.disposed) return;
     this.ensureSurface();
-    this.worker?.postMessage({ t: "reset" } satisfies ToWorker);
+    this.resetWorker();
     const handler: StreamHandler = {
       onSocketOpen: () => undefined,
       onWelcome: () => {
@@ -303,14 +312,14 @@ export class AppStream {
         // Attached again: a window that was live shows "reconnecting" until its first new picture; a paused one stays paused
         // until then; a window that never had a picture is still connecting.
         if (this.state.kind === "live" && this.hadPicture) this.setState({ kind: "reconnecting" });
-        if (this.keepControl) void this.takeControl();
+        if (this.keepControl) void this.takeControl(false);
       },
       onFrame: (frame) => this.frame(frame),
       onDisconnected: () => {
         this.attached = false;
         this.setControl({ kind: "none" });
         this.setState(onConnection(this.state, false, this.hadPicture));
-        this.worker?.postMessage({ t: "reset" } satisfies ToWorker);
+        this.resetWorker();
       },
       hasSession: () => false,
       onStatus: () => undefined,
@@ -318,13 +327,14 @@ export class AppStream {
     this.streamId = this.o.connection.openStream(handler);
   }
 
+  /** Retires the current attachment and resets the decoder while retaining its surface. */
   private detach(): void {
     if (this.streamId === undefined) return;
     const id = this.streamId;
     this.streamId = undefined;
     this.attached = false;
     this.o.connection.closeStream(id);
-    this.worker?.postMessage({ t: "reset" } satisfies ToWorker);
+    this.resetWorker();
     window.clearTimeout(this.statusTimer);
     this.statusTimer = 0;
     window.clearTimeout(this.pausedTimer);
@@ -332,6 +342,7 @@ export class AppStream {
     this.shapeTimer = 0;
   }
 
+  /** Handles viewer retirement and admits encoded video within the worker handoff budget. */
   private frame(frame: WireFrame): void {
     if (frame.type === "Close") {
       // Close retires this viewer; the server may still retain native capture.
@@ -342,24 +353,42 @@ export class AppStream {
       if (retired) (this.pendingStops ??= new Set()).add(retired);
       this.session = undefined;
       this.setControl({ kind: "none" });
-      void this.diagnose(this.generation, new Error("closed"));
+      if (frame.code === WINDOW_CLOSED) {
+        this.keepControl = false;
+        this.releaseSurface();
+        this.setState({ kind: "closed" });
+      } else {
+        void this.diagnose(this.generation, new Error("closed"));
+      }
       return;
     }
     if (frame.type !== "Desktop" || frame.message.kind !== "video") return;
+    const worker = this.worker;
+    if (!worker || !this.attached) return;
     const m = frame.message;
+    if (this.handoffUnits >= MAX_HANDOFF_UNITS || this.handoffBytes + m.bytes.byteLength > MAX_VIDEO_BYTES) {
+      this.waitingForHandoffKeyframe = true;
+      return;
+    }
+    if (this.waitingForHandoffKeyframe && !m.keyframe) return;
+    this.waitingForHandoffKeyframe = false;
+    this.lastHandoffSequence = m.sequence;
+    this.handoffUnits++;
+    this.handoffBytes += m.bytes.byteLength;
     const receivedAt = this.measuring ? traceClock() : 0;
     // The access unit is a view into the socket's receive buffer, which the next message reuses: copy it into a buffer
     // the worker takes over (one memcpy of the unit, nothing else on this thread).
     const copy = m.bytes.slice();
     const packet: ToWorker = { t: "chunk", sequence: Number(m.sequence), keyframe: m.keyframe, bytes: copy.buffer };
     if (this.measuring) packet.trace = { captureNs: m.captureNs.toString(), bytes: copy.byteLength, receivedAt, copyFinishedAt: traceClock() };
-    this.worker?.postMessage(packet, [copy.buffer]);
+    worker.postMessage(packet, [copy.buffer]);
   }
 
   // ---- the worker and its surface ---------------------------------------------------------------------------------
 
   private readonly measuring = traceEnabled();
 
+  /** Creates the canvas and its worker once, until the surface is released. */
   private ensureSurface(): void {
     window.clearTimeout(this.releaseTimer);
     if (this.worker) return;
@@ -368,7 +397,9 @@ export class AppStream {
     canvas.width = 2; canvas.height = 2;
     const offscreen = canvas.transferControlToOffscreen();
     const worker = this.o.makeWorker ? this.o.makeWorker() : new Worker(new URL("./decode.worker.on-demand.js", document.baseURI), { type: "module" });
-    worker.onmessage = (event: MessageEvent<FromWorker>) => this.fromWorker(event.data);
+    worker.onmessage = (event: MessageEvent<FromWorker>) => {
+      if (this.worker === worker) this.fromWorker(event.data);
+    };
     worker.onerror = () => { this.setState({ kind: "failed", reason: "decode" }); };
     worker.postMessage({ t: "init", canvas: offscreen, hardware: HARDWARE, ...(this.measuring ? { measure: true } : {}) } satisfies ToWorker, [offscreen]);
     this.worker = worker;
@@ -376,18 +407,35 @@ export class AppStream {
     this.o.events.surface(canvas);
   }
 
+  /** Retires the worker and frees its surface and outstanding video credits. */
   private releaseSurface(): void {
     if (!this.worker) return;
     this.worker.postMessage({ t: "close" } satisfies ToWorker);
     this.worker.terminate();
     this.worker = undefined;
+    this.handoffUnits = this.handoffBytes = 0;
     this.canvas = undefined;
     this.hadPicture = false;
     this.o.events.surface(undefined);
   }
 
+  /** Reset decoder state without refunding credits still in the worker's message queue. */
+  private resetWorker(): void {
+    this.waitingForHandoffKeyframe = false;
+    this.lastHandoffSequence = 0n;
+    this.worker?.postMessage({ t: "reset" } satisfies ToWorker);
+  }
+
+  /** Route worker results, including credit returned after processing an access unit. */
   private fromWorker(m: FromWorker): void {
     switch (m.t) {
+      case "admitted":
+        this.handoffUnits--;
+        this.handoffBytes -= m.bytes;
+        if (this.handoffUnits === 0 && this.waitingForHandoffKeyframe && this.streamId !== undefined && this.attached) {
+          this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "repair", lastSequence: this.lastHandoffSequence } });
+        }
+        return;
       case "first":
         this.hadPicture = true;
         this.o.events.picture({ width: m.width, height: m.height });
@@ -447,10 +495,10 @@ export class AppStream {
    */
   resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
-    const changed = sizeChanged(this.size, next);
     this.size = next;
-    if (this.canPushSize()) { if (changed || (byHand && sizeChanged(this.pushedSize, next))) this.pushSize(); }
-    else if (byHand && sizeChanged(this.pushedSize, next)) void this.leaseForSize();
+    if (!byHand || !sizeChanged(this.pushedSize, next)) return;
+    if (this.canPushSize()) this.pushSize();
+    else void this.leaseForSize();
   }
 
   /** Whether a lease is held, for input (announced) or for the size alone (quiet). */
@@ -498,8 +546,11 @@ export class AppStream {
     return true;
   }
 
-  /** Asks to control the machine through this stream (an explicit handover on the server). */
-  async takeControl(): Promise<boolean> {
+  /**
+   * Asks to control the machine through this stream. An explicit handover sends the current size before input.
+   * Reconnect renews the lease with the native geometry that already exists.
+   */
+  async takeControl(syncSize = true): Promise<boolean> {
     if (this.control.kind === "controlled") return true;
     if (this.control.kind === "requesting" || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return false;
     if (performance.now() - this.controlRefusedAt < CONTROL_RETRY_MS) return false;
@@ -510,7 +561,7 @@ export class AppStream {
       if (this.streamId !== id) return false;
       this.keepControl = true;
       this.setControl({ kind: "controlled" });
-      this.pushSize();
+      if (syncSize) this.pushSize();
       this.pollStatus();
       return true;
     } catch {

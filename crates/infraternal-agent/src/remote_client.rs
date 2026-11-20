@@ -552,7 +552,7 @@ fn client_greeting(renewal: bool, identity_rotation: bool) -> infraternal_protoc
     infraternal_protocol::Frame::Hello {
         version: 1,
         caps: daemon::hello_capabilities(true, renewal, identity_rotation),
-        client_info: "infraternal agent",
+        client_info: crate::host_os::CLIENT_INFO,
     }
 }
 

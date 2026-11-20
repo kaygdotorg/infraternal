@@ -840,6 +840,14 @@ pub(super) async fn run(
     .await
 }
 
+/// Keeps the host's link to the server up for as long as the agent runs.
+///
+/// With no direct QUIC endpoint it uses only the public HTTPS origin. With one,
+/// it dials QUIC first (moving onto mesh paths when proposed) and, when that
+/// dial fails, runs one HTTPS session before trying direct again, so the
+/// server port stays optional (D196, D291, #146).
+/// # Errors
+/// Only when the host's credentials are no longer usable.
 // One supervisor loop owns path selection, proof and the optional failure
 // observer; splitting it would pass the same retained link state around.
 pub(super) async fn run_observed(
@@ -899,6 +907,17 @@ pub(super) async fn run_observed(
                         eprintln!("{line}");
                     }
                     report(&registry, None, reason);
+                    // Direct UDP first, 443 last (D196, D291). A host that
+                    // cannot reach the server's QUIC port still links over the
+                    // public HTTPS origin; app windows need QUIC lanes, so they
+                    // wait for the next direct dial after this session ends
+                    // (#146).
+                    if identity.public_origin.is_some()
+                        && https_once(identity, &state, renewal, &registry, &connected, &notes)
+                            .await?
+                    {
+                        registry.capabilities(0);
+                    }
                     tokio::time::sleep(retry_delay(backoff, attempt_started.elapsed())).await;
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                     continue;
@@ -998,94 +1017,102 @@ async fn run_https(
     registry: crate::plugin_control::Registry,
     connected: tokio::sync::watch::Sender<bool>,
 ) -> io::Result<()> {
-    let public_origin = identity
-        .public_origin
-        .as_deref()
-        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut backoff = Duration::from_millis(200);
     let notes = LinkNotes::new();
     loop {
         let started = tokio::time::Instant::now();
-        let credentials = match current_credentials(identity, renewal) {
-            Ok(refreshed) => refreshed,
-            Err(error) => {
-                registry.set_server_link(ServerLink {
-                    kind: ServerLinkKind::Disconnected,
-                    endpoint: None,
-                    source_port: None,
-                    reason: ServerLinkReason::MeshUnavailable,
-                });
-                return Err(error);
-            }
-        };
-        let credentials = credentials.as_ref().unwrap_or(&identity.identity);
-        let channel = crate::remote_websocket::connect(
-            public_origin,
-            identity.host_id,
-            credentials,
-            identity.https_root.as_ref(),
-            identity.https_system_roots,
-        )
-        .await;
-        let channel = match channel {
-            Ok(channel) => channel,
-            Err(error) => {
-                if let Some(line) = notes.note(started, || {
-                    format!(
-                        "Infraternal agent HTTPS server link refused or unreachable (error {:?}); retrying",
-                        error.kind()
-                    )
-                }) {
-                    eprintln!("{line}");
-                }
-                registry.set_server_link(ServerLink {
-                    kind: ServerLinkKind::Disconnected,
-                    endpoint: None,
-                    source_port: None,
-                    reason: ServerLinkReason::MeshUnavailable,
-                });
-                tokio::time::sleep(retry_delay(backoff, started.elapsed())).await;
-                backoff = (backoff * 2).min(MAX_BACKOFF);
-                continue;
-            }
-        };
-        registry.set_server_link(ServerLink {
-            kind: ServerLinkKind::Fallback,
-            endpoint: None,
-            source_port: None,
-            reason: ServerLinkReason::MeshUnavailable,
-        });
-        connected.send_replace(true);
-        let active = daemon::run_authenticated_with_plugins(
-            &channel,
-            state.clone(),
-            identity.execution_uid,
-            renewal,
-            registry.clone(),
-        )
-        .await;
-        connected.send_replace(false);
-        channel.retire();
-        registry.set_server_link(ServerLink {
-            kind: ServerLinkKind::Disconnected,
-            endpoint: None,
-            source_port: None,
-            reason: ServerLinkReason::MeshUnavailable,
-        });
-        if let Some(line) = notes.note(started, || {
-            format!(
-                "Infraternal agent HTTPS server link closed (error {:?}); reconnecting",
-                active.err().map(|error| error.kind())
-            )
-        }) {
-            eprintln!("{line}");
-        }
-        if started.elapsed() >= Duration::from_secs(10) {
+        let ran = https_once(identity, &state, renewal, &registry, &connected, &notes).await?;
+        if ran && started.elapsed() >= Duration::from_secs(10) {
             backoff = Duration::from_millis(200);
         }
         tokio::time::sleep(retry_delay(backoff, started.elapsed())).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+/// One link over the public HTTPS origin, from dial to close.
+///
+/// Returns `Ok(true)` when a session ran (however it ended) and `Ok(false)`
+/// when the origin could not be reached; the caller owns the retry delay.
+/// Only expired or unusable credentials are an error. The link always ends
+/// reported as disconnected.
+async fn https_once(
+    identity: &RemoteIdentity,
+    state: &std::path::Path,
+    renewal: Option<&crate::remote_renewal::RenewalIdentity>,
+    registry: &crate::plugin_control::Registry,
+    connected: &tokio::sync::watch::Sender<bool>,
+    notes: &LinkNotes,
+) -> io::Result<bool> {
+    let public_origin = identity
+        .public_origin
+        .as_deref()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let started = tokio::time::Instant::now();
+    let disconnected = ServerLink {
+        kind: ServerLinkKind::Disconnected,
+        endpoint: None,
+        source_port: None,
+        reason: ServerLinkReason::MeshUnavailable,
+    };
+    let credentials = match current_credentials(identity, renewal) {
+        Ok(refreshed) => refreshed,
+        Err(error) => {
+            registry.set_server_link(disconnected.clone());
+            return Err(error);
+        }
+    };
+    let credentials = credentials.as_ref().unwrap_or(&identity.identity);
+    let channel = match crate::remote_websocket::connect(
+        public_origin,
+        identity.host_id,
+        credentials,
+        identity.https_root.as_ref(),
+        identity.https_system_roots,
+    )
+    .await
+    {
+        Ok(channel) => channel,
+        Err(error) => {
+            if let Some(line) = notes.note(started, || {
+                format!(
+                    "Infraternal agent HTTPS server link refused or unreachable (error {:?}); retrying",
+                    error.kind()
+                )
+            }) {
+                eprintln!("{line}");
+            }
+            registry.set_server_link(disconnected.clone());
+            return Ok(false);
+        }
+    };
+    registry.set_server_link(ServerLink {
+        kind: ServerLinkKind::Fallback,
+        endpoint: None,
+        source_port: None,
+        reason: ServerLinkReason::MeshUnavailable,
+    });
+    connected.send_replace(true);
+    let active = daemon::run_authenticated_with_plugins(
+        &channel,
+        state.to_path_buf(),
+        identity.execution_uid,
+        renewal,
+        registry.clone(),
+    )
+    .await;
+    connected.send_replace(false);
+    channel.retire();
+    registry.set_server_link(disconnected);
+    if let Some(line) = notes.note(started, || {
+        format!(
+            "Infraternal agent HTTPS server link closed (error {:?}); reconnecting",
+            active.err().map(|error| error.kind())
+        )
+    }) {
+        eprintln!("{line}");
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

@@ -109,6 +109,8 @@ struct State {
     /// A keyframe request is already queued, so another is not needed.
     repair_pending: bool,
     closed: bool,
+    /// The source confirmed destruction of the native window.
+    window_closed: bool,
 }
 /// No task, listener or timer is created by construction. The owner keeps this
 /// object in the server registry even when every viewer detaches.
@@ -158,6 +160,7 @@ impl Session {
                     next_viewer: 1,
                     repair_pending: false,
                     closed: false,
+                    window_closed: false,
                 }),
                 frames: watch::channel(None).0,
                 commands,
@@ -465,8 +468,24 @@ impl Session {
     ///
     /// Runtime disable clears retained video and closes pending receivers, without timers.
     pub fn close(&self) {
+        self.close_with_reason(false);
+    }
+
+    /// Ends the capture and preserves confirmation that its native window was destroyed.
+    pub(crate) fn close_window(&self) {
+        self.close_with_reason(true);
+    }
+
+    /// Reports authoritative destruction even after later cleanup calls.
+    pub(crate) fn window_closed(&self) -> bool {
+        self.state.lock().is_ok_and(|state| state.window_closed)
+    }
+
+    /// Publishes the terminal reason before waking viewers to retire.
+    fn close_with_reason(&self, window_closed: bool) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
+            state.window_closed |= window_closed;
             state.keyframe = None;
             state.viewers.clear();
             state.controller = None;

@@ -115,8 +115,9 @@ async fn restored_settings_configure_plugin_before_admission() {
     pool.close().await;
 }
 
+/// App windows are present only in desktop builds, on by default there (#146), and the owner switch works both ways.
 #[tokio::test]
-async fn compiled_desktop_is_optional_and_defaults_disabled() {
+async fn compiled_desktop_is_optional_and_defaults_enabled() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     sqlx::migrate!("./migrations").run(&pool).await.unwrap();
     let runtime = compiled(&pool).await.unwrap();
@@ -128,9 +129,10 @@ async fn compiled_desktop_is_optional_and_defaults_disabled() {
         .find(|plugin| plugin["descriptor"]["id"] == "desktop");
     assert_eq!(desktop.is_some(), cfg!(feature = "desktop"));
     if let Some(desktop) = desktop {
-        assert_eq!(desktop["enabled"], false);
-        runtime.set_enabled("desktop", true).await.unwrap();
+        // On by default where the build includes it (#146, D349); the owner's switch still works both ways.
+        assert_eq!(desktop["enabled"], true);
         runtime.set_enabled("desktop", false).await.unwrap();
+        runtime.set_enabled("desktop", true).await.unwrap();
     }
     drop(runtime);
     pool.close().await;

@@ -92,6 +92,42 @@ test.describe("phone production surface", () => {
   });
 });
 
+test("real app icons stay centered in picker rows and the window pill", async ({ page }) => {
+  test.setTimeout(120_000);
+  await open(page);
+  await enable(page);
+
+  await page.getByRole("button", { name: "New window", exact: true }).click();
+  const row = page.locator(".aw-row").filter({ hasText: "Editor" }).first();
+  const pickerIcon = row.locator(".aw-app-icon");
+  await expect(pickerIcon).toBeVisible();
+  await expect(pickerIcon).toHaveJSProperty("naturalWidth", 1);
+  await expect(pickerIcon).toHaveAttribute("src", /^blob:/);
+  const labelEdges = await page.locator(".aw-row .aw-name").evaluateAll((labels) => labels.map((label) => label.getBoundingClientRect().left));
+  expect(Math.max(...labelEdges) - Math.min(...labelEdges)).toBeLessThanOrEqual(0.5);
+  const rowCenter = await row.evaluate((element) => {
+    const icon = element.querySelector(".aw-app-icon")!.getBoundingClientRect();
+    const label = element.querySelector(".aw-name")!.getBoundingClientRect();
+    return Math.abs((icon.top + icon.height / 2) - (label.top + label.height / 2));
+  });
+  expect(rowCenter).toBeLessThanOrEqual(0.5);
+  await page.screenshot({ path: tracerEvidencePath("production-app-icon-picker.png") });
+  await page.keyboard.press("Escape");
+
+  const card = page.locator('.ui-window[data-kind="app"]');
+  const pillIcon = card.locator(".ui-window-mark > img");
+  await expect(pillIcon).toBeVisible();
+  await expect(pillIcon).toHaveJSProperty("naturalWidth", 1);
+  await expect(pillIcon).toHaveAttribute("src", /^blob:/);
+  const pillCenter = await card.evaluate((element) => {
+    const icon = element.querySelector(".ui-window-mark")!.getBoundingClientRect();
+    const label = element.querySelector(".ui-window-host")!.getBoundingClientRect();
+    return Math.abs((icon.top + icon.height / 2) - (label.top + label.height / 2));
+  });
+  expect(pillCenter).toBeLessThanOrEqual(0.5);
+  await page.screenshot({ path: tracerEvidencePath("production-app-icon-pill.png") });
+});
+
 test("turning the production setting off retires existing windows and source sessions", async ({ page }) => {
   test.setTimeout(60_000);
   await open(page);

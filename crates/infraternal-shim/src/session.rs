@@ -677,6 +677,9 @@ impl ChildSignals {
     }
 }
 
+/// Creates the session's private rendezvous socket under the runtime state
+/// directory (the configured one, the root runtime directory, or the
+/// account's private runtime directory) and returns it with its path.
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -689,19 +692,8 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
             "/run/infraternal"
         })
     } else {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .ok_or_else(|| io::Error::other("rootless shim requires XDG_RUNTIME_DIR"))?;
-        let runtime = PathBuf::from(runtime);
-        let metadata = fs::symlink_metadata(&runtime)?;
-        if !metadata.is_dir()
-            || metadata.uid() != Uid::effective().as_raw()
-            || metadata.mode() & 0o777 != 0o700
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "invalid runtime directory",
-            ));
-        }
+        // The same lookup as the agent, so both name one directory (macOS has no XDG_RUNTIME_DIR).
+        let runtime = crate::runtime_dir::user_runtime_dir()?;
         runtime.join("infraternal")
     };
     private_dir(&state)?;

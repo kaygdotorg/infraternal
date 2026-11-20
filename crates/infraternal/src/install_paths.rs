@@ -10,7 +10,8 @@
 //! (`infraternal.sqlite`), sockets, the identity and trust files: databases and
 //! state, in D395's words. It cannot be split yet, so the whole folder maps to
 //! D395's *state* location, with no extra suffix, matching the Linux system
-//! path that already exists:
+//! path that already exists. On a Linux system with an infraternal agent in
+//! the shared base, the server gets its own 0700 `server/` child.
 //!
 //! | Platform        | Data folder                                          |
 //! |-----------------|------------------------------------------------------|
@@ -50,6 +51,12 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+
+/// The Linux system base shared by the server and infraternal agent.
+pub(super) const LINUX_SYSTEM_BASE: &str = "/var/lib/infraternal";
+
+/// The standard private server child when the Linux system base is shared.
+pub(super) const LINUX_COMBINED_SERVER: &str = "/var/lib/infraternal/server";
 
 /// Why a folder could not be chosen; the text says what to pass instead.
 #[derive(Debug, thiserror::Error)]
@@ -167,7 +174,7 @@ pub fn check_scope(
 /// The server's default data folder for a fresh install in this scope (see the module table).
 pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBuf, PathError> {
     match (environment.os, scope) {
-        (Os::Linux, Scope::System) => Ok(PathBuf::from("/var/lib/infraternal")),
+        (Os::Linux, Scope::System) => Ok(linux_system_data_dir(Path::new(LINUX_SYSTEM_BASE))),
         (Os::Linux, Scope::User) => Ok(match &environment.xdg_state_home {
             Some(state) => state.join("infraternal"),
             None => environment
@@ -178,6 +185,30 @@ pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBu
         (Os::MacOs, Scope::User) => Ok(environment
             .absolute_home()?
             .join("Library/Application Support/infraternal")),
+    }
+}
+
+/// Select the private child for new installs when the infraternal agent uses the base.
+fn linux_system_data_dir(base: &Path) -> PathBuf {
+    // A binary directory can also be part of a server-only release. Look
+    // for infraternal agent state or ownership markers instead.
+    if [
+        "agent",
+        "state",
+        "sessions",
+        ".bootstrap-owner",
+        ".bootstrap-lock",
+        ".promotion-transaction",
+        "host-firewall-agent.json",
+    ]
+    .iter()
+    .any(|name| {
+        std::fs::symlink_metadata(base.join(name))
+            .is_ok_and(|entry| entry.is_dir() || entry.is_file())
+    }) {
+        base.join("server")
+    } else {
+        base.to_owned()
     }
 }
 
@@ -579,6 +610,32 @@ mod tests {
             fresh(Scope::System, &macos()).data,
             PathBuf::from("/Library/Application Support/infraternal")
         );
+    }
+
+    /// A new install selects the private child only when infraternal agent state exists.
+    #[test]
+    fn combined_system_default_uses_the_server_child() {
+        let base = scratch("combined");
+        std::fs::create_dir_all(base.join("bin")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base);
+        std::fs::create_dir(base.join("agent")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base.join("server"));
+        std::fs::remove_dir(base.join("agent")).unwrap();
+        std::fs::create_dir(base.join("server")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A standalone server may already use the name `server` for its web root.
+    #[test]
+    fn standalone_system_default_ignores_an_unrelated_server_child() {
+        let base = scratch("standalone-web");
+        std::fs::create_dir_all(base.join("server")).unwrap();
+        std::fs::write(base.join("server/index.html"), "standalone web").unwrap();
+        std::fs::write(base.join("infraternal.sqlite"), "standalone data").unwrap();
+        let selected = linux_system_data_dir(&base);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(selected, base);
     }
 
     /// An absolute `XDG_STATE_HOME` is honoured; empty or relative ones are ignored (XDG spec).

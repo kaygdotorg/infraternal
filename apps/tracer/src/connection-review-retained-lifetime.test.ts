@@ -166,7 +166,7 @@ test("review: window disposal clears held input and rejects a stale resend actio
   let noticeDisposed = 0;
   let streamClosed = 0;
   Object.assign(f.client, {
-    cancelStreamRetry() {}, pendingLinkRows: new Map(), forcedLinkRows: new Map(),
+    cancelStreamRetry() {}, pendingLinkRows: new Map(), forcedLinkRows: new Map(), glassListeners: new Set(),
     disposeTouch() {}, pauseTerminal() {}, offRoundTrip() {},
     resizeObserver: { disconnect() {} },
     config: { host: { removeEventListener() {} } },

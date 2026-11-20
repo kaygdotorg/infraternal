@@ -1,6 +1,6 @@
 /**
  * The seam between the canvas and the desktop streams (D207, D208): the canvas knows nothing of the wire. The product
- * supplies one adapter over its single `MuxConnection`; mockups supply none, and then the feature is simply not offered
+ * supplies an adapter with a desktop-only `MuxConnection`; mockups supply none, and then the feature is simply not offered
  * (the rule of the canvas: a feature whose adapter is missing is not drawn at all).
  *
  * `available()` is the whole gate. It is true only when the browser wants app windows (the preview door or the Settings
@@ -21,37 +21,38 @@ export interface AppWindowsAdapter {
   available(): boolean;
   /** The server says it can stream, whether or not this browser wants it (the Settings switch is shown on this). */
   serverCan(): boolean;
-  /** The Settings switch: remembered on this browser. Turning it on reconnects once, because the capability is declared when a socket opens. */
+  /** The Settings switch, remembered on this browser. */
   setWanted(on: boolean): void;
   /** The Settings switch's value. */
   readonly pref: boolean;
   /** Runs when either side of `available()` may have changed; returns the remover. */
   onChange(listener: () => void): () => void;
+  /** Releases the desktop transport when the signed-in canvas goes away. */
+  dispose(): void;
 }
 
 /**
- * Builds the adapter over the page's one connection. `serverCan` reads the desktop-video bit of the capabilities the server sent in
+ * Uses the terminal connection to learn the server's capability. The desktop connection opens on first use so a queued
+ * WebSocket video message or icon reply cannot hold up terminal bytes on the same TCP connection. The desktop connection
+ * stays available through preference changes so closing an app window can finish its source Stop.
+ * `serverCan` reads the desktop-video bit of the capabilities the server sent in
  * its Hello (unknown counts as no). `available()` needs both that and the browser's wish (`appWindowsWanted`). `onChange` fires
  * when either may have changed.
  */
-export function createAppWindowsAdapter(connection: MuxConnection): AppWindowsAdapter {
-  const serverCan = (): boolean => ((connection.serverCaps ?? 0n) & DESKTOP_VIDEO_CAP) !== 0n;
+export function createAppWindowsAdapter(primary: MuxConnection, openDesktop: () => MuxConnection): AppWindowsAdapter {
+  let desktop: MuxConnection | undefined;
+  const serverCan = (): boolean => ((primary.serverCaps ?? 0n) & DESKTOP_VIDEO_CAP) !== 0n;
   return {
-    connection,
+    get connection() { return desktop ??= openDesktop(); },
     serverCan,
     get pref() { return readAppWindowsPref(); },
-    setWanted(on) {
-      const before = appWindowsWanted();
-      writeAppWindowsPref(on);
-      // A socket declares its capabilities in its Hello. One opened before the switch did not, so it reconnects once (a resume:
-      // the terminals keep their screens), and only when the feature was not already wanted for another reason.
-      if (on && !before && serverCan()) connection.forceDrop();
-    },
+    setWanted: writeAppWindowsPref,
     available: () => appWindowsWanted() && serverCan(),
     onChange(listener) {
-      const offCaps = connection.onServerCaps(listener);
+      const offCaps = primary.onServerCaps(listener);
       window.addEventListener(APPWIN_EVENT, listener);
       return () => { offCaps(); window.removeEventListener(APPWIN_EVENT, listener); };
     },
+    dispose() { desktop?.dispose(); },
   };
 }

@@ -13,8 +13,8 @@
 # A second `systemctl` sits first in PATH and logs `EVIL ...`: the move must
 # never run it (J658's rule, J803 finding 4).
 #
-# J895 refuses the shared-base move and runs the admitted cutover against a
-# separate private target. The adapter serves only the health-check fixture.
+# The combined-host dry run selects the private server child. The admitted
+# cutover later in this test uses a separate base for the firewall fixture.
 #
 # Cases print `CASE <name> expect=<x> got=<y> ok|BAD`; the last line is
 # RESULT=<number of BAD cases>.
@@ -169,12 +169,12 @@ check OLD_UNIT_DATA 1 "$(grep -c "\"--data\" \"$OLD\"" $U)"
 check OLD_POLICY_MODE 600 "$(stat -c %a $D/host-firewall-server.json 2>/dev/null)"
 POLICY=$(sha256sum < $D/host-firewall-server.json | cut -c1-16)
 
-echo "### A shared install base is refused before stopping or changing its contents"
+echo "### A combined host plans the private server child without changing the shared base"
 UNIT_BEFORE=$(sha256sum < "$U" | cut -c1-16)
-init --host-firewall-allow '*,*,tcp,22'
+init --dry-run --host-firewall-allow '*,*,tcp,22'
 status=$?
-check SHARED_REFUSED 1 "$([ $status -ne 0 ] && echo 1 || echo 0)"
-check SHARED_DIAGNOSIS 1 "$(cat "$S/err" "$S/out" | grep -c 'shared install base')"
+check SHARED_PLAN_EXIT 0 "$status"
+check SHARED_PLAN_CHILD 1 "$(jq --arg dir "$D/server" '.data.data_move.to == $dir | if . then 1 else 0 end' "$S/out")"
 check SHARED_UNIT_UNCHANGED "$UNIT_BEFORE" "$(sha256sum < "$U" | cut -c1-16)"
 check SHARED_DATA_UNCHANGED "$DATA" "$(data "$OLD")"
 check SHARED_BASE_MODE 711 "$(stat -c %a "$D")"

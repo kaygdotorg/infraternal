@@ -14,6 +14,7 @@ use self::disk::Identity;
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fmt::Write as _,
     fs::File,
@@ -375,6 +376,12 @@ struct Journal {
     staged: Option<Identity>,
     /// The exact backup path, allocated before the original data is touched.
     backup: PathBuf,
+    /// On a combined host, only these recorded top-level entries may retire.
+    #[serde(default)]
+    original_entries: Option<BTreeMap<String, Identity>>,
+    /// Pinned backup directory for individually collected shared-base entries.
+    #[serde(default)]
+    backup_identity: Option<Identity>,
     /// Keep the old tree read-only after EXDEV and ambiguous legacy recovery.
     backup_action: Backup,
     /// An older installer put the only authoritative tree at the destination.
@@ -456,9 +463,10 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
         return Ok(None);
     }
     let old = legacy.as_deref().unwrap_or(from);
-    if !old.is_absolute() || !to.is_absolute() || old.starts_with(to) || to.starts_with(old) {
+    let combined = combined_move(old, to) && legacy.is_none();
+    if !valid_move_paths(old, to) || (combined_move(old, to) && !combined) {
         return Err(disk::invalid(
-            "data folders must be absolute and outside one another",
+            "data folders must be absolute and outside one another, except for the combined-host server directory",
         ));
     }
     if legacy.is_some() && from != old && from != to {
@@ -469,14 +477,27 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
     let (old_parent, old_name) = disk::parent(old, false)?;
     let source = optional_tree(&old_parent, old_name)?;
     if let Some(source) = &source {
-        reject_shared(source, "source")?;
+        if combined {
+            if !disk::names(source)?.iter().any(|name| is_shared(name)) {
+                return Err(disk::invalid("nested move requires a shared install base"));
+            }
+            database_identity(source)?;
+            for name in combined_entries(source)?.keys() {
+                checked_combined_link(source, OsStr::new(name))?;
+            }
+        } else {
+            reject_shared(source, "source")?;
+        }
     }
     let old_marker = source
         .as_ref()
         .map(read_legacy_marker)
         .transpose()?
         .flatten();
-    if old_marker.as_deref().is_some_and(|path| path != old) {
+    if old_marker
+        .as_deref()
+        .is_some_and(|path| path != old || combined)
+    {
         return Err(disk::invalid(
             "old data has a marker for a different transaction",
         ));
@@ -488,7 +509,7 @@ fn plan_inner(from: &Path, to: &Path, unit: &Path) -> io::Result<Option<Relocati
         ));
     }
     if legacy.is_none() {
-        inspect_target(to)?;
+        inspect_target(to, needs_private_target(to, combined))?;
     } else {
         let (parent, name) = disk::parent(to, false)?;
         let target = disk::tree(&parent, name)?;
@@ -524,13 +545,9 @@ impl Relocation {
     /// Carry an explicitly configured path inside the old data tree into the new tree.
     pub fn relocate_path(&self, path: &mut Option<PathBuf>) {
         if let Some(value) = path
-            && let Ok(suffix) = value.strip_prefix(&self.from)
+            && let Some(mapped) = relocated_path(value, &self.from, &self.to)
         {
-            *value = if suffix.as_os_str().is_empty() {
-                self.to.clone()
-            } else {
-                self.to.join(suffix)
-            };
+            *value = mapped;
         }
     }
 
@@ -614,8 +631,7 @@ fn apply_recorded(
                 target_name,
                 work,
                 work_name,
-                old_parent,
-                old_name,
+                ..
             } = transaction;
             let switched = current_side(journal, &read_units(&journal.unit, &journal.to)?)?;
             let prepare = (|| {
@@ -659,7 +675,7 @@ fn apply_recorded(
                 save(work, journal)
             })();
             let result = prepare.and_then(|()| {
-                let outcome = finish(old_parent, old_name, journal, service)?;
+                let outcome = finish(transaction, journal, service)?;
                 complete(journal, &outcome)?;
                 remove_journal(parent, work_name, work)?;
                 Ok(outcome)
@@ -755,7 +771,17 @@ fn with_journal<T>(
             .as_ref()
             .map(Identity::of)
             .transpose()?;
-        let backup = backup_path(&current.from, now)?;
+        let combined = combined_move(&current.from, &current.to);
+        let original_entries = if combined {
+            Some(combined_entries(&disk::tree(&old_parent, old_name)?)?)
+        } else {
+            None
+        };
+        let backup = backup_path(
+            if combined { &current.to } else { &current.from },
+            now,
+            combined,
+        )?;
         let journal = Journal {
             from: current.from,
             to: current.to,
@@ -766,6 +792,8 @@ fn with_journal<T>(
             staging: relocation.to.with_file_name(&work_name).join(STAGING),
             staged: None,
             backup,
+            original_entries,
+            backup_identity: None,
             backup_action: if current.same_filesystem && !current.legacy_target {
                 Backup::Remove
             } else {
@@ -959,7 +987,17 @@ fn prepare_data(
     let stage = disk::make_dir(work, stage_name)?;
     journal.staged = Some(Identity::of(&stage)?);
     save(work, journal)?;
-    for name in disk::names(&source)? {
+    let names = if let Some(entries) = &journal.original_entries {
+        if combined_entries(&source)? != *entries {
+            return Err(disk::invalid(
+                "original server entries changed before staging",
+            ));
+        }
+        entries.keys().map(OsString::from).collect()
+    } else {
+        disk::names(&source)?
+    };
+    for name in names {
         if name == MARKER {
             continue;
         }
@@ -968,7 +1006,19 @@ fn prepare_data(
                 "original folder contains files reserved for the install base",
             ));
         }
-        disk::copy_entry(&source, &stage, &name)?;
+        let link = if journal.original_entries.is_some() {
+            checked_combined_link(&source, &name)?
+        } else {
+            None
+        };
+        disk::copy_entry_with_link(&source, &stage, &name, link.as_deref())?;
+    }
+    if let Some(entries) = &journal.original_entries
+        && combined_entries(&source)? != *entries
+    {
+        return Err(disk::invalid(
+            "original server entries changed during staging",
+        ));
     }
     if journal.target.is_some() {
         let previous = disk::tree(parent, target_name)?;
@@ -978,7 +1028,16 @@ fn prepare_data(
             }
         }
     }
-    disk::preserve_copy(&source, &stage)?;
+    // The infraternal agent's traversable base does not describe the private
+    // child. For a disjoint source, still preserve its directory metadata.
+    if journal.original_entries.is_none() {
+        disk::preserve_copy(&source, &stage)?;
+    }
+    if needs_private_target(&journal.to, journal.original_entries.is_some()) {
+        use std::os::unix::fs::PermissionsExt as _;
+        stage.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        stage.sync_all()?;
+    }
     if journal.target.is_some() {
         disk::exchange(work, stage_name, parent, target_name)?;
     } else {
@@ -995,6 +1054,9 @@ fn database_identity(data: &File) -> io::Result<Identity> {
 /// Reopen the published directory and verify both identities before retirement.
 fn selected_target(parent: &File, name: &OsStr, journal: &Journal) -> io::Result<File> {
     let target = disk::tree(parent, name)?;
+    if needs_private_target(&journal.to, journal.original_entries.is_some()) {
+        check_combined_mode(&target)?;
+    }
     if journal.target != Some(Identity::of(&target)?) {
         return Err(disk::invalid("destination identity changed during cleanup"));
     }
@@ -1014,11 +1076,14 @@ fn live_target(journal: &Journal) -> io::Result<File> {
 
 /// Retire the saved source only after the current path and service agree.
 fn finish(
-    old_parent: &File,
-    old_name: &OsStr,
-    journal: &Journal,
+    transaction: &Transaction<'_>,
+    journal: &mut Journal,
     service: &dyn Service,
 ) -> io::Result<Outcome> {
+    if journal.original_entries.is_some() {
+        return finish_combined(transaction, journal, service);
+    }
+    let (old_parent, old_name) = (transaction.old_parent, transaction.old_name);
     let mut leftover = None;
     // The rename is recoverable: the journal already records the exact backup.
     // Do not change the source while the configured destination is uncertain.
@@ -1064,6 +1129,93 @@ fn finish(
     Ok(Outcome { leftover })
 }
 
+/// Retire the original server entries individually without renaming or chmodding the base.
+fn finish_combined(
+    transaction: &Transaction<'_>,
+    journal: &mut Journal,
+    service: &dyn Service,
+) -> io::Result<Outcome> {
+    let source = disk::tree(transaction.old_parent, transaction.old_name)?;
+    if journal.source != Some(Identity::of(&source)?)
+        || Identity::of(transaction.parent)? != Identity::of(&source)?
+    {
+        return Err(disk::invalid("shared base identity changed during move"));
+    }
+    let entries = journal
+        .original_entries
+        .as_ref()
+        .ok_or_else(|| disk::invalid("combined move is missing its original entries"))?;
+    let name = journal
+        .backup
+        .file_name()
+        .ok_or_else(|| disk::invalid("combined backup lacks a name"))?;
+    let backup = optional_tree(&source, name)?;
+    let keep = journal.backup_action == Backup::Retain;
+    let mut remaining = Vec::new();
+    for (entry, identity) in entries {
+        let entry = OsStr::new(entry);
+        let original = disk::entry_identity(&source, entry)?;
+        let saved = backup
+            .as_ref()
+            .map(|dir| disk::entry_identity(dir, entry))
+            .transpose()?
+            .flatten();
+        if original == Some(*identity) && saved.is_none() {
+            remaining.push((entry, *identity));
+        } else if !(original.is_none()
+            && (saved == Some(*identity)
+                || (!keep && saved.is_none() && journal.backup_identity.is_some())))
+        {
+            return Err(disk::invalid(
+                "recorded server entry changed before retirement",
+            ));
+        }
+    }
+    if let Some(backup) = &backup {
+        let identity = Identity::of(backup)?;
+        let entries_in_backup = disk::names(backup)?;
+        if backup.metadata()?.mode() & 0o077 != 0
+            || journal
+                .backup_identity
+                .is_some_and(|recorded| recorded != identity)
+            || (journal.backup_identity.is_none() && !entries_in_backup.is_empty())
+            || entries_in_backup
+                .iter()
+                .any(|name| name.to_str().is_none_or(|name| !entries.contains_key(name)))
+        {
+            return Err(disk::invalid(
+                "combined backup differs from its recorded entries",
+            ));
+        }
+    } else if journal.backup_identity.is_some() && (keep || !remaining.is_empty()) {
+        return Err(disk::invalid("recorded combined backup is missing"));
+    }
+    if backup.is_none() && remaining.is_empty() && !keep {
+        source.sync_all()?;
+        return Ok(Outcome { leftover: None });
+    }
+    check_retirement_health(journal, service)?;
+    let backup = match backup {
+        Some(backup) => backup,
+        None => disk::make_dir(&source, name)?,
+    };
+    let identity = Identity::of(&backup)?;
+    if journal.backup_identity.is_none() {
+        journal.backup_identity = Some(identity);
+        save(transaction.work, journal)?;
+    }
+    for (entry, expected) in remaining {
+        if disk::entry_identity(&source, entry)? != Some(expected) {
+            return Err(disk::invalid(
+                "original server entry changed during retirement",
+            ));
+        }
+        disk::rename_new(&source, entry, &backup, entry)?;
+    }
+    let leftover = retire_original(&source, name, identity, journal, service)?;
+    Ok(Outcome { leftover })
+}
+
 /// Renew the live proof immediately before retiring the exact recorded original.
 fn retire_original(
     parent: &File,
@@ -1072,13 +1224,18 @@ fn retire_original(
     journal: &Journal,
     service: &dyn Service,
 ) -> io::Result<Option<PathBuf>> {
-    let target = live_target(journal)?;
-    service.check_live(&journal.to, &target)?;
-    // The configured parent may have changed while the manager or server replied.
-    live_target(journal)?;
+    check_retirement_health(journal, service)?;
     let keep = journal.backup_action == Backup::Retain;
     disk::retire(parent, name, source, keep)?;
     Ok(keep.then(|| journal.backup.clone()))
+}
+
+/// Bind retirement to a fresh challenge and the configured destination.
+fn check_retirement_health(journal: &Journal, service: &dyn Service) -> io::Result<()> {
+    let target = live_target(journal)?;
+    service.check_live(&journal.to, &target)?;
+    // The configured parent may have changed while the manager or server replied.
+    live_target(journal).map(drop)
 }
 
 /// Remove the known record and private directory, leaving other siblings alone.
@@ -1126,19 +1283,25 @@ fn load_record(work: &File, to: &Path, unit: &Path) -> io::Result<Option<Journal
     let target = to
         .file_name()
         .ok_or_else(|| disk::invalid("target lacks a name"))?;
-    let old_name = journal
-        .from
-        .file_name()
-        .ok_or_else(|| disk::invalid("source lacks a name"))?;
-    let mut prefix = old_name.to_owned();
-    prefix.push(".moved-");
+    let combined = combined_move(&journal.from, to);
+    let backup_base = if combined { to } else { &journal.from };
+    let prefix = backup_prefix(backup_base, combined)?;
     if journal.to != to
         || journal.unit != unit
-        || !journal.from.is_absolute()
-        || journal.from.starts_with(to)
-        || to.starts_with(&journal.from)
+        || !valid_move_paths(&journal.from, to)
+        || combined != journal.original_entries.is_some()
+        || (combined && (journal.legacy_target || journal.source.is_none()))
+        || (journal.backup_identity.is_some() && (!combined || !journal.ready))
+        || journal.original_entries.as_ref().is_some_and(|entries| {
+            !entries.contains_key("infraternal.sqlite")
+                || entries.keys().any(|name| {
+                    Path::new(name).file_name() != Some(OsStr::new(name))
+                        || shared_base_entry(OsStr::new(name))
+                        || name == MARKER
+                })
+        })
         || journal.staging != to.with_file_name(work_name(target)).join(STAGING)
-        || journal.backup.parent() != journal.from.parent()
+        || journal.backup.parent() != backup_base.parent()
         || !journal.backup.file_name().is_some_and(|name| {
             name.to_string_lossy()
                 .starts_with(prefix.to_string_lossy().as_ref())
@@ -1203,23 +1366,33 @@ fn same_filesystem(from: &Path, to: &Path) -> io::Result<bool> {
 }
 
 /// Reserve a dated exact backup path without reusing an existing object.
-fn backup_path(old: &Path, now: SystemTime) -> io::Result<PathBuf> {
-    let (_, leaf) = disk::parent(old, false)?;
-    let mut name = leaf.to_owned();
+fn backup_path(old: &Path, now: SystemTime, combined: bool) -> io::Result<PathBuf> {
+    let mut name = backup_prefix(old, combined)?;
     let seconds = now
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_secs();
-    name.push(format!(
-        ".moved-{}-{}",
-        utc_stamp(seconds),
-        uuid::Uuid::new_v4()
-    ));
+    name.push(format!("{}-{}", utc_stamp(seconds), uuid::Uuid::new_v4()));
     Ok(old.with_file_name(name))
 }
 
+/// A combined backup is private and lives inside the shared base.
+fn backup_prefix(path: &Path, combined: bool) -> io::Result<OsString> {
+    let leaf = path
+        .file_name()
+        .ok_or_else(|| disk::invalid("source lacks a name"))?;
+    let mut prefix = if combined {
+        OsString::from(".")
+    } else {
+        OsString::new()
+    };
+    prefix.push(leaf);
+    prefix.push(".moved-");
+    Ok(prefix)
+}
+
 /// Inspect a fresh target, allowing only the server's dedicated firewall files.
-fn inspect_target(to: &Path) -> io::Result<()> {
+fn inspect_target(to: &Path, private: bool) -> io::Result<()> {
     let (parent, name) = match disk::parent(to, false) {
         Ok(path) => path,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -1228,6 +1401,9 @@ fn inspect_target(to: &Path) -> io::Result<()> {
     let Some(folder) = optional_tree(&parent, name)? else {
         return Ok(());
     };
+    if private {
+        check_combined_mode(&folder)?;
+    }
     reject_shared(&folder, "target")?;
     let mut foreign = Vec::new();
     for name in disk::names(&folder)? {
@@ -1259,6 +1435,108 @@ fn reject_shared(folder: &File, side: &str) -> io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// The one supported nested layout is the Linux shared base's private server child.
+fn combined_move(from: &Path, to: &Path) -> bool {
+    cfg!(target_os = "linux")
+        && to.parent() == Some(from)
+        && to.file_name() == Some(OsStr::new("server"))
+}
+
+/// Accept disjoint data trees and the narrowly defined shared-base split.
+fn valid_move_paths(from: &Path, to: &Path) -> bool {
+    from.is_absolute()
+        && to.is_absolute()
+        && (combined_move(from, to) || (!from.starts_with(to) && !to.starts_with(from)))
+}
+
+/// Paths whose ownership stays with the install base throughout a combined move.
+fn shared_base_entry(name: &OsStr) -> bool {
+    is_shared(name)
+        || is_firewall(name)
+        || matches!(
+            name.to_str(),
+            Some("server" | ".server.cutover" | ".infraternal-move-server")
+        )
+        || name.to_string_lossy().starts_with(".server.moved-")
+}
+
+/// Pin the durable server entries while leaving the infraternal agent's namespace unopened.
+fn combined_entries(source: &File) -> io::Result<BTreeMap<String, Identity>> {
+    let mut entries = BTreeMap::new();
+    for name in disk::names(source)? {
+        if shared_base_entry(&name) || name == MARKER || disk::is_socket(source, &name)? {
+            continue;
+        }
+        let identity = disk::entry_identity(source, &name)?
+            .ok_or_else(|| disk::invalid("server entry disappeared while planning"))?;
+        let name = name
+            .into_string()
+            .map_err(|_| disk::invalid("combined server entry is not UTF-8"))?;
+        entries.insert(name, identity);
+    }
+    Ok(entries)
+}
+
+/// Name the entry that prevented a safe combined move, including on dry runs.
+fn checked_combined_link(source: &File, name: &OsStr) -> io::Result<Option<OsString>> {
+    disk::combined_link(source, name, Some(excluded_combined_entry)).map_err(|error| {
+        io::Error::other(format!(
+            "checking links in {}: {error}",
+            name.to_string_lossy()
+        ))
+    })
+}
+
+/// Entries intentionally absent from the new server data directory.
+fn excluded_combined_entry(name: &OsStr) -> bool {
+    shared_base_entry(name) || name == MARKER
+}
+
+/// Map a server-owned path while preserving executables and other shared-base paths.
+fn relocated_path(path: &Path, from: &Path, to: &Path) -> Option<PathBuf> {
+    let suffix = path.strip_prefix(from).ok()?;
+    if combined_move(from, to) && suffix.iter().next().is_some_and(shared_base_entry) {
+        return None;
+    }
+    Some(if suffix.as_os_str().is_empty() {
+        to.to_owned()
+    } else {
+        to.join(suffix)
+    })
+}
+
+/// A combined host's server directory cannot expose its contents or traversal.
+fn check_combined_mode(folder: &File) -> io::Result<()> {
+    if folder.metadata()?.mode() & 0o7777 != 0o700 {
+        return Err(disk::invalid(
+            "combined server data directory must have mode 0700",
+        ));
+    }
+    Ok(())
+}
+
+/// The private child also receives servers formerly installed outside the shared base.
+fn needs_private_target(to: &Path, nested: bool) -> bool {
+    nested
+        || (cfg!(target_os = "linux")
+            && to == Path::new(super::install_paths::LINUX_COMBINED_SERVER))
+}
+
+/// Create or verify the private server child through the trusted shared base.
+pub(super) fn create_combined_server_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (base, name) = disk::parent(path, false)?;
+    let folder = if let Some(folder) = optional_tree(&base, name)? {
+        folder
+    } else {
+        let folder = disk::make_dir(&base, name)?;
+        folder.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        folder.sync_all()?;
+        folder
+    };
+    check_combined_mode(&folder)
 }
 
 /// Install-base files maintained for the server firewall independently of the server.
@@ -1329,7 +1607,7 @@ fn exec_start(text: &str) -> Option<Vec<String>> {
 
 /// Compute every replacement and identify the file whose rename switches the live path.
 fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> io::Result<(Vec<Rewrite>, usize)> {
-    let (Some(from_text), Some(to_text)) = (from.to_str(), to.to_str()) else {
+    let (Some(from_text), Some(_)) = (from.to_str(), to.to_str()) else {
         return Err(disk::invalid("data folders must be UTF-8 paths"));
     };
     let mut units = Vec::new();
@@ -1353,10 +1631,8 @@ fn unit_rewrites(unit: &Path, from: &Path, to: &Path) -> io::Result<(Vec<Rewrite
             {
                 let words = infraternal_status::exec_words(value)
                     .ok_or_else(|| disk::invalid("cannot safely parse ExecStart"))?;
-                let mapped: Vec<String> = words
-                    .iter()
-                    .map(|word| map_word(word, from_text, to_text))
-                    .collect();
+                let mapped: Vec<String> =
+                    words.iter().map(|word| map_word(word, from, to)).collect();
                 if mapped != words {
                     after.push_str("ExecStart=");
                     after.push_str(&render_exec(&mapped, &path).map_err(io::Error::other)?);
@@ -1455,15 +1731,10 @@ fn write_units(journal: &Journal) -> io::Result<()> {
 }
 
 /// Replace a word that is `from` or lies under it, also as `--flag=<path>`.
-fn map_word(word: &str, from: &str, to: &str) -> String {
-    let replace = |path: &str| -> Option<String> {
-        if path == from {
-            Some(to.to_owned())
-        } else {
-            path.strip_prefix(from)
-                .filter(|rest| rest.starts_with('/'))
-                .map(|rest| format!("{to}{rest}"))
-        }
+fn map_word(word: &str, from: &Path, to: &Path) -> String {
+    let replace = |path: &str| {
+        relocated_path(Path::new(path), from, to)
+            .and_then(|path| path.into_os_string().into_string().ok())
     };
     if let Some(mapped) = replace(word) {
         return mapped;

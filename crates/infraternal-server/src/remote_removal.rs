@@ -571,6 +571,60 @@ impl Removal {
         .bind(entry.host.as_bytes().as_slice())
         .fetch_one(&mut *tx)
         .await?;
+        let host = entry.host.simple().to_string();
+        let installation = if installed_by_setup {
+            Some(Installation::Bootstrap(&host))
+        } else {
+            mac_recovery.then_some(Installation::Mac(&host))
+        };
+        // A host's id is the durable key for its one removal request. A repeat
+        // observes that outbox entry under the writer lock, preserving the
+        // original uninstall choice and avoiding another cleanup attempt.
+        let existing_cleanup: Option<String> = sqlx::query_scalar(
+            "SELECT r.host_cleanup FROM remote_host_removals r
+             JOIN remote_login_cleanup q ON q.host_id=r.host_id AND q.person_id=r.owner_id
+             WHERE r.host_id=? AND r.owner_id=? AND r.uninstall=1
+               AND r.host_cleanup='pending' AND q.confirmed=0",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .bind(&entry.user)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(cleanup) = existing_cleanup {
+            if let Some(audit_id) = audit_id {
+                let updated = sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result=? WHERE id=? AND state='pending'")
+                    .bind(live)
+                    .bind(if Uuid::parse_str(&entry.user).is_ok() {
+                        "revoked, cleanup pending"
+                    } else {
+                        "removed"
+                    })
+                    .bind(audit_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                if updated != 1 {
+                    return Err(crate::auth::Error::Denied);
+                }
+            }
+            tx.commit().await?;
+            let (message, manual) = outcome(
+                &cleanup,
+                &mode,
+                display_name(&name),
+                &[],
+                installation,
+                true,
+            );
+            return Ok(json!({
+                "host_id": entry.host,
+                "state": "pending",
+                "host_cleanup": cleanup,
+                "message": message,
+                "manual": manual,
+                "left": [],
+            }));
+        }
         // Record the authorized request before the node effect; the same writer
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
@@ -644,12 +698,6 @@ impl Removal {
             .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let host = entry.host.simple().to_string();
-        let installation = if installed_by_setup {
-            Some(Installation::Bootstrap(&host))
-        } else {
-            mac_recovery.then_some(Installation::Mac(&host))
-        };
         // A connected host answers through the outbox within about a second of
         // the cut (#409). Wait for that, after the commit and so outside the
         // writer lock, so the result can say what happened and which kernel

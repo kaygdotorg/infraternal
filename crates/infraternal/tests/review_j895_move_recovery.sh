@@ -150,7 +150,7 @@ PY
 chmod 0755 "$P/systemctl"
 mount --bind "$P/systemctl" /usr/bin/systemctl
 case "$method" in
-    rename|resume|shared|force|partial|cutover|wrong-tree|post-stop|before-start|after-start|after-enable|metadata) old=/var/lib/j895-old ;;
+    rename|resume|shared|combined-fresh|force|partial|cutover|wrong-tree|post-stop|before-start|after-start|after-enable|metadata) old=/var/lib/j895-old ;;
     copy|full|stale) old=$P/old ;;
     *) exit 2 ;;
 esac
@@ -173,6 +173,22 @@ wait_token_ready() {
     done
 }
 cp /proc/self/uid_map "$P/uid-map"
+if [[ "$method" == combined-fresh ]]; then
+    install -d -m 0711 "$target"
+    install -d -m 0700 "$target/agent"
+    install -d -m 0755 "$target/bin"
+    install -m 0755 /dev/null "$target/bin/infraternal"
+    ln -s "$target/bin/infraternal" /usr/local/bin/infraternal
+    init --yes > "$P/fresh.json" 2> "$P/fresh.err"
+    check FRESH_SERVER_ANSWERS token_ready "$target/server"
+    check FRESH_SERVER_MODE test "$(stat -c '%a:%u' "$target/server")" = 700:0
+    check FRESH_BASE_MODE test "$(stat -c '%a:%u' "$target")" = 711:0
+    check FRESH_AGENT_REACHABLE setpriv --reuid 65534 --regid 65534 --clear-groups test -x "$target/bin/infraternal"
+    check FRESH_LINK_PRESERVED test "$(readlink /usr/local/bin/infraternal)" = "$target/bin/infraternal"
+    /usr/bin/systemctl stop "$UNIT_NAME"
+    echo RESULT=0
+    exit 0
+fi
 init --data "$old" --yes > "$P/first.json" 2> "$P/first.err"
 pid_before=$(cat "$P/server.pid")
 check OLD_SERVER_ANSWERS token_ready "$old"
@@ -359,21 +375,34 @@ if [[ "$method" == shared ]]; then
     install -d -m 0711 "$target"
     install -d -m 0755 "$target/bin"
     install -m 0755 /dev/null "$target/bin/agent-fixture"
+    install -d -m 0700 "$target/agent"
+    printf 'agent state\n' > "$target/agent/probe"
+    agent_before=$(fp "$target/agent/probe")
+    base_before=$(stat -c '%d:%i %a %u' "$target")
     check SHARED_AGENT_REACHABLE_BEFORE setpriv --reuid 65534 --regid 65534 --clear-groups test -x "$target/bin/agent-fixture"
-    if init --yes > "$P/shared.json" 2> "$P/shared.err"; then
-        check SHARED_MOVE_REFUSED false
-    fi
-    check SHARED_REFUSAL_EXPLAINS grep -Fq 'shared install base' "$P/shared.json"
-    check SHARED_OLD_SERVER_ANSWERS token_ready "$old"
-    check SHARED_MODE_PRESERVED test "$(stat -c %a "$target")" = 711
-    check SHARED_AGENT_REACHABLE_AFTER setpriv --reuid 65534 --regid 65534 --clear-groups test -x "$target/bin/agent-fixture"
-    # Start a server that was explicitly configured to use the existing shared base.
-    /usr/bin/systemctl stop infraternal-server.service
+    # Reproduce a legacy server configured directly in the existing shared base.
+    /usr/bin/systemctl stop "$UNIT_NAME"
     init --data "$target" --yes --force > "$P/shared-explicit.json" 2> "$P/shared-explicit.err"
     check SHARED_EXPLICIT_SERVER_ANSWERS wait_token_ready "$target"
-    check SHARED_EXPLICIT_MODE_PRESERVED test "$(stat -c %a "$target")" = 711
-    check SHARED_AGENT_REACHABLE_AFTER_EXPLICIT_START setpriv --reuid 65534 --regid 65534 --clear-groups test -x "$target/bin/agent-fixture"
-    /usr/bin/systemctl stop infraternal-server.service
+    init --dry-run > "$P/shared-plan.json" 2> "$P/shared-plan.err"
+    python3 - "$P/shared-plan.json" "$target" <<'PY'
+import json, sys
+plan, base = sys.argv[1:]
+move = json.load(open(plan))["data"]["data_move"]
+assert (move["from"], move["to"], move["same_filesystem"], move["moved"]) == (
+    base, base + "/server", True, False
+)
+print("CASE SHARED_PLAN_SELECTS_PRIVATE_CHILD ok")
+PY
+    check SHARED_PLAN_SIDE_EFFECT_FREE test ! -e "$target/server"
+    init --yes > "$P/shared.json" 2> "$P/shared.err"
+    check SHARED_SERVER_ANSWERS token_ready "$target/server"
+    check SHARED_SERVER_MODE test "$(stat -c '%a:%u' "$target/server")" = 700:0
+    check SHARED_ORIGINAL_DB_REMOVED test ! -e "$target/infraternal.sqlite"
+    check SHARED_BASE_PRESERVED test "$(stat -c '%d:%i %a %u' "$target")" = "$base_before"
+    check SHARED_AGENT_STATE_PRESERVED test "$(fp "$target/agent/probe")" = "$agent_before"
+    check SHARED_AGENT_REACHABLE_AFTER setpriv --reuid 65534 --regid 65534 --clear-groups test -x "$target/bin/agent-fixture"
+    /usr/bin/systemctl stop "$UNIT_NAME"
     echo RESULT=0
     exit 0
 fi

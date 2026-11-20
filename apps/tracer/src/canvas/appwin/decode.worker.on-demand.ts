@@ -279,7 +279,10 @@ scope.onmessage = (event: MessageEvent<ToWorker>) => {
         post({ t: "error", reason: context ? "unsupported-codec" : "unsupported-canvas" });
       }
       return;
-    case "chunk": chunk(m.sequence, m.keyframe, m.bytes, m.trace); return;
+    case "chunk":
+      try { chunk(m.sequence, m.keyframe, m.bytes, m.trace); }
+      finally { post({ t: "admitted", bytes: m.bytes.byteLength }); }
+      return;
     case "reset":
       retireDecoder();
       lastSequence = 0; waitingKeyframe = true; repairPending = false; first = true;

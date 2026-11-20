@@ -104,8 +104,10 @@ impl NodeHost for Host {
         })
     }
 }
+/// A valid capture request for the server lifecycle fixture.
 fn request() -> Start {
     Start {
+        passive_geometry: false,
         target: Target::Window {
             window_id: 9,
             owner_pid: 42,

@@ -1730,6 +1730,27 @@ mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
 
+    /// A login worker's bound control socket is not inherited by its children.
+    #[test]
+    fn runtime_socket_is_close_on_exec() {
+        let root = Path::new("/tmp");
+        let name = format!(
+            "infraternal-login-socket-test-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let endpoint = root.join(&name).join("login.sock");
+        let user = User::from_uid(Uid::effective()).unwrap().unwrap();
+        let bound = runtime_socket(root, &name, &endpoint, &user).unwrap();
+        let flags = nix::fcntl::FdFlag::from_bits_truncate(
+            nix::fcntl::fcntl(&bound, nix::fcntl::FcntlArg::F_GETFD).unwrap(),
+        );
+        drop(bound);
+        std::fs::remove_file(&endpoint).unwrap();
+        std::fs::remove_dir(endpoint.parent().unwrap()).unwrap();
+
+        assert!(flags.contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+    }
+
     /// Only Linux root shares the service manager's host-wide login registry.
     #[test]
     fn platform_login_registry_preserves_scope() {
