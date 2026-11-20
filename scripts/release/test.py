@@ -100,10 +100,42 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                 self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
                 if channel == 'stable':
                     self.assertNotEqual(build('--channel',channel).returncode, 0)
+            self.darwin_bundle(repo, build, stable)
             for version in ('1.2','1.2.3-rc1','edge-20261011t071500Z','edge-20261011T071500z','../1.2.3','1.2.3\n'):
                 for name in ('publish','verify'):
                     result = subprocess.run([str(repo / 'scripts/release' / name),version],env=env,text=True,capture_output=True)
                     self.assertEqual(result.returncode,2,result.stderr)
+
+    def darwin_bundle(self, repo, build, stable):
+        """--darwin adds the Mac binary under its own stamped version, and refuses a wrong one (#483)."""
+        header = bytes.fromhex('cffaedfe0c000001')
+        def darwin(name, version, body=None):
+            directory = repo / name
+            directory.mkdir()
+            (directory / 'VERSION').write_text(version + '\n')
+            (directory / 'infraternal-aarch64-darwin').write_bytes(body if body is not None else header + b'\0' * 24 + version.encode())
+            return str(directory)
+        version = 'edge-20261110T010203Z'
+        result = build('--channel', 'edge', '--darwin', darwin('mac-edge', version))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundle = repo / 'target/releases' / version
+        self.assertEqual((bundle / 'infraternal-x86_64-musl').read_text(), version + '\n', 'Linux payloads take the Mac build version')
+        self.assertEqual((bundle / 'infraternal-aarch64-darwin').read_bytes(), (repo / 'mac-edge/infraternal-aarch64-darwin').read_bytes())
+        self.assertIn('infraternal-aarch64-darwin', {line.split()[1] for line in (bundle / 'SHA256SUMS').read_text().splitlines()})
+        self.assertEqual(subprocess.run(['sha256sum', '--strict', '--check', 'SHA256SUMS'], cwd=bundle, capture_output=True).returncode, 0)
+        refusals = (
+            ('stable', darwin('mac-stable-edge', 'edge-20261110T010204Z')),
+            ('edge', darwin('mac-edge-stable', stable)),
+            ('edge', darwin('mac-elf', 'edge-20261110T010205Z', b'\x7fELF' + b'\0' * 60 + b'edge-20261110T010205Z')),
+            ('edge', darwin('mac-unstamped', 'edge-20261110T010206Z', header + b'\0' * 24 + b'edge-20261110T010207Z')),
+            ('edge', darwin('mac-bad-version', '../1.2.3')),
+            ('edge', str(repo / 'mac-missing')),
+        )
+        for channel, directory in refusals:
+            with self.subTest(channel=channel, directory=directory):
+                result = build('--channel', channel, '--darwin', directory)
+                self.assertNotEqual(result.returncode, 0, directory)
+        self.assertEqual(build('--channel', 'edge', '--other', darwin('mac-flag', 'edge-20261110T010208Z')).returncode, 2)
 
     def test_scripts_exist(self):
         for name in ('build', 'publish', 'verify'):
@@ -138,6 +170,13 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
     def test_signed_session_images_are_verified(self):
         self.local_publication('0.1.0', verification_only=True)
 
+    def test_signed_macos_binary_is_published_and_verified(self):
+        """A bundle built with --darwin publishes the Mac binary under the signed manifest (#483)."""
+        self.local_publication('edge-20261110T010203Z', include_darwin=True)
+
+    def test_signed_macos_binary_is_checked_on_verification(self):
+        self.local_publication('0.1.0', verification_only=True, include_darwin=True)
+
     def test_older_signed_releases_without_session_images_are_verified(self):
         self.local_publication('0.1.0', include_sessions=False, verification_only=True)
 
@@ -150,7 +189,7 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
         """Reject a new signed bundle before any network request if one notice is absent."""
         self.local_publication('0.1.0', missing_license=LICENSE_NOTICE_PATHS[1])
 
-    def local_publication(self, version, include_sessions=True, verification_only=False, missing_session=None, missing_license=None):
+    def local_publication(self, version, include_sessions=True, verification_only=False, missing_session=None, missing_license=None, include_darwin=False):
         scratch = Path(os.environ.get('CARGO_TARGET_DIR', Path.home() / '.cache/codex-scratch/release-pipeline/target'))
         scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=scratch) as directory:
@@ -171,6 +210,8 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                 for arch in ('x86_64', 'aarch64'):
                     name = f'infraternal-{arch}-session-musl'
                     files[name] = ('synthetic ' + name).encode()
+            if include_darwin:
+                files['infraternal-aarch64-darwin'] = b'synthetic infraternal-aarch64-darwin'
             if not verification_only:
                 for name in LICENSE_NOTICE_PATHS:
                     if name != missing_license:
@@ -291,6 +332,15 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                             store[version + '/' + name] = files[name]
                         del store[version + '/infraternal-aarch64-session-musl']
                         self.assertNotEqual(run('verify').returncode, 0)
+                        store[version + '/infraternal-aarch64-session-musl'] = files['infraternal-aarch64-session-musl']
+                        sign_store()
+                    if include_darwin:
+                        name = version + '/infraternal-aarch64-darwin'
+                        self.assertEqual(run('verify').returncode, 0)
+                        store[name] = b'tampered'
+                        self.assertNotEqual(run('verify').returncode, 0, 'a changed signed Mac binary must fail verification')
+                        del store[name]
+                        self.assertNotEqual(run('verify').returncode, 0, 'an advertised Mac binary must be downloadable')
                     return
                 (bundle / "VERSION").write_bytes(b"999.999.999\n")
                 self.assertNotEqual(run('publish').returncode, 0)

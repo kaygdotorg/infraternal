@@ -23,6 +23,8 @@ use crate::cli::output::{CommandResult, CommandState, Exit, RenderOptions, emit,
 enum Cause {
     /// No usable runtime directory: `XDG_RUNTIME_DIR` is unset or not private to this account.
     NoRuntimeDirectory,
+    /// The installed root unit or one of its drop-ins cannot safely choose the control socket.
+    UntrustedSystemUnit,
     /// The input given on standard input is not accepted.
     BadInput,
 }
@@ -31,6 +33,7 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::NoRuntimeDirectory => "no usable runtime directory",
+            Self::UntrustedSystemUnit => "the installed system unit source is not trusted",
             Self::BadInput => "input not accepted",
         })
     }
@@ -38,6 +41,7 @@ impl std::fmt::Display for Cause {
 
 impl std::error::Error for Cause {}
 
+/// Call a declared component action through the installed infraternal agent's control socket and present its reply.
 pub(crate) fn run_action(
     action: &infraternal_plugin_api::ActionDefinition,
     arguments: &ArgMatches,
@@ -69,10 +73,22 @@ pub(crate) fn run_action(
             json!({})
         };
         add_cli_values(definition, arguments, &mut input)?;
-        let state = infraternal_agent::sessions::state_path(
+        let state = action_state(
             arguments.get_one::<String>("state").map(PathBuf::from),
+            &infraternal_status::Roots::detect(),
+            nix::unistd::Uid::effective().is_root(),
         )
-        .map_err(|_| io::Error::new(io::ErrorKind::NotFound, Cause::NoRuntimeDirectory))?;
+        .map_err(|error| {
+            if error
+                .get_ref()
+                .and_then(|cause| cause.downcast_ref::<Cause>())
+                .is_some()
+            {
+                error
+            } else {
+                io::Error::new(io::ErrorKind::NotFound, Cause::NoRuntimeDirectory)
+            }
+        })?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -91,6 +107,39 @@ pub(crate) fn run_action(
         Ok(exit) => ExitCode::from(exit.code()),
         Err(error) => refuse(json_output, &command, &error),
     }
+}
+
+/// Resolve the local control runtime, keeping an explicit operator selection authoritative.
+fn action_state(
+    explicit: Option<PathBuf>,
+    roots: &infraternal_status::Roots,
+    root: bool,
+) -> io::Result<PathBuf> {
+    if explicit.is_some() {
+        return infraternal_agent::sessions::state_path(explicit);
+    }
+    if root {
+        let state = infraternal_status::trusted_system_agent_state(roots).map_err(|_| {
+            io::Error::new(io::ErrorKind::PermissionDenied, Cause::UntrustedSystemUnit)
+        })?;
+        if let Some(state) = state {
+            return Ok(state);
+        }
+        return infraternal_agent::sessions::state_path(None);
+    }
+    // Non-root discovery reads the user's installed unit without system ownership assumptions.
+    let status =
+        infraternal_status::probe(roots, &[], &|_, _| infraternal_status::Activity::Unknown);
+    if let Some(state) = status.units.into_iter().find_map(|(unit, _)| {
+        (unit.scope == infraternal_status::Scope::User
+            && unit.kind == infraternal_status::Kind::Agent
+            && unit.name == "infraternal-agent.service")
+            .then_some(unit.state)
+            .flatten()
+    }) {
+        return Ok(state);
+    }
+    infraternal_agent::sessions::state_path(None)
 }
 
 /// Map stable D303 component errors to their process exit behavior.
@@ -137,6 +186,12 @@ fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
             "XDG_RUNTIME_DIR is not set, or it is not a private directory of this account.",
             "Run this command in a login session of the account that runs the infraternal agent, or pass --state.",
             Exit::Unreachable,
+        ),
+        (Some(Cause::UntrustedSystemUnit), _) => (
+            "The installed infraternal agent unit cannot be trusted.",
+            "A system unit file, drop-in, or part of its path is not root-owned and protected from group or other writes.",
+            "Check the system unit and its drop-ins, then run this command again.",
+            Exit::NotAllowed,
         ),
         (Some(Cause::BadInput), _) => (
             "The input given on standard input was not accepted.",
