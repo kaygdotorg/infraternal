@@ -92,6 +92,8 @@ one client's LAN address, and checks that the other clients learn the new
 endpoint from the live-session announcement without user traffic. A changed stale candidate snapshot then
 checks that a still-authenticated endpoint is retained. The runner deletes all
 of its named namespaces before it exits.
+Use `--restart-only` to repeat the direct-path and restart checks without the
+later underlay-change phase.
 Set `J967_CAPTURE_UNDERLAY=1` to save UDP captures from C, S and the shared
 router around the address change; the report lists each capture and its decoded
 packets. This diagnostic mode needs `tcpdump` in the root proof's `PATH`.

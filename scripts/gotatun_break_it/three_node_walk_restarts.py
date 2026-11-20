@@ -393,8 +393,13 @@ def restart_node(
         stop_pingers(pingers)
 
 
-def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any]:
-    """Run four real mesh processes, coordinator snapshots, restarts and address roaming."""
+def run_proof(
+    binary: str,
+    coordinator_path: str,
+    scratch: str,
+    restart_only: bool = False,
+) -> dict[str, Any]:
+    """Run four real mesh processes, restart checks and optional address roaming."""
     topology = ThreeNodeTopology()
     nodes: dict[str, BinaryNode] = {}
     identities: dict[str, dict[str, Any]] = {}
@@ -481,6 +486,11 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         row["server_process_restart"]["idle_handshake_check_seconds"] = IDLE_WINDOW_SECONDS
         assert_peer_inventory(nodes, addresses, topology, ports)
 
+        if restart_only:
+            row["underlay_check_skipped"] = True
+            row["outcome"] = "PASS"
+            return row
+
         stop_pingers(pingers)
         pingers = []
         row["endpoints_before_underlay_change"] = {
@@ -514,6 +524,19 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         topology.propagate()
         topology.install()
         proof.ns("node-c", "ip", "addr", "del", f"{old_address}/24", "dev", "eth0")
+        # Replacing nft rules does not change the destination stored in an established conntrack
+        # entry. Retire C's old flow only, so the public mapping can now deliver to its new address.
+        row["old_address_conntrack_delete"] = proof.ns(
+            "rs", "conntrack", "-D", "-p", "udp", "-s", old_address, check=False
+        ).strip()
+        conntrack_after_move = proof.ns(
+            "rs", "conntrack", "-L", "-p", "udp", check=False
+        ).splitlines()
+        if any(f"src={old_address} dst={proof.SERVER_ADDRESS}" in line for line in conntrack_after_move):
+            raise AssertionError(
+                f"router retained C's stale UDP mapping from {old_address} to {proof.SERVER_ADDRESS}"
+            )
+        row["router_conntrack_after_old_flow_removal"] = conntrack_after_move
         row["underlay_address_change"] = {"from": old_address, "to": new_address}
         new_endpoint = f"{new_address}:{ports['C']}"
         announcement_started = time.monotonic()
@@ -546,10 +569,6 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
         row["router_conntrack_after_underlay_change"] = proof.ns(
             "rs", "conntrack", "-L", "-p", "udp", check=False
         ).splitlines()
-        if captures:
-            row["underlay_packet_capture"] = stop_packet_captures(captures)
-            captures.clear()
-
         stale_probe = dict(probes[MEMBERS.index("C")])
         stale_probe["lan"] = [f"10.9.0.45:{ports['C']}"]
         stale_probes = list(probes)
@@ -581,10 +600,34 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             direct_after_snapshot = wait_for_direct(nodes, addresses, topology, ports, RECOVERY_BOUND_SECONDS)
             traffic_after_snapshot = require_first_replies(post_snapshot, RECOVERY_BOUND_SECONDS)
             assert_peer_inventory(nodes, addresses, topology, ports)
+            conntrack_after_recovery = proof.ns(
+                "rs", "conntrack", "-L", "-p", "udp", check=False
+            ).splitlines()
+            if any(
+                f"src={old_address} dst={proof.SERVER_ADDRESS}" in line
+                for line in conntrack_after_recovery
+            ):
+                raise AssertionError(
+                    f"router recreated C's stale UDP mapping from {old_address}"
+                )
+            if not any(
+                f"src={new_address} dst={proof.SERVER_ADDRESS}" in line
+                and f"sport={ports['C']} dport={ports['S']}" in line
+                for line in conntrack_after_recovery
+            ):
+                raise AssertionError(
+                    f"router did not record C's new UDP mapping from {new_address} to the server"
+                )
             row["stale_snapshot_direct_endpoint_ms"] = direct_after_snapshot
             row["stale_snapshot_first_packet_ms"] = traffic_after_snapshot
+            row["router_conntrack_after_recovery"] = conntrack_after_recovery
         finally:
             stop_pingers(post_snapshot)
+        assert_no_idle_handshakes(nodes)
+        row["underlay_idle_handshake_check_seconds"] = IDLE_WINDOW_SECONDS
+        if captures:
+            row["underlay_packet_capture"] = stop_packet_captures(captures)
+            captures.clear()
 
         current_probes = [nodes[member].call("mesh.identity", {"candidates": True}) for member in MEMBERS]
         observer.request({"mode": "keep", "probes": current_probes})
@@ -627,7 +670,7 @@ def inner(args: argparse.Namespace) -> int:
     proof.run("mount", "-t", "tmpfs", "-o", "mode=0700", "tmpfs", "/run")
     Path("/run/netns").mkdir(parents=True, exist_ok=True)
     try:
-        row = run_proof(args.binary, args.coordinator, args.scratch)
+        row = run_proof(args.binary, args.coordinator, args.scratch, args.restart_only)
     except Exception as error:
         row = {"scenario": "three-node-candidate-walk-restarts", "outcome": "FAIL",
                "error": f"{type(error).__name__}: {error}"}
@@ -653,6 +696,8 @@ def outer(args: argparse.Namespace) -> int:
     command = ["unshare", "-m", "--propagation", "private", sys.executable,
                str(Path(__file__).resolve()), "--inner", "--binary", args.binary,
                "--coordinator", args.coordinator, "--scratch", str(run_scratch)]
+    if args.restart_only:
+        command.append("--restart-only")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True,
                                env={**os.environ, "TMPDIR": str(run_scratch)})
@@ -680,6 +725,11 @@ def main() -> None:
     parser.add_argument("--coordinator", required=True, help="absolute coordinator_fixture path")
     parser.add_argument("--scratch", required=True, help="absolute private scratch directory")
     parser.add_argument("--report", help="optional absolute JSON receipt path")
+    parser.add_argument(
+        "--restart-only",
+        action="store_true",
+        help="stop after the two mesh restarts and separate server-process restart",
+    )
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     for name in ("binary", "coordinator", "scratch"):
