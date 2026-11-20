@@ -1378,11 +1378,55 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         Err(error) => Err(error),
     }
 }
+/// Reports whether `path` already holds exactly `body`, and makes that durable.
+///
+/// A restart rewrites most public records with the bytes they already hold. Replacing the file
+/// costs a temporary file, two fsyncs of fresh data and a rename: about 9 ms on a Mac (#221),
+/// paid on every start for no change. When the existing file is ours (owner, mode 0600, one
+/// link, no symlink) and equal, we only fsync it and its directory. Both are nearly free when
+/// the data is already clean, and they keep the promise that returning `Ok` means the bytes
+/// survive a crash, even if an earlier run died before its own directory sync.
+///
+/// `Ok(false)` means "different, missing or not ours": the caller then replaces the file as usual.
+/// # Errors
+/// Reports a failed fsync of an equal file or its directory.
+pub(crate) fn existing_matches_and_is_durable(path: &Path, body: &[u8]) -> io::Result<bool> {
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return Ok(false);
+    };
+    let Ok(meta) = file.metadata() else {
+        return Ok(false);
+    };
+    if !meta.is_file()
+        || meta.uid() != nix::unistd::Uid::effective().as_raw()
+        || meta.nlink() != 1
+        || meta.mode() & 0o777 != 0o600
+        || meta.len() != body.len() as u64
+    {
+        return Ok(false);
+    }
+    let mut current = Vec::with_capacity(body.len());
+    if file.read_to_end(&mut current).is_err() || current != body {
+        return Ok(false);
+    }
+    file.sync_all()?;
+    FileSync::parent(path)?;
+    Ok(true)
+}
+
 /// Atomically replace a public state file through a synced temporary file.
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
+// An identical file is left in place (see `existing_matches_and_is_durable`).
 fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
+    if existing_matches_and_is_durable(path, body)? {
+        return Ok(());
+    }
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
@@ -2385,6 +2429,40 @@ pub(crate) mod tests {
                 .expect("legacy state remains readable")
                 .windows(b"gotatun".len())
                 .any(|window| window == b"gotatun")
+        );
+    }
+
+    /// Saving the bytes a record already holds leaves the file alone; a changed value replaces it
+    /// and a file that is not ours is never trusted as "already saved" (#221).
+    #[test]
+    fn identical_public_record_is_not_rewritten() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        store.record_listen_port(10_254).expect("first save");
+        let inode = fs::metadata(&store.listen_port_path).expect("metadata").ino();
+
+        store.record_listen_port(10_254).expect("repeat save");
+        assert_eq!(
+            fs::metadata(&store.listen_port_path).expect("metadata").ino(),
+            inode,
+            "an identical record must not be replaced"
+        );
+
+        store.record_listen_port(10_255).expect("changed save");
+        assert_eq!(store.recorded_listen_port().expect("read"), Some(10_255));
+        assert_ne!(
+            fs::metadata(&store.listen_port_path).expect("metadata").ino(),
+            inode,
+            "a changed record is replaced atomically"
+        );
+
+        fs::set_permissions(&store.listen_port_path, fs::Permissions::from_mode(0o644))
+            .expect("loosen mode");
+        store.record_listen_port(10_255).expect("repair save");
+        assert_eq!(
+            fs::metadata(&store.listen_port_path).expect("metadata").mode() & 0o777,
+            0o600,
+            "equal bytes in a file with the wrong mode are rewritten, not trusted"
         );
     }
 

@@ -716,6 +716,10 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
     if body.len() as u64 > MAX_PUBLIC_STATE_BYTES {
         return Err(io::ErrorKind::InvalidData.into());
     }
+    // A restart usually saves the snapshot it already has; skip the replacement then (#221).
+    if crate::node_state::existing_matches_and_is_durable(path, &body)? {
+        return crate::node_state::write_authority(&authority_path(path), &authority);
+    }
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
