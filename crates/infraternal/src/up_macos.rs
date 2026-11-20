@@ -470,7 +470,7 @@ fn run_tool(program: &str, arguments: &[&std::ffi::OsStr]) -> io::Result<()> {
 ///
 /// The copy is hashed on the way in and read back, so a short write or a
 /// changed file fails here rather than at the first service start.
-fn publish_binary(
+pub(super) fn publish_binary(
     input: &mut fs::File,
     mut output: fs::File,
     staging: &Path,

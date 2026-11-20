@@ -10,6 +10,11 @@ mod install;
 #[path = "up_macos.rs"]
 mod macos;
 
+/// Install and remove macOS user mode, the default for a Mac (#146).
+#[cfg(target_os = "macos")]
+#[path = "up_macos_user.rs"]
+pub(crate) mod macos_user;
+
 /// Route termination signals through enrollment cancellation and transaction cleanup.
 #[path = "up_termination.rs"]
 mod termination;
@@ -222,6 +227,41 @@ impl Failure {
     }
 }
 
+/// Which kind of installation a machine join asks the server for.
+///
+/// `System` is the root service on Linux and root mode on a Mac. `User` is macOS user mode
+/// (#146): the infraternal agent runs as the person with this uid, and the server issues a
+/// rootless invitation bound to that uid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JoinMode {
+    /// A root service; the server records execution uid 0.
+    System,
+    /// A per-user install for this uid (never 0).
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only Macs have user mode yet")
+    )]
+    User(u32),
+}
+
+impl JoinMode {
+    /// The `mode` text the device-approval request carries.
+    const fn wire_mode(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User(_) => "user",
+        }
+    }
+
+    /// The invitation mode and execution uid an approval must come back with.
+    const fn invitation(self) -> (Mode, u32) {
+        match self {
+            Self::System => (Mode::Rootful, 0),
+            Self::User(uid) => (Mode::Rootless, uid),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct MachineStartRequest<'a> {
     device: &'a str,
@@ -407,7 +447,7 @@ pub(crate) fn run(
     let Some(short_key) = machine_key_short(&fingerprint) else {
         return fail(json_output, Failure::Failed);
     };
-    let body = match machine_start_body(host_id, &hostname, &fingerprint) {
+    let body = match machine_start_body(host_id, &hostname, &fingerprint, JoinMode::System) {
         Ok(body) => body,
         Err(failure) => return fail(json_output, failure),
     };
@@ -419,11 +459,16 @@ pub(crate) fn run(
     if let Err(failure) = print_approval(json_output, &short_key, &approval.user_code, &link) {
         return fail(json_output, failure);
     }
-    let mut invitation =
-        match runtime.block_on(wait_for_approval(&server, &approval, host_id, &origin)) {
-            Ok(invitation) => invitation,
-            Err(failure) => return fail(json_output, failure),
-        };
+    let mut invitation = match runtime.block_on(wait_for_approval(
+        &server,
+        &approval,
+        host_id,
+        &origin,
+        JoinMode::System,
+    )) {
+        Ok(invitation) => invitation,
+        Err(failure) => return fail(json_output, failure),
+    };
     let payload = match encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules) {
         Ok(payload) => payload,
         Err(failure) => return fail(json_output, failure),
@@ -594,7 +639,7 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     let mut invitation = ApprovedInvitation(
         serde_json::from_slice(&handoff.invitation).map_err(|_| Failure::Permission)?,
     );
-    validate_invitation(&invitation.0, &origin, None)?;
+    validate_invitation(&invitation.0, &origin, None, JoinMode::System)?;
     if crate::remote::key_digest_from_pkcs8(&handoff.key_pkcs8).ok() != Some(handoff.key_digest) {
         return Err(Failure::Permission);
     }
@@ -705,10 +750,14 @@ fn shown_hostname(name: &str) -> String {
     }
 }
 
+/// The device-approval request body for one fresh machine: its new host id, the host name
+/// the owner reads before approving, the join mode with its execution uid, and the exact key
+/// fingerprint the approval binds to.
 fn machine_start_body(
     host_id: uuid::Uuid,
     hostname: &str,
     key_fingerprint: &str,
+    join: JoinMode,
 ) -> Result<Vec<u8>, Failure> {
     if hostname.is_empty()
         || hostname.len() > 128
@@ -723,8 +772,8 @@ fn machine_start_body(
         request: MachineRequest {
             host_id,
             hostname,
-            mode: "system",
-            execution_uid: 0,
+            mode: join.wire_mode(),
+            execution_uid: join.invitation().1,
             key_fingerprint,
         },
     })
@@ -856,6 +905,7 @@ async fn wait_for_approval(
     approval: &Approval,
     host_id: uuid::Uuid,
     origin: &str,
+    join: JoinMode,
 ) -> Result<ApprovedInvitation, Failure> {
     let deadline = Instant::now() + approval.lifetime;
     let body = Zeroizing::new(
@@ -893,7 +943,7 @@ async fn wait_for_approval(
                 let invitation = ApprovedInvitation(
                     serde_json::from_slice(&response.body).map_err(|_| Failure::Failed)?,
                 );
-                validate_invitation(&invitation.0, origin, Some(host_id))?;
+                validate_invitation(&invitation.0, origin, Some(host_id), join)?;
                 return Ok(invitation);
             }
             StatusCode::UNAUTHORIZED => {}
@@ -949,16 +999,21 @@ fn map_http_status(status: StatusCode) -> Failure {
     }
 }
 
+/// Check an approved invitation before anything is installed: a well-formed token, this
+/// server's origin, the join mode and execution uid that were requested, and (when known)
+/// the host id this run asked for.
 fn validate_invitation(
     invitation: &JoinInvitation,
     origin: &str,
     host_id: Option<uuid::Uuid>,
+    join: JoinMode,
 ) -> Result<(), Failure> {
     let token_ok = capability_has_shape(&invitation.token, 43);
+    let (mode, execution_uid) = join.invitation();
     if !token_ok
         || invitation.public_origin != origin
-        || invitation.mode != Mode::Rootful
-        || invitation.execution_uid != 0
+        || invitation.mode != mode
+        || invitation.execution_uid != execution_uid
         || host_id.is_some_and(|expected| invitation.host_id != expected)
     {
         return Err(Failure::Permission);
@@ -1301,8 +1356,8 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        Failure, JoinInvitation, Mode, SUDO_CANDIDATES, ToolError, approval_qr, encode_handoff,
-        install_system_service, invoke_sudo, join_approval_link, machine_key_short,
+        Failure, JoinInvitation, JoinMode, Mode, SUDO_CANDIDATES, ToolError, approval_qr,
+        encode_handoff, install_system_service, invoke_sudo, join_approval_link, machine_key_short,
         machine_start_body, map_remote_failure, read_handoff, sudo_command, trusted_program,
     };
     use crate::cli::output::Exit;
@@ -1410,12 +1465,14 @@ mod tests {
         );
     }
 
+    /// A system join asks for root mode with execution uid 0 and the exact key fingerprint.
     #[test]
     fn machine_start_body_binds_the_requested_system_mode_and_key() {
         let body = machine_start_body(
             uuid::Uuid::from_u128(1),
             "workstation",
             "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            JoinMode::System,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
