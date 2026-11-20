@@ -66,13 +66,21 @@ fn cancelled_capture_releases_native_write_and_reply_waits() {
             sent.send(reply).unwrap();
         });
         let ready = executable.with_extension("py.ready");
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Event wait for the fixture to reach its blocking boundary. Interpreter
+        // start-up stretches under load, so the bound is generous; cancelling
+        // before the boundary would test a different state.
+        let deadline = Instant::now() + Duration::from_secs(60);
         while !ready.exists() && Instant::now() < deadline {
+            // sleep: poll for the fixture's ready marker; the loop is bounded above.
             std::thread::sleep(Duration::from_millis(5));
         }
         let started = Instant::now();
         cancellation.store(true, Ordering::Release);
-        let completed = received.recv_timeout(Duration::from_secs(1));
+        // A cancelled worker returns `ConnectionAborted`; one that ignored the
+        // cancellation would return `TimedOut` after the three-second deadline, which
+        // the kind assertion below still rejects. The bound therefore only needs to
+        // survive load, not to separate the two outcomes.
+        let completed = received.recv_timeout(Duration::from_secs(20));
         // A failed assertion still joins after the ordinary three-second deadline
         // and native retirement, so this fixture cannot leave a worker behind.
         worker.join().unwrap();
@@ -154,6 +162,8 @@ fn timed_out_control_companion_gets_eof_cleanup_before_retirement() {
             include_str!("fixtures/atomic_marker.py"),
             r#"# Role: acknowledge cleanup only after the controller closes its input.
 import struct, sys
+# Tell the test the interpreter is up before the call's deadline starts.
+publish_marker(sys.argv[0] + '.ready', b'ready')
 source = sys.stdin.buffer
 length, = struct.unpack('>I', source.read(4))
 source.read(length)
@@ -166,6 +176,19 @@ if source.read(4) == b'':
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let mut companion = native::Native::spawn(&executable).unwrap();
     drop(publication);
+    // Event wait: interpreter start-up is load-stretched. The call below must
+    // time out against a running companion, and retirement's three-second grace
+    // for EOF cleanup must not also pay for the interpreter's start-up.
+    let ready = executable.with_extension("py.ready");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture did not start"
+        );
+        // sleep: poll for the fixture's ready marker; the loop is bounded above.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let reply = companion.call(protocol::Kind::List, b"{}");
     // Drop joins retirement, so this assertion observes completed child cleanup.
     drop(companion);
