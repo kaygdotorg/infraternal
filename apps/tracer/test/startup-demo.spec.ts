@@ -30,7 +30,7 @@ for (const size of SIZES) for (const theme of ["ink", "paper"] as const) {
     const context = await browser.newContext({ viewport: { width: size.width, height: size.height }, deviceScaleFactor: size.scale, hasTouch: size.touch, isMobile: size.touch });
     const page = await context.newPage();
     const errors: string[] = [];
-    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("pageerror", (error) => errors.push(`${error.message}\n${error.stack ?? ""}`)); // with the stack: an intermittent page error was unreadable without it (#443)
     const shot = (label: string) => page.screenshot({ path: `${OUT}/${size.name}-${theme}-${label}.png` });
     try {
       const url = `/?mock=1&proto=clusters&startup-demo=1&fixture=none&bg=none&theme=${theme}`;
