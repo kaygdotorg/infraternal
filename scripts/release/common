@@ -55,8 +55,9 @@ verify_download() {
     ssh-keygen -Y verify -f "$release_root/release/allowed_signers" -I release@infraternal.com \
         -n infraternal-release -s "$directory/SHA256SUMS.sig" < "$directory/SHA256SUMS"
     # Only fixed bundle names are accepted, even in a trusted signed manifest.
-    # Older signed releases may omit session images; advertised images are
-    # mandatory downloads and must match their signed digests.
+    # Older signed releases may omit session images, and only bundles built with
+    # --darwin carry the macOS binary (#483); advertised images are mandatory
+    # downloads and must match their signed digests.
     awk -v license_files="$license_names" '
         BEGIN {
             expected_licenses = split(license_files, license_name, " ")
@@ -67,6 +68,7 @@ verify_download() {
             if (!($2 in allowed_license) && $2 != "infraternal" &&
                 $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" &&
                 $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" &&
+                $2 != "infraternal-aarch64-darwin" &&
                 $2 != "proxy-traefik-darwin-amd64.json" && $2 != "proxy-traefik-darwin-arm64.json" &&
                 $2 != "proxy-traefik-linux-amd64.json" && $2 != "proxy-traefik-linux-arm64.json" &&
                 $2 != "VERSION") exit 1

@@ -238,7 +238,7 @@ pub async fn ensure(
     user: &User,
 ) -> io::Result<Option<PathBuf>> {
     let name = name(person, user.uid.as_raw());
-    let root = runtime_root(state);
+    let root = runtime_root(state, Uid::effective());
     // Serialize every account for a person against revocation. The tombstone
     // survives daemon restarts in the same runtime directory and fails closed.
     let _person = acquire(root, &format!("{}.person", person.simple())).await?;
@@ -685,18 +685,15 @@ fn set_group(identity: &mut crate::login_auth::Identity) -> io::Result<()> {
 /// Directory that holds the person locks, revocation markers and (as root)
 /// the login endpoints.
 ///
-/// As root, login units are host-wide service manager objects whose
-/// `RuntimeDirectory=` lives under `/run`, so their registry is host-wide too:
-/// two root daemons with different state directories still share one login per
-/// person and account, and must see the same revocation markers.
+/// Linux root login units are host-wide service manager objects whose
+/// `RuntimeDirectory=` lives under `/run`. Linux root daemons share their
+/// registry and revocation markers even when their state directories differ.
 ///
-/// Rootless, the registry belongs to this infraternal agent's state directory,
-/// which `sessions::state` has already resolved (an explicit `--state` wins,
-/// otherwise `$XDG_RUNTIME_DIR/infraternal`) and validated as private 0700. It
-/// never reads the environment again, so an explicit state works without
-/// `XDG_RUNTIME_DIR`, and open, revoke and restore always agree on one place.
-fn runtime_root(state: &Path) -> &Path {
-    if Uid::effective().is_root() {
+/// On macOS and for rootless infraternal agents, locks and revocation markers
+/// belong to the private session state directory. The caller already resolves
+/// and validates that directory, so open, revoke and restore use the same path.
+fn runtime_root(state: &Path, uid: Uid) -> &Path {
+    if cfg!(target_os = "linux") && uid.is_root() {
         Path::new("/run")
     } else {
         state
@@ -715,7 +712,7 @@ static AUTHORIZED: std::sync::LazyLock<
 /// No grant survives process exit, so an unconfirmed revocation cannot be lost
 /// into implicit permission when the daemon restarts before saving its marker.
 pub(crate) fn synchronize(state: &Path, person: uuid::Uuid) -> io::Result<()> {
-    synchronize_at(runtime_root(state), person)
+    synchronize_at(runtime_root(state, Uid::effective()), person)
 }
 
 /// Publish a bounded grant only when neither pending nor persisted refusal exists.
@@ -774,7 +771,7 @@ fn not_refused(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// ordinary opens never restore access.
 /// Returns `WouldBlock` when the durable queue is full, before opening a fence.
 pub async fn restore(state: &Path, person: uuid::Uuid) -> io::Result<()> {
-    restore_at(runtime_root(state), person).await
+    restore_at(runtime_root(state, Uid::effective()), person).await
 }
 
 /// Admit restoration before opening its fence and retain it through an executing sync.
@@ -834,7 +831,7 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// a bounded owner retries independently of caller lifetime and ordinary saves.
 pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<Revoked> {
     revoke_at(
-        runtime_root(state),
+        runtime_root(state, Uid::effective()),
         manager,
         person,
         !Uid::effective().is_root(),
@@ -1752,6 +1749,19 @@ mod tests {
         std::fs::remove_dir(endpoint.parent().unwrap()).unwrap();
 
         assert!(flags.contains(nix::fcntl::FdFlag::FD_CLOEXEC));
+    }
+
+    /// Only Linux root shares the service manager's host-wide login registry.
+    #[test]
+    fn platform_login_registry_preserves_scope() {
+        let state = Path::new("/fixture/agent-state");
+        assert_eq!(runtime_root(state, Uid::from_raw(501)), state);
+        let root_state = if cfg!(target_os = "linux") {
+            Path::new("/run")
+        } else {
+            state
+        };
+        assert_eq!(runtime_root(state, Uid::from_raw(0)), root_state);
     }
 
     /// A root open never takes the `su` fallback on a probe that only timed

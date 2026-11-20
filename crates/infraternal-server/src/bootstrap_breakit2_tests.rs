@@ -19,7 +19,7 @@ impl Drop for LiveFixtureDirectory {
     }
 }
 
-/// A public test CA that the ordinary disposable target can read during preflight.
+/// A public test CA used to exercise the disposable target's fixed system roots.
 struct TestHttpsRoot(PathBuf);
 impl TestHttpsRoot {
     fn write(root: &openssl::x509::X509Ref) -> Self {
@@ -531,11 +531,10 @@ fn breakit2_step(script: &str, input: &Input<'_>) -> &'static str {
     }
 }
 
-/// Trust the disposable HTTPS root for the join-key preflight command only.
+/// Add the disposable test root to the fixed system bundle for the join-key preflight only.
 ///
-/// That preflight verifies the public origin with system roots. OpenSSL's default verify
-/// paths honour `SSL_CERT_FILE`, so the harness points it at the test CA instead of
-/// adding a trust hook to the shipped binary or the target's system store.
+/// The preflight must use the same root-owned system bundle as production. Remove the test
+/// issuer and refresh that bundle when this remote command exits, including on failure.
 fn breakit2_test_https_root(script: &str, root: Option<&std::path::Path>) -> String {
     if !script.contains("prepare-join-key") {
         return script.to_owned();
@@ -543,9 +542,33 @@ fn breakit2_test_https_root(script: &str, root: Option<&std::path::Path>) -> Str
     let Some(root) = root else {
         return script.to_owned();
     };
-    let root = root.to_str().expect("test HTTPS root path is UTF-8");
-    let quoted = format!("'{}'", root.replace('\'', "'\\''"));
-    format!("export SSL_CERT_FILE={quoted}\n{script}")
+    let root = std::fs::read_to_string(root).expect("test HTTPS root is readable UTF-8 PEM");
+    let quoted_root = format!("'{}'", root.replace('\'', "'\\''"));
+    let test_ca = format!(
+        "/usr/local/share/ca-certificates/infraternal-breakit2-{}.crt",
+        uuid::Uuid::new_v4()
+    );
+    format!(
+        r#"test_ca="{test_ca}"
+root_file=""
+if [ -e "$test_ca" ] || [ -L "$test_ca" ]; then
+    printf 'Refusing to replace an existing test CA: %s\n' "$test_ca" >&2
+    exit 1
+fi
+cleanup_test_https_root() {{
+    sudo rm -f -- "$test_ca" >/dev/null 2>&1 || true
+    sudo update-ca-certificates >/dev/null 2>&1 || true
+    rm -f -- "$root_file"
+}}
+trap cleanup_test_https_root EXIT
+trap 'exit 1' HUP INT TERM
+root_file=$(mktemp /tmp/infraternal-breakit2-root.XXXXXXXXXX)
+printf '%s' {quoted_root} > "$root_file"
+sudo install -o root -g root -m 0644 "$root_file" "$test_ca"
+sudo update-ca-certificates >/dev/null
+unset SSL_CERT_FILE SSL_CERT_DIR
+{script}"#
+    )
 }
 
 #[test]
@@ -579,15 +602,30 @@ fn breakit2_step_labels_both_setup_headers_as_setup() {
 #[test]
 /// Restrict fixture TLS trust to its join-key command.
 fn breakit2_test_https_root_is_scoped_to_join_key_preflight() {
-    let path = std::path::Path::new("/tmp/test 'root.pem");
+    let path = std::env::temp_dir().join(format!(
+        "infraternal-breakit2-root-test-{}-{}.pem",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&path, "test 's PEM\n").unwrap();
     let preflight = "payload agent --data state prepare-join-key https://server:4930";
-    let command = breakit2_test_https_root(preflight, Some(path));
+    let command = breakit2_test_https_root(preflight, Some(&path));
+    std::fs::remove_file(&path).unwrap();
 
-    assert!(command.starts_with("export SSL_CERT_FILE='"));
-    assert!(command.contains("test '\\''root.pem'\n"));
+    assert!(
+        command.starts_with("test_ca=\"/usr/local/share/ca-certificates/infraternal-breakit2-")
+    );
+    assert!(command.contains("root_file=$(mktemp /tmp/infraternal-breakit2-root."));
+    assert!(command.contains("printf '%s' 'test '\\''s PEM\n' > \"$root_file\""));
+    assert!(command.contains("sudo install -o root -g root -m 0644 \"$root_file\" \"$test_ca\""));
+    assert!(command.contains("sudo update-ca-certificates >/dev/null"));
+    assert!(command.contains("trap cleanup_test_https_root EXIT"));
+    assert!(command.contains("unset SSL_CERT_FILE SSL_CERT_DIR"));
+    assert!(!command.contains("SSL_CERT_FILE="));
+    assert!(!command.contains("SSL_CERT_DIR="));
     assert!(command.ends_with(preflight));
     assert_eq!(
-        breakit2_test_https_root("other command", Some(path)),
+        breakit2_test_https_root("other command", Some(&path)),
         "other command"
     );
     assert_eq!(breakit2_test_https_root(preflight, None), preflight);

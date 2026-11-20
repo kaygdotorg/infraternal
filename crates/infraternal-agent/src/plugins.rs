@@ -2,6 +2,11 @@
 
 use infraternal_plugin_api::{PluginDescriptor, PluginError, PluginRegistry};
 
+/// Removal of device-approved launchd installations.
+#[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+#[path = "macos_uninstall.rs"]
+mod macos_uninstall;
+
 /// One node registry survives authenticated transport replacement; owned
 /// asynchronous operations never hold this lock while waiting on native I/O.
 pub type SharedRegistry = std::sync::Arc<std::sync::Mutex<PluginRegistry>>;
@@ -174,6 +179,17 @@ pub(crate) fn registry_at_with_mesh_state(
         ) {
             registry.register(Box::new(plugin))?;
         }
+    }
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    if mode == ExecutionMode::Remote
+        && state
+            == Some(std::path::Path::new(
+                infraternal_plugin_mesh::macos_service::MACHINE_STATE,
+            ))
+        && let Some(enrolment) = installation
+        && let Some(plugin) = macos_uninstall::Uninstall::for_enrolment(enrolment)
+    {
+        registry.register(Box::new(plugin))?;
     }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {

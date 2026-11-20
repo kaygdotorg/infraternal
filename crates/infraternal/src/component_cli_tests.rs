@@ -157,3 +157,124 @@ fn missing_component_action_results_keep_the_code_and_one_line_message() {
     assert_eq!(result.message, "No publication matches 3000.");
     assert_eq!(result.error.expect("D303 error").code, "missing");
 }
+
+/// Root Add host discovery refuses a state directory from a user-owned unit.
+#[test]
+fn root_add_host_refuses_a_user_owned_unit_source() {
+    let fixture = std::env::temp_dir().join(format!("j470b-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fixture).unwrap();
+    let installed = fixture.join("sessions");
+    std::fs::write(fixture.join("infraternal-agent.service"), format!(
+        "[Service]\nExecStart=\"/var/lib/infraternal/bin/current\" agent --data \"/var/lib/infraternal/state\" --state \"{}\" run\n", installed.display()
+    )).unwrap();
+    let roots = infraternal_status::Roots {
+        system_units: vec![fixture.clone()],
+        user_units: None,
+        run_dir: Some(fixture.join("wrong-runtime")),
+        data_dirs: vec![],
+        net_class: fixture.join("net"),
+    };
+    let result = super::action_state(None, &roots, true);
+    let explicit = super::action_state(Some(fixture.join("explicit")), &roots, true).unwrap();
+    std::fs::remove_dir_all(&fixture).unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(explicit, fixture.join("explicit"));
+}
+
+/// Root Add host discovery refuses a group-writable installed unit.
+#[test]
+fn root_add_host_refuses_a_group_writable_unit_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = std::env::temp_dir().join(format!("j470b-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fixture).unwrap();
+    let unit = fixture.join("infraternal-agent.service");
+    std::fs::write(
+        &unit,
+        "[Service]\nExecStart=/var/lib/infraternal/bin/current agent --state=/var/lib/infraternal/sessions run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&unit, std::fs::Permissions::from_mode(0o664)).unwrap();
+    let roots = infraternal_status::Roots {
+        system_units: vec![fixture.clone()],
+        user_units: None,
+        run_dir: Some(fixture.join("wrong-runtime")),
+        data_dirs: vec![],
+        net_class: fixture.join("net"),
+    };
+
+    let result = super::action_state(None, &roots, true);
+    std::fs::remove_dir_all(&fixture).unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+/// Root Add host discovery refuses a world-writable unit drop-in.
+#[test]
+fn root_add_host_refuses_a_world_writable_dropin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = std::env::temp_dir().join(format!("j470b-cli-{}", uuid::Uuid::new_v4()));
+    let dropins = fixture.join("infraternal-agent.service.d");
+    std::fs::create_dir_all(&dropins).unwrap();
+    std::fs::write(
+        fixture.join("infraternal-agent.service"),
+        "[Service]\nExecStart=/var/lib/infraternal/bin/current agent --state=/var/lib/infraternal/sessions run\n",
+    )
+    .unwrap();
+    let dropin = dropins.join("10-state.conf");
+    std::fs::write(
+        &dropin,
+        "[Service]\nExecStart=\nExecStart=/var/lib/infraternal/bin/current agent --state=/tmp/alternate-sessions run\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&dropin, std::fs::Permissions::from_mode(0o666)).unwrap();
+    let roots = infraternal_status::Roots {
+        system_units: vec![fixture.clone()],
+        user_units: None,
+        run_dir: Some(fixture.join("wrong-runtime")),
+        data_dirs: vec![],
+        net_class: fixture.join("net"),
+    };
+
+    let result = super::action_state(None, &roots, true);
+    std::fs::remove_dir_all(&fixture).unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+/// Root Add host discovery refuses a unit reached through a writable path component.
+#[test]
+fn root_add_host_refuses_a_writable_unit_path_chain() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = std::env::temp_dir().join(format!("j470b-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&fixture).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::write(
+        fixture.join("infraternal-agent.service"),
+        "[Service]\nExecStart=/var/lib/infraternal/bin/current agent --state=/var/lib/infraternal/sessions run\n",
+    )
+    .unwrap();
+    let roots = infraternal_status::Roots {
+        system_units: vec![fixture.clone()],
+        user_units: None,
+        run_dir: Some(fixture.join("wrong-runtime")),
+        data_dirs: vec![],
+        net_class: fixture.join("net"),
+    };
+
+    let result = super::action_state(None, &roots, true);
+    std::fs::remove_dir_all(&fixture).unwrap();
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}

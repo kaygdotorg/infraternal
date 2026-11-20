@@ -61,6 +61,16 @@ impl Source {
             changed.any |= changed.hostname;
         }
         if let Some(os) = os
+            && let Ok(result) = sqlx::query("UPDATE remote_hosts SET device_os=? WHERE id=? AND device_approved=1 AND revoked_at IS NULL AND device_os IS NOT ?")
+                .bind(os)
+                .bind(id.as_bytes().as_slice())
+                .bind(os)
+                .execute(&mut *tx)
+                .await
+        {
+            changed.any |= result.rows_affected() > 0;
+        }
+        if let Some(os) = os
             && let Ok(result) = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND os IS NOT ? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
                 .bind(os)
                 .bind(id.as_bytes().as_slice())
