@@ -260,6 +260,8 @@ def frame(client, streams):
         pass
     else:
         raise AssertionError(f"unexpected stream frame {(stream, kind)}")
+    if state["stamp_on_receipt"]:
+        settle_echo(state)
     return stream, kind
 
 
@@ -278,6 +280,7 @@ def new_stream_state(session_id):
         "token_keys": 0,
         "token_tail": b"",
         "paint_credit_pending": 0,
+        "stamp_on_receipt": False,
         "recent_output": bytearray(),
         "pending_ack": None,
         "pending_echo": None,
@@ -447,6 +450,9 @@ def measure_without_network(binary, state_dir, samples):
         time.sleep(1.0)
         idle_kb = rss(client.child.pid)
         streams = {1: new_stream_state(client.open())}
+        # The own-overhead row is the agent's work with no network; the simulated 120 Hz paint wait the other rows add
+        # (up to 8.3 ms, mean about 4 ms) is the display's, and the browser's share already counts its own frames.
+        streams[1]["stamp_on_receipt"] = True
         attach_streams(client, streams)
         prepare_cat(client, streams, 1, "__OVERHEAD_READY__")
         _, echo = sample_echoes(client, streams, 1, samples)
