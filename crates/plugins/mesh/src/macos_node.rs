@@ -717,7 +717,7 @@ fn write_public_state(path: &Path, state: &SavedState) -> io::Result<()> {
         return Err(io::ErrorKind::InvalidData.into());
     }
     // A restart usually saves the snapshot it already has; skip the replacement then (#221).
-    if crate::node_state::existing_matches_and_is_durable(path, &body)? {
+    if crate::node_state::existing_matches(path, &body) {
         return crate::node_state::write_authority(&authority_path(path), &authority);
     }
     let nonce = std::time::SystemTime::now()

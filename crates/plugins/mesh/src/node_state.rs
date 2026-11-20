@@ -1378,28 +1378,30 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         Err(error) => Err(error),
     }
 }
-/// Reports whether `path` already holds exactly `body`, and makes that durable.
+/// Reports whether `path` already holds exactly `body`, so the caller can skip the save.
 ///
 /// A restart rewrites most public records with the bytes they already hold. Replacing the file
-/// costs a temporary file, two fsyncs of fresh data and a rename: about 9 ms on a Mac (#221),
-/// paid on every start for no change. When the existing file is ours (owner, mode 0600, one
-/// link, no symlink) and equal, we only fsync it and its directory. Both are nearly free when
-/// the data is already clean, and they keep the promise that returning `Ok` means the bytes
-/// survive a crash, even if an earlier run died before its own directory sync.
+/// costs a temporary file, two fsyncs and a rename; on a Mac that is about 9 ms on every start
+/// for no change (#221). An fsync of an unchanged file is also not free there: it waits for
+/// whatever else the volume has dirty, about 4 ms in the trace, so this does not sync either.
 ///
-/// `Ok(false)` means "different, missing or not ours": the caller then replaces the file as usual.
-/// # Errors
-/// Reports a failed fsync of an equal file or its directory.
-pub(crate) fn existing_matches_and_is_durable(path: &Path, body: &[u8]) -> io::Result<bool> {
+/// What that gives up: the earlier save of these bytes returned only after its own syncs, or it
+/// died part-way. If it died between the rename and the directory sync, a power cut before the
+/// OS flushes could still bring back the older record. That is the same state a crash during
+/// that earlier save leaves, which restore already recovers from, so no new state appears.
+///
+/// Only a file that is ours (owner, mode 0600, one link, no symlink) counts as equal; anything
+/// else is replaced as before. `false` also covers missing and unreadable files.
+pub(crate) fn existing_matches(path: &Path, body: &[u8]) -> bool {
     let Ok(mut file) = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)
     else {
-        return Ok(false);
+        return false;
     };
     let Ok(meta) = file.metadata() else {
-        return Ok(false);
+        return false;
     };
     if !meta.is_file()
         || meta.uid() != nix::unistd::Uid::effective().as_raw()
@@ -1407,24 +1409,19 @@ pub(crate) fn existing_matches_and_is_durable(path: &Path, body: &[u8]) -> io::R
         || meta.mode() & 0o777 != 0o600
         || meta.len() != body.len() as u64
     {
-        return Ok(false);
+        return false;
     }
     let mut current = Vec::with_capacity(body.len());
-    if file.read_to_end(&mut current).is_err() || current != body {
-        return Ok(false);
-    }
-    file.sync_all()?;
-    FileSync::parent(path)?;
-    Ok(true)
+    file.read_to_end(&mut current).is_ok() && current == body
 }
 
 /// Atomically replace a public state file through a synced temporary file.
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
-// An identical file is left in place (see `existing_matches_and_is_durable`).
+// An identical file is left in place (see `existing_matches`).
 fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
-    if existing_matches_and_is_durable(path, body)? {
+    if existing_matches(path, body) {
         return Ok(());
     }
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
