@@ -356,4 +356,4 @@ mkdir "$result_dir"
 mv "$result_dir" "$output"
 printf 'Release asset: %s/%s\n' "$output" "$archive_name"
 printf 'SHA256SUMS:\n'
-/usr/bin/cat "$output/SHA256SUMS"
+/bin/cat "$output/SHA256SUMS"
