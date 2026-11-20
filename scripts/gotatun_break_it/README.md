@@ -89,8 +89,10 @@ starts one client process and the server mesh-node process separately,
 requiring all affected routes and traffic to recover within 30 seconds. It
 also restarts the actual server process and checks its health endpoint, changes
 one client's LAN address, and checks that the other clients learn the new
-endpoint from the live-session announcement without user traffic. A changed stale candidate snapshot then
-checks that a still-authenticated endpoint is retained. The runner deletes all
+endpoint from the live-session announcement without user traffic. The server
+continues to use C's public NAT mapping, while A and B learn its new LAN address.
+A changed stale candidate snapshot then checks that a still-authenticated
+endpoint is retained. The runner deletes all
 of its named namespaces before it exits.
 Use `--restart-only` to repeat the direct-path and restart checks without the
 later underlay-change phase.

@@ -517,6 +517,8 @@ def run_proof(
                     namespace, interface, capture_root / f"underlay-{name}.pcap"
                 )
                 captures.append((name, process, path))
+        # Include the address and NAT-rule updates; an announcement may arrive while they run.
+        announcement_started = time.monotonic()
         proof.ns("node-c", "ip", "addr", "add", f"{new_address}/24", "dev", "eth0")
         for router in topology.routers["C"]:
             router.inside.pop(old_address, None)
@@ -539,7 +541,6 @@ def run_proof(
         row["router_conntrack_after_old_flow_removal"] = conntrack_after_move
         row["underlay_address_change"] = {"from": old_address, "to": new_address}
         new_endpoint = f"{new_address}:{ports['C']}"
-        announcement_started = time.monotonic()
         deadline = announcement_started + ANNOUNCEMENT_BOUND_SECONDS
         announced: dict[str, bool] = {"A": False, "B": False}
         while time.monotonic() < deadline and not all(announced.values()):
