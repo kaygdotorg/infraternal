@@ -142,6 +142,12 @@ pub mod macos_key;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_node;
 
+/// Pure rules for macOS user mode: the helper's wire format, request checks, routing-table
+/// reading and launchd property lists (#146). Free of side effects, so its tests also run in
+/// the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+pub mod macos_user_mode;
+
 // Pure byte parsing, so its tests also run in the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
