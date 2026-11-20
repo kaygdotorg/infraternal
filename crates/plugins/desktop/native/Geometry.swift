@@ -79,8 +79,8 @@ final class WindowGeometry {
     /// Why the window is or is not being resized: `following`, `refused`, `managed`, `local_input` or
     /// `closed`.
     var reason = "following"
-    /// True once we changed the window's size, so `restore` knows it has work to do.
-    var didResize = false
+    /// The last frame resulting from our size write. A later local move or resize takes precedence on stop.
+    private var lastAppliedFrame: CGRect?
     /// Tracks whether the desktop owns this window's size.
     private var ownership = WindowResizeOwnership()
     /// Number of resize requests sent, for diagnostics.
@@ -197,8 +197,13 @@ final class WindowGeometry {
                 var size = desired
                 if let value = AXValueCreate(.cgSize, &size),
                    requestSize(window, value) == .success {
-                    didResize = true
-                    if let f = axFrame(window) { actual = f }
+                    if let f = axFrame(window) {
+                        if !sameWindowFrame(actual, f) { lastAppliedFrame = f }
+                        actual = f
+                        // Apps can constrain a successful AX resize. Later notifications must
+                        // compare with what was applied, so Stop still restores that change.
+                        ownership.applied(f.size)
+                    }
                 }
             }
             reason = canSet && abs(actual.width - desired.width) < 1 && abs(actual.height - desired.height) < 1 ? "following" : "refused"
@@ -216,24 +221,22 @@ final class WindowGeometry {
         content = CGRect(x: (output.width - size.width)/2, y: (output.height - size.height)/2, width: size.width, height: size.height)
     }
 
-    /// Puts the window back to its original size and position.
+    /// Undoes our most recent geometry change while the Mac still has the frame we applied.
     ///
-    /// Returns `true` when there was nothing to undo or the window is back within 1 point of the
-    /// original; `false` if it could not be restored. Does nothing for a managed window, because
-    /// restoring would start a fight with the manager.
+    /// Read AX again at teardown because a user can move, resize or close a window before the
+    /// observer runs. Preserving that edit and leaving managed windows alone both count as success.
+    /// Returns `false` if we tried to restore our frame but the app refused.
     func restore() -> Bool {
         ownership.detectManager(WindowManagerPresence.current(at: ProcessInfo.processInfo.systemUptime))
-        // Restoring an old size after ownership changed would restart the fight.
-        if ownership.managed { didResize = false; return true }
-        guard didResize, let window else { return true }
+        guard !ownership.managed, let window, let applied = lastAppliedFrame,
+              let current = axFrame(window), sameWindowFrame(current, applied) else { return true }
+        lastAppliedFrame = nil
         var size = original.size; var point = original.origin
         guard let s = AXValueCreate(.cgSize, &size), let p = AXValueCreate(.cgPoint, &point) else { return false }
         let resized = AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, s) == .success
         let moved = AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, p) == .success
         guard let f = axFrame(window) else { return false }
-        didResize = false
-        return resized && moved && abs(f.minX-original.minX) < 1 && abs(f.minY-original.minY) < 1
-            && abs(f.width-original.width) < 1 && abs(f.height-original.height) < 1
+        return resized && moved && sameWindowFrame(f, original)
     }
 
     /// The window's state as a JSON-ready dictionary (rectangles, reason, output size, IDs, scale).

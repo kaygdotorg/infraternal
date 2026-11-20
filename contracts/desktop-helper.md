@@ -98,7 +98,8 @@ forced IDR [D200 V2]. Encode at requested output dimensions.
 
 AX uses points. Desired source pixels are canvas size × backing scale; divide
 by the source display’s actual backing scale before setting AX size. Save original point position/size
-once, restore on stop and disconnect unless the desktop owns its geometry. Verify actual size after setting it;
+once. Restore on stop and disconnect when the live window still has the last
+frame applied by the helper. Leave local moves and resizes in place. Verify actual size after setting it;
 refusal or local input in the last 60 seconds means letterbox, with an explicit
 content rectangle. Follow once local input becomes idle [D208 A2]. Input coordinates use
 output pixels and map through that rectangle; bands accept no clicks.
@@ -106,7 +107,7 @@ output pixels and map through that rectangle; bands accept no clicks.
 Managed desktops are detected without a setting [D290]. Before a geometry write,
 inspect process executable names for a known tiling manager; never inspect its
 arguments, configuration or control socket. Independently, one own-window AX
-size notification that differs from our requested size within two monotonic
+size notification that differs from the applied size within two monotonic
 seconds permanently yields that window to the desktop. Move notifications also
 refresh its actual frame. The state lasts for the session, including stop and
 disconnect: no further native resize or original-geometry restoration is allowed.
