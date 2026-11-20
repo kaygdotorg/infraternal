@@ -136,3 +136,39 @@ fn odd_and_overlong_hostnames_give_no_name() {
         assert_eq!(machine_name(source), None, "{source}");
     }
 }
+
+/// D339 (#337): the OS word is the family, never the distribution, so an SSH probe's os-release name
+/// (`AlmaLinux`, `Ubuntu`) gives `linux` instead of `host`.
+#[test]
+fn a_distribution_name_gives_the_linux_family_word() {
+    let id = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+    for os in [
+        "AlmaLinux",
+        "Ubuntu",
+        "Rocky Linux 9.4",
+        "openSUSE Tumbleweed",
+        "Arch Linux",
+        "NixOS",
+        "Fedora Linux",
+        "Red Hat Enterprise Linux",
+        "Alpine Linux",
+        "Raspbian GNU/Linux 12 (bookworm)",
+    ] {
+        assert_eq!(fallback_machine_name(Some(os), id), "linux-0a1b2c", "{os}");
+    }
+}
+
+/// Only an unknown or missing OS gives `host`. Other BSDs and the illumos family keep their own word rather
+/// than being called `freebsd`, because a name must never claim an OS the machine did not report.
+#[test]
+fn unknown_is_host_and_other_families_keep_their_word() {
+    let id = "0a1b2c3d-4e5f-6789-abcd-ef0123456789";
+    assert_eq!(fallback_machine_name(Some("Unknown"), id), "host-0a1b2c");
+    assert_eq!(fallback_machine_name(Some("OpenBSD"), id), "openbsd-0a1b2c");
+    assert_eq!(
+        fallback_machine_name(Some("DragonFly BSD"), id),
+        "dragonfly-0a1b2c"
+    );
+    assert_eq!(fallback_machine_name(Some("illumos"), id), "illumos-0a1b2c");
+    assert_eq!(fallback_machine_name(Some("Solaris"), id), "solaris-0a1b2c");
+}
