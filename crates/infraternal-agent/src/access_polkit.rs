@@ -310,9 +310,15 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             if action.is_none() || scopes & bit != 0 {
                 return true;
             }
+            // `auth_self` asks only for the account's own credentials, so
+            // whoever can sign in as the account holds that action: a grant,
+            // like `yes`, allowed only where `yes` is. Only refusal or an
+            // administrator's approval grants nothing.
             match value.trim() {
-                "no" | "auth_self" | "auth_self_keep" | "auth_admin" | "auth_admin_keep" => {}
-                "yes" if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) => {
+                "no" | "auth_admin" | "auth_admin_keep" => {}
+                "yes" | "auth_self" | "auth_self_keep"
+                    if action.is_some_and(|id| HARMLESS_ACTIONS.contains(&id)) =>
+                {
                     approved_yes = true;
                 }
                 _ => return true,
@@ -406,6 +412,12 @@ mod tests {
             &denied.replace("auth_admin_keep", "yes")
         ));
         assert!(action_defaults_allow_or_unknown("unknown"));
+        for own in ["auth_self", "auth_self_keep"] {
+            assert!(
+                action_defaults_allow_or_unknown(&denied.replace("auth_admin_keep", own)),
+                "{own}"
+            );
+        }
     }
 
     /// Polkit counts as absent only when its unit is definitely not found and
