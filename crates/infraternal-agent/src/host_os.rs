@@ -25,31 +25,38 @@
 //! succeed.
 //!
 //! Old servers ignore the text and old agents send plain `infraternal agent`,
-//! so both directions stay compatible. The server accepts only the exact
-//! strings above ([`reported`]); anything else counts as "not said", so a
-//! host cannot store arbitrary text this way.
+//! so both directions stay compatible. The server accepts only
+//! `infraternal agent os=<token>` with a token from the closed OS table, optionally
+//! followed by ` direct=none` ([`reported`]); anything else counts as "not
+//! said", so a host cannot store arbitrary text this way.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The `client_info` this build of the infraternal agent sends in its Hello.
-#[cfg(target_os = "macos")]
-pub const CLIENT_INFO: &str = "infraternal agent os=macos";
-/// The `client_info` this build of the infraternal agent sends in its Hello.
-#[cfg(target_os = "linux")]
-pub const CLIENT_INFO: &str = "infraternal agent os=linux";
-/// The `client_info` this build of the infraternal agent sends in its Hello.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub const CLIENT_INFO: &str = "infraternal agent";
+/// Every OS token this module can report, with the name the server stores and the canvas shows.
+///
+/// The token is `std::env::consts::OS`, which the compiler fixes for each build, so an agent always
+/// names its own OS and needs no runtime probe (#337). The table is closed on purpose: the server accepts
+/// only these tokens, so a host can never store free text this way.
+const KNOWN_OS: &[(&str, &str)] = &[
+    ("linux", "Linux"),
+    ("macos", "macOS"),
+    ("windows", "Windows"),
+    ("freebsd", "FreeBSD"),
+    ("openbsd", "OpenBSD"),
+    ("netbsd", "NetBSD"),
+    ("dragonfly", "DragonFly BSD"),
+    ("illumos", "illumos"),
+    ("solaris", "Solaris"),
+    ("android", "Android"),
+    ("ios", "iOS"),
+    ("haiku", "Haiku"),
+    ("redox", "Redox"),
+    ("fuchsia", "Fuchsia"),
+    ("aix", "AIX"),
+];
 
-/// [`CLIENT_INFO`] for an agent whose enrollment has no direct server address.
-#[cfg(target_os = "macos")]
-const CLIENT_INFO_WITHOUT_DIRECT: &str = "infraternal agent os=macos direct=none";
-/// [`CLIENT_INFO`] for an agent whose enrollment has no direct server address.
-#[cfg(target_os = "linux")]
-const CLIENT_INFO_WITHOUT_DIRECT: &str = "infraternal agent os=linux direct=none";
-/// Other systems name no OS, so they have nothing to qualify either.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-const CLIENT_INFO_WITHOUT_DIRECT: &str = CLIENT_INFO;
+/// The marker an agent whose enrollment has no direct server address adds after its OS token.
+const WITHOUT_DIRECT: &str = " direct=none";
 
 /// Set once at start by the remote client when the stored identity has no
 /// direct server address. One agent process serves exactly one enrolled
@@ -66,21 +73,33 @@ pub fn enrolled_without_direct_endpoint() {
     ENROLLED_WITHOUT_DIRECT.store(true, Ordering::Release);
 }
 
-/// The `client_info` to send in a Hello now: [`CLIENT_INFO`], plus
-/// ` direct=none` after [`enrolled_without_direct_endpoint`].
+/// The `client_info` this build of the infraternal agent sends in its Hello:
+/// `infraternal agent os=<target>`, plus ` direct=none` after
+/// [`enrolled_without_direct_endpoint`].
+///
+/// Every build sends its own OS, in user mode and root mode alike, since both send this text. Only the
+/// `LazyLock`s make it a `&'static str` (the Hello borrows its strings); each text never changes at run time.
 #[must_use]
 pub fn client_info() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| format!("infraternal agent os={}", std::env::consts::OS));
+    static WITHOUT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "infraternal agent os={}{WITHOUT_DIRECT}",
+            std::env::consts::OS
+        )
+    });
     if ENROLLED_WITHOUT_DIRECT.load(Ordering::Acquire) {
-        CLIENT_INFO_WITHOUT_DIRECT
+        WITHOUT.as_str()
     } else {
-        CLIENT_INFO
+        TEXT.as_str()
     }
 }
 
 /// What a Hello's `client_info` says about the host, as the server keeps it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reported {
-    /// The OS name the server stores and the canvas shows (`"macOS"` or `"Linux"`).
+    /// The OS name the server stores and the canvas shows (`"macOS"`, `"Linux"`, `"FreeBSD"`, ...).
     pub os: &'static str,
     /// False when the host's enrollment has no direct server address, so it
     /// can never open App Windows lanes until it is added again.
@@ -90,17 +109,20 @@ pub struct Reported {
 /// Reads the OS and the enrollment's direct-address fact from an agent
 /// Hello's `client_info`.
 ///
-/// Returns `None` for an older agent, a server, or any text that is not one of
-/// the exact forms this module sends.
+/// Returns `None` for an older agent that sends plain `infraternal agent`, a server, a target this table does
+/// not list, or any text that is not `infraternal agent os=<listed token>` exactly. The server then keeps the
+/// machine's `host-<id>` fallback name (D339).
 #[must_use]
 pub fn reported(client_info: &str) -> Option<Reported> {
-    let (os, direct_endpoint) = match client_info {
-        "infraternal agent os=macos" => ("macOS", true),
-        "infraternal agent os=linux" => ("Linux", true),
-        "infraternal agent os=macos direct=none" => ("macOS", false),
-        "infraternal agent os=linux direct=none" => ("Linux", false),
-        _ => return None,
+    let rest = client_info.strip_prefix("infraternal agent os=")?;
+    let (token, direct_endpoint) = match rest.strip_suffix(WITHOUT_DIRECT) {
+        Some(token) => (token, false),
+        None => (rest, true),
     };
+    let os = KNOWN_OS
+        .iter()
+        .find(|(known, _)| *known == token)
+        .map(|(_, name)| *name)?;
     Some(Reported {
         os,
         direct_endpoint,
@@ -118,14 +140,16 @@ pub fn reported_os(client_info: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
 
-    /// Each form this module sends maps to its stored name; everything else is unknown.
+    /// Each listed token maps to its stored name; everything else (old agents, servers, near-misses) is unknown.
     #[test]
     fn only_exact_hello_forms_name_an_os() {
         assert_eq!(reported_os("infraternal agent os=macos"), Some("macOS"));
         assert_eq!(reported_os("infraternal agent os=linux"), Some("Linux"));
         assert_eq!(reported_os("infraternal agent"), None);
+        assert_eq!(reported_os("infraternal agent os="), None);
         assert_eq!(reported_os("infraternal agent os=macos "), None);
         assert_eq!(reported_os("infraternal agent os=MacOS"), None);
+        assert_eq!(reported_os("infraternal agent os=linux;x"), None);
         assert_eq!(reported_os("infraternal-server/0.1"), None);
     }
 
@@ -156,25 +180,35 @@ mod tests {
         assert_eq!(reported("infraternal agent os=macos direct=none "), None);
         assert_eq!(reported("infraternal agent os=macos direct=yes"), None);
         assert_eq!(reported("infraternal agent direct=none"), None);
+        assert_eq!(
+            reported("infraternal agent os=freebsd direct=none"),
+            without("FreeBSD")
+        );
+        assert_eq!(reported("infraternal agent os=direct=none"), None);
     }
 
-    /// The text this build sends is one the server reads back (on the two supported systems).
+    /// #337: a build for any listed system names itself, not only macOS and Linux. Before this, a FreeBSD agent
+    /// sent plain `infraternal agent` and its machine fell back to `host-<id>`.
+    #[test]
+    fn every_listed_system_is_named() {
+        assert_eq!(reported_os("infraternal agent os=freebsd"), Some("FreeBSD"));
+        assert_eq!(reported_os("infraternal agent os=windows"), Some("Windows"));
+        assert_eq!(reported_os("infraternal agent os=illumos"), Some("illumos"));
+    }
+
+    /// The Hello this build sends is one the server reads back, for every target this table lists.
     #[test]
     fn this_build_reports_itself() {
-        let expected = if cfg!(target_os = "macos") {
-            Some("macOS")
-        } else if cfg!(target_os = "linux") {
-            Some("Linux")
-        } else {
-            None
-        };
-        assert_eq!(reported_os(CLIENT_INFO), expected);
-        assert_eq!(reported_os(CLIENT_INFO_WITHOUT_DIRECT), expected);
-        if expected.is_some() {
-            assert_eq!(
-                reported(CLIENT_INFO_WITHOUT_DIRECT).map(|r| r.direct_endpoint),
-                Some(false)
-            );
-        }
+        let expected = KNOWN_OS
+            .iter()
+            .find(|(token, _)| *token == std::env::consts::OS)
+            .map(|(_, name)| *name);
+        assert_eq!(reported_os(client_info()), expected);
+        assert!(client_info().starts_with("infraternal agent os="));
+        let without = format!("{}{WITHOUT_DIRECT}", client_info());
+        assert_eq!(
+            reported(&without).map(|r| (r.os, r.direct_endpoint)),
+            expected.map(|os| (os, false))
+        );
     }
 }

@@ -18,7 +18,7 @@ const SIZES = {
 const HALF = 0.5;
 const near = (a: number, b: number, what: string): void => { expect(Math.abs(a - b), `${what}: ${a.toFixed(2)} vs ${b.toFixed(2)}`).toBeLessThanOrEqual(HALF); };
 /** The Settings windows the docs have no page for yet: they show no "?" (a button that opens nothing is not offered). */
-const WITHOUT_DOCS = ["s-appearance-themes", "s-appearance-layout", "s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-you-profile", "s-machines-updates", "s-mesh-names", "s-mesh-access", "s-mesh-connections", "s-sharing-published-services", "s-sharing-certificates", "s-about-version", "s-about-licences"];
+const WITHOUT_DOCS = ["s-appearance-themes", "s-appearance-layout", "s-terminal-typing", "s-terminal-hosts", "s-terminal-scrollback", "s-you-profile", "s-machines-updates", "s-machines-app-windows", "s-mesh-names", "s-mesh-access", "s-mesh-connections", "s-sharing-published-services", "s-sharing-certificates", "s-about-version", "s-about-licences"];
 const ROWS = ["appearance", "terminal", "you", "machines", "mesh", "sharing", "about"];
 
 async function open(page: Page, extra = ""): Promise<void> {
@@ -171,14 +171,14 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
     const r = n.getBoundingClientRect();
     return { id: n.dataset.windowId!, left: r.left, right: r.right, top: r.top, bottom: r.bottom, w: n.offsetWidth, h: n.offsetHeight, span: n.dataset.span ?? "" };
   }));
-  expect(wins.length).toBe(21);
+  expect(wins.length).toBe(22);
   const layout = await page.evaluate(() => ({ clh: parseFloat((document.querySelector(".cl-world") as HTMLElement).style.getPropertyValue("--clh")), terminalW: document.querySelector<HTMLElement>('.cl[data-view="console"] .ui-window')?.offsetWidth ?? 0 }));
   expect(layout.terminalW, "a terminal window gives the default width").toBeGreaterThan(300);
   expect(layout.clh, "the layout's height is known").toBeGreaterThan(500);
   const byRow = new Map<string, typeof wins>();
   for (const w of wins) { const key = w.id.split("-")[1]!; byRow.set(key, [...(byRow.get(key) ?? []), w]); }
   expect([...byRow.keys()]).toEqual(ROWS);
-  expect([...byRow.values()].map((r) => r.length)).toEqual([2, 4, 5, 2, 4, 2, 2]);
+  expect([...byRow.values()].map((r) => r.length)).toEqual([2, 4, 5, 3, 4, 2, 2]);
   for (const w of wins) {
     near(w.w, layout.terminalW, `${w.id} has the layout's width`);
     near(w.h, layout.clh, `${w.id} has the layout's height: it does not grow to its content`);
@@ -202,7 +202,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
 
   // A window the docs have a page for has "?" as the first button of its action group, and the group obeys the alignment rules. A window without a page has no "?".
   const groups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(groups.length).toBe(21);
+  expect(groups.length).toBe(22);
   expect(groups.filter((g) => g.ids.length === 0).map((g) => g.id).sort(), "windows without a docs page offer no button").toEqual([...WITHOUT_DOCS].sort());
   const settingsInset = checkGroups(groups.filter((g) => g.ids.length > 0), "docs");
   // No window's name is ever cut short, even with five windows to a row.
@@ -421,7 +421,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   expect(field!.height).toBeGreaterThanOrEqual(43.5);
   // The "?" is the first button of the action group, the group obeys the alignment rules on a phone too, and the title still shows.
   const phoneGroups = await page.evaluate(measureActions, '.cl[data-view="settings"] .ui-window');
-  expect(phoneGroups.length).toBe(21);
+  expect(phoneGroups.length).toBe(22);
   checkGroups(phoneGroups.filter((g) => g.ids.length > 0), "docs");
   const hit = await page.locator('[data-window-id="s-mesh-keys"] .ui-window-action[data-action="docs"]').boundingBox();
   expect(hit!.width).toBeGreaterThanOrEqual(28);
@@ -821,7 +821,7 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     const vw = size.viewport.width, vh = size.viewport.height;
     const problems: string[] = [];
     const ids = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.cl[data-view="settings"] .ui-window')].map((n) => n.dataset.windowId!));
-    expect(ids.length).toBe(21);
+    expect(ids.length).toBe(22);
     let rings = 0;
     for (const id of ids) {
       await flyTo(page, id);
@@ -1307,6 +1307,39 @@ for (const [label, size] of [["1440x900", SIZES.desktop], ["393x852", SIZES.phon
     await context.close();
   });
 }
+
+/** A wheel at the end of a window's content stays with that window (D377): fresh gestures there never step the canvas to the next row. */
+test("desktop: a wheel at the end of a window's content never steps to the next row", async ({ browser }) => {
+  test.setTimeout(240_000);
+  const context = await browser.newContext({ ...SIZES.desktop, baseURL: baseURL() });
+  const page = await context.newPage();
+  await open(page, "&at=terminal.typing");
+  const first = await page.evaluate(windowBoxes);
+  const b = (await page.locator('[data-window-id="s-terminal-typing"] .ui-window-body > .ui-settings-pane').boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  for (let i = 0; i < 6; i++) {
+    await page.mouse.wheel(0, 2000);
+    // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture
+    await page.waitForTimeout(300);
+  }
+  // sleep: the pane's scroll settles; no event marks the end
+  await page.waitForTimeout(600);
+  const atEnd = await page.evaluate(windowBoxes);
+  const typing = atEnd.find((w) => w.id === "s-terminal-typing")!;
+  expect(typing.paneMax - typing.paneTop, "the content is at its end").toBeLessThanOrEqual(1);
+  // Not one window moved while the content scrolled to its end, even with fresh gestures arriving at the end.
+  for (const [k, w] of atEnd.entries()) near(w.top, first[k]!.top, `${w.id} did not move while the content reached its end`);
+  for (let i = 0; i < 3; i++) {
+    await page.mouse.wheel(0, 300);
+    // sleep: a quiet gap longer than a gesture (150 ms), so each wheel is a fresh gesture at the end
+    await page.waitForTimeout(350);
+  }
+  // sleep: a wrongly started row step would be mid-spring now; no event marks that nothing happened
+  await page.waitForTimeout(1000);
+  const after = await page.evaluate(windowBoxes);
+  for (const [k, w] of after.entries()) near(w.top, first[k]!.top, `${w.id} did not move: the wheel at the end of the content stayed with the window`);
+  await context.close();
+});
 
 /** A resize drag changes only its own window (D323): the windows above, below and beside it keep their size, whichever edge is dragged. */
 test("desktop: narrowing one window leaves the rest of its column and its row as they were", async ({ browser }) => {

@@ -286,7 +286,7 @@ export function renderDevices(container: HTMLElement, api: DevicesApi): () => vo
       };
       button("Jump to its view", ICON_JUMP, () => api.jump(d.view));
       if (!d.current) button("Sign out this device", ICONS.signOut, (b) => mountConfirmTip(b, {
-        label: `Sign out ${d.name}`, title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
+        title: `Sign out ${d.name}?`, effect: "That device will be signed out and will need your passkey to sign in again.",
         named: true, confirmLabel: "Sign out device", cancelLabel: "Keep signed in", onConfirm: () => { api.signOut(d); paint(); },
       }));
       list.append(li);

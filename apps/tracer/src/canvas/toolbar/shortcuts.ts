@@ -15,6 +15,7 @@ import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
 import { onDemand } from "../../on-demand";
 import { WINDOW_DOCS_KEYS } from "./window-docs-keys";
+import { canvasModifierKeys } from "../camera/canvas-wheel-modifier";
 
 /** The digit-row chord that flies to view `n` (1 to 9): ⌘n on a Mac, Ctrl+Shift+n elsewhere. A position, so the digit row is matched by physical key. */
 const viewCombo = (n: number): Combo => platformCombo({ code: `Digit${n}`, mod: true }, { code: `Digit${n}`, mod: true, shift: true });
@@ -26,7 +27,11 @@ export const bindingText = (id: string): string => {
   return c ? comboLabel(c) : "";
 };
 
-/** Binds the canvas keys (window moves, the Escape overview, Control/Command + digit view jumps); flights they start jump, see Camera.flyTo. */
+/**
+ * Registers the canvas shortcuts in the shortcut registry and installs their handlers on `cx`: window moves, the Escape overview and
+ * Control/Command + digit view jumps (flights they start jump, see Camera.flyTo). Returns a function that removes both. The keyboard help
+ * (`?`) lists every entry, including the ones that are not bindings, such as the wheel gestures.
+ */
 export function installShortcuts(cx: Ctx): () => void {
   const { stage, signal, state, views } = cx;
   const removeRegistry = registerShortcuts({ id: "canvas", title: "Canvas", area: "canvas", shortcuts: [
@@ -54,7 +59,11 @@ export function installShortcuts(cx: Ctx): () => void {
     // emacs), ⌘/ and Ctrl+Shift+/ are the shortcuts panel, and Ctrl+Alt is AltGr: all three are taken.
     ...(cx.adapters.docs ? [{ id: "window-docs", label: "Read about this window", keys: "", combo: platformCombo(WINDOW_DOCS_KEYS.mac, WINDOW_DOCS_KEYS.other) }] : []),
     { id: "overview", label: "All views (overview)", keys: "Esc" },
-    { id: "pan", label: "Next window or column", keys: "Scroll" },
+    // A swipe that starts on empty canvas or a window's chrome moves to the next window or column (D377); plain scrolling over content never does.
+    { id: "pan", label: "Next window or column", keys: "Swipe on empty canvas" },
+    // Moving the canvas with a mouse wheel on purpose (D374, D377): the modifier lives in camera/canvas-wheel-modifier.ts, and the
+    // words follow it ("⌥ + scroll" on a Mac, "Alt + scroll" elsewhere).
+    { id: "wheel-canvas", label: "Move the canvas with the wheel", keys: canvasModifierKeys() },
     { id: "views", label: "Go to view 1 to 3", keys: { mac: "⌘1–3", other: "Ctrl+Shift+1–3" } },
   ] });
   // A key never animates and one press is one action: auto-repeat is ignored, so holding the key cannot queue work.

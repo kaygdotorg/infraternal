@@ -58,19 +58,54 @@ pub fn fallback_machine_name(os: Option<&str>, host_id: &str) -> String {
     format!("{}-{id}", os_family(os))
 }
 
-/// The short operating-system word used in fallback names.
-fn os_family(os: Option<&str>) -> &'static str {
+/// The short operating-system word used in fallback names: the family, never the distribution (D339, #337).
+///
+/// The name comes from an agent's reported OS (`Linux`, `macOS`, or a target name such as `illumos`) or from the
+/// SSH probe's os-release name (`AlmaLinux 9.4`, `Ubuntu`). Words are matched whole, so `macOS` never matches
+/// inside another word. A distribution name is Linux: any word that contains `linux`, or a known distribution.
+/// Unknown or missing gives `host`, the only fallback that claims no OS at all.
+fn os_family(os: Option<&str>) -> String {
     let os = os.unwrap_or_default().to_ascii_lowercase();
-    if os.contains("mac") || os.contains("darwin") {
-        "macos"
-    } else if os.contains("windows") {
-        "windows"
-    } else if os.contains("bsd") {
-        "freebsd"
-    } else if os.contains("linux") || os.contains("debian") || os.contains("ubuntu") {
-        "linux"
+    let words: Vec<&str> = os
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let has = |names: &[&str]| words.iter().any(|word| names.contains(word));
+    // A BSD or other system keeps its own word (`openbsd`, `illumos`): calling it `freebsd` would claim an OS
+    // the machine did not report.
+    let own = words.iter().find(|word| {
+        matches!(
+            **word,
+            "freebsd"
+                | "openbsd"
+                | "netbsd"
+                | "dragonfly"
+                | "illumos"
+                | "solaris"
+                | "sunos"
+                | "haiku"
+                | "android"
+                | "ios"
+                | "aix"
+                | "redox"
+                | "fuchsia"
+        )
+    });
+    if has(&["mac", "macos", "darwin"]) {
+        "macos".to_owned()
+    } else if has(&["windows"]) {
+        "windows".to_owned()
+    } else if let Some(word) = own {
+        (*word).to_owned()
+    } else if words.iter().any(|word| word.ends_with("linux"))
+        || has(&[
+            "ubuntu", "debian", "fedora", "centos", "rocky", "suse", "opensuse", "nixos", "gentoo",
+            "alpine", "mint", "raspbian", "manjaro", "rhel", "kali", "arch", "amazon", "oracle",
+        ])
+    {
+        "linux".to_owned()
     } else {
-        "host"
+        "host".to_owned()
     }
 }
 

@@ -16,8 +16,8 @@ judgment, and nothing waits on either.**
   shared with calternal and is used only for benchmarks, never for builds.
   Each run holds the shared lock (`scripts/perf-run`, agreed with the
   calternal session). Built binaries are copied to the VM.
-- Each budget in DECISIONS 41 and 81 is a CI check that fails on a
-  regression:
+- Each budget in DECISIONS 41 (rewritten as D375's 120 Hz table, §6) and 81
+  is a CI check that fails on a regression:
   - keystroke overhead and frame time, measured from the real UI;
   - flood throughput;
   - reconnect time;
@@ -25,6 +25,18 @@ judgment, and nothing waits on either.**
   - RSS at realistic scale (for example 50 sessions, not 1);
   - bundle size;
   - first paint.
+- Browser specs that assert a frame or motion budget carry the Playwright tag
+  `@perf` (`{ tag: "@perf" }` on the test). They only mean something on a quiet
+  machine, so `apps/tracer/playwright.config.ts` leaves them out (one
+  `grepInvert`) for `scripts/verify`, the nightly browser suite and every shared
+  build host (compute01, dev-02). On the perf VM, run them through
+  `TRACER_PERF=1 perf-run -- bun x playwright test --grep @perf` from
+  `apps/tracer`. A new spec that asserts wall-clock cost gets the tag.
+  Currently tagged: mesh-perf, the mesh frame budgets, motion-audit,
+  clusters-frames and clusters-keyboard-split. Not tagged: `perf-hud` (checks
+  that an injected stall is recorded, not how fast anything is) and
+  `row-swipe-continuity` (checks the row's position against the finger, and
+  only logs frame times).
 - Nightly: a trend of every budget, plus fuzzing of every parser.
 - Memory is always reported per unit × the expected count. A number for one
   session is not evidence.
@@ -168,10 +180,15 @@ numbered history, both timestamp arrival orders and altered checksums.
   `scripts/verify fast` runs a three-sample zero-delay byte-forwarding check
   without a timing bound; the configured RTT measurement stays in the latency
   profile. The full
-  `scripts/verify latency` profile runs the relay self-test, a real agent/PTy
-  echo and flood gate, `verify-auth-browser`, and the production tracer browser
-  suite. Playwright uses `TRACER_TEST_PORT` (default 4621); concurrent runs
-  must choose distinct ports.
+  `scripts/verify latency` profile runs the relay self-test, a real agent/PTY
+  echo and flood probe, `verify-auth-browser`, and the two production-tracer
+  specs that print D375 rows (`test/terminal.spec.ts`,
+  `test/latency-profile.spec.ts`), twice (see "Frame pacing" below). The
+  whole functional browser suite is not part of the profile: it took about
+  5 h on one worker and measures nothing the table needs; it runs in the
+  nightly browser suite (D373). Playwright uses `TRACER_TEST_PORT` (default
+  4621); concurrent runs must choose distinct ports. The agent is built for
+  the host's own target, so the profile runs on x86_64 and aarch64 VMs.
 - The TCP relay does not emulate the requested 0.5% packet loss: dropping bytes
   would corrupt a reliable TCP/WebSocket stream, and the available CDP
   `packetLoss` setting is documented for WebRTC rather than HTTP/WebSocket
@@ -179,14 +196,95 @@ numbered history, both timestamp arrival orders and altered checksums.
 
   The gate therefore reports `loss=unsupported`; packet loss needs a separate
   transport-level mechanism that preserves TCP semantics.
-- The input-to-photon report uses fixed `METRIC` records. Keystroke-to-glyph
-  p99 is report-only until predictive echo #50 lands, then its budget is 17 ms.
-  Echo confirmation is bounded by RTT + 34 ms. Flooding either another PTY or
-  the same PTY may grow echo p99 by at most one 60 Hz frame (16.67 ms).
-  Returning sign-in to a usable terminal uses the 5 s budget tracked in #52.
-  Reconnect-to-resumed is bounded by RTT × 2 + 300 ms; at the default 300 ms
-  RTT this is 900 ms, while D41's under-300 ms reconnect budget remains the
-  zero-network-overhead reference.
+- **Latency targets [D375].** The owner set every latency budget at 120 Hz on
+  2026-11-09; one frame is 8.3 ms. This table replaces D41's budgets and the
+  old "RTT × 2 + 300 ms" reconnect bound.
+
+  | Measure | Target, p99 | Measured by |
+  |---|---|---|
+  | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every one of 100 probe keys (a declined prediction counts as its real echo) |
+  | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
+  | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
+  | Own overhead, no network | 8.3 ms (stretch 5 ms); gate 12 ms until reached | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
+  | Reconnect, last screen | 8.3 ms | tracer scenario, socket drop to the first frame showing the last screen |
+  | Reconnect, typable, resumed link | 1 round trip + 50 ms | `verify-latency.py`, re-attach over the live link to the agent's Ack |
+  | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |
+  | Rendering | 120 fps at 10 MB/s output | `latency-profile.spec.ts`, 1000 / p99 frame interval while the terminal takes 10 MB/s |
+  | First paint | under 1 s on a mid-range phone | `latency-profile.spec.ts`, phone viewport, CPU slowed 4×, no injected delay |
+  | Idle infraternal agent | under 15 MB RSS | `verify-latency.py`, agent RSS idle, with no session and with one quiet session (the larger) |
+
+  Every row is printed on every run as `METRIC name=d375_<row>`, and
+  `scripts/latency_targets.py report` ends `scripts/verify latency` with the
+  table: measured value, target, the gate used and PASS/FAIL. A missing row
+  fails the run like a missed one. The full log is kept under
+  `$HOME/.cache/codex-scratch/latency/evidence/`.
+- **How the rows gate [D375].** Each row gates on its target, except own
+  overhead: its 8.3 ms target becomes the gate only once it is reached. Until
+  then the gate is **12 ms** (`OWN_OVERHEAD_GATE_MS` in
+  `scripts/latency_targets.py`; orchestrator, #447 round 3). It replaced the
+  D296 baseline of about 25 ms after the unthrottled profile measured
+  8.56 ms on dev-02.
+- **Switch rule for own overhead.** After **two consecutive perf-VM runs** of
+  `scripts/verify latency` with the own-overhead row (unthrottled) at or
+  under 8.3 ms, the gate becomes the 8.3 ms target: set
+  `OWN_OVERHEAD_GATE_MS = FRAME_MS` in the change that records both runs, with
+  their logs on the issue. A run on a shared build VM does not count toward
+  the two.
+  "Round trip" in a row means the slowest round trip the profile produces
+  (configured RTT plus its 30 ms jitter bound), so the relay's jitter cannot
+  fail a row by itself. The functional browser suite only prints its rows
+  (#314); the report and the perf-VM suite (`apps/tracer/perf`) are what
+  fail. Returning sign-in to a usable terminal keeps the 5 s budget tracked in
+  #52; it is not a D375 row.
+- **Frame pacing [D375].** Headless Chromium paces animation frames at
+  60 Hz, so a frame-bound row (a letter, the last screen, the browser's own
+  share of overhead, rendering) measured there includes up to 16.7 ms of
+  waiting for the next 60 Hz frame, whatever our code does. The profile
+  therefore runs the row specs twice:
+  - **unthrottled** (`INFRATERNAL_LATENCY_DISPLAY=unthrottled`, Chromium
+    started with `--disable-gpu-vsync --disable-frame-rate-limit`): a frame
+    comes as soon as the previous one is done, so the rows measure our own
+    work. **This run gates.**
+  - **60 Hz** (`INFRATERNAL_LATENCY_DISPLAY=60hz`, normal pacing): what a
+    60 Hz screen shows. Reported in its own column, never gates.
+
+  Each run prints `METRIC name=frame_pacing display=… phase=rows fps=…`, the
+  animation-frame rate while the prediction-off probe types its keys, and an
+  idle-page rate for reference. The report fails when the unthrottled run
+  stayed under 120 fps *while its rows ran*: below a 120 Hz display's rate,
+  under the rows' own load, its frame-bound rows would include frame waits
+  again. A row seen only at 60 Hz counts as MISSING. When one log measures a
+  row more than once, the report keeps the worst measurement and says "worst
+  of N runs", so a rerun cannot hide a failure. A row with fewer samples than
+  its minimum fails as well (100 keys, frames or flood samples; 20 reconnects
+  or pages; 2 memory readings), because a p99 of a few samples is only their
+  maximum.
+- **Measuring on your own device.** The gate cannot see a real 120 Hz panel;
+  this is a manual check, not a gate. On the owner's iPhone or Mac, signed
+  in to a server running the build under test:
+  1. Open a terminal, then add `?probe=1&n=100&predict=1` to the address (the
+     probe panel ships in production builds; `predict=1` turns predictive
+     echo on). Prediction engages only when the round trip is above 60 ms;
+     on a faster link the letter you see is the real echo.
+  2. Press **Run probe**. It types 100 keys and shows p50/p95/p99 key-to-paint
+     and the hop breakdown. With prediction on, p99 is the "key to letter"
+     row; target 8.3 ms.
+  3. Press **Drop socket**. "Time to resume" is the reconnect after a lost
+     link (4 round trips + 50 ms); repeat it a few times.
+  4. Press **Copy results** and paste them on the issue with the device,
+     browser version, refresh rate and the network path (for example
+     "iPhone, Safari, 120 Hz, LTE to Frankfurt").
+  Whether the browser really paints at 120 Hz is the device's call: a laptop
+  on battery or a phone in low-power mode can drop to 60 Hz or lower, and
+  Safari may limit pages to 60 Hz unless its settings allow more. If p50
+  key-to-paint sits near 16 ms, the page is being painted at 60 Hz.
+- **Measurement limits.** The browser rows run against the tracer test double
+  behind the relay, not the real server; the native rows run against the real
+  agent and PTY without a browser. Chromium has no 120 Hz emulation, so the
+  unthrottled number is a floor for a 120 Hz display (a real one adds up to
+  8.3 ms of waiting for its next frame) and the 60 Hz number is the ceiling.
+  Numbers from a shared build VM are indicative; gate decisions use the perf
+  VM.
 
 ## 7. Rust build speed and static binary size
 
@@ -752,7 +850,7 @@ targets for one second each; it is a smoke check, not an hour of fuzzing.
 
 ### Nightly browser suite (D373, #443)
 
-The full tracer browser suite (the browser phase of `verify_latency`) runs
+The full tracer browser suite (`bun x playwright test` in `apps/tracer`) runs
 every night on the latest origin/dev on dev-02, so job gates stay fast. The
 timer fires at 05:00 IST (up to fifteen minutes of jitter), three hours after
 the fuzz, and takes one of the build slots like any other run. Everything is

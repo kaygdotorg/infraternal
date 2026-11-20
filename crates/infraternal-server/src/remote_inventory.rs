@@ -351,6 +351,29 @@ mod tests {
             "Debian GNU/Linux"
         );
     }
+    /// #337 (D339): an agent that reports no hostname still gets a name from the OS it reported, `<os>-<6 id
+    /// characters>`, and `host-<id>` only when no OS was reported at all (an old agent).
+    #[tokio::test]
+    async fn an_agent_without_a_hostname_is_named_by_the_os_it_reported() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let six: String = host.simple().to_string().chars().take(6).collect();
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["name"],
+            format!("host-{six}")
+        );
+        source.save_reported_os(host, "Linux").await;
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["name"],
+            format!("linux-{six}")
+        );
+    }
+
     /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
     /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
     #[tokio::test]

@@ -44,7 +44,7 @@ async function trace(page: Page, run: () => Promise<void>): Promise<{ work: numb
 
 const wheel = (kind: "zoom" | "pan", ms: number): string => `new Promise((done) => { const t = document.querySelector(".cl-viewport"); const start = performance.now(); const step = (now) => { const p = (now - start) / ${ms}; if (p >= 1) { done(); return; } const d = p < 0.5 ? -1 : 1; t.dispatchEvent(new WheelEvent("wheel", ${kind === "zoom" ? "{ deltaY: d * 5, ctrlKey: true, clientX: 720, clientY: 450, bubbles: true, cancelable: true }" : "{ deltaX: d * 30, deltaY: d * 10, clientX: 720, clientY: 450, bubbles: true, cancelable: true }"})); requestAnimationFrame(step); }; requestAnimationFrame(step); })`;
 
-test("1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag", async ({ page }) => {
+test("1,000 nodes: the main thread's work per frame of a zoom, a pan and a drag", { tag: "@perf" }, async ({ page }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/?mock=1&proto=clusters&scene=6&theme=ink&bg=none&mesh=1000&meshgrants=3500" + (process.env.PERFQ ?? ""));

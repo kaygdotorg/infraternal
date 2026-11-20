@@ -826,10 +826,14 @@ impl Store {
         if port == 0 || port == 51_820 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        write_public(
-            &self.listen_port_path,
-            &serde_json::to_vec(&port).map_err(io::Error::other)?,
-        )
+        let body = serde_json::to_vec(&port).map_err(io::Error::other)?;
+        // Every start records the port it already has; leave an unchanged record alone (#221).
+        // Only this record and the Mac snapshot skip: the Linux journal and snapshot saves keep
+        // their write-always shape, which the failure-injection tests rely on.
+        if existing_matches(&self.listen_port_path, &body) {
+            return Ok(());
+        }
+        write_public(&self.listen_port_path, &body)
     }
 
     /// Read the saved automatic listener choice, if this node has started before.
@@ -1378,6 +1382,43 @@ fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option
         Err(error) => Err(error),
     }
 }
+/// Reports whether `path` already holds exactly `body`, so the caller can skip the save.
+///
+/// A restart rewrites most public records with the bytes they already hold. Replacing the file
+/// costs a temporary file, two fsyncs and a rename; on a Mac that is about 9 ms on every start
+/// for no change (#221). An fsync of an unchanged file is also not free there: it waits for
+/// whatever else the volume has dirty, about 4 ms in the trace, so this does not sync either.
+///
+/// What that gives up: the earlier save of these bytes returned only after its own syncs, or it
+/// died part-way. If it died between the rename and the directory sync, a power cut before the
+/// OS flushes could still bring back the older record. That is the same state a crash during
+/// that earlier save leaves, which restore already recovers from, so no new state appears.
+///
+/// Only a file that is ours (owner, mode 0600, one link, no symlink) counts as equal; anything
+/// else is replaced as before. `false` also covers missing and unreadable files.
+pub(crate) fn existing_matches(path: &Path, body: &[u8]) -> bool {
+    let Ok(mut file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(path)
+    else {
+        return false;
+    };
+    let Ok(meta) = file.metadata() else {
+        return false;
+    };
+    if !meta.is_file()
+        || meta.uid() != nix::unistd::Uid::effective().as_raw()
+        || meta.nlink() != 1
+        || meta.mode() & 0o777 != 0o600
+        || meta.len() != body.len() as u64
+    {
+        return false;
+    }
+    let mut current = Vec::with_capacity(body.len());
+    file.read_to_end(&mut current).is_ok() && current == body
+}
+
 /// Atomically replace a public state file through a synced temporary file.
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
@@ -2385,6 +2426,49 @@ pub(crate) mod tests {
                 .expect("legacy state remains readable")
                 .windows(b"gotatun".len())
                 .any(|window| window == b"gotatun")
+        );
+    }
+
+    /// Saving the bytes a record already holds leaves the file alone; a changed value replaces it
+    /// and a file that is not ours is never trusted as "already saved" (#221).
+    #[test]
+    fn identical_public_record_is_not_rewritten() {
+        let directory = Directory::new();
+        let (store, _) = Store::open(&directory.0).expect("initial state");
+        store.record_listen_port(10_254).expect("first save");
+        let inode = fs::metadata(&store.listen_port_path)
+            .expect("metadata")
+            .ino();
+
+        store.record_listen_port(10_254).expect("repeat save");
+        assert_eq!(
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .ino(),
+            inode,
+            "an identical record must not be replaced"
+        );
+
+        store.record_listen_port(10_255).expect("changed save");
+        assert_eq!(store.recorded_listen_port().expect("read"), Some(10_255));
+        assert_ne!(
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .ino(),
+            inode,
+            "a changed record is replaced atomically"
+        );
+
+        fs::set_permissions(&store.listen_port_path, fs::Permissions::from_mode(0o644))
+            .expect("loosen mode");
+        store.record_listen_port(10_255).expect("repair save");
+        assert_eq!(
+            fs::metadata(&store.listen_port_path)
+                .expect("metadata")
+                .mode()
+                & 0o777,
+            0o600,
+            "equal bytes in a file with the wrong mode are rewritten, not trusted"
         );
     }
 
