@@ -128,10 +128,21 @@ def start_node(
     )
     identity = json.loads(node.stdout.readline())
     if identity.get("port") != listen_port:
+        try:
+            process_port = next(
+                (
+                    entry.partition(b"=")[2].decode(errors="replace")
+                    for entry in Path(f"/proc/{node.pid}/environ").read_bytes().split(b"\0")
+                    if entry.startswith(b"INFRATERMINAL_MESH_PORT=")
+                ),
+                "<unset>",
+            )
+        except OSError as error:
+            process_port = f"<unavailable: {error}>"
         node.close()
         raise RuntimeError(
             f"mesh listener ignored its fixture override: requested {listen_port}, "
-            f"published {identity.get('port')}"
+            f"published {identity.get('port')}, child environment has {process_port}"
         )
     node.stdout.seek(0)
     return node
