@@ -1126,8 +1126,8 @@ impl RuntimeState {
     /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
     ///
     /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
-    /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
-    /// walking or relayed peer. No timer runs for a finished walk, so an idle node stays idle
+    /// [`Self::engine_addresses`] adds one before the apply when the snapshot changes any
+    /// installed peer (#483, J1025). No timer runs for a finished walk, so an idle node stays idle
     /// (D81). Known follow-up (J699 P3-2, D393): once any walk has found its peer, `watching` is
     /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
     /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
@@ -1185,14 +1185,11 @@ impl RuntimeState {
     /// Each peer's send and recent confirmed endpoints before `next` is applied, by device key,
     /// for [`Self::refresh_walks`] (J602 F1).
     ///
-    /// Read only when `next` changes a peer that walks or is relayed, because only then can
-    /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
+    /// Read whenever `next` changes any installed peer: `apply` rewrites a changed peer whole and
+    /// can keep its address only from this read ([`kept_address`]). Every other snapshot reads
     /// nothing here.
     async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, EngineEndpoint> {
-        let watched = |peer: &crate::dataplane::Peer| {
-            !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
-        };
-        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
+        if !crate::candidate_walks::engine_read_needed(self.config.as_ref(), next) {
             return BTreeMap::new();
         }
         let Some(device) = self.device.as_ref() else {
@@ -2320,6 +2317,24 @@ mod tests {
             #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
+    }
+
+    /// #483 (J1025): a peer with no candidate list is still re-installed with its snapshot
+    /// endpoint, so the engine's live address must be read before any peer change, or a stale
+    /// snapshot overwrites a roamed single-address peer.
+    #[test]
+    fn a_changed_single_address_peer_needs_the_engine_read() {
+        let applied = one_peer_config(Some("198.51.100.1:10254".parse().unwrap()));
+        let next = one_peer_config(Some("198.51.100.9:10254".parse().unwrap()));
+        assert!(crate::candidate_walks::engine_read_needed(
+            Some(&applied),
+            &next
+        ));
+        assert!(!crate::candidate_walks::engine_read_needed(
+            Some(&applied),
+            &applied
+        ));
+        assert!(!crate::candidate_walks::engine_read_needed(None, &next));
     }
 
     /// The Linux typed-packet adapter applies grants before returning packets to `GotaTun`.
