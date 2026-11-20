@@ -26,8 +26,12 @@
  * `data-open`), and every 250 ms for as long as it is on screen, but only re-evaluated when its box moved or resized. That
  * is a handful of box reads a few times a second, never per frame, and never in an input handler.
  *
- * The adaptive code is a separate on-demand chunk, prefetched when the first terminal registers; this module is the eager
- * part (the observer and the hit test) and stays small.
+ * This module is an on-demand chunk (D188), requested by the first `applyTheme` (the start of boot, in parallel with the first
+ * paint) and by each terminal as it opens, so none of the glass code is on the critical path. It starts by scanning the surfaces
+ * already in the document, so one that appeared before it arrived is covered when it does. The adaptive code, the contrast
+ * solver and the terminal's cell reader are chunks of their own (the adaptive one is prefetched when the first terminal registers).
+ * A surface marked here before they arrive is covered as soon as they do: the rules in `glass-rules.on-demand.ts` are keyed on
+ * the mark, not on when it was written.
  */
 import { TINT_USERS } from "./themes";
 
@@ -180,11 +184,12 @@ let started = false;
 
 /**
  * Starts the one watcher for every glass surface in the document (see the module note). Safe to call again; `applyTheme`
- * calls it. It does nothing where there is no document.
+ * requests it. It does nothing where there is no document. Sets `data-glass-watching` on the root once it is looking, which the specs wait for.
  */
 export function watchGlassSurfaces(): void {
   if (started || typeof MutationObserver === "undefined" || !document.body) return;
   started = true;
+  document.documentElement.setAttribute("data-glass-watching", "");
   const consider = (node: Node): void => {
     if (!(node instanceof Element)) return;
     if (node.matches(TINT_USERS)) watch(node as HTMLElement);

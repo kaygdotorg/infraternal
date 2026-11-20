@@ -8,7 +8,7 @@
  */
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
-import { settled } from "./glass-settled";
+import { glassReady, settled } from "./glass-settled";
 import { SIZES } from "./glass-scenes";
 
 /** Where the captures land. */
@@ -27,6 +27,7 @@ for (const size of SIZES) {
         await page.context().request.post("/__mock/open-terminal");
         await page.goto(`/?mock=1&theme=${scheme}&card=${card}&fps=0`);
         await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
+        await glassReady(page);
         await page.evaluate((text) => window.__tracerTestDouble!.writeText(`\x1b[2J\x1b[H${text}`), DENSE);
         await page.keyboard.press("Control+Shift+K");
         const palette = page.locator("#palette");

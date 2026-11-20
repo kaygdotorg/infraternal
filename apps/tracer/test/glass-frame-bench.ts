@@ -3,7 +3,7 @@
  * Frame-time bench for glass over a terminal (D365, #448; priority 3: it must feel native on an iPhone).
  *
  * One page, bundled by `glass-frame-bench.spec.ts` and also served as a static page to Safari in the iPhone Simulator, so the same
- * code produces the desktop and the phone numbers. It uses the real glass code (`applyTheme`, the watcher in `glass-under.ts` and the
+ * code produces the desktop and the phone numbers. It uses the real glass code (`applyTheme`, the watcher in `glass-under.on-demand.ts` and the
  * grid tracker in `glass-adapt.on-demand.ts`) over a stand-in terminal: 40 rows of text, bright rows under the card, and a screen that
  * repaints and notifies the glass on EVERY frame, which is the worst case of a busy terminal. Three phases of {@link PHASE_MS} each:
  *  - `idle`: the screen streams and no card is open (the baseline);
@@ -13,7 +13,7 @@
  * own update count and time (`globalThis.__glassStats`). The glass's cost is `card-tracked` minus `card-untracked`.
  */
 import { applyTheme, THEMES } from "../../../packages/ui/src/themes";
-import { registerGlassGrid, type GlassGrid, type GlassGridRead } from "../../../packages/ui/src/glass-under";
+import { registerGlassGrid, type GlassGrid, type GlassGridRead } from "../../../packages/ui/src/glass-under.on-demand";
 
 /** How long each phase runs, in milliseconds. */
 const PHASE_MS = 4000;

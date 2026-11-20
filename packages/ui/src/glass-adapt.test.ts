@@ -10,8 +10,9 @@
 import { describe, expect, test } from "bun:test";
 import { luminanceOf, type Rgb } from "./glass-contrast";
 import { blurCells, rangeOfGrid } from "./glass-adapt.on-demand";
-import type { GlassGridRead } from "./glass-under";
-import { THEMES, glassFor } from "./themes";
+import type { GlassGridRead } from "./glass-under.on-demand";
+import { glassFor } from "./glass-rules.on-demand";
+import { THEMES } from "./themes";
 
 /** A grid of `cols` by `rows` cells of one colour, cells 8 by 17 px (a terminal's), with the given rows painted `paint`. */
 function screen(cols: number, rows: number, bg: Rgb, paint: Array<{ row: number; colour: Rgb }> = []): GlassGridRead {

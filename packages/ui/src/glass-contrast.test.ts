@@ -17,7 +17,8 @@
 import { describe, expect, test } from "bun:test";
 import { ANY_BACKDROP, GLASS_CEILING, MAX_DRIFT, composite, hexToRgb, luminanceOf, ratioOf, surfaceOver, type GlassFills, type Rgb } from "./glass-contrast";
 import { hexToOklab } from "./color";
-import { CARD_LEVELS, THEMED_COVERAGE, THEMES, glassFills, glassFloor, glassFor, glassRoles, glassTint, levelName, levelOpacity, themedBackdrop } from "./themes";
+import { THEMED_COVERAGE, glassFills, glassFloor, glassFor, glassRoles, themedBackdrop } from "./glass-rules.on-demand";
+import { CARD_LEVELS, THEMES, glassTint, levelName, levelOpacity } from "./themes";
 
 /** The line every text role must reach (D365). */
 const LINE = 4.5;

@@ -19,6 +19,7 @@ import { appendFileSync } from "node:fs";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 import { measure } from "./glass-pixels";
+import { glassReady } from "./glass-settled";
 
 /** Where the captures and the tables land. */
 const OUT = tracerEvidencePath("glass-terminal");
@@ -43,6 +44,7 @@ for (const size of SIZES) {
           await page.context().request.post("/__mock/open-terminal");
           await page.goto(`/?mock=1&theme=${scheme}&card=${card}&fps=0`);
           await expect.poll(() => page.locator("#terminal-screen").getAttribute("data-connected"), { timeout: 30_000 }).toBe("true");
+          await glassReady(page);
           await page.evaluate(() => document.documentElement.setAttribute("data-glass-stats", ""));
           await page.evaluate((text) => window.__tracerTestDouble!.writeText(`\x1b[2J\x1b[H${text}`), DENSE);
           // First open: only to learn where the card lands; it is closed again before the bright rows are written.

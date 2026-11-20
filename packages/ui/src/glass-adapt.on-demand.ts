@@ -3,7 +3,7 @@
  * Adaptive glass density (D365): when the app can see what is behind a glass card, the card asks for only as much tint
  * and text colour as that content needs, so the approved levels stay distinct whenever the backdrop allows it.
  *
- * `glass-under.ts` finds what a surface is over and starts one of two trackers here. Until the first value arrives the
+ * `glass-under.on-demand.ts` finds what a surface is over and starts one of two trackers here. Until the first value arrives the
  * surface is on the static floor (set by the CSS from `data-glass-under`), which is correct over anything, so this module
  * can only make the glass lighter where that is safe; it never makes a card less readable.
  *
@@ -16,9 +16,13 @@
  * The cost of both is measured in `apps/tracer/test/glass-sample-cost.spec.ts` and `glass-terminal.spec.ts`; setting
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
  */
-import { activeGlass, glassFor, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
+import { activeGlass, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
+// The solver module is imported dynamically, not statically: a static import would make the bundler hoist it into a chunk shared
+// by this module and `themes.ts`'s own on-demand request for it, behind a tiny entry chunk that the transfer gate would count as
+// critical. This chunk is only ever loaded on demand, so waiting for it here costs nothing the person can see.
+const { glassFor, nominalOpacity } = await import("./glass-rules.on-demand");
 import { hexToRgb, luminanceOf, type BackdropRange, type Rgb } from "./glass-contrast";
-import type { GlassGrid, GlassGridRead } from "./glass-under";
+import type { GlassGrid, GlassGridRead } from "./glass-under.on-demand";
 
 /** Cells per side of the sample. 8x8 is enough because the card's own blur averages finer detail away anyway. */
 export const SAMPLE_CELLS = 8;
@@ -46,7 +50,7 @@ export function rangeOfSample(rgba: ArrayLike<number>): BackdropRange {
 
 /** What {@link watchBackdrop} needs to know about one card and the picture behind it. */
 export interface BackdropWatch {
-  /** The glass surface to adapt: it carries `data-glass-under` (set by `glass-under.ts`) and is written the sampled opacity and colours. */
+  /** The glass surface to adapt: it carries `data-glass-under` (set by `glass-under.on-demand.ts`) and is written the sampled opacity and colours. */
   marker: HTMLElement;
   /** The picture behind the card: a playing video, a canvas or an image. */
   source: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
@@ -57,17 +61,18 @@ export interface BackdropWatch {
   level: () => number;
 }
 
-/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level and range. */
+/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level, the starting opacity (a look's tint moves it) and range. */
 const solved = new Map<string, ReturnType<typeof glassFor>>();
 /** The solved glass for a theme, level and sampled range, from the memo or the solver. */
 const solveFor = (theme: Theme, level: number, range: BackdropRange): ReturnType<typeof glassFor> => {
   // Quantised to 8/255 so a flicker of a few levels in a video reuses the answer.
   const q = (rgb: Rgb): string => rgb.map((v) => v >> 3).join(",");
-  const key = `${theme.name}|${level}|${q(range.dark)}|${q(range.light)}`;
+  const nominal = nominalOpacity(theme, level);
+  const key = `${theme.name}|${level}|${nominal}|${q(range.dark)}|${q(range.light)}`;
   let hit = solved.get(key);
   if (!hit) {
     if (solved.size > 256) solved.clear();
-    hit = glassFor(theme, level, range);
+    hit = glassFor(theme, level, range, nominal);
     solved.set(key, hit);
   }
   return hit;
@@ -140,7 +145,7 @@ function clearSolution(surface: HTMLElement): void {
   for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
 }
 
-/** What a tracker hands back to `glass-under.ts`: nudge it to look again, or stop it and restore the floor. */
+/** What a tracker hands back to `glass-under.on-demand.ts`: nudge it to look again, or stop it and restore the floor. */
 export interface Tracker { refresh(): void; stop(): void }
 
 /** Counts one update in `globalThis.__glassStats` when the root carries `data-glass-stats` (the cost specs set it). */

@@ -8,6 +8,15 @@
  */
 import type { Page } from "playwright/test";
 
+/**
+ * Resolves once the glass is live on the page: its rules (`data-glass-rules`, written by `glass-rules.on-demand.ts`) and its watcher
+ * (`data-glass-watching`, `glass-under.on-demand.ts`) are on-demand chunks that load at the start of boot, so a spec that opens a
+ * surface right after the page loads waits for them, the way a person's first card comes after the page is up.
+ */
+export async function glassReady(page: Page): Promise<void> {
+  await page.waitForFunction(() => document.documentElement.hasAttribute("data-glass-rules") && document.documentElement.hasAttribute("data-glass-watching"), null, { timeout: 30_000 });
+}
+
 /** The glass's sampling cadence in ms (`SAMPLE_INTERVAL_MS` in `packages/ui/src/glass-adapt.on-demand.ts`), plus a frame of margin. */
 const STABLE_MS = 300;
 

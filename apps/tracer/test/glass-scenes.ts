@@ -9,6 +9,7 @@
  * surface looked like in the first frame a person could see it.
  */
 import { expect, type Page } from "playwright/test";
+import { glassReady } from "./glass-settled";
 
 /** The two sizes of the review: a desktop and an iPhone. */
 export const SIZES = [
@@ -104,6 +105,7 @@ export async function openScene(page: Page, scheme: "ink" | "paper", card: numbe
   // `theme=` is explicit: without it the page picks a theme from the colour scheme, not Ink or Paper.
   await page.goto(`/?mock=1&proto=clusters&scene=1&fps=0&removal=1&bg=none&theme=${scheme}&card=${card}`);
   await expect(page.locator(".ui-window").first()).toBeVisible({ timeout: 30_000 });
+  await glassReady(page);
   await page.waitForFunction(() => Boolean(window.__toast && window.__removalCard), null, { timeout: 30_000 });
   // The scene opens zoomed out, with windows the size of thumbnails; a menu or card on one of those is not what a person uses. Fly to the Console view.
   await page.waitForFunction(() => Boolean((window as unknown as { __tracerClusters?: unknown }).__tracerClusters), null, { timeout: 30_000 });

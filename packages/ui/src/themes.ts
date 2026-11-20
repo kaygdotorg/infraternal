@@ -1,7 +1,5 @@
 /** Curated UI and terminal palettes; one theme keeps both color systems coherent. */
 import { entityPaletteCss } from "./entity-palette";
-import { watchGlassSurfaces } from "./glass-under";
-import { ANY_BACKDROP, MAX_DRIFT, MAX_SHIFT, hexToRgb, luminanceOf, solveGlass, type BackdropRange, type GlassFills, type GlassRole, type GlassSolution, type Rgb } from "./glass-contrast";
 
 import { contrastRatio } from "./color";
 
@@ -153,8 +151,8 @@ export const THEMES: Record<string, Theme> = {
     "6a89a3 ff6762 c0ef7b ffd8a0 94bdff dba5fe 93efdd d6deeb"),
 };
 
-/** Mixes one curated hex color toward another to derive theme-matched surfaces. */
-function mix(left: string, right: string, amount: number): string {
+/** Mixes one curated hex color toward another (`left` to `right`, in sRGB, as six-digit hex) to derive theme-matched surfaces. */
+export function mix(left: string, right: string, amount: number): string {
   const channels = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
   const [from, to] = [channels(left), channels(right)];
   return `#${from.map((value, index) => Math.round(value + ((to[index] ?? value) - value) * amount).toString(16).padStart(2, "0")).join("")}`;
@@ -205,79 +203,11 @@ export const levelName = (level: number): string => LEVEL_NAMES[level - 1] ?? LE
 /** The colour of the glass tint for a theme: the page colour lifted toward white (a little on dark themes, a lot on light). */
 export const glassTint = (active: Theme): string => mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
 
-/** A level's own opacity for a theme (before any contrast floor, see {@link glassFor}). */
+/** A level's own opacity for a theme (before any contrast floor, see `glassFor` in `glass-rules.on-demand.ts`). */
 export const levelOpacity = (active: Theme, level: number): number => {
   const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
   return active.dark ? glass.dark : glass.light;
 };
-
-/**
- * How much of a glass card's area a single block of one of the terminal's own colours is assumed to cover, at most (20%).
- * A card blurs what is behind it, so a block shows as its average: a status line, a few highlighted rows or a progress
- * bar are a small share of a popover. This is a bound chosen on measured trade-offs, not a law: over a whole card of
- * a bright colour (inverse video, a full-screen pager) the approved thin levels cannot hold 4.5:1 and the glass's own
- * text halo carries what it can. Raising it to 30% raises 8 of 30 theme and level pairs, 50% raises 16 and puts Clear on
- * Frosted's opacity on ink, mocha, rosepine, nord and dracula (the sweep is in the audit's note and on #448). The audit
- * (`glass-contrast.test.ts`) holds every theme and level over every one of its 18 terminal colours up to this bound.
- */
-export const THEMED_COVERAGE = 0.2;
-
-/**
- * What a theme's own surfaces can have behind a glass card: the page colour at one end and, at the other, the page colour
- * mixed `coverage` of the way toward the most extreme colour the terminal can paint a block in (the theme's eight ANSI
- * colours, their bright forms, its text colour and its background). A programme can fill a block with any of them, so the
- * range is bounded by the theme's own palette and nothing outside it. A remote window's picture is not in it.
- */
-export function themedBackdrop(active: Theme, coverage = THEMED_COVERAGE): BackdropRange {
-  // Ordered by the luminance of what the card actually shows (the block's colour averaged with the page at `coverage`), which is not
-  // always the block's own order: a saturated red and a grey of equal luminance mix differently with the page colour.
-  const shown = [active.bg, ...[active.fg, ...active.ansi, ...active.bright].map((colour) => mix(active.bg, colour, coverage))]
-    .sort((x, y) => luminanceOf(hexToRgb(x)) - luminanceOf(hexToRgb(y)));
-  return { dark: hexToRgb(shown[0]!), light: hexToRgb(shown[shown.length - 1]!) };
-}
-
-/** CSS custom property each glass text role is written to. `secondary` is the quieter label colour (`--ui-text-secondary`). */
-export const GLASS_ROLE_VARS = {
-  fg: "--fg", fg2: "--fg-2", fg3: "--fg-3", secondary: "--ui-glass-secondary",
-  accent: "--accent", ok: "--ok", danger: "--danger", warn: "--warn",
-} as const;
-
-/** Every text colour a theme puts on glass, by role (see {@link GLASS_ROLE_VARS}). */
-export const glassRoles = (active: Theme): GlassRole[] => Object.entries({
-  fg: active.fg, fg2: active.fg2, fg3: active.fg3, secondary: mix(active.fg, active.bg, 0.2),
-  accent: active.accent, ok: active.ok, danger: active.ansi[1], warn: active.ansi[3],
-}).map(([role, colour]) => ({ role, colour }));
-
-/**
- * The fill states a glass surface paints under its labels, taken from the stylesheet's own tokens and rounded up by two
- * points for compositing: hovered (`--hover`, the text colour at 6%), a chip or a hovered chip (the text colour at 9%),
- * selected (`--accent-soft`, the accent at 16%) and a selected row that is also hovered. Nothing in the stylesheet fills
- * a control on press (the press is a scale), so there is no pressed fill to model.
- */
-export function glassFills(active: Theme): GlassFills {
-  const text = hexToRgb(active.fg), accent = hexToRgb(active.accent);
-  const hover = { rgb: text, alpha: 0.08 }, chip = { rgb: text, alpha: 0.11 }, selected = { rgb: accent, alpha: 0.18 };
-  return [[hover], [chip], [selected], [selected, hover]];
-}
-
-/**
- * The themed set for `level` of `active`: the level's approved opacity, kept, with each text role moved in lightness as
- * far as it must to reach 4.5:1 over the theme's own backdrop ({@link themedBackdrop}) in every fill state. Opacity is
- * raised only for a theme and level where no text colour can reach the line at the approved value (`raised`).
- */
-export function glassFor(active: Theme, level: number, range: BackdropRange = themedBackdrop(active)): GlassSolution {
-  return solveGlass(hexToRgb(glassTint(active)), levelOpacity(active, level), active.dark, glassRoles(active), { range, fills: glassFills(active) });
-}
-
-/**
- * The static floor for `level` of `active`: holds over any backdrop from pure black to pure white, for a picture the
- * theme knows nothing about. Text moves at most {@link MAX_SHIFT} so its tiers stay apart and the tint raises
- * instead, and the tint's lightness stays within {@link MAX_DRIFT} of its own over either extreme (so a light theme over
- * a dark picture is a pale card, not a grey slab).
- */
-export function glassFloor(active: Theme, level: number): GlassSolution {
-  return solveGlass(hexToRgb(glassTint(active)), levelOpacity(active, level), active.dark, glassRoles(active), { range: ANY_BACKDROP, fills: glassFills(active), maxShift: MAX_SHIFT, maxDrift: MAX_DRIFT });
-}
 
 /**
  * The floating-card material of one level for a theme: the tint (kept close to the palette on dark themes), its halo,
@@ -325,7 +255,7 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
  */
 let levelRules = false;
 /** Every element that reads the card tint (see styles.css, tooltip.ts and the key tray's lock mark). */
-/** The elements the glass rules style, and the ones `glass-under.ts` watches. */
+/** The elements the glass rules style, and the ones `glass-under.on-demand.ts` watches. */
 export const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
 function installLevelRules(): void {
   if (levelRules || typeof CSSStyleSheet === "undefined") return;
@@ -360,49 +290,31 @@ function installLevelRules(): void {
 /** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.on-demand.ts`). */
 export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
 
-/** The one adopted sheet that holds the glass contrast rules; created on first use and rewritten on a theme change. */
-let glassSheet: CSSStyleSheet | undefined;
+/**
+ * Puts the glass contrast rules (D365) in place for the theme and card level last applied. The solver that works them out is a
+ * separate on-demand chunk (`glass-rules.on-demand.ts`), so the critical path carries no contrast arithmetic: the chunk is
+ * requested by the first `applyTheme`, at the start of boot, in parallel with the first paint, and writes the rules as soon as it
+ * arrives (and `data-glass-rules` on the root says so). After that every call is a synchronous write, only when the theme changed.
+ */
+let rulesModule: typeof import("./glass-rules.on-demand") | undefined;
+function glassRules(): void {
+  if (rulesModule) rulesModule.installGlassRules();
+  else void import("./glass-rules.on-demand").then((m) => { rulesModule = m; m.installGlassRules(); });
+}
+
+/** Whether the watcher that finds what is under glass surfaces (`glass-under.on-demand.ts`) has been requested. */
+let watcherRequested = false;
+/** Requests the glass watcher once; it is an on-demand chunk like the rules, and scans the surfaces already on the page when it starts. */
+function glassWatcher(): void {
+  if (watcherRequested || typeof document === "undefined") return;
+  watcherRequested = true;
+  void import("./glass-under.on-demand").then((m) => m.watchGlassSurfaces());
+}
+
 /** The theme and card level `applyTheme` last applied; the sampler reads them to solve for what it sees. */
 let applied: { theme: Theme; level: number } | undefined;
 /** The active theme and card level (Ink and Tinted until `applyTheme` has run). */
 export const activeGlass = (): { theme: Theme; level: number } => applied ?? { theme: THEMES.ink!, level: DEFAULT_CARD };
-
-/** The theme the sheet was last written for, so applying the same theme again costs nothing. */
-let glassSheetTheme: Theme | undefined;
-/**
- * The contrast layer of the glass material (D365), as rules for the active theme.
- *
- * Two sets per level: the *themed* set (`glassFor`), which holds over the theme's own palette, keeps each level's approved
- * opacity and solves the text colours, and the *static floor* (`glassFloor`), which holds over anything from pure black to
- * pure white. The themed set applies everywhere. A glass surface that the overlay component finds over a picture (a video,
- * an image, an app window's stream) carries `data-glass-under` on itself and takes the floor; a sampler may refine that by
- * writing {@link GLASS_ADAPT_VARS} on the same surface, and it takes those values instead.
- * Each set writes the glass tint's opacity and the colour of every text role on the glass surface itself (and so on its
- * children), leaving the page's own tokens alone. Specificity of the themed set is zero, like the level rules above.
- * Rebuilt only when the theme changes, because working the sets out costs a few milliseconds.
- */
-function installGlassRules(active: Theme): void {
-  if (typeof CSSStyleSheet === "undefined" || glassSheetTheme === active) return;
-  glassSheetTheme = active;
-  const tint = hexToRgb(glassTint(active)).join(" ");
-  const write = (sol: GlassSolution, fallback?: GlassSolution): string => {
-    const own = `--overlay: ${fallback ? `var(${GLASS_ADAPT_VARS.overlay}, rgb(${tint} / ${sol.alpha}))` : `rgb(${tint} / ${sol.alpha})`};`;
-    return own + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
-  };
-  const css: string[] = [];
-  for (const level of Object.keys(CARD_LEVELS)) {
-    const name = levelName(Number(level)).toLowerCase();
-    css.push(`:where(:root[data-card="${name}"]) :where(${TINT_USERS}) { ${write(glassFor(active, Number(level)))} }`);
-    // On the surface itself: the overlay component marks the surface it finds over a picture (`glass-under.ts`).
-    const floor = glassFloor(active, Number(level));
-    css.push(`:root[data-card="${name}"] :is(${TINT_USERS})[data-glass-under] { ${write(floor, floor)} }`);
-  }
-  if (!glassSheet) {
-    glassSheet = new CSSStyleSheet();
-    document.adoptedStyleSheets = [...document.adoptedStyleSheets, glassSheet];
-  }
-  glassSheet.replaceSync(css.join("\n"));
-}
 
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
 export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
@@ -412,9 +324,9 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
   // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
   installLevelRules();
-  installGlassRules(active);
   applied = { theme: active, level: cardLevel };
-  watchGlassSurfaces();
+  glassRules();
+  glassWatcher();
   root.dataset.scheme = active.dark ? "dark" : "light";
   root.dataset.card = levelName(cardLevel).toLowerCase();
   root.dataset.windowLevel = levelName(windowLevel).toLowerCase();
