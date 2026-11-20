@@ -1482,7 +1482,10 @@ fn combined_entries(source: &File) -> io::Result<BTreeMap<String, Identity>> {
 /// Name the entry that prevented a safe combined move, including on dry runs.
 fn checked_combined_link(source: &File, name: &OsStr) -> io::Result<Option<OsString>> {
     disk::combined_link(source, name, Some(excluded_combined_entry)).map_err(|error| {
-        io::Error::other(format!("checking links in {}: {error}", name.to_string_lossy()))
+        io::Error::other(format!(
+            "checking links in {}: {error}",
+            name.to_string_lossy()
+        ))
     })
 }
 

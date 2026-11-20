@@ -341,8 +341,13 @@ fn check_link_target(dir: &File, target: &Path) -> io::Result<()> {
         current = tree(&current, part)?;
         part = next;
     }
-    if !matches!(kind(&entry(&current, part)?), SFlag::S_IFREG | SFlag::S_IFDIR) {
-        return Err(invalid("link must target a regular file or directory directly"));
+    if !matches!(
+        kind(&entry(&current, part)?),
+        SFlag::S_IFREG | SFlag::S_IFDIR
+    ) {
+        return Err(invalid(
+            "link must target a regular file or directory directly",
+        ));
     }
     // A trailing slash or "/." requires a directory even if components() normalizes it.
     fstatat(dir, target, AtFlags::AT_SYMLINK_NOFOLLOW)?;

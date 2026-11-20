@@ -205,8 +205,7 @@ fn linux_system_data_dir(base: &Path) -> PathBuf {
     .any(|name| {
         std::fs::symlink_metadata(base.join(name))
             .is_ok_and(|entry| entry.is_dir() || entry.is_file())
-    })
-    {
+    }) {
         base.join("server")
     } else {
         base.to_owned()
