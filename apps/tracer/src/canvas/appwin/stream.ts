@@ -303,7 +303,7 @@ export class AppStream {
         // Attached again: a window that was live shows "reconnecting" until its first new picture; a paused one stays paused
         // until then; a window that never had a picture is still connecting.
         if (this.state.kind === "live" && this.hadPicture) this.setState({ kind: "reconnecting" });
-        if (this.keepControl) void this.takeControl();
+        if (this.keepControl) void this.takeControl(false);
       },
       onFrame: (frame) => this.frame(frame),
       onDisconnected: () => {
@@ -447,10 +447,10 @@ export class AppStream {
    */
   resize(css: { width: number; height: number; density: number }, byHand = true): void {
     const next = chooseSize(css.width, css.height, css.density);
-    const changed = sizeChanged(this.size, next);
     this.size = next;
-    if (this.canPushSize()) { if (changed || (byHand && sizeChanged(this.pushedSize, next))) this.pushSize(); }
-    else if (byHand && sizeChanged(this.pushedSize, next)) void this.leaseForSize();
+    if (!byHand || !sizeChanged(this.pushedSize, next)) return;
+    if (this.canPushSize()) this.pushSize();
+    else void this.leaseForSize();
   }
 
   /** Whether a lease is held, for input (announced) or for the size alone (quiet). */
@@ -498,8 +498,11 @@ export class AppStream {
     return true;
   }
 
-  /** Asks to control the machine through this stream (an explicit handover on the server). */
-  async takeControl(): Promise<boolean> {
+  /**
+   * Asks to control the machine through this stream. An explicit handover sends the current size before input.
+   * Reconnect renews the lease with the native geometry that already exists.
+   */
+  async takeControl(syncSize = true): Promise<boolean> {
     if (this.control.kind === "controlled") return true;
     if (this.control.kind === "requesting" || this.streamId === undefined || !this.attached || !this.o.connection.isWelcomed) return false;
     if (performance.now() - this.controlRefusedAt < CONTROL_RETRY_MS) return false;
@@ -510,7 +513,7 @@ export class AppStream {
       if (this.streamId !== id) return false;
       this.keepControl = true;
       this.setControl({ kind: "controlled" });
-      this.pushSize();
+      if (syncSize) this.pushSize();
       this.pollStatus();
       return true;
     } catch {

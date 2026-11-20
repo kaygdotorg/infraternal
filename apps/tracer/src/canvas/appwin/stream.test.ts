@@ -272,7 +272,7 @@ test("a resize queued during control confirmation reaches the machine before pen
     const worker = f.worker as unknown as { onmessage: (event: { data: unknown }) => void };
     worker.onmessage({ data: { t: "first", width: 800, height: 600 } });
     await new Promise<void>(resolve => setImmediate(resolve));
-    resize = () => f.stream.resize({ width: 1000, height: 600, density: 1 }, false);
+    resize = () => f.stream.resize({ width: 1000, height: 600, density: 1 });
 
     binding.send({ kind: "text", scalar: 97 });
     expect(binding.queued).toEqual([{ kind: "text", scalar: 97 }]);
@@ -359,6 +359,26 @@ test("control held before a dropped connection comes back by itself on reconnect
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(f.actions.filter(action => action === "desktop.session.control")).toHaveLength(2);
     expect(f.stream.controlState.kind).toBe("controlled");
+  } finally { f.stream.dispose(); }
+});
+
+/** An automatic control renewal and the resulting canvas refit preserve a local Mac resize. */
+test("reconnecting renews control without replaying geometry", async () => {
+  const f = await fixture();
+  const sizes = () => f.frames.filter(({ frame }) => frame.type === "Desktop" && frame.message.kind === "size");
+  try {
+    expect(await f.stream.takeControl()).toBe(true);
+    expect(sizes()).toHaveLength(1);
+    const handler = f.handlers.get(1)!;
+    handler.onDisconnected(false);
+    handler.onWelcome(false);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.stream.controlState.kind).toBe("controlled");
+    expect(sizes()).toHaveLength(1);
+    f.stream.resize({ width: 940, height: 500, density: 1 }, false);
+    expect(sizes()).toHaveLength(1);
+    f.stream.resize({ width: 980, height: 500, density: 1 }, true);
+    expect(sizes()).toHaveLength(2);
   } finally { f.stream.dispose(); }
 });
 
