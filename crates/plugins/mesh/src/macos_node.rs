@@ -2137,7 +2137,9 @@ impl Node {
     /// `PermissionDenied` carrying a [`MachineBindingError`] for a foreign or unreadable identity.
     pub fn check_enrolled_machine(state_directory: &Path) -> io::Result<()> {
         match fs::symlink_metadata(state_directory) {
-            Ok(_) => crate::macos_machine::check(state_directory, crate::macos_machine::fingerprint()),
+            Ok(_) => {
+                crate::macos_machine::check(state_directory, crate::macos_machine::fingerprint())
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
         }
@@ -4625,17 +4627,26 @@ mod tests {
         forge_machine_record(&directory);
         let key = std::fs::read(directory.join(crate::macos_key::KEY_FILE)).expect("key");
         for error in [
-            Node::restore(&directory.0, Some(&current)).err().expect("restore refused"),
+            Node::restore(&directory.0, Some(&current))
+                .err()
+                .expect("restore refused"),
             Node::check_enrolled_machine(&directory.0).expect_err("pre-start check refused"),
         ] {
-            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            assert!(matches!(
-                error.get_ref().and_then(|inner| inner.downcast_ref::<MachineBindingError>()),
-                Some(MachineBindingError::ForeignMachine)
-            ));
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(
+                matches!(
+                    error.get_ref().and_then(
+                        |inner| inner.downcast_ref::<crate::enrolment::MachineBindingError>()
+                    ),
+                    Some(crate::enrolment::MachineBindingError::ForeignMachine)
+                )
+            );
         }
         // The refusal changes nothing: the key and the record stay as they were.
-        assert_eq!(std::fs::read(directory.join(crate::macos_key::KEY_FILE)).expect("key"), key);
+        assert_eq!(
+            std::fs::read(directory.join(crate::macos_key::KEY_FILE)).expect("key"),
+            key
+        );
     }
 
     #[test]

@@ -192,8 +192,14 @@ mod tests {
         let b = "BBBBBBBB-0000-0000-0000-000000000000";
         // The hardware and the volume are not interchangeable.
         assert_ne!(
-            fingerprint_from(&format!("\"IOPlatformUUID\" = \"{a}\""), &format!("Volume UUID: {b}")),
-            fingerprint_from(&format!("\"IOPlatformUUID\" = \"{b}\""), &format!("Volume UUID: {a}")),
+            fingerprint_from(
+                &format!("\"IOPlatformUUID\" = \"{a}\""),
+                &format!("Volume UUID: {b}")
+            ),
+            fingerprint_from(
+                &format!("\"IOPlatformUUID\" = \"{b}\""),
+                &format!("Volume UUID: {a}")
+            ),
         );
     }
 
@@ -214,9 +220,15 @@ mod tests {
         bind(&dir, fingerprint_from(IOREG, DISK)).unwrap();
         let before = std::fs::read(dir.join(MACHINE_FILE)).unwrap();
         let other = fingerprint_from(&IOREG.replace("e233", "e234"), DISK);
-        for error in [bind(&dir, other).unwrap_err(), check(&dir, other).unwrap_err()] {
+        for error in [
+            bind(&dir, other).unwrap_err(),
+            check(&dir, other).unwrap_err(),
+        ] {
             assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-            assert!(matches!(refusal(&error), MachineBindingError::ForeignMachine));
+            assert!(matches!(
+                refusal(&error),
+                MachineBindingError::ForeignMachine
+            ));
         }
         assert_eq!(std::fs::read(dir.join(MACHINE_FILE)).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
@@ -228,7 +240,10 @@ mod tests {
         bind(&dir, fingerprint_from(IOREG, DISK)).unwrap();
         let erased = fingerprint_from(IOREG, &DISK.replace("64E88BF5", "0A0A0A0A"));
         let error = bind(&dir, erased).unwrap_err();
-        assert!(matches!(refusal(&error), MachineBindingError::ForeignMachine));
+        assert!(matches!(
+            refusal(&error),
+            MachineBindingError::ForeignMachine
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
