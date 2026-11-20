@@ -26,7 +26,6 @@ from mesh_agent_fixture import BinaryNode, CoordinatorFixture
 
 MEMBERS = ("S", "A", "B", "C")
 CLIENTS = ("A", "B", "C")
-LISTEN_PORTS = {"S": 25000, "A": 25001, "B": 25002, "C": 25003}
 RECOVERY_BOUND_SECONDS = 30.0
 ANNOUNCEMENT_BOUND_SECONDS = 5.0
 IDLE_WINDOW_SECONDS = 7.0
@@ -114,45 +113,26 @@ def start_node(
     binary: str,
     scratch: str,
     namespace_pid: int,
-    listen_port: int,
     state_path: str | None = None,
 ) -> BinaryNode:
-    """Start one real node with an exact NAT-safe UDP port and verify its published identity."""
-    variable = "INFRATERMINAL_MESH_PORT"
-    node = BinaryNode(
-        binary,
-        scratch,
-        namespace_pid,
-        state_path=state_path,
-        env_overrides={variable: str(listen_port)},
-    )
-    identity = json.loads(node.stdout.readline())
-    if identity.get("port") != listen_port:
-        try:
-            process_port = next(
-                (
-                    entry.partition(b"=")[2].decode(errors="replace")
-                    for entry in Path(f"/proc/{node.pid}/environ").read_bytes().split(b"\0")
-                    if entry.startswith(b"INFRATERMINAL_MESH_PORT=")
-                ),
-                "<unset>",
-            )
-        except OSError as error:
-            process_port = f"<unavailable: {error}>"
-        node.close()
-        raise RuntimeError(
-            f"mesh listener ignored its fixture override: requested {listen_port}, "
-            f"published {identity.get('port')}, child environment has {process_port}"
-        )
-    node.stdout.seek(0)
-    return node
+    """Start one real node in its private namespace and keep its process-owned state."""
+    return BinaryNode(binary, scratch, namespace_pid, state_path=state_path)
+
+
+def public_endpoint(target: str, topology: ThreeNodeTopology, ports: dict[str, int]) -> str:
+    """Return the public endpoint this topology's NAT maps to the target node."""
+    if target in CLIENTS:
+        router = topology.routers[target][0]
+        port = router.outside_port(topology.node_address[target])
+        return f"{router.public_address}:{port}"
+    return f"{topology.public_address[target]}:{ports[target]}"
 
 
 def expected_endpoint(source: str, target: str, topology: ThreeNodeTopology, ports: dict[str, int]) -> str:
     """Return the path address that the production engine should currently use."""
     if source in CLIENTS and target in CLIENTS:
         return f"{topology.node_address[target]}:{ports[target]}"
-    return f"{topology.public_address[target]}:{ports[target]}"
+    return public_endpoint(target, topology, ports)
 
 
 def assert_peer_inventory(
@@ -298,7 +278,6 @@ def restart_node(
         binary,
         scratch,
         topology.node_pid[member],
-        LISTEN_PORTS[member],
         state_path=old_state,
     )
     nodes[member] = restarted
@@ -363,7 +342,6 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
                 binary,
                 scratch,
                 topology.node_pid[member],
-                LISTEN_PORTS[member],
             )
             identities[member] = json.loads(nodes[member].stdout.readline())
         ports = {member: int(identities[member]["port"]) for member in MEMBERS}
@@ -373,7 +351,7 @@ def run_proof(binary: str, coordinator_path: str, scratch: str) -> dict[str, Any
             if member in CLIENTS and f"{topology.node_address[member]}:{ports[member]}" not in probe.get("lan", []):
                 raise AssertionError(f"{member} did not publish its current LAN candidate: {probe}")
         row["candidate_probes"] = probes
-        endpoints = [f"{topology.public_address[member]}:{ports[member]}" for member in MEMBERS]
+        endpoints = [public_endpoint(member, topology, ports) for member in MEMBERS]
         coordinator = CoordinatorFixture(coordinator_path)
         observer = proof.Observer(coordinator, [nodes[member] for member in MEMBERS], list(MEMBERS))
         initial = observer.request({

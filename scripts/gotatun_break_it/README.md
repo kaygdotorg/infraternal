@@ -83,12 +83,13 @@ for an independently scheduled background worker.
 `three_node_walk_restarts.py` uses four real mesh agents: the server's mesh
 node and three clients behind one non-hairpin NAT. It requires all six
 client-to-client directions and the server links to settle on direct paths,
-then checks idle handshake counters. It kills and starts one client process
-and the server mesh-node process separately, requiring all affected routes and
-traffic to recover within 30 seconds. It also restarts the actual server
-process and checks its health endpoint, changes one client's LAN address, and
-checks that the other clients learn the new endpoint from the live-session
-announcement without user traffic. A changed stale candidate snapshot then
+using the shared NAT's per-host public mappings while all clients bind the
+default listener port. It then checks idle handshake counters. It kills and
+starts one client process and the server mesh-node process separately,
+requiring all affected routes and traffic to recover within 30 seconds. It
+also restarts the actual server process and checks its health endpoint, changes
+one client's LAN address, and checks that the other clients learn the new
+endpoint from the live-session announcement without user traffic. A changed stale candidate snapshot then
 checks that a still-authenticated endpoint is retained. The runner deletes all
 of its named namespaces before it exits.
 
