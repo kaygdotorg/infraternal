@@ -626,6 +626,18 @@ mod tests {
         std::fs::remove_dir_all(base).unwrap();
     }
 
+    /// A standalone server may already use the name `server` for its web root.
+    #[test]
+    fn standalone_system_default_ignores_an_unrelated_server_child() {
+        let base = scratch("standalone-web");
+        std::fs::create_dir_all(base.join("server")).unwrap();
+        std::fs::write(base.join("server/index.html"), "standalone web").unwrap();
+        std::fs::write(base.join("infraternal.sqlite"), "standalone data").unwrap();
+        let selected = linux_system_data_dir(&base);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(selected, base);
+    }
+
     /// An absolute `XDG_STATE_HOME` is honoured; empty or relative ones are ignored (XDG spec).
     #[test]
     fn xdg_state_home_is_honoured_only_when_absolute() {
