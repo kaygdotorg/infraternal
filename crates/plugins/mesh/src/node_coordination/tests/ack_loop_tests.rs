@@ -12,6 +12,11 @@ async fn file_service() -> (std::path::PathBuf, MeshService) {
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(8)
+        // The pool reports a slow open as `PoolTimedOut` after its acquire
+        // timeout (30 s by default). Creating and switching a new WAL database
+        // is disk-bound; on a host running other gates it stretched past 30 s
+        // and failed the fixture, not the behaviour under test (#553).
+        .acquire_timeout(std::time::Duration::from_secs(300))
         .connect_with(options)
         .await
         .unwrap();
@@ -322,8 +327,10 @@ async fn unchanged_views_do_not_loop_acknowledgments() {
                     .await
                     .unwrap()
                     .forget();
+                // The retry is due after UNKNOWN_SUPPORT_RETRY (five seconds); the
+                // bound only has to outlast that on a loaded host.
                 let retried = tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
+                    std::time::Duration::from_secs(60),
                     channel.finished.acquire_many(2),
                 )
                 .await;
@@ -615,6 +622,11 @@ async fn canceled_receipt_commit_is_not_lost_on_worker_replacement() {
         });
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(8)
+        // The pool reports a slow open as `PoolTimedOut` after its acquire
+        // timeout (30 s by default). Creating and switching a new WAL database
+        // is disk-bound; on a host running other gates it stretched past 30 s
+        // and failed the fixture, not the behaviour under test (#553).
+        .acquire_timeout(std::time::Duration::from_secs(300))
         .connect_with(options)
         .await
         .unwrap();

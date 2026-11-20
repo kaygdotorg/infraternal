@@ -23,8 +23,11 @@
  * is not seen by a hit test and is not covered.
  *
  * When. In the mutation callback that sees the surface (a microtask, before the first paint), when it is shown (`hidden`,
- * `data-open`), and every 250 ms for as long as it is on screen, but only re-evaluated when its box moved or resized. That
- * is a handful of box reads a few times a second, never per frame, and never in an input handler.
+ * `data-open`), and every 250 ms while the page is changing, but only re-evaluated when its box moved or resized. That
+ * is a handful of box reads a few times a second, never per frame, and never in an input handler. An idle page keeps no
+ * timer (the motion audit holds an idle screen to none): the checks stop after {@link QUIET_ROUNDS} rounds in which nothing
+ * moved, and start again on a DOM change, input, scroll, resize or the end of an animation, which is everything that can move a
+ * card. A card that moves with none of those would be missed until the next one; none does.
  *
  * This module is an on-demand chunk (D188), requested by the first `applyTheme` (the start of boot, in parallel with the first
  * paint) and by each terminal as it opens, so none of the glass code is on the critical path. It starts by scanning the surfaces
@@ -41,6 +44,8 @@ const PICTURE = "video, img, canvas.aw-surface, [data-glass-picture]";
 const MIN_SIDE = 64;
 /** How often an on-screen surface is checked for having moved, in milliseconds. */
 const WATCH_MS = 250;
+/** How many checks in a row may find nothing moved before the checking stops until something wakes it (one second). */
+const QUIET_ROUNDS = 4;
 
 /**
  * The cells of a terminal under one rectangle, as the colour each cell shows to the glass: its background (the
@@ -123,8 +128,10 @@ interface Tracked { key: Element; refresh(): void; stop(): void }
 const tracking = new WeakMap<HTMLElement, Tracked>();
 /** Every glass surface seen and not yet gone, with its last box as text. */
 const watched = new Map<HTMLElement, string>();
-/** The timer that rechecks on-screen surfaces. */
+/** The timer that rechecks on-screen surfaces; zero while the page is idle. */
 let timer = 0;
+/** Checks in a row that found no surface moved; {@link recheck} stops at {@link QUIET_ROUNDS}. */
+let quiet = 0;
 
 /** The box of `surface` as a comparable string, or an empty string when it is not on screen. */
 function boxOf(surface: HTMLElement): string {
@@ -164,14 +171,23 @@ function evaluate(surface: HTMLElement): void {
 /** Rechecks every watched surface that moved; drops those that are gone; stops itself when none are on screen. */
 function recheck(): void {
   timer = 0;
+  let moved = false;
   for (const [surface, last] of watched) {
     const box = boxOf(surface);
     if (!surface.isConnected) { release(surface); watched.delete(surface); continue; }
     if (box === last) continue;
+    moved = true;
     watched.set(surface, box);
     if (box) evaluate(surface); else release(surface);
   }
-  if (watched.size) timer = window.setTimeout(recheck, WATCH_MS);
+  quiet = moved ? 0 : quiet + 1;
+  if (watched.size && quiet < QUIET_ROUNDS) timer = window.setTimeout(recheck, WATCH_MS);
+}
+
+/** Starts the checks if they are stopped, and counts the quiet rounds afresh; the one place that arms {@link timer}. */
+function wake(): void {
+  quiet = 0;
+  if (!timer && watched.size) timer = window.setTimeout(recheck, WATCH_MS);
 }
 
 /** Starts watching one glass surface: looks under it now and keeps it checked. */
@@ -181,7 +197,7 @@ function watch(surface: HTMLElement): void {
     watched.set(surface, box);
     if (box) evaluate(surface); else release(surface);
   }
-  if (!timer) timer = window.setTimeout(recheck, WATCH_MS);
+  wake();
 }
 
 /** Whether the watcher has been started. */
@@ -207,4 +223,10 @@ export function watchGlassSurfaces(): void {
     }
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
   consider(document.body);
+  // Whatever can move a card without touching the DOM: input and scrolling (a drag, a pan), a resize, and a transition or animation
+  // ending (a fly settles). Each only arms the check timer if it is stopped; passive and in the capture phase, so it sees them all
+  // and never delays one.
+  const options = { capture: true, passive: true } as const;
+  for (const type of ["pointerdown", "pointermove", "pointerup", "wheel", "keydown", "scroll", "transitionend", "animationend"]) document.addEventListener(type, wake, options);
+  window.addEventListener("resize", wake, { passive: true });
 }
