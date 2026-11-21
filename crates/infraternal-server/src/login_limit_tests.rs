@@ -209,7 +209,7 @@ async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup(
     assert_eq!(
         tokio::time::timeout(
             Duration::from_secs(10),
-            actor.downgrade().revoke_login(person)
+            actor.downgrade().revoke_login(person, true)
         )
         .await
         .unwrap(),

@@ -564,19 +564,36 @@ async fn remote_router(
     let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
         let source = remote.enrollment.source.clone();
         let clock_health = remote.clock_health.clone();
-        Some(
-            crate::remote_runtime::RemoteListeners::start_with_recovery(
-                remote.enrollment.endpoint.endpoint,
-                &remote.identity.ok_or(ServerError::TlsConfiguration)?,
-                &remote.roots,
-                enrollment_store.clone(),
-                hosts.clone(),
-                source,
-                clock_health,
-            )
-            .await
-            .map_err(ServerError::Listener)?,
+        // Servers set up through bootstrap keep their leaf in the CA's
+        // `active` directory and rotate it while unlocked (#559).
+        let rotation = remote
+            .ca_administration
+            .as_ref()
+            .and_then(|administration| {
+                administration
+                    .server_leaf()
+                    .map(|(directory, name)| crate::server_leaf::Rotation {
+                        source: administration.memory_source(),
+                        directory,
+                        name,
+                    })
+            });
+        let identity = remote.identity.ok_or(ServerError::TlsConfiguration)?;
+        let mut listeners = crate::remote_runtime::RemoteListeners::start_with_recovery(
+            remote.enrollment.endpoint.endpoint,
+            &identity,
+            &remote.roots,
+            enrollment_store.clone(),
+            hosts.clone(),
+            source,
+            clock_health,
         )
+        .await
+        .map_err(ServerError::Listener)?;
+        if let Some(rotation) = rotation {
+            listeners.rotate_server_leaf(rotation, identity.certificate);
+        }
+        Some(listeners)
     } else {
         None
     };

@@ -197,12 +197,6 @@ pub fn remove_action() -> ActionDefinition {
                         "Cut the host's access but leave the infraternal agent installed on it.",
                     ),
                 ),
-                (
-                    "access_report".to_owned(),
-                    JsonSchema::boolean(
-                        "Show the access files on the host that changed since its logins were granted, as the host reported when they were revoked. Changes nothing.",
-                    ),
-                ),
             ],
             ["host".to_owned(), "server".to_owned()],
         ),

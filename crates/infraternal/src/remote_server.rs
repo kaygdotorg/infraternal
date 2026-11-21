@@ -134,7 +134,7 @@ pub(crate) async fn serve(
                     // example) undoes itself warm instead of exiting cold (#211 S4).
                     #[cfg(feature = "release")]
                     if result.is_err()
-                        && let Some(replacement) = crate::restart::failed_start(source.as_deref(), &data_dir)
+                        && let Some(replacement) = crate::restart::failed_start(source.as_ref(), &data_dir)
                     {
                         return Ok(Outcome::Restart(replacement));
                     }
@@ -142,13 +142,13 @@ pub(crate) async fn serve(
                 }
                 Some(request) = switch => {
                     #[cfg(feature = "release")]
-                    if let Some(replacement) = crate::restart::switch(request, source.as_deref(), &data_dir) {
+                    if let Some(replacement) = crate::restart::switch(request, source.as_ref(), &data_dir) {
                         return Ok(Outcome::Restart(replacement));
                     }
                     #[cfg(not(feature = "release"))]
                     let () = request;
                 }
-                replacement = control.requested(source.as_deref()) => {
+                replacement = control.requested(source.as_ref()) => {
                     match replacement {
                         Ok(replacement) => return Ok(Outcome::Restart(replacement)),
                         Err(error) => {

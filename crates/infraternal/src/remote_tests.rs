@@ -1,6 +1,7 @@
 //! Verifies bounded operator input, private identity creation and certificate-only renewal publication [63][132][133], #78.
 
 use super::*;
+use infraternal_agent::server_leaf_floor::ServerLeafFloor;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 
 struct Directory(PathBuf);
@@ -595,6 +596,74 @@ fn environment_root_probe() {
     );
 }
 
+/// A `test-trust-anchor` build trusts the one extra CA a live test names, and nothing else (#355,
+/// #483). The child gets the file only through `INFRATERNAL_TEST_TRUST_ANCHOR`: its own CA is
+/// accepted, an unrelated CA is still refused, and a missing file fails closed.
+#[cfg(feature = "test-trust-anchor")]
+#[test]
+fn test_trust_anchor_adds_only_the_named_ca() {
+    let directory = Directory::new();
+    let anchor = environment_ca(&PKey::generate_ed25519().unwrap());
+    let other = environment_ca(&PKey::generate_ed25519().unwrap());
+    let anchor_path = directory.0.join("anchor.pem");
+    let other_path = directory.0.join("other.pem");
+    std::fs::write(&anchor_path, anchor.to_pem().unwrap()).unwrap();
+    std::fs::write(&other_path, other.to_pem().unwrap()).unwrap();
+    let probe = |anchor: &Path, subject: &Path| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "remote::tests::test_trust_anchor_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("INFRATERNAL_TEST_TRUST_ANCHOR", anchor)
+            .env("INFRATERNAL_TEST_SUBJECT", subject)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(probe(&anchor_path, &anchor_path), "the named CA is trusted");
+    assert!(
+        !probe(&anchor_path, &other_path),
+        "an unnamed CA stays untrusted"
+    );
+    assert!(
+        !probe(&directory.0.join("missing.pem"), &anchor_path),
+        "a missing anchor file fails closed"
+    );
+}
+
+/// Child of `test_trust_anchor_adds_only_the_named_ca`: exit success only when the connector
+/// built with the environment's anchor accepts `INFRATERNAL_TEST_SUBJECT` as a root.
+#[cfg(feature = "test-trust-anchor")]
+#[test]
+#[ignore = "child of test_trust_anchor_adds_only_the_named_ca"]
+fn test_trust_anchor_probe() {
+    let subject = X509::from_pem(
+        &std::fs::read(std::env::var_os("INFRATERNAL_TEST_SUBJECT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let ssl = outbound_tls_connector(None)
+        .unwrap()
+        .configure()
+        .unwrap()
+        .into_ssl("anchor.invalid")
+        .unwrap();
+    let mut context = openssl::x509::X509StoreContext::new().unwrap();
+    let chain = openssl::stack::Stack::new().unwrap();
+    let accepted = context
+        .init(
+            ssl.ssl_context().cert_store(),
+            &subject,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
+        .unwrap_or(false);
+    assert!(accepted);
+}
+
 /// SSH setup copies the host's enrolled identity into its transaction before
 /// joining, and a published-setup Retry joins again for the same host (#230).
 /// Join must re-enroll that host's own key instead of refusing the identity;
@@ -941,4 +1010,43 @@ async fn an_unspecified_listener_dials_the_origin_host() {
     let fixed = Some("10.0.0.5:45681".parse().unwrap());
     assert_eq!(direct_endpoint(fixed, "https://ssh.kayg.org").await, fixed);
     assert_eq!(direct_endpoint(None, "https://ssh.kayg.org").await, None);
+}
+
+/// The agent's server-leaf floor survives a restart, belongs to one
+/// enrollment, and reads as "no floor" when missing, foreign or malformed (#559).
+#[test]
+fn server_leaf_file_persists_the_floor_for_its_own_enrollment_only() {
+    use infraternal_agent::server_leaf_floor::ServerLeafStore;
+    let directory = Directory::new();
+    let host = uuid::Uuid::new_v4();
+    let file = ServerLeafFile {
+        data: directory.0.clone(),
+        host,
+    };
+    assert_eq!(file.load(), None);
+    file.remember(1_800_000_000).unwrap();
+    file.remember(1_800_086_400).unwrap();
+    assert_eq!(file.load(), Some(1_800_086_400));
+    let metadata = std::fs::metadata(directory.0.join(ServerLeafFile::NAME)).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read_dir(&directory.0).unwrap().count(),
+        1,
+        "no pending file may be left behind"
+    );
+    assert_eq!(
+        ServerLeafFloor::newest(&ServerLeafFile::floor(&directory.0, host)),
+        Some(1_800_086_400)
+    );
+    let other = ServerLeafFile {
+        data: directory.0.clone(),
+        host: uuid::Uuid::new_v4(),
+    };
+    assert_eq!(
+        other.load(),
+        None,
+        "another enrollment's floor must not apply"
+    );
+    std::fs::write(directory.0.join(ServerLeafFile::NAME), b"not a floor\n").unwrap();
+    assert_eq!(file.load(), None);
 }

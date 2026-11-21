@@ -106,8 +106,8 @@ impl EnrollmentStore {
 
     /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
     /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
-    /// For a confirmation that carries no D356 report (the agent is gone): the
-    /// kept report says it was not checked.
+    /// For a confirmation that carries no D356 report (the agent is gone), no
+    /// report is kept (D398).
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
@@ -168,6 +168,18 @@ impl EnrollmentStore {
         }
     }
 
+    /// Whether `host` is being removed (a removal request exists for it, with
+    /// or without an uninstall). Only a revocation that leaves the host in
+    /// place asks its agent for an access report, and only it keeps one (D398).
+    pub(crate) async fn removal_requested(&self, host: Uuid) -> Result<bool, EnrollmentError> {
+        Ok(
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_host_removals WHERE host_id=?)")
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&self.0)
+                .await?,
+        )
+    }
+
     /// Whether this host's removal asked for an uninstall that its infraternal
     /// agent has not accepted yet, so the removal outbox must still ask (#409).
     /// `unreachable` rows come from before the outbox delivered uninstalls,
@@ -215,23 +227,30 @@ impl EnrollmentStore {
                 .map_or(0, |elapsed| {
                     i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
                 });
-            // Every confirmed revocation keeps a report. Without a host
-            // reply (the agent was removed), it says that nothing was checked.
+            // D398: only revoking a person while the host stays keeps a
+            // report (it becomes an Inbox item). A removal never does: it
+            // deletes infraternal and its state and nothing else, so no scan
+            // was asked for and nothing is stored. Neither does a
+            // confirmation without a host reply (the Start fresh proof): no
+            // agent answered, so there is nothing to say.
             // The outcome is decided here, by the server's rule, with the
             // host's mode from the server's own record (J334 P1-3).
-            let mode: Option<String> =
-                sqlx::query_scalar("SELECT mode FROM remote_hosts WHERE id=?")
-                    .bind(host.as_bytes().as_slice())
-                    .fetch_optional(&mut *transaction)
-                    .await?;
-            let rootless = mode.as_deref() != Some("rootful");
-            let report = report.cloned().unwrap_or_else(|| {
-                crate::access_report::AccessReport::not_checked(
-                    crate::access_report::Reason::AgentRemoved,
-                )
-            });
-            let report = report.decided(rootless);
-            crate::access_report::store(&mut transaction, host, person, &report, now).await?;
+            let removal: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM remote_host_removals WHERE host_id=?)",
+            )
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&mut *transaction)
+            .await?;
+            if let (false, Some(report)) = (removal, report) {
+                let mode: Option<String> =
+                    sqlx::query_scalar("SELECT mode FROM remote_hosts WHERE id=?")
+                        .bind(host.as_bytes().as_slice())
+                        .fetch_optional(&mut *transaction)
+                        .await?;
+                let rootless = mode.as_deref() != Some("rootful");
+                let report = report.clone().decided(rootless);
+                crate::access_report::store(&mut transaction, host, person, &report, now).await?;
+            }
         }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.

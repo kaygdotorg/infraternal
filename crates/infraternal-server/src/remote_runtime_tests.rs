@@ -394,6 +394,7 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
         "localhost",
         &fixture.expired,
         std::slice::from_ref(&fixture.root),
+        &infraternal_agent::server_leaf_floor::ServerLeafFloor::default(),
     )
     .await
     .unwrap();
@@ -417,6 +418,7 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
             "localhost",
             &fixture.expired,
             std::slice::from_ref(&fixture.root),
+            &infraternal_agent::server_leaf_floor::ServerLeafFloor::default(),
         )
         .await
         .is_err(),
@@ -741,6 +743,10 @@ mod standby;
 
 #[path = "remote_listener_tests.rs"]
 mod additional_listeners;
+
+/// Live listeners serving a rotated server leaf (#559).
+#[path = "server_leaf_listener_tests.rs"]
+mod server_leaf_listeners;
 
 /// Forged QUIC Initials and a real host's reconnect under them (#572).
 #[path = "remote_retry_tests.rs"]

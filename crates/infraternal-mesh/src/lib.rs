@@ -24,4 +24,7 @@ pub mod mesh_ssh;
 /// Observation bounds for relay discovery, and the address rules every candidate follows (#515).
 pub mod discovery;
 
+/// The measured path rule for a mesh pair: which relay, and direct or relayed (D313 Q5, #201).
+pub mod path_choice;
+
 pub mod cli;

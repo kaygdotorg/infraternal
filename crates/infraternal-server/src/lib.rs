@@ -81,6 +81,8 @@ pub use infraternal_plugin_mesh::api as mesh_api;
 /// D356: the access report a host returns when it revokes a login (#355).
 #[cfg(feature = "remote")]
 mod access_report;
+/// D398: the words of an access report for the owner's Inbox (#355).
+mod access_report_text;
 #[cfg(feature = "remote")]
 mod api_actions;
 #[cfg(feature = "remote")]
@@ -146,6 +148,9 @@ mod remote_startup;
 #[cfg(feature = "remote")]
 mod remote_successor;
 mod runtime;
+/// The server's short-lived, rotating leg-B TLS leaf (#559).
+#[cfg(feature = "remote")]
+mod server_leaf;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]
 mod socket_authority;

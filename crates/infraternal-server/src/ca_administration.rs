@@ -3,7 +3,7 @@ use crate::{
     auth::Auth,
     ca::{CaError, CaKeySource, CaMaterial},
     ca_copies::CaCopies,
-    ca_membership::{Membership, require_binding, require_live},
+    ca_membership::{Membership, peek_live, require_binding, require_live},
     ca_memory::{AdministratorCaUnlock, MemoryCaSource},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
@@ -35,6 +35,15 @@ impl CaAdministrationConfig {
             bootstrap: None,
         }
     }
+    /// The CA's `active` directory and the server name its leg-B leaf
+    /// certifies, when this server keeps its leaf there (every server set up
+    /// through bootstrap). The listeners' leaf rotation writes there (#559).
+    #[must_use]
+    pub(crate) fn server_leaf(&self) -> Option<(PathBuf, String)> {
+        self.bootstrap
+            .as_ref()
+            .map(|config| (config.directory.join("active"), config.name.clone()))
+    }
     /// Share the configured process-only signer with the trusted exec lifecycle
     /// adapter. This never reads an encrypted copy or authorizes an HTTP unlock.
     #[must_use]
@@ -42,6 +51,8 @@ impl CaAdministrationConfig {
         self.source.clone()
     }
 
+    /// Create the runtime authority with the listener registry and store that
+    /// first-run bootstrap activation needs.
     pub(crate) fn with_runtime(
         &self,
         auth: Auth,
@@ -53,7 +64,10 @@ impl CaAdministrationConfig {
         let mut authority = CaAdministration::new(auth, pool, self.source.clone(), copies);
         authority.bootstrap = self.bootstrap.clone().map(|config| {
             Arc::new(crate::ca_bootstrap::BootstrapRuntime::new(
-                config, hosts, store,
+                config,
+                hosts,
+                store,
+                self.source.clone(),
             ))
         });
         Ok(Arc::new(authority))
@@ -131,13 +145,25 @@ impl CaAdministration {
     }
 
     /// Read lock status only for a current, live administrator credential session.
+    ///
+    /// This is a plain read and takes no writer lock, because every CA route calls it first,
+    /// before any session is known to be valid (#559, J1099). Status reveals only the lock bit,
+    /// so it needs no serialization with revocation; mutations recheck under the writer lock.
     /// # Errors
     /// Refuses missing/revoked administrator authority or storage failures.
     pub async fn status(&self, token: &str, now: i64) -> Result<bool, CaError> {
-        let mut tx = self.pool.begin().await.map_err(|_| CaError)?;
-        require_live(&mut tx, &crate::auth::hash(token), now).await?;
-        tx.rollback().await.map_err(|_| CaError)?;
+        self.administrator(token, now).await?;
         Ok(*self.source.subscribe_locked().borrow())
+    }
+
+    /// Return the live administrator behind `token`, from a plain read that takes no writer lock.
+    ///
+    /// The per-principal start budget keys on this user id. It used to come from the session
+    /// slide, which is a write even for an unknown token.
+    /// # Errors
+    /// Refuses missing/revoked administrator authority or storage failures.
+    pub(crate) async fn administrator(&self, token: &str, now: i64) -> Result<Membership, CaError> {
+        peek_live(&self.pool, &crate::auth::hash(token), now).await
     }
 
     /// Whether public trust was retained, independently of the private signing key's lock state.

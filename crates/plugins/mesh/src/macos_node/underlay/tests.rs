@@ -2,7 +2,7 @@
 //! (built byte for byte from the `libc` layouts), and, with root, the real kernel's messages
 //! and the real-change proof harness.
 
-use super::{UnderlayAnnouncer, UnderlayBooks, UnderlayMonitor};
+use super::{PeerToPeerLinks, UnderlayAnnouncer, UnderlayBooks, UnderlayMonitor};
 use crate::underlay_announce::UnderlayAnnounce;
 use nix::libc;
 use std::{
@@ -16,6 +16,38 @@ use std::{
 const UTUN: u16 = 9;
 /// The Ethernet underlay's index in the synthetic messages.
 const EN0: u16 = 4;
+
+/// `awdl0`'s index in the synthetic messages; 13 is its index on the M1 Air J1028 captured.
+const AWDL0: u16 = 13;
+/// `llw0`'s index in the synthetic messages.
+const LLW0: u16 = 14;
+/// A peer-to-peer link that appears only after the books were built.
+const AWDL1: u16 = 21;
+
+/// The interfaces the synthetic messages name, so they never meet the test Mac's real ones.
+fn synthetic_interfaces() -> Vec<(u16, String)> {
+    [
+        (EN0, "en0"),
+        (UTUN, "utun9"),
+        (AWDL0, "awdl0"),
+        (LLW0, "llw0"),
+        (AWDL1, "awdl1"),
+    ]
+    .into_iter()
+    .map(|(index, name)| (index, name.to_owned()))
+    .collect()
+}
+
+/// Empty books whose interface names come from [`synthetic_interfaces`].
+fn books() -> UnderlayBooks {
+    UnderlayBooks {
+        peer_to_peer: PeerToPeerLinks {
+            known: std::collections::BTreeMap::new(),
+            list: synthetic_interfaces,
+        },
+        ..UnderlayBooks::default()
+    }
+}
 
 /// Pad a sockaddr to the routing socket's 4-byte alignment.
 fn padded(mut sockaddr: Vec<u8>) -> Vec<u8> {
@@ -164,7 +196,7 @@ fn en0_address(kind: i32, ip: [u8; 4]) -> Vec<u8> {
 /// would make every apply announce to every live session.
 #[test]
 fn our_own_utun_never_counts() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let host = libc::RTF_UP | libc::RTF_HOST | libc::RTF_STATIC;
     let peer = [(0, v4([100, 64, 0, 7])), (1, link(UTUN))];
     for kind in [libc::RTM_ADD, libc::RTM_CHANGE, libc::RTM_DELETE] {
@@ -177,12 +209,122 @@ fn our_own_utun_never_counts() {
     assert!(!books.observe(&interface(UTUN, libc::IFF_UP), UTUN));
 }
 
+/// The messages macOS sends for nearby devices on its peer-to-peer Wi-Fi links never count.
+/// They are the ones J1028 captured on an idle M1 Air on Wi-Fi (#260, `observe.txt` and
+/// `observe-flap.txt`): an `fe80::` host route to a nearby device is added unscoped (index 0,
+/// the link only in its gateway, `HOST|DONE|STATIC`) and deleted scoped to `awdl0`
+/// (`0x3000844`, which adds `IFSCOPE` and the kernel's condemned bit), about once per 112 s; a
+/// Wi-Fi flap adds `llw0` deletes, `fe80::` address churn and link flag changes. Before J1108
+/// every delete was a change, so an idle Mac asked every session for a keepalive and restaled
+/// every connected send each time.
+#[test]
+fn peer_to_peer_wifi_links_never_count() {
+    let mut books = books();
+    let nearby: Ipv6Addr = "fe80::a0f9:4cff:fe7c:36b5".parse().expect("address");
+    let captured_add = libc::RTF_HOST | libc::RTF_DONE | libc::RTF_STATIC;
+    assert_eq!(captured_add, 0x844, "the flags J1028 captured on the add");
+    let captured_delete = 0x300_0844;
+    let route_to =
+        |kind, index, flags| route(kind, index, flags, 0, &[(0, v6(nearby)), (1, link(AWDL0))]);
+    for _ in 0..48 {
+        assert!(!books.observe(&route_to(libc::RTM_ADD, 0, captured_add), UTUN));
+        assert!(!books.observe(&route_to(libc::RTM_DELETE, AWDL0, captured_delete), UTUN));
+    }
+    // A Wi-Fi flap: llw0's route delete, the links' fe80:: addresses and flags.
+    let llw_route = route(
+        libc::RTM_DELETE,
+        LLW0,
+        0x320_0004,
+        0,
+        &[(0, v6(nearby)), (1, link(LLW0))],
+    );
+    assert!(!books.observe(&llw_route, UTUN));
+    let own: Ipv6Addr = "fe80::1c4d:2eff:fe11:9a01".parse().expect("address");
+    for index in [AWDL0, LLW0] {
+        let fe80 = [(2, mask(8, &[255; 8])), (5, v6(own))];
+        assert!(!books.observe(&address(libc::RTM_DELADDR, index, &fe80), UTUN));
+        assert!(!books.observe(&address(libc::RTM_NEWADDR, index, &fe80), UTUN));
+        assert!(!books.observe(&interface(index, libc::IFF_UP), UTUN));
+        assert!(!books.observe(&interface(index, libc::IFF_UP | libc::IFF_RUNNING), UTUN));
+    }
+    // A peer-to-peer link created after the books were built is recognised by its name too.
+    assert!(!books.observe(&interface(AWDL1, libc::IFF_UP), UTUN));
+
+    // The same messages on the Wi-Fi underlay still count: only the peer-to-peer links are
+    // dropped.
+    let en0_route = route(
+        libc::RTM_DELETE,
+        EN0,
+        captured_delete,
+        0,
+        &[(0, v6(nearby)), (1, link(EN0))],
+    );
+    assert!(books.observe(&en0_route, UTUN));
+    assert!(books.observe(&interface(EN0, libc::IFF_UP), UTUN));
+}
+
+/// Two routing messages exactly as the kernel sent them on an idle M1 Air on Wi-Fi (macOS
+/// 27.2.1, J1108 capture on #260: 52 adds and 51 deletes like these in 24 minutes, awdl0 is
+/// index 13 there). The add is unscoped (index 0) and names awdl0 only in its gateway's
+/// `sockaddr_dl`; both carry the destination's scope embedded in the address (`fe80:d::`).
+/// Neither counts; the same add with the gateway on en0 does.
+#[test]
+fn captured_awdl0_messages_never_count() {
+    let add: &[u8] = &[
+        0x8c, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x44, 0x08, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x00, 0x49, 0x01, 0x00, 0x00, 0x89, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x1c, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0x80, 0x00, 0x0d, 0x00,
+        0x00, 0x00, 0x00, 0xa4, 0x3d, 0x58, 0xff, 0xfe, 0x9f, 0x55, 0xe0, 0x0d, 0x00, 0x00, 0x00,
+        0x14, 0x12, 0x0d, 0x00, 0x06, 0x00, 0x06, 0x00, 0xa6, 0x3d, 0x58, 0x9f, 0x55, 0xe0, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let delete: &[u8] = &[
+        0x8c, 0x00, 0x05, 0x02, 0x0d, 0x00, 0x00, 0x00, 0x44, 0x08, 0x00, 0x03, 0x03, 0x00, 0x00,
+        0x00, 0x49, 0x01, 0x00, 0x00, 0x8a, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xdc, 0x05, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x1c, 0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xfe, 0x80, 0x00, 0x0d, 0x00,
+        0x00, 0x00, 0x00, 0xf0, 0xa8, 0xbf, 0xff, 0xfe, 0x48, 0xc8, 0x53, 0x00, 0x00, 0x00, 0x00,
+        0x14, 0x12, 0x0d, 0x00, 0x06, 0x00, 0x06, 0x00, 0xf2, 0xa8, 0xbf, 0x48, 0xc8, 0x53, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let utun = 21;
+    let mut books = books();
+    assert!(!books.observe(add, utun), "the unscoped add");
+    assert!(!books.observe(delete, utun), "the awdl0 delete");
+    // The gateway's interface index sits after the header, the 28-byte destination and the
+    // gateway's length and family bytes.
+    let gateway_index = size_of::<libc::rt_msghdr>() + 28 + 2;
+    assert_eq!(add[gateway_index..gateway_index + 2], AWDL0.to_ne_bytes());
+    let mut on_en0 = add.to_vec();
+    put(&mut on_en0, gateway_index, &EN0.to_ne_bytes());
+    assert!(books.observe(&on_en0, utun), "the same route on en0 counts");
+}
+
+/// An index no interface has (a link already gone) is not peer-to-peer: its messages count, so
+/// a doubt announces instead of hiding a change.
+#[test]
+fn an_unknown_interface_still_counts() {
+    let mut books = books();
+    assert!(books.observe(&interface(77, libc::IFF_UP), UTUN));
+    assert!(
+        !books.peer_to_peer.known.contains_key(&77),
+        "not remembered"
+    );
+}
+
 /// ARP and neighbour entries and per-destination clones come and go with ordinary traffic, and
 /// lookups, misses and failed requests change nothing; none of them may wake the announce, or
 /// an idle Mac on a busy LAN would announce all day (D81).
 #[test]
 fn traffic_lookups_and_failed_requests_never_count() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let neighbour = [(0, v4([192, 168, 64, 7])), (1, link(EN0))];
     for flags in [libc::RTF_LLINFO, libc::RTF_WASCLONED] {
         let flags = flags | libc::RTF_UP | libc::RTF_HOST;
@@ -215,7 +357,7 @@ fn traffic_lookups_and_failed_requests_never_count() {
 /// lifetime refresh) does not; its removal does.
 #[test]
 fn a_new_address_counts_and_its_refresh_does_not() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     assert!(books.observe(&en0_address(libc::RTM_NEWADDR, [192, 168, 64, 51]), UTUN));
     assert!(!books.observe(&en0_address(libc::RTM_NEWADDR, [192, 168, 64, 51]), UTUN));
     assert!(books.observe(&en0_address(libc::RTM_NEWADDR, [192, 168, 64, 52]), UTUN));
@@ -226,7 +368,7 @@ fn a_new_address_counts_and_its_refresh_does_not() {
 /// netmask, so a refresh of a SLAAC address is recognised.
 #[test]
 fn an_ipv6_address_refresh_does_not_count() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let ip: Ipv6Addr = "2001:db8:64::51".parse().expect("address");
     let message = address(
         libc::RTM_NEWADDR,
@@ -243,7 +385,7 @@ fn an_ipv6_address_refresh_does_not_count() {
 /// does not, nor does a change only to its lifetime; its removal does.
 #[test]
 fn a_route_change_counts_and_its_repeat_does_not() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     assert!(books.observe(&default_route(libc::RTM_ADD, [192, 168, 64, 1]), UTUN));
     assert!(!books.observe(&default_route(libc::RTM_CHANGE, [192, 168, 64, 1]), UTUN));
     let mut refreshed = default_route(libc::RTM_CHANGE, [192, 168, 64, 1]);
@@ -261,7 +403,7 @@ fn a_route_change_counts_and_its_repeat_does_not() {
 /// as peers see it, so it counts.
 #[test]
 fn a_new_source_address_on_a_route_counts() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let host = libc::RTF_UP | libc::RTF_HOST | libc::RTF_STATIC;
     let via = |source: [u8; 4]| {
         route(
@@ -281,7 +423,7 @@ fn a_new_source_address_on_a_route_counts() {
 /// and an unchanged report do not.
 #[test]
 fn a_link_state_change_counts_and_a_repeat_does_not() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let up = libc::IFF_UP | libc::IFF_RUNNING | libc::IFF_BROADCAST;
     assert!(books.observe(&interface(EN0, up), UTUN));
     assert!(!books.observe(&interface(EN0, up), UTUN));
@@ -295,7 +437,7 @@ fn a_link_state_change_counts_and_a_repeat_does_not() {
 /// Truncated or foreign-version messages are ignored, never read past their end.
 #[test]
 fn malformed_messages_never_count() {
-    let mut books = UnderlayBooks::default();
+    let mut books = books();
     let whole = default_route(libc::RTM_ADD, [192, 168, 64, 1]);
     for length in 0..whole.len() {
         assert!(!books.observe(&whole[..length], UTUN), "{length} bytes");

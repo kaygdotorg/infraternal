@@ -5168,3 +5168,33 @@ access (#341 B19).
        packets first and dropping only packets that cannot be marked, once
        its final run (on top of the 512-slot build) holds those numbers. The
        owner, verbatim: "agreed".
+
+398. **The left-behind report belongs to revoking a person, not to removing a host (owner, 2026-11-21, #355; refines D356 and D367; confirmed by the owner 2026-11-22):**
+     - **Context:** D356 shows what a person left behind (an SSH key, a
+       cron entry, a user service, a shell startup line) when their access
+       is revoked, and D360/D364/D367 fixed how it is worded. Reviews of it
+       (J1005, J1013, J1051) kept finding routes the scan does not cover,
+       and the report also ran on a host removal, where the host's own
+       owner may simply be leaving infraternal.
+     - **Host removal (default and `--retain`):** the owner, verbatim: "I
+       feel like this is a grey area. what if the user is simply leaving us
+       and is switching to public ssh? i don't think our cleanup should
+       include anything more than deleting our app+appstates." A removal
+       deletes infraternal and its state and nothing else: the host's
+       infraternal agent is not asked to scan anything, the server keeps and
+       reads no report, and the removal screen and `remove-host` offer none
+       (`--access-report` and its route are gone). Keys and crontabs on the
+       host are the person's own.
+     - **Revoking one person while the host stays:** the report stays, as
+       an Inbox item (D234). The owner, verbatim: "agreed! it's an inbox
+       item!" It is owner-only, lists the files and lines that are new, and
+       keeps the D360, D364 and D367 wording ("No changes found in the N
+       places we watch ... Access outside these checks isn't covered."); a
+       report that could not check says why and never reads as clean. The
+       owner dismisses it; a toast says so once when it arrives while they
+       have the page open.
+     - **Renewal for removed hosts (#498):** moot. A removed host has no
+       report to read, so nothing needs a passkey tap there.
+     - **Rejected:** keeping the report on removal (a removal then reaches
+       into files that are not infraternal's), and reporting only on
+       `--retain` (the same files, the same objection).

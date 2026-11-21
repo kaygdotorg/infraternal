@@ -55,13 +55,25 @@ pub fn first_present() -> Option<&'static str> {
 /// parse the selected bundle.
 #[cfg(feature = "tls-roots")]
 pub fn public_root_store() -> Result<X509Store, ErrorStack> {
+    Ok(public_root_store_builder()?.build())
+}
+
+/// The same store as [`public_root_store`], still open so a caller that has an
+/// explicit, compile-time-gated reason (a test-only build) can add one more
+/// root before building it. Production callers use [`public_root_store`].
+///
+/// # Errors
+///
+/// As [`public_root_store`].
+#[cfg(feature = "tls-roots")]
+pub fn public_root_store_builder() -> Result<X509StoreBuilder, ErrorStack> {
     let mut store = X509StoreBuilder::new()?;
     if let Some(bundle) = first_present() {
         store
             .add_lookup(X509Lookup::file())?
             .load_cert_file(bundle, SslFiletype::PEM)?;
     }
-    Ok(store.build())
+    Ok(store)
 }
 
 /// Accept only a fixed bundle whose source and resolved path are root-owned and protected.
