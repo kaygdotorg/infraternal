@@ -52,6 +52,6 @@ test("the returning-visit script reads the same counter that hints.ts writes", (
   // The engine's wasm is preloaded as a fetch (what streaming compilation asks for), only for a returning device.
   const withEngine = withReturningVisitPreload("<head></head>", [], ["ghostty-vt-abc.wasm"]);
   expect(withEngine).toContain('["./ghostty-vt-abc.wasm"]');
-  expect(withEngine).toContain('l.as="fetch";l.crossOrigin="anonymous"');
+  expect(withEngine).toContain('l.as="fetch";l.crossOrigin="anonymous";l.fetchPriority="low"');
   expect(withEngine).toContain('signIns>0');
 });
