@@ -49,6 +49,8 @@ export TRACER_TEST_PORT=4391 RUST_BACKTRACE=0
 export TMPDIR=/root/.iproof-tmp
 mkdir -p -m 700 "$TMPDIR" "$run/f"
 cd "$run"
+# The server's journal, live, so a stuck run can be read from the host.
+journalctl -f -n 0 -u infraternal-proof.service -o short-iso > "$out/journal-live-$phase.log" 2>&1 &
 
 if [ "$phase" = 1 ]; then
     log "phase 1 start run=$run"

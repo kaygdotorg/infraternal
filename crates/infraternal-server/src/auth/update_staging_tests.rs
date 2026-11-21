@@ -570,16 +570,29 @@ struct Server {
 impl Server {
     /// Open the full set of live PTY sessions and record their shims.
     async fn open_sessions(&mut self) {
-        self.sessions = terminals(self.address, &self.session, ORIGIN).await;
+        println!("UPDATE step=open_sessions");
+        self.sessions = tokio::time::timeout(
+            Duration::from_secs(300),
+            terminals(self.address, &self.session, ORIGIN),
+        )
+        .await
+        .expect("the sessions opened within 5 minutes");
         self.shims = shim_pids(&self.sessions);
         self.sent.clear();
     }
     /// Attach to every session and check each browser's first session still echoes.
+    /// Fails the proof (with this step named) if it takes over 2 minutes.
     async fn echo(&mut self, marker: &str) -> usize {
-        let mut attached = attach_all(self.address, &self.session, &self.sessions, ORIGIN).await;
-        let echoed = echo_all(&mut attached, &mut self.sent, marker).await;
-        attached.clear();
-        echoed
+        println!("UPDATE step=echo marker={marker}");
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut attached =
+                attach_all(self.address, &self.session, &self.sessions, ORIGIN).await;
+            let echoed = echo_all(&mut attached, &mut self.sent, marker).await;
+            attached.clear();
+            echoed
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no echo within 2 minutes ({marker})"))
     }
     /// The boot pointer's target, relative to `updates/`.
     fn pointer(&self) -> PathBuf {
@@ -624,6 +637,7 @@ impl Server {
         bucket: &Bucket,
         marker: i64,
     ) {
+        println!("UPDATE step=case case={case} version={version}");
         write_marker(&self.database, marker).await;
         downtime.take_ms();
         announce(bucket, Some(version));
