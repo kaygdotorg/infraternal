@@ -116,6 +116,13 @@ import CoreGraphics
         guard rawDrop.next(at: 600) == .refresh else { fatalError("settled refresh must survive repair") }
         rawDrop.completed(delivered: true)
         guard rawDrop.next(at: 601) == nil else { fatalError("successful refresh must go idle") }
+        // Encoder rate mode setting and its cap.
+        assert(EncoderRateMode(setting: nil) == .realtime && EncoderRateMode(setting: "bogus") == .realtime)
+        assert(EncoderRateMode(setting: "low-latency") == .lowLatency && EncoderRateMode(setting: "realtime") == .realtime)
+        assert(EncoderRateMode.lowLatency.dataRateLimits(bitsPerSecond: 8_000_000).isEmpty)
+        let cap = EncoderRateMode.realtime.dataRateLimits(bitsPerSecond: 8_000_000)
+        assert(cap.count == 1 && cap[0].bytes == 1_500_000 && cap[0].seconds == 1)
+
         var rate = AdaptiveBitrate(maximum: 12_000_000)
         assert(rate.feedback(at: 0, congested: true) == 8_400_000)
         assert(rate.feedback(at: 0.1, congested: true) == 8_400_000)

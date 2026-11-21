@@ -46,6 +46,17 @@ browser after 15 minutes. It removes its private server state and stops its
 browser, fixture window, source process and helper children.
 No production service, owner fixture, permission entry or trust setting changes.
 
+## Encoder mode
+
+The encoder uses the ordinary real-time rate control with a data-rate cap. The
+earlier low-latency rate control stays one setting away while it is compared
+on more Macs:
+`defaults write com.infraternal.desktop.helper EncoderRateMode low-latency`
+(`defaults delete com.infraternal.desktop.helper EncoderRateMode` to return).
+To measure both modes on a Mac, run
+`research/app-windows/j1115/run-encoder-probes.sh` from a checkout and attach
+the log it writes to [#146](https://git.kayg.org/kayg/infraternal/issues/146).
+
 ## Known limits
 
 - The recorded fixture can show clipped text or a black band while

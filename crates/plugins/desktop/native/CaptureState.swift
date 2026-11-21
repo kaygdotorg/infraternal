@@ -226,6 +226,41 @@ struct DamageEncodingState {
     var refreshDeadline: Double? { settle }
 }
 
+/// Which VideoToolbox rate control the hardware encoder uses [D204, #146].
+///
+/// `realtime` is the ordinary real-time session with a data-rate cap; `lowLatency` is the
+/// session with low-latency rate control that shipped before J1115. On the M1 at 1.56 MP and
+/// 120 Hz the low-latency mode took 9.5 ms p50 and 14.3 ms p95 per frame against 6.8 and 6.9,
+/// and a 0.28 MP window scrolling at 120 Hz dropped 139 of 160 frames against none (J1115 on
+/// #146; J1078 found the same direction), so `realtime` is the default. The other mode stays one
+/// setting away until the owner's M2 Max numbers are in: the companion reads the user default
+/// `EncoderRateMode` (`realtime` or `low-latency`), for example
+/// `defaults write com.infraternal.desktop.helper EncoderRateMode low-latency`, or the same
+/// pair as launch arguments (`-EncoderRateMode low-latency`).
+enum EncoderRateMode: String {
+    /// Ordinary real-time rate control with `dataRateLimits`.
+    case realtime
+    /// Low-latency rate control, as before J1115.
+    case lowLatency = "low-latency"
+    /// The user-default key that selects the mode.
+    static let settingKey = "EncoderRateMode"
+    /// The mode named by a setting value; anything missing or unknown is `realtime`.
+    init(setting value: String?) { self = value.flatMap(EncoderRateMode.init(rawValue:)) ?? .realtime }
+    /// The data-rate cap for the ordinary real-time mode, as VideoToolbox `DataRateLimits` pairs of
+    /// (bytes, window seconds) for an average of `bitsPerSecond`; empty for `lowLatency`, whose
+    /// own rate control already holds the budget. Without a cap the ordinary mode treats a pause
+    /// as saved budget and spends it on the next typed letter: 30.6 KB per letter after a 150 ms
+    /// pause at 1.56 MP on the M1, against 250 bytes with this cap (J1115). The cap allows 1.5x
+    /// the average over any second. Measured and rejected: 1x (scrolling fell from 30.2 to 24.6
+    /// dB), and an extra 3x-over-100 ms window (no gain; it starved the first refinement pass).
+    /// The encoder treats the cap as a target, not a wall: a 0.28 MP window scrolling at 120 Hz
+    /// still sent 2.9 Mbit/s against a 1.25 Mbit/s cap.
+    func dataRateLimits(bitsPerSecond: Int) -> [(bytes: Int, seconds: Double)] {
+        guard self == .realtime, bitsPerSecond > 0 else { return [] }
+        return [(Int(Double(bitsPerSecond) / 8 * 1.5), 1)]
+    }
+}
+
 /// Raises and lowers the video bit rate (bits per second) based on delivery feedback.
 ///
 /// Congestion cuts the rate to 70 percent (at most every 0.5 s, never below 500 kbit/s). Eight
