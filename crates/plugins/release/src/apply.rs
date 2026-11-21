@@ -60,8 +60,14 @@ pub const DATABASE: &str = "infraternal.sqlite";
 /// The largest `pending.json` accepted.
 const MAX_PENDING: u64 = 8192;
 
-/// Why B undid itself when its health check did not pass in time.
+/// Why B undid itself when its health check failed.
 pub const UNHEALTHY: &str = "the new release failed its health check";
+/// Why B undid itself when its health check had not passed after the trial limit
+/// (about 2 minutes, D295).
+pub const TIMED_OUT: &str = "the new release did not pass its health check in time";
+/// Why B undid itself when it could not start serving at all, for example because its
+/// database migration failed.
+pub const FAILED_TO_START: &str = "the new release could not start serving";
 /// Why A undid B when B stopped during its trial (a crash, a kill or a reboot).
 pub const STOPPED_IN_TRIAL: &str = "the new release stopped during its health check";
 /// Why A paused B when B's exec failed and A came back without B running.
@@ -332,10 +338,7 @@ pub fn resume(
         let reason = match pending.phase {
             Phase::Switching => DID_NOT_START,
             Phase::Trial => STOPPED_IN_TRIAL,
-            Phase::Rollback => match pending.reason.as_deref() {
-                Some(UNHEALTHY) => UNHEALTHY,
-                _ => STOPPED_IN_TRIAL,
-            },
+            Phase::Rollback => undo_reason(pending.reason.as_deref()),
         };
         // B never ran after a failed exec, so the database is still A's own.
         if pending.phase != Phase::Switching
@@ -359,6 +362,18 @@ pub fn resume(
     remove_pending(&lock)?;
     lock.write_state(&state)?;
     Ok(Resume::Finished(outcome))
+}
+
+/// The recorded reason for an undo B began with `reason`: one of the reasons B gives
+/// itself ([`UNHEALTHY`], [`TIMED_OUT`], [`FAILED_TO_START`]), or [`STOPPED_IN_TRIAL`]
+/// for anything else (B stopped before it could say why). The marker is a file, so
+/// only these known texts are ever copied into the update state.
+#[must_use]
+pub fn undo_reason(reason: Option<&str>) -> &'static str {
+    [UNHEALTHY, TIMED_OUT, FAILED_TO_START]
+        .into_iter()
+        .find(|known| Some(*known) == reason)
+        .unwrap_or(STOPPED_IN_TRIAL)
 }
 
 /// Whether a switch is in flight here (`pending.json` exists). A server never starts

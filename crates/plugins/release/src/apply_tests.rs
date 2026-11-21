@@ -204,6 +204,10 @@ fn the_previous_release_restores_the_database_after_a_failed_trial() {
     for (phase, reason, expected) in [
         (Phase::Trial, None, STOPPED_IN_TRIAL),
         (Phase::Rollback, Some(UNHEALTHY), UNHEALTHY),
+        (Phase::Rollback, Some(TIMED_OUT), TIMED_OUT),
+        (Phase::Rollback, Some(FAILED_TO_START), FAILED_TO_START),
+        // A marker is a file: an unknown reason is never copied into the state.
+        (Phase::Rollback, Some("made up"), STOPPED_IN_TRIAL),
     ] {
         let data = Data::new();
         write_file(&data.0.join(DATABASE), b"written-by-b");
