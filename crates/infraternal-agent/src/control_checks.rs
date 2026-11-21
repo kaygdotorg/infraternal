@@ -192,16 +192,9 @@ fn check_hello_os(data: &[u8]) {
             panic!("an OS was named without the exact Hello prefix");
         };
         // The direct-endpoint flag is false exactly when the one suffix is there.
-        let token = match rest.strip_suffix(" direct=none") {
-            Some(token) => {
-                assert!(!read.direct_endpoint);
-                token
-            }
-            None => {
-                assert!(read.direct_endpoint);
-                rest
-            }
-        };
+        let without = rest.strip_suffix(" direct=none");
+        assert_eq!(read.direct_endpoint, without.is_none());
+        let token = without.unwrap_or(rest);
         assert!(
             !token.is_empty()
                 && token
