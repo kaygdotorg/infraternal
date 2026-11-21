@@ -3,9 +3,12 @@
 import importlib.machinery
 import importlib.util
 import json
+import re
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+from unittest import mock
 import unittest
 
 sys.dont_write_bytecode = True
@@ -152,6 +155,72 @@ class InstallerTests(unittest.TestCase):
         """03:30 IST is before the 05:30 to 07:45 IST dev-02 window and the timer is in IST."""
         timer = installer.unit_texts(Path("/x"), "/usr/bin")["infraternal-nightly-latency.timer"]
         self.assertIn("OnCalendar=*-*-* 03:30:00 Asia/Kolkata", timer)
+
+
+# The perf VM's installed perf-run takes only `[--cold] [--root] [--out DIR] -- <cmd>` (its usage line).
+# It has no `status` subcommand; a call that uses one fails on the VM with exit status 2 (#447).
+PERF_RUN_FLAGS = r"(?:--cold|--root|--out \S+)"
+
+
+def perf_run_calls(text):
+    """Every `perf-run ... -- ` invocation written in `text`, as the flags between the name and the `--`."""
+    return re.findall(r"perf-run((?: " + PERF_RUN_FLAGS + r")*) -- ", text)
+
+
+class PerfRunInterfaceTests(unittest.TestCase):
+    """Every perf-run call the nightly makes, and the installer's preflight, use the interface the perf VM has."""
+
+    def test_nightly_calls_use_only_the_installed_interface(self):
+        """Each perf-run call in the coordinator is `perf-run [--cold|--root|--out DIR]... -- <cmd>`."""
+        text = (HERE / "nightly-latency.py").read_text(encoding="utf-8")
+        calls = perf_run_calls(text)
+        self.assertTrue(calls, "expected the coordinator to call perf-run")
+        for flags in calls:
+            self.assertRegex(flags, r"^(?: " + PERF_RUN_FLAGS + r")*$")
+
+    def test_no_status_subcommand_anywhere_in_the_nightly_scripts(self):
+        """The nightly scripts never call `perf-run status`, which the perf VM does not have."""
+        for name in ("nightly-latency.py", "install-nightly-latency"):
+            self.assertNotIn("perf-run status", (HERE / name).read_text(encoding="utf-8"))
+
+    def test_preflight_command_is_a_real_invocation(self):
+        """The preflight is `perf-run -- <cmd>`, a call the perf VM accepts (exit 0 on `true`)."""
+        self.assertEqual(perf_run_calls(installer.PERF_PREFLIGHT + " "), [""])
+        self.assertTrue(installer.PERF_PREFLIGHT.endswith("-- true"))
+
+    def test_preflight_sends_that_command_to_the_perf_vm(self):
+        """preflight() runs PERF_PREFLIGHT on the perf VM through netbird ssh, and reports a non-zero exit."""
+        seen = []
+
+        def fake_run(argv, **_):
+            seen.append(argv)
+            return subprocess_result(0 if argv[2] != installer.PERF_HOST else 2, "usage: perf-run")
+
+        with mock.patch.object(installer.shutil, "which", return_value="/usr/bin/x"), \
+                mock.patch.object(installer.subprocess, "run", side_effect=fake_run):
+            problems = installer.preflight()
+        perf = [argv for argv in seen if argv[2] == installer.PERF_HOST]
+        self.assertEqual(perf, [["netbird", "ssh", installer.PERF_HOST, installer.PERF_PREFLIGHT]])
+        self.assertEqual(len(problems), 1)
+        self.assertIn(installer.PERF_PREFLIGHT, problems[0])
+
+    def test_preflight_reports_a_timeout_instead_of_crashing(self):
+        """A perf VM that does not answer within the timeout is one reported problem, not a traceback."""
+        def fake_run(argv, **_):
+            if argv[2] == installer.PERF_HOST:
+                raise subprocess.TimeoutExpired(argv, 120)
+            return subprocess_result(0, "")
+
+        with mock.patch.object(installer.shutil, "which", return_value="/usr/bin/x"), \
+                mock.patch.object(installer.subprocess, "run", side_effect=fake_run):
+            problems = installer.preflight()
+        self.assertEqual(len(problems), 1)
+        self.assertIn("did not finish within 120 s", problems[0])
+
+
+def subprocess_result(code, stderr):
+    """A stand-in for subprocess.CompletedProcess with the fields preflight() reads."""
+    return subprocess.CompletedProcess(args=[], returncode=code, stdout="", stderr=stderr)
 
 
 if __name__ == "__main__":
