@@ -29,13 +29,8 @@ CLIENTS = ("A", "B", "C")
 RECOVERY_BOUND_SECONDS = 30.0
 ANNOUNCEMENT_BOUND_SECONDS = 5.0
 IDLE_WINDOW_SECONDS = 7.0
-# The shortest time an off-list authenticated address is kept after its handshake (J1025).
-# Mirrors `candidate_walks::OFF_LIST_RETENTION`; the quiet-mover cases straddle it.
-OFF_LIST_RETENTION_SECONDS = 25.0
-QUIET_AGED_WAIT_SECONDS = OFF_LIST_RETENTION_SECONDS + 10.0
-QUIET_CAP_SECONDS = 200.0
-# With the retention in place, a peer whose session is older than it must be followed at once.
-QUIET_AGED_BOUND_SECONDS = 5.0
+# The quiet-mover cases: a session just made, and one 35 s old.
+QUIET_AGED_WAIT_SECONDS = 35.0
 QUIET_ROW_CAP_SECONDS = 900
 
 
@@ -750,11 +745,11 @@ def run_proof(
         assert_peer_inventory(nodes, addresses, topology, ports)
         if quiet_mover:
             row["quiet_mover"] = []
-            # A fresh session is inside the retention, so its observers keep the old address; that
-            # window is measured, not asserted. An aged session must be followed at once.
+            # Measured, not asserted: the live-endpoint rule keeps the old address of a quiet mover
+            # (J1025 finding on #483), so the numbers are the receipt for a design decision.
             for label, wait, cap, bound in (
                 ("fresh_session", 0.0, 60.0, None),
-                ("aged_session", QUIET_AGED_WAIT_SECONDS, QUIET_CAP_SECONDS, QUIET_AGED_BOUND_SECONDS),
+                ("aged_session", QUIET_AGED_WAIT_SECONDS, 60.0, None),
             ):
                 row["quiet_mover"].append(quiet_mover_case(
                     label, wait, cap, bound, nodes, observer, current_probes, addresses, ports))

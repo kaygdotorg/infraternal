@@ -98,13 +98,10 @@ runner deletes all
 of its named namespaces before it exits.
 Use `--restart-only` to repeat the direct-path and restart checks without the
 later underlay-change phase.
-`--quiet-mover` adds two cases for a peer that moved and then stays quiet (J1025).
-C is frozen (SIGSTOP), the coordinator lists a new LAN address for it, and the
-proof times how long A and B keep sending to the old one. After a session older than
-`OFF_LIST_RETENTION` (25 s) they must follow at once, which is asserted. A session
-inside the retention keeps the old address until the next snapshot after its
-handshake passes `SILENT`, which is measured over a 60 s cap, not asserted. The row
-cap grows to 900 s for it.
+`--quiet-mover` adds two measured (not asserted) cases for a peer that moved and then
+stays quiet (J1025). C is frozen (SIGSTOP), the coordinator lists a new LAN address for
+it, and the proof times how long A and B keep sending to the old one, after a fresh
+session and after a 35 s old one. The row cap grows to 900 s for it.
 Set `J967_CAPTURE_UNDERLAY=1` to save UDP captures from C, S and the shared
 router around the address change; the report lists each capture and its decoded
 packets. This diagnostic mode needs `tcpdump` in the root proof's `PATH`.
