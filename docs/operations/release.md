@@ -1,4 +1,4 @@
-<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225,226]. -->
+<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225,226]; S3 publication #211. -->
 # Signed releases
 
 Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
@@ -85,41 +85,68 @@ chmod +x infraternal-aarch64-darwin && ./infraternal-aarch64-darwin up https://<
 
 `allowed_signers` is `release/allowed_signers` from this repository.
 
-The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and
-`RELEASE_CALLER_TOKEN` in the publishing process environment, then runs:
+The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY` and `RELEASE_CALLER_TOKEN` in the publishing process
+environment, then runs:
 
 ```sh
 scripts/release/publish <version>
 ```
 
-Do not put tokens in shell arguments, checked-in environment files or logs.
-Authorization is passed to curl through its configuration stdin; the scripts
-never print tokens or write them to files. The uploader needs R2 object access,
-without Worker edit access. Only the owner may change/deploy the signer [224].
-Every authenticated and public request includes a User-Agent.
+The R2 pair is an S3 API key scoped to the one bucket `infraternal-builds`
+(object read and write). That is the narrowest grant: no account-wide R2 and no
+Workers access. `publish` talks to
+`https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com/infraternal-builds/...`
+and lets curl sign each request with SigV4 (`--aws-sigv4 aws:amz:auto:s3`).
+`CLOUDFLARE_API_TOKEN` is no longer used: the Cloudflare REST objects API is not
+called (#211). `RELEASE_CALLER_TOKEN` is for the signer Worker only.
+
+Do not put keys or tokens in shell arguments, checked-in environment files or
+logs. Both the R2 pair and the caller token are passed to curl through its
+configuration on stdin; the scripts never print them or write them to files, so
+`/proc/<pid>/cmdline` of the curl child holds neither. The key id and secret must
+use plain key characters, or the script refuses them before curl starts. Only the
+owner may change/deploy the signer [224]. Every authenticated and public request
+includes a User-Agent.
 
 Publication refuses an existing object or signed release. It uploads the whole
 bundle, asks the Worker to sign, downloads the manifest, signature and payloads,
 and verifies the signature and all hashes before reporting success. Interrupted
 publication leaves an immutable partial release; investigate it rather than
-repeating uploads over existing objects. The uploader checks the authoritative R2 object prefix, including partial or
-unrelated objects, and holds a nonblocking `flock` for the entire publication,
-including signing and public verification. The fixed per-user lock path is
-`${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish/<version>.lock`,
-independent of `CARGO_TARGET_DIR` and the worktree. The state path must be
-absolute; the lock directory and file must be owned and private. Lock files
-remain in place: unlinking a held lock would allow a second writer to lock a
-new inode. The kernel releases the lock when its last descriptor closes;
-in-flight child requests retain it after an abrupt publisher stop. PUTs also send
-`If-None-Match: *` as a precaution. The REST upload reference does not promise
-conditional-write semantics, so the orchestrator must serialize publishers
-across machines; the preflight is not a distributed lock. See the official
-[object list](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/list/)
-and [upload](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/upload/)
-API definitions. Storage listing/upload JSON and Worker replies are bounded
-and reject duplicate fields recursively, including nested objects. An
-ambiguous response stops publication with a plain reason; no provider
-diagnostics are echoed. This pipeline does not consume `releases/index.json`.
+repeating uploads over existing objects.
+
+Admission and uploads work like this:
+
+- **Listing.** A ListObjectsV2 request with `prefix=releases/<version>/` covers
+  every object, partial or unrelated. The page must be empty. A page that is
+  empty but truncated is followed through its continuation token for at most 5
+  pages; after that publication stops.
+- **Strict XML.** The reply is read up to 1 MiB, with no DTD or entity allowed
+  (`response.py`). It must be a `ListBucketResult` for this bucket and prefix,
+  with `KeyCount` 0, a consistent `IsTruncated` and token, and no repeated or
+  unknown top-level element. Any `Contents` entry is refused even when the count
+  says 0. Anything else stops with a plain reason, and no provider diagnostics
+  are echoed.
+- **Upload.** Each PUT is signed, sends `If-None-Match: *` and checks the HTTP
+  status through curl (`--fail`); its reply body is bounded and discarded. R2
+  supports conditional PutObject on its S3 API, evaluated atomically against the
+  committed state, so a concurrent writer gets 412 instead of replacing an
+  object ([R2 conditional operations](https://developers.cloudflare.com/r2/api/s3/conditional-operations/),
+  [S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/)).
+  The old REST upload had no such promise. Even so, serialize publishers across
+  machines: the listing is not a distributed lock.
+- **Lock.** A nonblocking `flock` is held for the entire publication, including
+  signing and public verification. The fixed per-user lock path is
+  `${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish/<version>.lock`,
+  independent of `CARGO_TARGET_DIR` and the worktree. The state path must be
+  absolute; the lock directory and file must be owned and private. Lock files
+  remain in place: unlinking a held lock would allow a second writer to lock a
+  new inode. The kernel releases the lock when its last descriptor closes;
+  in-flight child requests retain it after an abrupt publisher stop.
+- **Worker reply.** The signer's JSON reply is bounded and rejects duplicate
+  fields recursively, including nested objects.
+
+This pipeline does not consume `releases/index.json`.
 
 For an edge publication, take the version from the completed bundle's directory
 name, then publish and verify that exact version:
@@ -316,7 +343,9 @@ remains enabled. The script tests
 copy the scripts and trust file into an isolated fixture, generate a throwaway
 key, and use a loopback bucket/signer. Production key injection is unavailable.
 `RELEASE_TEST_ORIGIN` exists solely for an explicit loopback HTTP stand-in;
-the default endpoints always use HTTPS. These tests never contact the live
+the default endpoints always use HTTPS. The loopback origin also serves the S3
+calls and recomputes each SigV4 signature, and the test inspects the live curl
+child's `/proc/<pid>/cmdline` for secrets. These tests never contact the live
 bucket or Worker.
 
 # Review checklist
@@ -335,11 +364,11 @@ bucket or Worker.
   release work runs while the component is off.
 - Environment tokens reach curl through stdin, with tracing disabled. No signing
   key, credential file, secret argument or provider diagnostic is recorded.
-- Publisher decoding of R2 preflight and Worker responses rejects duplicate
-  fields at every depth. The
+- The R2 key is bucket-scoped. The preflight XML is decoded strictly and
+  bounded, and the Worker's JSON rejects duplicate fields at every depth. The
   fixed per-user flock refuses concurrent same-version publishers even with
-  different build directories; cross-machine
-  serialization is required because REST conditional PUT is not guaranteed.
+  different build directories; `If-None-Match: *` makes R2 refuse an overwrite,
+  and cross-machine serialization is still required for the listing.
 - Stable defaults never depend on the running binary's channel. Edge requires
   explicit confirmation in both adapters; returning to stable is one action.
 - Channel pointers are bounded strict objects; signed VERSION binds the exact
