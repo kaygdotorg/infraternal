@@ -56,10 +56,21 @@ export function parsePointerShape(value: unknown): PointerShape | undefined {
 /**
  * The CSS `cursor` value that draws `shape`: the image at its density, the hotspot, and the ordinary pointer as the
  * fallback for a browser that refuses the image. Hotspot numbers are rounded to whole CSS pixels, which is what
- * browsers accept.
+ * browsers accept. `prefixed` writes `-webkit-image-set`, for a browser that only knows that spelling in a cursor.
  */
-export function pointerCss(shape: PointerShape | undefined): string {
+export function pointerCss(shape: PointerShape | undefined, prefixed = false): string {
   if (!shape) return DEFAULT_POINTER;
   const url = `url("data:image/png;base64,${shape.png}")`;
-  return `image-set(${url} ${shape.scale}x) ${Math.round(shape.hotX)} ${Math.round(shape.hotY)}, ${DEFAULT_POINTER}`;
+  return `${prefixed ? "-webkit-image-set" : "image-set"}(${url} ${shape.scale}x) ${Math.round(shape.hotX)} ${Math.round(shape.hotY)}, ${DEFAULT_POINTER}`;
+}
+
+/**
+ * Puts `shape` on `style` as its cursor. A browser that does not understand a value silently keeps the one before it,
+ * which here would be the previous shape, so the cursor is cleared first (the stylesheet's ordinary pointer then shows)
+ * and the prefixed spelling is tried when the standard one was not accepted.
+ */
+export function applyPointer(style: CSSStyleDeclaration, shape: PointerShape | undefined): void {
+  style.cursor = "";
+  style.cursor = pointerCss(shape);
+  if (!style.cursor && shape) style.cursor = pointerCss(shape, true);
 }
