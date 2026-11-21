@@ -47,7 +47,7 @@ export function mountUpdateNotices(core: CoreScreen, source: UpdatesSource, opti
   let last: UpdateState = options.announceReady ? { kind: "never" } : source.facts().state;
   let running = source.facts().running;
   let cancelReload: (() => void) | undefined;
-  const say = (message: string): void => core.toast.show({ message, tone: "error" });
+  const say = (message: string): void => { core.toast.show({ message, tone: "error" }); };
 
   const reloadWhenIdle = (): void => {
     cancelReload?.();

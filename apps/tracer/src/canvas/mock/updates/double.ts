@@ -53,7 +53,7 @@ export const UPDATE_SCENARIOS: UpdatesScenario[] = [
     history: Array.from({ length: 12 }, (_, i): UpdateHistoryEntry => ({ version: `0.12.${104 - i}-edge.3`, from: `0.12.${103 - i}-edge.3`, outcome: i === 3 ? "failed" : "applied", at: n - (i + 1) * DAY, ...(i === 3 ? { reason: "The new version could not open the database copy, which is read-only on this volume. Nothing was changed." } : {}) })) }) },
 ];
 
-const wait = (ms: number): Promise<void> => new Promise((resolve) => { window.setTimeout(resolve, ms); });
+const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 export interface UpdatesDouble extends UpdatesSource {
   setScenario(id: string): void;
