@@ -328,6 +328,7 @@ export class Wizard {
     return { id: entry.id, label, icon: typed && !entry.discovered ? svg(ICON.typed, "is-line") : hostIconMarkup(entry.os, "") };
   }
 
+  /** The markup of one discovered host's row, with a labelled image mark for each source that found it; `added` shows it as already in the inventory. */
   private rowOf(entry: Entry, added: boolean): string {
     const host = entry.discovered!;
     const status = statusOf(host);

@@ -323,6 +323,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       };
     }
 
+    /** The markup of one discovered or typed host's row in the list, with a labelled mark for each source it was found by. */
     private hostRow(host: AddHostFixture): string {
       const typed = this.typed.includes(host);
       const status = typed ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
