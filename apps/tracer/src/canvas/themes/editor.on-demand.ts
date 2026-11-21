@@ -278,7 +278,7 @@ export function renderThemeEditor(pane: HTMLElement): () => void {
     paintChoice(font, now.font);
     paintInterfaceFont();
     const here = familyOf(now.colors).id;
-    for (const [id, row] of rowOf) { row.toggleAttribute("data-current", id === here); row.setAttribute("aria-checked", String(id === here)); }
+    for (const [id, row] of rowOf) { row.toggleAttribute("data-current", id === here); }
     for (const [id, dot] of dots) dot.setAttribute("aria-checked", String(id === now.colors));
     // Background: the tabs, the Colour's own solids and gradients drawn in the selected Colour, the custom ones, and the person's colours.
     const theme = THEMES[now.colors] ?? THEMES.mocha!;
