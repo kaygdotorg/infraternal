@@ -1,12 +1,12 @@
 //! Thread quality-of-service classes on macOS (#554).
 //!
-//! The kernel schedules a thread by its QoS class, and a thread with no class runs wherever
+//! The kernel schedules a thread by its quality-of-service class, and a thread with no class runs wherever
 //! the process default puts it. Latency-critical threads (the runtime that relays terminal
 //! bytes, the shim that owns a PTY) ask for [`Qos::UserInteractive`] so they are woken on a
 //! performance core. Housekeeping threads ask for [`Qos::Utility`] so they never compete.
 //!
 //! This is **not** what fixes late timers. Measured on a real M1 (#554), only the launchd job's
-//! `ProcessType=Interactive` stops timer coalescing; a thread QoS leaves a 8.33 ms timer at
+//! `ProcessType=Interactive` stops timer coalescing; a thread class leaves a 8.33 ms timer at
 //! 34 ms. This module only decides which core a woken thread runs on, so keep both.
 //!
 //! On every other platform each function does nothing and reports success, so callers need no `cfg`.
@@ -42,7 +42,7 @@ unsafe extern "C" {
 
 /// Give the calling thread `qos`. Call it first thing on the thread you mean to change.
 ///
-/// Returns `true` when the class took effect, and `true` on platforms without QoS. A refusal is
+/// Returns `true` when the class took effect, and `true` on platforms without quality-of-service classes. A refusal is
 /// harmless (the thread keeps its default class), so callers may ignore it.
 #[must_use]
 pub fn set_current_thread(qos: Qos) -> bool {
