@@ -5,6 +5,9 @@
 #[cfg(any(feature = "source", feature = "server"))]
 use infraternal_plugin_desktop::media;
 use infraternal_plugin_desktop::{capture, protocol, socket};
+#[allow(dead_code)]
+#[path = "../src/backlog.rs"]
+mod backlog;
 #[path = "../src/helper.rs"]
 mod helper;
 #[allow(dead_code)]

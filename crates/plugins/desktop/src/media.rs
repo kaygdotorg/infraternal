@@ -28,6 +28,16 @@ impl Video {
         }
     }
 }
+impl crate::backlog::Unit for Video {
+    /// True if a viewer can start decoding from this frame.
+    fn keyframe(&self) -> bool {
+        self.keyframe
+    }
+    /// The encoded size, without the wire header.
+    fn size(&self) -> usize {
+        self.bytes.len()
+    }
+}
 /// Why a desktop operation was refused. Deliberately coarse so error text sent to
 /// users reveals nothing about hosts, sessions or windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

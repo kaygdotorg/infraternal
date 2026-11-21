@@ -7,9 +7,12 @@
 //! produces encoded video frames, so slow capture or encoding never delays
 //! input handling.
 //!
-//! The two sides communicate through small bounded slots rather than queues:
-//! one pending resize, a single encoded-frame slot, and coalesced "need a
-//! keyframe" and "congested" flags. A frame that does not fit is dropped and the
+//! The two sides communicate through small bounded slots: one pending resize,
+//! coalesced "need a keyframe" and "congested" flags, and the encoded frames
+//! waiting for the socket (`Frames`, an age-bounded `Backlog`). A short
+//! stall of the session thread (an input call to the companion, the 100 ms
+//! position check) leaves a few delta frames waiting instead of forcing a
+//! keyframe. Only a stall beyond the backlog's bound drops frames, and then the
 //! next delivered frame is forced to be a keyframe, because a delta frame that
 //! refers to a dropped one would corrupt decoding. A condition variable (`Wake`)
 //! lets the session thread sleep until there is input, a frame or a deadline,
@@ -19,6 +22,7 @@ use crate::capture::{Capture, CapturedFrame};
 #[cfg(any(target_os = "macos", test))]
 use crate::macos::MacCapture;
 use crate::{
+    backlog::{Admission, Backlog},
     capture::Rect,
     native::Native,
     protocol::{self, Kind, Size, Start},
@@ -108,8 +112,8 @@ struct Worker {
     /// True when capturing a whole display. A window is followed by checking its
     /// position regularly; a display needs no such check.
     screen: bool,
-    /// Encoded frames, holding at most one so a slow client cannot build a backlog.
-    frames: mpsc::Receiver<io::Result<Vec<u8>>>,
+    /// Encoded frames waiting for the socket, bounded by age (see [`Frames`]).
+    frames: Arc<Frames>,
     thread: Option<thread::JoinHandle<()>>,
 }
 impl Worker {
@@ -146,7 +150,8 @@ impl Worker {
         let force = Arc::clone(&force_keyframe);
         let congested = Arc::new(AtomicBool::new(false));
         let pressure = Arc::clone(&congested);
-        let (sender, frames) = mpsc::sync_channel(1);
+        let frames = Arc::new(Frames::default());
+        let sender = Arc::clone(&frames);
         let size = start.size;
         let screen = matches!(start.target, protocol::Target::Screen { .. });
         let start = start.clone();
@@ -198,9 +203,7 @@ impl Worker {
                     },
                 )
             };
-            if let Err(error) = result {
-                let _ = sender.try_send(Err(error));
-            }
+            sender.finish(result);
             wake.notify();
         });
         Ok(Self {
@@ -235,16 +238,85 @@ impl Drop for Worker {
 // Both capture paths share coalesced control flags and one bounded frame slot.
 // These borrows stay inside the owning worker thread; retirement joins it.
 /// The capture thread's view of the signals shared with the session thread: see
-/// the same-named fields of `Worker`. `frames` is the single-slot frame
-/// channel, and `wake` is notified after each frame.
+/// the same-named fields of `Worker`. `frames` holds the encoded frames waiting
+/// for the socket, and `wake` is notified after each frame.
 #[derive(Clone, Copy)]
 struct Production<'a> {
     pending: &'a Mutex<Option<(Size, Rect)>>,
     stop: &'a Arc<AtomicBool>,
     force_keyframe: &'a AtomicBool,
     congested: &'a AtomicBool,
-    frames: &'a mpsc::SyncSender<io::Result<Vec<u8>>>,
+    frames: &'a Frames,
     wake: &'a Wake,
+}
+
+/// The encoded frames the capture thread hands to the session thread, and how
+/// the capture thread ended.
+///
+/// The capture thread pushes; the session thread takes them in order and
+/// writes them to the client socket. Frames wait in an age-bounded
+/// [`Backlog`], so a session thread busy for a moment with a companion call
+/// costs no keyframe. When the capture thread ends it records its result with
+/// [`Frames::finish`]; the session thread sees that only after every waiting
+/// frame has been taken.
+#[derive(Default)]
+struct Frames {
+    /// The waiting frames and the end result, behind one short-held lock.
+    state: Mutex<FramesState>,
+}
+/// The inside of [`Frames`].
+#[derive(Default)]
+struct FramesState {
+    /// Encoded frame bodies waiting for the socket, oldest first.
+    backlog: Backlog<Vec<u8>>,
+    /// Set once by the capture thread as it ends: `Ok` for a normal stop,
+    /// `Err` with the reason it failed.
+    ended: Option<io::Result<()>>,
+}
+/// What the session thread got from [`Frames::take`].
+enum Taken {
+    /// The next frame body to write.
+    Frame(Vec<u8>),
+    /// Nothing is waiting and capture still runs.
+    Empty,
+    /// Capture ended with this error (or with "stopped" when it ended without one).
+    Ended(io::Error),
+}
+impl Frames {
+    /// Offers one encoded frame body, queued now. See [`Backlog::push`]: on
+    /// anything but `Queued` the caller must ask for a keyframe.
+    fn push(&self, body: Vec<u8>) -> Admission {
+        self.state
+            .lock()
+            .map_or(Admission::Overflowed, |mut state| {
+                state.backlog.push(body, Instant::now())
+            })
+    }
+    /// Records how the capture thread ended. Only the first result counts.
+    fn finish(&self, result: io::Result<()>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.ended.get_or_insert(result);
+        }
+    }
+    /// Takes the oldest waiting frame; once none waits, reports the end of
+    /// capture if it has ended.
+    fn take(&self) -> Taken {
+        let Ok(mut state) = self.state.lock() else {
+            return Taken::Ended(io::Error::other("Desktop capture unavailable."));
+        };
+        if let Some(body) = state.backlog.pop() {
+            return Taken::Frame(body);
+        }
+        match state.ended.take() {
+            None => Taken::Empty,
+            Some(Err(error)) => Taken::Ended(error),
+            Some(Ok(())) => {
+                // Keep reporting the end on later calls.
+                state.ended = Some(Ok(()));
+                Taken::Ended(io::Error::other("Desktop capture stopped."))
+            }
+        }
+    }
 }
 
 /// Coalesces repair signals and retries only while an IDR is still missing.
@@ -411,16 +483,15 @@ fn produce(
             return Err(io::Error::other("Desktop encoding unavailable."));
         }
         crate::measurement::helper_frame("helper_native_read", &body);
-        // At most one compressed frame waits for the local writer. Never wait on a
-        // slow reader here. After an encoded drop the next delivered frame must be an
-        // IDR: a P-frame that references an undelivered frame would corrupt decoding.
-        match frames.try_send(Ok(body)) {
-            Ok(()) => {
-                needs_keyframe = false;
-                wake.notify();
-            }
-            Err(mpsc::TrySendError::Full(_)) => needs_keyframe = true,
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        // Compressed frames wait for the local writer only within the backlog's
+        // age bound. Never wait on a slow reader here. After a drop the next
+        // delivered frame must be an IDR: a P-frame that references an
+        // undelivered frame would corrupt decoding.
+        if frames.push(body) == Admission::Queued {
+            needs_keyframe = false;
+            wake.notify();
+        } else {
+            needs_keyframe = true;
         }
         refreshed |= sharp;
         // The owned-pixel fallback is bounded by capture/copy cost, not an extra
@@ -484,7 +555,8 @@ mod startup_recovery_tests {
         let pending = Arc::new(Mutex::new(None));
         let force_keyframe = Arc::new(AtomicBool::new(false));
         let congested = Arc::new(AtomicBool::new(false));
-        let (frames, received) = mpsc::sync_channel(1);
+        let frames = Arc::new(Frames::default());
+        let received = Arc::clone(&frames);
         let wake = Arc::new(Wake::default());
         let worker_stop = Arc::clone(&stop);
         let worker_pending = Arc::clone(&pending);
@@ -507,19 +579,32 @@ mod startup_recovery_tests {
                 },
             )
         });
+        // Event wait for the first delivered frame (the wake fires on every
+        // push). Interpreter start-up is load-stretched wall time, so the
+        // bound only separates a stuck worker from a slow one.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let first = loop {
+            let generation = wake.generation().expect("wake");
+            match received.take() {
+                Taken::Frame(frame) => break Some(frame),
+                Taken::Ended(_) => break None,
+                Taken::Empty if Instant::now() >= deadline => break None,
+                Taken::Empty => wake
+                    .wait(
+                        generation,
+                        Some(deadline.saturating_duration_since(Instant::now())),
+                    )
+                    .expect("wait"),
+            }
+        };
 
-        // Event wait for the first delivered frame. Interpreter start-up is
-        // load-stretched wall time, so the bound only separates a stuck worker from a slow one.
-        let first = received.recv_timeout(Duration::from_secs(30));
         stop.store(true, Ordering::Release);
         let _ = worker.join();
         let requests =
             fs::read_to_string(format!("{}.requests", native_path.display())).unwrap_or_default();
         let _ = fs::remove_dir_all(&root);
 
-        let frame = first
-            .expect("startup delta must trigger a repair keyframe")
-            .unwrap();
+        let frame = first.expect("startup delta must trigger a repair keyframe");
         assert_eq!(
             frame.get(8),
             Some(&1),
@@ -562,8 +647,7 @@ mod startup_recovery_tests {
 }
 
 /// Capture loop for the normal path: a dedicated companion process captures and
-/// encodes, and this loop forwards its video. Runs until `stop` is set or the
-/// frame receiver goes away.
+/// encodes, and this loop forwards its video. Runs until `stop` is set.
 ///
 /// On a resize the companion is stopped and a fresh one started with the new
 /// geometry. Frames are forwarded only once a keyframe has been seen, and a
@@ -629,14 +713,12 @@ fn produce_surface(
         if !recovery.admit(keyframe) {
             continue;
         }
-        match frames.try_send(Ok(body)) {
-            Ok(()) => {
-                wake.notify();
-            }
-            Err(mpsc::TrySendError::Full(_)) => {
-                recovery.request();
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => break,
+        // A backlog past its age bound has dropped what waited; only an IDR can
+        // follow (the recovery refuses deltas until then).
+        if frames.push(body) == Admission::Queued {
+            wake.notify();
+        } else {
+            recovery.request();
         }
     }
     Ok(())
@@ -785,27 +867,16 @@ fn run(
                 }
                 reconcile = Instant::now() + Duration::from_millis(100);
             }
-            let frame = stream.frames.try_recv();
-            let had_frame = frame.is_ok();
-            match frame {
-                Ok(frame) => {
-                    let frame = match frame {
-                        Ok(frame) => frame,
-                        Err(error) => return surface_failure(socket, native, error),
-                    };
+            let had_frame = match stream.frames.take() {
+                Taken::Frame(frame) => {
                     crate::measurement::helper_frame("helper_socket_begin", &frame);
                     protocol::write(socket, Kind::Video, &frame)?;
                     crate::measurement::helper_frame("helper_socket_end", &frame);
+                    true
                 }
-                Err(mpsc::TryRecvError::Empty) => {}
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    return surface_failure(
-                        socket,
-                        native,
-                        io::Error::other("Desktop capture stopped."),
-                    );
-                }
-            }
+                Taken::Empty => false,
+                Taken::Ended(error) => return surface_failure(socket, native, error),
+            };
             // Window following still reconciles at its existing deadline. An
             // idle whole-display capture sleeps until input, damage or EOF;
             // it performs no 5 ms socket/frame polling.

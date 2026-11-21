@@ -9,14 +9,16 @@
 //!   the helper is handed to the sender. Every reply is owed within 3 seconds,
 //!   but while nothing is owed and no video flows there is no timer at all.
 //! - The sender (`send_video`) writes video to the lane in its own task, so a
-//!   slow or blocked video write can never delay input. Between them sits a
-//!   one-slot "newest frame" holder: if the sender falls behind, older frames
-//!   are replaced, and the sender then asks for a keyframe because a delta frame
-//!   after a gap cannot be decoded.
+//!   slow or blocked video write can never delay input. Between them sits an
+//!   age-bounded queue ([`crate::backlog`]): a sender that falls behind for a
+//!   moment catches up with the waiting delta frames. Only a sender more than
+//!   about 100 ms behind loses them, and then a keyframe is requested, because
+//!   a delta frame after a gap cannot be decoded.
 //!
 //! When the task ends for any reason, the helper is stopped and its cleanup
 //! result is reported separately from the session's own result.
 use crate::{
+    backlog::{Admission, Backlog},
     media::{ASSEMBLY_TIMEOUT, Video},
     protocol::{self, Input, Kind, Size},
     source::{Control, Metadata, Outcome},
@@ -31,9 +33,12 @@ use infraternal_protocol::{
 use serde_json::Value;
 use std::{
     collections::VecDeque,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Notify, mpsc, watch};
 use uuid::Uuid;
 
 /// Everything a worker needs to serve one lane.
@@ -70,29 +75,58 @@ struct Pending {
     /// Where to pass the reply body on, for requests that want it.
     reply: Option<tokio::sync::oneshot::Sender<Result<Value, PluginError>>>,
 }
-/// The producing end of the one-slot "newest frame" holder.
-struct PendingVideo {
-    frames: watch::Sender<Option<Video>>,
+/// The frames waiting between the pump and the video sender.
+///
+/// One in-flight write plus an age-bounded [`Backlog`] bound storage: a
+/// stalled lane can hold at most about 100 ms of video, never an unbounded
+/// queue ahead of new damage.
+#[derive(Default)]
+struct Waiting {
+    /// Frames the sender has not taken yet, oldest first.
+    backlog: Mutex<Backlog<Video>>,
+    /// Wakes the sender when a frame is queued or the pump goes away. It keeps
+    /// one permit, so a wake-up just before the sender waits is not lost.
+    ready: Notify,
+    /// The pump has finished; the sender ends once the backlog is empty.
+    closed: AtomicBool,
 }
-/// Creates the newest-frame holder: the publisher and the sender's receiver.
-fn pending_video() -> (PendingVideo, watch::Receiver<Option<Video>>) {
-    let (frames, receive) = watch::channel(None);
-    (PendingVideo { frames }, receive)
+/// The producing end of [`Waiting`]. Dropping it lets the sender finish.
+struct PendingVideo {
+    waiting: Arc<Waiting>,
+}
+/// Creates the frame queue: the publisher and the sender's end.
+fn pending_video() -> (PendingVideo, Arc<Waiting>) {
+    let waiting = Arc::new(Waiting::default());
+    (
+        PendingVideo {
+            waiting: Arc::clone(&waiting),
+        },
+        waiting,
+    )
 }
 impl PendingVideo {
-    /// Stores `video` as the newest frame, replacing any frame the sender has not
-    /// picked up, then yields once so a ready sender can take it first.
-    async fn publish(&self, video: Video) {
-        // One in-flight write and one newest pending frame bound storage. A
-        // stalled native lane cannot pin an older queue entry ahead of damage.
-        // Sequence gaps are repaired by the consumer before sending any delta.
-        self.frames.send_replace(Some(video));
-        // A pipe read can make several access units ready in one executor turn.
-        // Give the awakened writer a scheduling opportunity before replacing its
-        // only pending slot; otherwise even a writable lane loses codec references.
-        // This never waits for a transport write: a blocked lane still retains
-        // only the newest pending picture, and control remains independent.
-        tokio::task::yield_now().await;
+    /// Queues `video` for the sender. Never waits for a transport write: a
+    /// blocked lane only makes the backlog overflow, and control stays
+    /// independent. On anything but [`Admission::Queued`] the caller asks for
+    /// a keyframe; the frames that waited were dropped.
+    fn publish(&self, video: Video) -> Admission {
+        let admission = self
+            .waiting
+            .backlog
+            .lock()
+            .map_or(Admission::Overflowed, |mut backlog| {
+                backlog.push(video, tokio::time::Instant::now().into_std())
+            });
+        if admission == Admission::Queued {
+            self.waiting.ready.notify_one();
+        }
+        admission
+    }
+}
+impl Drop for PendingVideo {
+    fn drop(&mut self) {
+        self.waiting.closed.store(true, Ordering::Release);
+        self.waiting.ready.notify_one();
     }
 }
 /// Runs one lane to completion: starts a helper, opens the capture, pumps until
@@ -189,6 +223,8 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
     let mode = leg.delivery;
     let mut sender = tokio::spawn(async move { send_video(lane, mode, id, receive, repair).await });
     let mut pending = VecDeque::<Pending>::new();
+    // A keyframe request for an overflowed backlog could not be queued yet.
+    let mut repair_owed = false;
     // A root agent's helper runs as the person at the screen. When that person
     // changes, the session ends for good (`gone`), whole-screen ones included.
     let mut console = helper.console_watch();
@@ -226,7 +262,13 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
                     if kind == Kind::Video {
                         let video = video(&body, &leg.metadata)?;
                         crate::measurement::frame("source_helper_read", &video);
-                        send.publish(video).await;
+                        // The sender fell beyond the backlog's bound: only an IDR can
+                        // follow. Ask once per overflow; retry on later sealed deltas
+                        // only while the bounded repair queue had no room.
+                        let admission = send.publish(video);
+                        if admission == Admission::Overflowed || (admission == Admission::Sealed && repair_owed) {
+                            repair_owed = leg.repair.try_send(Control { kind: Kind::Keyframe, reply: None }).is_err();
+                        }
                     } else if kind == Kind::Error {
                         remember_closed_window(&leg.metadata, &body);
                         return Err(PluginError::Rejected);
@@ -282,7 +324,8 @@ fn video(body: &bytes::Bytes, metadata: &Metadata) -> Result<Video, PluginError>
     video.validate().map_err(|_| PluginError::Rejected)?;
     Ok(video)
 }
-/// Writes each newest frame to the lane until the frame holder is closed.
+/// Writes each waiting frame to the lane, oldest first, until the pump has
+/// gone and nothing waits.
 ///
 /// Reliable mode sends a whole frame per packet; datagram mode sends
 /// fixed-size fragments. A frame gets 250 ms to be written, otherwise the worker
@@ -294,7 +337,7 @@ async fn send_video(
     lane: Arc<dyn WireLane>,
     mode: Delivery,
     id: Uuid,
-    mut frames: watch::Receiver<Option<Video>>,
+    frames: Arc<Waiting>,
     repair: mpsc::Sender<Control>,
 ) -> Result<(), PluginError> {
     let datagrams = match mode {
@@ -304,8 +347,19 @@ async fn send_video(
     let mut wire = Vec::new();
     let mut previous = 0;
     let mut waiting_keyframe = true;
-    while frames.changed().await.is_ok() {
-        let Some(video) = frames.borrow_and_update().clone() else {
+    loop {
+        let next = frames
+            .backlog
+            .lock()
+            .map_err(|_| PluginError::Rejected)?
+            .pop();
+        let Some(video) = next else {
+            if frames.closed.load(Ordering::Acquire) {
+                break;
+            }
+            // A notify sent since the last check left its permit, so this
+            // returns at once and the backlog is checked again.
+            frames.ready.notified().await;
             continue;
         };
         if previous != 0 && previous + 1 != video.sequence {
@@ -560,11 +614,11 @@ mod pacing_tests {
             receive,
             repair,
         ));
-        publisher.publish(frame(1)).await;
+        publisher.publish(frame(1));
         for sequence in 2..=6 {
             let mut next = frame(sequence);
             next.keyframe = false;
-            publisher.publish(next).await;
+            publisher.publish(next);
         }
         drop(publisher);
         assert!(writing.await.unwrap().is_ok());
@@ -595,23 +649,21 @@ mod pacing_tests {
             receive,
             repair,
         ));
-        publisher.publish(frame(1)).await;
+        publisher.publish(frame(1));
         assert_eq!(packets.recv().await, Some(1));
-        publisher.publish(frame(2)).await;
-        publisher.publish(frame(3)).await;
+        publisher.publish(frame(2));
+        publisher.publish(frame(3));
         drop(publisher);
         lane.release.notify_one();
         let resumed = packets.recv().await;
         assert!(writing.await.unwrap().is_ok());
-        assert_eq!(
-            resumed,
-            Some(3),
-            "a blocked source must drop the stale pending frame"
-        );
+        assert_eq!(resumed, Some(3), "a newer keyframe replaces a waiting one");
     }
 
-    #[tokio::test]
-    async fn overwritten_delta_waits_for_fresh_keyframe() {
+    /// A lane blocked for less than the backlog bound loses no delta: the
+    /// waiting frames follow in order once it writes again (#146).
+    #[tokio::test(start_paused = true)]
+    async fn briefly_blocked_source_write_sends_every_waiting_delta() {
         let (entered, mut packets) = mpsc::unbounded_channel();
         let lane = Arc::new(PausedLane {
             entered,
@@ -626,17 +678,58 @@ mod pacing_tests {
             receive,
             repair,
         ));
-        publisher.publish(frame(1)).await;
+        publisher.publish(frame(1));
         assert_eq!(packets.recv().await, Some(1));
-        publisher.publish(frame(2)).await;
-        let mut delta = frame(3);
-        delta.keyframe = false;
-        publisher.publish(delta).await;
-        lane.release.notify_one();
-        assert_eq!(repairs.recv().await.unwrap().kind, Kind::Keyframe);
-        publisher.publish(frame(4)).await;
+        for sequence in 2..=6 {
+            tokio::time::advance(std::time::Duration::from_millis(8)).await;
+            let mut delta = frame(sequence);
+            delta.keyframe = false;
+            assert_eq!(publisher.publish(delta), Admission::Queued);
+        }
         drop(publisher);
-        assert_eq!(packets.recv().await, Some(4));
+        for sequence in 2..=6 {
+            lane.release.notify_one();
+            assert_eq!(packets.recv().await, Some(sequence));
+        }
+        lane.release.notify_one();
+        assert!(writing.await.unwrap().is_ok());
+        assert!(repairs.try_recv().is_err(), "no keyframe was needed");
+    }
+
+    /// A lane blocked past the backlog bound drops what waited and takes no
+    /// delta until a fresh keyframe (D254 drop-to-newest beyond the bound).
+    #[tokio::test(start_paused = true)]
+    async fn delta_past_the_bound_waits_for_fresh_keyframe() {
+        let (entered, mut packets) = mpsc::unbounded_channel();
+        let lane = Arc::new(PausedLane {
+            entered,
+            release: tokio::sync::Notify::new(),
+        });
+        let (repair, _repairs) = mpsc::channel(1);
+        let (publisher, receive) = pending_video();
+        let writing = tokio::spawn(send_video(
+            lane.clone(),
+            Delivery::Reliable,
+            Uuid::new_v4(),
+            receive,
+            repair,
+        ));
+        publisher.publish(frame(1));
+        assert_eq!(packets.recv().await, Some(1));
+        let delta = |sequence| {
+            let mut delta = frame(sequence);
+            delta.keyframe = false;
+            delta
+        };
+        assert_eq!(publisher.publish(delta(2)), Admission::Queued);
+        tokio::time::advance(std::time::Duration::from_millis(150)).await;
+        assert_eq!(publisher.publish(delta(3)), Admission::Overflowed);
+        assert_eq!(publisher.publish(delta(4)), Admission::Sealed);
+        assert_eq!(publisher.publish(frame(5)), Admission::Queued);
+        drop(publisher);
+        lane.release.notify_one();
+        assert_eq!(packets.recv().await, Some(5));
+        lane.release.notify_one();
         assert!(writing.await.unwrap().is_ok());
         drop(lane);
         assert!(packets.recv().await.is_none());

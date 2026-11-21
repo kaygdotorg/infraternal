@@ -303,7 +303,11 @@ async fn ten_concurrent_streams_deliver_their_first_keyframe_through_the_server_
     let mut delivery_failures = Vec::new();
     while let Some(result) = deliveries.join_next().await {
         match result {
-            Ok(Ok(video)) if video.sequence == 1 && video.keyframe => delivered += 1,
+            // In fixture mode every unit is a keyframe: Start sends one and each
+            // repair request another. A newer keyframe that arrives before the
+            // viewer runs replaces older ones in the source and server backlogs
+            // (#146), so the first delivered unit is a keyframe, not always #1.
+            Ok(Ok(video)) if video.keyframe => delivered += 1,
             Ok(Ok(video)) => delivery_failures.push(format!(
                 "unexpected first access unit sequence={} keyframe={}",
                 video.sequence, video.keyframe
