@@ -93,6 +93,8 @@ export interface PredictiveEchoState {
  * - `onVisible`: called when the prediction for the key with this `sequence` first showed, at the frame time `at`.
  * - `setHostCursorHidden`: hides the host cursor while the overlay draws its own.
  * - `onRendererPainted`: called after the renderer painted an output frame.
+ * - `textBeforeCursor`: the text on the cursor's row left of the cursor, read only for the first key of a burst,
+ *   so that a password or passphrase prompt is never predicted into (see {@link isSecretPrompt}).
  */
 export interface PredictiveEchoOptions {
   host: HTMLElement;
@@ -101,6 +103,7 @@ export interface PredictiveEchoOptions {
   onVisible: (sequence: string, at: number) => void;
   setHostCursorHidden?: (hidden: boolean) => void;
   onRendererPainted?: () => void;
+  textBeforeCursor?: () => string | undefined;
 }
 
 /** Where the echo scanner is inside a terminal escape sequence. */
@@ -330,6 +333,13 @@ export class PredictiveEcho {
     if (this.muted || this.mispredictions >= 3) {
       this.offerEchoProof(bytes);
       this.lastReason = "echo-unverified";
+      return;
+    }
+    // A secret prompt does not echo, so the echo timeout would only hide the first character after it was shown.
+    // The row is read once per burst (the queue is empty); later keys of the burst follow a key that was predicted.
+    if (!this.pending.length && isSecretPrompt(this.options.textBeforeCursor?.() ?? "")) {
+      this.clearPending("secret-prompt");
+      this.waitingForOutput = true;
       return;
     }
 
@@ -848,6 +858,18 @@ export class PredictiveEcho {
     return { bytes: visible.subarray(0, length), erases };
   }
 }
+
+/**
+ * Whether the text left of the cursor ends like a prompt for a secret ("Password:", "[sudo] password for kayg:",
+ * "Enter passphrase for key '…':", "PIN:", "Verification code:"). The host's own echo setting is not visible to the
+ * client, and inside a remote login (a raw terminal relaying another host) it never would be, so the prompt text is
+ * the signal that also works there. A false match only costs prediction for that key.
+ */
+export function isSecretPrompt(text: string): boolean {
+  return SECRET_PROMPT.test(text);
+}
+/** A secret-asking word, at most 60 more characters on the row, then `:` or `?` and only spaces before the cursor. */
+const SECRET_PROMPT = /(pass(word|phrase|code)?|\bpin\b|secret|token|\botp\b|one-time|verification code)[^\n]{0,60}[:?]\s*$/i;
 
 /** The characters of `data` when it is all printable (no control, surrogate or line-separator characters), otherwise `undefined`. */
 function printableGraphemes(data: string): string[] | undefined {

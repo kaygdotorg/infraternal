@@ -487,6 +487,7 @@ export class TerminalClient {
         // and a stall between keydown and the draw (a slow input handler) would not show in the row at all (#447).
         onVisible: (sequence) => config.hooks?.onTrace?.(sequence, "prediction", performance.now()),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
+        textBeforeCursor: () => this.textBeforeCursor(),
       })
       : undefined;
     this.cursorLayer = mountTerminalCursorLayer(config.host);
@@ -2800,6 +2801,16 @@ export class TerminalClient {
       cells.push({ text, ...(target === null ? {} : { target }) });
     }
     return { y, bufferType: active.type, wrapped: line.isWrapped, wrapKnown: active.type === "alternate" || y >= scrollback, cells };
+  }
+
+  /**
+   * The live screen's text on the cursor's row, left of the cursor, for the secret-prompt check of predictive echo.
+   * Prediction only runs at the live (bottom) viewport, where the cursor row is `rows` from the end of the buffer.
+   */
+  private textBeforeCursor(): string | undefined {
+    const buffer = this.terminal.buffer.active;
+    const row = buffer.length - this.terminal.rows + buffer.cursorY;
+    return buffer.getLine(row)?.translateToString(false, 0, buffer.cursorX);
   }
 
   /** Uses the same viewport slice the renderer uses for its cursor row. */
