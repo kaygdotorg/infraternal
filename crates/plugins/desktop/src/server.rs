@@ -248,7 +248,7 @@ impl DesktopServer {
                             .and_then(|bytes| prepared_capture(&bytes, id))
                             .and_then(|state| match state {
                                 PreparedCapture::Ready => Ok(()),
-                                PreparedCapture::Gone => Err(Error::Unavailable),
+                                PreparedCapture::Gone(_) => Err(Error::Unavailable),
                             })
                     },
                 };
