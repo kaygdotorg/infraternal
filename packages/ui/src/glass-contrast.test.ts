@@ -15,10 +15,11 @@
  *   listed in `RAISED`, where no text colour can reach the line at the approved value.
  */
 import { describe, expect, test } from "bun:test";
-import { ANY_BACKDROP, GLASS_CEILING, MAX_DRIFT, composite, hexToRgb, luminanceOf, ratioOf, surfaceOver, type GlassFills, type Rgb } from "./glass-contrast";
+import { ADAPT_LIMIT, ANY_BACKDROP, GLASS_CEILING, MAX_DRIFT, composite, hexToRgb, luminanceOf, ratioOf, surfaceOver, type GlassFills, type Rgb } from "./glass-contrast";
 import { hexToOklab } from "./color";
-import { THEMED_COVERAGE, glassFills, glassFloor, glassFor, glassRoles, themedBackdrop } from "./glass-rules.on-demand";
+import { THEMED_COVERAGE, glassFills, glassFloor, glassFor, glassRoles, glassSeen, themedBackdrop } from "./glass-rules.on-demand";
 import { CARD_LEVELS, THEMES, glassTint, levelName, levelOpacity } from "./themes";
+import { SOLID_HYSTERESIS, solveFor } from "./glass-adapt.on-demand";
 
 /** The line every text role must reach (D365). */
 const LINE = 4.5;
@@ -66,7 +67,8 @@ describe("glass text reaches 4.5:1 over worst-case backdrops (D365)", () => {
           const got = lowest(sol.colours[role]!, tint, sol.alpha, [...RAMP, ...extremes], fills);
           expect(got.ratio, `${label} ${role} ${sol.colours[role]} at alpha ${sol.alpha} over rgb(${got.at})`).toBeGreaterThanOrEqual(LINE);
         }
-        expect(sol.alpha).toBeLessThanOrEqual(Math.max(levelOpacity(theme, level), GLASS_CEILING));
+        // Glass stays within the adaptive limit; anything beyond is the solid card (opaque, with the theme's own text colours).
+        if (sol.solid) expect(sol.alpha).toBe(1); else expect(sol.alpha).toBeLessThanOrEqual(Math.max(levelOpacity(theme, level), ADAPT_LIMIT));
       });
       test(`${label}: static floor keeps the tint's lightness over either extreme (no grey slab)`, () => {
         const sol = glassFloor(theme, level);
@@ -115,5 +117,44 @@ describe("glass text reaches 4.5:1 over worst-case backdrops (D365)", () => {
     const ink = THEMES.ink!;
     expect(glassFor(ink, 4, { dark: grey(0), light: grey(40) }).alpha).toBeLessThan(glassFloor(ink, 4).alpha);
     expect(ANY_BACKDROP.light[0]).toBe(255);
+  });
+});
+
+/**
+ * The solid fallback (#448, D365, 2026-11-20). Over a hard backdrop (a light theme over black, a dark theme over white) glass
+ * cannot hold 4.5:1 without a flat grey slab or a glow behind the text, so the card turns solid: opaque tint, the theme's own
+ * text colours, no blur. Over a moderate backdrop it stays glass, and it never needs a glow (there is none).
+ */
+describe("a card that cannot stay readable turns solid, never grey and never glowing", () => {
+  const darkPicture = { dark: grey(0), light: grey(0) }, lightPicture = { dark: grey(255), light: grey(255) };
+  for (const [id, theme] of Object.entries(THEMES)) {
+    const over = theme.dark ? lightPicture : darkPicture;
+    for (const level of [2, 3, 4]) test(`${id} / ${levelName(level)}: over a ${theme.dark ? "white" : "black"} picture the card is solid and every role reaches ${LINE}:1 on it`, () => {
+      const sol = glassSeen(theme, level, over);
+      expect(sol.solid).toBe(true);
+      expect(sol.alpha).toBe(1);
+      const tint = hexToRgb(glassTint(theme));
+      for (const { role } of glassRoles(theme)) {
+        const got = lowest(sol.colours[role]!, tint, 1, [grey(0), grey(255)], glassFills(theme));
+        expect(got.ratio, `${id} ${role} ${sol.colours[role]}`).toBeGreaterThanOrEqual(LINE);
+      }
+    });
+    test(`${id}: over a picture of its own kind the card stays glass at the approved opacity`, () => {
+      const same = theme.dark ? darkPicture : lightPicture;
+      const sol = glassSeen(theme, 3, same);
+      expect(sol.solid).toBe(false);
+      expect(sol.alpha).toBeLessThanOrEqual(ADAPT_LIMIT);
+    });
+  }
+
+  test("going solid has hysteresis: a card that was solid needs a clearly easier backdrop to return to glass", () => {
+    const paper = THEMES.paper!;
+    // Find a backdrop level where glass just holds, then check that a solid card does not return there but does well inside it.
+    let edge = 0;
+    for (let v = 0; v <= 255; v++) if (!glassSeen(paper, 3, { dark: grey(v), light: grey(v) }).solid) { edge = v; break; }
+    expect(edge).toBeGreaterThan(0);
+    expect(solveFor(paper, 3, { dark: grey(edge), light: grey(edge) }, false).solid).toBe(false);
+    expect(solveFor(paper, 3, { dark: grey(edge), light: grey(edge) }, true).solid).toBe(true);
+    expect(solveFor(paper, 3, { dark: grey(Math.min(255, edge + 2 * SOLID_HYSTERESIS)), light: grey(Math.min(255, edge + 2 * SOLID_HYSTERESIS)) }, true).solid).toBe(false);
   });
 });

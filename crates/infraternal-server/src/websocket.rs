@@ -106,8 +106,6 @@ const MAX_RESUME_ROWS: i64 = 4096;
 pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
-// Bound unfinished host-facts and terminal-open calls on each socket.
-const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 // Cap a fragmented input frame before the decoder retains more bytes.
@@ -119,6 +117,8 @@ const SOCKET_READ_CHUNK: usize = 32 * 1024;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
 type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
+/// Running and waiting plugin calls of one socket (#556).
+type PluginCalls = crate::plugin_calls::PluginCalls<PendingPluginCall>;
 
 // Pool connections that authority work may hold at once: half of the
 // production pool's eight (runtime.rs), so retries and renewals under a stalled
@@ -792,9 +792,10 @@ async fn run_socket(
     // Poll plugin calls beside inbound frames; dropping this socket drops any unfinished waits.
     // Calls keep polling while this loop authorizes another frame. An in-loop
     // future can hold the only SQLite connection while the loop awaits that same
-    // pool; independent tasks avoid that cycle without raising the four-call bound.
+    // pool; independent tasks avoid that cycle. At most four run at once; more wait in a
+    // bounded queue instead of being refused (plugin_calls.rs, #556).
     // Shutdown below aborts and joins every call before releasing socket state.
-    let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
+    let mut pending_plugin_calls = PluginCalls::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
     plugins.set_peer_capabilities(peer_capabilities);
     let mut output_open = true;
@@ -2063,14 +2064,15 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
 }
 
-// Each browser frame is validated here and routed without allocating a second terminal payload.
+/// Validates one browser frame and routes it without allocating a second terminal payload. A plugin call goes
+/// to `pending_plugin_calls`, which runs it now or queues it behind the busy ones (#556); only a full queue refuses.
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
     owner: bool,
-    pending_plugin_calls: &mut tokio::task::JoinSet<PendingPluginCall>,
+    pending_plugin_calls: &mut PluginCalls,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
@@ -2126,7 +2128,7 @@ where
             };
             let valid = request.as_ref().is_some_and(|(size, _)| size.valid());
             if let Some((size, host)) = request.filter(|(size, _)| size.valid())
-                && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS
+                && pending_plugin_calls.has_room()
             {
                 let state = state.clone();
                 let user = user_id.to_owned();
@@ -2135,7 +2137,7 @@ where
                 // Opening a PTY may wait for a remote login. Poll it alongside route
                 // proofs, input and revocation; never suspend the multiplexed receive loop.
                 // The existing bounded call queue owns cancellation on socket teardown.
-                pending_plugin_calls.spawn(async move {
+                pending_plugin_calls.submit(true, async move {
                     let result = while_authorized_value(&state, &user, &token, false, async {
                         Ok(open_terminal(&state, &user, &token, size, host).await)
                     })
@@ -2185,13 +2187,13 @@ where
             input_json,
         } if stream_id == CONTROL_STREAM
             && input_json.len() <= 8192
-            && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS =>
+            && pending_plugin_calls.has_room() =>
         {
             let state = state.clone();
             let user = user_id.to_owned();
             let token = session_token.to_owned();
             let input = input_json.to_vec();
-            pending_plugin_calls.spawn(async move {
+            pending_plugin_calls.submit(false, async move {
                 let result = while_authorized_value(&state, &user, &token, false, async {
                     Ok(startup_call(&state, &user, &input).await)
                 })
@@ -2219,11 +2221,11 @@ where
                             Permission::Any(permissions) => !permissions.is_empty(),
                         }
                 });
-            if authorized && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS {
+            if authorized && pending_plugin_calls.has_room() {
                 let agent = state.agent.clone();
                 let action_id = action_id.to_owned();
                 let input_json = input_json.to_vec();
-                pending_plugin_calls.spawn(async move {
+                pending_plugin_calls.submit(false, async move {
                     let result =
                         tokio::time::timeout(BACKEND_TIMEOUT, agent.call(action_id, input_json))
                             .await
