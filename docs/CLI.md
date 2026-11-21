@@ -105,7 +105,15 @@ binary (the release bundle layout) when it exists, and otherwise leaves the
 flag out. A relative `--data` or `--web-root` is refused, and the error names
 the absolute path to pass instead. `--system` needs root, except with
 `--dry-run`; without `--system`, init installs a per-user service, for root
-too. A real install creates a missing data folder with mode 0700.
+too. Root runs what a system install writes (the server and firewall
+units and the command link all name the running binary, which init does not
+copy), so a real `--system` install, or root's own per-user one, refuses a
+binary another account could replace: the file and every folder above it must
+be owned by root and not writable by group or others (a sticky folder such as
+`/tmp` counts as protected). Move the release folder somewhere only root can
+change, such as `/opt/infraternal`, and run init from there; `--dry-run`
+prints a warning instead (#146). A real install creates a missing data
+folder with mode 0700.
 `--dry-run` prints the resolved `Data folder` and `Web folder` as absolute
 paths. The rules live in `crates/infraternal/src/install_paths.rs`.
 
