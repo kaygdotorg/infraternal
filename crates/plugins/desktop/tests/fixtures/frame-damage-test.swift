@@ -2,10 +2,12 @@
 import Foundation
 import CoreGraphics
 
+/// The fixture's entry point: damage-metadata classification and the tile lane's budget.
 @main struct FrameDamageTest {
     static func expect(_ condition: Bool, _ name: String) {
         if !condition { fputs("FAIL \(name)\n", stderr); exit(1) }
     }
+    /// Runs every check and prints one PASS line; the first failure exits with status 1.
     static func main() {
         let empty = CGRect.zero.dictionaryRepresentation
         expect(!captureFrameHasDamage([empty], initial: false), "nonempty list of empty dictionaries is unchanged")

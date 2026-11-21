@@ -1,4 +1,9 @@
-/** Content-free, bounded receipts for explicitly requested app-window stage measurements [D208,D232,D262]. */
+/**
+ * Content-free, bounded receipts for explicitly requested app-window stage measurements [D208,D232,D262].
+ * Each receipt times one access unit, video or tile (#146 proposal C), from the socket to the canvas; no pixels or titles.
+ */
+
+/** The stage times of one access unit, in `traceClock` milliseconds, and what became of it. */
 export interface FrameTrace {
   sequence: number;
   captureNs: string;

@@ -23,12 +23,14 @@ import "../../../apps/tracer/src/canvas/appwin/decode.worker.on-demand";
 /** A replay request from the page. */
 interface Run { t: "run"; packets: ArrayBuffer; source: ArrayBuffer; mode: "realtime" | "fast" | "jitter" | "swap" | "latency"; seed: number; scenarios?: { name: string; first_ns: string; last_ns: string }[] }
 
+/** This worker's global scope, seen through the members the harness uses. */
 const scope = self as unknown as { onmessage: ((event: MessageEvent<ToWorker | Run>) => void) | null; postMessage(message: unknown): void };
 /** The real worker's message handler, installed by its import above. */
 const deliver = scope.onmessage!;
 /** The page's own postMessage; the real worker's messages are intercepted instead. */
 const toPage = scope.postMessage.bind(scope);
 
+/** Side of the square blocks the canvas is compared in, in pixels. */
 const BLOCK = 16;
 /** Mean absolute difference per channel (0-255) under which a block matches a source frame. */
 const TOLERANCE = 8;
@@ -95,6 +97,7 @@ let capture = true;
 const snapshots: { kind: "video" | "tile"; captureNs: string; image: ImageData; at: number }[] = [];
 /** Video snapshots still waiting for their trace, oldest first. */
 const unlabelled: { captureNs: string }[] = [];
+/** The 2D context the real worker draws through: it forwards to the real context and snapshots each video picture. */
 const proxy = {
   drawImage(source: CanvasImageSource, x: number, y: number) {
     context.drawImage(source, x, y);
@@ -104,6 +107,7 @@ const proxy = {
   },
   putImageData(image: ImageData, x: number, y: number) { context.putImageData(image, x, y); },
 };
+/** The canvas handed to the real worker: the real canvas's size, with `proxy` as its context. */
 const canvas = {
   get width() { return real.width; }, set width(value: number) { real.width = value; },
   get height() { return real.height; }, set height(value: number) { real.height = value; },
@@ -228,6 +232,7 @@ async function run(request: Run): Promise<void> {
 
 /** The real worker's last stats reply. */
 let lastStats: unknown;
+/** The message hook installed above, wrapped once more to keep the worker's last stats reply. */
 const intercept = scope.postMessage;
 scope.postMessage = (message: unknown) => {
   if ((message as FromWorker).t === "stats") lastStats = (message as { stats: unknown }).stats;

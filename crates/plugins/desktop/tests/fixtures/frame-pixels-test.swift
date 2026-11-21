@@ -3,6 +3,7 @@ import Compression
 import CoreVideo
 import Foundation
 
+/// The fixture's entry point: exact BGRA history, caret cadence and the tile lane's rectangles with real CoreVideo buffers.
 @main struct FramePixelsTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
@@ -34,6 +35,7 @@ import Foundation
             }
         }
     }
+    /// Changes every other pixel of a rectangle (and its last pixel) to `byte`: a change whose pixel count, not its size, matters.
     static func paintSparse(_ pixel: CVPixelBuffer, x: Int, y: Int, width: Int, height: Int, byte: UInt8) {
         expect(CVPixelBufferLockBaseAddress(pixel, []) == kCVReturnSuccess, "sparse damage write lock")
         defer { CVPixelBufferUnlockBaseAddress(pixel, []) }
@@ -120,6 +122,7 @@ import Foundation
         expect(history.tileUpdate([]) == nil, "empty update refused")
         print("PASS tile lane: separated and merged rectangles, area and count limits, exact RGBA, bounds checks")
     }
+    /// Runs every check and prints PASS lines; the first failure exits with status 1.
     static func main() {
         let damageHistory = FramePixels(), surface = pixel(96, 48)
         fill(surface, 47)

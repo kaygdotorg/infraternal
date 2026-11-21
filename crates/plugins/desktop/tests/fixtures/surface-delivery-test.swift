@@ -6,10 +6,12 @@ import Foundation
 
 enum HelperFailure: Error { case invalid, permission, unavailable }
 
+/// The fixture's entry point: the production mailbox and hardware encoder driven with real buffers, including one tile.
 @main struct SurfaceDeliveryTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
     }
+    /// Runs the delivery sequence and prints one PASS line; the first failure exits with status 1.
     static func main() {
         let lock = NSLock()
         var keys: [Bool] = []

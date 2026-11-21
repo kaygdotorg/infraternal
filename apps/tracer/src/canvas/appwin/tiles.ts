@@ -158,6 +158,7 @@ export class TileLayer {
   private generation = 0;
   readonly stats: TileStats = { received: 0, painted: 0, superseded: 0, waited: 0, dropped: 0 };
 
+  /** Creates the empty layer of one window, drawing on `surface`. */
   constructor(private readonly surface: TileSurface) {}
 
   /** A video unit with this order number was accepted and will come out of the decoder later. */

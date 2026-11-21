@@ -42,12 +42,21 @@ struct Scene {
 
 /// Draws `Scene`s into BGRA buffers.
 final class Renderer {
-    let width: Int, height: Int
+    /// Picture width in pixels.
+    let width: Int
+    /// Picture height in pixels.
+    let height: Int
+    /// The text font: a monospaced 13 pt face, so typed text advances evenly.
     let font = CTFontCreateWithName("Menlo" as CFString, 13, nil)
+    /// Distance between text lines in pixels.
     let lineHeight = 17
+    /// Space around the text in pixels.
     let margin = 12
+    /// Height of the grey status bar at the bottom, in pixels.
     let statusHeight = 22
+    /// The colour space every picture is drawn in, matching the product's sRGB capture.
     private let color = CGColorSpace(name: CGColorSpace.sRGB)!
+    /// A renderer for pictures of `width` x `height` pixels.
     init(width: Int, height: Int) { self.width = width; self.height = height }
 
     /// One text line as a CoreText line in `rgb` colour.
@@ -137,7 +146,9 @@ func append(_ data: inout Data, _ value: UInt64, _ bytes: Int) {
     for shift in stride(from: (bytes - 1) * 8, through: 0, by: -8) { data.append(UInt8((value >> UInt64(shift)) & 0xff)) }
 }
 
+/// The recorder's entry point; see the module comment for its arguments and output.
 @main struct Record {
+    /// Plays every scenario through `SurfaceCapture`, then writes the packets, the sources and the manifest.
     static func main() throws {
         let arguments = CommandLine.arguments
         guard arguments.count == 4, let width = Int(arguments[2]), let height = Int(arguments[3]) else {

@@ -4,7 +4,9 @@ import Foundation
 import CoreGraphics
 #endif
 
+/// The fixture's entry point: framework-free policy checks, each an `assert`.
 @main struct PolicyTests {
+    /// Runs every check and prints one PASS line; the first failed assertion stops it.
     static func main() {
         let source = CGRect(x: -1512, y: 90, width: 1512, height: 982)
         let output = CGSize(width: 1920, height: 1080)
