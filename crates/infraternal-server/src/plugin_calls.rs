@@ -23,6 +23,7 @@ pub(crate) const MAX_RUNNING: usize = 4;
 /// Calls that may wait for a running slot on one socket.
 pub(crate) const MAX_WAITING: usize = 64;
 
+/// Work that has not started: boxed so waiting calls of different shapes share one queue.
 type Work<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// A call that has not started: its work (nothing polled yet) and whether it goes first.
@@ -38,8 +39,12 @@ pub(crate) struct PluginCalls<T: Send + 'static> {
 }
 
 impl<T: Send + 'static> PluginCalls<T> {
+    /// An empty set: nothing running, nothing waiting.
     pub(crate) fn new() -> Self {
-        Self { running: JoinSet::new(), waiting: VecDeque::new() }
+        Self {
+            running: JoinSet::new(),
+            waiting: VecDeque::new(),
+        }
     }
 
     /// Whether [`submit`](Self::submit) would accept another call: a slot is free or the queue has room.
@@ -49,12 +54,19 @@ impl<T: Send + 'static> PluginCalls<T> {
 
     /// Starts `work` now when a slot is free, else queues it. Call only after `has_room()` said yes; a call
     /// past the bound is dropped unstarted, and the caller answers it as refused.
-    pub(crate) fn submit(&mut self, urgent: bool, work: impl Future<Output = T> + Send + 'static) -> bool {
+    pub(crate) fn submit(
+        &mut self,
+        urgent: bool,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> bool {
         if self.running.len() < MAX_RUNNING {
             self.running.spawn(work);
             true
         } else if self.waiting.len() < MAX_WAITING {
-            self.waiting.push_back(Waiting { urgent, work: Box::pin(work) });
+            self.waiting.push_back(Waiting {
+                urgent,
+                work: Box::pin(work),
+            });
             true
         } else {
             false
@@ -82,8 +94,18 @@ impl<T: Send + 'static> PluginCalls<T> {
     pub(crate) async fn join_next(&mut self) -> Option<Result<T, JoinError>> {
         let done = self.running.join_next().await;
         while self.running.len() < MAX_RUNNING {
-            let next = self.waiting.iter().position(|call| call.urgent).or(if self.waiting.is_empty() { None } else { Some(0) });
-            let Some(call) = next.and_then(|at| self.waiting.remove(at)) else { break };
+            let next =
+                self.waiting
+                    .iter()
+                    .position(|call| call.urgent)
+                    .or(if self.waiting.is_empty() {
+                        None
+                    } else {
+                        Some(0)
+                    });
+            let Some(call) = next.and_then(|at| self.waiting.remove(at)) else {
+                break;
+            };
             self.running.spawn(call.work);
         }
         done
@@ -96,6 +118,7 @@ impl<T: Send + 'static> PluginCalls<T> {
     }
 }
 
+/// Tests for the queue's three promises: calls wait and then run, the queue is bounded, urgent goes first.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +134,7 @@ mod tests {
         }
     }
 
+    /// Ten calls on a four-call socket all finish; six had to wait.
     #[tokio::test]
     async fn calls_past_the_running_bound_wait_and_then_run() {
         let mut calls = PluginCalls::<u32>::new();
@@ -125,15 +149,16 @@ mod tests {
                 done.push(label);
             }
         }
-        done.sort();
+        done.sort_unstable();
         assert_eq!(done, (0..10).collect::<Vec<_>>());
     }
 
+    /// Past running plus waiting, a call is refused, and shutdown empties both.
     #[tokio::test]
     async fn the_queue_is_bounded() {
         let gate = Arc::new(Notify::new());
         let mut calls = PluginCalls::<u32>::new();
-        for label in 0..(MAX_RUNNING + MAX_WAITING) as u32 {
+        for label in 0..u32::try_from(MAX_RUNNING + MAX_WAITING).unwrap() {
             assert!(calls.submit(false, held(label, &gate)));
         }
         assert!(!calls.has_room());
@@ -142,12 +167,13 @@ mod tests {
         assert_eq!((calls.running(), calls.waiting()), (0, 0));
     }
 
+    /// A freed slot goes to a waiting urgent call before an older ordinary one.
     #[tokio::test]
     async fn urgent_calls_start_before_older_ordinary_ones() {
         let mut calls = PluginCalls::<u32>::new();
         let release: Vec<Arc<Notify>> = (0..8).map(|_| Arc::new(Notify::new())).collect();
         for (label, gate) in release.iter().enumerate().take(MAX_RUNNING) {
-            calls.submit(false, held(label as u32, gate));
+            calls.submit(false, held(u32::try_from(label).unwrap(), gate));
         }
         calls.submit(false, held(4, &release[4]));
         calls.submit(true, held(5, &release[5]));
@@ -157,7 +183,11 @@ mod tests {
         assert_eq!(calls.join_next().await.unwrap().unwrap(), 0);
         release[5].notify_one();
         tokio::task::yield_now().await;
-        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), calls.join_next()).await.unwrap().unwrap().unwrap();
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), calls.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         assert_eq!(finished, 5, "the urgent call ran ahead of call 4");
         calls.shutdown().await;
     }

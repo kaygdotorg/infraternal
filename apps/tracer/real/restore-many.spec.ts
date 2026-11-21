@@ -11,7 +11,9 @@ import { personName, startRealServer, type RealServer } from "./server";
 
 test.describe.configure({ mode: "default" });
 
+/** Every terminal window on the console view. */
 const windows = (page: Page) => page.locator('.cl[data-view="console"] .ui-window');
+/** What a window says when the server refused its open as unavailable. */
 const OFFLINE = "offline or cannot reach";
 
 /** Enrols the first passkey of a fresh server and lands on the canvas. */
@@ -45,6 +47,7 @@ function refusedActions(server: RealServer): string[] {
   }
   return names;
 }
+/** How many calls the server refused (see `refusedActions`). */
 const refusedOn = (server: RealServer): number => refusedActions(server).length;
 /** Distinct sessions attached on the sockets still open (a long-lived page rotates to a second socket past 28 windows). */
 const attachedOn = (server: RealServer): number => new Set(server.bridges.filter((b) => !b.closed).flatMap((b) => [...b.attached.values()].flat())).size;
@@ -90,6 +93,7 @@ for (const total of [8, 16, 32]) {
       }
       // The server keeps the layout; the last window's save is still on its way when its shell attaches, and a reload
       // before it lands would restore one window fewer, which is a different question from this spec's.
+      // sleep: the layout save has no signal the page exposes; this only lets the last window's save land before the reload
       await page.waitForTimeout(3_000);
 
       const before = refusedOn(server);
