@@ -58,6 +58,7 @@ pub fn set_current_thread(qos: Qos) -> bool {
     }
 }
 
+/// Exercise both classes and the kernel constants.
 #[cfg(test)]
 mod tests {
     use super::{Qos, set_current_thread};

@@ -173,6 +173,7 @@ impl Failure {
     }
 }
 
+/// The plain, detail-free refusal: the reason is deliberately not reported.
 fn refused() -> io::Error {
     Failure::Refused.error(io::ErrorKind::PermissionDenied)
 }
@@ -410,6 +411,8 @@ fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
     }
 }
 
+/// Read the join key saved before elevation, if one exists and is private to this account.
+/// Returns `Ok(None)` when there is none; a shared or foreign file is refused.
 fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Private>>> {
     use std::{
         io::Read,
@@ -904,6 +907,7 @@ fn prepare(data: &Path) -> io::Result<()> {
     }
 }
 
+/// Create the data directory as `0700` and refuse one that is shared, foreign or a symlink.
 fn prepare_directory(data: &Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
