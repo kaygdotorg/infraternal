@@ -2727,6 +2727,7 @@ mod inherited_login_process_tests {
     //! Process pins cross exec without asking the child to inspect a protected parent's descriptors.
     use super::*;
     use std::io::Read as _;
+    use std::os::fd::AsFd as _;
     /// Checks that a login child's readiness descriptor still reaches the reserved socket when the
     /// process pin is passed to the same child.
     ///
