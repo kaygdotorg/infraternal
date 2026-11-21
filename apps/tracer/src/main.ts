@@ -24,6 +24,7 @@ import type { HumanTrace, PerformanceProbe, ProbeTraceSample } from "./perf-prob
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
+import { predictiveEchoEnabled } from "./host-echo-signal";
 
 declare global {
   interface Window {
@@ -515,7 +516,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
-  const predictiveEcho = query.get("predict") === "1";
+  const predictiveEcho = predictiveEchoEnabled(query.get("predict"));
   const reviewLayout = productTestMode && query.get("reviewLayout") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
