@@ -2072,6 +2072,24 @@ fn block_on<T>(
     runtime.block_on(operation)
 }
 
+/// How long a stopping server waits for blocking work nobody awaits any more.
+#[cfg(feature = "plugin-server")]
+const SERVER_STOP_BLOCKING_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Drop the server's runtime with a bound once `serve` has returned.
+///
+/// By then the server has closed its listener and database, and every step a
+/// stop needs has finished. What can remain are detached blocking tasks, for
+/// example the payload warm-up hashing a release binary, which Tokio cannot
+/// cancel. A plain drop waits for them without limit: a "stopped normally"
+/// server then lived on for seconds, and for more than the service manager's
+/// patience on a loaded host with a large debug binary (#516). The grace is
+/// the same 4 s the same-PID restart gives its own runtime.
+#[cfg(feature = "plugin-server")]
+fn stop_server_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(SERVER_STOP_BLOCKING_GRACE);
+}
+
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     mut args: ServerArgs,
@@ -2097,13 +2115,18 @@ fn run_server_foreground(
         "public_origin": config.public_origin,
     });
     infraternal_server::configure_logging(json_output);
-    match block_on(&runtime, remote_server::serve(config, options)) {
+    let stopped = match block_on(&runtime, remote_server::serve(config, options)) {
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
             // Same-PID exec consumes the runtime after cancelling server tasks.
-            restart::replace(runtime, replacement, json_output)
+            return restart::replace(runtime, replacement, json_output);
         }
-        Ok(remote_server::Outcome::Stopped) => {
+        Ok(remote_server::Outcome::Stopped) => Ok(()),
+        Err(error) => Err(error),
+    };
+    stop_server_runtime(runtime);
+    match stopped {
+        Ok(()) => {
             print_result(
                 &CommandResult::new(
                     "server",
@@ -3335,5 +3358,40 @@ fn run_local_action(
     {
         let _ = matches;
         run_unavailable(action, json_output)
+    }
+}
+
+#[cfg(all(test, feature = "plugin-server"))]
+mod server_stop_tests {
+    //! Pins the bound on a stopping server's runtime (#516).
+
+    /// A blocking task nobody awaits must not keep a stopped server alive. The
+    /// task blocks on a channel the test holds, so a plain runtime drop would
+    /// never return; the test then fails at its deadline instead of hanging.
+    #[test]
+    fn a_stopped_server_does_not_wait_for_detached_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("build a test runtime");
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, entered) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started.send(()).expect("report the blocking task start");
+            let _ = blocked.recv();
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the blocking task started");
+        let (done, stopped) = std::sync::mpsc::channel();
+        let began = std::time::Instant::now();
+        std::thread::spawn(move || {
+            super::stop_server_runtime(runtime);
+            let _ = done.send(());
+        });
+        let result = stopped.recv_timeout(super::SERVER_STOP_BLOCKING_GRACE * 5);
+        drop(release);
+        result.expect("the runtime stop waited for detached blocking work");
+        assert!(began.elapsed() < super::SERVER_STOP_BLOCKING_GRACE * 5);
     }
 }
