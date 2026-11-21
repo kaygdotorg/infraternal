@@ -13,6 +13,18 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="infraternal" />
+    <!-- Before first paint: the last applied theme (written by core-screen.ts as "tracer.chrome") picks the status-bar style and
+         the theme colour, so a light theme gets dark status-bar text ("default") and a dark theme keeps the translucent bar.
+         iOS reads the style at launch, so a theme change shows on the next launch. Without a saved value nothing changes. -->
+    <script>
+      try {
+        var chrome = JSON.parse(localStorage.getItem("tracer.chrome") || "null");
+        if (chrome && typeof chrome.bg === "string" && /^#[0-9a-f]{6}$/i.test(chrome.bg)) {
+          document.getElementById("theme-color").setAttribute("content", chrome.bg);
+          if (chrome.dark === false) document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]').setAttribute("content", "default");
+        }
+      } catch (e) { /* storage may be blocked: keep the defaults */ }
+    </script>
     <title>infraternal</title>
     <!-- App icons (owner-supplied, 2026-11-14): the tab follows the system scheme; the home-screen icon is the dark variant. -->
     <link rel="icon" href="./icons/light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
