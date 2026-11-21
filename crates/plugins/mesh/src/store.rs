@@ -426,6 +426,32 @@ fn naming(
     }
 }
 
+/// Whether `key` is already one of another node's keys: its current key, or
+/// the candidate or previous key of a rotation it has open (D166).
+///
+/// `mesh_nodes.public_key` is UNIQUE, but during a rotation a node's old key
+/// lives only in its rotation row, and the next load gives every node its
+/// previous key too. A second node holding that key made every load fail
+/// ("Mesh allocation invalid.") until someone edited the database (#572
+/// finding 1). Every write that gives a node a key (attach, enrollment, a
+/// rotation's candidate) checks here first, in the same transaction.
+/// `node` is the node that would hold the key, `None` for a new one.
+pub(crate) async fn key_held_by_another_node(
+    connection: &mut sqlx::SqliteConnection,
+    key: &[u8],
+    node: Option<i64>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mesh_nodes WHERE public_key=?1 AND id IS NOT ?2) \
+             OR EXISTS(SELECT 1 FROM mesh_node_key_rotation WHERE node_id IS NOT ?2 \
+                       AND (candidate_public_key=?1 OR previous_public_key=?1))",
+    )
+    .bind(key)
+    .bind(node)
+    .fetch_one(connection)
+    .await
+}
+
 /// The `unnamed` / `unnamed-<n>` labels older versions stored for nodes without a name (migration 0029). Only used
 /// to recognise them for replacement: a person may now pick such a name, which then has source `hand` and is never
 /// touched, and a machine may report it as its hostname.
@@ -1163,6 +1189,13 @@ impl Store {
         if unsupported {
             return Err(MeshApiError::Conflict);
         }
+        // The candidate must not be a key another node holds, including one it is rotating away from (#572).
+        if key_held_by_another_node(&mut tx, candidate.0.as_slice(), Some(node_id))
+            .await
+            .map_err(storage_sql_error)?
+        {
+            return Err(MeshApiError::Conflict);
+        }
         let revision: i64 = sqlx::query_scalar(
             "UPDATE mesh_state SET revision=revision+1 WHERE singleton=1 AND revision<9223372036854775807 RETURNING revision",
         )
@@ -1643,6 +1676,12 @@ impl Store {
                     false,
                 ));
             }
+            if key_held_by_another_node(&mut tx, &public_key, Some(id))
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?
+            {
+                return Err("Mesh identity conflicts.");
+            }
             sqlx::query(
                 "UPDATE mesh_nodes SET public_key=?,endpoint=?,dataplane_host=?,key_rotation_supported=?,authority_epoch_supported=? WHERE id=?",
             )
@@ -1661,6 +1700,12 @@ impl Store {
             // A new node always gets a name; only the nodes it moves aside are renames.
             let naming = naming(&nodes, high, host, None, wanted, &records, &fallback)
                 .ok_or("Mesh identity invalid.")?;
+            if key_held_by_another_node(&mut tx, key.0.as_slice(), None)
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?
+            {
+                return Err("Mesh identity conflicts.");
+            }
             renamed = naming.moved;
             rename(&mut tx, &renamed).await?;
             sqlx::query("INSERT INTO mesh_nodes(id,name,name_source,name_claim,public_key,dataplane_host,endpoint,key_rotation_supported,authority_epoch_supported) VALUES(?,?,?,?,?,?,?,?,?)").bind(high).bind(naming.name).bind(naming.source).bind(naming.claim).bind(key.0.as_slice()).bind(host).bind(&endpoint).bind(key_rotation_supported).bind(authority_epoch).execute(&mut *tx).await.map_err(|_|"Mesh identity conflicts.")?;
