@@ -844,14 +844,12 @@ async fn a_key_that_expires_while_waiting_for_the_writer_is_not_renewed() {
 /// receipt, and its own key then joined as a second active certificate for the host.
 #[tokio::test]
 async fn device_code_machine_join_cannot_name_an_existing_host() {
-    let (store, pool, existing) = crate::enrollment::authority::tests::enrolled().await;
-    // The state a finished root handover leaves: root mode, no join-token row.
-    sqlx::query("UPDATE remote_hosts SET mode='rootful', execution_uid=0, hostname='laptop' WHERE id=?")
-        .bind(existing.as_bytes().as_slice())
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM remote_join_tokens WHERE host_id=?")
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    // The state a finished root handover leaves: a live root host with no
+    // join-token row. (Mode changes only through a promotion, so the row is
+    // seeded directly in its final form.)
+    let existing = Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,hostname) VALUES(?,'owner','rootful',0,100,'laptop')")
         .bind(existing.as_bytes().as_slice())
         .execute(&pool)
         .await
