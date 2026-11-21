@@ -89,7 +89,7 @@ describe("a card that straddles a picture and the page", () => {
   });
 
   test("a hard mix is solid where either half alone would be glass", () => {
-    const ink = THEMES.find((t) => t.name === "ink")!;
+    const ink = THEMES.ink!;
     const white = rangeOfSample([255, 255, 255, 255]);
     const dark = rangeOfSample([...INK_BG, 255]);
     expect(glassFor(ink, 3, dark).solid).toBe(false);
