@@ -40,6 +40,7 @@ test("a session answer asked for early is dropped when the server needs first-ru
   await expect(page.locator("#login-passkey")).toHaveCount(0);
 });
 
+/** The style sheets only the signed-in canvas needs; the page loads them without blocking the first paint. */
 const CANVAS_SHEETS = ["canvas", "clusters", "mesh", "sessions", "addhost"];
 
 test("the page links fingerprinted sheets, and the five canvas sheets are off the render-blocking path", async ({ page }) => {

@@ -1,3 +1,4 @@
+/** Checks that the build names its per-visit files by content hash and that the page, the sheets and the chunk lists follow the new names (#573). */
 import { expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

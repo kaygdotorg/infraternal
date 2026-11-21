@@ -23,7 +23,10 @@ fn fixture() -> (PathBuf, Router) {
         ("main.js", b"mutable entry".as_slice()),
         ("main.0123456789.js", b"fingerprinted entry".as_slice()),
         ("ui.89abcdef01.css", b"fingerprinted sheet".as_slice()),
-        ("fonts/a/roman.latin.2468ace135.woff2", b"fingerprinted font".as_slice()),
+        (
+            "fonts/a/roman.latin.2468ace135.woff2",
+            b"fingerprinted font".as_slice(),
+        ),
         ("favicon.ico", b"\0\0\x01\0icon".as_slice()),
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
