@@ -33,7 +33,7 @@ use infraternal_plugin_api::{
 };
 use infraternal_protocol::{
     Frame, decode_muxed_frame,
-    desktop::{Delivery, Message, WINDOW_CLOSED},
+    desktop::{Delivery, EndReason, Message},
     encode_frame_into, encode_muxed_frame_into,
 };
 use serde::Deserialize;
@@ -139,7 +139,7 @@ struct State {
     limit: usize,
     records: HashMap<SessionId, Record>,
     /// Recent native closures, bounded independently of live capture capacity.
-    closed_windows: VecDeque<(SessionId, Arc<dyn NodeHost>)>,
+    closed_windows: VecDeque<(SessionId, Arc<dyn NodeHost>, EndReason)>,
 }
 /// The desktop plugin for the server. Cloning is cheap and shares all state.
 ///
@@ -213,11 +213,11 @@ impl DesktopServer {
                 if !record.worker.finished() {
                     return true;
                 }
-                if record.session.window_closed() && limit != 0 {
+                if let Some(reason) = record.session.end_reason().filter(|_| limit != 0) {
                     if closed.len() == limit {
                         closed.pop_front();
                     }
-                    closed.push_back((*id, record.host.clone()));
+                    closed.push_back((*id, record.host.clone(), reason));
                 }
                 false
             });
@@ -248,7 +248,7 @@ impl DesktopServer {
                             .and_then(|bytes| prepared_capture(&bytes, id))
                             .and_then(|state| match state {
                                 PreparedCapture::Ready => Ok(()),
-                                PreparedCapture::Gone => Err(Error::Unavailable),
+                                PreparedCapture::Gone(_) => Err(Error::Unavailable),
                             })
                     },
                 };
@@ -338,22 +338,26 @@ impl DesktopServer {
             .attach_authorized(id, host.user_id().to_owned(), host.authority())
     }
     /// Reads a terminal reason only for the live owner of the original capture.
-    fn window_closed_for(&self, id: &SessionId, socket: &dyn SocketHost) -> bool {
+    fn end_reason_for(&self, id: &SessionId, socket: &dyn SocketHost) -> Option<EndReason> {
         if !socket.authority().permits() {
-            return false;
+            return None;
         }
         let Ok(state) = self.state.lock() else {
-            return false;
+            return None;
         };
         let owns = |node: &dyn NodeHost| node.owner_id() == socket.user_id() && node.permits();
         state
             .records
             .get(id)
-            .is_some_and(|record| record.session.window_closed() && owns(record.host.as_ref()))
-            || state
-                .closed_windows
-                .iter()
-                .any(|(closed, node)| closed == id && owns(node.as_ref()))
+            .filter(|record| owns(record.host.as_ref()))
+            .and_then(|record| record.session.end_reason())
+            .or_else(|| {
+                state
+                    .closed_windows
+                    .iter()
+                    .find(|(closed, node, _)| closed == id && owns(node.as_ref()))
+                    .map(|(.., reason)| *reason)
+            })
     }
     /// Runs one browser action and returns its JSON result.
     ///
@@ -636,13 +640,13 @@ impl Plugin for DesktopServer {
                                             // Keep the reply guarded through the actual socket write.
                                             let completed = replies.with_authority(Arc::new(ViewerCompletion(stopped.clone())));
                                             let _ = viewer_loop(viewer, stream, rx, replies.clone(), stopped).await;
-                                            let closed = server.window_closed_for(&id, host.as_ref());
+                                            let closed = server.end_reason_for(&id, host.as_ref());
                                             let _ = tokio::time::timeout(Duration::from_secs(1), send_viewer_close(&completed, stream, closed, true)).await;
                                             stream
                                         });
                                         viewers.insert(stream, ViewerHandle { task: task.id(), requests: tx, stop });
                                     } else {
-                                        let closed = server.window_closed_for(session_id, host.as_ref());
+                                        let closed = server.end_reason_for(session_id, host.as_ref());
                                         send_viewer_close(&replies, stream, closed, false).await;
                                     }
                                 } else if matches!(decoded.frame, Frame::Close { .. }) {
@@ -653,7 +657,7 @@ impl Plugin for DesktopServer {
                                     }
                                     if wire.len() > 64 || !matches!(decoded.frame, Frame::Desktop(Message::Input(_) | Message::Size { .. } | Message::Repair { .. }))
                                         || sender.requests.try_send(ViewerCommand::Wire(wire.clone())).is_err() { viewers.remove(&stream); }
-                                } else { send_viewer_close(&replies, stream, false, false).await; }
+                                } else { send_viewer_close(&replies, stream, None, false).await; }
                                 continue;
                             }
                             let Frame::Call { action_id, input_json, .. } = decoded.frame else { break; };
@@ -779,8 +783,8 @@ async fn capture(
             };
             match prepared {
                 Some(PreparedCapture::Ready) => {}
-                Some(PreparedCapture::Gone) => {
-                    session.close_window();
+                Some(PreparedCapture::Gone(reason)) => {
+                    session.close_for(reason);
                     break;
                 }
                 None => {
@@ -1008,10 +1012,15 @@ enum ViewerCommand {
         oneshot::Sender<Result<(), Error>>,
     ),
 }
-/// Retires a viewer, preserving native window closure when the source confirmed it.
-async fn send_viewer_close(replies: &ReplySender, stream: u32, closed: bool, attached: bool) {
-    let (code, reason) = if closed {
-        (WINDOW_CLOSED, "window closed")
+/// Retires a viewer, telling it why when the source ended the session for good (`ended`).
+async fn send_viewer_close(
+    replies: &ReplySender,
+    stream: u32,
+    ended: Option<EndReason>,
+    attached: bool,
+) {
+    let (code, reason) = if let Some(reason) = ended {
+        (reason.close_code(), reason.close_text())
     } else if attached {
         (4404, "viewer ended")
     } else {
@@ -1111,8 +1120,8 @@ struct InventoryPage {
 enum PreparedCapture {
     /// The source can accept a capture lane.
     Ready,
-    /// This session's window no longer exists.
-    Gone,
+    /// This session ended for good, for the given reason.
+    Gone(EndReason),
 }
 
 /// Reads the source's preparation reply, after confirming it names session `id`.
@@ -1126,7 +1135,9 @@ fn prepared_capture(bytes: &[u8], id: SessionId) -> Result<PreparedCapture, Erro
         .is_some_and(|value| *value.as_bytes() == id)
     {
         if value["state"] == "gone" {
-            Ok(PreparedCapture::Gone)
+            Ok(PreparedCapture::Gone(EndReason::from_helper_word(
+                value["reason"].as_str(),
+            )))
         } else {
             Ok(PreparedCapture::Ready)
         }

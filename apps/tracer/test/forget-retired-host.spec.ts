@@ -107,3 +107,43 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     });
   }
 }
+
+/** A closed admin window answers Forget with 428, and the page offers the passkey tap instead of a dead end (#563). */
+test("forget on a closed admin window offers the passkey renewal", async ({ page }) => {
+  await page.request.post("/__mock/reset");
+  const id = "11111111-2222-3333-4444-555555555555";
+  let forgets = 0;
+  let push: (() => void) | undefined;
+  await page.route("**/remote/hosts/actions", (route) => route.fulfill({ json: { id: "remote.host.remove", label: "Remove host" } }));
+  await page.route("**/remote/hosts/reauth/start", (route) => route.fulfill({ json: { ceremony: "fixture-ceremony", options: { publicKey: { challenge: "AQID", rpId: "localhost", allowCredentials: [] } } } }));
+  await page.route("**/remote/hosts/forget", (route) => { forgets += 1; return route.fulfill({ status: 428 }); });
+  await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
+    const server = socket.connectToServer();
+    socket.onMessage((message) => {
+      if (typeof message !== "string") {
+        const { frame } = decodeMuxedFrame(message);
+        if (frame.type === "Call" && frame.actionId === "remote.host.list") {
+          socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: [{ id, name: "retired-worker", online: false, state: "retired-unreachable" }], next: null })) })));
+          return;
+        }
+        if (frame.type === "Subscribe" && JSON.parse(new TextDecoder().decode(frame.filterJson)).topic === "remote.hosts") {
+          push = () => socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Event", subId: frame.subId, eventJson: new TextEncoder().encode('{"type":"changed"}') })));
+          return;
+        }
+      }
+      server.send(message);
+    });
+    server.onMessage((message) => socket.send(message));
+  });
+  await page.goto("/?mock=1&proto=product&fresh=1&bg=none");
+  await expect.poll(() => Boolean(push), { timeout: 20000 }).toBe(true);
+  await page.keyboard.press("Control+Shift+K");
+  await page.locator("#palette-input").fill("retired-worker");
+  await page.locator("#palette-results [role=option]").filter({ hasText: "retired-worker" }).click();
+  await page.getByRole("button", { name: "Forget", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Confirm with passkey", exact: true })).toBeVisible();
+  expect(forgets).toBe(1);
+  await page.getByRole("button", { name: "Keep host", exact: true }).click();
+  await expect(page.locator(".ui-toast").filter({ hasText: "Passkey confirmation was cancelled" })).toBeVisible();
+  expect(forgets, "a cancelled renewal never retries the forget").toBe(1);
+});

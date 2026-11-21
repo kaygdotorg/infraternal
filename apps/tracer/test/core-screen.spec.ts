@@ -143,7 +143,7 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     // and cross-fades to it for 160 ms, during which the painted fill is not the tint. Wait for it to settle, then read the fill
     // and the expected colour in one go.
     await settled(page, "#palette");
-    const { paletteMaterial, paletteFill } = await page.locator("#palette").evaluate((element) => {
+    const readPalette = (): Promise<{ paletteMaterial: { background: string; line: string; shadow: string }; paletteFill: string }> => page.locator("#palette").evaluate((element) => {
       const style = getComputedStyle(element);
       const probe = document.createElement("div");
       // D219: the palette's fill is ITS card tint mixed 58% over the page colour, so it is never thinner than the shared
@@ -157,6 +157,11 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       probe.remove();
       return { paletteMaterial: { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow }, paletteFill: fill };
     });
+    // Under load the glass can answer a little after the card settled (its fade then starts), and a read inside the 160 ms fade sees
+    // the painted fill mid-way while the property already holds the end. The fill must match its formula once the fade is over, so
+    // the pair is read again until it does (the nightly of 2026-11-21 failed on one such read, #567); a fill that never matches still fails.
+    await expect.poll(async () => { const read = await readPalette(); return cssChannels(read.paletteMaterial.background).join() === cssChannels(read.paletteFill).join(); }, { timeout: 5_000 }).toBe(true);
+    const { paletteMaterial, paletteFill } = await readPalette();
     expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(paletteFill));
     expect(cssChannels(paletteMaterial.background)[3]).toBeGreaterThanOrEqual(cssChannels(material.root)[3]);
     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));

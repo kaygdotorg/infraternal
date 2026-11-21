@@ -34,10 +34,26 @@ const TOKEN_PROGRAM =
 const BAR_MODULUS = 40;
 /** A `<K000042>` token spans this many cells before its bar. */
 const TOKEN_CELLS = 9;
+/**
+ * The paint profile's flood generator. By default it is `yes !`, which writes as fast as the PTY takes it. Setting
+ * `REAL_FLOOD_RATE_MBS` (J1065, #569) swaps in a perl loop that writes that many MB/s in 1 ms bursts instead, so the
+ * profile measures D375's "10 MB/s" flood on a host with few cores, where an unbounded `yes` starves every other process
+ * and measures the host's CPU rather than the relay. The text ends up inside the program's single-quoted `bash -c`.
+ */
+const FLOOD_RATE_MBS = Number(process.env.REAL_FLOOD_RATE_MBS ?? 0);
+const FLOOD_COMMAND = FLOOD_RATE_MBS > 0
+  ? `perl -e \"\\$|=1; while (1) { print qq(!\\n) x ${Math.round(FLOOD_RATE_MBS * 500)}; select(undef,undef,undef,0.001); }\"`
+  : "yes \\!";
+/**
+ * Whether the flood phase starts only once the flood has spent the whole bulk window. That holds at a 300 ms round trip,
+ * where credit is slow to return. At a short round trip a fast browser keeps up with a 10 MB/s flood and the window
+ * never empties, so `REAL_WAIT_FOR_EXHAUSTED_WINDOW=0` starts measuring once 1 MiB of flood output has arrived (J1065, #569).
+ */
+const WAIT_FOR_EXHAUSTED_WINDOW = process.env.REAL_WAIT_FOR_EXHAUSTED_WINDOW !== "0";
 /** Keep each probe key in one overwritten cell outside the independent flood scroll region. */
 const PAINT_PROGRAM =
   "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; flood_pid=; " +
-  "while IFS= read -rsn1 key; do if [ \"$key\" = F ]; then yes \\! & flood_pid=$!; " +
+  "while IFS= read -rsn1 key; do if [ \"$key\" = F ]; then " + FLOOD_COMMAND + " & flood_pid=$!; " +
   "elif [ \"$key\" = S ]; then kill \"$flood_pid\" 2>/dev/null || :; wait \"$flood_pid\" 2>/dev/null || :; break; " +
   "elif [ \"$key\" = R ]; then printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; " +
   "else printf \"\\033[1;1H\\033[2K%s\" \"$key\"; fi; done; stty sane'";
@@ -46,7 +62,7 @@ const KEYS = 20;
 /** Quiet baseline count; shorten only diagnostic runs, while the flood p99 always uses 200 samples. */
 const QUIET_PAINT_KEYS = Number(process.env.REAL_QUIET_PAINT_KEYS ?? 200);
 /** Flood samples for a meaningful nearest-rank p99. */
-const FLOOD_PAINT_KEYS = 200;
+const FLOOD_PAINT_KEYS = Number(process.env.REAL_FLOOD_PAINT_KEYS ?? 200);
 /** Raw output may spend this full amount while the separate repaint reserve stays protected. */
 const BULK_WINDOW_BYTES = 1024 * 1024;
 /** The browser reserves this part of its opening grant for an input-triggered repaint. */
@@ -59,7 +75,7 @@ const FREEZE_MS = 15_000;
 const FLOOD_PAINT_TIMEOUT_MS = Number(process.env.REAL_FLOOD_PAINT_TIMEOUT_MS ?? 720_000);
 
 test.beforeAll(async ({ browser }) => {
-  server = await startRealServer({ latencyMs: 150, recordFlow: true, recordCloses: true });
+  server = await startRealServer({ latencyMs: Number(process.env.REAL_ONE_WAY_MS ?? 150), recordFlow: true, recordCloses: true });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } });
   page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -350,7 +366,7 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
       const rawBytes = (rawOutput.get(stream) ?? 0) - floodStartBytes;
       const creditBalance = serverCreditBalance(bridge, stream);
       return rawBytes >= BULK_WINDOW_BYTES
-        && creditBalance <= REPAINT_RESERVE_BYTES
+        && (!WAIT_FOR_EXHAUSTED_WINDOW || creditBalance <= REPAINT_RESERVE_BYTES)
         && activeTerminalBridge()?.id === bridge.id
         && bridge.attached.has(stream);
     }, { timeout: FREEZE_MS, intervals: [5, 10, 25] }).toBe(true);

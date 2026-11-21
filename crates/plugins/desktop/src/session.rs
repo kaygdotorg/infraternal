@@ -17,7 +17,7 @@
 //! Access decisions come from an [`AccessRules`] implementation and, per viewer,
 //! the viewer's own login (an `Authority`).
 use infraternal_plugin_api::streams::Authority;
-use infraternal_protocol::desktop::Input;
+use infraternal_protocol::desktop::{EndReason, Input};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -109,8 +109,8 @@ struct State {
     /// A keyframe request is already queued, so another is not needed.
     repair_pending: bool,
     closed: bool,
-    /// The source confirmed destruction of the native window.
-    window_closed: bool,
+    /// Why the source ended the session for good (the window was destroyed, or the person at the Mac changed).
+    ended: Option<EndReason>,
 }
 /// No task, listener or timer is created by construction. The owner keeps this
 /// object in the server registry even when every viewer detaches.
@@ -160,7 +160,7 @@ impl Session {
                     next_viewer: 1,
                     repair_pending: false,
                     closed: false,
-                    window_closed: false,
+                    ended: None,
                 }),
                 frames: watch::channel(None).0,
                 commands,
@@ -468,24 +468,24 @@ impl Session {
     ///
     /// Runtime disable clears retained video and closes pending receivers, without timers.
     pub fn close(&self) {
-        self.close_with_reason(false);
+        self.close_with_reason(None);
     }
 
-    /// Ends the capture and preserves confirmation that its native window was destroyed.
-    pub(crate) fn close_window(&self) {
-        self.close_with_reason(true);
+    /// Ends the capture and preserves the source's confirmation of why it ended for good.
+    pub(crate) fn close_for(&self, reason: EndReason) {
+        self.close_with_reason(Some(reason));
     }
 
-    /// Reports authoritative destruction even after later cleanup calls.
-    pub(crate) fn window_closed(&self) -> bool {
-        self.state.lock().is_ok_and(|state| state.window_closed)
+    /// Reports the source's reason even after later cleanup calls; the first one stays.
+    pub(crate) fn end_reason(&self) -> Option<EndReason> {
+        self.state.lock().ok().and_then(|state| state.ended)
     }
 
     /// Publishes the terminal reason before waking viewers to retire.
-    fn close_with_reason(&self, window_closed: bool) {
+    fn close_with_reason(&self, reason: Option<EndReason>) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
-            state.window_closed |= window_closed;
+            state.ended = state.ended.or(reason);
             state.keyframe = None;
             state.viewers.clear();
             state.controller = None;

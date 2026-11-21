@@ -16,6 +16,10 @@
  *   are skipped: the admitted coded units still establish codec references. Each picture is closed before the callback
  *   returns, so no presentation queue pins decoder memory or holds newer work behind obsolete conversion.
  *
+ * Small changes may arrive as tile updates (exact pixels, #146 proposal C) instead of video. They share the sequence and the
+ * decoder-timestamp order with the video, and `TileLayer` (tiles.ts) draws them over the video in that order: a tile waits
+ * for every older video picture to come out of the decoder, and a newer video picture supersedes it.
+ *
  * Nothing is scheduled while no unit arrives and nothing is drawn without a new picture: a window whose machine shows
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
  * the window closes or has been off screen for long.
@@ -23,6 +27,7 @@
 import { traceClock, TRACE_LIMIT, type FrameTrace, type ReceiveTrace } from "./frame-trace";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
+import { isTileUpdate, TileLayer } from "./tiles";
 
 /** The few members of the worker's global scope used here (the project compiles against the page's types). */
 interface WorkerScope {
@@ -65,8 +70,10 @@ let lastSequence = 0;
 let waitingKeyframe = true;
 /** True while a repair request has been sent and its keyframe has not arrived. */
 let repairPending = false;
-/** The decoder timestamp of the newest accepted unit. An output older than this is superseded and not drawn. */
+/** The order number of the newest accepted unit, video or tile; video units use it as their decoder timestamp. */
 let timestamp = 0;
+/** The decoder timestamp of the newest accepted video unit. A decoded picture older than this is superseded and not drawn. */
+let newestVideo = 0;
 /** One encoded access unit waiting for the decoder. `stamp` is its decoder timestamp; `trace` is set only during measurement. */
 interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number; trace?: FrameTrace }
 // The map exists only for measurement; decoder timestamps keep delayed outputs
@@ -82,6 +89,8 @@ let pendingBytes = 0;
 let pumping = false;
 /** True until the first picture of this attach has been drawn. */
 let first = true;
+/** True once any video picture has been drawn on the canvas, so its size is the stream's picture size. */
+let drawn = false;
 /** The width and height of the last picture reported with a `size` message. */
 let shownW = 0, shownH = 0;
 /** The counters returned by a `stats` request. */
@@ -121,7 +130,7 @@ function output(frame: VideoFrame): void {
   try {
     // Newer work is already accepted. Converting obsolete output would block its
     // callback and can overload the bounded decoder with avoidable canvas work.
-    if (frame.timestamp < timestamp) { stats.superseded++; if (trace) trace.outcome = "superseded"; return; }
+    if (frame.timestamp < newestVideo) { stats.superseded++; if (trace) trace.outcome = "superseded"; return; }
     if (!canvas || !context) return;
     if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
       canvas.width = frame.displayWidth;
@@ -129,6 +138,7 @@ function output(frame: VideoFrame): void {
     }
     if (trace) trace.drawStartedAt = traceClock();
     context.drawImage(frame, 0, 0);
+    drawn = true;
     if (trace) { trace.drawFinishedAt = traceClock(); trace.width = frame.displayWidth; trace.height = frame.displayHeight; trace.outcome = "painted"; }
     stats.painted++;
     if (first) { first = false; post({ t: "first", width: frame.displayWidth, height: frame.displayHeight }); }
@@ -137,6 +147,8 @@ function output(frame: VideoFrame): void {
       post({ t: "size", width: shownW, height: shownH });
     }
   } finally {
+    // Tiles that waited for this picture are drawn now, in the same task, so no frame shows it without them.
+    tiles.videoRetired(frame.timestamp);
     frame.close();
     if (trace) post({ t: "trace", frame: trace });
     // Output proves codec progress even if its dequeue event is still pending.
@@ -146,11 +158,20 @@ function output(frame: VideoFrame): void {
 }
 
 /** Forgets every waiting unit. */
-function discardPending(): void { pending.length = 0; pendingBytes = 0; }
+function discardPending(): void {
+  for (const unit of pending) tiles.videoDropped(unit.stamp);
+  pending.length = 0; pendingBytes = 0;
+}
 
 /** Closes the decoder and forgets its codec and traces. The waiting units are dropped too, unless `keepPending` (a keyframe is replacing the decoder and its followers belong to the new one). */
 function retireDecoder(keepPending = false): void {
-  if (!keepPending) discardPending();
+  if (!keepPending) {
+    discardPending();
+    // Units inside the closed decoder never come out, and a repair or a reset follows.
+    tiles.videoForgotten();
+  }
+  // With `keepPending` a keyframe is replacing the decoder. Units left in the old one are older than that keyframe, and
+  // its output retires them for the tile layer, so tiles after it still wait for it.
   if (repairTimer !== undefined) { scope.clearTimeout(repairTimer); repairTimer = undefined; }
   if (decoder && decoder.state !== "closed") decoder.close();
   traces?.clear();
@@ -165,7 +186,7 @@ function retireDecoder(keepPending = false): void {
 function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number, trace?: FrameTrace): void {
   if (keyframe) {
     const wanted = avcCodecString(bytes) ?? codec;
-    if (!wanted) { discardPending(); repair(); return; }
+    if (!wanted) { discardPending(); tiles.videoDropped(stamp); repair(); return; }
     if (!decoder || codec !== wanted) {
       // Units buffered after this IDR belong to its new codec, not the retired
       // decoder. Closing the old decoder must preserve that new reference chain.
@@ -188,18 +209,38 @@ function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number, trace?:
     waitingKeyframe = false;
     repairPending = false;
   }
-  if (!decoder) { stats.dropped++; repair(); return; }
-  if (trace) {
-    if (traces!.size === TRACE_LIMIT) {
-      const oldest = traces!.keys().next().value!;
-      post({ t: "trace", frame: traces!.get(oldest)! });
-      traces!.delete(oldest);
-    }
-    trace.submittedAt = traceClock(); traces!.set(stamp, trace);
-  }
+  if (!decoder) { stats.dropped++; tiles.videoDropped(stamp); repair(); return; }
+  if (trace) { trace.submittedAt = traceClock(); rememberTrace(stamp, trace); }
   try { decoder.decode(new EncodedVideoChunk({ type: keyframe ? "key" : "delta", timestamp: stamp, data: bytes })); }
   catch { retireDecoder(); post({ t: "error", reason: "decode" }); repair(); }
 }
+
+/** Keeps a measurement trace by order number, posting the oldest one when the bounded map is full. */
+function rememberTrace(order: number, trace: FrameTrace): void {
+  if (traces!.size === TRACE_LIMIT) {
+    const oldest = traces!.keys().next().value!;
+    post({ t: "trace", frame: traces!.get(oldest)! });
+    traces!.delete(oldest);
+  }
+  traces!.set(order, trace);
+}
+
+/** The window's tile lane: exact small changes drawn over the video in arrival order (tiles.ts). */
+const tiles = new TileLayer({
+  size: () => (canvas && context && drawn ? { width: canvas.width, height: canvas.height } : undefined),
+  draw: (piece) => context?.putImageData(piece.image, piece.x, piece.y),
+  repair: () => repair(),
+  painted: (order, inflatedAt, drawnAt) => {
+    const trace = traces?.get(order);
+    if (!trace) return;
+    traces!.delete(order);
+    trace.decodedAt = performance.timeOrigin + inflatedAt;
+    trace.drawStartedAt = trace.decodedAt;
+    trace.drawFinishedAt = performance.timeOrigin + drawnAt;
+    trace.outcome = "painted";
+    post({ t: "trace", frame: trace });
+  },
+});
 
 /** Moves waiting units to the decoder while it has fewer than two queued. */
 function pump(): void {
@@ -240,6 +281,13 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt
     pump();
     if (!keyframe && waitingKeyframe) { stats.dropped++; return; }
   }
+  if (!keyframe && isTileUpdate(new Uint8Array(buffer, 0, Math.min(2, buffer.byteLength)))) {
+    // A tile never enters the decoder. It takes the next order number, so the layer can tell which video pictures are older.
+    const order = ++timestamp;
+    if (traces && receipt) rememberTrace(order, { ...receipt, sequence, workerReceivedAt: receivedAt, lane: "tile", outcome: "unpainted" });
+    tiles.accept(order, new Uint8Array(buffer));
+    return;
+  }
   if (!buffer.byteLength || buffer.byteLength > MAX_VIDEO_BYTES || pending.length >= MAX_PENDING_UNITS || pendingBytes + buffer.byteLength > MAX_VIDEO_BYTES) {
     stats.dropped += pending.length + 1;
     discardPending();
@@ -250,6 +298,8 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt
   // Advance before decoder admission: even output from an admitted older unit
   // is obsolete while a newer accepted picture waits for its codec references.
   const bytes = new Uint8Array(buffer), stamp = ++timestamp;
+  newestVideo = stamp;
+  tiles.videoAccepted(stamp);
   const trace: FrameTrace | undefined = traces && receipt ? { ...receipt, sequence, workerReceivedAt: receivedAt, outcome: "unpainted" } : undefined;
   // Ordinary delivery allocates no pending record. Only references waiting for
   // codec capacity need the extra bounded queue entry.
@@ -285,11 +335,13 @@ scope.onmessage = (event: MessageEvent<ToWorker>) => {
       return;
     case "reset":
       retireDecoder();
+      tiles.reset();
       lastSequence = 0; waitingKeyframe = true; repairPending = false; first = true;
       return;
-    case "stats": post({ t: "stats", stats: { ...stats } }); return;
+    case "stats": post({ t: "stats", stats: { ...stats, tiles: { ...tiles.stats } } }); return;
     case "close":
       retireDecoder();
+      tiles.reset();
       canvas = undefined; context = null;
       scope.close();
       return;

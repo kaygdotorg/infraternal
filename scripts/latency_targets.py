@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The D375 latency target table, its METRIC row format and the end-of-run report [D375, D296, D267].
 
-D375 (owner, 2026-11-09) sets ten p99 targets at 120 Hz, where one frame is
+D375 (owner, 2026-11-09) sets ten p99 targets at 120 Hz (an eleventh, the second burst, was added on 2026-11-21), where one frame is
 8.3 ms, and asks for every row to be reported on every run. This module is the
 single Python copy of that table:
 
@@ -88,6 +88,7 @@ ROWS = (
     Row("reconnect_network_change", "Reconnect, typable, after a network change", "4 round trips + 50 ms", 20),
     Row("render_10mbps", "Rendering at 10 MB/s output", "120 fps", 100),
     Row("first_paint_phone", "First paint, mid-range phone", "under 1 s", 20),
+    Row("second_burst_extra_frames", "Second burst, extra frames", "0 extra frames", 20),
     Row("idle_agent_rss", "Idle infraternal agent", "under 15 MB RSS", 2),
 )
 
@@ -288,7 +289,7 @@ def report(log_text: str) -> tuple[str, bool]:
 
     Each row gates on its unthrottled (browser) or native measurement; the 60 Hz
     display's value is shown beside it and never gates. Returns the markdown table
-    and `True` only when all ten rows have a gated measurement, none failed, and
+    and `True` only when all eleven rows have a gated measurement, none failed, and
     the unthrottled run really ran above 60 Hz. Missing rows are listed as
     MISSING: a producer that stopped printing its row must fail the gate rather
     than vanish from the report.

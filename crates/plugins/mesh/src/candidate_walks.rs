@@ -121,25 +121,25 @@ pub(crate) fn walking_peers<'a>(
         .collect()
 }
 
-/// Whether applying `next` over `applied` re-installs (changes) a peer that `watched` picks: one
-/// that walks, or on Linux one on its relay. Only then can a re-install keep the engine's address
-/// ([`kept_address`]), so only then does a worker read where the engine sends each peer before
-/// the apply (the `before` map of [`Walks::start`], J602 F1).
+/// Whether a worker must read the engine's addresses before applying `next` over `applied`
+/// (the `before` map [`kept_address`] judges, and [`Walks::start`] reads, J602 F1).
+///
+/// True when `next` changes any peer that was already installed (#483, J1025). A changed peer
+/// is rewritten whole by the engine, endpoint included, so any of them, walking or not, relayed
+/// or not, can lose a live NAT-roamed address to a stale snapshot unless [`kept_address`] sees
+/// it. Limiting the read to walking and relayed peers left a single-address peer on its old
+/// recovery time. The cost is one O(peers) read per snapshot that changes a peer; a snapshot
+/// that changes none reads nothing, and neither does the first one.
 #[must_use]
-pub(crate) fn reinstalls_a_peer(
-    applied: Option<&Config>,
-    next: &Config,
-    watched: impl Fn(&Peer) -> bool,
-) -> bool {
+pub(crate) fn engine_read_needed(applied: Option<&Config>, next: &Config) -> bool {
     let Some(applied) = applied else {
         return false;
     };
     next.peers.iter().any(|(id, policy)| {
-        watched(&policy.peer)
-            && applied
-                .peers
-                .get(id)
-                .is_some_and(|previous| previous.peer != policy.peer)
+        applied
+            .peers
+            .get(id)
+            .is_some_and(|previous| previous.peer != policy.peer)
     })
 }
 

@@ -25,7 +25,7 @@ use crate::{
 use infraternal_plugin_api::{PluginError, streams::WireLane};
 use infraternal_protocol::{
     Frame, decode_frame,
-    desktop::{Delivery, Input as WireInput, Message},
+    desktop::{Delivery, EndReason, Input as WireInput, Message},
     encode_frame_into,
 };
 use serde_json::Value;
@@ -253,8 +253,10 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
 /// Keeps the companion's permanent closure result across replacement capture lanes.
 /// Generic helper errors and transport failures leave the target eligible to reconnect.
 fn remember_closed_window(metadata: &Metadata, body: &[u8]) {
-    if serde_json::from_slice::<Value>(body).is_ok_and(|reply| reply["state"] == "gone") {
-        metadata.gone.store(true, Ordering::Release);
+    if let Ok(reply) = serde_json::from_slice::<Value>(body)
+        && reply["state"] == "gone"
+    {
+        metadata.latch_gone(EndReason::from_helper_word(reply["reason"].as_str()));
     }
 }
 /// Turns the helper's video payload (8-byte capture time, 1-byte keyframe flag,
