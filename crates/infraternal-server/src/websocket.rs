@@ -1666,30 +1666,25 @@ where
             attachment.last_in_acked = in_seq_acked;
             // Each device acknowledges only its durable writer range. The old
             // session column is retained for diagnostics, never new input authority.
-            let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
-                .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
-                .bind(crate::auth::hash(session_token)).bind(user_id).execute(&state.pool).await;
-            if !matches!(changed, Ok(result) if result.rows_affected() == 1) {
-                return Err(());
-            }
-            let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
-            let acked_u64 = in_seq_acked.to_be_bytes();
+            // Both rows change in one transaction on the D379 writer (#562).
             let Ok(now) = unix_seconds() else {
                 return Err(());
             };
-            let result = sqlx::query("UPDATE terminal_sessions SET input_acked_u64=CASE WHEN input_acked_u64<? THEN ? ELSE input_acked_u64 END, input_acked=CASE WHEN ?>=0 THEN MAX(input_acked,?) ELSE input_acked END, last_seen=? WHERE id=? AND user_id=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(acked_u64.as_slice())
-                .bind(acked_u64.as_slice())
-                .bind(legacy_acked)
-                .bind(legacy_acked)
-                .bind(now)
-                .bind(attachment.session_id.as_slice())
-                .bind(user_id)
-                .bind(crate::auth::hash(session_token)).bind(user_id)
-                .execute(&state.pool)
-                .await;
-            if !matches!(result, Ok(result) if result.rows_affected() == 1) {
+            let recorded = crate::terminal_input_ack::record(
+                &state.auth,
+                &state.pool,
+                crate::terminal_input_ack::InputAck {
+                    connection_id,
+                    client_stream: stream_id,
+                    session_id: attachment.session_id,
+                    in_seq_acked,
+                    user_id,
+                    session_token,
+                    now,
+                },
+            )
+            .await;
+            if !recorded {
                 return Err(());
             }
             if !session_is_live(state, user_id, session_token).await {
