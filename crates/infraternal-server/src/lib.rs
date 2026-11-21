@@ -134,6 +134,8 @@ mod server_tls;
 mod socket_authority;
 mod stream_close;
 mod terminal_exit;
+/// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
+mod terminal_input_ack;
 mod web_assets;
 mod websocket;
 mod websocket_input;
