@@ -423,13 +423,19 @@ async fn switch_once(
     }
 }
 
-/// Write the D295 database copy to `path` with `VACUUM INTO`, then make it private (0600).
+/// Write the D295 database copy to `path` with `VACUUM INTO`, make it private (0600)
+/// and durable.
 ///
 /// SQLite creates the file with the process umask, but the copy holds everything the
 /// database holds, and the undo restores only a private file. Its folder (`previous/`,
 /// 0700) keeps it unreachable to anyone else in between.
+///
+/// The copy and its folder entry are flushed to disk before this returns, because the
+/// marker written next is: after a power loss during the trial, a durable marker
+/// would make the previous release restore whatever part of the copy had reached the
+/// disk. SQLite does not promise that `VACUUM INTO` output is synced.
 /// # Errors
-/// The path is not text, or the copy could not be written or made private.
+/// The path is not text, or the copy could not be written, made private or synced.
 pub(crate) async fn copy_database(
     pool: &sqlx::SqlitePool,
     path: &Path,
@@ -442,7 +448,17 @@ pub(crate) async fn copy_database(
         .await
         .map_err(|_| "the database copy could not be written")?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(|_| "the database copy could not be made private")
+        .map_err(|_| "the database copy could not be made private")?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        std::fs::File::open(&path)?.sync_all()?;
+        let folder = path.parent().ok_or(std::io::ErrorKind::NotFound)?;
+        std::fs::File::open(folder)?.sync_all()
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .ok_or("the database copy could not be synced")
 }
 
 /// The new release's trial: health within [`TRIAL_LIMIT`], then commit or undo.
