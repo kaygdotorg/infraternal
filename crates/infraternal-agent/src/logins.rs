@@ -1620,10 +1620,29 @@ pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
             && metadata.uid() == 0
             && metadata.mode() & 0o022 == 0
             && metadata.mode() & 0o111 != 0
-            && protected)
+            && protected
+            && links.iter().all(|link| link_fixed(link)))
             .then_some(canonical);
     }
     None
+}
+
+/// Whether only root can repoint `link`. [`account_tool`] accepts a
+/// root-owned sticky directory that others can write (the Nix store is
+/// `root:nixbld 1775`), but the owner of a link inside one may still delete
+/// it and put a new link in its place, and `fs.protected_symlinks` guards
+/// only world-writable sticky directories. So in a directory group or others
+/// can write, the link must be root's own; elsewhere the directory's owner
+/// (root, checked by the caller) is the only one who can change it (J1051).
+fn link_fixed(link: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(parent) = link.parent() else {
+        return false;
+    };
+    match (std::fs::metadata(parent), std::fs::symlink_metadata(link)) {
+        (Ok(directory), Ok(link)) => directory.mode() & 0o022 == 0 || link.uid() == 0,
+        _ => false,
+    }
 }
 
 /// Root of the unified cgroup hierarchy that cgroup paths are relative to.
@@ -2064,6 +2083,26 @@ async fn acquire(root: &Path, name: &str) -> io::Result<nix::fcntl::Flock<std::f
 mod tests {
     //! Person identity remains distinct even when the OS account is shared.
     use super::*;
+
+    /// J1051: in a directory others can write, sticky or not, a link's owner
+    /// can delete and re-create it, so only a link root owns there stays
+    /// fixed. In a directory only its owner writes, any link is fixed.
+    #[test]
+    fn a_link_in_a_shared_directory_is_fixed_only_when_root_owns_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = nix::unistd::mkdtemp("/tmp/rvtool-XXXXXX").unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink("/usr/bin/true", &link).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(link_fixed(&link));
+        let ours = nix::unistd::Uid::effective().is_root();
+        for mode in [0o1777, 0o1775, 0o775] {
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(link_fixed(&link), ours, "{mode:o}");
+        }
+        assert!(!link_fixed(&root.join("missing")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A login worker's bound control socket is not inherited by its children.
     #[test]
