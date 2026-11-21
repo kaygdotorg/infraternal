@@ -717,7 +717,10 @@ mod tests {
                 &STOCK_DEBIAN13[at..]
             )
         };
-        for stock in ["org.freedesktop.login1.reboot", "org.freedesktop.login1.power-off"] {
+        for stock in [
+            "org.freedesktop.login1.reboot",
+            "org.freedesktop.login1.power-off",
+        ] {
             assert!(!action_defaults_allow_or_unknown(&imply(stock)), "{stock}");
         }
         for other in [
