@@ -5,8 +5,8 @@
 /// CoreText into IOSurface-backed buffers and hands them to `SurfaceCapture.receiveFrame`, the same handoff ScreenCaptureKit
 /// uses, so the product's real mailbox, exact-pixel history, tile lane and hardware encoder decide every packet.
 ///
-/// Scenarios, in this order: `typing` (160 characters, 60 ms apart), `blink` (an idle caret for 3 s), `scroll` (90 frames
-/// at 60 Hz, 6 px each), `mixed` (typing every 50 ms with a 60 Hz spinner, a 10 Hz clock and a one-line scroll every 7th
+/// Scenarios, in this order: `typing` (160 characters, 60 ms apart), `blink` (an idle caret for 3 s), `scroll` (a window
+/// full of text, 90 frames at 60 Hz, 6 px each), `mixed` (typing every 50 ms with a 60 Hz spinner, a 10 Hz clock and a one-line scroll every 7th
 /// key) and `burst` (30 times: a scroll, then a key 3 ms later, so a tile arrives right behind a video frame).
 ///
 /// Output in `<out-dir>`:
@@ -195,10 +195,14 @@ func append(_ data: inout Data, _ value: UInt64, _ bytes: Int) {
         scenario("typing") { for i in 0..<160 { type(i); scene.caret = true; clock += 0.06; show(at: clock) } }
         scenario("blink") { for _ in 0..<6 { scene.caret.toggle(); clock += 0.53; show(at: clock) } }
         scene.caret = true
-        for i in 0..<160 { type(i + 7) }
+        // Fill the window with text, so a scroll changes the whole picture (video), not a few lines.
+        for i in 0..<(70 * 60) { type(i + 7) }
         show(at: clock); clock += 0.6
         scenario("scroll") { for _ in 0..<90 { scene.scroll += 6; clock += 1.0 / 60; show(at: clock) } }
-        scene.scroll = 0
+        // Keep the typed (last) line in view with room for a few more wrapped lines; the window is full of text above it, so a one-line
+        // scroll in the next scenarios moves the whole picture.
+        let bottom = max(0, renderer.margin + scene.lines.count * renderer.lineHeight - (height - renderer.statusHeight) + 4 * renderer.lineHeight)
+        scene.scroll = bottom
         scenario("mixed") {
             var key = 0, tick = 0
             let begin = clock
@@ -208,7 +212,7 @@ func append(_ data: inout Data, _ value: UInt64, _ bytes: Int) {
                 if tick % 6 == 0 { scene.clock = String(format: "00:%02d.%d", tick / 60, (tick / 6) % 10) }
                 if tick % 3 == 0 {
                     type(key); key += 1
-                    if key % 7 == 0 { scene.scroll = scene.scroll == 0 ? 17 : 0 }
+                    if key % 7 == 0 { scene.scroll = scene.scroll == bottom ? bottom - 17 : bottom }
                 }
                 show(at: clock)
             }
@@ -216,7 +220,7 @@ func append(_ data: inout Data, _ value: UInt64, _ bytes: Int) {
         scene.spinner = -1; scene.clock = ""
         scenario("burst") {
             for i in 0..<30 {
-                clock += 0.12; scene.scroll = scene.scroll == 0 ? 17 : 0; show(at: clock)
+                clock += 0.12; scene.scroll = scene.scroll == bottom ? bottom - 17 : bottom; show(at: clock)
                 clock += 0.003; type(i + 300); show(at: clock)
             }
         }
