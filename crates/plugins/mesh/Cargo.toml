@@ -106,3 +106,8 @@ required-features = ["server"]
 [[example]]
 name = "relay_fixture"
 required-features = ["relay", "test-support"]
+
+# Userspace key-echo through relayed pairs, for relay-choice measurements (#201, J1105).
+[[example]]
+name = "relay_echo"
+required-features = ["relay", "test-support"]
