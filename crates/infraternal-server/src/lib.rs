@@ -52,6 +52,9 @@ pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]
 #[doc(hidden)]
 pub use terminal_queries::verify_terminal_query_sample;
+#[cfg(feature = "parser-checks")]
+#[doc(hidden)]
+pub use websocket::receive_checks::verify_receive_wire_sample;
 mod liveness;
 pub mod login_access;
 #[cfg(all(feature = "ssh", feature = "mesh", feature = "remote"))]
