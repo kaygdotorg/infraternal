@@ -647,7 +647,12 @@ async fn issue_approved_machine_join(
             .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
             .transpose()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-        endpoint: None,
+        // The same direct QUIC listener an Add-host invitation names. It
+        // travels only to the poll-token holder over this pinned HTTPS reply,
+        // inside the invitation already bound to the approved host and key,
+        // so it needs no separate proof. App Windows lanes exist only on QUIC
+        // (#146, D349); the public origin stays the fallback (D196, D291).
+        endpoint: Some(api.endpoint.endpoint),
         server_name: api.endpoint.server_name,
     };
     transaction

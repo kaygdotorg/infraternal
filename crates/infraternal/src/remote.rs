@@ -1048,6 +1048,14 @@ async fn direct_endpoint(
 /// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
+    // An enrollment without the server's direct address can only link over
+    // HTTPS, so it never gets App Windows lanes. The Hello says so, and the
+    // canvas asks the person to add the machine again (#146, D349). This
+    // reads the stored enrollment, not the lookup below, which can fail for a
+    // moment without meaning anything.
+    if stored.endpoint.is_none() {
+        infraternal_agent::host_os::enrolled_without_direct_endpoint();
+    }
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
     let https_root = if stored.https_system_roots {
         None
