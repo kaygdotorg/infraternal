@@ -837,3 +837,108 @@ async fn a_key_that_expires_while_waiting_for_the_writer_is_not_renewed() {
     assert!(dead, "the expired key was renewed instead of tombstoned");
     assert_eq!(expires_at, wall + 30);
 }
+
+/// #559 F1: a device-code machine join may only publish a receipt for the host row its own
+/// approval created. A promoted host has no join-token row left (the root handover deletes
+/// it), so before this check a passkey-approved request naming that host's id got a fresh
+/// receipt, and its own key then joined as a second active certificate for the host.
+#[tokio::test]
+async fn device_code_machine_join_cannot_name_an_existing_host() {
+    let (store, pool, existing) = crate::enrollment::authority::tests::enrolled().await;
+    // The state a finished root handover leaves: root mode, no join-token row.
+    sqlx::query("UPDATE remote_hosts SET mode='rootful', execution_uid=0, hostname='laptop' WHERE id=?")
+        .bind(existing.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM remote_join_tokens WHERE host_id=?")
+        .bind(existing.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let now = super::now().unwrap();
+    auth.set_test_http_time(now);
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let issuer = InvitationIssuer::new(
+        auth.clone(),
+        pool.clone(),
+        store.clone(),
+        EnrollmentService {
+            source: source.clone(),
+            endpoint: endpoint.clone(),
+        },
+    );
+    let app = crate::auth::router_with_invitation_issuer(auth.clone(), Some(issuer)).merge(
+        router_with_store(auth.clone(), pool.clone(), store, source, endpoint),
+    );
+    let key = PKey::generate_ed25519().unwrap();
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
+    let start = request(
+        &app,
+        "/auth/device-start",
+        json!({
+            "kind": "join_machine",
+            "device": "laptop",
+            "request": {
+                "host_id": existing,
+                "hostname": "laptop",
+                "mode": "system",
+                "execution_uid": 0,
+                "key_fingerprint": format!("SHA256:{}", FINGERPRINT_B64.encode(key_digest)),
+            },
+        }),
+        None,
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&start.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let inspected = request(
+        &app,
+        "/auth/device-inspect",
+        json!({"code":approval["user_code"]}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    auth.approve_without_passkey_for_tests(&token, approval["user_code"].as_str().unwrap(), now)
+        .await
+        .unwrap();
+    let response = request(
+        &app,
+        "/auth/device-redeem",
+        json!({"token":approval["poll_token"]}),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an approval must not publish a receipt for a host it did not create"
+    );
+    let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens WHERE host_id=?")
+        .bind(existing.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(receipts, 0, "no receipt exists for the existing host");
+}
