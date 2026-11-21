@@ -51,7 +51,8 @@ for (const [name, viewport, scale] of SIZES) {
         // The Inbox item the staged version raises: the sidebar open, the item expanded.
         await scenario(page, "ready");
         await page.locator("#sidebar-toggle").click();
-        await expect(page.locator(".ui-inbox .ui-inbox-title, .ui-inbox").first()).toBeVisible();
+        await expect(page.locator(".ui-inbox .ui-inbox-row").first()).toBeVisible();
+        await page.locator(".ui-inbox .ui-inbox-row").first().click();
         await page.waitForTimeout(600);
         await page.screenshot({ path: resolve(OUT, `inbox-ready-${name}-${theme}.png`) });
         await context.close();
