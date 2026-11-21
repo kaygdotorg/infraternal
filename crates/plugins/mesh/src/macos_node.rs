@@ -1403,7 +1403,11 @@ async fn bind_udp(
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
-    let mut factory = UdpSocketFactory::default();
+    // The product's S choice, the same one the worker starts its route listener with.
+    let mut factory = UdpSocketFactory {
+        mac_connected: Some(walks::mac_connected_sends_enabled()),
+        ..UdpSocketFactory::default()
+    };
     if request.port != 0 {
         let params = UdpTransportFactoryParams {
             addr: None,
