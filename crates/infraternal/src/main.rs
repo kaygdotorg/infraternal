@@ -2965,6 +2965,18 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
     // programs and an in-place restart still get it back.
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     let _ = infraternal_shim::disable_process_thp();
+    // The server and the infraternal agent hold a few descriptors per terminal
+    // session, so they raise their soft open-file limit to the hard one; the
+    // programs they start (shims, and through them people's shells) get the
+    // original back (#562). Best effort: on failure the limit stays as it was.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if std::env::args_os()
+        .skip(1)
+        .find(|argument| argument != "--json")
+        .is_some_and(|argument| argument == "server" || argument == "agent")
+    {
+        let _ = infraternal_shim::open_files::raise_open_file_limit();
+    }
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]

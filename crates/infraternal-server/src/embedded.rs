@@ -3606,7 +3606,17 @@ fn spawn_socketpair_agent_with_mesh_state(
         );
     }
     let argv: Vec<_> = arguments.iter().map(CString::as_c_str).collect();
+    // posix_spawn can't change limits, so the child learns the soft open-file
+    // limit this server was started with, and gives it back to the shells it
+    // starts (#562). The server removed the variable from its own environment.
+    let handoff = infraternal_shim::open_files::launcher_soft_limit().map(|soft| {
+        (
+            std::ffi::OsString::from(infraternal_shim::open_files::HANDOFF_ENV),
+            std::ffi::OsString::from(soft.to_string()),
+        )
+    });
     let environment = std::env::vars_os()
+        .chain(handoff)
         .map(|(key, value)| {
             let mut entry = key.as_os_str().as_bytes().to_vec();
             entry.push(b'=');
