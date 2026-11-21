@@ -3,7 +3,7 @@
   "short_name": "infraternal",
   "start_url": "./",
   "scope": "./",
-  "display": "browser",
+  "display": "standalone",
   "background_color": "#101113",
   "theme_color": "#101113",
   "icons": [

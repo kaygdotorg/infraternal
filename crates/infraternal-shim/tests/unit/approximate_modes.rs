@@ -168,8 +168,8 @@ fn faithful_repaint_keeps_every_mode() {
     );
 }
 
-/// A full-screen program's whole input setup survives together, the way vim
-/// or htop leave it: alternate screen, SGR mouse, bracketed paste, cursor
+/// A full-screen program's whole input setup survives together, as a full-screen
+/// program leaves it: alternate screen, SGR mouse, bracketed paste, cursor
 /// keys, keypad, focus events, a bar cursor and Kitty flags.
 #[test]
 fn approximate_repaint_keeps_a_full_screen_programs_setup() {

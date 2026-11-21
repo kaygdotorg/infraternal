@@ -254,6 +254,20 @@ impl Inventory for Source {
                 // or a false durable receipt; renewal already refuses this row.
                 let online = cleanup.is_none() && self.hosts.online(id).await;
                 let mut value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
+                // `"direct": false` marks a live host whose enrollment has no
+                // direct server address: it links over HTTPS only, so the
+                // canvas asks for it to be added again before App Windows can
+                // open (#146, D349). Absent otherwise, including for offline
+                // hosts, whose Hello is not current.
+                if online
+                    && self
+                        .hosts
+                        .actor(id)
+                        .await
+                        .is_some_and(|actor| actor.lacks_direct_endpoint())
+                {
+                    value["direct"] = false.into();
+                }
                 if let Some(cleanup) = cleanup {
                     value["state"] = cleanup.into();
                 }

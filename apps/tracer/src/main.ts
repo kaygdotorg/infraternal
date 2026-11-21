@@ -20,10 +20,11 @@ import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
-import type { PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
+import type { HumanTrace, PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
+import { predictiveEchoEnabled } from "./host-echo-signal";
 
 declare global {
   interface Window {
@@ -33,6 +34,14 @@ declare global {
       trace: () => ProbeTraceSample[];
       /** How much history the terminal holds, as counts (#569). */
       scrollbackSummary: (prefix: string) => { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } | undefined;
+      /** The typing recorder for a driver that types like a person (see `PerformanceProbe.startHumanRecording`). */
+      human: {
+        start: () => void;
+        stop: () => void;
+        trace: () => HumanTrace;
+        cursorColumn: () => number;
+        lastPaintedAt: () => number;
+      };
     };
     __tracerTestDouble?: {
       isConnected: () => boolean;
@@ -178,8 +187,10 @@ async function start(): Promise<void> {
     return;
   }
   try {
+    const statusRequest = checkStatus();
+    startSessionProbe();
     const [status] = await Promise.all([
-      checkStatus(),
+      statusRequest,
       fontsReady,
     ]);
     installTooltips();
@@ -199,7 +210,27 @@ async function refreshAuth(): Promise<void> {
   }
 }
 
+/**
+ * The session check that started together with the first-run check, if any (J1069).
+ *
+ * The two answers are independent, so asking for both at once saves a network round trip before the sign-in screen
+ * or the terminal can appear. The check is asked for speculatively: when the server turns out to need first-run
+ * setup its answer is never read, and a failure is dropped with it. It belongs to the first call of
+ * {@link showAuthState} only; every later call (after setup, after a refresh) asks again.
+ */
+let sessionProbe: ReturnType<typeof checkSession> | undefined;
+
+/** Starts the session check now, so the first {@link showAuthState} can use its answer. */
+function startSessionProbe(): void {
+  sessionProbe = checkSession();
+  sessionProbe.catch(() => undefined);
+}
+
+/** Shows the screen for the server's first-run state: setup, sign-in, a device approval, or the terminal of a live session. */
 async function showAuthState(status: AuthStatus): Promise<void> {
+  // Taken here, before any early return, so a probe that was not needed can never answer a later call with a stale "signed out".
+  const probe = sessionProbe;
+  sessionProbe = undefined;
   if (deviceApprovalComplete) {
     await showDeviceApprovalSuccess();
     return;
@@ -210,7 +241,7 @@ async function showAuthState(status: AuthStatus): Promise<void> {
       await showDeviceApproval(kind, code);
       return;
     }
-    const session = status.setupRequired ? undefined : await checkSession();
+    const session = status.setupRequired ? undefined : await (probe ?? checkSession());
     if (session) {
       activeUserId = session.user_id;
       await showDeviceApproval(kind, code);
@@ -219,7 +250,7 @@ async function showAuthState(status: AuthStatus): Promise<void> {
     }
     return;
   }
-  const session = status.setupRequired ? undefined : await checkSession();
+  const session = status.setupRequired ? undefined : await (probe ?? checkSession());
   if (session) {
     activeUserId = session.user_id;
     await showTerminal(session);
@@ -487,7 +518,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
-  const predictiveEcho = query.get("predict") === "1";
+  const predictiveEcho = predictiveEchoEnabled(query.get("predict"));
   const reviewLayout = productTestMode && query.get("reviewLayout") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
@@ -630,6 +661,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     window.__tracerPerformanceProbe = {
       trace: () => performanceProbe?.traceSamples() ?? [],
       scrollbackSummary: (prefix) => currentTerminal?.scrollbackSummary(prefix),
+      human: {
+        start: () => performanceProbe?.startHumanRecording(),
+        stop: () => performanceProbe?.stopHumanRecording(),
+        trace: () => performanceProbe?.humanTrace() ?? { keys: [], outputs: [], overlay: [], startColumn: 0, lastPaintedAt: 0, predictor: undefined },
+        cursorColumn: () => performanceProbe?.cursorColumn() ?? 0,
+        lastPaintedAt: () => performanceProbe?.lastPaintedAt() ?? 0,
+      },
     };
   }
   const probeHooks = performanceProbe?.hooks();

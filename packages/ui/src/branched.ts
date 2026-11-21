@@ -80,9 +80,9 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string): H
   return node;
 }
 
-/** Builds one section of the tree (its header, branch drawing and rows, with a host caption's quiet note where the leaf has one). */
+/** Builds one section of the tree (its header, branch drawing and rows, with a host caption's quiet note where the leaf has one). A `div`: a `section` element may not carry the treeitem role. */
 function makeSection(section: BranchSection): HTMLElement {
-  const root = el("section", "bm-sec");
+  const root = el("div", "bm-sec");
   root.dataset.id = section.id;
   root.setAttribute("role", "treeitem");
   const open = Boolean(section.open && section.leaves.length);

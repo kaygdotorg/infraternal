@@ -60,8 +60,8 @@ denial is a warning; rollback reverses only a setting this attempt enabled.
 
 Upload a configured matching static binary over an authenticated SSH stdin
 stream to an installation-owned staging directory. Verify its SHA256 before
-execution. Install data under D17's data directory; the user/system launcher
-is `~/.local/bin/infraternal` or `/usr/local/bin/infraternal`. Never overwrite
+execution. Install data under D17's data directory, as amended by D395; the
+user/system launcher (D395) is `~/.local/bin/infraternal` or `/usr/local/bin/infraternal`. Never overwrite
 an unrelated file, unit or installation. Repeated operations serialize on the
 host. Keep a previous binary and service until authenticated check-in succeeds;
 failure restores them or removes only a fresh bootstrap's own artifacts.

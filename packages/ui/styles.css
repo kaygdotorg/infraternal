@@ -10,6 +10,16 @@
 @media (pointer: coarse) { :root { --ui-base: 1; } }
 @media (pointer: coarse) { :root { --row: 2.75rem; } }
 
+/* No page zoom from a pinch, anywhere (#560). iOS Safari ignores `maximum-scale=1`; what stops a pinch from zooming the whole page
+   is `touch-action` without `pinch-zoom`, and the browser takes the value from the element under the fingers up to its nearest
+   scroll container only. The root and body already say `pan-x pan-y`, but every scroll container inside the app (a window's body,
+   a settings list, a palette) starts a new chain, so a pinch over one zoomed the page out of the app (measured on an iPhone 18 Pro
+   simulator, iOS 27). One rule at zero specificity gives every element the same value; any class that sets its own `touch-action`
+   (`none` on the canvas, `pan-y` on rows) still wins, and `manipulation` on a control no longer re-enables the pinch.
+   The pinch that changes the terminal's font size is read from touch and gesture events, which this does not affect.
+   Pinned by `touch-action-guard.test.ts`. */
+:where(*) { touch-action: pan-x pan-y; }
+
 /* Focus rings appear only while the person navigates with the keyboard (focus-ring.ts sets
    data-focus-ring="on"); clicks, taps and shortcuts that move focus in script draw none. */
 :focus-visible { outline: none; }

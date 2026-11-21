@@ -1,8 +1,8 @@
 /**
  * Keeps opt-in local keystroke predictions in a removable overlay above the terminal renderer.
  *
- * A prediction is an ordered queue of operations: a printable glyph, or an erase (the host's `\b \b` echo
- * of DEL). Invariants that keep the predicted cursor on the cell grid and on the host's cursor:
+ * A prediction is an ordered queue of operations: a printable glyph, or an erase (the host's echo of DEL:
+ * `\b \b` from the kernel's line discipline, or `\b` then erase-to-end-of-line `ESC [ K` from line editors). Invariants that keep the predicted cursor on the cell grid and on the host's cursor:
  *
  * - Every operation stores the integer cell (column, row) where it lands and where the cursor is afterwards,
  *   computed once when the key is typed from the previous operation (or, for the first one, from the host
@@ -93,6 +93,8 @@ export interface PredictiveEchoState {
  * - `onVisible`: called when the prediction for the key with this `sequence` first showed, at the frame time `at`.
  * - `setHostCursorHidden`: hides the host cursor while the overlay draws its own.
  * - `onRendererPainted`: called after the renderer painted an output frame.
+ * - `textBeforeCursor`: the text on the cursor's row left of the cursor, read only for the first key of a burst,
+ *   so that a password or passphrase prompt is never predicted into (see {@link isSecretPrompt}).
  */
 export interface PredictiveEchoOptions {
   host: HTMLElement;
@@ -101,11 +103,12 @@ export interface PredictiveEchoOptions {
   onVisible: (sequence: string, at: number) => void;
   setHostCursorHidden?: (hidden: boolean) => void;
   onRendererPainted?: () => void;
+  textBeforeCursor?: () => string | undefined;
 }
 
 /** Where the echo scanner is inside a terminal escape sequence. */
 type VtParserState = "text" | "escape" | "csi" | "string" | "string-escape";
-/** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete `\b \b` erase occurred. */
+/** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete erase echo occurred. */
 type VisibleOutput = { bytes: Uint8Array; erases: number[] };
 
 /** A single terminal session's bounded, client-only prediction state. */
@@ -131,8 +134,13 @@ export class PredictiveEcho {
   private mispredictions = 0;
   /** Set after something that makes the cursor position uncertain; no key is predicted until host output has settled it. */
   private waitingForOutput = false;
-  /** Progress through matching the host's `\b \b` erase echo. */
-  private backspaceEchoState: 0 | 1 | 2 = 0;
+  /**
+   * Progress through matching the host's erase echo: 1 after `\b`, 2 after `\b ` (expecting the closing `\b`),
+   * 3 after `\b ESC` (expecting `[K`, `[0K`, which line editors send instead of overwriting with a space).
+   */
+  private backspaceEchoState: 0 | 1 | 2 | 3 = 0;
+  /** The parameter bytes of the CSI sequence that follows a `\b` (state 3); only empty or `0` before `K` is an erase. */
+  private eraseCsiParams = "";
   /** The pending echo or proof timeout. */
   private timeout = 0;
   /** The pending animation frame for a render. */
@@ -325,6 +333,13 @@ export class PredictiveEcho {
     if (this.muted || this.mispredictions >= 3) {
       this.offerEchoProof(bytes);
       this.lastReason = "echo-unverified";
+      return;
+    }
+    // A secret prompt does not echo, so the echo timeout would only hide the first character after it was shown.
+    // The row is read once per burst (the queue is empty); later keys of the burst follow a key that was predicted.
+    if (!this.pending.length && isSecretPrompt(this.options.textBeforeCursor?.() ?? "")) {
+      this.clearPending("secret-prompt");
+      this.waitingForOutput = true;
       return;
     }
 
@@ -657,12 +672,21 @@ export class PredictiveEcho {
     }, expectedDelay);
   }
 
-  /** Counts a wrong prediction, mutes prediction after the third, and clears the queue. */
+  /**
+   * Counts a wrong prediction, mutes prediction after the third, and clears the queue.
+   *
+   * Keys queued behind the mismatched one were sent too, and their echoes are still on the way. Until the host's
+   * output has caught up with them (see `echoExpectedAt`), a new key would be placed from a cursor that lacks
+   * them and mispredict in turn; replayed typing at a 300 ms round trip showed that cascade as most of the
+   * mispredictions (#569). So the next key waits for host output in that case, like any other unplaced key.
+   */
   private noteMisprediction(): void {
     this.mispredictions += 1;
     this.lastReason = this.mispredictions >= 3 ? "repeated-mispredictions" : "misprediction";
     if (this.mispredictions >= 3) this.muted = true;
+    const echoesInFlight = this.pending.length > 1;
     this.clearPending(this.lastReason);
+    if (echoesInFlight) this.waitingForOutput = true;
   }
 
   /** Records that the echo of a key sent at `sentAt` cannot arrive before one round trip later (less a jitter margin). */
@@ -761,7 +785,7 @@ export class PredictiveEcho {
     this.render(at, false);
   }
 
-  /** The printable echo bytes of one output chunk, with the offsets at which a `\b \b` erase finished. Escape sequences are skipped. */
+  /** The printable echo bytes of one output chunk, with the offsets at which an erase echo finished. Escape sequences are skipped. */
   private visibleBytes(bytes: Uint8Array): VisibleOutput {
     const visible = new Uint8Array(Math.min(bytes.byteLength, MAX_VISIBLE_ECHO_BYTES));
     let length = 0;
@@ -775,6 +799,21 @@ export class PredictiveEcho {
     for (const byte of bytes) {
       scanned += 1;
       if (scanned > MAX_VISIBLE_ECHO_BYTES) break;
+      if (this.backspaceEchoState === 3) {
+        // `\b` then `ESC [ K` (or `ESC [ 0 K`): the cell left of the cursor is cleared, like `\b \b`. Any other
+        // sequence after a `\b` is a plain cursor move, which is not an erase; it is skipped like other escapes.
+        if (this.parserState !== "escape" || byte === 0x5b) {
+          if (this.parserState === "escape") this.parserState = "csi";
+          else if (byte >= 0x40 && byte <= 0x7e) {
+            if (byte === 0x4b && (this.eraseCsiParams === "" || this.eraseCsiParams === "0")) erases.push(length);
+            this.backspaceEchoState = 0;
+            this.parserState = "text";
+          } else this.eraseCsiParams += String.fromCharCode(byte);
+          continue;
+        }
+        // Not a CSI (for example an OSC string): no erase; the escape is parsed as usual below.
+        this.backspaceEchoState = 0;
+      }
       if (this.parserState === "escape") {
         if (byte === 0x5b) this.parserState = "csi";
         else if (byte === 0x5d || byte === 0x50 || byte === 0x5e || byte === 0x5f || byte === 0x58) this.parserState = "string";
@@ -788,6 +827,13 @@ export class PredictiveEcho {
         this.parserState = byte === 0x5c ? "text" : "string";
       } else if (byte === 0x1b) {
         this.parserState = "escape";
+        if (this.backspaceEchoState === 1) {
+          this.backspaceEchoState = 3;
+          this.eraseCsiParams = "";
+        } else if (this.backspaceEchoState === 2) {
+          this.backspaceEchoState = 0;
+          emit(0x20);
+        }
       } else if (this.backspaceEchoState === 0 && byte === 0x08) {
         this.backspaceEchoState = 1;
       } else if (this.backspaceEchoState === 1) {
@@ -812,6 +858,40 @@ export class PredictiveEcho {
     return { bytes: visible.subarray(0, length), erases };
   }
 }
+
+/**
+ * Whether the text left of the cursor ends like a prompt for a secret ("Password:", "[sudo] password for kayg:",
+ * "Enter passphrase for key '…':", "PIN:", "API key:", "Enter password> ", "Kennwort:", "パスワード:"). The host's
+ * own echo setting is not visible to the client, and inside a remote login (a raw terminal relaying another host)
+ * it never would be, so the prompt text is the signal that also works there. A false match only costs prediction
+ * for that key. A terminal-mode signal from the host is the planned primary rule for direct sessions (#569); this
+ * list stays as the rule for nested logins.
+ */
+export function isSecretPrompt(text: string): boolean {
+  return SECRET_PROMPT.test(text);
+}
+/**
+ * Words that ask for a secret: English ones, and "password" in the languages most often seen in terminal prompts
+ * (German, Spanish, Portuguese, French, Italian, Dutch, the Nordic languages, Polish, Czech/Slovak, Hungarian,
+ * Turkish, Russian/Ukrainian, Greek, Japanese, Chinese, Korean, Vietnamese).
+ */
+const SECRET_WORDS = [
+  "pass(?:word|phrase|code)?", "\\bpin\\b", "secret", "token", "\\botp\\b", "one-time", "verification code",
+  "(?:api|access|private|secret|license) key", "recovery (?:words|phrase|code)", "seed phrase", "mnemonic",
+  "passwort", "kennwort", "contrase\u00f1a", "senha", "mot de passe", "wachtwoord", "l\u00f6senord", "passord",
+  "adgangskode", "salasana", "has\u0142o", "heslo", "jelsz\u00f3", "\u015fifre", "\u043f\u0430\u0440\u043e\u043b\u044c",
+  "\u03ba\u03c9\u03b4\u03b9\u03ba\u03cc\u03c2", "\u30d1\u30b9\u30ef\u30fc\u30c9", "\u6697\u8a3c", "\u5bc6\u7801", "\u5bc6\u78bc",
+  "\u53e3\u4ee4", "\ube44\ubc00\ubc88\ud638", "m\u1eadt kh\u1ea9u",
+];
+/**
+ * A secret word, then at most 60 more characters and `:` `：` `?`; or a secret word that starts the row or follows
+ * a space, then at most 20 characters without a path separator and `>` (so a shell prompt such as
+ * `~/src/token-service> ` is not taken for one). Only spaces follow before the cursor.
+ */
+const SECRET_PROMPT = new RegExp(
+  `(?:${SECRET_WORDS.join("|")})[^\\n]{0,60}[:\uff1a?]\\s*$|(?:^|\\s)(?:${SECRET_WORDS.join("|")})[^\\n/~]{0,20}>\\s*$`,
+  "iu",
+);
 
 /** The characters of `data` when it is all printable (no control, surrogate or line-separator characters), otherwise `undefined`. */
 function printableGraphemes(data: string): string[] | undefined {

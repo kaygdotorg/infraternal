@@ -246,6 +246,26 @@ final class DeviceQA: XCTestCase {
             case "dump":
                 let text = safari.debugDescription
                 if a.count > 1 { try? text.write(toFile: a[1], atomically: true, encoding: .utf8) } else { print("QA_DUMP_BEGIN\n\(text)\nQA_DUMP_END") }
+            case "rotate":
+                // rotate~landscape|portrait: turns the simulated device (landscape-left / portrait), then lets the page re-lay out.
+                XCUIDevice.shared.orientation = a[1] == "landscape" ? .landscapeLeft : .portrait
+                sleep(2)
+            case "home":
+                // home: presses the Home button, so Safari goes to the background (the page gets visibilitychange/pagehide).
+                XCUIDevice.shared.press(.home)
+                sleep(1)
+            case "foreground":
+                // foreground: brings Safari back from the background without reloading the page.
+                safari.activate()
+                sleep(2)
+            case "doubletap":
+                // doubletap~x~y: two quick taps at a normalized point (Safari zooms a double-tap on text unless the page forbids it).
+                springboard.coordinate(withNormalizedOffset: CGVector(dx: Double(a[1])!, dy: Double(a[2])!)).doubleTap()
+                sleep(1)
+            case "pinch":
+                // pinch~scale~velocity at the middle of the screen: scale above 1 zooms in, below 1 out.
+                safari.windows.firstMatch.pinch(withScale: CGFloat(Double(a[1])!), velocity: CGFloat(Double(a.count > 2 ? a[2] : "1")!))
+                sleep(1)
             default:
                 result("unknown action \(a[0])", false)
             }

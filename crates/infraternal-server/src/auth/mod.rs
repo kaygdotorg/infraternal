@@ -331,6 +331,13 @@ impl Auth {
         }
     }
 
+    /// The D379 pool (`infraternal-db`) shared with the session statements, for
+    /// other hot writes that move off sqlx (#473, #562). `None` for in-memory
+    /// test databases; callers then run the same SQL on sqlx.
+    pub(crate) fn database(&self) -> Option<&infraternal_db::Database> {
+        self.db.as_ref()
+    }
+
     /// Whether the session statements run on the D379 pool (tests only).
     #[cfg(test)]
     pub(crate) fn sessions_on_pool(&self) -> bool {

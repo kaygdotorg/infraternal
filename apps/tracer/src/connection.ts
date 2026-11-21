@@ -65,6 +65,8 @@ export function reconnectDelay(attempt: number): number {
 }
 // Coalesce focus, page-show, and input events without a recurring idle timer.
 const ACTIVITY_PROBE_COOLDOWN_MS = 1000;
+/** Input after this long without any starts a new burst, which may cut a reconnect backoff short once. */
+const INPUT_BURST_GAP_MS = 1000;
 const LIVENESS_TASK_TOLERANCE_MS = 25;
 const MAX_SOCKETS = 12;
 const VERSION = 1;
@@ -203,6 +205,8 @@ export class MuxConnection {
   private nextCall = 1;
   private nextPingNonce = 0n;
   private retryTimer = 0;
+  /** When input last asked for a retry ({@link MuxConnection.retryForInput}). */
+  private lastInputAt = -Infinity;
   private retryAttempt = 0;
   /** Server refusals remain failures even when browser network hints lag. */
   private refusalBackoff = false;
@@ -526,6 +530,22 @@ export class MuxConnection {
    * "Try again"). A handshake already in flight is left alone, and a refusal's backoff still counts afterwards.
    */
   connectNow(): void { this.retryNow(true); }
+
+  /**
+   * A key or tap while the connection waits out a reconnect backoff: retry now instead of at its end (up to 7.5 s
+   * sooner when the server is already back). Bounded: one immediate retry per input burst (a burst ends after
+   * {@link INPUT_BURST_GAP_MS} without input), and never while a refusal's backoff runs, since a refused client
+   * retrying on every key would hammer the server that refused it. The attempt counter keeps growing, so an
+   * outage that really lasts still backs off.
+   */
+  retryForInput(): void {
+    const now = performance.now();
+    const quiet = now - this.lastInputAt >= INPUT_BURST_GAP_MS;
+    this.lastInputAt = now;
+    if (!quiet || this.closed || this.retryTimer === 0 || this.refusalBackoff || this.pageHidden()) return;
+    this.clearRetryTimer();
+    this.connect();
+  }
 
   /** Closes the socket so the connection restarts (every stream re-attaches on the next welcome). */
   /** Closes the socket for a close the server named; `code` and `reason` are that close, for the console line. */

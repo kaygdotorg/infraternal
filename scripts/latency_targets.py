@@ -46,6 +46,8 @@ FRAME_MS = 1000 / 120
 #: halves the old 25 ms D296 baseline. Becomes FRAME_MS after two consecutive perf-VM
 #: runs at or under 8.3 ms (PROCESS.md §6).
 OWN_OVERHEAD_GATE_MS = 12.0
+#: D375 row 1 (owner, 2026-11-21): our own work for a predicted letter, p99; the letter must also be in the first frame.
+PREDICTED_GLYPH_WORK_MS = 4.0
 #: The fixed allowance D259/D267 add after the round trips of a reconnect.
 RECONNECT_ALLOWANCE_MS = 50.0
 #: D41/D375: an idle infraternal agent stays under 15 MB resident (decimal megabytes).
@@ -68,11 +70,16 @@ class Row:
     measure: str
     target: str
     min_n: int
+    #: The display the row gates on when it is not `unthrottled`/`native`. Row 1 gates at normal 60 Hz pacing (vsync
+    #: on): its target is about frames, and an unthrottled run has no frame to be in (owner, 2026-11-21).
+    display: str | None = None
+    #: False for a row that is measured and shown but cannot fail the run yet (`result=REPORT`).
+    gating: bool = True
 
 
 #: The D375 table in the owner's order. Keys are the suffix after `d375_` in METRIC lines.
 ROWS = (
-    Row("predicted_glyph", "Key to letter on screen, with prediction", "8.3 ms", 100),
+    Row("predicted_glyph", "Own work with prediction, and the letter in the first frame", "own work at most 4 ms; letter in the first frame after the key", 100, display="60hz"),
     Row("real_echo", "Real echo", "round trip + 16.7 ms", 100),
     Row("flood_effect", "Flood effect on typing", "at most +8.3 ms", 100),
     Row("own_overhead", "Own overhead, no network", "8.3 ms (stretch 5 ms); gate 12 ms until reached", 100),
@@ -83,6 +90,24 @@ ROWS = (
     Row("first_paint_phone", "First paint, mid-range phone", "under 1 s", 20),
     Row("idle_agent_rss", "Idle infraternal agent", "under 15 MB RSS", 2),
 )
+
+
+#: The rows a person typing and a person on a phone network see (#569 finding 2, #573). They are measured beside the
+#: ten owner rows and shown in a second table. The old rows keep gating until these are stable.
+#: `real_paint_after_ws` and `real_echo_shell` gate; the rest are reported until their fixes land (the first-paint
+#: rows wait for J1069/J1100, #573; `real_typed_letter` for the predictor work, #569; `real_flood_effect` for two perf-VM runs).
+EXTRA_ROWS = (
+    Row("real_paint_after_ws", "Socket message to paint, real shell, overlapping typing", "8.3 ms", 100),
+    Row("real_echo_shell", "Real echo, real shell, overlapping typing", "round trip + 16.7 ms", 100),
+    Row("real_typed_letter", "Key to letter in its own cell, prediction on, real shell", "8.3 ms (reported)", 100, gating=False),
+    Row("real_flood_effect", "Flood effect on typing, no jitter", "at most +8.3 ms (reported)", 100, gating=False),
+    Row("first_paint_4g_signin", "First paint, 4G 9 Mbps/170 ms: sign-in visible", "under 1 s (reported)", 5, gating=False),
+    Row("first_paint_4g_connected", "First paint, 4G 9 Mbps/170 ms: terminal connected", "reported", 5, gating=False),
+    Row("first_paint_3g_signin", "First paint, fast 3G: sign-in visible", "reported", 5, gating=False),
+    Row("first_paint_3g_connected", "First paint, fast 3G: terminal connected", "reported", 5, gating=False),
+)
+#: Every key `row_line` accepts.
+ROW_KEYS = {row.key for row in (*ROWS, *EXTRA_ROWS)}
 
 
 def round_trip_bound_ms(rtt_ms: float, jitter_ms: float) -> float:
@@ -97,7 +122,8 @@ def round_trip_bound_ms(rtt_ms: float, jitter_ms: float) -> float:
 
 
 def row_line(key: str, *, source: str, n: int, value: float, unit: str, target: float, gate: float | None = None,
-             higher_is_better: bool = False, extra: str = "", display: str | None = None) -> str:
+             higher_is_better: bool = False, extra: str = "", display: str | None = None,
+             report_only: bool = False) -> str:
     """Format one measured D375 row as a METRIC line and decide its result.
 
     `target` is the D375 number for this run (already expanded for the round trip
@@ -105,9 +131,10 @@ def row_line(key: str, *, source: str, n: int, value: float, unit: str, target: 
     target and differs only for the own-overhead row. `higher_is_better` flips the
     comparison for frame rates. `extra` is appended verbatim (space-separated
     `key=value` details such as p50 or sample breakdowns). `display` tags a
-    browser row with the frame pacing it ran under (`unthrottled` or `60hz`).
+    browser row with the frame pacing it ran under (`unthrottled` or `60hz`). `report_only` prints `result=REPORT`
+    (measured, shown, never failing) for a row that does not gate yet.
     """
-    if key not in {row.key for row in ROWS}:
+    if key not in ROW_KEYS:
         raise ValueError(f"unknown D375 row: {key}")
     gate = target if gate is None else gate
 
@@ -116,6 +143,8 @@ def row_line(key: str, *, source: str, n: int, value: float, unit: str, target: 
 
     # No samples or a non-finite value (a probe that never finished) can never pass.
     result = "PASS" if n > 0 and value == value and abs(value) != float("inf") and within(gate) else "FAIL"
+    if report_only:
+        result = "REPORT"
     met = "yes" if within(target) else "no"
     tail = f" {extra}" if extra else ""
     shown = f" display={display}" if display else ""
@@ -180,6 +209,13 @@ def parse(log_text: str) -> dict[str, dict[str, dict[str, str]]]:
             displays[display] = fields
         displays[display]["runs"] = str(runs)
     return rows
+
+
+def gated_display(row: Row, entries: dict[str, dict[str, str]]) -> str | None:
+    """The display whose measurement of `row` gates: the row's own (row 1 gates at 60 Hz), else unthrottled or native."""
+    if row.display is not None:
+        return row.display if row.display in entries else None
+    return next((name for name in GATED_DISPLAYS if name in entries), None)
 
 
 def frame_pacing(log_text: str) -> tuple[dict[str, float], dict[str, float]]:
@@ -266,8 +302,8 @@ def report(log_text: str) -> tuple[str, bool]:
     unthrottled_rows = False
     for row in ROWS:
         entries = measured.get(row.key, {})
-        display = next((name for name in GATED_DISPLAYS if name in entries), None)
-        at_60 = entries.get("60hz")
+        display = gated_display(row, entries)
+        at_60 = entries.get("60hz") if row.display is None else entries.get("unthrottled")
         shown_60 = f"{at_60.get('value', '?')} {at_60.get('unit', '')}" if at_60 else "-"
         if display is None:
             passed = False
@@ -288,6 +324,35 @@ def report(log_text: str) -> tuple[str, bool]:
         lines.append(
             f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
             f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}{reruns}) | {shown_60} | "
+            f"{fields.get('target_met', '?')} | {result} |"
+        )
+    lines.append("")
+    lines.append("Rows a person typing, and a person on a phone network, sees (#569, #573; the rows above keep gating)")
+    lines.append("")
+    lines.append("| Measure | Target, p99 | Gate this run | Measured (gated) | Other display | Target met | Result |")
+    lines.append("|---|---|---|---|---|---|---|")
+    for row in EXTRA_ROWS:
+        entries = measured.get(row.key, {})
+        display = gated_display(row, entries) or next(iter(entries), None)
+        if display is None:
+            passed = False
+            lines.append(f"| {row.measure} | {row.target} | - | - | - | - | MISSING |")
+            continue
+        fields = entries[display]
+        unit = fields.get("unit", "")
+        others = [f"{name} {entry.get('value', '?')} {entry.get('unit', '')}" for name, entry in entries.items() if name != display]
+        result = fields.get("result", "FAIL")
+        try:
+            samples = int(fields.get("n", "0"))
+        except ValueError:
+            samples = 0
+        if samples < row.min_n:
+            result = f"FAIL (n {samples} < {row.min_n})" if row.gating else f"REPORT (n {samples} < {row.min_n})"
+        # A reported row never fails the run; a gating one fails on anything but PASS.
+        passed &= result == "PASS" if row.gating else not result.startswith("FAIL")
+        lines.append(
+            f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
+            f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}) | {', '.join(others) or '-'} | "
             f"{fields.get('target_met', '?')} | {result} |"
         )
     during_rows, idle = frame_pacing(log_text)

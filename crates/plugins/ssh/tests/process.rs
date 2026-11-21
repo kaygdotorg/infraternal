@@ -10,6 +10,31 @@ use infraternal_plugin_ssh::{
 use std::time::Duration;
 use tokio::process::Command;
 
+/// Upper bound for every helper deadline and observation wait in the real-process
+/// tests of this file (the virtual-time tests below keep their own exact bounds).
+///
+/// Each wait ends the moment its real signal arrives (a pid file appears, a
+/// process turns zombie, the helper returns), so this only bounds a hang. It used
+/// to be 1 to 3 seconds, which a build host with a load average far above its core
+/// count could not meet: starting `/bin/sh` or `python3` alone can take longer
+/// than that when the machine is starved (#443).
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
+/// Wait until `done` holds and report whether it did before [`HANG_GUARD`].
+///
+/// The old loops spun on `yield_now`, burning a core per waiting test and slowing
+/// the very processes being waited on.
+async fn until(mut done: impl FnMut() -> bool) -> bool {
+    tokio::time::timeout(HANG_GUARD, async {
+        while !done() {
+            // sleep: poll interval for a pid file or /proc state that has no wakeup of its own
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
 fn live(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .is_ok_and(|stat| stat.split_whitespace().nth(2) != Some("Z"))
@@ -40,6 +65,7 @@ impl Drop for Descendant {
     }
 }
 
+/// Aborting a running helper must also retire the background process it started.
 #[tokio::test]
 async fn cancellation_retires_the_helper_descendant_too() {
     let root = common::scratch();
@@ -53,16 +79,13 @@ async fn cancellation_retires_the_helper_descendant_too() {
         command.args(["-c", &script]);
         execute(&mut command, Input::Empty, Duration::from_secs(70)).await
     });
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while std::fs::read_to_string(&path)
+    assert!(
+        until(|| !std::fs::read_to_string(&path)
             .unwrap_or_default()
-            .is_empty()
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+            .is_empty())
+        .await,
+        "the helper never reported its descendant"
+    );
     let child: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
     let _cleanup = Descendant {
         pid: child,
@@ -71,25 +94,21 @@ async fn cancellation_retires_the_helper_descendant_too() {
     assert!(live(child));
     running.abort();
     let _ = running.await;
-    let retired = tokio::time::timeout(Duration::from_secs(1), async {
-        while live(child) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
+    let retired = until(|| !live(child)).await;
     std::fs::remove_file(path).unwrap();
     assert!(
-        retired.is_ok(),
+        retired,
         "the owned descendant remained live after helper cancellation"
     );
 }
 
+/// Output past the cap and a helper that outlives its deadline are both refused.
 #[tokio::test]
 async fn oversized_remote_output_is_bounded_and_active_timeout_is_enforced() {
     let mut command = Command::new("/bin/sh");
     command.args(["-c", "head -c 4097 /dev/zero"]);
     assert!(
-        execute(&mut command, Input::Empty, Duration::from_secs(2))
+        execute(&mut command, Input::Empty, HANG_GUARD)
             .await
             .is_err()
     );
@@ -102,6 +121,7 @@ async fn oversized_remote_output_is_bounded_and_active_timeout_is_enforced() {
     );
 }
 
+/// The cancellation group id stays owned while a descendant still holds the helper's pipes.
 #[tokio::test]
 async fn group_identity_is_retained_until_inherited_pipes_finish() {
     let scratch = common::scratch();
@@ -113,23 +133,20 @@ async fn group_identity_is_retained_until_inherited_pipes_finish() {
     let running = tokio::spawn(async move {
         let mut command = Command::new("/usr/bin/python3");
         command.args(["-c", &script]);
-        execute(&mut command, Input::Empty, Duration::from_secs(3)).await
+        execute(&mut command, Input::Empty, HANG_GUARD).await
     });
-    let ids = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let ids: Vec<u32> = std::fs::read_to_string(&path)
-                .unwrap_or_default()
-                .split_whitespace()
-                .filter_map(|id| id.parse().ok())
-                .collect();
-            if ids.len() == 2 {
-                break ids;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    let read_ids = || -> Vec<u32> {
+        std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|id| id.parse().ok())
+            .collect()
+    };
+    assert!(
+        until(|| read_ids().len() == 2).await,
+        "the fixture never wrote both ids"
+    );
+    let ids = read_ids();
     let escape_cleanup = Descendant {
         pid: ids[1],
         birth: birth(ids[1]),
@@ -151,6 +168,7 @@ async fn group_identity_is_retained_until_inherited_pipes_finish() {
     );
 }
 
+/// A helper that exits cleanly still retires descendants that closed their pipes.
 #[tokio::test]
 async fn completed_helper_retires_descendants_with_closed_pipes() {
     let mut command = Command::new("/bin/sh");
@@ -160,7 +178,7 @@ async fn completed_helper_retires_descendants_with_closed_pipes() {
         "-c",
         "sleep 60 </dev/null >/dev/null 2>&1 & printf '%s' \"$!\"",
     ]);
-    let output = execute(&mut command, Input::Empty, Duration::from_secs(3))
+    let output = execute(&mut command, Input::Empty, HANG_GUARD)
         .await
         .unwrap();
     assert!(output.success);
@@ -174,19 +192,15 @@ async fn completed_helper_retires_descendants_with_closed_pipes() {
     };
     // Group signals are asynchronous. Bound termination as the cancellation
     // oracle does, rather than racing delivery immediately after killpg returns.
-    let retired = tokio::time::timeout(Duration::from_secs(1), async {
-        while live(pid) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
+    let retired = until(|| !live(pid)).await;
     drop(cleanup);
     assert!(
-        retired.is_ok(),
+        retired,
         "owned descendant remained live after helper completion"
     );
 }
 
+/// A helper launched from a thread that blocks SIGHUP must not inherit that mask.
 #[tokio::test]
 async fn reviewer_ssh_helper_does_not_inherit_server_reload_mask() {
     use nix::sys::signal::{SigSet, SigmaskHow, Signal};
@@ -201,7 +215,7 @@ async fn reviewer_ssh_helper_does_not_inherit_server_reload_mask() {
     // Server runtime workers inherit the mask installed before runtime startup.
     // Exercise the normal helper launcher on that thread, then restore the mask
     // before any assertion so other tests retain their own signal policy.
-    let result = execute(&mut command, Input::Empty, Duration::from_secs(3)).await;
+    let result = execute(&mut command, Input::Empty, HANG_GUARD).await;
     previous.thread_set_mask().unwrap();
     let output = result.unwrap();
     assert!(output.success);
@@ -279,6 +293,7 @@ async fn unavailable_negotiated_codec_never_sends_invitation() {
 
 // A setup child can refuse enrollment without reading private stdin. The
 // compound command reports that refusal in stdout while exiting successfully.
+/// A refusal receipt printed before the helper closes stdin is still delivered.
 #[tokio::test]
 async fn review_compound_refusal_preserves_receipt_when_invitation_pipe_closes() {
     use infraternal_plugin_ssh::{
@@ -299,7 +314,7 @@ async fn review_compound_refusal_preserves_receipt_when_invitation_pipe_closes()
             payload_ack: false,
             declared: None,
         },
-        Duration::from_secs(10),
+        HANG_GUARD,
     )
     .await;
     assert!(
@@ -342,7 +357,7 @@ out.write(b'STEP join\nSTEP install\nSTEP start\nSTEP linger\nyes\nDONE\n')
             payload_ack: true,
             declared: Some(TransferChoice::Raw),
         },
-        Duration::from_secs(3),
+        HANG_GUARD,
     )
     .await
     .unwrap();
@@ -380,7 +395,7 @@ async fn declared_selection_mismatch_and_missing_verification_withhold_private_i
                 payload_ack: true,
                 declared: Some(TransferChoice::Raw),
             },
-            Duration::from_secs(3),
+            HANG_GUARD,
         )
         .await;
         let bytes = std::fs::read(&path).unwrap_or_default();

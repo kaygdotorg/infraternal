@@ -38,6 +38,13 @@ pub mod login;
 pub mod login_handoff;
 // The macOS record codec stays for the agent's Linux login code paths; its
 // receive refuses there, because host-login workers are Linux-only (D247).
+/// Code-signing identity of this process and of a local socket peer, for the
+/// root agent's desktop helper admission (D203 C2, #146).
+#[cfg(all(feature = "desktop-user", target_os = "macos"))]
+pub mod code_identity;
+/// Private macOS entry that starts the desktop helper as the console user (D203 C2, #146).
+#[cfg(all(feature = "desktop-user", target_os = "macos"))]
+pub mod desktop_user;
 #[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
 /// A terminal no other process of the account can open, for the password
@@ -46,6 +53,8 @@ pub mod login_ready;
 pub mod private_pty;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
+/// Thread quality-of-service classes on macOS, a no-op elsewhere (#554).
+pub mod qos;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;

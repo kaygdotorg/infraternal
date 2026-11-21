@@ -55,6 +55,8 @@ beforeEach(() => {
     window: {
       setTimeout: (run: () => void, ms: number) => { const id = nextTimer++; timers.push({ at: now + ms, run, id }); return id; },
       clearTimeout: (id: number) => { timers = timers.filter((timer) => timer.id !== id); },
+      requestAnimationFrame: (run: () => void) => { const id = nextTimer++; timers.push({ at: now + 16, run, id }); return id; },
+      cancelAnimationFrame: (id: number) => { timers = timers.filter((timer) => timer.id !== id); },
     },
     document: {
       addEventListener: (type: string, listener: (event: { key: string; preventDefault(): void }) => void) => { if (type === "keydown") keydownListeners.push(listener); },
@@ -318,5 +320,53 @@ describe("PerformanceProbe key samples", () => {
     hooks.onPaintedOutput?.(encoder.encode("\x1b[1;1Hb"), now, 5n, "snapshot");
     expect(results.textContent).toContain("Painted echoes: 2 / 2");
     probe.dispose();
+  });
+});
+
+describe("PerformanceProbe typing recorder", () => {
+  test("pairs trusted keys with their input bytes, separates output offsets from input sequences, and sees overlay changes", () => {
+    const { probe, terminal, hooks } = setup();
+    Object.assign(terminal, {
+      rendererMetrics: { cursorX: 2, cellWidth: 10 },
+      predictiveEchoState: { overlay: { visible: true, glyphs: [{ text: "e", x: 20, y: 0 }] } },
+    });
+    probe.startHumanRecording();
+    const press = (key: string) => (document as unknown as { dispatchEvent(event: unknown): void })
+      .dispatchEvent({ key, isTrusted: true, preventDefault() {} });
+    // Two keys down before the first one's echo: the overlapping typing a person produces.
+    press("e");
+    advance(5);
+    expect(hooks.onInput?.("e", now, 40n)).toBe(true);
+    // A cursor report the terminal generates itself is not a key and pairs with nothing.
+    expect(hooks.onInput?.("\x1b[1;1R", now, 41n)).toBe(false);
+    advance(100);
+    press("c");
+    advance(5);
+    expect(hooks.onInput?.("c", now, 41n)).toBe(true);
+    hooks.onTrace?.("40", "wsSend", 5);
+    hooks.onTrace?.("40", "prediction", 12);
+    // Output offset 40 is not input sequence 40: it must not land on the key with that number.
+    hooks.onTrace?.("40", "wsMessage", 300);
+    advance(200);
+    hooks.onPaintedOutput?.(new TextEncoder().encode("e"), 305, 40n, "output");
+    advance(16);
+    const trace = probe.humanTrace();
+    expect(trace.startColumn).toBe(2);
+    expect(trace.keys.map((key) => key.key)).toEqual(["e", "c"]);
+    expect(trace.keys[0]?.keydownAt).toBe(0);
+    expect(trace.keys[0]?.wsSendAt).toBe(5);
+    expect(trace.keys[0]?.predictedAt).toBe(12);
+    expect(trace.keys[0]?.echoPaintedAt).toBe(305);
+    expect(trace.outputs).toEqual([{ sequence: "40", bytes: 1, wsMessageAt: 300, paintedAt: 305 }]);
+    expect(trace.overlay[0]?.glyphs).toEqual([{ text: "e", column: 2 }]);
+    probe.stopHumanRecording();
+  });
+
+  test("synthetic keys and idle pages record nothing", () => {
+    const { probe, hooks } = setup();
+    hooks.onInput?.("a", now, 1n);
+    hooks.onPaintedOutput?.(new TextEncoder().encode("a"), now, 1n, "output");
+    expect(probe.humanTrace().keys).toEqual([]);
+    expect(probe.humanTrace().outputs).toEqual([]);
   });
 });

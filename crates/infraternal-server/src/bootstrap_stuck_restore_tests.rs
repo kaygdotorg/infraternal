@@ -96,8 +96,8 @@ impl Home {
         )
     }
     /// Run a host program in sh as the private HOME's user, with its mock
-    /// service manager first on PATH. Never killed on drop: like sshd, the
-    /// host runs a command to the end after the client goes away (#305 P2-1).
+    /// service manager first on PATH. Never killed on drop: the host runs
+    /// a command to the end after the client goes away (#305 P2-1).
     fn sh(&self, script: &str) -> tokio::process::Command {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg(script).env("HOME", &self.root).env(

@@ -126,3 +126,74 @@ async fn a_held_lifecycle_lock_blocks_the_automatic_switch() {
     assert!(!bridge.0.state.lock().unwrap().enabled);
     drop(held);
 }
+
+/// A whole-screen session first shown for one console user is never shown
+/// for another: a leg for someone else ends it for good, and the server's
+/// next prepare reads `gone` (owner decision 2026-11-20, #146, D203 C2).
+#[tokio::test]
+async fn a_whole_screen_session_ends_when_the_person_at_the_screen_changes() {
+    let bridge = SourceBridge::new("missing-runtime".into(), "missing-helper".into(), 2);
+    bridge.set_enabled(true).await.unwrap();
+    let id = Uuid::from_u128(7);
+    bridge.prepare(id, start()).unwrap();
+    let metadata = bridge.0.state.lock().unwrap().prepared[&id]
+        .metadata
+        .clone();
+    assert!(
+        metadata.bind_console(None),
+        "a same-user helper never changes person"
+    );
+    assert!(
+        metadata.bind_console(Some(501)),
+        "the first person binds the session"
+    );
+    assert!(
+        metadata.bind_console(Some(501)),
+        "the same person may reattach"
+    );
+    assert_eq!(bridge.prepare(id, start()).unwrap()["state"], Value::Null);
+    assert!(
+        !metadata.bind_console(Some(502)),
+        "another person must not see it"
+    );
+    assert_eq!(bridge.prepare(id, start()).unwrap()["state"], "gone");
+}
+
+/// A running leg that sees the console change ends its session the same way.
+#[test]
+fn a_console_change_during_a_leg_latches_gone() {
+    let metadata = Metadata::new(start(), 0);
+    assert!(metadata.bind_console(Some(501)));
+    metadata.console_changed();
+    assert!(metadata.gone.load(Ordering::Acquire));
+}
+
+/// Every window list after the first carries the icons the agent holds, and
+/// `Helper::send` refuses a body the validator refuses, which left the picker
+/// unanswered until the agent restarted (J992, #146). This drives the real
+/// path: icons absorbed from a helper's inventory, then the next List body,
+/// then the validator. It covers the full key count and the longest bundle
+/// identifier the store keeps, so the store and the validator cannot drift.
+#[test]
+fn every_later_window_list_passes_the_helpers_validator() {
+    use base64::Engine;
+    let png =
+        base64::engine::general_purpose::STANDARD.encode(crate::app_icons::tests::png(64, 64, 0));
+    let mut icons = crate::app_icons::IconStore::default();
+    let first = list_request(&icons).unwrap();
+    crate::protocol::validate_command(Kind::List, &first).unwrap();
+    let longest = "a".repeat(256);
+    let mut entries: Vec<Value> = (0..crate::protocol::MAX_KNOWN_ICONS + 4)
+        .map(|n| json!({"bundle_id": format!("org.example.app{n}"), "app_version": "1.0+1", "png_64": png}))
+        .collect();
+    entries.push(json!({"bundle_id": longest, "app_version": "v".repeat(128), "png_64": png}));
+    let mut inventory = json!({"windows": [], "app_icons": entries});
+    icons.absorb(&mut inventory);
+    let later = list_request(&icons).unwrap();
+    let request: Value = serde_json::from_slice(&later).unwrap();
+    assert_eq!(
+        request["known_icons"].as_array().map(Vec::len),
+        Some(crate::protocol::MAX_KNOWN_ICONS)
+    );
+    crate::protocol::validate_command(Kind::List, &later).unwrap();
+}

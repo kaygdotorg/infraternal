@@ -1333,9 +1333,11 @@ fn map_remote_failure(error: &io::Error) -> Failure {
             | crate::remote::Failure::Upgrade
             | crate::remote::Failure::Challenge,
         ) => Failure::Unreachable,
-        Some(crate::remote::Failure::Refused | crate::remote::Failure::IdentityMismatch) => {
-            Failure::Permission
-        }
+        Some(
+            crate::remote::Failure::Refused
+            | crate::remote::Failure::IdentityMismatch
+            | crate::remote::Failure::SharedFile,
+        ) => Failure::Permission,
     }
 }
 
