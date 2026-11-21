@@ -2727,23 +2727,51 @@ mod inherited_login_process_tests {
     //! Process pins cross exec without asking the child to inspect a protected parent's descriptors.
     use super::*;
     use std::io::Read as _;
+    use std::os::fd::AsFd as _;
+    /// Checks that a login child's readiness descriptor still reaches the reserved socket when the
+    /// process pin is passed to the same child.
+    ///
+    /// The pin must never replace the readiness source. The body runs in a fresh fixture process
+    /// (selected by an environment marker) so that the descriptor numbers are predictable.
+    /// The test's own copies are made at 10 and up, so each descriptor has exactly one owner
+    /// whether fds 3 and 4 are free or held (#553).
     #[test]
     fn reserved_ready_source_survives_process_pin_transfer() {
         const FIXTURE: &str = "INFRATERNAL_READY_PIN_FIXTURE";
         if std::env::var_os(FIXTURE).is_none() {
-            assert!(Command::new(std::env::current_exe().unwrap())
+            // Capture the fixture's output so a failure names the child's
+            // message instead of only the exit status (#553, J1047).
+            let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "pty::inherited_login_process_tests::reserved_ready_source_survives_process_pin_transfer"])
-                .env(FIXTURE, "1").status().unwrap().success());
+                .env(FIXTURE, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "ready-pin fixture failed with {}\n--- fixture stdout ---\n{}\n--- fixture stderr ---\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
             return;
         }
         let (parent, ready) = std::os::unix::net::UnixStream::pair().unwrap();
-        let parent_copy = parent.try_clone().unwrap();
-        let ready_copy = ready.try_clone().unwrap();
+        // Copies take numbers from 10 up, whatever fds 3 to 9 hold. try_clone
+        // would take the lowest free number, which can be 5 (the dup2 target
+        // below). An owned copy overwritten there leaves two owners of one
+        // descriptor, and the second close aborts with an IO-safety violation.
+        let dup_from_ten = |socket: &std::os::unix::net::UnixStream| {
+            let raw = fcntl(socket.as_fd(), FcntlArg::F_DUPFD_CLOEXEC(10)).unwrap();
+            // SAFETY: fcntl returned a fresh descriptor that nothing else owns.
+            unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) }
+        };
+        let parent_copy = dup_from_ten(&parent);
+        let ready_copy = dup_from_ten(&ready);
         drop(parent);
         drop(ready);
-        // SAFETY: this isolated fixture owns no descriptor 5 after its original
-        // socket pair closes. Duplicate the ready socket onto the reserved pin
-        // slot to reproduce callback ordering with a small descriptor table.
+        // SAFETY: every descriptor this test owns is now either a copy at 10 or
+        // above or was closed above, so dup2 can only replace a number nothing
+        // owns. Duplicate the ready socket onto the reserved slot 5 to reproduce
+        // callback ordering with a small descriptor table. `ready` is the only
+        // owner of fd 5 from here on.
         assert_ne!(unsafe { nix::libc::dup2(ready_copy.as_raw_fd(), 5) }, -1);
         let ready = unsafe { File::from_raw_fd(5) };
         // Open the process pin after reserving fd 5 so the fixture cannot
@@ -2754,9 +2782,15 @@ mod inherited_login_process_tests {
         child.args(["-c", "test -d \"$1\" && printf r >&4", "pin-ready"]);
         child.arg(pin);
         inherit_login_ready(&mut child, &ready).unwrap();
+        // output() instead of status(): the shell's own stderr says which
+        // step failed when the pin or the readiness descriptor is missing.
+        let output = child.output().unwrap();
         assert!(
-            child.status().unwrap().success(),
-            "readiness source was replaced by the process pin"
+            output.status.success(),
+            "readiness source was replaced by the process pin: shell exited with {}\n--- shell stdout ---\n{}\n--- shell stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
         let mut response = [0];
         (&parent_copy).read_exact(&mut response).unwrap();
