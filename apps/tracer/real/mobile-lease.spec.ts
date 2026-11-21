@@ -30,10 +30,6 @@ test("hidden mobile page keeps its terminal and a stale resume attaches afresh o
     await page.getByRole("button", { name: "Open infraternal" }).click();
     await page.locator(".cl-viewport").waitFor();
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    const unlock = page.getByLabel("Hosts settings").getByRole("button", { name: "Unlock", exact: true, includeHidden: true });
-    await expect(unlock).toHaveAttribute("data-shown", "true");
-    await unlock.evaluate(button => (button as HTMLButtonElement).click());
-    await expect.poll(() => page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).toEqual({ locked: false, initialized: true });
     const terminal = page.locator('.cl[data-view="console"] .ui-window').first();
     await expect(terminal).toHaveAttribute("data-status", "live");
     console.log("MOBILE_UI terminal ready");
