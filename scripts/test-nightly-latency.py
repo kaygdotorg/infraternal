@@ -25,7 +25,11 @@ def log_with(**values):
         value = values.get(row.key, 200.0 if row.key == "render_10mbps" else 1.0)
         unit = "fps" if row.key == "render_10mbps" else "ms"
         lines.append(targets.row_line(row.key, source="test", n=100, value=value, unit=unit,
-                                      target=100.0 if unit == "ms" else 120.0, higher_is_better=unit == "fps"))
+                                      target=100.0 if unit == "ms" else 120.0, higher_is_better=unit == "fps",
+                                      display=row.display))
+    for row in targets.EXTRA_ROWS:
+        lines.append(targets.row_line(row.key, source="test", n=100, value=values.get(row.key, 1.0), unit="ms",
+                                      target=100.0, report_only=not row.gating))
     return "\n".join(lines)
 
 
@@ -69,7 +73,7 @@ class DecisionTests(unittest.TestCase):
 
     def test_too_few_samples_fail(self):
         """A p99 from fewer samples than the row's minimum cannot pass."""
-        line = targets.row_line("predicted_glyph", source="test", n=5, value=1.0, unit="ms", target=8.3)
+        line = targets.row_line("predicted_glyph", source="test", n=5, value=1.0, unit="ms", target=8.3, display="60hz")
         rows = nightly.gated_rows(targets, line)
         self.assertTrue(rows["predicted_glyph"]["result"].startswith("FAIL"))
 

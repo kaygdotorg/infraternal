@@ -148,6 +148,30 @@ verify_latency_steps() {
         cd -- "$repo_dir/apps/tracer" &&
             INFRATERNAL_LATENCY_DISPLAY=60hz TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test "${row_specs[@]}"
     ) || failed=1
+    # The rows a person sees (#569 finding 2, #573): overlapping typing into a real shell and first paint on 4G and
+    # fast 3G, on the production server and a production build of the tracer. The typing spec runs unthrottled (this
+    # gates: paint minus message measures our own work) and at 60 Hz (reported); first paint runs once. The server
+    # is the binary measured above; RTT is the profile's own. The bridge delays in user space, so no network
+    # setting on the machine changes.
+    local real_binary="${INFRATERNAL_LATENCY_BINARY:-$CARGO_TARGET_DIR/$native_target/release/infraternal}"
+    local one_way=$(( ${INFRATERNAL_TEST_RTT:-300} / 2 ))
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            bun run build
+    ) || failed=1
+    report_environment realistic-typing-unthrottled
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_BIN="$real_binary" REAL_ONE_WAY_MS="$one_way" INFRATERNAL_LATENCY_DISPLAY=unthrottled \
+                TRACER_CHROMIUM_FLAGS="$unthrottled_flags" \
+                bun x playwright test -c playwright.real.config.ts real/realistic-typing.spec.ts
+    ) || failed=1
+    report_environment realistic-typing-60hz
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_BIN="$real_binary" REAL_ONE_WAY_MS="$one_way" \
+                bun x playwright test -c playwright.real.config.ts real/realistic-typing.spec.ts real/first-paint-network.spec.ts
+    ) || failed=1
     report_environment finish
     return "$failed"
 }

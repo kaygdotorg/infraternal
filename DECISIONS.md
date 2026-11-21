@@ -4639,6 +4639,25 @@ access (#341 B19).
        are removed after their offline time (D370). D166 amended.
      - **Solid material (A16):** overlays are never opaque, except when the
        person chooses Solid. D160 amended.
+     - **Amendment (owner, 2026-11-21, #569, #573; J1079's audit and J1090):**
+       the owner answered "agreed" to two changes.
+       1. **Row 1 is reworded.** "Key to letter on screen, prediction on:
+          8.3 ms p99" becomes "our own work at most 4 ms p99, and the letter
+          appears in the first frame after the key". On a real 120 Hz panel
+          the wait for the next frame is uniform between 0 and 8.3 ms before
+          any work, so the old row could not be met; it passed in the profile
+          only because vsync was off. The row now measures our work and the
+          frame the letter lands in, with vsync on (the 60 Hz run gates; the
+          unthrottled run is shown beside it).
+       2. **Two first-paint rows on real phone networks.** "First paint,
+          mid-range phone" stays. Beside it the report adds first paint on 4G
+          (9 Mbps, 170 ms) and on fast 3G, each for "sign-in visible" and
+          "terminal connected", on a cold cache with the CPU slowed 4x. They
+          are reported now and become gates once the first-paint fixes of
+          J1069 and J1100 land (#573).
+       No other target changes. The rows that measure real overlapping typing
+       into a real shell (#569 finding 2) run beside the old rows and are
+       reported until they are stable; the old rows keep gating.
 
 376. **Upgrading a host to root, design round (owner, 2026-11-09, #399;
      completes D274's round):**
