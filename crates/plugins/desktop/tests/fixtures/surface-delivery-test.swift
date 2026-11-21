@@ -6,7 +6,8 @@ import Foundation
 
 enum HelperFailure: Error { case invalid, permission, unavailable }
 
-/// The fixture's entry point: the production mailbox and hardware encoder driven with real buffers, including one tile.
+/// The fixture's entry point: the production mailbox and hardware encoder driven with real buffers,
+/// including one tile; it counts startup, the sharp refresh in the configured rate mode, changes and repair.
 @main struct SurfaceDeliveryTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
@@ -49,7 +50,11 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
         }
         Thread.sleep(forTimeInterval: 0.4)
         let idleCount = count()
-        expect(idleCount == 2, "eight identical callbacks need startup plus one sharp refresh, got \(idleCount)")
+        // The startup picture is a keyframe at the motion budget, so every row counts as touched:
+        // the sharp refresh is one keyframe or the heavy-motion refinement passes (deltas).
+        let plan = SharpRefreshPlan(mode: Encoder().mode), passes = plan.passes(touched: 1)
+        expect(idleCount == 1 + max(1, passes), "eight identical callbacks need startup plus one sharp refresh, got \(idleCount)")
+        expect(lock.withLock { keys.dropFirst().allSatisfy { $0 == (passes == 0) } }, "the sharp refresh is a keyframe or only deltas")
         for value in 1...8 {
             fill(UInt8(value))
             let next = count() + 1
@@ -77,6 +82,6 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
         source.stop()
         Thread.sleep(forTimeInterval: 0.1)
         expect(!lock.withLock { failed }, "no native error")
-        print("PASS production surface delivery: identical_callbacks=8 idle_pictures=2 distinct_changes=8 tile=1 static_repair=IDR")
+        print("PASS production surface delivery: identical_callbacks=8 idle_pictures=\(idleCount) rate_mode=\(Encoder().mode.rawValue) distinct_changes=8 tile=1 static_repair=IDR")
     }
 }

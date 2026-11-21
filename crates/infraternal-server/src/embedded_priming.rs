@@ -53,6 +53,9 @@ struct Waiting {
     since: Instant,
 }
 
+/// One terminal actor's native secondary (D215): the shadow link while it is
+/// prepared and hedged, its flights, and what is needed to forward each
+/// output, Snapshot and notice from either link exactly once.
 #[derive(Default)]
 pub(super) struct State {
     flights: flights::State,
@@ -66,6 +69,10 @@ pub(super) struct State {
     refused: HashMap<u32, [u8; 16]>,
     snapshots: HashMap<u32, ([u8; 16], u64)>,
     notices: HashMap<u32, ([u8; 16], u8, u64)>,
+    /// The last echo state forwarded per stream: session, output head, hidden.
+    /// Kept apart from `notices` so another notice in between cannot make a
+    /// stale echo copy from the other link look new (#569).
+    echoes: HashMap<u32, ([u8; 16], u64, bool)>,
 }
 pub(super) enum Event {
     Prepared,
@@ -80,6 +87,8 @@ impl State {
     pub(super) fn connection(&mut self) -> Option<&mut AgentConnection> {
         self.shadow.as_mut().map(|shadow| &mut shadow.connection)
     }
+    /// Drop the secondary and every record about it, after joining its flights
+    /// so nothing it started can publish once it is gone.
     pub(super) async fn cancel(&mut self) {
         // Flights keep native channels alive. Join them before releasing the
         // shadow connection so cancellation cannot publish after its owner exits.
@@ -98,6 +107,7 @@ impl State {
         self.refused.clear();
         self.snapshots.clear();
         self.notices.clear();
+        self.echoes.clear();
         self.deduplicate = false;
         self.cancel_requested = false;
     }
@@ -382,10 +392,13 @@ impl State {
         if !self.deduplicate {
             return;
         }
-        let _ = normalize_notice(incoming, attachments, &mut self.notices);
+        let _ = normalize_notice(incoming, attachments, &mut self.notices, &mut self.echoes);
         normalize_snapshot(incoming, attachments, &mut self.snapshots);
         trim_output(incoming, attachments);
     }
+    /// Whether a frame from the secondary may reach the viewer: Acks within
+    /// the writer's range, funded output of a hedged slot, and notices that are
+    /// not copies of ones already forwarded.
     pub(super) fn accept(
         &mut self,
         incoming: &mut Incoming,
@@ -439,7 +452,8 @@ impl State {
                 let Some(slot) = shadow.slots.get(stream_id) else {
                     return false;
                 };
-                slot.hedged && normalize_notice(incoming, attachments, &mut self.notices)
+                slot.hedged
+                    && normalize_notice(incoming, attachments, &mut self.notices, &mut self.echoes)
             }
             // A queued notice, reset or unexpected control frame does
             // not mutate the working primary or its browser attachment.
@@ -645,10 +659,19 @@ async fn prepare(
     Ok(Shadow { connection, slots })
 }
 
+/// Forward a notice from either link of a hedged stream once, turning a copy
+/// already forwarded from the other link into an empty Output.
+///
+/// Fenced notices are copies when their kind repeats at the same or an earlier
+/// cursor. Echo states are not fences and alternate, so they are compared with
+/// the last echo state alone: a copy has an earlier head, or the same head and
+/// the same state. A late copy from the slower link therefore cannot undo a
+/// newer state (#569).
 fn normalize_notice(
     incoming: &mut Incoming,
     attachments: &HashMap<u64, AttachmentState>,
     seen: &mut HashMap<u32, ([u8; 16], u8, u64)>,
+    echoes: &mut HashMap<u32, ([u8; 16], u64, bool)>,
 ) -> bool {
     let (stream, json) = match incoming {
         Incoming::Event {
@@ -670,7 +693,31 @@ fn normalize_notice(
     if decode_session_id(notice.session_id()) != Some(a.session_id) {
         return false;
     }
+    if let TerminalNotice::Echo { seq, hidden, .. } = &notice {
+        let (seq, hidden) = (*seq, *hidden);
+        if echoes
+            .get(&stream)
+            .is_some_and(|(session, last, was_hidden)| {
+                *session == a.session_id && (*last > seq || (*last == seq && *was_hidden == hidden))
+            })
+        {
+            *incoming = Incoming::Output {
+                stream_id: stream,
+                out_seq: a.last_out_seq,
+                bytes: Bytes::new(),
+            };
+            return true;
+        }
+        if !a.output.admits(json_len) {
+            return false;
+        }
+        echoes.retain(|stream, _| attachments.values().any(|a| a.stream_id == *stream));
+        echoes.insert(stream, (a.session_id, seq, hidden));
+        return true;
+    }
     let (kind, seq) = match notice {
+        // Forwarded or dropped above.
+        TerminalNotice::Echo { .. } => return true,
         TerminalNotice::Snapshot { seq, .. } => (0, seq),
         TerminalNotice::Unavailable { seq, .. } => (1, seq),
         TerminalNotice::Exited { final_seq, .. } => (2, final_seq),
@@ -1177,6 +1224,52 @@ mod tests {
             infraternal_protocol::Frame::Credit { bytes }
                 if u64::from(bytes) == KEY_REPAINT_RESERVE_CREDIT
         ));
+    }
+
+    /// Echo states from two links of one hedged stream reach the viewer once each and in
+    /// order: a copy is dropped, a state at the same head that differs is not, and a late
+    /// copy from the slower link cannot undo a newer state, even with a fenced notice
+    /// between them (#569).
+    #[test]
+    fn hedged_echo_states_are_forwarded_once_and_never_undone() {
+        // The viewer's queue must stay open, or no notice is admitted at all.
+        let (attachment, _viewer) = attachment();
+        let attachments = HashMap::from([(1u64, attachment)]);
+        let mut seen = HashMap::new();
+        let mut echoes = HashMap::new();
+        let echo = |seq: u64, hidden: bool| Incoming::Event {
+            stream_id: 1,
+            event_json: Bytes::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "type": "terminal.echo",
+                    "session_id": "07070707-0707-0707-0707-070707070707",
+                    "seq": seq,
+                    "hidden": hidden,
+                }))
+                .unwrap(),
+            ),
+        };
+        let forwarded = |mut incoming: Incoming, seen: &mut _, echoes: &mut _| {
+            assert!(normalize_notice(&mut incoming, &attachments, seen, echoes));
+            matches!(incoming, Incoming::Event { .. })
+        };
+        // Primary: hidden at 20; secondary copy of it.
+        assert!(forwarded(echo(20, true), &mut seen, &mut echoes));
+        assert!(!forwarded(echo(20, true), &mut seen, &mut echoes));
+        // `read -s` ends without output: same head, other state.
+        assert!(forwarded(echo(20, false), &mut seen, &mut echoes));
+        // A fenced notice in between does not reset the echo record.
+        let snapshot = Incoming::Event {
+            stream_id: 1,
+            event_json: Bytes::from_static(
+                br#"{"type":"terminal.snapshot","session_id":"07070707-0707-0707-0707-070707070707","seq":30,"approximate":false}"#,
+            ),
+        };
+        assert!(forwarded(snapshot, &mut seen, &mut echoes));
+        // The next prompt hides at 40; the slower link's stale states arrive after it.
+        assert!(forwarded(echo(40, true), &mut seen, &mut echoes));
+        assert!(!forwarded(echo(20, false), &mut seen, &mut echoes));
+        assert!(!forwarded(echo(40, true), &mut seen, &mut echoes));
     }
 
     /// The relay keeps priming until it has forwarded the reserve after the bulk window.

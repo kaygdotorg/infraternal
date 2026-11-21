@@ -4,9 +4,10 @@ import Foundation
 import CoreGraphics
 #endif
 
-/// The fixture's entry point: framework-free policy checks, each an `assert`.
+/// Deterministic checks of the framework-free capture policy: coordinates, local-input priority,
+/// the encode scheduler (repair, drops, sharp refresh plans), the encoder rate mode and bit rate.
 @main struct PolicyTests {
-    /// Runs every check and prints one PASS line; the first failed assertion stops it.
+    /// Runs every check; an `assert` or `fatalError` fails the process, `PASS` means all held.
     static func main() {
         let source = CGRect(x: -1512, y: 90, width: 1512, height: 982)
         let output = CGSize(width: 1920, height: 1080)
@@ -102,9 +103,11 @@ import CoreGraphics
         rawDrop.completed(delivered: true)
         rawDrop.changed(at: 0.1)
         guard rawDrop.next(at: 0.1) == .motion(keyframe: false),
-              !rawDrop.encoderDropped(.motion(keyframe: false)), rawDrop.next(at: 0.11) == nil else {
-            fatalError("a raw encoder drop must not create reference repair or an immediate retry")
+              rawDrop.encoderDropped(.motion(keyframe: false)), rawDrop.next(at: 0.11) == .motion(keyframe: false) else {
+            fatalError("a dropped motion delta is retried at the next tick as a delta, without reference repair")
         }
+        rawDrop.completed(delivered: true)
+        guard rawDrop.next(at: 0.12) == nil else { fatalError("a delivered retry goes idle until the refresh") }
         guard rawDrop.next(at: 0.35) == .refresh, rawDrop.encoderDropped(.refresh),
               rawDrop.next(at: 0.36) == .refresh else { fatalError("a dropped sharp refresh must retain its quality budget") }
         rawDrop.completed(delivered: true)
@@ -118,6 +121,69 @@ import CoreGraphics
         guard rawDrop.next(at: 600) == .refresh else { fatalError("settled refresh must survive repair") }
         rawDrop.completed(delivered: true)
         guard rawDrop.next(at: 601) == nil else { fatalError("successful refresh must go idle") }
+        // Sharp refresh after small changes: delta refinement passes, not a keyframe.
+        var refine = DamageEncodingState()
+        assert(refine.plan == SharpRefreshPlan(mode: .lowLatency), "the default keeps the keyframe after heavy motion")
+        refine.changed(at: 0)
+        assert(refine.next(at: 0, touched: 1) == .motion(keyframe: true))
+        refine.completed(delivered: true)
+        refine.changed(at: 0.1)
+        assert(refine.next(at: 0.1, touched: 0.02) == .motion(keyframe: false))
+        refine.completed(delivered: true)
+        assert(refine.next(at: 0.349, touched: 0.02) == nil)
+        for pass in 1...SharpRefreshPlan.smallChangePasses {
+            assert(refine.next(at: 0.35, touched: 0.02) == .refine, "refinement pass \(pass)")
+            refine.completed(delivered: true)
+            assert(refine.refining == (pass < SharpRefreshPlan.smallChangePasses))
+        }
+        assert(refine.next(at: 0.36, touched: 0) == nil, "refinement ends after its passes")
+        assert(!EncodeDecision.refine.keyframe && EncodeDecision.refine.sharp && EncodeDecision.refresh.sharp && !EncodeDecision.caret.sharp)
+        // A dropped pass is owed again; new motion cancels the rest and owes a new plan.
+        refine.changed(at: 1)
+        assert(refine.next(at: 1, touched: 0.02) == .motion(keyframe: false))
+        refine.completed(delivered: true)
+        assert(refine.next(at: 1.25, touched: 0.02) == .refine)
+        assert(refine.encoderDropped(.refine))
+        assert(refine.next(at: 1.26, touched: 0.02) == .refine, "a dropped refinement pass is retried")
+        refine.completed(delivered: true)
+        refine.changed(at: 1.27)
+        assert(refine.next(at: 1.27, touched: 0.02) == .motion(keyframe: false))
+        refine.completed(delivered: true)
+        assert(!refine.refining && refine.next(at: 1.28, touched: 0.02) == nil, "new motion cancels the old picture's refinement")
+        assert(refine.next(at: 1.52, touched: 0.9) == .refresh, "heavy motion keeps the keyframe refresh")
+        refine.completed(delivered: true)
+        assert(refine.next(at: 1.53, touched: 0) == nil)
+        // A caret blink during refinement does not cancel it, and a repair comes first.
+        refine.changed(at: 2)
+        assert(refine.next(at: 2, touched: 0.01) == .motion(keyframe: false)); refine.completed(delivered: true)
+        assert(refine.next(at: 2.25, touched: 0.01) == .refine); refine.completed(delivered: true)
+        refine.changed(at: 2.26, caret: true)
+        assert(refine.next(at: 2.26, touched: 0.01) == .caret); refine.completed(delivered: true)
+        assert(refine.next(at: 2.27, touched: 0.01) == .refine, "a blink keeps the owed refinement")
+        refine.completed(delivered: true)
+        refine.repair()
+        assert(refine.next(at: 2.28, touched: 0.01) == .motion(keyframe: true), "repair wins over refinement")
+        refine.completed(delivered: true)
+        assert(refine.next(at: 2.29, touched: 1) == .refresh && !refine.refining, "a repair during refinement owes a full refresh")
+        refine.completed(delivered: true)
+        assert(refine.next(at: 2.3, touched: 0) == nil)
+        let keep = SharpRefreshPlan(mode: .lowLatency), refineAll = SharpRefreshPlan(mode: .realtime)
+        assert(keep.passes(touched: .nan) == 0 && keep.passes(touched: SharpRefreshPlan.heavyMotionFraction) == SharpRefreshPlan.smallChangePasses)
+        assert(refineAll.passes(touched: 1) == 8 && refineAll.passes(touched: 0.01) == SharpRefreshPlan.smallChangePasses)
+        // The real-time plan refines heavy motion too, in more passes.
+        var heavy = DamageEncodingState(); heavy.plan = refineAll
+        heavy.changed(at: 0); _ = heavy.next(at: 0); heavy.completed(delivered: true)
+        heavy.changed(at: 0.1); _ = heavy.next(at: 0.1); heavy.completed(delivered: true)
+        for pass in 1...8 { assert(heavy.next(at: 0.35, touched: 1) == .refine, "heavy pass \(pass)"); heavy.completed(delivered: true) }
+        assert(heavy.next(at: 0.4, touched: 1) == nil)
+
+        // Encoder rate mode setting and its cap.
+        assert(EncoderRateMode(setting: nil) == .realtime && EncoderRateMode(setting: "bogus") == .realtime)
+        assert(EncoderRateMode(setting: "low-latency") == .lowLatency && EncoderRateMode(setting: "realtime") == .realtime)
+        assert(EncoderRateMode.lowLatency.dataRateLimits(bitsPerSecond: 8_000_000).isEmpty)
+        let cap = EncoderRateMode.realtime.dataRateLimits(bitsPerSecond: 8_000_000)
+        assert(cap.count == 1 && cap[0].bytes == 1_500_000 && cap[0].seconds == 1)
+
         var rate = AdaptiveBitrate(maximum: 12_000_000)
         assert(rate.feedback(at: 0, congested: true) == 8_400_000)
         assert(rate.feedback(at: 0.1, congested: true) == 8_400_000)
@@ -139,6 +205,15 @@ import CoreGraphics
         tiled.completed(delivered: true)
         tiled.postponeRefresh(at: 1)
         assert(tiled.refreshDeadline == nil, "a tile never creates a refresh")
-        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry encoded_gap=IDR bitrate_feedbacks=1102")
+        // A tile during refinement stops the passes: the rest becomes a refresh once typing stops.
+        var tiledRefine = DamageEncodingState()
+        tiledRefine.changed(at: 0); _ = tiledRefine.next(at: 0); tiledRefine.completed(delivered: true)
+        tiledRefine.changed(at: 0.1); _ = tiledRefine.next(at: 0.1, touched: 0.01); tiledRefine.completed(delivered: true)
+        assert(tiledRefine.next(at: 0.35, touched: 0.01) == .refine && tiledRefine.refining); tiledRefine.completed(delivered: true)
+        tiledRefine.changed(at: 0.36, caret: true); assert(tiledRefine.next(at: 0.36, touched: 0.01) == .caret); tiledRefine.completed(delivered: true)
+        tiledRefine.postponeRefresh(at: 0.36)
+        assert(!tiledRefine.refining && tiledRefine.refreshDeadline == 0.61, "a tile stops refinement and re-owes the refresh")
+        assert(tiledRefine.next(at: 0.4, touched: 0.01) == nil && tiledRefine.next(at: 0.61, touched: 0.01) == .refine, "refinement restarts once typing stops")
+        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry motion_drop=retry tile_postpones=refresh,refine refine_passes=\(SharpRefreshPlan.smallChangePasses)/8 encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }

@@ -3,7 +3,8 @@ import Compression
 import CoreVideo
 import Foundation
 
-/// The fixture's entry point: exact BGRA history, caret cadence and the tile lane's rectangles with real CoreVideo buffers.
+/// The fixture's entry point: exact BGRA history, caret cadence, the tile lane's rectangles and the
+/// rows touched since the last sharp picture, with real CoreVideo buffers.
 @main struct FramePixelsTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
@@ -390,7 +391,31 @@ import Foundation
         expect(history.prepare(resized), "oversized input invalidates history")
         history.delivered(); history.reset()
         expect(history.prepare(resized), "reset retires history")
+
+        // Rows touched since the last sharp picture decide between refinement and a keyframe.
+        let sharpness = FramePixels(), page = pixel(64, 100)
+        fill(page, 200)
+        expect(sharpness.prepare(page) && sharpness.touchedFraction == 1, "no sharp picture yet: everything touched")
+        sharpness.delivered(); sharpness.markSharp()
+        expect(sharpness.touchedFraction == 0, "a sharp picture resets touched rows")
+        paint(page, x: 3, y: 10, width: 4, height: 6, byte: 10)
+        expect(sharpness.prepare(page), "a glyph changes the picture"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.06) < 1e-9, "a 6-row glyph touches 6 of 100 rows")
+        paint(page, x: 9, y: 12, width: 4, height: 6, byte: 10)
+        expect(sharpness.prepare(page), "a second glyph on the same line"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.08) < 1e-9, "touched rows are a union: rows 10-17")
+        paint(page, x: 0, y: 40, width: 64, height: 50, byte: 90)
+        expect(sharpness.prepare(page), "a large change past the cursor scan limit"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.58) < 1e-9, "rows past the cursor scan limit still count")
+        sharpness.markSharp(); sharpness.markAllTouched()
+        expect(sharpness.touchedFraction == 1, "a motion keyframe touches everything")
+        sharpness.markSharp()
+        paint(page, x: 0, y: 0, width: 1, height: 1, byte: 1)
+        expect(sharpness.prepare(page), "an undelivered change"); sharpness.dropped()
+        expect(sharpness.prepare(page) && sharpness.touchedFraction == 1, "after a drop the comparison is not against the viewer's picture")
+        sharpness.delivered(); sharpness.reset()
+        expect(sharpness.touchedFraction == 1, "reset forgets sharpness")
         tileLane()
-        print("PASS exact BGRA history: padding, reused storage, last-row alpha, dimensions, raw drop, refresh drop, unknown format and reset")
+        print("PASS exact BGRA history: padding, reused storage, last-row alpha, dimensions, raw drop, refresh drop, unknown format, reset and touched rows")
     }
 }

@@ -223,6 +223,34 @@ final class FramePixels {
     /// Tracking state from before the latest `prepare`, restored if that picture is dropped.
     private var recognitionBeforePrepare: CaretRecognition?
 
+    /// Rows changed since the last sharp picture (`markSharp`), one flag per row of `height`.
+    private var touched: [Bool] = []
+    /// How many flags in `touched` are set.
+    private var touchedCount = 0
+    /// True when every row counts as touched: no sharp picture yet, a size change, or a
+    /// comparison that was not against the delivered picture (after a drop or reset).
+    private var touchedAll = true
+
+    /// Fraction (0...1) of picture rows that changed since the last sharp picture. Pictures are
+    /// counted when prepared, so an undelivered picture can only over-count, which errs towards
+    /// a full keyframe refresh, never towards a stale picture.
+    var touchedFraction: Double { touchedAll || height == 0 ? 1 : Double(touchedCount) / Double(height) }
+    /// Records that the delivered picture is now sharp everywhere (a sharp refresh or the last
+    /// refinement pass reached the stream), so touched rows count from zero again.
+    func markSharp() {
+        guard valid, height > 0 else { touchedAll = true; return }
+        if touched.count != height { touched = [Bool](repeating: false, count: height) }
+        else { for row in touched.indices { touched[row] = false } }
+        touchedCount = 0; touchedAll = false
+    }
+    /// Records that every row is at motion quality again (a keyframe at the motion budget).
+    func markAllTouched() { touchedAll = true }
+    /// Counts `row` as changed since the last sharp picture.
+    private func touch(_ row: Int) {
+        guard !touchedAll, row < touched.count, !touched[row] else { return }
+        touched[row] = true; touchedCount += 1
+    }
+
     /// True only after a picture has been successfully delivered to the stream.
     var hasDeliveredHistory: Bool { valid }
 
@@ -276,6 +304,7 @@ final class FramePixels {
                     if memcmp(currentRow, previousRow, rowBytes) == 0 { continue }
                     same = false
                     changedRows.append(row)
+                    touch(row)
                     // Every changed row is recorded so only those rows are copied into the history
                     // below; once neither the caret scan nor the tile bands need detail, the rest of
                     // the frame is still compared, never copied.
@@ -321,6 +350,7 @@ final class FramePixels {
                 }
             }
         }
+        if !comparable { touchedAll = true }
         prepared = true; alreadyDelivered = same
         tileRects = comparable && !same ? splitRectangles.flatMap { rects in
             rects.reduce(0) { $0 + $1.width * $1.height } <= tileAreaLimit ? rects : nil
@@ -383,6 +413,7 @@ final class FramePixels {
         damageKind = .content; damageBounds = nil; changedPixels = 0; damageBoundsComplete = true
         tileRects = nil
         caretRecognition = .empty; recognitionBeforePrepare = nil
+        touchedAll = true
     }
 
     /// Index of the leftmost pixel that differs between two rows of `width` BGRA pixels. The rows
