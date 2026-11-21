@@ -176,8 +176,10 @@ async function start(): Promise<void> {
     return;
   }
   try {
+    const statusRequest = checkStatus();
+    startSessionProbe();
     const [status] = await Promise.all([
-      checkStatus(),
+      statusRequest,
       fontsReady,
     ]);
     installTooltips();
@@ -197,7 +199,27 @@ async function refreshAuth(): Promise<void> {
   }
 }
 
+/**
+ * The session check that started together with the first-run check, if any (J1069).
+ *
+ * The two answers are independent, so asking for both at once saves a network round trip before the sign-in screen
+ * or the terminal can appear. The check is asked for speculatively: when the server turns out to need first-run
+ * setup its answer is never read, and a failure is dropped with it. It belongs to the first call of
+ * {@link showAuthState} only; every later call (after setup, after a refresh) asks again.
+ */
+let sessionProbe: ReturnType<typeof checkSession> | undefined;
+
+/** Starts the session check now, so the first {@link showAuthState} can use its answer. */
+function startSessionProbe(): void {
+  sessionProbe = checkSession();
+  sessionProbe.catch(() => undefined);
+}
+
+/** Shows the screen for the server's first-run state: setup, sign-in, a device approval, or the terminal of a live session. */
 async function showAuthState(status: AuthStatus): Promise<void> {
+  // Taken here, before any early return, so a probe that was not needed can never answer a later call with a stale "signed out".
+  const probe = sessionProbe;
+  sessionProbe = undefined;
   if (deviceApprovalComplete) {
     await showDeviceApprovalSuccess();
     return;
@@ -208,7 +230,7 @@ async function showAuthState(status: AuthStatus): Promise<void> {
       await showDeviceApproval(kind, code);
       return;
     }
-    const session = status.setupRequired ? undefined : await checkSession();
+    const session = status.setupRequired ? undefined : await (probe ?? checkSession());
     if (session) {
       activeUserId = session.user_id;
       await showDeviceApproval(kind, code);
@@ -217,7 +239,7 @@ async function showAuthState(status: AuthStatus): Promise<void> {
     }
     return;
   }
-  const session = status.setupRequired ? undefined : await checkSession();
+  const session = status.setupRequired ? undefined : await (probe ?? checkSession());
   if (session) {
     activeUserId = session.user_id;
     await showTerminal(session);
