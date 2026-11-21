@@ -2531,6 +2531,20 @@ mod tests {
             (after.0 - before.0) as f64 / elapsed,
             (after.1 - before.1) as f64 * 1000.0 / hz / elapsed,
         );
+        // The status path is a separate command: it must still answer, for every peer, while
+        // the scan runs only on wakes (the worker serves it from its select loop).
+        let (reply, counters) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Counters(reply))
+            .map_err(|_| "worker ended")
+            .expect("counters");
+        let counters = tokio::task::spawn_blocking(move || counters.recv())
+            .await
+            .expect("join")
+            .expect("counters reply")
+            .expect("counters");
+        eprintln!("status-counters peers_reported={}", counters.len());
+        assert_eq!(counters.len(), count as usize);
         drop(kernel);
         let (reply, stopped) = sync::sync_channel(1);
         commands
