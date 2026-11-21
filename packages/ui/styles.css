@@ -1490,3 +1490,9 @@
 .ui-theme-strip[data-fade~="right"] { -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - var(--ui-theme-pad)), transparent); mask-image: linear-gradient(90deg, #000 calc(100% - var(--ui-theme-pad)), transparent); }
 .ui-theme-strip[data-fade="left right"] { -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad), #000 calc(100% - var(--ui-theme-pad)), transparent); mask-image: linear-gradient(90deg, transparent, #000 var(--ui-theme-pad), #000 calc(100% - var(--ui-theme-pad)), transparent); }
 
+/*
+ * A theme switch changes every colour at once; nothing eases it (themes.ts `holdTransitions`, #567, D365: a text colour easing over a
+ * new glass tint is a low-contrast frame). A surface that is being hidden keeps its own fade: the palette closes in the same task as
+ * the switch, and the transition that runs is the one of the state it ends in (`[hidden]`, `data-hidden="true"`), which this leaves alone.
+ */
+:root[data-theme-switch] :not([hidden], [data-hidden="true"]), :root[data-theme-switch] :not([hidden], [data-hidden="true"])::before, :root[data-theme-switch] :not([hidden], [data-hidden="true"])::after { transition: none !important; }
