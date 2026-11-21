@@ -297,6 +297,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     // the last video picture, and the next video frame encodes from there.
                     pixels.delivered()
                     damageState.completed(delivered: true)
+                    damageState.postponeRefresh(at: ProcessInfo.processInfo.systemUptime)
                     continue
                 }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current

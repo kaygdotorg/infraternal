@@ -127,6 +127,16 @@ import CoreGraphics
         assert(rate.current > 500_000 && rate.current < 12_000_000)
         for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
+        // Tile lane [#146 C]: a tile owes no refresh, but it postpones one already owed after motion.
+        var tiled = DamageEncodingState()
+        tiled.changed(at: 0); _ = tiled.next(at: 0); tiled.completed(delivered: true)
+        tiled.changed(at: 0.1, caret: true); assert(tiled.next(at: 0.1) == .caret); tiled.completed(delivered: true)
+        tiled.postponeRefresh(at: 0.2)
+        assert(tiled.refreshDeadline == 0.45, "a tile postpones the owed refresh while changes continue")
+        assert(tiled.next(at: 0.3) == nil && tiled.next(at: 0.45) == .refresh, "the postponed refresh still comes once changes stop")
+        tiled.completed(delivered: true)
+        tiled.postponeRefresh(at: 1)
+        assert(tiled.refreshDeadline == nil, "a tile never creates a refresh")
         print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }

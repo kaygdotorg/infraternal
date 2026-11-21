@@ -190,6 +190,13 @@ struct DamageEncodingState {
             retryRefresh = false
         }
     }
+    /// Records a change that went out exactly as a tile update [#146 proposal C]. A tile owes no sharp
+    /// refresh, but a refresh already owed (after earlier video motion) waits until changes stop, as it
+    /// does for motion: refreshing while someone types would only send a large keyframe that the next
+    /// tiles and deltas make stale at once.
+    mutating func postponeRefresh(at now: Double) {
+        if settle != nil { settle = now + 0.25 }
+    }
     /// Forces the next encoded picture to be a keyframe, after the viewer lost one.
     mutating func repair() { keyframe = true }
     /// Returns what to encode now, or `nil` if nothing is due. Call it after a capture event or when
