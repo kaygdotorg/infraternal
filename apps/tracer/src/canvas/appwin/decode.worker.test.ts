@@ -308,7 +308,7 @@ test("decoder output presents the newest admitted picture immediately and releas
     // A stale decoder and the tile lane (#146): a tile that arrives while the oldest waiting video unit has waited past
     // 100 ms overflows like video. The waiting video is dropped, no tile is drawn over the older picture, and later
     // tiles wait for the repair keyframe.
-    send({ t: "reset" }); layers.length = 0;
+    send({ t: "reset" }); layers.length = 0; holdDecoder = true;
     send({ t: "chunk", sequence: 20, keyframe: true, bytes: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]).buffer });
     const behind = current!;
     send({ t: "chunk", sequence: 21, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
