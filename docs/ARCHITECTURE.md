@@ -46,15 +46,19 @@ retires the recorded originals. [Server CLI and recovery](CLI.md)
 You define each action once (schema, permission, handler). The API, CLI, MCP
 and UI adapters come from that definition.
 
-## Repo layout (target)
+## Repo layout
 
 ```
 crates/        server, db (SQLite access, D379), agent, shim, protocol, plugin-api, plugins/*
-apps/website   infraternal.com (SvelteKit static)
-apps/docs      docs at /docs (Astro Starlight)
-apps/web       the product UI (SvelteKit, embedded in the server binary)
+apps/tracer    the product UI (TypeScript); its build is the `web/` folder the server serves (`--web-root`), and it holds the browser tests
+apps/release-signer  the release signing service
+docs/user      user docs, published at /docs and shown in the app's Docs view (D317)
+packages/protocol  the browser side of the wire protocol: codec and stream decoder (TypeScript)
 packages/ui    shared tokens and components (vendored from calternal until @kayg/ui exists)
-ee/            commercial-licensed features (multi-user management)
 contracts/     protocol, plugin and action specs (written before code)
 scripts/       verify (fast | integration | browser | bench), deploy, sync
 ```
+
+Planned, not in the tree yet: `apps/website` (infraternal.com) and `apps/docs`
+(D44). Commercial-licensed features live in their own repository,
+`kayg/infraternal-enterprise`, never here (D277).
