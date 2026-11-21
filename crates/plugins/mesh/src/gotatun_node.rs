@@ -2298,11 +2298,12 @@ mod tests {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(4096);
-        let mut config = one_peer_config(Some("198.51.100.1:10254".parse().unwrap()));
+        let mut config =
+            one_peer_config(Some("198.51.100.1:10254".parse().expect("fixture value")));
         let template = config.peers.remove(&NodeId(1)).expect("template peer");
         for n in 1..=u64::from(count) {
             let mut peer = template.clone();
-            let [_, _, high, low] = u32::try_from(n).unwrap().to_be_bytes();
+            let [_, _, high, low] = u32::try_from(n).expect("fixture value").to_be_bytes();
             peer.peer.key = PublicKey({
                 let mut key = [3; 32];
                 key[..8].copy_from_slice(&n.to_le_bytes());
@@ -2323,7 +2324,7 @@ mod tests {
             };
             peer.peer.endpoint = Some(SocketAddr::from((
                 [198, 51, 100, 1],
-                10_000 + u16::try_from(n % 50_000).unwrap(),
+                10_000 + u16::try_from(n % 50_000).expect("fixture value"),
             )));
             config.peers.insert(NodeId(n), peer);
         }
@@ -2388,8 +2389,11 @@ mod tests {
             relayed: BTreeMap::new(),
         };
         let mut next = config.clone();
-        next.peers.get_mut(&NodeId(1)).unwrap().peer.endpoint =
-            Some("203.0.113.9:10254".parse().unwrap());
+        next.peers
+            .get_mut(&NodeId(1))
+            .expect("fixture value")
+            .peer
+            .endpoint = Some("203.0.113.9:10254".parse().expect("fixture value"));
         let unchanged = state.engine_addresses(&config).await;
         assert!(unchanged.is_empty(), "an unchanged snapshot reads nothing");
         let mut samples = Vec::new();
@@ -2397,7 +2401,7 @@ mod tests {
             let started = std::time::Instant::now();
             let read = state.engine_addresses(&next).await;
             samples.push(started.elapsed());
-            assert_eq!(read.len(), usize::try_from(count).unwrap());
+            assert_eq!(read.len(), usize::try_from(count).expect("fixture value"));
         }
         samples.sort();
         eprintln!(
@@ -2456,8 +2460,8 @@ mod tests {
     /// snapshot overwrites a roamed single-address peer.
     #[test]
     fn a_changed_single_address_peer_needs_the_engine_read() {
-        let applied = one_peer_config(Some("198.51.100.1:10254".parse().unwrap()));
-        let next = one_peer_config(Some("198.51.100.9:10254".parse().unwrap()));
+        let applied = one_peer_config(Some("198.51.100.1:10254".parse().expect("fixture address")));
+        let next = one_peer_config(Some("198.51.100.9:10254".parse().expect("fixture address")));
         assert!(crate::candidate_walks::engine_read_needed(
             Some(&applied),
             &next
