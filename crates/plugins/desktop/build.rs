@@ -64,6 +64,7 @@ fn main() {
             "native/Cursor.swift",
             "native/LowDelaySPS.swift",
             "native/Encoder.swift",
+            "native/EncoderPriority.swift",
             "native/SurfaceCapture.swift",
             "native/main.swift",
             "-o",

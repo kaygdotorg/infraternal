@@ -25,6 +25,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
     /// The hardware encoder; used only from the encoding queue.
     private let encoder = Encoder()
+    /// Lets the controlled window use the shared encoder first (`EncoderPriority.swift`).
+    private let encoderPriority: EncoderPriority
     /// The running capture stream, or `nil` before start and after stop.
     private var stream: SCStream?
     // Only the serial callback queue touches this bounded diagnostic counter.
@@ -76,6 +78,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///   - output: Receives each packet to send.
     init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
         self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
+        encoderPriority = EncoderPriority(key: EncoderPriority.targetKey(windowID: target["window_id"] as? UInt32, displayID: target["display_id"] as? UInt32))
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
     }
 
@@ -259,7 +262,10 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 if frame == nil, !deferHistoryUntilAfterPaint { _ = pixels.prepare(current.0) }
                 let prepared = measure ? nanos(mach_absolute_time()) : 0
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
-                guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
+                encoderPriority.beforeEncode()
+                let encoded = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget)
+                encoderPriority.afterEncode()
+                guard let body = encoded else {
                     pixels.dropped()
                     retryDroppedFrame = damageState.encoderDropped(decision)
                     break

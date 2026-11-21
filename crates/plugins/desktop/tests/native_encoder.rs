@@ -102,6 +102,19 @@ fn delivered_pixels_are_owned_and_raw_drops_never_confirm_new_content() {
 }
 
 #[test]
+fn the_controlled_window_is_encoded_first_and_the_others_only_wait() {
+    // Real shared memory between three encoder-priority handles; no GUI or hardware needed.
+    run_swift_fixture(
+        "encoder-priority",
+        &[
+            "native/EncoderPriority.swift",
+            "tests/fixtures/encoder-priority-test.swift",
+        ],
+        false,
+    );
+}
+
+#[test]
 fn identical_surface_callbacks_preserve_one_refresh_and_static_repair() {
     run_swift_fixture(
         "surface-delivery",
@@ -111,6 +124,7 @@ fn identical_surface_callbacks_preserve_one_refresh_and_static_repair() {
             "native/FramePixels.swift",
             "native/LowDelaySPS.swift",
             "native/Encoder.swift",
+            "native/EncoderPriority.swift",
             "native/SurfaceCapture.swift",
             "tests/fixtures/surface-delivery-test.swift",
         ],
