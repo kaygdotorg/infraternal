@@ -1,4 +1,5 @@
 /** Independent #244 retained-typing lifetime and consent controls; all input is synthetic. */
+import { KeyAckRtt } from "./key-ack-rtt";
 import { expect, test } from "bun:test";
 import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
@@ -45,7 +46,7 @@ function fixture() {
     inputModifiers: { ctrl: "off", alt: "off" }, cursorEpoch: 0,
     nextInSeq: 0n, ackedInSeq: 0n, sessionId: new Uint8Array(16),
     outputQueue: { clear() {} }, terminal: { reset() {} },
-    config: { hooks: {} }, sampleRoundTrip() {},
+    config: { hooks: {} }, sampleRoundTrip() {}, conn: { retryForInput() {} }, keyAck: new KeyAckRtt(),
     inputResendNotice: {
       show(value: ToastMessage) { notice = value; },
       dismiss() { dismissals += 1; },
