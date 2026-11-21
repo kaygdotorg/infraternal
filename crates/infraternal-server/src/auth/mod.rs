@@ -16,6 +16,8 @@ mod crypto;
 mod devices;
 #[cfg(feature = "remote")]
 pub(crate) use devices::ApprovedMachineJoin;
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+pub(crate) use devices::check_join_machine_sample;
 mod http;
 pub(crate) use http::refresh_api_cookie;
 mod recovery;
@@ -102,6 +104,11 @@ impl VerifiedPasskey {
 pub enum Error {
     #[error("authorization failed")]
     Denied,
+    /// The caller is a signed-in account, but its 15-minute admin window (D333) has closed.
+    /// Every route that needs the window answers this the same way: HTTP 428, so the page can
+    /// offer the quick passkey renewal (#498, #563). It is not an authorization failure.
+    #[error("confirm with your passkey again")]
+    FreshRequired,
     #[error("invalid request")]
     Invalid,
     #[error("username already exists")]
@@ -329,6 +336,13 @@ impl Auth {
         if let Some(db) = &self.db {
             db.close().await;
         }
+    }
+
+    /// The D379 pool (`infraternal-db`) shared with the session statements, for
+    /// other hot writes that move off sqlx (#473, #562). `None` for in-memory
+    /// test databases; callers then run the same SQL on sqlx.
+    pub(crate) fn database(&self) -> Option<&infraternal_db::Database> {
+        self.db.as_ref()
     }
 
     /// Whether the session statements run on the D379 pool (tests only).

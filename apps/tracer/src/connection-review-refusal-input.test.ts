@@ -1,4 +1,5 @@
 /** Independent #244 review: a refused connection resume must retain typing never sent to the host. */
+import { KeyAckRtt } from "./key-ack-rtt";
 import { expect, test } from "bun:test";
 import { MuxConnection, type StreamHandler } from "./connection";
 import { Osc52Scanner } from "./osc52";
@@ -74,7 +75,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
       outputQueue: { length: 0, clear() {} },
       config: { hooks: {}, status: { textContent: "" } }, conn,
       terminal: { reset() {} }, lastSize: { cols: 80, rows: 24, pxW: 0, pxH: 0 },
-      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {},
+      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {}, keyAck: new KeyAckRtt(),
       sendFrame: (stream: number, frame: WireFrame) => conn.send(stream, frame),
     }) as TerminalProbe;
     conn.openStream(terminal.streamHandler());

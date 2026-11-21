@@ -128,19 +128,17 @@ async fn deliver_login_cleanup(
             tokio::select! {
                 biased;
                 delivered = async {
-                    if !crate::remote_guard::durable_cleanup(actor.downgrade(), person).await {
-                        return None;
-                    }
+                    let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person).await?;
                     if !uninstall {
-                        return Some(None);
+                        return Some((revoked, None));
                     }
                     match crate::remote_removal::ask_uninstall(&actor, host).await {
                         // Its report of the kernel objects it leaves is kept
                         // with the answer, for the removal result (#235, #409).
-                        crate::remote_removal::UninstallReply::Accepted(left) => Some(Some(("requested", left))),
+                        crate::remote_removal::UninstallReply::Accepted(left) => Some((revoked, Some(("requested", left)))),
                         // The host answered no: the install stays, and the
                         // removal toast already handed over the manual command.
-                        crate::remote_removal::UninstallReply::Refused => Some(Some(("unreachable", Vec::new()))),
+                        crate::remote_removal::UninstallReply::Refused => Some((revoked, Some(("unreachable", Vec::new())))),
                         crate::remote_removal::UninstallReply::Lost => None,
                     }
                 } => delivered,
@@ -152,7 +150,7 @@ async fn deliver_login_cleanup(
         },
     )
     .await;
-    if let Ok(Some(answer)) = result {
+    if let Ok(Some((revoked, answer))) = result {
         store
             .confirm_removal_cleanup(
                 host,
@@ -160,6 +158,7 @@ async fn deliver_login_cleanup(
                 answer
                     .as_ref()
                     .map(|(cleanup, left)| (*cleanup, left.as_slice())),
+                revoked.report.as_ref(),
             )
             .await
             .map_err(io::Error::other)?;

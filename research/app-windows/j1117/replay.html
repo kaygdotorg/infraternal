@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- Role: flicker-proof replay page for the App Windows tile lane (#146 proposal C); runs replay-worker.js and posts its report. -->
+<meta charset="utf-8"><title>tile lane replay</title>
+<pre id="out">running</pre>
+<script type="module">
+  // Fetches the recording, runs one replay per mode in a fresh worker, and posts each report back to serve.py.
+  const params = new URLSearchParams(location.search);
+  const modes = (params.get("modes") ?? "realtime,fast,jitter,swap").split(",");
+  const run = params.get("run") ?? "run1";
+  const [packets, source] = await Promise.all(["packets.bin", "source.bin"].map((name) => fetch(`${run}/${name}`).then((r) => r.arrayBuffer())));
+  const manifest = await fetch(`${run}/manifest.json`).then((r) => r.json());
+  for (const mode of modes) {
+    const worker = new Worker("replay-worker.js", { type: "module" });
+    const report = await new Promise((resolve) => {
+      worker.onmessage = (event) => { if (event.data.t === "report") resolve(event.data); };
+      worker.onerror = (event) => resolve({ error: String(event.message) });
+      worker.postMessage({ t: "run", packets: packets.slice(0), source, mode, seed: 7, scenarios: manifest.scenarios });
+    });
+    worker.terminate();
+    report.userAgent = navigator.userAgent;
+    await fetch(`report?name=${encodeURIComponent(`${params.get("browser") ?? "browser"}-${mode}`)}`, { method: "POST", body: JSON.stringify(report) });
+    document.getElementById("out").textContent += `\n${mode}: ${JSON.stringify(report.summary ?? report.error)}`;
+  }
+  await fetch("report?name=done", { method: "POST", body: "{}" });
+</script>

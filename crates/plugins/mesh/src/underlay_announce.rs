@@ -117,7 +117,7 @@ impl CoalescedSchedule {
 ///
 /// A peer learns our endpoint only from an authenticated packet. A node that is only receiving
 /// sends nothing until `WireGuard`'s keepalive-plus-rekey timeout, so after an address change the
-/// peer kept sending to the old address for 15.2 s (J561's break-it matrix, against D41's 300 ms).
+/// peer kept sending to the old address for 15.2 s (J561's break-it matrix, against the reconnect budget of D375 and D267).
 /// The Linux route-netlink listener and the macOS routing-socket listener call
 /// [`Self::changed`]. The worker asks `GotaTun` for one keepalive per live session via
 /// `request_keepalives`, so the send count follows the number of live sessions.

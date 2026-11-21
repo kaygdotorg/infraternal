@@ -14,7 +14,9 @@ use std::{
 // Reuse the existing JSON object representation instead of instantiating a
 // second ordered-map implementation and serde visitors for private name rows.
 pub(super) type Names = serde_json::Map<String, Value>;
-fn decode_names(bytes: &[u8]) -> io::Result<Names> {
+/// Decodes `session-names.json`: an object of UUID keys, each holding exactly
+/// a valid `name` and a `uid` that fits `u32`; anything else is refused.
+pub(super) fn decode_names(bytes: &[u8]) -> io::Result<Names> {
     let Value::Object(names) = serde_json::from_slice(bytes)? else {
         return Err(io::ErrorKind::InvalidData.into());
     };

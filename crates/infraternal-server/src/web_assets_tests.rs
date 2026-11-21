@@ -12,14 +12,23 @@ fn fixture() -> (PathBuf, Router) {
         .join("../../target")
         .join(format!("web-assets-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(root.join("fonts/a")).unwrap();
     for (name, bytes) in [
         ("chunk-1234abcd.js", b"identity payload".as_slice()),
         ("chunk-1234abcd.js.gz", b"gzip".as_slice()),
         ("chunk-1234abcd.js.br", b"br".as_slice()),
+        ("ghostty-vt-1234abcd.wasm", b"\0asm engine".as_slice()),
+        ("ghostty-vt-1234abcd.wasm.br", b"br wasm".as_slice()),
         ("index.html", b"<html>entry</html>".as_slice()),
         ("index.html.br", b"compressed html".as_slice()),
         ("font.woff2", b"font bytes".as_slice()),
         ("main.js", b"mutable entry".as_slice()),
+        ("main.0123456789.js", b"fingerprinted entry".as_slice()),
+        ("ui.89abcdef01.css", b"fingerprinted sheet".as_slice()),
+        (
+            "fonts/a/roman.latin.2468ace135.woff2",
+            b"fingerprinted font".as_slice(),
+        ),
         ("favicon.ico", b"\0\0\x01\0icon".as_slice()),
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
@@ -182,6 +191,25 @@ async fn encodings_and_identity_have_correct_headers_and_sizes() {
             .to_bytes()
             .is_empty()
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The terminal engine's content-hashed wasm streams: `application/wasm` (streaming compilation refuses any other type),
+/// a year-long immutable cache and its Brotli encoding. A wasm name without the bundler's hash is not immutable (#573).
+#[tokio::test]
+async fn engine_wasm_is_served_as_wasm_and_cached_for_good() {
+    let (root, app) = fixture();
+    let response = get(&app, "/ghostty-vt-1234abcd.wasm", &[]).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/wasm");
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "br");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    std::fs::write(root.join("ghostty-vt.wasm"), b"\0asm plain").unwrap();
+    let plain = get(&app, "/ghostty-vt.wasm", &[]).await;
+    assert_eq!(plain.headers()[header::CACHE_CONTROL], "no-cache");
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -513,5 +541,44 @@ async fn head_and_get_share_validators_and_conditional_responses() {
             }
         }
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #573: files whose name carries a content hash are cached for a year and revalidate never; look-alikes that are not
+/// that shape (a short hash, upper-case, a stem that is only the hash, another extension, a missing file) stay `no-cache`.
+#[tokio::test]
+async fn fingerprinted_files_are_immutable_and_look_alikes_are_not() {
+    let (root, app) = fixture();
+    for path in [
+        "/main.0123456789.js",
+        "/ui.89abcdef01.css",
+        "/fonts/a/roman.latin.2468ace135.woff2",
+    ] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable",
+            "{path}"
+        );
+    }
+    for name in [
+        "main.js",
+        "main.012345678.js",
+        "main.0123456789a.js",
+        "main.ABCDEF0123.js",
+        ".0123456789.js",
+        "main.0123456789.map",
+        "main.0123456789.html",
+    ] {
+        assert!(!fingerprinted(&format!("/{name}")), "{name}");
+    }
+    // A fingerprinted name the bundle does not hold is a bare 404 (a file extension the bundle lacks), never an immutable shell.
+    let missing = get(&app, "/main.fedcba9876.js", &[]).await;
+    assert_eq!(missing.status(), 404);
+    assert_ne!(
+        missing.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

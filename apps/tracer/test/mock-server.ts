@@ -676,6 +676,25 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     session.echoDelayMs = delay === undefined ? 0 : Number(delay);
     return sendJson(response, 200, { mode: session.echoMode, delay_ms: session.echoDelayMs });
   }
+  // Plays the shim's echo report (#569): the host reads a hidden line (a password prompt) or echoes again.
+  // Echo of typed keys stops with it, the way a real terminal in that mode behaves.
+  if (request.method === "POST" && url.pathname === "/__mock/host-echo") {
+    const body = await readJson(request);
+    if (typeof body?.hidden !== "boolean") return sendJson(response, 400, { error: "hidden must be boolean" });
+    session.echoMode = body.hidden ? "none" : "normal";
+    let told = 0;
+    for (const connection of connections) if (connection.attached && connection.session === session) {
+      sendFrame(connection.socket, connection.stream, {
+        type: "Event",
+        subId: 0,
+        eventJson: new TextEncoder().encode(JSON.stringify({
+          type: "terminal.echo", session_id: session.sessionIdText, seq: session.outputLength, hidden: body.hidden,
+        })),
+      });
+      told += 1;
+    }
+    return sendJson(response, 200, { hidden: body.hidden, told });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/alternate-screen") {
     const body = await readJson(request);
     if (typeof body?.active !== "boolean") return sendJson(response, 400, { error: "active must be boolean" });

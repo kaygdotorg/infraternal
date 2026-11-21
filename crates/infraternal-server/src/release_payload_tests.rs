@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::{
     collections::HashMap,
     io::{Read, Write},
-    net::TcpListener,
+    net::{SocketAddr, TcpListener},
     sync::{
         Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
@@ -93,9 +93,17 @@ impl Bucket {
     pub(crate) fn new(files: HashMap<String, Vec<u8>>) -> Self {
         Self::with_response(files, false)
     }
+    /// Starts a bucket serving `files` on the fixed loopback `address`, for a proof whose
+    /// server must find the same origin again after a reboot (#211 S4).
+    pub(crate) fn at(address: SocketAddr, files: HashMap<String, Vec<u8>>) -> Self {
+        Self::on(TcpListener::bind(address).unwrap(), files, false)
+    }
     /// Starts a bucket serving `files`; with `refused` it answers every request with an error status.
     fn with_response(files: HashMap<String, Vec<u8>>, refused: bool) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        Self::on(TcpListener::bind("127.0.0.1:0").unwrap(), files, refused)
+    }
+    /// Serve `files` (or refusals) on `listener` until dropped.
+    fn on(listener: TcpListener, files: HashMap<String, Vec<u8>>, refused: bool) -> Self {
         listener.set_nonblocking(true).unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let files = Arc::new(StdMutex::new(files));

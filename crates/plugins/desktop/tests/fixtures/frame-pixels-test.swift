@@ -1,7 +1,10 @@
 /// Role: verify owned BGRA history, caret cadence, sharp glyph guards and delivery retries with real CoreVideo storage [D254,D266,#146].
+import Compression
 import CoreVideo
 import Foundation
 
+/// The fixture's entry point: exact BGRA history, caret cadence, the tile lane's rectangles and the
+/// rows touched since the last sharp picture, with real CoreVideo buffers.
 @main struct FramePixelsTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
@@ -33,6 +36,7 @@ import Foundation
             }
         }
     }
+    /// Changes every other pixel of a rectangle (and its last pixel) to `byte`: a change whose pixel count, not its size, matters.
     static func paintSparse(_ pixel: CVPixelBuffer, x: Int, y: Int, width: Int, height: Int, byte: UInt8) {
         expect(CVPixelBufferLockBaseAddress(pixel, []) == kCVReturnSuccess, "sparse damage write lock")
         defer { CVPixelBufferUnlockBaseAddress(pixel, []) }
@@ -44,6 +48,82 @@ import Foundation
             }
         }
     }
+    /// Tile lane [#146 C]: changed rows become a few exact rectangles within the area limit; the
+    /// caret scan's results are unchanged by the band pass; a tile update carries exact RGBA.
+    static func tileLane() {
+        let history = FramePixels(), surface = pixel(200, 120)
+        history.tileAreaLimit = 2_000
+        fill(surface, 200)
+        expect(history.prepare(surface, at: 0), "tile first picture")
+        expect(history.tileRects == nil, "no history means no tiles")
+        history.delivered()
+        // A letter-sized change and a second one far below it: two rectangles.
+        paint(surface, x: 20, y: 10, width: 8, height: 12, byte: 9)
+        paint(surface, x: 150, y: 90, width: 5, height: 6, byte: 77)
+        expect(history.prepare(surface, at: 1), "tile change")
+        expect(history.tileRects == [PixelDamageBounds(x: 20, y: 10, width: 8, height: 12), PixelDamageBounds(x: 150, y: 90, width: 5, height: 6)],
+               "two separated rectangles, got \(String(describing: history.tileRects))")
+        expect(history.damageKind == .content && !history.damageBoundsComplete, "caret scan still stops at its limit")
+        guard let unit = history.tileUpdate(history.tileRects!) else { expect(false, "tile update"); return }
+        expect(unit[0] == 0xF7 && unit[1] == 0x54 && unit[2] == 1, "tile magic and version")
+        expect(unit[4] == 0 && unit[5] == 200 && unit[6] == 0 && unit[7] == 120 && unit[8] == 2, "tile picture size and count")
+        let rawLength = unit[25...28].reduce(0) { ($0 << 8) | Int($1) }
+        expect(rawLength == (8 * 12 + 5 * 6) * 4, "raw pixel length")
+        var raw = Data(unit[29...])
+        if unit[3] == 1 {
+            var out = [UInt8](repeating: 0, count: rawLength)
+            let n = raw.withUnsafeBytes { compression_decode_buffer(&out, rawLength, $0.bindMemory(to: UInt8.self).baseAddress!, raw.count, nil, COMPRESSION_ZLIB) }
+            expect(n == rawLength, "deflate round trip")
+            raw = Data(out)
+        }
+        expect(raw.count == rawLength, "tile payload length")
+        expect(raw[0] == 9 && raw[3] == 255 && raw[8 * 12 * 4] == 77 && raw[8 * 12 * 4 + 3] == 255, "exact opaque RGBA pixels")
+        history.delivered()
+        // Rows within the gap join one rectangle that covers both columns ranges.
+        paint(surface, x: 40, y: 50, width: 4, height: 2, byte: 1)
+        paint(surface, x: 60, y: 55, width: 4, height: 2, byte: 1)
+        expect(history.prepare(surface, at: 2), "near change")
+        expect(history.tileRects == [PixelDamageBounds(x: 40, y: 50, width: 24, height: 7)], "close rows merge, got \(String(describing: history.tileRects))")
+        history.delivered()
+        // Two changes on the same rows, far apart: split at the unchanged columns between them.
+        paint(surface, x: 2, y: 100, width: 3, height: 3, byte: 5)
+        paint(surface, x: 150, y: 101, width: 3, height: 2, byte: 5)
+        expect(history.prepare(surface, at: 2.5), "same-row change")
+        expect(history.tileRects == [PixelDamageBounds(x: 2, y: 100, width: 3, height: 3), PixelDamageBounds(x: 150, y: 101, width: 3, height: 2)],
+               "a wide band splits at unchanged columns, got \(String(describing: history.tileRects))")
+        history.delivered()
+        // Only changed rows are copied into the history, and the history stays exact.
+        expect(!history.prepare(surface, at: 2.6), "history equals the picture after a partial copy")
+        history.delivered()
+        // A wrap: the caret leaves the end of one line and a letter starts the next. The rows merge
+        // into one band wider than the limit, which the column split cuts to two small rectangles.
+        paint(surface, x: 180, y: 60, width: 2, height: 10, byte: 6)
+        paint(surface, x: 1, y: 72, width: 6, height: 10, byte: 6)
+        expect(history.prepare(surface, at: 2.7), "wrap change")
+        expect(history.tileRects == [PixelDamageBounds(x: 1, y: 72, width: 6, height: 10), PixelDamageBounds(x: 180, y: 60, width: 2, height: 10)],
+               "a wrap stays tiles, got \(String(describing: history.tileRects))")
+        history.delivered()
+        // Past the area limit the picture goes to video.
+        paint(surface, x: 0, y: 0, width: 100, height: 30, byte: 3)
+        expect(history.prepare(surface, at: 3), "large change")
+        expect(history.tileRects == nil, "area limit sends video")
+        history.delivered()
+        // More than eight separate rectangles also goes to video.
+        for band in 0..<9 { paint(surface, x: 150, y: band * 12, width: 2, height: 2, byte: UInt8(100 + band)) }
+        expect(history.prepare(surface, at: 4), "scattered change")
+        expect(history.tileRects == nil, "nine rectangles send video")
+        history.delivered()
+        expect(!history.prepare(surface, at: 5) && history.tileRects == nil, "unchanged picture has no tiles")
+        // The pass is off by default.
+        let off = FramePixels(); let other = pixel(32, 32); fill(other, 1)
+        _ = off.prepare(other, at: 0); off.delivered(); paint(other, x: 1, y: 1, width: 2, height: 2, byte: 9)
+        expect(off.prepare(other, at: 1) && off.tileRects == nil, "tile pass off without an area limit")
+        // Rectangles outside the picture are refused.
+        expect(history.tileUpdate([PixelDamageBounds(x: 199, y: 0, width: 2, height: 1)]) == nil, "outside rectangle refused")
+        expect(history.tileUpdate([]) == nil, "empty update refused")
+        print("PASS tile lane: separated and merged rectangles, area and count limits, exact RGBA, bounds checks")
+    }
+    /// Runs every check and prints PASS lines; the first failure exits with status 1.
     static func main() {
         let damageHistory = FramePixels(), surface = pixel(96, 48)
         fill(surface, 47)
@@ -311,6 +391,31 @@ import Foundation
         expect(history.prepare(resized), "oversized input invalidates history")
         history.delivered(); history.reset()
         expect(history.prepare(resized), "reset retires history")
-        print("PASS exact BGRA history: padding, reused storage, last-row alpha, dimensions, raw drop, refresh drop, unknown format and reset")
+
+        // Rows touched since the last sharp picture decide between refinement and a keyframe.
+        let sharpness = FramePixels(), page = pixel(64, 100)
+        fill(page, 200)
+        expect(sharpness.prepare(page) && sharpness.touchedFraction == 1, "no sharp picture yet: everything touched")
+        sharpness.delivered(); sharpness.markSharp()
+        expect(sharpness.touchedFraction == 0, "a sharp picture resets touched rows")
+        paint(page, x: 3, y: 10, width: 4, height: 6, byte: 10)
+        expect(sharpness.prepare(page), "a glyph changes the picture"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.06) < 1e-9, "a 6-row glyph touches 6 of 100 rows")
+        paint(page, x: 9, y: 12, width: 4, height: 6, byte: 10)
+        expect(sharpness.prepare(page), "a second glyph on the same line"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.08) < 1e-9, "touched rows are a union: rows 10-17")
+        paint(page, x: 0, y: 40, width: 64, height: 50, byte: 90)
+        expect(sharpness.prepare(page), "a large change past the cursor scan limit"); sharpness.delivered()
+        expect(abs(sharpness.touchedFraction - 0.58) < 1e-9, "rows past the cursor scan limit still count")
+        sharpness.markSharp(); sharpness.markAllTouched()
+        expect(sharpness.touchedFraction == 1, "a motion keyframe touches everything")
+        sharpness.markSharp()
+        paint(page, x: 0, y: 0, width: 1, height: 1, byte: 1)
+        expect(sharpness.prepare(page), "an undelivered change"); sharpness.dropped()
+        expect(sharpness.prepare(page) && sharpness.touchedFraction == 1, "after a drop the comparison is not against the viewer's picture")
+        sharpness.delivered(); sharpness.reset()
+        expect(sharpness.touchedFraction == 1, "reset forgets sharpness")
+        tileLane()
+        print("PASS exact BGRA history: padding, reused storage, last-row alpha, dimensions, raw drop, refresh drop, unknown format, reset and touched rows")
     }
 }

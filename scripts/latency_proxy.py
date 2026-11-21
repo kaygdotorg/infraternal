@@ -46,7 +46,18 @@ class LatencyConfig:
             raise ValueError("INFRATERNAL_TEST_RTT must be a non-negative integer in milliseconds") from error
         if not 0 <= rtt_ms <= 60_000:
             raise ValueError("INFRATERNAL_TEST_RTT must be between 0 and 60000 milliseconds")
-        return cls(rtt_ms=rtt_ms, jitter_ms=0 if rtt_ms == 0 else DEFAULT_JITTER_MS)
+        jitter_ms = 0 if rtt_ms == 0 else DEFAULT_JITTER_MS
+        # A probe that compares two p99s (a flood row) turns the jitter off: the link's own noise is as big as the
+        # effect it looks for, and a growth of -7 ms is impossible (#569). The round trip itself stays.
+        override = os.environ.get("INFRATERNAL_TEST_JITTER")
+        if override is not None:
+            try:
+                jitter_ms = int(override, 10)
+            except ValueError as error:
+                raise ValueError("INFRATERNAL_TEST_JITTER must be a non-negative integer in milliseconds") from error
+            if not 0 <= jitter_ms <= 60_000:
+                raise ValueError("INFRATERNAL_TEST_JITTER must be between 0 and 60000 milliseconds")
+        return cls(rtt_ms=rtt_ms, jitter_ms=jitter_ms)
 
     def one_way_delay(self, generator: random.Random) -> float:
         """Return seconds of one-way delay; two independent halves bound RTT jitter."""

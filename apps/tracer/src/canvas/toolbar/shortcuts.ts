@@ -10,6 +10,7 @@
 import { allShortcuts, bindCombo, bindShortcut, bindingOf, comboLabel, matchesCombo, onBindingsChange, platformCombo, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
 import { isTypingTarget } from "../../../../../packages/ui/src/shortcuts-view";
 import { isKeyboardLocked } from "../../../../../packages/ui/src/keyboard-lock";
+import { keyboardLikely } from "../../../../../packages/ui/src/platform";
 import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
@@ -19,6 +20,9 @@ import { canvasModifierKeys } from "../camera/canvas-wheel-modifier";
 
 /** The digit-row chord that flies to view `n` (1 to 9): ⌘n on a Mac, Ctrl+Shift+n elsewhere. A position, so the digit row is matched by physical key. */
 const viewCombo = (n: number): Combo => platformCombo({ code: `Digit${n}`, mod: true }, { code: `Digit${n}`, mod: true, shift: true });
+
+/** `text · keys` for a palette hint, or just `text` where no hardware keyboard is likely (a phone shows no key hints). */
+export const hintWithKeys = (text: string, keys: string): string => (keys && keyboardLikely() ? (text ? `${text} · ${keys}` : keys) : text);
 
 /** The current key combination of a shortcut as text ("" when unbound). */
 export const bindingText = (id: string): string => {

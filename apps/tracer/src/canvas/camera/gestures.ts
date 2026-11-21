@@ -1,5 +1,5 @@
 /**
- * Gestures on the canvas: wheel, trackpad, touch and pointer, and what each does in each mode (D118, D159, D177).
+ * Gestures on the canvas: wheel, trackpad, touch and pointer, and what each does in each mode (D118, D159, D177, D377).
  *
  * Canvas lock on (snapped):
  * - a wheel or trackpad gesture moves one column or window (a long flick, two); no zoom; the canvas moves on purpose
@@ -27,7 +27,7 @@ import { setActivity } from "../../perf-activity";
 
 /**
  * Installs every canvas gesture on `cx`: the snapped and free wheel, the two-finger touch drag and the taps on a peeking
- * neighbour. It routes each wheel gesture to the content under the pointer or to the canvas (D275, D374). It lives as long
+ * neighbour. It routes each wheel gesture to the content under the pointer or to the canvas (D275, D374, D377). It lives as long
  * as `cx.signal`; aborting that removes every listener.
  */
 export function installGestures(cx: Ctx): void {

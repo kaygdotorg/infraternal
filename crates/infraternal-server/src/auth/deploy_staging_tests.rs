@@ -700,3 +700,7 @@ async fn staging_browser_services_probes_between_commands() {
     drop(unit);
     f.auth.auth.pool.close().await;
 }
+
+/// The S4 auto-update proof (#211) reuses this module's unit, passkey and PTY helpers.
+#[path = "update_staging_tests.rs"]
+mod update_staging;

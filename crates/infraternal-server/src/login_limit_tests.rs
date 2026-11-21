@@ -103,6 +103,8 @@ async fn bridge(front: UnixStream, back: UnixStream, full: oneshot::Sender<()>) 
     }
 }
 
+/// With the command queue, the pending table and the owner links all full, a
+/// login revocation still reaches the real host and is confirmed.
 #[tokio::test]
 #[ignore = "requires INFRATERNAL_TEST_BINARY; real host combined limits gate"]
 async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup() {
@@ -211,7 +213,12 @@ async fn full_command_queue_pending_table_and_owner_links_preserve_real_cleanup(
         )
         .await
         .unwrap(),
-        Ok(())
+        // The fake host answers like an agent older than D356.
+        Ok(crate::embedded::Revoked {
+            report: Some(crate::access_report::AccessReport::not_checked(
+                crate::access_report::Reason::OlderAgent
+            )),
+        })
     );
     let mut exited = [nix::poll::PollFd::new(
         pin.as_fd(),

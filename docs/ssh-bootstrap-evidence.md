@@ -53,7 +53,7 @@ permission prompts. Rootless requires an available systemd user manager;
 request own-user linger only through noninteractive host policy, without sudo.
 Denial produces a warning; rollback reverses only a newly enabled setting.
 
-Data is under D17, with a private owned 0700 root. SHA256 verification precedes
+Data is under D17 (as amended by D395), with a private owned 0700 root. SHA256 verification precedes
 execution. Upgrade only recognizable bootstrap-owned layouts; refuse unrelated files
 and units. Keep prior binary/state/unit until authenticated readiness. Rejoin
 copies existing identity only inside its private host-local transaction; no
