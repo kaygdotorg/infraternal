@@ -12,6 +12,10 @@ pub mod daemon;
 pub use control as daemon;
 #[path = "daemon_portable.rs"]
 pub mod control;
+/// Fuzz entry point for local control-socket messages and the Hello OS token (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[doc(hidden)]
+pub mod control_checks;
 mod daemon_writer;
 /// Admit bounded durable work before moving it off the async runtime.
 mod durable_io;
