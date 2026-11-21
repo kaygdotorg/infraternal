@@ -46,6 +46,9 @@ mod ssh_askpass;
 mod ssh_internal;
 #[cfg(test)]
 mod test_executable;
+/// The one check that a program root will run is one only root can replace (#146).
+#[cfg(any(machine_up, feature = "plugin-server"))]
+mod trusted_program;
 #[cfg(machine_up)]
 mod up;
 

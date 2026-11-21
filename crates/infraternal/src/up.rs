@@ -36,6 +36,7 @@ use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
+use crate::trusted_program::{ToolError, trusted_program};
 #[cfg(all(
     target_os = "linux",
     any(feature = "plugin-mesh", feature = "plugin-server")
@@ -1106,64 +1107,6 @@ fn trusted_tool(candidates: &[&str], missing: Failure) -> Result<PathBuf, Failur
     })
 }
 
-#[derive(Debug, Eq, PartialEq)]
-enum ToolError {
-    Missing,
-    Untrusted,
-}
-
-/// Resolve the first existing candidate to its canonical file, checking that
-/// nobody but root (or `owner`, which tests set to themselves) can replace it.
-/// An existing but replaceable candidate is refused, never skipped, so a
-/// tampered first choice cannot quietly fall through to another.
-fn trusted_program(candidates: &[&str], owner: u32) -> Result<PathBuf, ToolError> {
-    for candidate in candidates {
-        let candidate = Path::new(candidate);
-        let canonical = match fs::canonicalize(candidate) {
-            Ok(path) => path,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(ToolError::Untrusted),
-        };
-        // Both chains count: symlinks on the way (merged /usr, NixOS's
-        // /run/current-system) live in the candidate's own directories.
-        let trusted = regular_executable_of(&canonical, owner)
-            && candidate
-                .parent()
-                .into_iter()
-                .flat_map(Path::ancestors)
-                .chain(canonical.parent().into_iter().flat_map(Path::ancestors))
-                .all(|directory| protected_directory(directory, owner));
-        return if trusted {
-            Ok(canonical)
-        } else {
-            Err(ToolError::Untrusted)
-        };
-    }
-    Err(ToolError::Missing)
-}
-
-fn regular_executable_of(path: &Path, owner: u32) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| {
-        let mode = metadata.permissions().mode();
-        metadata.is_file()
-            && (metadata.uid() == 0 || metadata.uid() == owner)
-            && mode & 0o022 == 0
-            && mode & 0o111 != 0
-    })
-}
-
-/// A directory only root (or `owner`) can add to or rename in. A sticky
-/// directory (such as `/nix/store`) may be group-writable: others can add
-/// entries there but cannot replace the root-owned ones checked below it.
-fn protected_directory(directory: &Path, owner: u32) -> bool {
-    fs::metadata(directory).is_ok_and(|metadata| {
-        let mode = metadata.permissions().mode();
-        metadata.is_dir()
-            && (metadata.uid() == 0 || metadata.uid() == owner)
-            && (mode & 0o022 == 0 || mode & 0o1000 != 0)
-    })
-}
-
 /// Send enrollment input privately and preserve local preflight refusals from the helper.
 fn invoke_sudo(command: &mut Command, payload: &[u8]) -> Result<(), Failure> {
     let mut child = command
@@ -1521,99 +1464,9 @@ mod tests {
         );
     }
 
-    /// A private directory chain the test user owns, holding one program.
-    fn program_in(temporary: &TemporaryDirectory, directory_mode: u32, file_mode: u32) -> String {
-        let directory = temporary.0.join("bin");
-        fs::create_dir_all(&directory).unwrap();
-        fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(directory_mode)).unwrap();
-        let program = directory.join("tool");
-        fs::write(&program, "#!/bin/sh\n").unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(file_mode)).unwrap();
-        program.to_str().unwrap().to_owned()
-    }
-
+    /// The test account, which stands in for root as the trusted owner.
     fn me() -> u32 {
         nix::unistd::geteuid().as_raw()
-    }
-
-    #[test]
-    fn a_program_only_its_owner_can_replace_is_trusted_at_its_canonical_path() {
-        let temporary = TemporaryDirectory::new();
-        let program = program_in(&temporary, 0o755, 0o755);
-        assert_eq!(
-            trusted_program(&[program.as_str()], me()),
-            Ok(fs::canonicalize(&program).unwrap())
-        );
-        // A sticky shared directory (like /nix/store) is still protected.
-        let sticky = TemporaryDirectory::new();
-        let program = program_in(&sticky, 0o1777, 0o755);
-        assert!(trusted_program(&[program.as_str()], me()).is_ok());
-    }
-
-    #[test]
-    fn a_program_others_can_replace_is_refused() {
-        for (directory_mode, file_mode) in [
-            (0o755, 0o775),
-            (0o755, 0o757),
-            (0o777, 0o755),
-            (0o775, 0o755),
-        ] {
-            let temporary = TemporaryDirectory::new();
-            let program = program_in(&temporary, directory_mode, file_mode);
-            assert_eq!(
-                trusted_program(&[program.as_str()], me()),
-                Err(ToolError::Untrusted),
-                "directory {directory_mode:o}, file {file_mode:o}"
-            );
-        }
-        // Owned by someone else entirely: the test user cannot vouch for it.
-        let temporary = TemporaryDirectory::new();
-        let program = program_in(&temporary, 0o755, 0o755);
-        assert_eq!(
-            trusted_program(&[program.as_str()], me().wrapping_add(1)),
-            if me() == 0 {
-                Ok(fs::canonicalize(&program).unwrap())
-            } else {
-                Err(ToolError::Untrusted)
-            }
-        );
-    }
-
-    #[test]
-    fn a_replaceable_first_candidate_is_refused_not_skipped() {
-        let bad = TemporaryDirectory::new();
-        let good = TemporaryDirectory::new();
-        let bad = program_in(&bad, 0o777, 0o755);
-        let good = program_in(&good, 0o755, 0o755);
-        assert_eq!(
-            trusted_program(&[bad.as_str(), good.as_str()], me()),
-            Err(ToolError::Untrusted)
-        );
-        let missing = TemporaryDirectory::new();
-        let missing = missing.0.join("absent");
-        assert_eq!(
-            trusted_program(&[missing.to_str().unwrap(), good.as_str()], me()),
-            Ok(fs::canonicalize(&good).unwrap())
-        );
-        assert_eq!(
-            trusted_program(&[missing.to_str().unwrap()], me()),
-            Err(ToolError::Missing)
-        );
-    }
-
-    #[test]
-    fn a_symlink_in_a_writable_directory_is_refused_even_to_a_trusted_file() {
-        let target = TemporaryDirectory::new();
-        let target = program_in(&target, 0o755, 0o755);
-        let open = TemporaryDirectory::new();
-        fs::set_permissions(&open.0, fs::Permissions::from_mode(0o777)).unwrap();
-        let link = open.0.join("tool");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert_eq!(
-            trusted_program(&[link.to_str().unwrap()], me()),
-            Err(ToolError::Untrusted)
-        );
     }
 
     /// Both public names must reach the installed system image.
