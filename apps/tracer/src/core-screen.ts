@@ -8,7 +8,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { markMotion, triggeredByKeyboard } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
-import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
+import { isMacPlatform, keyboardLikely, shortcutLabel } from "../../../packages/ui/src/platform";
 import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
 import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
@@ -571,7 +571,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
     ...(options.canvas ? [
-      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: bindingLabel("shortcuts") || "?", action: "shortcuts:open" },
+      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: keyboardLikely() ? bindingLabel("shortcuts") || "?" : "", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
       ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),
