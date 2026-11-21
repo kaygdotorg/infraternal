@@ -1690,6 +1690,7 @@ async fn bind_udp(
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
         send_buffer_size: Some(UDP_BUFFER_BYTES),
+        ..UdpSocketFactory::default()
     };
     if request.port != 0 {
         let params = UdpTransportFactoryParams {
