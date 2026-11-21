@@ -807,6 +807,8 @@ fn run_configured(
     group: Option<&Path>,
     prestarted: Option<Pty>,
 ) -> io::Result<()> {
+    // The shim's one loop moves every key and every byte of output: keep it on a fast core (#554).
+    let _ = crate::qos::set_current_thread(crate::qos::Qos::UserInteractive);
     #[cfg(feature = "host-login")]
     let placement = group
         .map(|path| {

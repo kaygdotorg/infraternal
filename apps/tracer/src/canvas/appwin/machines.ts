@@ -90,8 +90,12 @@ export class Machines {
     });
   }
 
-  /** Asks one machine. Concurrent asks share the answer. */
+  /**
+   * Asks one machine. Concurrent asks share the answer. A machine whose enrollment has no direct address (`direct: false`) is never
+   * asked: it links over HTTPS only, so the ask could only fail, and the picker explains that it must be added again instead (#146).
+   */
   refresh(machine: HostEntry): Promise<void> {
+    if (machine.direct === false) return Promise.resolve();
     const running = this.inflight.get(machine.id);
     if (running) return running;
     const before = this.states.get(machine.id);

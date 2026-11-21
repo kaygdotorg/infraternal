@@ -91,10 +91,10 @@ async fn local_identity_load_refuses_symlink_and_shared_file() {
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, b"public fixture").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(
-        run(&data, None).await.unwrap_err().to_string(),
-        "remote infraternal agent operation refused"
-    );
+    // A 0644 identity names its fix instead of the generic failure (#554).
+    let error = run(&data, None).await.unwrap_err();
+    assert_eq!(Failure::of(&error), Some(Failure::SharedFile));
+    assert!(public_error(&error).contains("chmod 600"));
 }
 
 /// Restart refuses an enrolled certificate whose saved private key no longer matches.

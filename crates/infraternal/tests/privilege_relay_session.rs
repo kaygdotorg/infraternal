@@ -1,4 +1,4 @@
-//! Root upgrade steps over the relay behave like SSH commands, through the real helper binary (D376, #399).
+//! Root upgrade steps over the relay use the same step interface as the SSH install path, through the real helper binary (D376, #399).
 //!
 //! `RelaySession` runs each install step through `infraternal
 //! __privilege-channel`, so these tests use the built binary
@@ -282,8 +282,9 @@ async fn a_guard_disarm_failure_keeps_handover_unconfirmed() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// When the relay vanishes, a running step ends like a dropped SSH
-/// connection (exit 255) and later steps are refused.
+/// When the relay vanishes, a running step ends with exit status 255, the
+/// status the SSH transport reports for a lost connection, and later steps are
+/// refused.
 #[tokio::test]
 async fn a_lost_relay_fails_every_step() {
     let (relay, session, dir) = session("lost").await;

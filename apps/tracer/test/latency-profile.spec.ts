@@ -18,6 +18,7 @@
  *   reports the paint entry counts with the slower "visible after two frames" bound (`fcp_missing_n`).
  */
 import { expect, test, type Page } from "playwright/test";
+import { installFirstPaintRecorder, readFirstPaintMarks } from "./first-paint-recorder";
 import { d375Row, FIRST_PAINT_MS, latencyDisplay, PHONE_CPU_SLOWDOWN, RENDER_FPS } from "./latency-targets";
 
 test.skip(process.env.INFRATERNAL_LATENCY_PROFILE !== "1", "runs only in scripts/verify latency");
@@ -100,6 +101,7 @@ test("first paint on a phone-class CPU", async ({ browser }) => {
   const localOrigin = `http://localhost:${backendPort}`;
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   const firstPaints: number[] = [];
+  const browserFirstPaints: number[] = [];
   let missingEntries = 0;
   try {
     for (let index = 0; index < 20; index += 1) {
@@ -108,27 +110,14 @@ test("first paint on a phone-class CPU", async ({ browser }) => {
       const cdp = await context.newCDPSession(sample);
       await cdp.send("Emulation.setCPUThrottlingRate", { rate: PHONE_CPU_SLOWDOWN });
       await sample.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
+      await installFirstPaintRecorder(sample);
       await sample.goto(localOrigin);
       await expect(sample.locator("#login-passkey")).toBeVisible();
-      // An upper bound first: the time after the next two frames, once the sign-in button is visible (the perf suite's
-      // desktop check uses the same bound). Then the paint entry, delivered asynchronously; a buffered observer sees it
-      // even if it was recorded already. A sample without the entry falls back to the bound, which can only be slower.
-      const paint = await sample.evaluate(async () => {
-        const bound = await new Promise<number>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now()))));
-        const fcp = await new Promise<number | null>((resolve) => {
-          const observer = new PerformanceObserver((list) => {
-            const entry = list.getEntriesByName("first-contentful-paint")[0];
-            if (entry) { observer.disconnect(); resolve(entry.startTime); }
-          });
-          observer.observe({ type: "paint", buffered: true });
-          // sleep: the paint entry has no completion event to wait on; give it a bounded second, then use the bound.
-          setTimeout(() => { observer.disconnect(); resolve(null); }, 1_000);
-        });
-        return { bound, fcp };
-      });
-      if (paint.fcp === null) missingEntries += 1;
-      firstPaints.push(paint.fcp ?? paint.bound);
+      // The sample is the page's own clock: two frames after the sign-in button appeared (see first-paint-recorder.ts).
+      const marks = await readFirstPaintMarks(sample, "signin", 30_000);
+      if (marks.firstContentfulPaint === undefined) missingEntries += 1;
+      if (marks.firstPaint !== undefined) browserFirstPaints.push(marks.firstPaint);
+      firstPaints.push(marks.signin ?? Number.POSITIVE_INFINITY);
       await sample.close();
     }
   } finally {
@@ -138,8 +127,11 @@ test("first paint on a phone-class CPU", async ({ browser }) => {
   console.log(d375Row({
     key: "first_paint_phone", source: "tracer-production-build", n: sorted.length, value: percentile(sorted, 0.99),
     unit: "ms", target: FIRST_PAINT_MS,
-    extra: `p50_ms=${percentile(sorted, 0.5).toFixed(2)} fcp_missing_n=${missingEntries} cpu_slowdown=${PHONE_CPU_SLOWDOWN} ` +
-      "viewport=393x852 rtt_ms=0",
+    // `fcp_missing_n` stays for comparison with older logs: Chromium reports no first-contentful-paint for the sign-in
+    // page (a data: page does), so the row is the frame that shows the sign-in button, `signin_frame`.
+    extra: `p50_ms=${percentile(sorted, 0.5).toFixed(2)} fcp_missing_n=${missingEntries} measure=signin_frame ` +
+      `first_paint_entry_p50_ms=${percentile(browserFirstPaints.sort((left, right) => left - right), 0.5).toFixed(2)} ` +
+      `cpu_slowdown=${PHONE_CPU_SLOWDOWN} viewport=393x852 rtt_ms=0`,
   }).line);
 });
 

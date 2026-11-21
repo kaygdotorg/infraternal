@@ -135,7 +135,7 @@ export interface Bridge {
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
-  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** For a refused `Result`: the server's error text (at most 120 characters; never a success body). */ reason?: string; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
   cookie: string;
 }
 
@@ -572,7 +572,7 @@ export async function startRealServer(options: {
               if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_CLOSE_FRAME b${bridge.id} stream=${stream} code=${close.code} reason=${JSON.stringify(reason)}`);
             }
           }
-          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
+          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(f.ok ? {} : { reason: new TextDecoder().decode(f.json).slice(0, 120) }), ...(options.timedControls ? { at: Date.now() } : {}) });
         });
         // Drain messages already received before closing the browser side of a failed upstream route.
         later(() => {

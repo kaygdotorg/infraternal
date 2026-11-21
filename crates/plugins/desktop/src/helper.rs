@@ -645,7 +645,9 @@ fn produce_surface(
 /// Serves one client connection until it disconnects, `stopping` is set, or
 /// something fails.
 ///
-/// The client must pass peer admission first. A reader thread parses incoming
+/// The client must pass `peer` admission first ([`crate::socket::Peer::admit`]:
+/// the same user, or only root plus the token for a helper the root agent
+/// started as the console user). A reader thread parses incoming
 /// messages while the calling thread runs the control loop, so a slow write
 /// never blocks reading (writes time out after 2 seconds). On exit the
 /// companion is told to stop, the stream thread is joined, and the socket is
@@ -658,9 +660,10 @@ pub fn session(
     native: &mut Native,
     native_path: &Path,
     stopping: &Arc<AtomicBool>,
+    peer: &crate::socket::Peer,
 ) -> io::Result<()> {
-    crate::socket::admit(&socket)?;
     socket.set_write_timeout(Some(Duration::from_secs(2)))?;
+    peer.admit(&socket)?;
     let shutdown = socket.try_clone()?;
     let mut reader = DeadlineReader {
         stream: socket.try_clone()?,
