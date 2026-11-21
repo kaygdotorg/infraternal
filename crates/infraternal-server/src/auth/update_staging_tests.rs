@@ -53,6 +53,7 @@
 //! good release. No signing key is present.
 use super::*;
 use crate::release_payload::tests::Bucket;
+use futures_util::FutureExt;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
 /// The image name for this machine.
@@ -150,6 +151,8 @@ struct Carry {
     marker: i64,
     /// How many passkey unlocks phase 1 needed.
     unlocks: u32,
+    /// The warm cases after whose undo a session refused input (J1085 finding 1).
+    refused_after_undo: Vec<String>,
 }
 
 /// Every file of every release folder under `releases`, keyed by bucket path.
@@ -561,6 +564,8 @@ struct Server {
     shims: Vec<i32>,
     /// Input bytes sent per attached browser.
     sent: HashMap<usize, u64>,
+    /// The warm cases after whose undo a session refused input; must stay empty.
+    refused_after_undo: Vec<String>,
 }
 impl Server {
     /// Open the full set of live PTY sessions and record their shims.
@@ -623,6 +628,7 @@ impl Server {
         downtime.take_ms();
         announce(bucket, Some(version));
         let limit = if case == "timeout" { 420 } else { 240 };
+        let mut in_trial = "not-tried";
         if case == "timeout" {
             // While the new release is on trial, write into its database: the undo must
             // throw this away with the rest of the trial's writes (D295).
@@ -632,6 +638,19 @@ impl Server {
             .await;
             serving(self.address).await;
             write_marker(&self.database, marker + 100).await;
+            // J1085 finding 1: type into the sessions while the new release is on trial.
+            // If the new release takes the input, it records the ack in its database,
+            // which the undo then rewinds while the shims keep the newer cursor.
+            let typed = tokio::time::timeout(
+                Duration::from_secs(20),
+                std::panic::AssertUnwindSafe(self.echo("in-trial")).catch_unwind(),
+            )
+            .await;
+            in_trial = match typed {
+                Ok(Ok(_)) => "echoed",
+                Ok(Err(_)) => "refused",
+                Err(_) => "held",
+            };
         }
         let state = wait_outcome(&self.data, Duration::from_secs(limit), version, "undone").await;
         serving(self.address).await;
@@ -647,13 +666,24 @@ impl Server {
             self.shims,
             "the shims are unchanged"
         );
-        let echoed = self.echo(&format!("after-{case}")).await;
+        // Every session must still take input after the undo (J1085 finding 1).
+        let echoed = std::panic::AssertUnwindSafe(self.echo(&format!("after-{case}")))
+            .catch_unwind()
+            .await;
+        if echoed.is_err() {
+            self.refused_after_undo.push(case.to_owned());
+        }
         println!(
-            "UPDATE case={case} bucket=warm outcome=undone reason={:?} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_kept=true trial_write_discarded={} max_healthz_gap_ms={gap:.1}",
+            "UPDATE case={case} bucket=warm outcome=undone reason={:?} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} in_trial_typing={in_trial} echoed_browsers_after_undo={:?} marker_kept=true trial_write_discarded={} max_healthz_gap_ms={gap:.1}",
             state.applied.as_ref().unwrap().reason,
             self.shims.len(),
+            echoed.ok(),
             case == "timeout",
         );
+        if !self.refused_after_undo.is_empty() {
+            // Carry on with fresh sessions, so the rest of the matrix still runs.
+            self.open_sessions().await;
+        }
     }
 }
 
@@ -810,6 +840,7 @@ async fn auto_update_failure_matrix() {
         sessions: Vec::new(),
         shims: Vec::new(),
         sent: HashMap::new(),
+        refused_after_undo: Vec::new(),
     };
     server.open_sessions().await;
     assert_eq!(running_digest(pid), server.digests[&versions.old]);
@@ -955,6 +986,7 @@ async fn auto_update_failure_matrix() {
         boot_id: boot_id(),
         marker: 16,
         unlocks,
+        refused_after_undo: server.refused_after_undo.clone(),
     };
     let path = root.join(CARRY);
     private_write(&path, &serde_json::to_vec(&carry).unwrap());
@@ -1032,6 +1064,7 @@ async fn auto_update_after_reboot() {
         sessions: Vec::new(),
         shims: Vec::new(),
         sent: HashMap::new(),
+        refused_after_undo: Vec::new(),
     };
     server.assert_undone(&versions.reboot, carry.marker).await;
     let locked = !ca_unlocked(address, &server.session).await;
@@ -1079,4 +1112,10 @@ async fn auto_update_after_reboot() {
     );
     drop(downtime);
     let _ = Command::new("systemctl").args(["stop", UNIT]).status();
+    // Checked last, so a failure still leaves the whole matrix in the log.
+    assert!(
+        carry.refused_after_undo.is_empty(),
+        "sessions refused input after the undo in: {:?}",
+        carry.refused_after_undo
+    );
 }
