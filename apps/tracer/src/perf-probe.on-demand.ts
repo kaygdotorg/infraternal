@@ -529,7 +529,8 @@ export class PerformanceProbe {
       overlay: this.humanOverlay.map((frame) => ({ at: frame.at, glyphs: frame.glyphs.map((glyph) => ({ ...glyph })) })),
       startColumn: this.humanStartColumn,
       lastPaintedAt: this.humanLastPaintedAt,
-      predictor: this.terminal === undefined ? undefined : (({ reason, muted, mispredictions, fallbacks }) => ({ reason, muted, mispredictions, fallbacks }))(this.terminal.predictiveEchoState),
+      // A terminal (or a test double) may expose no prediction state yet; the trace then records none.
+      predictor: ((state) => state === undefined ? undefined : { reason: state.reason, muted: state.muted, mispredictions: state.mispredictions, fallbacks: state.fallbacks })(this.terminal?.predictiveEchoState),
     };
   }
 
