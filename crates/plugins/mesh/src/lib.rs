@@ -84,7 +84,7 @@ pub mod node;
 /// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.
 #[cfg(any(
     all(feature = "agent", target_os = "macos"),
-    all(test, target_os = "linux")
+    all(test, feature = "agent", target_os = "linux")
 ))]
 mod macos_machine;
 
