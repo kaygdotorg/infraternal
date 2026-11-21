@@ -77,6 +77,9 @@ pub const DID_NOT_START: &str = "the new release could not start";
 /// stays paused.
 pub const RESTORE_PENDING: &str =
     "the previous release runs again, but its database copy could not be restored yet";
+/// Why a new release on trial refuses to open the database: it could not record
+/// its trial in the marker, so nothing would check it or undo it (J1085).
+pub const TRIAL_NOT_RECORDED: &str = "the new release could not record its trial";
 /// Why a marker that names neither the running image nor its predecessor was dropped.
 pub const INTERRUPTED: &str = "the update was interrupted by a different server binary";
 
@@ -312,10 +315,14 @@ pub fn resume(
     };
     let own = own()?;
     if own == pending.to_sha256 {
+        // A trial that cannot be recorded must not run at all: the caller then stays
+        // off the database and stops, so the previous release starts instead (J1085).
+        let record =
+            |pending: &Pending| write_pending(&lock, pending).map_err(|_| TRIAL_NOT_RECORDED);
         return match pending.phase {
             Phase::Switching => {
                 pending.phase = Phase::Trial;
-                write_pending(&lock, &pending)?;
+                record(&pending)?;
                 Ok(Resume::Trial(pending))
             }
             // B started again mid-trial (a reload or a restart into B): it is not
@@ -327,7 +334,7 @@ pub fn resume(
             // The exec of A failed and the late-exec recovery brought B back.
             Phase::Rollback if pending.undo_attempts < MAX_UNDO_ATTEMPTS => {
                 pending.undo_attempts += 1;
-                write_pending(&lock, &pending)?;
+                record(&pending)?;
                 Ok(Resume::Trial(pending))
             }
             Phase::Rollback => Ok(Resume::Finished(UNDO_FAILED)),

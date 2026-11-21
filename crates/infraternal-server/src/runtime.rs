@@ -203,6 +203,10 @@ pub enum ServerError {
     /// System time predates the Unix epoch or does not fit the auth API.
     #[error("system clock is invalid")]
     Clock,
+    /// This is a new release whose update trial could not be recorded, so it must not
+    /// serve; the previous release starts instead (#211 S4).
+    #[error("the update trial could not be recorded")]
+    UpdateTrial,
 }
 
 /// The maximum time server startup waits for a configured listen address to appear.

@@ -51,7 +51,9 @@ pub(crate) async fn serve(
         // An update switch in flight is settled before anything opens the database:
         // the previous release puts back its D295 copy here (#211 S4).
         #[cfg(feature = "release")]
-        infraternal_server::update_apply::startup(&config.data_dir);
+        if infraternal_server::update_apply::startup(&config.data_dir).is_err() {
+            return Err(infraternal_server::ServerError::UpdateTrial);
+        }
         let remote = options
             .remote_listen
             .map(|listen| {

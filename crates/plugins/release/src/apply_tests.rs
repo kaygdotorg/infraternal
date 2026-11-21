@@ -425,3 +425,24 @@ fn a_failed_restore_pauses_the_new_release_and_retries_at_the_next_start() {
     assert_eq!(std::fs::read(data.0.join(DATABASE)).unwrap(), b"a-copy");
     assert!(!in_flight(&data.0));
 }
+
+/// J1085 finding 3 (its experiment 3): a new release that cannot record its trial
+/// (here `pending.json.tmp` is blocked by a folder, as a full or failing disk would)
+/// gets TRIAL_NOT_RECORDED, so its startup stays off the database.
+#[test]
+fn a_new_release_that_cannot_record_its_trial_is_told_so() {
+    let data = Data::new();
+    data.mark(Phase::Switching);
+    let blocker = data.updates().join("pending.json.tmp");
+    std::fs::create_dir(&blocker).unwrap();
+    std::fs::write(blocker.join("x"), b"x").unwrap();
+    assert_eq!(
+        resume(&data.0, B, || Ok("bb".repeat(32))),
+        Err(TRIAL_NOT_RECORDED)
+    );
+    assert_eq!(
+        read_pending(&data.updates()).unwrap().phase,
+        Phase::Switching,
+        "the marker still says B never ran, so A keeps its database"
+    );
+}

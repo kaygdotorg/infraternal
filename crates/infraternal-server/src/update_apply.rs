@@ -126,10 +126,15 @@ pub fn image_digest(file: &std::fs::File) -> Result<String, &'static str> {
 ///
 /// Call it first thing in server startup, before the database or the CA are touched.
 /// Only root release builds do anything here. Errors are logged and never stop the
-/// server: a failed undo must not take it offline.
-pub fn startup(data: &Path) {
+/// server (a failed undo must not take it offline), with one exception: a new
+/// release that cannot record its trial returns `Err` and must not open the
+/// database. The caller stops; the service manager then starts the boot pointer, the
+/// previous release, which finds the switch never ran and keeps its database (J1085).
+/// # Errors
+/// [`apply::TRIAL_NOT_RECORDED`]: this process is the new release, untried.
+pub fn startup(data: &Path) -> Result<(), &'static str> {
     if update::availability(crate::release_latest::release_build()).is_err() {
-        return;
+        return Ok(());
     }
     let resumed = apply::resume(data, infraternal_plugin_api::VERSION, || {
         std::fs::File::open("/proc/self/exe")
@@ -149,8 +154,16 @@ pub fn startup(data: &Path) {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
         }
         Ok(Resume::Finished(outcome)) => tracing::warn!(outcome, "update_switch_finished"),
+        Err(apply::TRIAL_NOT_RECORDED) => {
+            tracing::error!(
+                reason = apply::TRIAL_NOT_RECORDED,
+                "update_switch_resume_failed"
+            );
+            return Err(apply::TRIAL_NOT_RECORDED);
+        }
         Err(reason) => tracing::error!(reason, "update_switch_resume_failed"),
     }
+    Ok(())
 }
 
 /// Start S4 next to the S3 check: run the trial if this process is one, then watch for
