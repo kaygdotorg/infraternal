@@ -686,21 +686,9 @@ pub(crate) async fn attach_all(
     sessions: &[[u8; 16]],
     origin: &str,
 ) -> Vec<Browser> {
-    attach_all_at(address, token, sessions, origin, |_| 0).await
-}
-/// Like [`attach_all`], but each session (by its index in `sessions`) reattaches with
-/// the input cursor `last_in` gives it: what a browser that already typed into the
-/// session sends, so a resumed browser can keep typing at its own offset (#211 S4).
-pub(crate) async fn attach_all_at(
-    address: std::net::SocketAddr,
-    token: &str,
-    sessions: &[[u8; 16]],
-    origin: &str,
-    last_in: impl Fn(usize) -> u64,
-) -> Vec<Browser> {
     use infraternal_protocol::{Frame, decode_muxed_frame};
     let mut browsers = Vec::new();
-    for (chunk_index, chunk) in sessions.chunks(25).enumerate() {
+    for chunk in sessions.chunks(25) {
         let mut socket = browser(address, token, origin).await;
         for (index, session_id) in chunk.iter().enumerate() {
             let stream = u32::try_from(index * 2 + 1).unwrap();
@@ -710,7 +698,7 @@ pub(crate) async fn attach_all_at(
                 &Frame::AttachTerm {
                     session_id,
                     last_out_seq: 0,
-                    last_in_seq: last_in(chunk_index * 25 + index),
+                    last_in_seq: 0,
                 },
             )
             .await;

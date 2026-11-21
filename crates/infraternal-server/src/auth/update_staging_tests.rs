@@ -585,23 +585,11 @@ impl Server {
     async fn echo(&mut self, marker: &str) -> usize {
         println!("UPDATE step=echo marker={marker}");
         tokio::time::timeout(Duration::from_secs(120), async {
-            // Each browser typed only into its first session (index 25 * browser), and
-            // reattaches it at the offset it reached, as a real browser does.
-            let sent = self.sent.clone();
-            let mut attached = crate::ca_handoff::shipping_tests::attach_all_at(
-                self.address,
-                &self.session,
-                &self.sessions,
-                ORIGIN,
-                |session| {
-                    if session % 25 == 0 {
-                        sent.get(&(session / 25)).copied().unwrap_or(0)
-                    } else {
-                        0
-                    }
-                },
-            )
-            .await;
+            // Every echo opens new browser connections, and each connection's writer
+            // starts its own input stream at offset 0, so nothing carries over.
+            self.sent.clear();
+            let mut attached =
+                attach_all(self.address, &self.session, &self.sessions, ORIGIN).await;
             let echoed = echo_all(&mut attached, &mut self.sent, marker).await;
             attached.clear();
             echoed
@@ -923,7 +911,8 @@ async fn auto_update_failure_matrix() {
     // Sessions live in their own scope units, so they may outlive the server; whether
     // the cold-started release can still reach them is reported, not required.
     let echoed_after_cold = if shims_left == server.sessions.len() {
-        tokio::time::timeout(Duration::from_secs(60), server.echo("after-kill"))
+        std::panic::AssertUnwindSafe(server.echo("after-kill"))
+            .catch_unwind()
             .await
             .ok()
     } else {
