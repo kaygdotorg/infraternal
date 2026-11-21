@@ -4638,6 +4638,7 @@ mod tests {
             .collect()
     }
 
+    /// State from an unbound (slice-1) node loses its key and peers once, then keeps everything.
     #[test]
     fn restoring_unbound_state_removes_the_key_and_logs_why() {
         let directory = test_directory();
@@ -4766,6 +4767,7 @@ mod tests {
         assert_eq!(Some(first), crate::macos_machine::fingerprint());
     }
 
+    /// Restoring under a new enrolment retires the old key and records the new binding.
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();

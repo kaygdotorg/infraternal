@@ -265,7 +265,6 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A reinstall on the same hardware (new volume) is refused like Linux refuses a new machine ID.
     /// Mesh state with no record is refused as unbound, and no record is written.
     #[test]
     fn mesh_state_with_no_binding_record_is_refused_and_left_untouched() {
@@ -298,6 +297,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A reinstall on the same hardware (new volume) is refused like Linux refuses a new machine ID.
     #[test]
     fn a_reinstall_on_the_same_hardware_is_refused() {
         let dir = state();
