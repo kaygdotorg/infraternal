@@ -1311,3 +1311,7 @@ mod renewal_cli;
 
 #[path = "remote_shipping_route_tests.rs"]
 mod shipping_route;
+
+/// Many-host fixture for the #562 scale measurements (`scripts/measure-many-hosts.py`).
+#[path = "remote_many_host_tests.rs"]
+mod many_host;
