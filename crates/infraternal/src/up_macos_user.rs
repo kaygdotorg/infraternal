@@ -47,8 +47,6 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// The receipt that names the host this user-mode install belongs to.
-const RECEIPT: &str = ".user-owner";
 /// The root-mode `LaunchDaemon`; user mode refuses to install beside it.
 const ROOT_MODE_PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
 /// How long `up` waits for launchd to report the agent running.
@@ -80,11 +78,11 @@ impl Paths {
             .ok_or(ErrorKind::NotFound)?
             .dir;
         let library = home.join("Library");
-        let base = library.join("Application Support/infraternal");
+        let base = macos_user_mode::user_install_base(&home);
         Ok(Self {
             data: base.join("agent"),
             state: base.join("state"),
-            binary: base.join("bin/infraternal"),
+            binary: macos_user_mode::user_install_binary(&home),
             logs: library.join("Logs/infraternal"),
             launch_agent: library.join(format!("LaunchAgents/{AGENT_LABEL}.plist")),
             base,
@@ -93,7 +91,7 @@ impl Paths {
 
     /// The receipt naming this install's host.
     fn receipt(&self) -> PathBuf {
-        self.base.join(RECEIPT)
+        self.base.join(macos_user_mode::USER_RECEIPT)
     }
 
     /// The `PATH` line `up` prints, since a per-user Mac install adds no link (D395).
@@ -577,14 +575,23 @@ fn stop_agent(uid: u32) -> io::Result<()> {
     }
 }
 
-/// Remove this person's user-mode install when run as `--bootstrap-uninstall <host>`.
+/// Remove this person's user-mode install when run as `--bootstrap-uninstall <host>`, or as
+/// the server-requested [`macos_user_mode::USER_REMOVE_HANDOFF`] child.
+///
+/// The handoff child is what the agent starts, in its own process group, when the server asks
+/// it to uninstall (J1087): it first waits for the one armed byte the agent writes after its
+/// reply went out, so a dropped reply removes nothing, then removes the install exactly like
+/// the person's own command (which also stops the agent that started it).
 ///
 /// Returns `None` for any other command, for root (root mode has its own removal), and when
 /// this account has no user-mode receipt, so the existing removal paths keep their meaning.
 #[must_use]
 pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
     let arguments: Vec<OsString> = env::args_os().skip(1).collect();
-    if arguments.len() != 2 || arguments[0] != "--bootstrap-uninstall" {
+    let handoff = arguments
+        .first()
+        .is_some_and(|first| first == macos_user_mode::USER_REMOVE_HANDOFF);
+    if arguments.len() != 2 || !(handoff || arguments[0] == "--bootstrap-uninstall") {
         return None;
     }
     let uid = nix::unistd::Uid::current().as_raw();
@@ -596,6 +603,12 @@ pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
         return None;
     }
     let host = arguments[1].to_str()?;
+    if handoff {
+        let mut armed = [0_u8];
+        if io::stdin().read_exact(&mut armed).is_err() || armed != [1] {
+            return Some(ExitCode::FAILURE);
+        }
+    }
     Some(match uninstall(&paths, uid, host) {
         Ok(()) => {
             println!(
@@ -616,7 +629,7 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
     fs::File::open(paths.receipt())?
         .take(64)
         .read_to_string(&mut receipt)?;
-    if receipt.trim_end() != host {
+    if !macos_user_mode::receipt_names_host(&receipt, host) {
         return Err(io::Error::new(
             ErrorKind::PermissionDenied,
             "this install belongs to another host",

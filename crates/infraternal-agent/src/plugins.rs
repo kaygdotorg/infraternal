@@ -191,6 +191,17 @@ pub(crate) fn registry_at_with_mesh_state(
     {
         registry.register(Box::new(plugin))?;
     }
+    // A user-mode Mac (#146) is removed from the server the same way, by the person's own
+    // agent, which checks it runs its install's binary and that the receipt names this host
+    // (J1087). Before this the server's uninstall reached no plugin on such a Mac.
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    if mode == ExecutionMode::Remote
+        && !nix::unistd::Uid::effective().is_root()
+        && let Some(enrolment) = installation
+        && let Some(plugin) = macos_uninstall::Uninstall::for_user_mode(enrolment)
+    {
+        registry.register(Box::new(plugin))?;
+    }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
         let executable = std::env::current_exe().map_err(|_| PluginError::Rejected)?;

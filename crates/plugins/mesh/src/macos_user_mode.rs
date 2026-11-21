@@ -21,6 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 
 /// The launchd label of the on-demand root helper.
 pub const HELPER_LABEL: &str = "org.infraternal.mesh-helper";
@@ -39,6 +40,46 @@ pub const HELPER_SOCKET: &str = "/var/run/org.infraternal.mesh-helper.sock";
 pub const HELPER_ENTRY: &str = "__mesh-helper";
 /// The launchd label of the user-mode agent.
 pub const AGENT_LABEL: &str = "org.infraternal.agent";
+/// The receipt in a user-mode install's base folder that names the host it belongs to.
+pub const USER_RECEIPT: &str = ".user-owner";
+/// The hidden entry a user-mode agent starts, in its own process group, to remove its install
+/// after the server's authenticated uninstall reply is written (J1087, J1027).
+///
+/// The child waits for one armed byte on standard input, so a reply the transport drops
+/// (stdin closes unread) removes nothing.
+pub const USER_REMOVE_HANDOFF: &str = "--macos-user-remove-after-reply";
+
+/// A user-mode install's base folder for the account whose home is `home` (D395).
+#[must_use]
+pub fn user_install_base(home: &Path) -> PathBuf {
+    home.join("Library/Application Support/infraternal")
+}
+
+/// The binary a user-mode `LaunchAgent` runs, under [`user_install_base`].
+#[must_use]
+pub fn user_install_binary(home: &Path) -> PathBuf {
+    user_install_base(home).join("bin/infraternal")
+}
+
+/// The receipt naming the install's host, under [`user_install_base`].
+#[must_use]
+pub fn user_install_receipt(home: &Path) -> PathBuf {
+    user_install_base(home).join(USER_RECEIPT)
+}
+
+/// Whether a user-mode receipt's `contents` name exactly `host`.
+///
+/// `host` must be the 32-digit lowercase form the receipt is written in, so a removal request
+/// for any other text never matches a receipt by accident.
+#[must_use]
+pub fn receipt_names_host(contents: &str, host: &str) -> bool {
+    host.len() == 32
+        && host
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && contents.trim_end_matches('\n') == host
+}
+
 /// The version both sides must speak; a mismatch is refused, never guessed.
 pub const PROTOCOL_VERSION: u32 = 1;
 /// Largest request or reply body accepted, in bytes.
@@ -962,6 +1003,31 @@ mod tests {
             interface: "utun3".to_owned(),
         };
         assert!(plan_route(wanted, "utun7", &[vpn_route], &[]).is_err());
+    }
+
+    /// A user-mode install's paths sit under the person's own `~/Library` (D395), and a receipt
+    /// matches only the exact host it names (J1087 server uninstall).
+    #[test]
+    fn user_install_paths_and_receipts() {
+        let home = Path::new("/Users/a");
+        assert_eq!(
+            user_install_binary(home),
+            Path::new("/Users/a/Library/Application Support/infraternal/bin/infraternal")
+        );
+        assert_eq!(
+            user_install_receipt(home),
+            Path::new("/Users/a/Library/Application Support/infraternal/.user-owner")
+        );
+        let host = "0123456789abcdef0123456789abcdef";
+        assert!(receipt_names_host(&format!("{host}\n"), host));
+        assert!(!receipt_names_host(
+            &format!("{host}\n"),
+            "0123456789abcdef0123456789abcdee"
+        ));
+        assert!(!receipt_names_host("\n", ""));
+        assert!(!receipt_names_host(" x\n", " x"));
+        let upper = host.to_ascii_uppercase();
+        assert!(!receipt_names_host(&upper, &upper));
     }
 
     /// The helper's property list is socket-activated for one uid and read back exactly.
