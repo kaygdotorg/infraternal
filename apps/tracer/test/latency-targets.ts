@@ -47,7 +47,10 @@ export interface D375Measurement {
     | "reconnect_last_screen"
     | "reconnect_network_change"
     | "render_10mbps"
-    | "first_paint_phone";
+    | "first_paint_phone"
+    | "real_paint_after_ws"
+    | "real_echo_shell"
+    | "real_typed_letter";
   source: string;
   n: number;
   value: number;
@@ -55,6 +58,8 @@ export interface D375Measurement {
   target: number;
   gate?: number;
   higherIsBetter?: boolean;
+  /** Print `result=REPORT` instead of PASS/FAIL: a row that is measured and shown but does not gate yet. */
+  reportOnly?: boolean;
   extra?: string;
 }
 
@@ -67,6 +72,6 @@ export function d375Row(row: D375Measurement): { line: string; passed: boolean }
     `METRIC name=d375_${row.key} source=${row.source} display=${latencyDisplay()} n=${row.n} ` +
     `value=${row.value.toFixed(2)} unit=${row.unit} ` +
     `target=${row.target.toFixed(2)} gate=${gate.toFixed(2)} target_met=${within(row.target) ? "yes" : "no"} ` +
-    `result=${passed ? "PASS" : "FAIL"}${row.extra ? ` ${row.extra}` : ""}`;
+    `result=${row.reportOnly ? "REPORT" : passed ? "PASS" : "FAIL"}${row.extra ? ` ${row.extra}` : ""}`;
   return { line, passed };
 }

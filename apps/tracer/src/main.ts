@@ -20,7 +20,7 @@ import { BRAND_MARK } from "./auth-marks";
 import { loading } from "../../../packages/ui/src/countup";
 import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
-import type { PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
+import type { HumanTrace, PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
@@ -31,6 +31,14 @@ declare global {
     __tracerPerformanceProbe?: {
       /** Returns content-free probe stage times for the current synthetic key run. */
       trace: () => ProbeTraceSample[];
+      /** The typing recorder for a driver that types like a person (see `PerformanceProbe.startHumanRecording`). */
+      human: {
+        start: () => void;
+        stop: () => void;
+        trace: () => HumanTrace;
+        cursorColumn: () => number;
+        lastPaintedAt: () => number;
+      };
     };
     __tracerTestDouble?: {
       isConnected: () => boolean;
@@ -625,7 +633,16 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     const { PerformanceProbe } = await onDemand(() => import("./perf-probe.on-demand"));
     if (generation !== sessionGeneration) return;
     performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
-    window.__tracerPerformanceProbe = { trace: () => performanceProbe?.traceSamples() ?? [] };
+    window.__tracerPerformanceProbe = {
+      trace: () => performanceProbe?.traceSamples() ?? [],
+      human: {
+        start: () => performanceProbe?.startHumanRecording(),
+        stop: () => performanceProbe?.stopHumanRecording(),
+        trace: () => performanceProbe?.humanTrace() ?? { keys: [], outputs: [], overlay: [], startColumn: 0, lastPaintedAt: 0 },
+        cursorColumn: () => performanceProbe?.cursorColumn() ?? 0,
+        lastPaintedAt: () => performanceProbe?.lastPaintedAt() ?? 0,
+      },
+    };
   }
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
