@@ -10,9 +10,9 @@
 //! libraries, sourced files and arbitrary root executable-input graphs are not.
 //! A negative result establishes none of those routes' absence. The report
 //! names completed checks and explicitly says access outside them is uncovered.
-use std::{io::Read, path::Path, process::Stdio, time::Duration};
 #[cfg(not(target_vendor = "apple"))]
 use std::ffi::CString;
+use std::{io::Read, path::Path, process::Stdio, time::Duration};
 
 use nix::unistd::{Group, Uid, User};
 use tokio::io::AsyncReadExt as _;
