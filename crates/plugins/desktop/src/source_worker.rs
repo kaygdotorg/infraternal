@@ -227,10 +227,10 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
 /// Keeps the companion's permanent closure result across replacement capture lanes.
 /// Generic helper errors and transport failures leave the target eligible to reconnect.
 fn remember_closed_window(metadata: &Metadata, body: &[u8]) {
-    if let Ok(reply) = serde_json::from_slice::<Value>(body) {
-        if reply["state"] == "gone" {
-            metadata.latch_gone(EndReason::from_helper_word(reply["reason"].as_str()));
-        }
+    if let Ok(reply) = serde_json::from_slice::<Value>(body)
+        && reply["state"] == "gone"
+    {
+        metadata.latch_gone(EndReason::from_helper_word(reply["reason"].as_str()));
     }
 }
 /// Turns the helper's video payload (8-byte capture time, 1-byte keyframe flag,
