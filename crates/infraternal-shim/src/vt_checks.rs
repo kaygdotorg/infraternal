@@ -200,3 +200,29 @@ mod seed_corpus {
         assert!(seeds > 0, "no seeds in {dir}");
     }
 }
+
+/// Inputs the 2026-11-21 campaign found (#561), kept as named regressions.
+#[cfg(test)]
+mod found {
+    /// ESC followed by a C1-range byte (0x80-0x9F) and a printable: a fresh
+    /// terminal fed the snapshot must end in the same state as the original.
+    /// (The leading reset only makes a snapshot representable; the resize
+    /// marker only makes the hook take its snapshot after the output.)
+    ///
+    /// Fails today (#561): the engine applies the VT500 "anywhere" C1
+    /// transitions inside escape, CSI, DCS-header and SOS/PM/APC states (here
+    /// 0x9C ends the escape and the next byte prints), while the carry
+    /// observer (vte) ignores C1 bytes there. The carry keeps `ESC 0x9C '`,
+    /// and a viewer replaying it prints `'` a second time.
+    #[test]
+    #[ignore = "known carry/engine divergence on C1 bytes inside sequences, #561"]
+    fn snapshot_continues_after_esc_c1_byte_and_resize() {
+        for input in [
+            &b"\x50\x01\x00\x1bc\x1b\x9c'\xfe\xfe'"[..],
+            b"\x50\x01\x00\x1bc\x1b\x9cX\r\n\xfe\xfe'",
+            b"\x50\x01\x00\x1bc\x1b\x80'\xfe\xfe\x50",
+        ] {
+            super::verify_vt_stream_sample(input);
+        }
+    }
+}
