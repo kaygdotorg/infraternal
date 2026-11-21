@@ -258,14 +258,23 @@ fn an_end_reason_roundtrips_as_a_close_code_and_unknown_values_are_safe() {
         };
         assert_eq!(EndReason::from_close_code(code), Some(reason));
         assert_eq!(text, reason.close_text());
-        assert_eq!(EndReason::from_helper_word(Some(reason.helper_word())), reason);
+        assert_eq!(
+            EndReason::from_helper_word(Some(reason.helper_word())),
+            reason
+        );
     }
     assert_eq!(WINDOW_CLOSED, 4410);
     assert_eq!(CONSOLE_USER_CHANGED, 4411);
     for code in [0, 4403, 4404, 4409, 4412, u16::MAX] {
         assert_eq!(EndReason::from_close_code(code), None);
     }
-    for word in [None, Some(""), Some("window_closed"), Some("CONSOLE_USER_CHANGED"), Some("<script>")] {
+    for word in [
+        None,
+        Some(""),
+        Some("window_closed"),
+        Some("CONSOLE_USER_CHANGED"),
+        Some("<script>"),
+    ] {
         assert_eq!(EndReason::from_helper_word(word), EndReason::WindowClosed);
     }
 }

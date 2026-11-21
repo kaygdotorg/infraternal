@@ -84,8 +84,12 @@ impl NodeHost for Node {
                         .unwrap_or(0),
                 );
                 self.prepared.notify_one();
-                if let (Some(word), true) = (self.closed_during_disconnect, self.opens.load(Ordering::Relaxed) > 0) {
-                    let mut reply = serde_json::json!({"session_id":input["session_id"],"state":"gone"});
+                if let (Some(word), true) = (
+                    self.closed_during_disconnect,
+                    self.opens.load(Ordering::Relaxed) > 0,
+                ) {
+                    let mut reply =
+                        serde_json::json!({"session_id":input["session_id"],"state":"gone"});
                     if let Some(word) = word {
                         reply["reason"] = word.into();
                     }

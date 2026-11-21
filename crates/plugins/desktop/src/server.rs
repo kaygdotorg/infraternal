@@ -1013,7 +1013,12 @@ enum ViewerCommand {
     ),
 }
 /// Retires a viewer, telling it why when the source ended the session for good (`ended`).
-async fn send_viewer_close(replies: &ReplySender, stream: u32, ended: Option<EndReason>, attached: bool) {
+async fn send_viewer_close(
+    replies: &ReplySender,
+    stream: u32,
+    ended: Option<EndReason>,
+    attached: bool,
+) {
     let (code, reason) = if let Some(reason) = ended {
         (reason.close_code(), reason.close_text())
     } else if attached {
