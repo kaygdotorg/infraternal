@@ -4696,14 +4696,12 @@ mod tests {
                 .expect("restore refused"),
             Node::check_enrolled_machine(&directory.0).expect_err("pre-start check refused"),
         ] {
-            assert!(
-                matches!(
+            assert!(matches!(
                     error.get_ref().and_then(
                         |inner| inner.downcast_ref::<crate::enrolment::MachineBindingError>()
                     ),
                     Some(crate::enrolment::MachineBindingError::UnboundRecord)
-                )
-            );
+                ));
         }
         assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
         assert!(!directory.join(crate::macos_machine::MACHINE_FILE).exists());
