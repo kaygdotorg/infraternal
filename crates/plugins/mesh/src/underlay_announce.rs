@@ -35,8 +35,8 @@ pub(crate) struct CoalescedWake {
 }
 
 impl CoalescedWake {
-    /// Whether a wakeup is already queued and not yet begun. Only the Linux packet path asks.
-    #[cfg(target_os = "linux")]
+    /// Whether a wakeup is already queued and not yet begun. Only the Linux packet path asks; tests on every host check it.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn is_pending(&self) -> bool {
         self.pending.load(Ordering::Relaxed)
     }
