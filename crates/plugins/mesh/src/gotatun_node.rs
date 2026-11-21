@@ -2381,7 +2381,7 @@ mod tests {
                     0,
                     0,
                     0,
-                    0,
+                    1,
                     0,
                     (index >> 16) as u16,
                     index as u16,
