@@ -12,6 +12,7 @@ fn fixture() -> (PathBuf, Router) {
         .join("../../target")
         .join(format!("web-assets-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(root.join("fonts/a")).unwrap();
     for (name, bytes) in [
         ("chunk-1234abcd.js", b"identity payload".as_slice()),
         ("chunk-1234abcd.js.gz", b"gzip".as_slice()),
@@ -22,6 +23,12 @@ fn fixture() -> (PathBuf, Router) {
         ("index.html.br", b"compressed html".as_slice()),
         ("font.woff2", b"font bytes".as_slice()),
         ("main.js", b"mutable entry".as_slice()),
+        ("main.0123456789.js", b"fingerprinted entry".as_slice()),
+        ("ui.89abcdef01.css", b"fingerprinted sheet".as_slice()),
+        (
+            "fonts/a/roman.latin.2468ace135.woff2",
+            b"fingerprinted font".as_slice(),
+        ),
         ("favicon.ico", b"\0\0\x01\0icon".as_slice()),
     ] {
         std::fs::write(root.join(name), bytes).unwrap();
@@ -534,5 +541,44 @@ async fn head_and_get_share_validators_and_conditional_responses() {
             }
         }
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// #573: files whose name carries a content hash are cached for a year and revalidate never; look-alikes that are not
+/// that shape (a short hash, upper-case, a stem that is only the hash, another extension, a missing file) stay `no-cache`.
+#[tokio::test]
+async fn fingerprinted_files_are_immutable_and_look_alikes_are_not() {
+    let (root, app) = fixture();
+    for path in [
+        "/main.0123456789.js",
+        "/ui.89abcdef01.css",
+        "/fonts/a/roman.latin.2468ace135.woff2",
+    ] {
+        let response = get(&app, path, &[]).await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable",
+            "{path}"
+        );
+    }
+    for name in [
+        "main.js",
+        "main.012345678.js",
+        "main.0123456789a.js",
+        "main.ABCDEF0123.js",
+        ".0123456789.js",
+        "main.0123456789.map",
+        "main.0123456789.html",
+    ] {
+        assert!(!fingerprinted(&format!("/{name}")), "{name}");
+    }
+    // A fingerprinted name the bundle does not hold is a bare 404 (a file extension the bundle lacks), never an immutable shell.
+    let missing = get(&app, "/main.fedcba9876.js", &[]).await;
+    assert_eq!(missing.status(), 404);
+    assert_ne!(
+        missing.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

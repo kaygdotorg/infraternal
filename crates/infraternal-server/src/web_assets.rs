@@ -1,8 +1,10 @@
-//! Serves build-time encodings without request CPU and caches only Bun's content-hashed chunks [5][41].
+//! Serves build-time encodings without request CPU and caches only content-hashed files [5][41].
 //!
-//! Two kinds of file leave here. A hashed `chunk-<hash>.js` never changes under its name, so it is cached for a
-//! year. Everything else (the page, `main.js`, the style sheets, the workers) keeps its name across releases, so it
-//! is `no-cache`: the browser asks again on every load and must be told reliably whether its copy is still the
+//! Two kinds of file leave here. A file whose name carries a hash of its bytes never changes under that name, so it
+//! is cached for a year: Bun's `chunk-<hash>.js`, the terminal engine `ghostty-vt-<hash>.wasm`, and the build's own fingerprinted names
+//! `<stem>.<10 hex digits>.js|css|woff2` (the entry script, the page's style sheets and fonts; `apps/tracer/fingerprint.ts`
+//! writes them, #573). Everything else (the page, the workers, the sheets and fonts that code loads by a fixed name)
+//! keeps its name across releases, so it is `no-cache`: the browser asks again on every load and must be told reliably whether its copy is still the
 //! current release's. That answer is the `ETag`, and the one the file service computes (file time and size) cannot give
 //! it: reproducible bundles carry one fixed file time, so two releases whose `main.js` compress to the same number
 //! of bytes have the same `ETag`, and a browser then reuses the *old* `main.js`, which imports chunk names that no
@@ -105,7 +107,7 @@ async fn headers(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let immutable = hashed_chunk(request.uri().path());
+    let immutable = immutable_name(request.uri().path());
     // Taken out of the request so the file service never decides "not modified" on its (time, size) validators. A
     // chunk is fetched without validators in normal use (it is cached for a year), so answering it in full is fine.
     request.headers_mut().remove(header::IF_MODIFIED_SINCE);
@@ -202,7 +204,7 @@ fn bundle_fingerprint(root: &Path) -> String {
             let derived = Path::new(relative).extension().is_some_and(|ext| {
                 ext.eq_ignore_ascii_case("br") || ext.eq_ignore_ascii_case("gz")
             });
-            if !hashed_chunk(&format!("/{relative}")) && !derived {
+            if !immutable_name(&format!("/{relative}")) && !derived {
                 let bytes = std::fs::read(root.join(relative))?;
                 digest.update((bytes.len() as u64).to_le_bytes());
                 digest.update(&bytes);
@@ -245,18 +247,38 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> io::Result
     Ok(())
 }
 
-/// True for the files whose name carries a hash of their contents, so the bytes behind a name never change: Bun's
-/// split chunks, `/chunk-<8 alphanumerics>.js`, and the terminal engine, `/ghostty-vt-<8 alphanumerics>.wasm` (the
-/// bundler's asset name, `apps/tracer/src/engine-wasm.ts`, #573). Kept in step with `build.ts` and `transfer-budget.ts`.
-fn hashed_chunk(path: &str) -> bool {
-    let hashed = |name: &str, prefix: &str, suffix: &str| {
-        name.strip_prefix(prefix)
+/// True when `path` names a file whose name contains a hash of its contents, so the bytes behind it can never change.
+///
+/// Three shapes qualify: Bun's split chunks, `/chunk-<8 alphanumerics>.js`, the terminal engine,
+/// `/ghostty-vt-<8 alphanumerics>.wasm` (the bundler's asset name, `apps/tracer/src/engine-wasm.ts`), and the fingerprinted files the tracer build
+/// writes, `<stem>.<10 lowercase hex digits>.<js|css|woff2>` in any folder (`apps/tracer/fingerprint.ts`; keep the two
+/// in step). A file that merely looks like one but is not in the bundle gets the single-page fallback, and [`headers`]
+/// never trusts the name when the response is that HTML.
+fn immutable_name(path: &str) -> bool {
+    let bundled = |prefix: &str, suffix: &str| {
+        path.strip_prefix(prefix)
             .and_then(|name| name.strip_suffix(suffix))
             .is_some_and(|hash| {
                 hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
             })
     };
-    hashed(path, "/chunk-", ".js") || hashed(path, "/ghostty-vt-", ".wasm")
+    bundled("/chunk-", ".js") || bundled("/ghostty-vt-", ".wasm") || fingerprinted(path)
+}
+
+/// True for a file name ending `.<10 lowercase hex digits>.<js|css|woff2>` with a non-empty stem before the hash.
+fn fingerprinted(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some(stem) = ["js", "css", "woff2"]
+        .iter()
+        .find_map(|extension| name.strip_suffix(&format!(".{extension}")))
+    else {
+        return false;
+    };
+    stem.len() > 11
+        && stem.as_bytes()[stem.len() - 11] == b'.'
+        && stem.as_bytes()[stem.len() - 10..]
+            .iter()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 #[cfg(test)]

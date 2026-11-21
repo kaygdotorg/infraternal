@@ -8,6 +8,7 @@ import { returningVisitChunks, staticClosure, withModulePreload, withReturningVi
 import { buildDocs } from "./docs-build";
 import type { BunPlugin, PluginBuilder } from "bun";
 import { docsDatasetPlugin } from "./docs-dataset";
+import { fingerprintAssets, withHashedReferences } from "./fingerprint";
 
 // TRACER_DIST builds elsewhere (a build next to a running preview server must not replace its files).
 const dist = process.env.TRACER_DIST ?? "dist";
@@ -82,19 +83,33 @@ await Promise.all([
 ]);
 // The pages for the version this build is (the app's ? links open them); plain HTML and CSS, outside the JS budget.
 await buildDocs(`${dist}/docs`);
+// Files the page loads on every visit get content-hashed names, so the server can cache them for good (fingerprint.ts, #573).
+// Only what index.html links is renamed; the sheets that code loads by name later (account, appwin, ...) keep theirs.
+/** The page as written in the source tree, before the build points it at hashed names and adds preload hints. */
+const page = await Bun.file("index.html").text();
+/** The style sheets the page links, relative to the output folder. */
+const pageSheets = [...page.matchAll(/<link rel="stylesheet" href="\.\/([^"]+\.css)"/g)].map((match) => match[1]!);
+/** The fonts the page preloads; the hint must follow the font file name the sheet fetches. */
+const pageFonts = [...page.matchAll(/<link rel="preload" href="\.\/(fonts\/[^"]+\.woff2)"/g)].map((match) => match[1]!);
+/** Old name to hashed name for every renamed file. */
+const names = await fingerprintAssets(dist, pageSheets, "main.js");
+/** The entry script's hashed file name. */
+const entryName = names.get("main.js")!;
+// The bundler's lists name the entry `main.js`; follow the rename so the chunk classes and the preload hints are about real files.
+/** The bundler's outputs with the entry under its hashed name. */
+const outputs = Object.fromEntries(Object.entries((build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile.outputs).map(([path, out]) => [path.replace(/^\.\/main\.js$/, `./${entryName}`).replace(/^main\.js$/, entryName), out]));
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
-const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
-await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));
+await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(outputs), null, 1));
 // The first screen's code is fetched in parallel with the page instead of one import level per round trip (entry-preload.ts).
 // A device that has signed in before also gets the code of the screen it is about to open, so the terminal does not wait for the session answer.
-/** The files every visit needs at once: `main.js` and its static imports. */
-const firstScreen = staticClosure(meta.outputs, "main.js");
+/** The files every visit needs at once: the entry and its static imports. */
+const firstScreen = staticClosure(outputs, entryName);
 /** The extra files a device that has signed in before needs next: the core screen and the terminal. */
-const returningVisit = returningVisitChunks(meta.outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
+const returningVisit = returningVisitChunks(outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
 /** The terminal engine's wasm, which the bundler copied under a content-hashed name (src/engine-wasm.ts): preloaded for a returning device, like the terminal's code. */
 const engineFiles = build.outputs.filter((output) => output.kind === "asset" && output.path.endsWith(".wasm")).map((output) => output.path.split("/").at(-1)!);
 if (engineFiles.length !== 1) throw new Error(`expected one engine wasm in the build, found ${engineFiles.length}`);
-await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(await Bun.file("index.html").text(), firstScreen), returningVisit, engineFiles));
+await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(withHashedReferences(page, names, pageFonts), firstScreen), returningVisit, engineFiles));
 // Tools ask for /favicon.ico by habit, whatever the page's <link> says; give them a real icon (#518).
 await Bun.write(`${dist}/favicon.ico`, pngToIco(new Uint8Array(await Bun.file("icons/dark-32.png").arrayBuffer())));
 await precompress(dist);
