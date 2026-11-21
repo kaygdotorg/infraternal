@@ -109,6 +109,7 @@ access (#341 B19).
 
 24. **Passkeys only.** Each user has one passkey and a recovery key
     (mandatory) and can add one more passkey (optional). No passwords.
+    - *Later (owner, 2026-11-21, #557):* D375 A2 (2026-11-09) adds sign-in through an identity provider ("Continue with: Passkey, OIDC"), so passkeys are no longer the only way in.
 25. **Recovery key.** 24 words. Recovery waits 24 h. Signed-in devices can
     cancel it.
     *Pointer (2026-11-08, #341 B3):* D113 settles the delay: recovery is
@@ -3550,6 +3551,7 @@ access (#341 B19).
      *Pointer (2026-11-08, #341 B16):* The lume VM `macos-02-std` named in the
      app windows bullet no longer exists. macOS builds and app-window tests run
      on `macos-01-std`.
+     - *Later (owner, 2026-11-21, #557):* D375 A1 replaces the "permanent keys rejected" rule (every API key has an approved hard end), and D383 amends it again: API keys have two dates and both can be "forever".
 312. **Layout edits live per tab; the server is the only saved copy
      (owner, 2026-10-30, #250; replaces the multi-tab layout journal):**
      - Each tab keeps its unconfirmed canvas layout edits in memory and
@@ -3871,6 +3873,7 @@ access (#341 B19).
        aimed at the 11–14 MiB per endpoint that stays after load: "yes
        please, we gotta really optimise it."
      - Testing: "please extensively test it on linux and macos".
+     - *Later (owner, 2026-11-21, #557):* the fork pin has moved since: see D348 and D397.
 332. **When GotaTun becomes the Linux default (owner, 2026-11-03, #260;
      amends D163):** kernel WireGuard stays the Linux default until the
      integrated GotaTun engine matches it on both throughput and loaded
@@ -3879,6 +3882,7 @@ access (#341 B19).
      tonight". The userspace interface survives an infraternal agent
      restart, as kernel WireGuard's does, so routes the person added and
      open flows are kept: "correct!".
+     - *Later (owner, 2026-11-21, #557):* D346 amends this entry.
 333. **When a passkey is asked (owner, 2026-11-03; refines D28, D311,
      D319):** "I don't want a passkey ask everytime I wanna do admin
      operations. because I should be able to ask my agent to do those
