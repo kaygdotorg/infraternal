@@ -235,12 +235,14 @@ fn environment_file(text: &str) -> Option<Vec<(String, String)>> {
 /// The manager also accepts a wildcard (`/etc/app/env.d/*.conf`) and reads
 /// every match. Such a value names no file of its own, so it is unknown
 /// rather than "missing", or a matched file the account can edit would go
-/// unseen (J1013). A file is opened once, without blocking, and checked and
-/// read through that one descriptor with a size bound, so swapping it for a
-/// FIFO or `/dev/zero` cannot stall or exhaust the root scan.
+/// unseen (J1013). A file is opened only once it is seen to be a regular
+/// file, without blocking or taking a controlling terminal, then checked
+/// to be that same file and read through that one descriptor with a size
+/// bound, so swapping it for a FIFO, a device or `/dev/zero` cannot act on
+/// the device, stall or exhaust the root scan.
 fn environment_files(files: &[(String, bool)]) -> Option<Vec<(String, String)>> {
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
     let mut pairs = Vec::new();
     for (path, _optional) in files {
         if path.contains(['*', '?', '[']) {
@@ -250,17 +252,26 @@ fn environment_files(files: &[(String, bool)]) -> Option<Vec<(String, String)>> 
         if !path.is_absolute() {
             return None;
         }
-        let file = match std::fs::File::options()
-            .read(true)
-            .custom_flags(nix::libc::O_NONBLOCK)
-            .open(path)
-        {
-            Ok(file) => file,
+        // Look before opening: opening a device as root can act on it (a
+        // watchdog arms, a terminal becomes this daemon's controlling
+        // terminal), so only a regular file is ever opened (J1051).
+        let named = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_file() => meta,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
+            _ => return None,
         };
+        let file = std::fs::File::options()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+            .open(path)
+            .ok()?;
+        // The name may have been swapped since the look: read only the
+        // file that was looked at.
         let meta = file.metadata().ok()?;
-        if !meta.is_file() || meta.len() > 65536 {
+        if !meta.is_file()
+            || (meta.dev(), meta.ino()) != (named.dev(), named.ino())
+            || meta.len() > 65536
+        {
             return None;
         }
         let mut text = String::new();
@@ -664,6 +675,33 @@ mod tests {
                 "{unknown}"
             );
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J1051: a name that is not a regular file is refused before it is
+    /// opened. Opening a device as root can act on it (a watchdog arms, a
+    /// terminal becomes the daemon's controlling terminal), so the root scan
+    /// must not open one just to find out what it is.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_environment_file_that_is_no_file_is_never_opened() {
+        use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+        let root = nix::unistd::mkdtemp("/tmp/rvenvo-XXXXXX").unwrap();
+        let fifo = root.join("fifo");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        let watch = Inotify::init(InitFlags::IN_NONBLOCK).unwrap();
+        watch.add_watch(&fifo, AddWatchFlags::IN_OPEN).unwrap();
+        for path in [&fifo, &link] {
+            assert!(environment_files(&[(path.display().to_string(), true)]).is_none());
+        }
+        let opened = match watch.read_events() {
+            Ok(events) => events.len(),
+            Err(nix::errno::Errno::EAGAIN) => 0,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(opened, 0, "the FIFO was opened");
         std::fs::remove_dir_all(root).unwrap();
     }
 
