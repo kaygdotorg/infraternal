@@ -3048,9 +3048,12 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
-                        "REFUSED"
-                    }
+                    Some(
+                        remote::Failure::Refused
+                        | remote::Failure::IdentityMismatch
+                        | remote::Failure::SharedFile,
+                    )
+                    | None => "REFUSED",
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -3160,6 +3163,7 @@ fn run_remote_agent(
                     None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
+                        | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
                         | remote::Failure::Challenge,
                     )
