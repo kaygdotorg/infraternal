@@ -108,12 +108,15 @@ use std::{
     collections::{BTreeSet, HashMap},
     io,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::RwLock;
 
-use crate::policy::model::PublicKey;
+use crate::{policy::model::PublicKey, underlay_announce::CoalescedWake};
 
 /// Why the guard kept an initiation away from `GotaTun`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -525,6 +528,97 @@ fn distinct_endpoints(lists: Lists<'_>) -> usize {
     lists.configured.len() + lists.confirmed.len() - also_configured
 }
 
+/// Tells the node worker that a datagram arrived from a source `GotaTun` has not confirmed, so
+/// it reads the peers' confirmed endpoints now instead of on a timer (#260 J1077 finding 3).
+///
+/// A peer's confirmed endpoint can only move after a datagram from the new address reaches the
+/// receive task, so that task is the one place that knows a scan can find something. It keeps
+/// a private copy of the confirmed list ([`Self::snapshot`]) and, per datagram, compares the
+/// source with the previous one first and with the list second: no lock and no allocation. A
+/// source in the list wakes nobody, which is every datagram of a steady mesh. An idle node
+/// receives nothing from a new source, so it scans only on the worker's slow fallback.
+///
+/// The list is exactly what [`ConfirmedEndpointFeed`] last wrote into the guard; the guard
+/// publishes it from [`PeerAdmission::set_confirmed_endpoints`]. A wake is a hint, never state:
+/// a spurious one costs one scan, and a missed one is covered by the worker's fallback scan.
+#[derive(Debug, Default)]
+pub(crate) struct SourceWatch {
+    /// Bumped when `confirmed` is replaced, so a receiver reloads its copy once per change.
+    generation: AtomicU64,
+    /// The confirmed endpoints in [`endpoint_list`] form. Held for one `Arc` clone, never across
+    /// an `.await`.
+    confirmed: Mutex<Arc<[EndpointKey]>>,
+    /// Raised by the receive path for a source outside `confirmed`; the worker waits on it.
+    pub(crate) wake: CoalescedWake,
+}
+
+impl SourceWatch {
+    /// Publish a new confirmed list and its generation.
+    fn publish(&self, list: &[EndpointKey]) {
+        *self
+            .confirmed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = list.into();
+        self.generation.fetch_add(1, AtomicOrdering::Release);
+    }
+
+    /// The current list and the generation it belongs to.
+    fn snapshot(&self) -> (u64, Arc<[EndpointKey]>) {
+        let list = Arc::clone(
+            &self
+                .confirmed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        // Read after the list: a publish in between makes the generation newer than the list,
+        // and the next batch reloads, which is harmless.
+        (self.generation.load(AtomicOrdering::Acquire), list)
+    }
+}
+
+/// One receive task's view of a [`SourceWatch`]: its copy of the list and the last source that
+/// was in it.
+struct SourceCursor {
+    watch: Arc<SourceWatch>,
+    generation: u64,
+    list: Arc<[EndpointKey]>,
+    /// The previous datagram's source when it was in `list`: a burst from one peer (the bulk
+    /// case) costs one comparison per datagram.
+    last_known: Option<SocketAddr>,
+}
+
+impl SourceCursor {
+    fn new(watch: Arc<SourceWatch>) -> Self {
+        let (generation, list) = watch.snapshot();
+        Self {
+            watch,
+            generation,
+            list,
+            last_known: None,
+        }
+    }
+
+    /// Reload the list if it changed. One relaxed-cost load per batch.
+    fn sync(&mut self) {
+        if self.watch.generation.load(AtomicOrdering::Acquire) != self.generation {
+            (self.generation, self.list) = self.watch.snapshot();
+            self.last_known = None;
+        }
+    }
+
+    /// Note one datagram's source; wake the worker when no confirmed endpoint matches it.
+    fn note(&mut self, source: SocketAddr) {
+        if self.last_known == Some(source) {
+            return;
+        }
+        if self.list.binary_search(&endpoint_key(source)).is_ok() {
+            self.last_known = Some(source);
+        } else {
+            self.watch.wake.request();
+        }
+    }
+}
+
 /// Holds the live mesh identities allowed to reach `GotaTun`'s handshake queue and cookie check.
 ///
 /// The peer list changes only after the device accepts a snapshot, while both key checks follow
@@ -541,6 +635,8 @@ pub(crate) struct PeerAdmission {
     configured_endpoints: Vec<EndpointKey>,
     /// The endpoints `GotaTun` confirmed from installed peers' authenticated traffic, sorted.
     confirmed_endpoints: Vec<EndpointKey>,
+    /// Shows the receive task `confirmed_endpoints` and carries its wake to the worker.
+    sources: Arc<SourceWatch>,
     /// The [`reserve_share`] for the current lists, worked out when a list changes so the
     /// receive path does no division.
     share: u8,
@@ -565,6 +661,7 @@ impl PeerAdmission {
             peers: BTreeSet::new(),
             configured_endpoints: Vec::new(),
             confirmed_endpoints: Vec::new(),
+            sources: Arc::default(),
             share: reserve_share(0),
             budget: Mutex::default(),
             #[cfg(test)]
@@ -615,6 +712,7 @@ impl PeerAdmission {
     ) {
         let confirmed = endpoint_list(endpoints);
         if confirmed != self.confirmed_endpoints {
+            self.sources.publish(&confirmed);
             let old = std::mem::replace(&mut self.confirmed_endpoints, confirmed);
             self.carry_reserve_spend(None, Some(&old));
         }
@@ -678,6 +776,11 @@ impl PeerAdmission {
                     .ok()
                     .map(|index| self.configured_endpoints.len() + index)
             })
+    }
+
+    /// The watch the receive task and the node worker share (see [`SourceWatch`]).
+    pub(crate) fn sources(&self) -> Arc<SourceWatch> {
+        Arc::clone(&self.sources)
     }
 
     /// Replace the local identity after `GotaTun` accepts a key rotation.
@@ -810,12 +913,18 @@ pub(crate) struct AdmissionRecvBuf {
 pub(crate) struct PeerAdmissionUdpReceiver {
     socket: GotaUdpSocket,
     admission: Arc<RwLock<PeerAdmission>>,
+    /// Set on the first datagram (the constructor is not async): see [`SourceWatch`].
+    sources: Option<SourceCursor>,
 }
 
 impl PeerAdmissionUdpReceiver {
     /// Wrap a bound receive socket with the node's shared admission state.
     pub(crate) fn new(socket: GotaUdpSocket, admission: Arc<RwLock<PeerAdmission>>) -> Self {
-        Self { socket, admission }
+        Self {
+            socket,
+            admission,
+            sources: None,
+        }
     }
 
     /// The address the wrapped socket is bound to, for the Mac tests that check socket reuse.
@@ -824,15 +933,31 @@ impl PeerAdmissionUdpReceiver {
         self.socket.local_addr()
     }
 
-    /// Run the guard on one received datagram.
-    async fn admits(&self, packet: &Packet, source: SocketAddr) -> bool {
-        !PeerAdmission::needs_admission(packet)
+    /// Run the guard on one received datagram, and tell the worker about a source it has not
+    /// confirmed. Refused datagrams are not reported, so a flood of spoofed initiations cannot
+    /// make the worker scan.
+    async fn admits(&mut self, packet: &Packet, source: SocketAddr) -> bool {
+        let admitted = !PeerAdmission::needs_admission(packet)
             || self
                 .admission
                 .read()
                 .await
                 .check(packet, source, Instant::now())
-                .is_ok()
+                .is_ok();
+        if let (true, Some(cursor)) = (admitted, self.sources.as_mut()) {
+            cursor.note(source);
+        }
+        admitted
+    }
+
+    /// Start or refresh this receiver's copy of the confirmed list before a batch.
+    async fn sync_sources(&mut self) {
+        if let Some(cursor) = self.sources.as_mut() {
+            cursor.sync();
+        } else {
+            let watch = self.admission.read().await.sources();
+            self.sources = Some(SourceCursor::new(watch));
+        }
     }
 }
 
@@ -843,6 +968,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
     async fn recv_from(&mut self, pool: &mut PacketBufPool) -> io::Result<(Packet, SocketAddr)> {
         loop {
             let packet = self.socket.recv_from(pool).await?;
+            self.sync_sources().await;
             if self.admits(&packet.0, packet.1).await {
                 return Ok(packet);
             }
@@ -877,6 +1003,7 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
             (first_new_packet..packets.len())
                 .map(|index| GotaUdpSocket::rx_timestamp_ns(&recv_buf.socket_buf, index)),
         );
+        self.sync_sources().await;
         let mut read = first_new_packet;
         let mut write = first_new_packet;
         while read < packets.len() {
@@ -950,6 +1077,46 @@ mod tests {
         let socket = size_of::<<GotaUdpSocket as UdpRecv>::RecvManyBuf>();
         eprintln!("macOS receive buffer sizes: wrapper={wrapped} socket={socket}");
         assert_eq!(wrapped, socket, "macOS has no receive stamps to retain");
+    }
+
+    /// The receive path wakes the worker for a source outside the confirmed list, and for no
+    /// other (#260 J1077 finding 3): a steady mesh must cost the worker nothing.
+    #[test]
+    fn only_an_unconfirmed_source_wakes_the_worker() {
+        use super::SourceCursor;
+        let mut guard = PeerAdmission::new(StaticSecret::from(NODE));
+        let known: SocketAddr = "192.0.2.10:51820".parse().expect("address");
+        let moved: SocketAddr = "198.51.100.7:4000".parse().expect("address");
+        let watch = guard.sources();
+        let mut cursor = SourceCursor::new(Arc::clone(&watch));
+
+        cursor.note(known);
+        assert!(watch.wake.is_pending(), "nothing is confirmed yet");
+        watch.wake.begin();
+
+        guard.set_confirmed_endpoints([known]);
+        cursor.sync();
+        for _ in 0..1000 {
+            cursor.note(known);
+        }
+        assert!(!watch.wake.is_pending(), "a confirmed source is silent");
+
+        cursor.note(moved);
+        assert!(watch.wake.is_pending(), "a source nobody confirmed wakes");
+        watch.wake.begin();
+
+        guard.set_confirmed_endpoints([moved]);
+        cursor.sync();
+        cursor.note(moved);
+        assert!(
+            !watch.wake.is_pending(),
+            "the new list is silent for its source"
+        );
+        cursor.note(known);
+        assert!(
+            watch.wake.is_pending(),
+            "a source that left the list wakes again, though it was cached as known"
+        );
     }
 
     /// How many X25519 key agreements `admission` has run so far.
