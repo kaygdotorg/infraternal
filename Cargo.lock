@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.3"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf#c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1567,6 +1567,7 @@ dependencies = [
  "blake2 0.10.6",
  "bytes",
  "chacha20poly1305",
+ "concurrent-queue",
  "constant_time_eq",
  "duplicate",
  "either",
@@ -1599,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "gotatun-crypto"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf#c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
 dependencies = [
  "ring",
  "x25519-dalek",
@@ -1608,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "gotatun-packet"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf#c4abd7f34440e9bb3cfcb8fb9bec19836c9f61bf"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
 dependencies = [
  "bitfield-struct",
  "bytes",
