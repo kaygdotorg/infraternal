@@ -195,6 +195,25 @@ import CoreGraphics
         assert(rate.current > 500_000 && rate.current < 12_000_000)
         for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
-        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry motion_drop=retry refine_passes=\(SharpRefreshPlan.smallChangePasses)/8 encoded_gap=IDR bitrate_feedbacks=1102")
+        // Tile lane [#146 C]: a tile owes no refresh, but it postpones one already owed after motion.
+        var tiled = DamageEncodingState()
+        tiled.changed(at: 0); _ = tiled.next(at: 0); tiled.completed(delivered: true)
+        tiled.changed(at: 0.1, caret: true); assert(tiled.next(at: 0.1) == .caret); tiled.completed(delivered: true)
+        tiled.postponeRefresh(at: 0.2)
+        assert(tiled.refreshDeadline == 0.45, "a tile postpones the owed refresh while changes continue")
+        assert(tiled.next(at: 0.3) == nil && tiled.next(at: 0.45) == .refresh, "the postponed refresh still comes once changes stop")
+        tiled.completed(delivered: true)
+        tiled.postponeRefresh(at: 1)
+        assert(tiled.refreshDeadline == nil, "a tile never creates a refresh")
+        // A tile during refinement stops the passes: the rest becomes a refresh once typing stops.
+        var tiledRefine = DamageEncodingState()
+        tiledRefine.changed(at: 0); _ = tiledRefine.next(at: 0); tiledRefine.completed(delivered: true)
+        tiledRefine.changed(at: 0.1); _ = tiledRefine.next(at: 0.1, touched: 0.01); tiledRefine.completed(delivered: true)
+        assert(tiledRefine.next(at: 0.35, touched: 0.01) == .refine && tiledRefine.refining); tiledRefine.completed(delivered: true)
+        tiledRefine.changed(at: 0.36, caret: true); assert(tiledRefine.next(at: 0.36, touched: 0.01) == .caret); tiledRefine.completed(delivered: true)
+        tiledRefine.postponeRefresh(at: 0.36)
+        assert(!tiledRefine.refining && tiledRefine.refreshDeadline == 0.61, "a tile stops refinement and re-owes the refresh")
+        assert(tiledRefine.next(at: 0.4, touched: 0.01) == nil && tiledRefine.next(at: 0.61, touched: 0.01) == .refine, "refinement restarts once typing stops")
+        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry motion_drop=retry tile_postpones=refresh,refine refine_passes=\(SharpRefreshPlan.smallChangePasses)/8 encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }

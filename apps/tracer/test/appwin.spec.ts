@@ -284,6 +284,21 @@ test("the machine's local-input pause shows for as long as it lasts, then contro
   await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal", { timeout: 10_000 });
 });
 
+/** After a console-user change the card says who changed, not that the still-open app was closed (#146). */
+test("a console user change ends the window with its own words, and the app is still open", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openCanvas(page, "&appwin=1", { startDelayMs: 0 });
+  await requireFixtureH264(page);
+  await plus(page).click();
+  await page.getByRole("option", { name: /Editor, stream\.ts/ }).click();
+  await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
+  await page.request.post("/__mock/appwin/end", { data: { window_id: 201, reason: "console_user_changed" } });
+  await expect(appWindow(page).locator(".aw-card")).toContainText("The person at studio-mac changed");
+  await expect(appWindow(page).locator(".aw-card")).toContainText("Editor is still open on studio-mac");
+  await expect(appWindow(page).locator(".aw-card")).not.toContainText("was closed");
+  await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "none");
+});
+
 test("every state is honest: closed, permission missing, connecting, reconnecting, unsupported", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await openCanvas(page, "&appwin=1", { startDelayMs: 1500 });

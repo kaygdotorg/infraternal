@@ -85,7 +85,9 @@ const measure = (page: Page, id: string): Promise<SectionEdges | undefined> => p
   // A changed row keeps its caps on the edge too (its mark is a dot on the caps, not a button beside them); "Reset all" has no caps.
   for (const row of pane.querySelectorAll(".ui-ss-row:not([data-reset-all])")) {
     const caps = row.querySelectorAll("kbd");
-    add("shortcut", row, row.querySelector(".ui-ss-label")!.textContent!, text(row.querySelector(".ui-ss-label")), { m: caps.length ? rect(caps[caps.length - 1]) : text(row.querySelector(".ui-ss-keys")), kind: "keys" });
+    // A phone shows no caps (#560), so its rows have no right edge to measure.
+    if (!caps.length) continue;
+    add("shortcut", row, row.querySelector(".ui-ss-label")!.textContent!, text(row.querySelector(".ui-ss-label")), { m: rect(caps[caps.length - 1]), kind: "keys" });
   }
   for (const row of pane.querySelectorAll(".ui-sp-device")) {
     const buttons = row.querySelectorAll(".ui-window-action svg");
@@ -136,7 +138,7 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
       const where = `${section.id} ${theme} ${w}`;
       expect.soft(m.overflow, `${where}: the pane never scrolls sideways`).toBeLessThanOrEqual(1);
       if (m.headingLeft !== undefined) expect.soft(Math.abs(m.headingLeft - m.left), `${where}: the heading is on the content edge`).toBeLessThanOrEqual(0.5);
-      for (const type of EXPECTED[section.id] ?? []) expect.soft(m.rows.filter((r) => r.type === type).length, `${where}: has ${type} rows to measure`).toBeGreaterThan(0);
+      for (const type of (EXPECTED[section.id] ?? []).filter((t) => !(touch && t === "shortcut"))) expect.soft(m.rows.filter((r) => r.type === type).length, `${where}: has ${type} rows to measure`).toBeGreaterThan(0);
       for (const r of m.rows) {
         expect.soft(Math.abs(r.firstLeft - m.left), `${where}: ${r.type} "${r.name}" starts on the left edge`).toBeLessThanOrEqual(0.5);
         // A segmented control is a control, not a value: only its left edge belongs to the shared edges.

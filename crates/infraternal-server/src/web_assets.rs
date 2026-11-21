@@ -245,12 +245,18 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> io::Result
     Ok(())
 }
 
+/// True for the files whose name carries a hash of their contents, so the bytes behind a name never change: Bun's
+/// split chunks, `/chunk-<8 alphanumerics>.js`, and the terminal engine, `/ghostty-vt-<8 alphanumerics>.wasm` (the
+/// bundler's asset name, `apps/tracer/src/engine-wasm.ts`, #573). Kept in step with `build.ts` and `transfer-budget.ts`.
 fn hashed_chunk(path: &str) -> bool {
-    path.strip_prefix("/chunk-")
-        .and_then(|name| name.strip_suffix(".js"))
-        .is_some_and(|hash| {
-            hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
+    let hashed = |name: &str, prefix: &str, suffix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|name| name.strip_suffix(suffix))
+            .is_some_and(|hash| {
+                hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+    };
+    hashed(path, "/chunk-", ".js") || hashed(path, "/ghostty-vt-", ".wasm")
 }
 
 #[cfg(test)]

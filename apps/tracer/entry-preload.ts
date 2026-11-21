@@ -82,11 +82,17 @@ export const SIGN_IN_COUNTER_KEY = "tracer.hints";
  * The script is plain and wrapped in `try`, because storage can be refused and the page must never depend on it.
  * @param html the page's source
  * @param files file names relative to the page
+ * @param fetches data files the terminal fetches (the engine's wasm), preloaded as fetches rather than modules
  * @returns the page with the script before `</head>`
  */
-export function withReturningVisitPreload(html: string, files: readonly string[]): string {
+export function withReturningVisitPreload(html: string, files: readonly string[], fetches: readonly string[] = []): string {
   if (!html.includes("</head>")) throw new Error("index.html has no </head> to put the returning-visit preload in");
-  if (files.length === 0) return html;
-  const script = `try{if(JSON.parse(localStorage.getItem(${JSON.stringify(SIGN_IN_COUNTER_KEY)})||"{}").signIns>0){${JSON.stringify(files.map((file) => `./${file}`))}.forEach(function(f){var l=document.createElement("link");l.rel="modulepreload";l.href=f;document.head.appendChild(l)})}}catch(e){}`;
+  if (files.length === 0 && fetches.length === 0) return html;
+  // `as=fetch` with `crossorigin` is what `fetch()` (and so streaming compilation) matches; without the attribute the preload is fetched twice.
+  // Low priority: the engine is needed only after the first screen, so its bytes must not slow the sheets and fonts that paint it.
+  // The browser raises the priority when the terminal's own `fetch()` picks the preload up.
+  const modules = `${JSON.stringify(files.map((file) => `./${file}`))}.forEach(function(f){var l=document.createElement("link");l.rel="modulepreload";l.href=f;document.head.appendChild(l)});`;
+  const data = `${JSON.stringify(fetches.map((file) => `./${file}`))}.forEach(function(f){var l=document.createElement("link");l.rel="preload";l.as="fetch";l.crossOrigin="anonymous";l.fetchPriority="low";l.href=f;document.head.appendChild(l)});`;
+  const script = `try{if(JSON.parse(localStorage.getItem(${JSON.stringify(SIGN_IN_COUNTER_KEY)})||"{}").signIns>0){${files.length ? modules : ""}${fetches.length ? data : ""}}}catch(e){}`;
   return html.replace("</head>", `    <script>${script}</script>\n  </head>`);
 }

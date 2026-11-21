@@ -237,7 +237,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       scenesLoaded ??= onDemand(() => import("./session-scenes.on-demand")).then((m) => m.installSessionScenes({ cx, inventory, rebuild: () => { world.role = "operator"; world.omit = []; build(); cx.nav.flyView("console", true); } }));
       await (await scenesLoaded).run(n);
     },
-    entries: (): PaletteEntry[] => SESSION_SCENES.map((scene, i) => ({ group: "Mockup", glyph: "▷", label: `Mockup: sessions scene ${i + 1}`, hint: scene.hint, action: `proto:sessions-scene:${i + 1}` })),
+    entries: (): PaletteEntry[] => SESSION_SCENES.map((scene) => ({ group: "Mockup", glyph: "▷", label: `Mockup: sessions scene ${scene.n}`, hint: scene.hint, action: `proto:sessions-scene:${scene.n}` })),
     dispose: (): void => { void scenesLoaded?.then((loaded) => loaded.dispose()); },
   };
   // Palette rows that put a window's connection icon in each state (#212): the test double has no network to break.
