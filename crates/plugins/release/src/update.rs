@@ -190,7 +190,36 @@ pub struct UpdateState {
     /// A release staged by an explicit request (a D295 rollback or a channel switch).
     /// Periodic checks keep it staged until it is applied or cancelled.
     pub hold: Option<String>,
+    /// How the last switch to a staged release ended (#211 S4; S5 shows it).
+    pub applied: Option<Applied>,
+    /// A release that failed here (its health check, its start, or it stopped during its
+    /// trial) and was undone (D295). Periodic checks never stage it again; a newer
+    /// release, or an explicit request, replaces it.
+    pub paused: Option<String>,
 }
+
+/// The outcome of one switch to a staged release (#211 S4, D295).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Applied {
+    /// The release the server switched to (or tried to).
+    pub version: String,
+    /// [`APPLIED`], [`UNDONE`] or [`NOT_APPLIED`].
+    pub outcome: String,
+    /// A fixed public reason when it was undone or not applied.
+    pub reason: Option<String>,
+    /// When the switch ended, in Unix seconds.
+    pub at: i64,
+}
+
+/// The new release passed its health check and is now the one that starts.
+pub const APPLIED: &str = "applied";
+/// The new release failed and the previous release and database copy came back (D295).
+pub const UNDONE: &str = "undone";
+/// The switch was refused before the new release ran; nothing changed.
+pub const NOT_APPLIED: &str = "not-applied";
+/// The periodic check's refusal for a release that failed here before.
+pub const PAUSED: &str = "this release failed on this server and was undone; it stays paused";
 
 /// A staged release the updater threw away, kept in the state so the owner can see why
 /// (S5 shows it). Cleared when another release is staged.
@@ -215,6 +244,9 @@ pub const REMOVED_NOT_NEWER: &str =
 pub const REMOVED_CANCELLED: &str = "the explicit update was cancelled";
 /// Why a staged release was removed when its channel stopped announcing it.
 pub const REMOVED_WITHDRAWN: &str = "the channel no longer offers this release";
+/// [`Updater::confirm_staged`]'s refusal when the channel now offers a newer release
+/// than the staged one; the next check stages the newer one.
+pub const SUPERSEDED: &str = "the channel offers a newer release than the staged one";
 /// The refusal when the release plugin is switched off (or its channel setting is
 /// unusable): the check does nothing and the timer keeps its normal pace.
 pub const UPDATES_OFF: &str = "updates are turned off in the release settings";
@@ -326,6 +358,8 @@ pub struct Updater {
     required_space: u64,
     /// The largest image accepted. Tests lower it to cut a download off midway.
     max_image: u64,
+    /// The check period before backoff (15 minutes; see [`Updater::with_period`]).
+    period: Duration,
 }
 
 /// How a check ended, for the caller and the state file.
@@ -384,7 +418,17 @@ impl Updater {
             settings,
             required_space: MAX_IMAGE + RESERVE,
             max_image: MAX_IMAGE,
+            period: PERIOD,
         }
+    }
+
+    /// Check every `period` instead of every 15 minutes (the backoff still doubles it).
+    /// Only the server's `staging-trust` hook uses this, so a root staging proof does
+    /// not wait a quarter of an hour per step.
+    #[must_use]
+    pub fn with_period(mut self, period: Duration) -> Self {
+        self.period = period;
+        self
     }
 
     /// Change the free-space requirement and the image bound (tests only use this to
@@ -519,9 +563,13 @@ impl Updater {
             };
             state.available = Some(version.clone());
             // The channel is authoritative: a staged release it no longer announces
-            // (yanked, replaced, or the pointer moved back) must never be applied.
+            // (yanked, or the pointer moved back or across) must never be applied. One
+            // it only overtook with a newer release stays until that one is published
+            // below, which replaces it (J734 P3-c): a failed download of the newer
+            // release must not leave nothing staged under a "withdrawn" label.
             if admission == Admission::Forward
-                && let Some(withdrawn) = staged.take_if(|staged| *staged != version)
+                && let Some(withdrawn) =
+                    staged.take_if(|staged| *staged != version && !overtaken(staged, &version))
             {
                 retire(lock, state, Some(withdrawn), REMOVED_WITHDRAWN)?;
             }
@@ -529,6 +577,14 @@ impl Updater {
         };
         if guard(&self.current, &version, admission).map_err(Stop::Refusal)? == Verdict::Same {
             return Ok(Outcome::Current(version));
+        }
+        // A release undone here (D295) is not offered again by the timer; only a newer
+        // release or an explicit request moves on.
+        if admission == Admission::Forward && state.paused.as_deref() == Some(version.as_str()) {
+            if let Some(paused) = staged.take() {
+                retire(lock, state, Some(paused), PAUSED)?;
+            }
+            return Err(Stop::Refusal(PAUSED));
         }
         if admission == Admission::Explicit {
             // Set before the download: a failed attempt leaves no staged match, so the
@@ -590,6 +646,19 @@ impl Updater {
         lock: &Locked,
         state: &mut UpdateState,
     ) -> Result<Option<String>, &'static str> {
+        Ok(self
+            .inspect_staged_image(lock, state)
+            .await?
+            .map(|(version, _)| version))
+    }
+
+    /// [`Updater::inspect_staged`], also returning the open image whose bytes were just
+    /// hashed (J734 P3-b), so S4 switches from exactly what was verified.
+    async fn inspect_staged_image(
+        &self,
+        lock: &Locked,
+        state: &mut UpdateState,
+    ) -> Result<Option<(String, std::fs::File)>, &'static str> {
         let path = self.directory.join("staged");
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             state.staged = None;
@@ -598,10 +667,12 @@ impl Updater {
         let verified = if private_directory(&metadata) {
             let (engine, artifact) = (Arc::clone(&self.engine), self.artifact.clone());
             let folder = path.clone();
-            tokio::task::spawn_blocking(move || verify_staged(engine.as_ref(), &folder, &artifact))
-                .await
-                .map_err(|_| "release verification could not finish")?
-                .ok()
+            tokio::task::spawn_blocking(move || {
+                verify_staged_image(engine.as_ref(), &folder, &artifact)
+            })
+            .await
+            .map_err(|_| "release verification could not finish")?
+            .ok()
         } else {
             None
         };
@@ -609,7 +680,7 @@ impl Updater {
             let claimed = staged_version(&self.directory);
             retire(lock, state, claimed, REMOVED_UNVERIFIED)?;
         }
-        state.staged.clone_from(&verified);
+        state.staged = verified.as_ref().map(|(version, _)| version.clone());
         Ok(verified)
     }
 
@@ -646,11 +717,12 @@ impl Updater {
             .await
             .unwrap_or(Err("the update check exceeded its time limit"));
         lock.write_state(&state)?;
-        let version = result?;
+        let (version, image) = result?;
         Ok(Confirmed {
-            image: self.directory.join("staged").join(&self.artifact),
+            path: self.directory.join("staged").join(&self.artifact),
+            image,
             version,
-            _lock: lock,
+            lock,
         })
     }
 
@@ -659,8 +731,14 @@ impl Updater {
         &self,
         lock: &Locked,
         state: &mut UpdateState,
-    ) -> Result<String, &'static str> {
-        let Some(staged) = self.inspect_staged(lock, state).await? else {
+    ) -> Result<(String, std::fs::File), &'static str> {
+        // The switch comes first (J734 P3-a): with updates off nothing applies, not even
+        // a held explicit stage. The stage and its hold are kept for when they return.
+        let (enabled, channel) = (self.settings)().await?;
+        if !enabled {
+            return Err(UPDATES_OFF);
+        }
+        let Some((staged, image)) = self.inspect_staged_image(lock, state).await? else {
             state.hold = None;
             return Err(NOTHING_STAGED);
         };
@@ -669,13 +747,9 @@ impl Updater {
         if state.hold.as_deref() == Some(staged.as_str())
             && guard(&self.current, &staged, Admission::Explicit) == Ok(Verdict::Stage)
         {
-            return Ok(staged);
+            return Ok((staged, image));
         }
         state.hold = None;
-        let (enabled, channel) = (self.settings)().await?;
-        if !enabled {
-            return Err(UPDATES_OFF);
-        }
         let download = lock.download()?;
         let announced = crate::latest::fetch_metadata(
             self.engine.as_ref(),
@@ -688,7 +762,15 @@ impl Updater {
         if announced.as_deref() == Some(staged.as_str())
             && guard(&self.current, &staged, Admission::Forward) == Ok(Verdict::Stage)
         {
-            return Ok(staged);
+            return Ok((staged, image));
+        }
+        // Overtaken, not withdrawn (J734 P3-c): never applied, but kept until the next
+        // check publishes the newer release over it.
+        if announced
+            .as_deref()
+            .is_some_and(|announced| overtaken(&staged, announced))
+        {
+            return Err(SUPERSEDED);
         }
         retire(lock, state, Some(staged), REMOVED_WITHDRAWN)?;
         Err("the channel no longer offers the staged release")
@@ -741,7 +823,7 @@ impl Updater {
                         status_of(&self.directory, &self.current).failures.max(1)
                     }
                 };
-                wait = delay(failures, random());
+                wait = delay_from(self.period, failures, random());
             }
         })
     }
@@ -763,9 +845,19 @@ impl Updater {
 /// `random` so many servers never check in step.
 #[must_use]
 pub fn delay(failures: u32, random: u64) -> Duration {
-    const BASE: u64 = 15 * 60;
+    delay_from(PERIOD, failures, random)
+}
+
+/// The normal check period.
+const PERIOD: Duration = Duration::from_mins(15);
+
+/// [`delay`] with another base period (see [`Updater::with_period`]).
+fn delay_from(period: Duration, failures: u32, random: u64) -> Duration {
     const CAP: u64 = 6 * 60 * 60;
-    let base = BASE.saturating_mul(1u64 << failures.min(10)).min(CAP);
+    let base = period
+        .as_secs()
+        .saturating_mul(1u64 << failures.min(10))
+        .min(CAP);
     // random % 401 picks a point in -20 %..=+20 % in steps of 0.1 %.
     let spread = random % 401;
     Duration::from_millis(base * (800 + spread))
@@ -786,7 +878,7 @@ fn random() -> u64 {
 }
 
 /// The current time in Unix seconds (0 if the clock is before 1970).
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| {
@@ -795,7 +887,7 @@ fn now() -> i64 {
 }
 
 /// The state saved in the updates folder `directory`, reporting `current` as the running version.
-fn status_of(directory: &Path, current: &str) -> UpdateState {
+pub(crate) fn status_of(directory: &Path, current: &str) -> UpdateState {
     let mut state = read_state(&directory.join("state.json")).unwrap_or_default();
     current.clone_into(&mut state.current);
     state
@@ -868,6 +960,15 @@ fn verify_staged(
     directory: &Path,
     artifact: &str,
 ) -> Result<String, &'static str> {
+    verify_staged_image(engine, directory, artifact).map(|(version, _)| version)
+}
+
+/// [`verify_staged`], also returning the open image file whose bytes were verified.
+fn verify_staged_image(
+    engine: &dyn ReleaseEngine,
+    directory: &Path,
+    artifact: &str,
+) -> Result<(String, std::fs::File), &'static str> {
     let read = |name: &str, limit: u64| -> Result<Vec<u8>, &'static str> {
         use std::io::Read;
         let file = open_private(&directory.join(name))?;
@@ -884,12 +985,19 @@ fn verify_staged(
     let signature = read("SHA256SUMS.sig", 1024)?;
     let version = open_private(&directory.join("VERSION"))?;
     let image = open_private(&directory.join(artifact))?;
-    engine.verify_image(&version, &image, artifact, &sums, &signature)
+    let version = engine.verify_image(&version, &image, artifact, &sums, &signature)?;
+    Ok((version, image))
+}
+
+/// Whether `announced` is a newer release than `staged` on the same channel, so the
+/// staged release was only overtaken, not withdrawn (J734 P3-c).
+fn overtaken(staged: &str, announced: &str) -> bool {
+    guard(staged, announced, Admission::Forward) == Ok(Verdict::Stage)
 }
 
 /// Open `path` without following symlinks and check it is a private, single-link regular file owned by this user.
 #[allow(clippy::verbose_bit_mask)]
-fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
+pub(crate) fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -909,13 +1017,19 @@ fn open_private(path: &Path) -> Result<std::fs::File, &'static str> {
 
 /// A staged release [`Updater::confirm_staged`] just re-verified against the channel.
 /// While it lives, the update folder stays locked, so the staged files cannot change.
+///
+/// It also keeps the image file whose bytes the verifier hashed (J734 P3-b). S4 switches
+/// from that open file, never by opening a path again, so what runs is what was checked.
+/// The lock is a close-on-exec descriptor: the exec that switches releases it.
 pub struct Confirmed {
     /// The confirmed version.
     version: String,
     /// `updates/staged/<image>`, verified under the lock this value holds.
-    image: PathBuf,
+    path: PathBuf,
+    /// The open, verified image (the same inode as `path` while the lock is held).
+    image: std::fs::File,
     /// Held until the caller has switched (or given up).
-    _lock: Locked,
+    lock: Locked,
 }
 
 impl Confirmed {
@@ -925,24 +1039,53 @@ impl Confirmed {
         &self.version
     }
 
-    /// The verified image to switch to.
+    /// Where the verified image is staged (for reading only; switch from [`Self::file`]).
     #[must_use]
     pub fn image(&self) -> &Path {
+        &self.path
+    }
+
+    /// The open image file the verifier hashed.
+    #[must_use]
+    pub fn file(&self) -> &std::fs::File {
         &self.image
+    }
+
+    /// A confirmation built directly from its parts, for [`crate::apply`]'s unit tests.
+    #[cfg(test)]
+    #[allow(clippy::unwrap_used)]
+    pub(crate) fn for_test(version: &str, directory: &Path, artifact: &str) -> Self {
+        let path = directory.join("staged").join(artifact);
+        Self {
+            version: version.to_owned(),
+            image: std::fs::File::open(&path).unwrap(),
+            path,
+            lock: Locked::open(directory).unwrap(),
+        }
+    }
+
+    /// Take the parts S4's [`crate::apply`] needs: version, image file and the lock.
+    pub(crate) fn into_parts(self) -> (String, std::fs::File, Locked) {
+        (self.version, self.image, self.lock)
     }
 }
 
+/// The lock error while another check or a switch holds `updates/`.
+const BUSY: &str = "an update check is already running";
+/// How often [`Locked::wait`] retries a busy lock.
+const LOCK_RETRY: Duration = Duration::from_millis(100);
+
 /// An exclusive lock on `updates/`, held for one whole check.
-struct Locked {
+pub(crate) struct Locked {
     directory: PathBuf,
     _lock: nix::fcntl::Flock<std::fs::File>,
 }
 
 /// A `download-<uuid>/` folder. Dropping it deletes the folder, so a failed or
 /// cancelled check never leaves a partial download behind, unless it was published.
-struct Download {
-    path: PathBuf,
-    published: bool,
+pub(crate) struct Download {
+    pub(crate) path: PathBuf,
+    pub(crate) published: bool,
 }
 impl Drop for Download {
     fn drop(&mut self) {
@@ -953,24 +1096,36 @@ impl Drop for Download {
 }
 
 impl Locked {
+    /// The locked `updates/` folder.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     /// Create `updates/` if needed (0700), check it is private and ours, and lock it,
     /// waiting for another check to finish.
-    fn open(directory: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn open(directory: &Path) -> Result<Self, &'static str> {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusive)
     }
 
-    /// [`Locked::open`] on the blocking pool, so waiting for another check (or for S4,
-    /// which holds the lock through a whole switch) never stalls an async worker that
-    /// serves terminals.
+    /// Take the lock, waiting while another check (or S4, which holds it until its exec)
+    /// has it.
+    ///
+    /// It retries a non-blocking lock every [`LOCK_RETRY`] on the async timer instead of
+    /// parking a thread in a blocking `flock` (#211 S4): a blocked thread cannot be
+    /// cancelled, and the switch's runtime shutdown waited its full 4 s for one, which
+    /// added 4 s of downtime to every update whose switch met a periodic check. Waits
+    /// are rare and short (a check or a switch), so the retry costs nothing measurable.
     async fn wait(directory: &Path) -> Result<Self, &'static str> {
-        let directory = directory.to_owned();
-        tokio::task::spawn_blocking(move || Self::open(&directory))
-            .await
-            .map_err(|_| "the update folder is unavailable")?
+        loop {
+            match Self::try_open(directory) {
+                Err(BUSY) => tokio::time::sleep(LOCK_RETRY).await,
+                locked => return locked,
+            }
+        }
     }
 
     /// Like [`Locked::open`] but gives up at once if a check holds the lock.
-    fn try_open(directory: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn try_open(directory: &Path) -> Result<Self, &'static str> {
         Self::lock(directory, nix::fcntl::FlockArg::LockExclusiveNonblock)
     }
 
@@ -995,8 +1150,7 @@ impl Locked {
         }) {
             return Err(unsafe_folder);
         }
-        let lock = nix::fcntl::Flock::lock(file, mode)
-            .map_err(|_| "an update check is already running")?;
+        let lock = nix::fcntl::Flock::lock(file, mode).map_err(|_| BUSY)?;
         Ok(Self {
             directory: directory.to_owned(),
             _lock: lock,
@@ -1005,7 +1159,7 @@ impl Locked {
 
     /// Delete abandoned `download-*` and `retired-*` folders. Holding the lock means no
     /// live check owns them. Symlinks and other entries are never followed or removed.
-    fn sweep(&self) -> Result<(), &'static str> {
+    pub(crate) fn sweep(&self) -> Result<(), &'static str> {
         let entries =
             std::fs::read_dir(&self.directory).map_err(|_| "the update folder is unavailable")?;
         for entry in entries {
@@ -1030,7 +1184,7 @@ impl Locked {
     }
 
     /// Make a fresh private `download-<uuid>/` folder.
-    fn download(&self) -> Result<Download, &'static str> {
+    pub(crate) fn download(&self) -> Result<Download, &'static str> {
         use std::os::unix::fs::DirBuilderExt;
         let path = self
             .directory
@@ -1084,7 +1238,7 @@ impl Locked {
 
     /// Replace `state.json` atomically: write a private temporary file, flush it,
     /// rename it over the old one and flush the folder. Then wake subscribers.
-    fn write_state(&self, state: &UpdateState) -> Result<(), &'static str> {
+    pub(crate) fn write_state(&self, state: &UpdateState) -> Result<(), &'static str> {
         use std::{io::Write, os::unix::fs::OpenOptionsExt};
         let saved = "the update state could not be saved";
         let temporary = self.directory.join("state.json.tmp");
@@ -1142,7 +1296,7 @@ impl Locked {
     }
 
     /// Flush `updates/` itself so renames inside it survive a crash.
-    fn sync(&self) -> Result<(), &'static str> {
+    pub(crate) fn sync(&self) -> Result<(), &'static str> {
         std::fs::File::open(&self.directory)
             .and_then(|folder| folder.sync_all())
             .map_err(|_| "the update folder could not be saved")

@@ -48,6 +48,12 @@ pub(crate) async fn serve(
         // Detach private stdin before cold_start can return an error or perform
         // any configuration I/O; install only after retained trust is available.
         let inherited = infraternal_server::ca_handoff::receive_stdin();
+        // An update switch in flight is settled before anything opens the database:
+        // the previous release puts back its D295 copy here (#211 S4).
+        #[cfg(feature = "release")]
+        if infraternal_server::update_apply::startup(&config.data_dir).is_err() {
+            return Err(infraternal_server::ServerError::UpdateTrial);
+        }
         let remote = options
             .remote_listen
             .map(|listen| {
@@ -75,14 +81,28 @@ pub(crate) async fn serve(
             outcome = if warm { "warm" } else { "cold" },
             "server_ca_startup"
         );
+
         let source = remote
             .as_ref()
             .map(|remote| remote.enrollment.source.clone());
+        // Updates must keep the CA if it is unlocked at switch time, whether it came
+        // through the handoff or a passkey unlocked it later (D217, #211 S4).
+        #[cfg(feature = "release")]
+        if let Some(source) = source.clone() {
+            infraternal_server::update_apply::set_ca_probe(Box::new(move || {
+                source
+                    .subscribe_locked()
+                    .is_some_and(|locked| !*locked.borrow())
+            }));
+        }
         let clock_health = remote.as_ref().map_or_else(
             || std::sync::Arc::new(infraternal_server::clock_health::ClockHealth::default()),
             |remote| remote.clock_health.clone(),
         );
         let control = crate::restart::Control::start_with_clock(&config.data_dir, clock_health);
+        // The auto-update's switches mirror Mesh state from this folder (#211 S4, #489).
+        #[cfg(feature = "release")]
+        let data_dir = config.data_dir.clone();
         let serving = async move {
             if let Some(remote) = remote {
                 infraternal_server::serve_with_remote(config, remote).await
@@ -100,10 +120,35 @@ pub(crate) async fn serve(
             }
         };
         tokio::pin!(serving);
+        // The auto-updater's switches use this same loop and handoff (#211 S4).
+        #[cfg(feature = "release")]
+        let mut switches = infraternal_server::update_apply::switch_requests();
         loop {
+            #[cfg(feature = "release")]
+            let switch = switches.recv();
+            #[cfg(not(feature = "release"))]
+            let switch = std::future::pending::<Option<()>>();
             tokio::select! {
-                result = &mut serving => return result.map(|()| Outcome::Stopped),
-                replacement = control.requested(source.as_deref()) => {
+                result = &mut serving => {
+                    // A new release on trial that cannot serve (a failed migration, for
+                    // example) undoes itself warm instead of exiting cold (#211 S4).
+                    #[cfg(feature = "release")]
+                    if result.is_err()
+                        && let Some(replacement) = crate::restart::failed_start(source.as_ref(), &data_dir)
+                    {
+                        return Ok(Outcome::Restart(replacement));
+                    }
+                    return result.map(|()| Outcome::Stopped);
+                }
+                Some(request) = switch => {
+                    #[cfg(feature = "release")]
+                    if let Some(replacement) = crate::restart::switch(request, source.as_ref(), &data_dir) {
+                        return Ok(Outcome::Restart(replacement));
+                    }
+                    #[cfg(not(feature = "release"))]
+                    let () = request;
+                }
+                replacement = control.requested(source.as_ref()) => {
                     match replacement {
                         Ok(replacement) => return Ok(Outcome::Restart(replacement)),
                         Err(error) => {

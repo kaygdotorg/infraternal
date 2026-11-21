@@ -106,6 +106,19 @@ async function removeReviewed(id: string, name: string): Promise<Result> {
     return run();
   }
 }
+/** Forget one host, renewing the admin window once if it has closed (#563), like a removal does. */
+async function forgetReviewed(id: string, name: string): Promise<{ host_id: string; state: string; message: string }> {
+  const seen = renewals;
+  const run = (): Promise<{ host_id: string; state: string; message: string }> =>
+    post("forget", { host_id: id }, "The host could not be forgotten. Refresh the list or sign in again, then try again.");
+  try { return await run(); }
+  catch (error) {
+    if (!(error instanceof RemovalError) || error.status !== 428) throw error;
+    // A renewal that finished while this request was in flight already reopened the window.
+    if (renewals === seen) await renewOnce(id, name);
+    return run();
+  }
+}
 /** Confirm a host removal and keep pending cleanup visible until server delivery. */
 export async function createHostRemoval(core: CoreScreen, removed: (id: string) => void) {
   // The server's `label` is a sentence describing the action; rows and buttons use this short name instead.
@@ -129,7 +142,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
       confirmHostForget(name, anchor, () => {
         if (again()) return;
         running.add(id);
-        void post<{ host_id: string; state: string; message: string }>("forget", { host_id: id }, "The host could not be forgotten. Refresh the list or sign in again, then try again.").then((result) => {
+        void forgetReviewed(id, name).then((result) => {
           if (result.host_id !== id || result.state !== "forgotten") throw new Error("Host forgetting could not be confirmed.");
           removed(id);
           core.toast.show({ message: result.message, duration: 5000 });

@@ -1,4 +1,4 @@
-<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225,226]. -->
+<!-- Operator contract for immutable signed releases and architecture-specific bootstrap payloads [184,213,220,224,225,226]; S3 publication #211. -->
 # Signed releases
 
 Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
@@ -85,41 +85,68 @@ chmod +x infraternal-aarch64-darwin && ./infraternal-aarch64-darwin up https://<
 
 `allowed_signers` is `release/allowed_signers` from this repository.
 
-The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and
-`RELEASE_CALLER_TOKEN` in the publishing process environment, then runs:
+The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+`R2_SECRET_ACCESS_KEY` and `RELEASE_CALLER_TOKEN` in the publishing process
+environment, then runs:
 
 ```sh
 scripts/release/publish <version>
 ```
 
-Do not put tokens in shell arguments, checked-in environment files or logs.
-Authorization is passed to curl through its configuration stdin; the scripts
-never print tokens or write them to files. The uploader needs R2 object access,
-without Worker edit access. Only the owner may change/deploy the signer [224].
-Every authenticated and public request includes a User-Agent.
+The R2 pair is an S3 API key scoped to the one bucket `infraternal-builds`
+(object read and write). That is the narrowest grant: no account-wide R2 and no
+Workers access. `publish` talks to
+`https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com/infraternal-builds/...`
+and lets curl sign each request with SigV4 (`--aws-sigv4 aws:amz:auto:s3`).
+`CLOUDFLARE_API_TOKEN` is no longer used: the Cloudflare REST objects API is not
+called (#211). `RELEASE_CALLER_TOKEN` is for the signer Worker only.
+
+Do not put keys or tokens in shell arguments, checked-in environment files or
+logs. Both the R2 pair and the caller token are passed to curl through its
+configuration on stdin; the scripts never print them or write them to files, so
+`/proc/<pid>/cmdline` of the curl child holds neither. The key id and secret must
+use plain key characters, or the script refuses them before curl starts. Only the
+owner may change/deploy the signer [224]. Every authenticated and public request
+includes a User-Agent.
 
 Publication refuses an existing object or signed release. It uploads the whole
 bundle, asks the Worker to sign, downloads the manifest, signature and payloads,
 and verifies the signature and all hashes before reporting success. Interrupted
 publication leaves an immutable partial release; investigate it rather than
-repeating uploads over existing objects. The uploader checks the authoritative R2 object prefix, including partial or
-unrelated objects, and holds a nonblocking `flock` for the entire publication,
-including signing and public verification. The fixed per-user lock path is
-`${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish/<version>.lock`,
-independent of `CARGO_TARGET_DIR` and the worktree. The state path must be
-absolute; the lock directory and file must be owned and private. Lock files
-remain in place: unlinking a held lock would allow a second writer to lock a
-new inode. The kernel releases the lock when its last descriptor closes;
-in-flight child requests retain it after an abrupt publisher stop. PUTs also send
-`If-None-Match: *` as a precaution. The REST upload reference does not promise
-conditional-write semantics, so the orchestrator must serialize publishers
-across machines; the preflight is not a distributed lock. See the official
-[object list](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/list/)
-and [upload](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/objects/methods/upload/)
-API definitions. Storage listing/upload JSON and Worker replies are bounded
-and reject duplicate fields recursively, including nested objects. An
-ambiguous response stops publication with a plain reason; no provider
-diagnostics are echoed. This pipeline does not consume `releases/index.json`.
+repeating uploads over existing objects.
+
+Admission and uploads work like this:
+
+- **Listing.** A ListObjectsV2 request with `prefix=releases/<version>/` covers
+  every object, partial or unrelated. The page must be empty. A page that is
+  empty but truncated is followed through its continuation token for at most 5
+  pages; after that publication stops.
+- **Strict XML.** The reply is read up to 1 MiB, with no DTD or entity allowed
+  (`response.py`). It must be a `ListBucketResult` for this bucket and prefix,
+  with `KeyCount` 0, a consistent `IsTruncated` and token, and no repeated or
+  unknown top-level element. Any `Contents` entry is refused even when the count
+  says 0. Anything else stops with a plain reason, and no provider diagnostics
+  are echoed.
+- **Upload.** Each PUT is signed, sends `If-None-Match: *` and checks the HTTP
+  status through curl (`--fail`); its reply body is bounded and discarded. R2
+  supports conditional PutObject on its S3 API, evaluated atomically against the
+  committed state, so a concurrent writer gets 412 instead of replacing an
+  object ([R2 conditional operations](https://developers.cloudflare.com/r2/api/s3/conditional-operations/),
+  [S3 compatibility](https://developers.cloudflare.com/r2/api/s3/api/)).
+  The old REST upload had no such promise. Even so, serialize publishers across
+  machines: the listing is not a distributed lock.
+- **Lock.** A nonblocking `flock` is held for the entire publication, including
+  signing and public verification. The fixed per-user lock path is
+  `${XDG_STATE_HOME:-$HOME/.local/state}/infraternal/release-publish/<version>.lock`,
+  independent of `CARGO_TARGET_DIR` and the worktree. The state path must be
+  absolute; the lock directory and file must be owned and private. Lock files
+  remain in place: unlinking a held lock would allow a second writer to lock a
+  new inode. The kernel releases the lock when its last descriptor closes;
+  in-flight child requests retain it after an abrupt publisher stop.
+- **Worker reply.** The signer's JSON reply is bounded and rejects duplicate
+  fields recursively, including nested objects.
+
+This pipeline does not consume `releases/index.json`.
 
 For an edge publication, take the version from the completed bundle's directory
 name, then publish and verify that exact version:
@@ -170,7 +197,7 @@ infraternal server --data /path/to/existing/private/data channel edge
 infraternal server --data /path/to/existing/private/data channel edge --yes
 infraternal server --data /path/to/existing/private/data channel stable
 infraternal server --data /path/to/existing/private/data release latest --json
-infraternal skill release.channel.set
+infraternal skill server channel
 ```
 
 Edge builds are published as they are made, unreviewed. Switching to edge
@@ -222,7 +249,10 @@ the channel still announces it: when the pointer moves to anything else (a yanke
 build, another version, or nothing), the staged release is removed and the state
 says why. S4 applies only what `Updater::confirm_staged` returns. That call
 re-checks the staged release against the pointer and holds the folder lock until
-the switch is done.
+the switch is done. When the pointer moves on to a *newer* release on the same
+channel, the staged release stays until the newer one is downloaded and replaces
+it, so a failed download never leaves nothing staged. At apply time such a
+release is refused as superseded, not withdrawn, and kept.
 
 Only faults back off: the network, the disk or a failed verification. A
 refusal (an older or another channel's release) is recorded as `refused` and
@@ -240,6 +270,86 @@ database restore does not erase it. Owners read it with the
 `mode`, which is `auto` or `off`, and `reason`, which says plainly why updates
 are off on this host: not a Linux server, a development build, the server not
 running as root, the release plugin switched off, or no valid channel set.
+
+## Applying an update and undoing it (#211 S4)
+
+Where the check runs, the server also applies what it staged, by itself, in a
+**quiet window**: nobody has typed into a terminal or attached one for 5 minutes
+(D251). No deadline forces it, so an update never interrupts typing. With the
+release plugin switched off nothing applies, not even an explicit stage. A
+release the channel withdrew, or one it superseded, is never applied.
+
+The switch is the same warm in-memory handoff as `infraternal server … restart
+--binary` (D217): one process (the PID stays the same), the CA handed over
+unlocked on a private stdin pipe, and live sessions continue in their own shim
+processes. If the CA is unlocked when the switch starts, whether by an earlier
+handoff or a passkey, the new release must receive it, or the switch is refused
+and nothing changes. Like any restart into a named binary, the switch mirrors the
+durable mesh identity (`<data>/mesh/`, #489) to the legacy runtime path, so a
+previous build finds it too. An undo does not start the previous build without
+that mirror.
+
+Before the switch, the server:
+
+1. re-confirms the staged release against the channel (S3) and keeps the folder
+   locked until the exec;
+2. moves it to `<data>/updates/releases/<version>/` (a rename, so the file that
+   was verified is the file that runs; the switch re-checks its signature on a
+   sealed copy and never reopens it by path);
+3. copies its own image to `updates/previous/` and writes one database copy
+   beside it (`VACUUM INTO`, D295);
+4. writes `updates/pending.json`, naming both releases by the SHA-256 of their
+   images.
+
+**The trial.** The new release has 2 minutes to pass its health check. `/healthz`
+must answer 200 on its own listener, a write transaction must commit, and the CA
+must be unlocked if it was before. On a pass, `updates/current` (a symlink, the
+boot pointer) moves to `releases/<new>`. Other installed releases are removed,
+and `previous/` is kept until the next update, so S5's manual roll back can use
+it.
+
+**The undo (D295).** If the check fails or times out, or the new release cannot
+start serving at all (a failed database migration, for example), the new release
+execs the previous image again, warm, and gives it back its own path. Before the database
+opens, the previous release puts the database copy back (removing the WAL and
+shared-memory files of the database it replaces) and records the update as
+`undone`. It also **pauses** that version, so the timer never stages it again.
+Data written during the trial is lost, as D295 accepts.
+
+- If the new release crashes or is killed during its trial, the service manager
+  starts the boot pointer, which still names the previous release. That start is
+  cold (D168): the CA stays locked until a passkey unlocks it. The previous release
+  still restores the copy and pauses the new version.
+- If the new release cannot even exec, the late-exec recovery brings the previous
+  release straight back. The database is untouched, because nothing else ran.
+- If the undo exec itself fails, the new release retries it 3 times. After that it
+  keeps serving, and the marker stays, so the previous release's next start still
+  restores the copy. It never exits on its own.
+
+`state.json` records the last switch as `applied` (`applied`, `undone` or
+`not-applied`, with a reason) and the paused version as `paused`.
+
+**For services to follow updates across cold starts,** start the server from
+`<data>/updates/current/infraternal-<arch>-musl` (S6 points the production unit
+there). A unit that starts a fixed path runs the updated release only until its
+next cold start.
+
+The undo is recorded with its reason: `the new release failed its health check`,
+`… did not pass its health check in time`, `… could not start serving`, `… stopped
+during its health check` (crash, kill or reboot, the cold case) or `… could not
+start` (the exec was refused).
+
+**Staging proof.** `staging-trust` builds (never production;
+`check-production-trust.py` refuses them) read three more variables:
+`INFRATERNAL_STAGING_BUILDS_ORIGIN` (a `http://127.0.0.1:` channel),
+`INFRATERNAL_STAGING_UPDATE_SECONDS` (first check, check period and quiet window)
+and `INFRATERNAL_STAGING_FAULTS`, space-separated `<version>=<fault>` entries
+where the fault is `unhealthy` (the health check fails), `timeout` (it never
+answers, so the 2-minute limit ends the trial), `migration` (startup fails like a
+broken migration) or `exec` (the exec of that release is refused).
+`scripts/update-proof-vm` runs the root proof in a throwaway NixOS microVM, with
+real terminal sessions, and covers each of those faults plus a kill and a hard
+reboot during the trial, updates off, a withdrawn release and a good release.
 
 # Add-host payloads
 
@@ -316,7 +426,9 @@ remains enabled. The script tests
 copy the scripts and trust file into an isolated fixture, generate a throwaway
 key, and use a loopback bucket/signer. Production key injection is unavailable.
 `RELEASE_TEST_ORIGIN` exists solely for an explicit loopback HTTP stand-in;
-the default endpoints always use HTTPS. These tests never contact the live
+the default endpoints always use HTTPS. The loopback origin also serves the S3
+calls and recomputes each SigV4 signature, and the test inspects the live curl
+child's `/proc/<pid>/cmdline` for secrets. These tests never contact the live
 bucket or Worker.
 
 # Review checklist
@@ -335,11 +447,11 @@ bucket or Worker.
   release work runs while the component is off.
 - Environment tokens reach curl through stdin, with tracing disabled. No signing
   key, credential file, secret argument or provider diagnostic is recorded.
-- Publisher decoding of R2 preflight and Worker responses rejects duplicate
-  fields at every depth. The
+- The R2 key is bucket-scoped. The preflight XML is decoded strictly and
+  bounded, and the Worker's JSON rejects duplicate fields at every depth. The
   fixed per-user flock refuses concurrent same-version publishers even with
-  different build directories; cross-machine
-  serialization is required because REST conditional PUT is not guaranteed.
+  different build directories; `If-None-Match: *` makes R2 refuse an overwrite,
+  and cross-machine serialization is still required for the listing.
 - Stable defaults never depend on the running binary's channel. Edge requires
   explicit confirmation in both adapters; returning to stable is one action.
 - Channel pointers are bounded strict objects; signed VERSION binds the exact

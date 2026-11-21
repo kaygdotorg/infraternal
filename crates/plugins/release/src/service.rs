@@ -1,5 +1,5 @@
 //! Persists release opt-in atomically and delegates bounded verified lookups without polling [198,226].
-use crate::apply::{Unavailable, UpdateApplier};
+use crate::applier::{Unavailable, UpdateApplier};
 use crate::descriptor::{
     CHANNEL_GET, CHANNEL_SET, EDGE_WARNING, LATEST, UPDATE_APPLY, UPDATE_CANCEL, UPDATE_CHECK,
     UPDATE_HISTORY, UPDATE_ROLLBACK, UPDATE_SETTINGS, UPDATE_STATUS,
@@ -390,7 +390,7 @@ impl ReleaseService {
 }
 
 /// Turn an applier's answer into the wire JSON.
-fn to_json(started: crate::apply::Started) -> Result<Value, &'static str> {
+fn to_json(started: crate::applier::Started) -> Result<Value, &'static str> {
     serde_json::to_value(started).map_err(|_| "release unavailable")
 }
 

@@ -4,7 +4,10 @@ use infraternal_protocol::desktop::MAX_VIDEO_BYTES;
 use std::time::Duration;
 /// A session's 16-byte identifier (a UUID's raw bytes).
 pub type SessionId = [u8; 16];
-/// One encoded video frame (an H.264 access unit) travelling from capture to viewers.
+/// One access unit travelling from capture to viewers: an encoded video frame
+/// (H.264 Annex B), or, with `keyframe` false, a tile update of exact pixels for
+/// a small change (#146 proposal C; layout in `contracts/desktop-helper.md`).
+/// Both kinds share the sequence, so a missed tile is repaired like a missed delta.
 #[derive(Clone, Debug)]
 pub struct Video {
     /// Increasing frame number. Zero is reserved and never valid.
@@ -26,6 +29,16 @@ impl Video {
         } else {
             Ok(())
         }
+    }
+}
+impl crate::backlog::Unit for Video {
+    /// True if a viewer can start decoding from this frame.
+    fn keyframe(&self) -> bool {
+        self.keyframe
+    }
+    /// The encoded size, without the wire header.
+    fn size(&self) -> usize {
+        self.bytes.len()
     }
 }
 /// Why a desktop operation was refused. Deliberately coarse so error text sent to

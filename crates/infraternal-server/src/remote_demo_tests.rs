@@ -338,6 +338,28 @@ async fn invitation_for_uid(
     uid: u32,
     expected_key_digest: [u8; 32],
 ) -> Vec<u8> {
+    invitation_with_mode(
+        address,
+        root,
+        origin,
+        cookie,
+        host,
+        ("rootless", uid),
+        expected_key_digest,
+    )
+    .await
+}
+
+/// An invitation for `host` in `mode` ("rootless" or "rootful") running as `uid`.
+async fn invitation_with_mode(
+    address: SocketAddr,
+    root: &X509,
+    origin: &str,
+    cookie: &str,
+    host: uuid::Uuid,
+    (mode, uid): (&str, u32),
+    expected_key_digest: [u8; 32],
+) -> Vec<u8> {
     use http_body_util::BodyExt;
     let stream = tls(address, root).await;
     let (mut sender, connection) =
@@ -346,7 +368,7 @@ async fn invitation_for_uid(
             .unwrap();
     let task = tokio::spawn(connection);
     let body = serde_json::to_vec(
-        &serde_json::json!({"host_id":host,"mode":"rootless","execution_uid":uid,"expected_key_digest":expected_key_digest}),
+        &serde_json::json!({"host_id":host,"mode":mode,"execution_uid":uid,"expected_key_digest":expected_key_digest}),
     )
     .unwrap();
     let request = hyper::Request::builder()
@@ -1266,6 +1288,10 @@ async fn remote_cli_enrollment_and_browser_terminal_at(
 
 #[path = "remote_host_tests.rs"]
 mod real_host;
+
+/// D356 delivered on a real root host through a live server (#355).
+#[path = "remote_access_report_live_tests.rs"]
+mod access_report_live;
 
 #[path = "remote_cold_tests.rs"]
 mod cold_start;

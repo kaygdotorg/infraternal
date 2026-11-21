@@ -381,13 +381,16 @@ export async function appwinHttp(request: IncomingMessage, response: ServerRespo
   }
   if (request.method === "POST" && pathname === "/__mock/appwin/end") {
     // The app closes: its window leaves the list and every viewer of it is ended, as the real server ends a viewer.
-    const body = await readJson(request) as { window_id?: number } | undefined;
+    // With `reason: "console_user_changed"` the machine ends the sessions because the person at its screen changed (Close
+    // 4411, as the real server sends it): the app stays open and in the list.
+    const body = await readJson(request) as { window_id?: number; reason?: string } | undefined;
+    const consoleChanged = body?.reason === "console_user_changed";
     for (const s of [...sessions.values()]) {
       if (body?.window_id !== undefined && !(s.target.type === "window" && s.target.window_id === body.window_id)) continue;
-      for (const v of [...s.viewers]) { v.socket.send(Buffer.from(encodeMuxedFrame(v.stream, { type: "Close", code: 4404, reason: "viewer ended" })), { binary: true }); detach(v); }
+      for (const v of [...s.viewers]) { v.socket.send(Buffer.from(encodeMuxedFrame(v.stream, consoleChanged ? { type: "Close", code: 4411, reason: "console user changed" } : { type: "Close", code: 4404, reason: "viewer ended" })), { binary: true }); detach(v); }
       sessions.delete(s.id);
     }
-    if (body?.window_id !== undefined) config.windows = config.windows.filter((w) => w.window_id !== body.window_id);
+    if (body?.window_id !== undefined && !consoleChanged) config.windows = config.windows.filter((w) => w.window_id !== body.window_id);
     sendJson(response, 200, { ok: true });
     return true;
   }

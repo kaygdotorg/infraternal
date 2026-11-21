@@ -466,6 +466,7 @@ fn registry() -> crate::plugin_control::Registry {
     plugins.register(Box::<Fixture>::default()).unwrap();
     crate::plugin_control::Registry::new(plugins)
 }
+/// An enrollment identity signed by `ca` that dials `endpoint`.
 fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
     RemoteIdentity {
         host_id: uuid::Uuid::new_v4(),
@@ -477,6 +478,7 @@ fn identity(ca: &remote_tls::Identity, endpoint: SocketAddr) -> RemoteIdentity {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     }
 }
 
@@ -663,6 +665,7 @@ async fn candidate_mtls_refusal_retries_the_pending_predecessor() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let mut renewal = crate::remote_renewal::RenewalIdentity::new(
         &identity.identity,
@@ -1806,6 +1809,7 @@ async fn unavailable_credentials_do_not_end_server_link() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let directory = Directory::new();
     assert!(
@@ -1833,6 +1837,7 @@ async fn failed_control_worker_returns_to_retry_owner() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let directory = Directory::new();
     let result = tokio::time::timeout(

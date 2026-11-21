@@ -9,8 +9,15 @@ and its evidence; it does not install the timer.
 ## Schedule and accounts
 
 `infraternal-browser-suite.timer` starts
-`infraternal-browser-suite.service` daily at 05:00 Asia/Kolkata with up to 15
-minutes of randomized delay. The service takes two build slots through
+`infraternal-browser-suite.service` daily. The installer's timer is 05:00
+Asia/Kolkata with up to 15 minutes of randomized delay. Since 2026-11-20 the
+owner runs dev-02 with a host-local drop-in
+(`/etc/systemd/system/infraternal-browser-suite.timer.d/schedule.conf`) that
+moves it to 05:30 Asia/Kolkata with up to 5 minutes of delay, so the report is
+ready for the morning report; the run is expected to end by about 07:30 to
+07:45. The installer does not write that drop-in, so a reinstall keeps it and a
+new host needs it added by hand. Do not start gates, builds or load tests on
+dev-02 in that window. The service takes two build slots through
 `/home/claude/infraternal-ops/build-slot`, one for each Playwright shard.
 
 The `infraternal-browser` system account owns the mode-0700 checkout and raw

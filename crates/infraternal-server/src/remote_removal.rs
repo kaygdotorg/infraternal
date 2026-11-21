@@ -194,6 +194,66 @@ impl Removal {
         );
         Ok(start)
     }
+    /// D398: the access reports waiting in the owner's Inbox: what the host
+    /// found in the access files of a person whose login was revoked while the
+    /// host stayed, as it reported when it revoked them. Read-only. Only the
+    /// server owner's session reads it; others are refused. A host removal
+    /// never makes one. The text can include a pasted token from a shell
+    /// startup file, so it goes to the owner's session and nowhere else, and
+    /// is never logged. The admin window is not needed: revoked hosts cannot
+    /// start the passkey renewal that window needs (#498), and this reads
+    /// nothing a signed-in owner cannot already see in a terminal.
+    pub(crate) async fn access_reports(
+        &self,
+        token: &str,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let session = self.auth.session(token, now).await?;
+        if !session.owner {
+            return Err(crate::auth::Error::Denied);
+        }
+        let waiting = crate::access_report::inbox(&self.pool, &session.user_id).await?;
+        let mut shown = Vec::with_capacity(waiting.reports.len());
+        for item in waiting.reports {
+            // The words are built here, once, from the cleaned report (D360,
+            // D364, D367): the browser only draws them. The raw report object
+            // is not sent, so nothing in the page can reword it.
+            let single = json!({"state": "reported", "outcome": item.report.state, "more": 0, "reports": [item.report]});
+            let lines: Vec<String> = crate::access_report_text::report_body(&single)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            shown.push(json!({
+                "host_id": item.host,
+                "host": display_name(&item.host_name),
+                "person_id": item.person,
+                "person_name": crate::access_report::person_name(&self.pool, item.person).await?,
+                "recorded_at": item.recorded_at,
+                "outcome": item.report.state,
+                "headline": crate::access_report_text::headline(&single),
+                "lines": lines,
+            }));
+        }
+        Ok(json!({"reports": shown, "more": waiting.more}))
+    }
+
+    /// The owner dismisses one Inbox report. `false` when it is not theirs or
+    /// is already dismissed.
+    pub(crate) async fn dismiss_access_report(
+        &self,
+        token: &str,
+        host: Uuid,
+        person: Uuid,
+        now: i64,
+    ) -> Result<bool, crate::auth::Error> {
+        let session = self.auth.session(token, now).await?;
+        if !session.owner {
+            return Err(crate::auth::Error::Denied);
+        }
+        Ok(crate::access_report::dismiss(&self.pool, &session.user_id, host, person, now).await?)
+    }
+
     /// Remove the host a review from this session's dry run named. A review for another host
     /// is refused without spending it.
     pub(crate) async fn finish_host(
@@ -436,7 +496,7 @@ impl Removal {
                 )
                 .await?
                 {
-                    return Err(crate::auth::Error::Denied);
+                    return Err(crate::auth::Error::FreshRequired);
                 }
             }
             RemovalAuthority::ApiKey { key_hash, .. } => {
@@ -518,18 +578,20 @@ impl Removal {
                 // window closing after the dry run refuses the removal.
                 let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id JOIN remote_hosts h ON h.owner_id=u.id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1 AND h.id=? AND h.revoked_at IS NULL)")
                     .bind(&entry.hash).bind(&entry.user).bind(live).bind(entry.host.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
-                if !allowed
-                    || entry.expires <= live
-                    || !infraternal_plugin_api::fresh_session_tx(
-                        &mut tx,
-                        &entry.hash,
-                        &entry.user,
-                        now,
-                        infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
-                    )
-                    .await?
-                {
+                if !allowed || entry.expires <= live {
                     return Err(crate::auth::Error::Denied);
+                }
+                // Same answer as every other closed window (#563): the page renews and retries.
+                if !infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    &entry.hash,
+                    &entry.user,
+                    now,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
+                )
+                .await?
+                {
+                    return Err(crate::auth::Error::FreshRequired);
                 }
                 None
             }

@@ -71,6 +71,10 @@ final class RemoteControl {
     private var lastPoint = CGPoint.zero
     /// The app that receives remote keyboard events, which are sent to its process directly.
     private var owner: NSRunningApplication?
+    /// Monotonic seconds when the target window was last confirmed raised and not minimized. Pointer
+    /// moves skip those Accessibility round trips to the target app while this is fresh and the app
+    /// is still active.
+    private var frontConfirmedAt = -Double.infinity
 
     /// Creates the shared local-input clock unless this is the separate encoder process.
     init() { if clock == nil && !CommandLine.arguments.contains("--encoder") { clock = LocalInputClock() } }
@@ -156,7 +160,11 @@ final class RemoteControl {
         let idle = localIdleSeconds()
         guard idle >= 2 else { releaseHeld(); return ["accepted": false, "reason": "local_input", "pause_remaining_ms": (2-idle)*1000] }
         guard let type = input["type"] as? String else { throw HelperFailure.invalid }
+        // Moves and scrolls (up to 120 a second) cannot change the window, so they take the
+        // cheap paths below. Clicks and keys always re-check everything (#146).
+        let isMove = type == "scroll" || (type == "mouse" && input["state"] as? UInt8 == 0)
         if type == "text" || type == "key" { geometry?.validateKeyboardTarget() }
+        else if isMove { geometry?.followIfStale() }
         else { geometry?.follow() }
         guard geometry?.exists != false else { throw HelperFailure.unavailable }
         if let geometry, let app = NSRunningApplication(processIdentifier: geometry.pid) {
@@ -169,7 +177,10 @@ final class RemoteControl {
                 guard app.isActive else { throw HelperFailure.unavailable }
             }
             owner = app
-            if let window = geometry.window {
+            let uptime = ProcessInfo.processInfo.systemUptime
+            let frontIsFresh = isMove && uptime - frontConfirmedAt < 0.5
+            if !frontIsFresh, let window = geometry.window {
+                frontConfirmedAt = uptime
                 if axValue(window,kAXMinimizedAttribute as CFString) as? Bool == true {
                     _ = AXUIElementSetAttributeValue(window,kAXMinimizedAttribute as CFString,kCFBooleanFalse)
                 }
@@ -205,11 +216,10 @@ final class RemoteControl {
             } else { point = nil }
             guard let point else { return ["accepted": false, "reason": "letterbox"] }
             if let geometry {
-                let front = windowSnapshot(applicationMetadata: false).first { entry in
-                    guard entry["on_screen"] as? Bool == true, let raw = entry["frame"] as? [String:Any], let frame = try? rect(raw) else { return false }
-                    return frame.contains(point)
-                }
-                guard front?["owner_pid"] as? Int32 == geometry.pid else { return ["accepted":false,"reason":"occluded"] }
+                // Only the windows above the target can hide it: one small query, not the whole list.
+                // An off-screen target, or a foreign window covering the point, refuses the event.
+                if !geometry.onScreen { geometry.follow() }   // activation may just have brought it back
+                guard geometry.onScreen, [nil, geometry.pid].contains(geometry.ownerCovering(point)) else { return ["accepted":false,"reason":"occluded"] }
             }
             lastPoint = point
             if type == "mouse" {
