@@ -711,7 +711,7 @@ fn enrolled_record(root: &File) -> Option<String> {
         '_' => '/',
         other => other,
     }));
-    while key.len() % 4 != 0 {
+    while !key.len().is_multiple_of(4) {
         key.push('=');
     }
     let der = zeroize::Zeroizing::new(openssl::base64::decode_block(&key).ok()?);
