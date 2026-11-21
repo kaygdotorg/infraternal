@@ -33,7 +33,7 @@ use infraternal_plugin_api::{
 };
 use infraternal_protocol::{
     Frame, decode_frame,
-    desktop::{Delivery, Message},
+    desktop::{Delivery, EndReason, Message},
 };
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +59,25 @@ pub(super) struct Metadata {
     pub sequence: AtomicU64,
     /// Latches only when the native companion confirms the target window closed.
     pub gone: AtomicBool,
+    /// Why `gone` latched: 0 the window is gone (the default), 1 the person at the Mac changed.
+    /// Only read once `gone` is set; set it with [`Metadata::latch_gone`].
+    pub(super) gone_reason: std::sync::atomic::AtomicU8,
+}
+impl Metadata {
+    /// Remembers that the session ended for good, and why, across replacement lanes. The first reason stays.
+    pub(super) fn latch_gone(&self, reason: EndReason) {
+        let code = u8::from(reason == EndReason::ConsoleUserChanged);
+        let _ = self.gone_reason.compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+        self.gone.store(true, Ordering::Release);
+    }
+    /// Why the session ended, as the viewer will be told.
+    pub(super) fn gone_reason(&self) -> EndReason {
+        if self.gone_reason.load(Ordering::Acquire) == 1 {
+            EndReason::ConsoleUserChanged
+        } else {
+            EndReason::WindowClosed
+        }
+    }
 }
 /// A session that has been prepared by the server.
 struct Prepared {
@@ -302,6 +321,7 @@ impl SourceBridge {
                         start: Mutex::new(start),
                         sequence: AtomicU64::new(sequence_floor),
                         gone: AtomicBool::new(false),
+                        gone_reason: std::sync::atomic::AtomicU8::new(0),
                     }),
                     worker: None,
                     stopping: false,
@@ -310,7 +330,9 @@ impl SourceBridge {
         }
         let prepared = state.prepared.get(&id).ok_or(PluginError::Rejected)?;
         if prepared.metadata.gone.load(Ordering::Acquire) {
-            return Ok(json!({"session_id":id,"state":"gone"}));
+            return Ok(
+                json!({"session_id":id,"state":"gone","reason":prepared.metadata.gone_reason().helper_word()}),
+            );
         }
         if passive_geometry {
             prepared

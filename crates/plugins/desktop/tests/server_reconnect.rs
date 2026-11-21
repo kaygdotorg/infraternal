@@ -12,7 +12,7 @@ use infraternal_plugin_desktop::{
 };
 use infraternal_protocol::{
     Frame, decode_frame, decode_muxed_frame,
-    desktop::{Delivery, Message, WINDOW_CLOSED},
+    desktop::{CONSOLE_USER_CHANGED, Delivery, Message, WINDOW_CLOSED},
     encode_muxed_frame_into,
 };
 use std::sync::{
@@ -47,7 +47,8 @@ struct Node {
     opens: AtomicUsize,
     second_lane: Option<Arc<Lane>>,
     /// Reports the captured Mac window gone on the first re-preparation.
-    closed_during_disconnect: bool,
+    /// When set, a re-prepare after the first lane answers `gone`, with this `reason` word (`Some(None)` sends none).
+    closed_during_disconnect: Option<Option<&'static str>>,
     floors: Mutex<Vec<u64>>,
     preparations: Mutex<Vec<Start>>,
     prepared: Notify,
@@ -83,11 +84,12 @@ impl NodeHost for Node {
                         .unwrap_or(0),
                 );
                 self.prepared.notify_one();
-                if self.closed_during_disconnect && self.opens.load(Ordering::Relaxed) > 0 {
-                    return Ok(serde_json::to_vec(
-                        &serde_json::json!({"session_id":input["session_id"],"state":"gone"}),
-                    )
-                    .unwrap());
+                if let (Some(word), true) = (self.closed_during_disconnect, self.opens.load(Ordering::Relaxed) > 0) {
+                    let mut reply = serde_json::json!({"session_id":input["session_id"],"state":"gone"});
+                    if let Some(word) = word {
+                        reply["reason"] = word.into();
+                    }
+                    return Ok(serde_json::to_vec(&reply).unwrap());
                 }
             }
             Ok(serde_json::to_vec(&serde_json::json!({"session_id":input["session_id"]})).unwrap())
@@ -163,7 +165,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         }),
         opens: AtomicUsize::new(0),
         second_lane: None,
-        closed_during_disconnect: false,
+        closed_during_disconnect: None,
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
         prepared: Notify::new(),
@@ -273,7 +275,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
             media: tokio::sync::Mutex::new(second_rx),
             controls,
         })),
-        closed_during_disconnect: false,
+        closed_during_disconnect: None,
         floors: Mutex::new(Vec::new()),
         opens: AtomicUsize::new(0),
         preparations: Mutex::new(Vec::new()),
@@ -338,6 +340,25 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
 /// A confirmed native close ends the existing viewer and prevents reuse of its cached picture.
 #[tokio::test]
 async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
+    ended_while_disconnected(None, WINDOW_CLOSED).await;
+}
+
+/// The source's `console_user_changed` word reaches the viewer as its own Close code, on the live
+/// attachment and again on a later attach (#146).
+#[tokio::test]
+async fn a_console_user_change_reaches_the_viewer_as_its_own_close_code() {
+    ended_while_disconnected(Some("console_user_changed"), CONSOLE_USER_CHANGED).await;
+}
+
+/// A reason word this server does not know is the safe default (window closed), never a new message.
+#[tokio::test]
+async fn an_unknown_end_reason_word_ends_as_a_closed_window() {
+    ended_while_disconnected(Some("something_new"), WINDOW_CLOSED).await;
+}
+
+/// Runs a session whose source answers `gone` with `reason_word` after its first lane, and checks the
+/// viewer's Close code on the live attachment and on a later one is `expected`.
+async fn ended_while_disconnected(reason_word: Option<&'static str>, expected: u16) {
     let (media, rx) = mpsc::channel(4);
     let (controls, mut received) = mpsc::channel(8);
     let node = Arc::new(Node {
@@ -346,7 +367,7 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
             controls,
         }),
         second_lane: None,
-        closed_during_disconnect: true,
+        closed_during_disconnect: Some(reason_word),
         opens: AtomicUsize::new(0),
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
@@ -419,10 +440,7 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
         .unwrap();
     assert!(matches!(
         decode_muxed_frame(&ended.wire).unwrap().frame,
-        Frame::Close {
-            code: WINDOW_CLOSED,
-            ..
-        }
+        Frame::Close { code, .. } if code == expected
     ));
     attach(3).await.unwrap();
     let reattached = tokio::time::timeout(std::time::Duration::from_secs(2), replies.recv())
@@ -433,10 +451,7 @@ async fn a_window_closed_while_disconnected_retires_instead_of_reopening() {
     assert_eq!(reattached.stream_id, 3);
     assert!(matches!(
         reattached.frame,
-        Frame::Close {
-            code: WINDOW_CLOSED,
-            ..
-        }
+        Frame::Close { code, .. } if code == expected
     ));
     drop(requests);
     socket.await.unwrap();

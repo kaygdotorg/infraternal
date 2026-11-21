@@ -34,6 +34,14 @@ test("paused and reconnecting keep only a dimmed memory and say so in the pill, 
   expect(Object.keys(paused).concat(Object.keys(re))).not.toContain("strip");
 });
 
+test("a console user change says the person at the machine changed, in one line, and names the app as still open (#146)", () => {
+  const card = describe({ kind: "closed", why: "console-user-changed" }, ctx).card!;
+  expect(card).toMatchObject({ title: "The person at studio-mac changed", hint: "Editor is still open on studio-mac. Open it again to see it.", action: { id: "close" } });
+  expect(card.title).not.toContain("closed");
+  expect(describe({ kind: "closed", why: "console-user-changed" }, { ...ctx, screen: true }).card?.hint).toBe("Open the screen again to see it.");
+  expect(describe({ kind: "closed", why: "console-user-changed" }, ctx).keepPicture).toBe(false);
+});
+
 test("a closed app, a missing permission, an unsupported browser and a failure each name the cause and the next step", () => {
   expect(describe({ kind: "closed" }, ctx).card).toMatchObject({ title: "Editor was closed", action: { id: "close" } });
   const perm = describe({ kind: "permission", what: "Screen Recording" }, ctx);
