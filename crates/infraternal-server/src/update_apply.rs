@@ -14,8 +14,10 @@
 //!   CA stays unlocked, D217). An update never interrupts typing (D251), so there is
 //!   no deadline that would force it.
 //! - **Trial.** The new release checks itself within [`TRIAL_LIMIT`]: `/healthz`
-//!   answers 200 on its own listener, a write transaction commits, and the CA is
-//!   unlocked if it was before. On a pass it commits the boot pointer. Otherwise it
+//!   answers 200 on its own listener, a write transaction commits, the CA is
+//!   unlocked if it was before, and its embedded infraternal agent lists every live
+//!   session the previous release recorded in the marker, except those whose shim
+//!   exited meanwhile (owner, 2026-11-21). On a pass it commits the boot pointer. Otherwise it
 //!   asks the loop to exec the previous release warm, which restores the database
 //!   copy at its own startup (D295).
 //! - **A new release that cannot start.** If the server fails to start serving while
@@ -95,6 +97,85 @@ static TRIAL_OPEN: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
 pub(crate) async fn terminals_admitted() {
     let mut open = TRIAL_OPEN.subscribe();
     let _ = open.wait_for(|open| !*open).await;
+}
+
+/// The embedded infraternal agent's live session census, registered by the WebSocket
+/// state when the server starts (see [`set_session_inventory`]).
+static INVENTORY: Mutex<
+    Option<tokio::sync::watch::Receiver<crate::embedded::SessionInventoryState>>,
+> = Mutex::new(None);
+/// How many recorded sessions the trial is still waiting for B to list; read when the
+/// trial limit passes, to say why it failed.
+static SESSIONS_WAITING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Register the embedded infraternal agent's session census: a switch records the live
+/// sessions from it, and a trial requires them back from it.
+pub(crate) fn set_session_inventory(
+    inventory: tokio::sync::watch::Receiver<crate::embedded::SessionInventoryState>,
+) {
+    *INVENTORY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(inventory);
+}
+
+/// The live sessions in the latest complete census, or `None` when there is none yet
+/// (or the infraternal agent link is down).
+fn live_sessions() -> Option<Vec<[u8; 16]>> {
+    let inventory = INVENTORY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()?;
+    match &*inventory.borrow() {
+        crate::embedded::SessionInventoryState::Available(ids) => Some(ids.to_vec()),
+        _ => None,
+    }
+}
+
+/// Whether the shim of session `id` is still running: its socket is still there and
+/// it has not sealed an exit record. Only the files are read; the shim is never
+/// contacted, so this check cannot disturb a session.
+fn shim_alive(sessions: Option<&Path>, id: &[u8; 16]) -> bool {
+    let Some(sessions) = sessions else {
+        return true;
+    };
+    let socket = sessions.join(format!("{}.sock", uuid::Uuid::from_bytes(*id).simple()));
+    match std::fs::symlink_metadata(&socket) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+        Ok(_) => !matches!(infraternal_shim::ended::read(&socket), Ok(Some(_))),
+    }
+}
+
+/// Wait until this release lists every session in `expected` (simple-form UUIDs, from
+/// the marker) whose shim is still alive in the shim folder `folder`. A session that
+/// exited during the trial is not required (owner, 2026-11-21). Returns only once they
+/// are all listed; the trial limit bounds the wait.
+async fn sessions_listed(expected: &[String], folder: Option<&Path>) {
+    let expected: Vec<[u8; 16]> = expected
+        .iter()
+        .filter_map(|id| uuid::Uuid::parse_str(id).ok())
+        .map(uuid::Uuid::into_bytes)
+        .collect();
+    loop {
+        let listed = live_sessions().unwrap_or_default();
+        #[cfg(feature = "staging-trust")]
+        let listed =
+            if staging_fault(infraternal_plugin_api::VERSION) == Some(StagingFault::Unlisted) {
+                Vec::new()
+            } else {
+                listed
+            };
+        let missing = expected
+            .iter()
+            .filter(|id| !listed.contains(id) && shim_alive(folder, id))
+            .count();
+        SESSIONS_WAITING.store(missing, std::sync::atomic::Ordering::Relaxed);
+        if missing == 0 {
+            return;
+        }
+        // sleep: the census refreshes as the infraternal agent reattaches each shim.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// Answers whether the CA is unlocked right now; see [`set_ca_probe`].
@@ -278,6 +359,9 @@ pub enum StagingFault {
     /// `exec`: the running release's exec of this release is refused, so the late-exec
     /// recovery brings the running release back.
     Exec,
+    /// `unlisted`: the release's trial sees no live sessions, as if its infraternal
+    /// agent could not reattach any shim.
+    Unlisted,
 }
 
 /// The fault `list` (the `INFRATERNAL_STAGING_FAULTS` format) gives `version`, if any.
@@ -294,6 +378,7 @@ fn parse_fault(list: &str, version: &str) -> Option<StagingFault> {
             "timeout" => Some(StagingFault::Timeout),
             "migration" => Some(StagingFault::Migration),
             "exec" => Some(StagingFault::Exec),
+            "unlisted" => Some(StagingFault::Unlisted),
             _ => None,
         }
     })
@@ -430,6 +515,10 @@ async fn switch_once(
         crate::update_activity::freeze(false);
         Retry::Later(reason)
     };
+    // The new release must list these again before it commits (owner, 2026-11-21).
+    let Some(sessions) = live_sessions() else {
+        return Err(give_up(switch, "the live sessions could not be listed"));
+    };
     // From the copy to the exec no terminal input is taken, so nothing the copy lacks
     // is acknowledged to a shim (J1085); a refused switch admits it again.
     crate::update_activity::freeze(true);
@@ -448,6 +537,10 @@ async fn switch_once(
         started: now(),
         reason: None,
         undo_attempts: 0,
+        sessions: sessions
+            .iter()
+            .map(|id| uuid::Uuid::from_bytes(*id).simple().to_string())
+            .collect(),
     };
     if let Err(reason) = switch.begin(&pending) {
         return Err(give_up(switch, reason));
@@ -541,15 +634,21 @@ async fn run_trial(
     let verdict = if trial.reason.is_some() {
         Err(apply::undo_reason(trial.reason.as_deref()))
     } else {
-        match tokio::time::timeout(TRIAL_LIMIT, healthy(pool, listen, trial.ca_warm)).await {
+        match tokio::time::timeout(TRIAL_LIMIT, healthy(pool, listen, trial)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => {
                 tracing::warn!(reason, "update_health_failed");
                 Err(apply::UNHEALTHY)
             }
             Err(_) => {
-                tracing::warn!(reason = apply::TIMED_OUT, "update_health_failed");
-                Err(apply::TIMED_OUT)
+                let missing = SESSIONS_WAITING.load(std::sync::atomic::Ordering::Relaxed);
+                let reason = if missing > 0 {
+                    apply::SESSIONS_MISSING
+                } else {
+                    apply::TIMED_OUT
+                };
+                tracing::warn!(reason, missing_sessions = missing, "update_health_failed");
+                Err(reason)
             }
         }
     };
@@ -628,9 +727,9 @@ async fn undo(trial: &Pending, data: &Path, artifact: &'static str, reason: &'st
 async fn healthy(
     pool: &sqlx::SqlitePool,
     listen: SocketAddr,
-    ca_was_warm: bool,
+    trial: &Pending,
 ) -> Result<(), &'static str> {
-    if ca_was_warm && !ca_warm() {
+    if trial.ca_warm && !ca_warm() {
         return Err("the new release did not receive the unlocked CA");
     }
     #[cfg(feature = "staging-trust")]
@@ -662,6 +761,10 @@ async fn healthy(
         .execute(&mut *connection)
         .await
         .map_err(|_| "the database cannot take a write")?;
+    let folder = infraternal_agent::sessions::state_path(None)
+        .ok()
+        .map(|state| state.join("sessions"));
+    sessions_listed(&trial.sessions, folder.as_deref()).await;
     Ok(())
 }
 

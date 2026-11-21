@@ -273,6 +273,8 @@ impl WebSocketState {
         let queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>> = Arc::default();
         let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
+        // Update switches record the live sessions, and trials require them (#211 S4).
+        crate::update_apply::set_session_inventory(inventory.clone());
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
         tokio::spawn(async move {

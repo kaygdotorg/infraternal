@@ -48,6 +48,23 @@ async fn only_a_200_from_healthz_counts() {
     assert!(!healthz(address).await);
 }
 
+/// A trial marker whose previous release held the CA unlocked or not, with no sessions.
+fn trial(ca_warm: bool) -> Pending {
+    Pending {
+        phase: Phase::Trial,
+        from_version: "edge-20261121T000001Z".into(),
+        from_sha256: "aa".repeat(32),
+        from_path: "/opt/a/infraternal".into(),
+        to_version: "edge-20261121T000002Z".into(),
+        to_sha256: "bb".repeat(32),
+        ca_warm,
+        started: 1,
+        reason: None,
+        undo_attempts: 0,
+        sessions: Vec::new(),
+    }
+}
+
 /// A healthy listener and a writable database pass; losing the unlocked CA fails at
 /// once, before anything is probed.
 #[tokio::test]
@@ -59,14 +76,14 @@ async fn health_needs_the_listener_a_write_and_the_ca() {
     set_ca_probe(Box::new(move || {
         probe.load(std::sync::atomic::Ordering::Relaxed)
     }));
-    assert_eq!(healthy(&pool, address, false).await, Ok(()));
+    assert_eq!(healthy(&pool, address, &trial(false)).await, Ok(()));
     assert_eq!(
-        healthy(&pool, address, true).await,
+        healthy(&pool, address, &trial(true)).await,
         Err("the new release did not receive the unlocked CA")
     );
     // Unlocked later (a passkey after a cold start) counts the same as a handoff.
     unlocked.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert_eq!(healthy(&pool, address, true).await, Ok(()));
+    assert_eq!(healthy(&pool, address, &trial(true)).await, Ok(()));
 }
 
 /// A database whose write lock is held elsewhere fails the write step.
@@ -94,7 +111,7 @@ async fn a_database_that_cannot_take_a_write_fails() {
         .unwrap();
     let address = answering("200 OK").await;
     assert_eq!(
-        healthy(&pool, address, false).await,
+        healthy(&pool, address, &trial(false)).await,
         Err("the database cannot take a write")
     );
     drop(held);
@@ -198,4 +215,44 @@ async fn sockets_wait_while_the_new_release_is_on_trial() {
         .await
         .expect("admitted once the trial commits")
         .unwrap();
+}
+
+/// Owner decision 2026-11-21 (J1085 F4): the trial waits until the new release lists
+/// every recorded session whose shim is still alive. A recorded session whose shim
+/// has gone (exited during the trial) is not required. Before this check a release
+/// that listed no session at all passed at once.
+#[tokio::test]
+async fn the_trial_waits_for_every_live_recorded_session() {
+    use crate::embedded::SessionInventoryState;
+    let folder = std::env::temp_dir().join(format!("s4-shims-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&folder).unwrap();
+    let (alive, exited) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    // A live shim is a socket in the folder; the exited one left nothing behind.
+    let _shim =
+        std::os::unix::net::UnixListener::bind(folder.join(format!("{}.sock", alive.simple())))
+            .unwrap();
+    let (census, inventory) = tokio::sync::watch::channel(SessionInventoryState::Available(
+        Vec::<[u8; 16]>::new().into(),
+    ));
+    set_session_inventory(inventory);
+    let expected = vec![alive.simple().to_string(), exited.simple().to_string()];
+    let waiting = {
+        let (expected, folder) = (expected.clone(), folder.clone());
+        tokio::spawn(async move { sessions_listed(&expected, Some(&folder)).await })
+    };
+    // sleep: the new release lists nothing yet; give the trial time to (wrongly) pass.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!waiting.is_finished(), "a live recorded session is missing");
+    assert_eq!(
+        SESSIONS_WAITING.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    census.send_replace(SessionInventoryState::Available(
+        vec![*alive.as_bytes()].into(),
+    ));
+    tokio::time::timeout(Duration::from_secs(2), waiting)
+        .await
+        .expect("passes once every live recorded session is listed")
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&folder);
 }

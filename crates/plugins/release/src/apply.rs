@@ -68,6 +68,9 @@ pub const TIMED_OUT: &str = "the new release did not pass its health check in ti
 /// Why B undid itself when it could not start serving at all, for example because its
 /// database migration failed.
 pub const FAILED_TO_START: &str = "the new release could not start serving";
+/// Why B undid itself when, by the trial limit, it still did not list every session A
+/// recorded that is still alive: it cannot serve the sessions people have open.
+pub const SESSIONS_MISSING: &str = "the new release did not list the live sessions";
 /// Why A undid B when B stopped during its trial (a crash, a kill or a reboot).
 pub const STOPPED_IN_TRIAL: &str = "the new release stopped during its health check";
 /// Why A paused B when B's exec failed and A came back without B running.
@@ -124,6 +127,11 @@ pub struct Pending {
     /// How many times B came back after its undo exec failed (see [`MAX_UNDO_ATTEMPTS`]).
     #[serde(default)]
     pub undo_attempts: u32,
+    /// The live terminal sessions A served when it began the switch, as simple-form
+    /// UUIDs. B's trial passes only once B lists every one of them whose shim is still
+    /// alive; sessions that exited meanwhile do not count (owner, 2026-11-21, J1085 F4).
+    #[serde(default)]
+    pub sessions: Vec<String>,
 }
 
 /// How often B retries the warm undo when its exec of A keeps failing. After that B keeps
@@ -382,7 +390,7 @@ pub fn resume(
 /// only these known texts are ever copied into the update state.
 #[must_use]
 pub fn undo_reason(reason: Option<&str>) -> &'static str {
-    [UNHEALTHY, TIMED_OUT, FAILED_TO_START]
+    [UNHEALTHY, TIMED_OUT, FAILED_TO_START, SESSIONS_MISSING]
         .into_iter()
         .find(|known| Some(*known) == reason)
         .unwrap_or(STOPPED_IN_TRIAL)

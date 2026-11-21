@@ -84,6 +84,7 @@ fn pending(phase: Phase) -> Pending {
         started: 1,
         reason: None,
         undo_attempts: 0,
+        sessions: Vec::new(),
     }
 }
 
@@ -206,6 +207,7 @@ fn the_previous_release_restores_the_database_after_a_failed_trial() {
         (Phase::Rollback, Some(UNHEALTHY), UNHEALTHY),
         (Phase::Rollback, Some(TIMED_OUT), TIMED_OUT),
         (Phase::Rollback, Some(FAILED_TO_START), FAILED_TO_START),
+        (Phase::Rollback, Some(SESSIONS_MISSING), SESSIONS_MISSING),
         // A marker is a file: an unknown reason is never copied into the state.
         (Phase::Rollback, Some("made up"), STOPPED_IN_TRIAL),
     ] {
