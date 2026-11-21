@@ -1599,7 +1599,7 @@ impl RuntimeState {
         &mut self,
         config: Config,
         budgets: PathBudgets,
-        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         self.apply_with_rollback(config, budgets, true, before)
             .await
@@ -1716,7 +1716,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
         rollback_on_failure: bool,
-        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
