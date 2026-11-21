@@ -337,22 +337,6 @@ let applied: { theme: Theme; level: number } | undefined;
 /** The active theme and card level (Ink and Tinted until `applyTheme` has run). */
 export const activeGlass = (): { theme: Theme; level: number } => applied ?? { theme: THEMES.ink!, level: DEFAULT_CARD };
 
-/** Frames the transitions stay off after a theme switch; a style recalculation that follows the write needs one, a second is margin for a slow frame. */
-const SWITCH_FRAMES = 2;
-let switchFrames = 0;
-/** Turns transitions off (`data-theme-switch` on the root, see `styles.css`) until {@link SWITCH_FRAMES} frames have been painted. */
-function holdTransitions(root: HTMLElement): void {
-  const running = switchFrames > 0;
-  switchFrames = SWITCH_FRAMES;
-  root.setAttribute("data-theme-switch", "");
-  if (running || typeof requestAnimationFrame === "undefined") return;
-  const tick = (): void => {
-    if (--switchFrames > 0) requestAnimationFrame(tick);
-    else root.removeAttribute("data-theme-switch");
-  };
-  requestAnimationFrame(tick);
-}
-
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
 export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
   const style = root.style;
@@ -361,10 +345,6 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
   // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
   installLevelRules();
-  // A switch to another theme must not ease: a button's text colour transition would carry the old theme's text over the new glass
-  // tint for its few frames (2.1:1 measured on a notice's action, #567, D365). Transitions are off for this change and the two
-  // frames after it, which is when the colours are recomputed; nothing else changes meanwhile.
-  if (applied && applied.theme !== active) holdTransitions(root);
   applied = { theme: active, level: cardLevel };
   glassRules();
   glassWatcher();
