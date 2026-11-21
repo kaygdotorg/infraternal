@@ -104,6 +104,11 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// The link already carries the most terminal streams it may (#562). The
+    /// browser's attach is refused at once, instead of waiting for a reply the
+    /// host will never send.
+    #[error("terminal stream limit reached")]
+    StreamLimit,
     /// A public terminal admission refusal; transport failures remain generic.
     #[error("terminal open refused")]
     OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
@@ -2415,6 +2420,16 @@ async fn process_command(
             }
             if stream_id == 0 || stream_id % 2 != 0 {
                 let _ = reply.send(Err(AgentError::Protocol));
+                return true;
+            }
+            // The leg-B reserve (D214) bounds the streams of one link. A new
+            // stream past the bound is refused here, before anything is sent,
+            // so the browser hears a Close at once. A reattach of a stream
+            // already routed is not new and passes.
+            if !routes.contains_key(&stream_id)
+                && routes.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+            {
+                let _ = reply.send(Err(AgentError::StreamLimit));
                 return true;
             }
             #[cfg(feature = "remote")]

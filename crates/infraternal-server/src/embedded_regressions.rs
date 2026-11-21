@@ -2143,6 +2143,51 @@ async fn half_open_infraternal_agent_route_loses_inventory_without_eof() {
     drop(peer);
 }
 
+/// A link that already carries the most terminal streams refuses the next attach at once, with its own
+/// error, instead of sending it to a host that will not answer (#562). The bound itself is unchanged
+/// (D214), and a stream already attached may still be re-attached.
+#[tokio::test]
+async fn attach_past_the_stream_limit_is_refused_at_once() {
+    let limit = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    let agent = EmbeddedAgent::from_test_socket(socket);
+    let mut wire = Vec::new();
+    encode_muxed_frame_into(
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "stream limit fixture",
+        },
+        &mut wire,
+    )
+    .unwrap();
+    peer.write_all(&wire).await.unwrap();
+    let mut attached = Vec::new();
+    for index in 0..limit {
+        let stream = 2 + 2 * u32::try_from(index).unwrap();
+        attached.push(
+            agent
+                .attach([1; 16], 0, 0, stream)
+                .await
+                .unwrap_or_else(|error| panic!("stream {index} of {limit}: {error:?}")),
+        );
+    }
+    let next = 2 + 2 * u32::try_from(limit).unwrap();
+    let started = std::time::Instant::now();
+    let refused = tokio::time::timeout(Duration::from_secs(1), agent.attach([2; 16], 0, 0, next))
+        .await
+        .expect("a full link answers at once, not after the client's timeout");
+    assert!(matches!(refused, Err(AgentError::StreamLimit)));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    // The same session on a stream already routed is a reattach, not a new stream.
+    agent
+        .attach([1; 16], 0, 0, 2)
+        .await
+        .expect("a reattach of an attached stream passes the bound");
+    drop(attached);
+}
+
 /// An expired browser route must wait for authenticated consumer admission before backend work.
 #[tokio::test(start_paused = true)]
 async fn expired_route_waits_for_browser_authority_before_rebind() {
