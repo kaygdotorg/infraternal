@@ -26,7 +26,7 @@ use std::{io, os::unix::fs::MetadataExt as _, path::Path};
 pub(crate) const MACHINE_FILE: &str = "mesh-machine.json";
 
 /// Files whose presence shows that a folder already holds this node's Mesh state: the public
-/// snapshot and the WireGuard key (`macos_node::PUBLIC_STATE`, `macos_key::KEY_FILE`; a Mac test
+/// snapshot and the `WireGuard` key (`macos_node::PUBLIC_STATE`, `macos_key::KEY_FILE`; a Mac test
 /// checks these names still match).
 pub(crate) const MESH_STATE: [&str; 2] = ["mesh-public.json", "mesh-wireguard.key"];
 
