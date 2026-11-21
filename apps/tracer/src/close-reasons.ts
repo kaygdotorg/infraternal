@@ -34,6 +34,7 @@ const KNOWN: Record<string, string> = {
   "terminal command queue full; reattach and replay unacknowledged input": "Too much typing was waiting for the host. Open the terminal again to continue.",
   "shim lacks restart-safe input capability": "The infraternal agent on that host is too old for this terminal. Update it on the host.",
   "shim refused terminal request": "The host would not open this terminal.",
+  "terminal stream limit": "This host already shows as many terminals as it can. Close one to open this one.",
   // Reasons the infraternal agent sends for a single terminal.
   "input queue full": "Too much typing was waiting for the host, so this window reconnected.",
   "terminal route unresponsive": "The terminal on the host stopped responding.",
@@ -43,6 +44,7 @@ const KNOWN: Record<string, string> = {
   "the infraternal agent ended the terminal stream": "The infraternal agent on the host closed this terminal.",
   "the infraternal agent lost its connection to the server": "The infraternal agent on the host lost its connection to the server.",
   "the host could not accept the terminal attachment": "The host could not open this terminal right now.",
+  "this host already shows as many terminals as it can; close one to open another": "This host already shows as many terminals as it can. Close one to open this one.",
   "terminal input exceeded the flow-control limit": "Too much typing was waiting for the host, so this window reconnected.",
   "the terminal reader fell behind and is reconnecting": "The screen could not keep up, so this window was reconnected.",
   "the terminal on the host stopped responding": "The terminal on the host stopped responding.",

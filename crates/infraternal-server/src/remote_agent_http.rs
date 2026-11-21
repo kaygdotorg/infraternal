@@ -5,26 +5,145 @@ use crate::{
 };
 use axum::{
     Router,
-    extract::{
-        ConnectInfo, Request, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
-    },
-    http::StatusCode,
+    body::Body,
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use futures_util::{SinkExt, StreamExt};
+use hyper_util::rt::TokioIo;
 use infraternal_plugin_remote::agent_link::{
     AgentLinkChallenge, AgentLinkProof, AgentLinkReady, proof_bytes,
 };
 use openssl::{hash::MessageDigest, pkey::Id, rand::rand_bytes, sign::Verifier, x509::X509};
-use std::{io, net::IpAddr, sync::Arc, time::Duration};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use std::{
+    io,
+    net::IpAddr,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
+use tokio_tungstenite::{
+    WebSocketStream,
+    tungstenite::{
+        Message,
+        handshake::derive_accept_key,
+        protocol::{Role, WebSocketConfig},
+    },
+};
 use uuid::Uuid;
 
 const MAX_PROOF_MESSAGE: usize = 8192;
 const MAX_MESSAGE: usize = infraternal_protocol::MAX_FRAME_LEN + 64;
 const HANDSHAKE: Duration = Duration::from_secs(5);
+/// Bytes an unproved peer may make the server read: one proof message plus
+/// the largest masked frame header (2 + 8 length + 4 mask bytes). The
+/// infraternal agent sends the proof as a single frame and nothing else until
+/// it reads `ready`, so an honest peer never comes near this (#572 finding 6).
+const PROOF_READ_BUDGET: usize = MAX_PROOF_MESSAGE + 14;
+
+/// The WebSocket an enrolled host link runs on after `/remote/agent` admits it.
+/// The read budget is lifted by then, so it carries full protocol frames.
+pub(crate) type AgentSocket = WebSocketStream<ProofBudget<TokioIo<hyper::upgrade::Upgraded>>>;
+
+/// Caps how many bytes an unauthenticated `/remote/agent` socket may read
+/// before its proof passes (#572 finding 6).
+///
+/// The socket must accept 4 MiB messages once the host is admitted, and the
+/// WebSocket layer cannot change its size limit after the upgrade. Without
+/// this cap, any peer could make each of the 64 handshake slots buffer up to
+/// 4 MiB for the 5 s handshake deadline before the 8 KiB proof check ran.
+/// The budget counts raw bytes read from the connection, so it also covers
+/// fragmented and control frames. A read past it fails with `InvalidData`,
+/// which ends the handshake. [`ProofBudget::lift`] removes the cap once the
+/// proof is authenticated.
+pub(crate) struct ProofBudget<S> {
+    inner: S,
+    /// Bytes still allowed, or `None` once the proof has passed.
+    remaining: Option<usize>,
+}
+
+impl<S> ProofBudget<S> {
+    /// Wrap `inner` so at most `budget` bytes can be read until [`Self::lift`].
+    fn new(inner: S, budget: usize) -> Self {
+        Self {
+            inner,
+            remaining: Some(budget),
+        }
+    }
+
+    /// Remove the cap: the peer has proved it holds an enrolled host key.
+    fn lift(&mut self) {
+        self.remaining = None;
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ProofBudget<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let Some(remaining) = this.remaining else {
+            return Pin::new(&mut this.inner).poll_read(cx, buf);
+        };
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        if remaining == 0 {
+            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+        }
+        // Read into a window no larger than the budget. Zeroing it costs at
+        // most the budget once per read, and only before the proof.
+        let window = buf.initialize_unfilled_to(remaining.min(buf.remaining()));
+        let mut limited = ReadBuf::new(window);
+        let result = Pin::new(&mut this.inner).poll_read(cx, &mut limited);
+        let read = limited.filled().len();
+        if let Poll::Ready(Ok(())) = result {
+            buf.advance(read);
+            this.remaining = Some(remaining - read);
+        }
+        result
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ProofBudget<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, data)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, data)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 #[derive(Clone)]
 struct Api {
@@ -57,7 +176,10 @@ pub(crate) fn router(hosts: RemoteHosts, store: EnrollmentStore) -> Router {
         })
 }
 
-async fn upgrade(State(api): State<Api>, ws: WebSocketUpgrade, request: Request) -> Response {
+/// Accept the WebSocket upgrade by hand so the socket starts under a
+/// [`ProofBudget`]. The infraternal agent connects over HTTP/1.1 only, so
+/// this checks exactly the RFC 6455 opening handshake and answers 101.
+async fn upgrade(State(api): State<Api>, mut request: Request) -> Response {
     let address = request
         .extensions()
         .get::<crate::runtime::ClientAddress>()
@@ -69,25 +191,75 @@ async fn upgrade(State(api): State<Api>, ws: WebSocketUpgrade, request: Request)
                 .map(|address| address.0.ip())
         })
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let Some(accept) = websocket_accept(request.headers()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(on_upgrade) = request
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>()
+    else {
+        return StatusCode::UPGRADE_REQUIRED.into_response();
+    };
     let Some(source) = api.sources.reserve(address) else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     let Ok(permit) = api.admission.clone().try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
-    ws.max_message_size(MAX_MESSAGE)
-        .max_frame_size(MAX_MESSAGE)
-        .on_upgrade(move |socket| async move {
-            if let Err(error) = admit(socket, api, address, source, permit).await {
-                eprintln!("Infraternal agent HTTPS link ended ({:?})", error.kind());
-            }
+    tokio::spawn(async move {
+        // The permits move into this task, so a failed upgrade returns them.
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_MESSAGE);
+        config.max_frame_size = Some(MAX_MESSAGE);
+        let socket = WebSocketStream::from_raw_socket(
+            ProofBudget::new(TokioIo::new(upgraded), PROOF_READ_BUDGET),
+            Role::Server,
+            Some(config),
+        )
+        .await;
+        if let Err(error) = admit(socket, api, address, source, permit).await {
+            eprintln!("Infraternal agent HTTPS link ended ({:?})", error.kind());
+        }
+    });
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    let headers = response.headers_mut();
+    headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
+    response
+}
+
+/// Check an HTTP/1.1 WebSocket opening request and return the
+/// `Sec-WebSocket-Accept` value for it, or `None` when it is not one.
+fn websocket_accept(headers: &HeaderMap) -> Option<HeaderValue> {
+    let has_token = |name: header::HeaderName, token: &str| {
+        headers.get_all(name).iter().any(|value| {
+            value.to_str().is_ok_and(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim().eq_ignore_ascii_case(token))
+            })
         })
+    };
+    let version = headers.get(header::SEC_WEBSOCKET_VERSION)?;
+    if !has_token(header::CONNECTION, "upgrade")
+        || !has_token(header::UPGRADE, "websocket")
+        || version.as_bytes() != b"13"
+    {
+        return None;
+    }
+    let key = headers.get(header::SEC_WEBSOCKET_KEY)?;
+    HeaderValue::from_str(&derive_accept_key(key.as_bytes())).ok()
 }
 
 /// Authenticate the host proof and protocol Hello before returning handshake
 /// capacity. The bounded per-host cleanup lane owns durable delivery from here.
 async fn admit(
-    mut socket: WebSocket,
+    mut socket: AgentSocket,
     api: Api,
     address: IpAddr,
     source: OwnedSemaphorePermit,
@@ -102,7 +274,7 @@ async fn admit(
     trace_test_phase("challenge-send", send_text(&mut socket, &challenge).await)?;
     let proof = trace_test_phase(
         "proof-receive",
-        tokio::time::timeout(HANDSHAKE, socket.recv())
+        tokio::time::timeout(HANDSHAKE, socket.next())
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
             .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?
@@ -120,6 +292,8 @@ async fn admit(
         "proof-authenticate",
         authenticate(api.store.clone(), &proof, &nonce).await,
     )?;
+    // The peer holds an enrolled host key: from here it may send full frames.
+    socket.get_mut().lift();
     trace_test_phase(
         "ready-send",
         send_text(
@@ -145,7 +319,8 @@ async fn admit(
     )
 }
 
-async fn send_text<T: serde::Serialize>(socket: &mut WebSocket, message: &T) -> io::Result<()> {
+/// Send one handshake message as JSON text, within the handshake deadline.
+async fn send_text<T: serde::Serialize>(socket: &mut AgentSocket, message: &T) -> io::Result<()> {
     let text = serde_json::to_string(message).map_err(io::Error::other)?;
     tokio::time::timeout(HANDSHAKE, socket.send(Message::Text(text.into())))
         .await
@@ -396,6 +571,92 @@ mod tests {
             "cleanup retained source handshake slot"
         );
         drop(socket);
+        server.abort();
+        let _ = server.await;
+    }
+
+    /// The budget hands out at most its size, refuses the next read, and
+    /// passes every byte once lifted, without losing any in between.
+    #[tokio::test]
+    async fn proof_budget_caps_reads_until_lifted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut peer, local) = tokio::io::duplex(64);
+        let mut budget = ProofBudget::new(local, 4);
+        peer.write_all(b"abcdefgh").await.unwrap();
+        let mut read = [0; 8];
+        assert_eq!(budget.read(&mut read).await.unwrap(), 4);
+        assert_eq!(&read[..4], b"abcd");
+        assert_eq!(
+            budget.read(&mut read).await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        budget.lift();
+        assert_eq!(budget.read(&mut read).await.unwrap(), 4);
+        assert_eq!(&read[..4], b"efgh");
+    }
+
+    /// #572 finding 6: a peer that has not proved anything may not make the
+    /// server buffer a 4 MiB message. The test announces a 4 MiB text message
+    /// as its "proof" and sends 64 KiB of it. The server must drop the socket
+    /// once it has read a proof's worth of bytes, long before the 5 s
+    /// handshake deadline, and return its handshake slots. Before the fix it
+    /// kept reading until the deadline.
+    #[tokio::test]
+    async fn unproved_peer_is_cut_off_after_a_proofs_worth_of_bytes() {
+        use futures_util::StreamExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (store, _pool, _host) = crate::enrollment::authority::tests::enrolled().await;
+        let global = Arc::new(Semaphore::new(1));
+        let sources = Arc::new(crate::remote_admission::SourceSlots::new(1));
+        let api = Api {
+            hosts: RemoteHosts::default(),
+            store,
+            admission: global.clone(),
+            sources,
+        };
+        let router = Router::new()
+            .route("/remote/agent", get(upgrade))
+            .with_state(api);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let tcp = tokio::net::TcpStream::connect(endpoint).await.unwrap();
+        let (mut socket, _) =
+            tokio_tungstenite::client_async(format!("ws://{endpoint}/remote/agent"), tcp)
+                .await
+                .unwrap();
+        let _challenge = socket.next().await.unwrap().unwrap();
+        // Write the frame by hand: FIN + text, masked, 64-bit length 4 MiB,
+        // a zero mask key, then 64 KiB of the payload.
+        let tcp = socket.get_mut();
+        let mut header = vec![0x81, 0x80 | 127];
+        header.extend_from_slice(&(4_u64 << 20).to_be_bytes());
+        header.extend_from_slice(&[0; 4]);
+        tcp.write_all(&header).await.unwrap();
+        // The server may reset the stream while we write; that is the result
+        // we want, so write errors are ignored here and judged by the read.
+        let _ = tcp.write_all(&vec![b'a'; 64 * 1024]).await;
+        let mut byte = [0; 1];
+        let closed = tokio::time::timeout(Duration::from_secs(2), tcp.read(&mut byte)).await;
+        assert!(
+            matches!(closed, Ok(Ok(0) | Err(_))),
+            "server kept buffering an unproved 4 MiB message: {closed:?}"
+        );
+        // The permit returns when the admission task ends; give it a moment.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while global.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handshake slot returned after the cut-off");
         server.abort();
         let _ = server.await;
     }

@@ -32,7 +32,14 @@
       devShells = forAll (pkgs:
         let
           # Channel, components and musl targets come from rust-toolchain.toml.
-          rust = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+          # The shell adds the arm64 macOS standard library on top, so the "macOS
+          # compile" row in scripts/verify can type-check macOS code from Linux
+          # (#260). It stays out of rust-toolchain.toml: nix/package.nix builds the
+          # Linux release from that file, and its inputs should not grow.
+          pinned = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
+          rust = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+            targets = pinned.toolchain.targets ++ [ "aarch64-apple-darwin" ];
+          };
           # .cargo/rustc.sh asks `rustup which rustc` for the compiler. The
           # toolchain is already pinned by nix, so answer that one query and
           # refuse everything else; real rustup would download a compiler.

@@ -57,11 +57,12 @@ export interface D375Measurement {
     | "first_paint_4g_signin"
     | "first_paint_4g_connected"
     | "first_paint_3g_signin"
-    | "first_paint_3g_connected";
+    | "first_paint_3g_connected"
+    | "second_burst_extra_frames";
   source: string;
   n: number;
   value: number;
-  unit: "ms" | "fps";
+  unit: "ms" | "fps" | "frames";
   target: number;
   gate?: number;
   higherIsBetter?: boolean;

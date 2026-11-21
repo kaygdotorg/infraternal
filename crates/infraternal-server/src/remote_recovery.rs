@@ -64,11 +64,14 @@ struct Bucket {
 }
 
 impl Limiter {
-    /// Charge the source address before any parsing or storage work.
+    /// Charge the source network before any parsing or storage work. An IPv6
+    /// caller is charged to its /64, the same network unit as auth (#263), so
+    /// one routed /64 can neither reset its budget by rotating addresses nor
+    /// fill the 4,096-entry table and deny recovery to every new source (#572).
     fn admit_source(&self, source: IpAddr) -> bool {
         bucket_admits(
             &self.sources,
-            source,
+            crate::runtime::device_source(source),
             Instant::now(),
             MAX_SOURCE_BUCKETS,
             MAX_SOURCE_ATTEMPTS,
@@ -1519,6 +1522,24 @@ mod tests {
         assert!(bucket_admits(&buckets, source, now, 4, 2));
         assert!(!bucket_admits(&buckets, source, now, 4, 2));
         assert!(bucket_admits(&buckets, source, now + RATE_WINDOW, 4, 2));
+    }
+
+    /// #572 finding 5: addresses rotating inside one IPv6 /64 share one source
+    /// budget, while another /64 keeps its own.
+    #[test]
+    fn source_budget_is_shared_by_one_ipv6_slash_64() {
+        let limiter = Limiter::default();
+        for host in 0..MAX_SOURCE_ATTEMPTS {
+            let source = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, host));
+            assert!(limiter.admit_source(source), "attempt {host} refused early");
+        }
+        let rotated = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 9, 9, 9, 9));
+        assert!(
+            !limiter.admit_source(rotated),
+            "a new address in the same /64 got a fresh budget"
+        );
+        let neighbour = IpAddr::V6(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 2, 0, 0, 0, 1));
+        assert!(limiter.admit_source(neighbour));
     }
 
     /// An untrusted server clock denies recovery before the CA material is consulted.

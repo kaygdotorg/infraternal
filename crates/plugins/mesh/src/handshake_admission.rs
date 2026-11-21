@@ -1,8 +1,9 @@
 //! Drops handshake initiations from keys the node has not granted, before `GotaTun` sees them.
 //!
-//! `GotaTun` answers a MAC1-valid initiation with a cookie once its per-source limiter is under
-//! load, and it does so before it looks up the sender's key. MAC1 needs only the node's public
-//! key, which mesh members can see, so without this guard a stranger could make the node reply.
+//! `GotaTun` answers a MAC1-valid initiation with a cookie while the device is under load (its
+//! handshake backlog is an eighth full, #260 J1112), and it does so before it looks up the
+//! sender's key. MAC1 needs only the node's public key, which mesh members can see, so without
+//! this guard a stranger could make the node reply.
 //! The guard sits between the UDP socket and `GotaTun` on both node platforms (Linux and macOS):
 //! it validates MAC1, decrypts the sender's static key, and passes the initiation on only when
 //! that key belongs to a peer the node has installed. Every other packet passes unchanged, and
@@ -37,8 +38,10 @@
 //! never get a reply, and a flood costs one MAC1 check per packet, as it did before the guard
 //! existed.
 //!
-//! The total per-source budget is twice `GotaTun`'s own per-source limit, so a granted peer's
-//! burst still reaches `GotaTun`'s cookie reply and its MAC2 retry, as without the guard.
+//! The total per-source budget is twice [`REFUSED_SOURCE_BUDGET`], so a granted peer's burst
+//! gets room a stranger's does not. `GotaTun` no longer limits per source at all: it demands
+//! cookies only while its handshake backlog says it is under load (#260, J1112), so these budgets
+//! are what bound one source's key agreements.
 //!
 //! What a sustained flood of MAC1-valid initiations does (a replayed initiation is enough, and
 //! anyone who knows the node's public key can make one). The budgets refill every second, so a
@@ -79,18 +82,21 @@
 //!
 //! Handshake responses are not filtered (J778, #483). A response carries no sender key the guard
 //! could check, and only `GotaTun` knows which of its own initiations a response answers.
-//! `GotaTun`'s limiter counts responses together with initiations per source address and, past
-//! its per-source limit, answers a MAC1-valid response that lacks a valid MAC2 with a cookie
-//! reply, before it looks the response up. MAC1 needs only the node's public key, so anyone who
-//! knows that key can still draw cookie replies this way, to a spoofed address too. Each reply
-//! (64 bytes) is smaller than the response that caused it (92 bytes), so it never amplifies a
-//! flood. Closing this needs a response budget here or a `GotaTun` change; it is a follow-up.
+//! `GotaTun` no longer counts responses per source (#260, J1112), so a burst of responses to the
+//! node's own initiations (many peers behind one NAT after a restart) draws no cookie. While its
+//! handshake backlog says it is under load, it answers a MAC1-valid response that lacks a valid
+//! MAC2 with a cookie reply, before it looks the response up. MAC1 needs only the node's public
+//! key, so anyone who knows that key and can build such a backlog can still draw cookie replies
+//! this way, to a spoofed address too. Each reply (64 bytes) is smaller than the response that
+//! caused it (92 bytes), so it never amplifies a flood. Closing this needs a response budget here
+//! or a `GotaTun` change; it is a follow-up.
 //!
 //! Cookie-proven (MAC2) initiations get no budget of their own: the cookie secret is private to
 //! the `GotaTun` device, so the guard cannot check MAC2 without a `GotaTun` change. `GotaTun`
-//! sends a cookie only to a source the guard admitted more than 100 times in one second, so a
-//! peer retrying every five seconds never holds one; a peer bursting from its known endpoint
-//! spends its share of the reserve first and then the budgets every source has.
+//! sends cookies only while its handshake backlog says it is under load, which the guard's
+//! budgets keep rare: they admit at most [`NODE_BUDGET`] key agreements a second, and the backlog
+//! that means load is 128 waiting messages. A peer bursting from its known endpoint spends its
+//! share of the reserve first and then the budgets every source has.
 
 use gotatun::{
     noise::{handshake::parse_handshake_anon, rate_limiter::RateLimiter},
@@ -133,15 +139,17 @@ pub(crate) enum Refusal {
 /// Key agreements per second and source that may end in a refusal (an unknown or undecryptable
 /// key).
 ///
-/// This is `GotaTun`'s own per-source handshake limit (`HANDSHAKE_RATE_LIMIT`): a stranger costs
-/// no more key agreements than it could cause before the guard existed.
+/// This was `GotaTun`'s own per-source handshake limit before the guard existed. `GotaTun` now
+/// decides load by its handshake backlog instead (#260, J1112), so this budget alone keeps one
+/// stranger at 100 key agreements a second.
 pub(crate) const REFUSED_SOURCE_BUDGET: u32 = 100;
 
 /// Key agreements per second and source, admitted or not.
 ///
-/// Twice `GotaTun`'s per-source limit, so `GotaTun`'s limiter, not the guard, is what a granted
-/// peer's burst meets first: it gets the standard cookie and can retry with MAC2. The guard still
-/// bounds a granted peer's flood.
+/// Twice [`REFUSED_SOURCE_BUDGET`], so a granted peer's burst gets more room than a stranger's.
+/// The guard still bounds a granted peer's flood. (While `GotaTun` counted handshakes per source,
+/// past 100 a granted peer met its cookie first; since #260 J1112 it sends cookies only when its
+/// backlog says it is under load.)
 pub(crate) const SOURCE_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
 
 /// Key agreements per second and network (IPv4 /24, IPv6 /48) that may end in a refusal.
@@ -517,7 +525,7 @@ fn distinct_endpoints(lists: Lists<'_>) -> usize {
     lists.configured.len() + lists.confirmed.len() - also_configured
 }
 
-/// Holds the live mesh identities allowed to reach `GotaTun`'s handshake cookie limiter.
+/// Holds the live mesh identities allowed to reach `GotaTun`'s handshake queue and cookie check.
 ///
 /// The peer list changes only after the device accepts a snapshot, while both key checks follow
 /// live local-key rotation.
@@ -702,9 +710,8 @@ impl PeerAdmission {
             return Ok(());
         }
         // Keep malformed traffic out of the static-key decryption path and out of the real
-        // limiter. MAC1 does not depend on the source address, so keep the validator's per-IP
-        // counter on one fixed key instead of letting spoofed sources grow a second map.
-        self.mac1.try_reset_count();
+        // limiter. MAC1 does not depend on the source address. The validator is never told of a
+        // handshake backlog, so it is never under load and only checks MAC1 (#260, J1112).
         let validation_source = SocketAddr::from(([0, 0, 0, 0], 0));
         let validation_packet: Packet = Packet::copy_from(packet.as_ref());
         let Ok(WgKind::HandshakeInit(initiation)) = self
@@ -1174,11 +1181,10 @@ mod tests {
         );
     }
 
-    /// A granted peer's burst passes the guard past `GotaTun`'s own limit of 100, so `GotaTun`
-    /// answers it with the standard cookie, and the guard stops it only at twice that. A stranger
-    /// on the same source is still cut off after 100 refusals.
+    /// A granted peer's burst passes the guard up to twice the refusal budget, and the guard
+    /// stops it there. A stranger on the same source is still cut off after 100 refusals.
     #[test]
-    fn a_granted_peer_burst_reaches_gotatun_cookie_limit_before_the_guard() {
+    fn a_granted_peer_burst_gets_twice_a_strangers_budget() {
         let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
         let peer = [0x66; 32];
         admission.set_peers([PublicKey(

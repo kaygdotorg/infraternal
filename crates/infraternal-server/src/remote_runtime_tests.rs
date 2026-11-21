@@ -742,6 +742,10 @@ mod standby;
 #[path = "remote_listener_tests.rs"]
 mod additional_listeners;
 
+/// Forged QUIC Initials and a real host's reconnect under them (#572).
+#[path = "remote_retry_tests.rs"]
+mod retry;
+
 #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
 #[path = "remote_mesh_namespace_tests.rs"]
 pub(crate) mod mesh_namespace;

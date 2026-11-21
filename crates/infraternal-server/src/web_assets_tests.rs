@@ -16,6 +16,8 @@ fn fixture() -> (PathBuf, Router) {
         ("chunk-1234abcd.js", b"identity payload".as_slice()),
         ("chunk-1234abcd.js.gz", b"gzip".as_slice()),
         ("chunk-1234abcd.js.br", b"br".as_slice()),
+        ("ghostty-vt-1234abcd.wasm", b"\0asm engine".as_slice()),
+        ("ghostty-vt-1234abcd.wasm.br", b"br wasm".as_slice()),
         ("index.html", b"<html>entry</html>".as_slice()),
         ("index.html.br", b"compressed html".as_slice()),
         ("font.woff2", b"font bytes".as_slice()),
@@ -182,6 +184,25 @@ async fn encodings_and_identity_have_correct_headers_and_sizes() {
             .to_bytes()
             .is_empty()
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The terminal engine's content-hashed wasm streams: `application/wasm` (streaming compilation refuses any other type),
+/// a year-long immutable cache and its Brotli encoding. A wasm name without the bundler's hash is not immutable (#573).
+#[tokio::test]
+async fn engine_wasm_is_served_as_wasm_and_cached_for_good() {
+    let (root, app) = fixture();
+    let response = get(&app, "/ghostty-vt-1234abcd.wasm", &[]).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/wasm");
+    assert_eq!(response.headers()[header::CONTENT_ENCODING], "br");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    std::fs::write(root.join("ghostty-vt.wasm"), b"\0asm plain").unwrap();
+    let plain = get(&app, "/ghostty-vt.wasm", &[]).await;
+    assert_eq!(plain.headers()[header::CACHE_CONTROL], "no-cache");
     std::fs::remove_dir_all(root).unwrap();
 }
 

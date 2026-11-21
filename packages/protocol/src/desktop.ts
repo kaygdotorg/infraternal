@@ -23,6 +23,17 @@ export const DESKTOP_VIDEO = 16n;
 export const MAX_VIDEO_BYTES = 4 * 1024 * 1024 - 42;
 /** Viewer Close code for an authoritative native window retirement. */
 export const WINDOW_CLOSED = 4410;
+/** Viewer Close code for a session the machine ended because the person at its screen changed. */
+export const CONSOLE_USER_CHANGED = 4411;
+/**
+ * Why a machine ended a desktop session for good: the closed set carried by the viewer's final Close code
+ * (same values as `EndReason` in the Rust protocol crate). Anything else is not an end reason.
+ */
+export type EndReason = "window-closed" | "console-user-changed";
+/** The end reason a Close `code` carries, or `undefined` when it is not one (a viewer ending, a refusal). */
+export function endReason(code: number): EndReason | undefined {
+  return code === WINDOW_CLOSED ? "window-closed" : code === CONSOLE_USER_CHANGED ? "console-user-changed" : undefined;
+}
 /**
  * One input event from the viewer to the host screen (carried by an `input` message).
  * - `release`: let go of every key and button the host believes is held.

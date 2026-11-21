@@ -20,7 +20,7 @@
  * closing, an action refusing, the socket dropping.
  */
 import type { MuxConnection, StreamHandler } from "../../connection";
-import { MAX_VIDEO_BYTES, WINDOW_CLOSED, type VideoInput } from "../../../../../packages/protocol/src/desktop";
+import { MAX_VIDEO_BYTES, endReason, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { parseInventory, type AppTarget } from "./inventory";
 import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
@@ -353,10 +353,11 @@ export class AppStream {
       if (retired) (this.pendingStops ??= new Set()).add(retired);
       this.session = undefined;
       this.setControl({ kind: "none" });
-      if (frame.code === WINDOW_CLOSED) {
+      const ended = endReason(frame.code);
+      if (ended) {
         this.keepControl = false;
         this.releaseSurface();
-        this.setState({ kind: "closed" });
+        this.setState(ended === "console-user-changed" ? { kind: "closed", why: "console-user-changed" } : { kind: "closed" });
       } else {
         void this.diagnose(this.generation, new Error("closed"));
       }
