@@ -624,7 +624,10 @@ fn test_trust_anchor_adds_only_the_named_ca() {
             .success()
     };
     assert!(probe(&anchor_path, &anchor_path), "the named CA is trusted");
-    assert!(!probe(&anchor_path, &other_path), "an unnamed CA stays untrusted");
+    assert!(
+        !probe(&anchor_path, &other_path),
+        "an unnamed CA stays untrusted"
+    );
     assert!(
         !probe(&directory.0.join("missing.pem"), &anchor_path),
         "a missing anchor file fails closed"
