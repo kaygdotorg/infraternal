@@ -685,6 +685,11 @@ export class TerminalClient {
     await warmup;
   }
 
+  /**
+   * Loads the font and the terminal engine once and shares the work between every caller: the engine's wasm file is
+   * fetched and compiled here (`src/engine-wasm.ts`), and the loaded engine is kept for the renderers built afterwards.
+   * @param font the face whose upright files gate the first paint
+   */
   private static async prepareResources(font: MonoFont): Promise<void> {
     let renderer = TerminalClient.rendererPreparation;
     if (!renderer) {
