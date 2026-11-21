@@ -94,7 +94,7 @@ export function withFakeDom(body: (parent: FakeElement, clock: FakeClock) => voi
   };
   const overrides = {
     document: { createElement: (tag: string) => new FakeElement(tag) },
-    window: { setTimeout: (run: () => void) => { timers.set(++serial, run); return serial; }, clearTimeout: (id: number) => { timers.delete(id); } },
+    window: { setTimeout: (run: () => void) => { timers.set(++serial, run); return serial; }, clearTimeout: (id: number) => { timers.delete(id); }, addEventListener() {}, removeEventListener() {} },
     requestAnimationFrame: (callback: FrameRequestCallback) => frames.push(callback),
     cancelAnimationFrame() {},
   };
