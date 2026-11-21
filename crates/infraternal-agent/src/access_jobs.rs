@@ -589,7 +589,24 @@ fn root_crontab(observed: &mut Observation) {
 /// delay identifier command`, with `@monthly`-style periods taking the same
 /// three columns; assignments are read like a cron file's.
 fn anacrontab(observed: &mut Observation) {
-    root_table(observed, Path::new("/etc/anacrontab"), |_| 3);
+    anacron(observed, Path::new("/etc/anacrontab"));
+}
+
+/// Read anacron's table at `path` (see [`anacrontab`]). Unlike cron, which
+/// refuses a table root does not own or others can write, anacron runs its
+/// table whatever its owner or mode, so the table itself, its directories
+/// and any link on the way are root inputs too: whoever can write any of
+/// them adds a root job (J1051). A missing table is no input.
+fn anacron(observed: &mut Observation, path: &Path) {
+    root_table(observed, path, |_| 3);
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) {
+        return;
+    }
+    root_job(
+        observed,
+        path.display().to_string(),
+        Some(vec![path.to_owned()]),
+    );
 }
 
 /// Resolve every job line of one root-owned schedule table without a user
@@ -1021,6 +1038,31 @@ mod tests {
         );
         let mut missing = Observation::empty();
         root_table(&mut missing, &root.join("absent"), |_| 3);
+        assert!(missing.complete && missing.root_inputs.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J1051: anacron, unlike cron, runs its table whatever its owner or
+    /// mode, so whoever can write the table adds root jobs. The table and
+    /// its directories are root inputs themselves; a missing table is none.
+    #[test]
+    fn the_anacron_table_itself_is_a_root_input() {
+        let root = nix::unistd::mkdtemp("/tmp/rvant-XXXXXX").unwrap();
+        let table = root.join("anacrontab");
+        fs::write(&table, "SHELL=/bin/sh\n").unwrap();
+        let mut observed = Observation::empty();
+        anacron(&mut observed, &table);
+        let inputs: Vec<_> = observed
+            .root_inputs
+            .iter()
+            .flat_map(|(_, paths)| paths.iter().cloned())
+            .collect();
+        for expected in [table.clone(), root.clone()] {
+            assert!(inputs.contains(&expected), "{expected:?}: {inputs:?}");
+        }
+        assert!(observed.complete && !observed.privileged);
+        let mut missing = Observation::empty();
+        anacron(&mut missing, &root.join("absent"));
         assert!(missing.complete && missing.root_inputs.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
