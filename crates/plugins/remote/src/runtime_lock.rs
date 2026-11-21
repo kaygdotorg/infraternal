@@ -666,6 +666,10 @@ struct EnrolledFields {
     key_der: zeroize::Zeroizing<String>,
 }
 
+/// Read `state/identity.json` under `root` and build the `<digest> <server>`
+/// record that [`enrolled`] reports. Returns `None` for a missing, foreign-owned,
+/// group/other-readable, oversized or malformed identity; the private key is
+/// only used to derive its public half and is wiped when this returns.
 fn enrolled_record(root: &File) -> Option<String> {
     let state = directory(&at(root, "state")).ok()?;
     let mut file = OpenOptions::new()
