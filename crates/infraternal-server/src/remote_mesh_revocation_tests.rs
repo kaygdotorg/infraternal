@@ -114,7 +114,10 @@ async fn watched_by_peer(
 }
 
 /// How many mesh node rows have this id (0 once retired).
-async fn node_rows(pool: &sqlx::SqlitePool, node: infraternal_plugin_mesh::policy::model::NodeId) -> i64 {
+async fn node_rows(
+    pool: &sqlx::SqlitePool,
+    node: infraternal_plugin_mesh::policy::model::NodeId,
+) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mesh_nodes WHERE id=?")
         .bind(i64::try_from(node.0).unwrap())
         .fetch_one(pool)
@@ -201,7 +204,10 @@ async fn pending_person_removal_pushes_peer_withdrawal_before_the_receipt() {
         .commit_revocation_intent(transaction, host, 200)
         .await
         .unwrap();
-    assert!(pending, "a UUID owner's removal waits for the host's receipt");
+    assert!(
+        pending,
+        "a UUID owner's removal waits for the host's receipt"
+    );
     let withdrawal = tokio::time::timeout(std::time::Duration::from_secs(5), deliveries.recv())
         .await
         .expect("peers must be told to drop the key before the host confirms")
@@ -240,7 +246,11 @@ async fn pending_person_removal_pushes_peer_withdrawal_before_the_receipt() {
             .await
             .unwrap();
     assert!(revoked, "the receipt still completes the removal");
-    assert_eq!(mesh_revision(&pool).await, revision, "retirement bumps once");
+    assert_eq!(
+        mesh_revision(&pool).await,
+        revision,
+        "retirement bumps once"
+    );
     println!(
         "METRIC mesh_pending_removal_publication peers=1 elapsed_us={}",
         elapsed.as_micros()
