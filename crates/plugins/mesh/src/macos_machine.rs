@@ -130,6 +130,19 @@ pub(crate) fn check(state: &Path, current: Option<[u8; 32]>) -> io::Result<()> {
     })
 }
 
+/// [`check`] for a folder that may not exist yet (the pre-start check): a missing folder has no
+/// binding to refuse.
+/// # Errors
+/// As [`check`], or the error of looking at the folder.
+#[cfg(target_os = "macos")]
+pub(crate) fn check_existing(state: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(state) {
+        Ok(_) => check(state, fingerprint()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Check the binding and, on a folder that has none, record this Mac's.
 /// # Errors
 /// As [`check`], plus `MissingId` when the fingerprint is unavailable and refusals of an
