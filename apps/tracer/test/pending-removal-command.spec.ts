@@ -28,8 +28,9 @@ async function removeOffline(
   await page.route("**/remote/hosts/remove/finish", route => {
     if (!renewed) return route.fulfill({ status: 428 });
     finishes += 1;
-    if (finishes > 1) {
-      // Keep a first browser stale long enough to repeat its reviewed request.
+    // Only the repeat scenario keeps the first browser stale (its list shows no pending row) so it can repeat its reviewed
+    // request; every other scenario sees the host turn pending as soon as the first removal is answered (#443, #483).
+    if (!repeat || finishes > 1) {
       pending = true;
       push?.();
     }
