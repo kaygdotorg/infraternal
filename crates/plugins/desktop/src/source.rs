@@ -115,7 +115,11 @@ impl Metadata {
     }
     /// Remembers that the session ended for good, and why, across replacement lanes. The first reason stays.
     pub(super) fn latch_gone(&self, reason: EndReason) {
-        let code = if reason == EndReason::ConsoleUserChanged { 2 } else { 1 };
+        let code = if reason == EndReason::ConsoleUserChanged {
+            2
+        } else {
+            1
+        };
         let _ = self
             .gone_reason
             .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
