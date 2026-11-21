@@ -2279,6 +2279,220 @@ mod tests {
         stopped.recv().expect("stop reply");
     }
 
+    /// A configuration with `count` installed peers that have an endpoint and never handshake.
+    fn many_peer_config(count: u32) -> Config {
+        let mut config = one_peer_config(None);
+        let template = config.peers[&NodeId(1)].clone();
+        config.peers.clear();
+        for index in 0..count {
+            let mut policy = template.clone();
+            let [a, b, c, d] = index.to_be_bytes();
+            policy.peer.key = PublicKey([
+                a ^ 0x5a,
+                b,
+                c,
+                d.wrapping_add(1),
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+            ]);
+            policy.peer.addresses = Addresses {
+                ipv4: std::net::Ipv4Addr::new(
+                    10,
+                    100 + (index >> 16) as u8,
+                    (index >> 8) as u8,
+                    index as u8,
+                ),
+                ipv6: std::net::Ipv6Addr::new(
+                    0xfd01,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    (index >> 16) as u16,
+                    index as u16,
+                ),
+            };
+            policy.peer.endpoint = Some(SocketAddr::from((
+                [192, 0, 2, 1],
+                20_000 + (index % 30_000) as u16,
+            )));
+            config.peers.insert(NodeId(10 + u64::from(index)), policy);
+        }
+        config
+    }
+
+    /// Hand-run measurement (#260 J1077 finding 3, J1113): what the node's worker costs an
+    /// idle node that has `INFRATERNAL_IDLE_PEERS` installed peers. Prints one row of process
+    /// wakeups (voluntary context switches over every thread) and CPU per second over
+    /// `INFRATERNAL_IDLE_SECS`. Run it as `cargo test -p infraternal-plugin-mesh --features agent
+    /// -- --ignored --nocapture idle_cost_with_many_peers`, or copy the test binary to a quiet
+    /// machine and run it there. No root is needed: a socket pair stands in for the TUN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "measurement only: run by hand with INFRATERNAL_IDLE_PEERS and INFRATERNAL_IDLE_SECS"]
+    async fn idle_cost_with_many_peers() {
+        use super::{
+            EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
+            RouteEndpointUpdater, RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device,
+            run_worker,
+        };
+        use gotatun::x25519::StaticSecret;
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::sync::{Arc, mpsc as sync};
+        let env = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let count = env("INFRATERNAL_IDLE_PEERS", 1);
+        let seconds = env("INFRATERNAL_IDLE_SECS", 30);
+        /// Voluntary context switches and CPU ticks of every thread of this process.
+        fn sample() -> (u64, u64) {
+            let (mut switches, mut ticks) = (0, 0);
+            for task in std::fs::read_dir("/proc/self/task")
+                .expect("tasks")
+                .flatten()
+            {
+                let status =
+                    std::fs::read_to_string(task.path().join("status")).unwrap_or_default();
+                let stat = std::fs::read_to_string(task.path().join("stat")).unwrap_or_default();
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("voluntary_ctxt_switches:") {
+                        switches += rest.trim().parse::<u64>().unwrap_or(0);
+                    }
+                }
+                if let Some(end) = stat.rfind(')') {
+                    let fields: Vec<_> = stat[end + 2..].split_whitespace().collect();
+                    let at = |index: usize| {
+                        fields
+                            .get(index)
+                            .and_then(|f| f.parse::<u64>().ok())
+                            .unwrap_or(0)
+                    };
+                    ticks += at(11) + at(12);
+                }
+            }
+            (switches, ticks)
+        }
+        let private_key = StaticSecret::from([7; 32]);
+        let (kernel, device) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let health = Arc::new(Health::default());
+        let config = many_peer_config(count);
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        let tun = LinuxPacketIo::new(
+            crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
+                .expect("TUN stand-in registers"),
+            filter,
+        );
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("engine socket");
+        let peers = peers_for_config(&config).expect("peers");
+        let device = build_device(
+            factory.clone(),
+            private_key.clone(),
+            port,
+            peers,
+            admitted_peer_keys(&config),
+            tun.clone(),
+        )
+        .await
+        .expect("device");
+        let state = RuntimeState {
+            tun: Some(tun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            pending: Some(PendingDevice {
+                factory,
+                private_key,
+            }),
+            config: Some(config),
+            info: RuntimeInfo {
+                interface: "test-tun".to_owned(),
+                port,
+                thp_disabled: true,
+                offloads_enabled: true,
+            },
+            health: Arc::clone(&health),
+            restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
+        };
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let updater: RouteEndpointUpdater = Arc::new(|_| Ok(()));
+        let worker = tokio::spawn(run_worker(
+            receiver,
+            state,
+            Arc::new(EndpointRefreshSignal::default()),
+            updater,
+            Arc::default(),
+        ));
+        // Let the start-up work (first scan, first walk step) finish before the window opens.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let (before, started) = (sample(), std::time::Instant::now());
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(seconds))).await;
+        let (after, elapsed) = (sample(), started.elapsed().as_secs_f64());
+        let hz = 100.0; // sysconf(_SC_CLK_TCK) is 100 on every Linux we run
+        eprintln!(
+            "idle-cost peers={count} secs={elapsed:.1} wakeups_per_s={:.2} cpu_ms_per_s={:.2}",
+            (after.0 - before.0) as f64 / elapsed,
+            (after.1 - before.1) as f64 * 1000.0 / hz / elapsed,
+        );
+        drop(kernel);
+        let (reply, stopped) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Stop(reply))
+            .map_err(|_| "worker ended")
+            .expect("stop");
+        worker.await.expect("worker");
+        stopped.recv().expect("stop reply");
+    }
+
     /// A configuration with one peer at `endpoint`.
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
