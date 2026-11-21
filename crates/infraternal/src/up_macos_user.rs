@@ -623,9 +623,20 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
         ));
     }
     stop_agent(uid)?;
-    if macos_helper::registered_for_current_user() {
-        macos_helper::request(&Request::Remove, None)?;
-    }
+    // An unreadable registration is reported after the person's own files are gone, with the
+    // administrator command that removes the helper; it is never read as "no helper" (J1087).
+    let helper = match macos_helper::registration_for_current_user() {
+        Ok(true) => macos_helper::request(&Request::Remove, None).map(|_| ()),
+        Ok(false) => Ok(()),
+        Err(error) => Err(io::Error::new(
+            error.kind(),
+            format!(
+                "the mesh helper registration could not be read ({error}); run sudo {} {} to remove the helper",
+                macos_user_mode::HELPER_BINARY,
+                macos_helper::REMOVE_ENTRY
+            ),
+        )),
+    };
     match fs::remove_file(&paths.launch_agent) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -638,5 +649,5 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    Ok(())
+    helper
 }

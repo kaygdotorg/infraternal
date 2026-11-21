@@ -250,17 +250,27 @@ pub(crate) fn registry_at_with_mesh_state(
             mesh_state.or(state),
             installation,
         )?))?;
-    } else if infraternal_plugin_mesh::macos_helper::registered_for_current_user() {
-        infraternal_plugin_mesh::macos_helper::enter_user_mode();
-        eprintln!("Infraternal Mesh node running in user mode through the mesh helper");
-        registry.register(Box::new(darwin_mesh_plugin(
-            mesh_state.or(state),
-            installation,
-        )?))?;
     } else {
-        eprintln!(
-            "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
-        );
+        match infraternal_plugin_mesh::macos_helper::registration_for_current_user() {
+            Ok(true) => {
+                infraternal_plugin_mesh::macos_helper::enter_user_mode();
+                eprintln!("Infraternal Mesh node running in user mode through the mesh helper");
+                registry.register(Box::new(darwin_mesh_plugin(
+                    mesh_state.or(state),
+                    installation,
+                )?))?;
+            }
+            // A helper is installed but its registration cannot be checked: say so, instead
+            // of the root-mode sentence, so the person knows which repair to run (J1087).
+            Err(error) => eprintln!(
+                "Infraternal Mesh node skipped: the mesh helper registration could not be read ({error}). Run sudo {} {} and then infraternal up again.",
+                infraternal_plugin_mesh::macos_user_mode::HELPER_BINARY,
+                infraternal_plugin_mesh::macos_helper::REMOVE_ENTRY
+            ),
+            Ok(false) => eprintln!(
+                "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
+            ),
+        }
     }
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;

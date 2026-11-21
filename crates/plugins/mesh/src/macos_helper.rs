@@ -66,7 +66,7 @@ use std::{
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
         unix::{
-            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
             net::UnixStream,
             process::CommandExt,
         },
@@ -109,11 +109,21 @@ pub(crate) fn user_mode() -> bool {
 
 /// Whether the helper is registered for the current (non-root) user.
 ///
-/// Reads only the root-owned property list; a missing, foreign or edited file is `false`.
-#[must_use]
-pub fn registered_for_current_user() -> bool {
+/// Reads only the root-owned property list.
+///
+/// `Ok(false)` means no helper, or one registered for another account. An `Err` means a helper
+/// property list exists but could not be checked (for example one an older install left
+/// unreadable under a restrictive `sudo` umask, J1027 / J1087), so callers can say so and
+/// point at the administrator removal instead of silently skipping the mesh or the helper.
+///
+/// # Errors
+/// Reports a property list that is not a root-owned regular file or cannot be read.
+pub fn registration_for_current_user() -> io::Result<bool> {
     let uid = nix::unistd::Uid::effective().as_raw();
-    uid != 0 && registered_uid().ok().flatten() == Some(uid)
+    if uid == 0 {
+        return Ok(false);
+    }
+    Ok(registered_uid()? == Some(uid))
 }
 
 /// The uid the installed helper serves, if a helper property list this code wrote exists.
@@ -803,7 +813,8 @@ fn remove_root_file(path: &Path) -> io::Result<()> {
 fn publish_binary(source: &Path) -> io::Result<()> {
     let directory = Path::new(HELPER_DIRECTORY);
     match fs::DirBuilder::new().mode(0o755).create(directory) {
-        Ok(()) => {}
+        // sudo can pass on a restrictive umask; the folder must stay traversable for launchd.
+        Ok(()) => fs::set_permissions(directory, fs::Permissions::from_mode(0o755))?,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
         Err(error) => return Err(error),
     }
@@ -828,6 +839,11 @@ fn publish_binary(source: &Path) -> io::Result<()> {
 }
 
 /// Write `contents` beside `path` with its final mode, sync, and rename it into place.
+///
+/// The mode is set explicitly on the open file, never left to the umask: `infraternal up`
+/// runs the install through `sudo`, which can keep a person's `077` or `027` umask. A `0600`
+/// property list would then be unreadable to the person's agent, which would skip the mesh
+/// and leave the helper behind at uninstall (J1087, J1027).
 fn publish_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(path)
         && (!metadata.is_file() || metadata.uid() != 0)
@@ -846,6 +862,7 @@ fn publish_file(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
             .mode(mode)
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
         file.write_all(contents)?;
         file.sync_all()?;
         fs::rename(&temporary, path)?;
