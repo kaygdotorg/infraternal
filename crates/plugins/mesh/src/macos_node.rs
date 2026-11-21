@@ -4642,11 +4642,12 @@ mod tests {
     #[test]
     fn restoring_unbound_state_removes_the_key_and_logs_why() {
         let directory = test_directory();
+        // Bound while the folder is still empty: a folder with state and no record is refused.
+        bind_this_mac(&directory);
         let current = enrolment(b"coordinator B");
         write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None))
             .expect("write slice-1 state");
         write_key(&directory);
-        bind_this_mac(&directory);
 
         Node::restore(&directory.0, Some(&current)).expect("restore unbound state");
         assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
@@ -4720,6 +4721,8 @@ mod tests {
     #[test]
     fn an_enrolled_restore_binds_this_mac_and_refuses_a_folder_from_another() {
         let directory = test_directory();
+        // Bound while the folder is still empty: a folder with state and no record is refused.
+        bind_this_mac(&directory);
         let current = enrolment(b"coordinator B");
         // A disabled node: an enabled one would need root to open its utun.
         write_public_state(
@@ -4728,7 +4731,6 @@ mod tests {
         )
         .expect("write state");
         write_key(&directory);
-        bind_this_mac(&directory);
 
         Node::restore(&directory.0, Some(&current)).expect("restore keeps the binding");
         assert!(directory.join(crate::macos_machine::MACHINE_FILE).is_file());
@@ -4769,6 +4771,8 @@ mod tests {
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();
+        // Bound while the folder is still empty: a folder with state and no record is refused.
+        bind_this_mac(&directory);
         let old = enrolment(b"coordinator A");
         let new = enrolment(b"coordinator B");
         write_public_state(
@@ -4777,7 +4781,6 @@ mod tests {
         )
         .expect("write old state");
         write_key(&directory);
-        bind_this_mac(&directory);
 
         Node::restore(&directory.0, Some(&old)).expect("restore same enrolment");
         assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
