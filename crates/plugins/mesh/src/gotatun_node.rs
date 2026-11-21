@@ -733,10 +733,11 @@ async fn initialize(
     })
 }
 
-/// Most worker threads the engine runtime uses. `GotaTun` runs UDP receive and decryption, TUN
-/// reads, TUN writes, and encryption as separate tasks joined by channels; on one thread those
-/// hand-offs only add work (#260 R4b). The bound keeps a large host from giving the mesh every
-/// core.
+/// Most worker threads the engine runtime uses. `GotaTun` runs its receive path (UDP receive,
+/// decryption, TUN write) and its send path (TUN read, encryption, UDP send) as two tasks, each
+/// writing to an idle device itself and queueing only behind a busy one (#260, J1122); bulk
+/// crypto runs on its own worker threads. On one thread the two paths would take turns (#260
+/// R4b). The bound keeps a large host from giving the mesh every core.
 const ENGINE_WORKERS_MAX: usize = 4;
 
 fn engine_runtime() -> io::Result<(tokio::runtime::Runtime, bool)> {
@@ -1806,6 +1807,22 @@ impl IpSend for LinuxPacketIo {
             return Ok(());
         };
         self.tun.send(packet).await
+    }
+
+    /// Filter and hook each packet of a decrypted run as [`IpSend::send`] does, then hand the
+    /// survivors to the TUN as one run, so it can merge them into GSO frames and write them
+    /// in this task (#260, J1122). `packets` is empty afterwards.
+    async fn send_many(&mut self, packets: &mut Vec<Packet<Ip>>) -> io::Result<()> {
+        let mut kept = Vec::with_capacity(packets.len());
+        for packet in packets.drain(..) {
+            let Some(packet) = filter_ip_packet(packet, &self.filter, Direction::MeshToHost) else {
+                continue;
+            };
+            if let Some(packet) = self.local_service_hook(packet)? {
+                kept.push(packet);
+            }
+        }
+        self.tun.send_many(&mut kept).await
     }
 }
 
