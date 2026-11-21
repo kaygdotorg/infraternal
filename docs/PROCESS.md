@@ -12,10 +12,14 @@ judgment, and nothing waits on either.**
 
 ## 1. Performance is a gate, not a review
 
-- Benchmarks run only on the pinned perf VM (`perf-test-69-63`). It is
-  shared with calternal and is used only for benchmarks, never for builds.
-  Each run holds the shared lock (`scripts/perf-run`, agreed with the
-  calternal session). Built binaries are copied to the VM.
+- Benchmarks run only on the pinned perf VM (`infraternal-perf-01-backup01`),
+  which is used only for benchmarks, never for builds. Every run goes through
+  the VM's `perf-run [--cold] [--root] [--out DIR] -- <cmd>`: it takes the
+  exclusive lock, optionally drops caches, and snapshots the machine before and
+  after. Built binaries are copied to the VM. Numbers that must come from real
+  Apple hardware are measured on the bare-metal MacBook Air (`mba`; owner,
+  2026-11-20): never build there, copy finished binaries, take its lock
+  directory first and remove it after.
 - Each budget in DECISIONS 41 (rewritten as D375's 120 Hz table, §6) and 81
   is a CI check that fails on a regression:
   - keystroke overhead and frame time, measured from the real UI;
@@ -150,11 +154,15 @@ numbered history, both timestamp arrival orders and altered checksums.
 
 ## 5. Capacity
 
-- infraternal-dev (8 cores): at most about 3 Rust lanes and 1 review at the
-  same time.
-- An M5 Ultra Mac Studio arrives soon. Planned use: native macOS and iOS
-  builds and the macOS agent (S2), Safari and iOS Simulator testing, and
-  extra build lanes through Linux VMs (OrbStack).
+- Heavy commands (cargo build, test and clippy, `scripts/verify`, browser
+  suites, static builds) run on a build VM, `infraternal-dev-01-compute01` or
+  `infraternal-dev-02-std`, as `~/infraternal-ops/build-slot <cmd>`. The slots
+  limit how many run at once, and the count changes with the host's load, so
+  `build-slot --status` (slots, queue, free disk) is the truth, not this page.
+  The control host only edits and runs git.
+- The Mac Studio and its macOS VM (`infraternal-macos-01-std`) build and test
+  the native macOS parts of the infraternal agent (S2) and run Safari and the
+  iOS Simulator. A macOS VM has one job at a time and needs no slot.
 - Jobs avoid wording that tooling filters flag. Process-termination tests
   are described neutrally ("abrupt stop", "restart").
 
@@ -703,7 +711,9 @@ The aim is that the backend is finished when the design is approved, so approved
 
 ## 9. Every backend job gets a break-it review (owner, 2026-10-08)
 
-When a Codex implementation job finishes, an independent Codex reviewer starts automatically on its branch head (`~/.local/state/codex-jobs/infraternal/auto-review.sh`, template `review-template.md`). The reviewer gets the diff, the contract and the claims, not the author's reasoning. Its only goal is to prove the work wrong: correctness and concurrency edge cases, defensive input and authorization checks, data safety, resource leaks, re-measured performance claims and contract drift. Each finding is a failing test committed on `review-<job>`, plus an entry in its findings file and a comment on the issue for P0/P1, ending with a verdict. The implementation's next run must make those tests pass before merge. Sol reviews security, data and sync work; Luna reviews the rest.
+When an implementation job finishes, the orchestrator starts an independent reviewer job on its branch head (a different model or prompt from the author's). The reviewer gets the diff, the contract and the claims, not the author's reasoning. Its only goal is to prove the work wrong: correctness and concurrency edge cases, defensive input and authorization checks, data safety, resource leaks, re-measured performance claims and contract drift. Each finding is a failing test committed on `review-<job>`, plus an entry in its findings file and a comment on the issue for P0/P1, ending with a verdict. The implementation's next run must make those tests pass before merge. Sol reviews security, data and sync work; Luna reviews the rest.
+
+A lane gets at most three review rounds; a new P0 or P1 in round 3 stops the lane and a plan is written instead. A reviewer never runs `scripts/verify fast` or `scripts/verify quick` on the branch it reviews: the author already ran the gate, and a rerun takes a build slot from someone else. The reviewer runs only the specific tests its findings need (a reproducer, or a red/green pair), and the orchestrator reruns the full gate on the merge result.
 
 
 ## 10. Branches, commits and pushing (owner, 2026-10-10)
@@ -874,7 +884,10 @@ targets for one second each; it is a smoke check, not an hour of fuzzing.
 The full tracer browser suite (`bun x playwright test` in `apps/tracer`) runs
 every night on the latest origin/dev on dev-02, so job gates stay fast. The
 timer fires at 05:00 IST (up to fifteen minutes of jitter), three hours after
-the fuzz, and takes one of the build slots like any other run. Everything is
+the fuzz, and takes two build slots, one per shard, like any other run. On
+dev-02 a host-local drop-in has moved it to 05:30 IST (up to five minutes)
+since 2026-11-20; see the operations page for the window. Jobs keep their own
+builds and gates off dev-02 during it. Everything is
 `scripts/nightly-browser-suite.py` (`run` and `report`), a root-owned helper
 `scripts/nightly-browser-suite-service`, and `scripts/install-nightly-browser-suite`
 (needs the fuzz install and its token first).

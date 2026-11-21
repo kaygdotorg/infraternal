@@ -197,7 +197,7 @@ infraternal server --data /path/to/existing/private/data channel edge
 infraternal server --data /path/to/existing/private/data channel edge --yes
 infraternal server --data /path/to/existing/private/data channel stable
 infraternal server --data /path/to/existing/private/data release latest --json
-infraternal skill release.channel.set
+infraternal skill server channel
 ```
 
 Edge builds are published as they are made, unreviewed. Switching to edge
