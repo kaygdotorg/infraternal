@@ -45,6 +45,9 @@ for vector in wire:
     (seeds / f'socket-{vector.stem}').write_bytes(b'\x00\x03\x00\x01\x05' + frame)
 (seeds / 'names').write_bytes(b'\x01' + json.dumps({'00000000-0000-4000-8000-000000000001': {'name': 'build', 'uid': 1000}}).encode())
 (seeds / 'reply').write_bytes(b'\x02' + json.dumps({'code': 0, 'message': 'ok', 'next': '', 'data': {}}).encode())
+# Found by the campaign (#561): an integer beyond u64 becomes a float that
+# serde_json's default parser reads back one ULP off.
+(seeds / 'reply-integer-beyond-u64').write_bytes(b'\x02{"code":0,"message":"","next":"","data":555558558355585583686}')
 for token in ['linux', 'macos', 'freebsd', 'MacOS', '']:
     (seeds / f'hello-{token or "empty"}').write_bytes(b'\x03' + f'infraternal agent os={token}'.encode())
 

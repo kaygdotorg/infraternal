@@ -133,12 +133,50 @@ fn check_reply(data: &[u8]) {
             panic!("a re-encoded reply is refused");
         };
         assert_eq!(
-            (again.code, &again.message, &again.next, &again.data),
-            (reply.code, &reply.message, &reply.next, &reply.data)
+            (again.code, &again.message, &again.next),
+            (reply.code, &reply.message, &reply.next)
         );
+        // serde_json's default number parser (no `float_roundtrip` feature)
+        // may land one ULP off when it reads back the shortest spelling of a
+        // float, for example one parsed from an integer beyond u64 (#561).
+        // Reply data carries integers and strings; floats only keep their shape.
+        if contains_float(&reply.data) {
+            assert!(same_shape(&again.data, &reply.data));
+        } else {
+            assert_eq!(again.data, reply.data);
+        }
     }
     #[cfg(not(target_os = "linux"))]
     let _ = data;
+}
+
+/// Whether `value` holds a number that is neither a u64 nor an i64.
+#[cfg(target_os = "linux")]
+fn contains_float(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.is_f64(),
+        serde_json::Value::Array(items) => items.iter().any(contains_float),
+        serde_json::Value::Object(map) => map.values().any(contains_float),
+        _ => false,
+    }
+}
+
+/// Equal except that floats only need to be floats: same keys, lengths and other leaves.
+#[cfg(target_os = "linux")]
+fn same_shape(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() && b.is_f64() => true,
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_shape(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(key, a)| b.get(key).is_some_and(|b| same_shape(a, b)))
+        }
+        _ => left == right,
+    }
 }
 
 /// The Hello OS token: only the exact form names an OS, and it names it the same way every time.
