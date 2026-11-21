@@ -61,6 +61,7 @@ fn main() {
             "native/Inventory.swift",
             "native/Geometry.swift",
             "native/Input.swift",
+            "native/Cursor.swift",
             "native/LowDelaySPS.swift",
             "native/Encoder.swift",
             "native/SurfaceCapture.swift",

@@ -176,6 +176,8 @@ private final class Session {
     var output: CGSize = .zero
     /// Remote keyboard and mouse input.
     let control = RemoteControl()
+    /// The pointer shape the Mac is showing, reported on every status reply for the viewer to draw.
+    let cursor = MachineCursor()
     /// The video encoder used in `--encoder` mode and for pixels sent by the caller.
     let encoder = Encoder()
     /// Once a second, re-reads the window's frame and state so it is followed while idle.
@@ -256,6 +258,7 @@ private final class Session {
             }
             let ticks = mach_absolute_time()
             var result = state(); result["capture_ticks"] = ticks; result["capture_ns"] = nanos(ticks)
+            if !surfaceMode, let shape = cursor.current() { result["cursor"] = shape }
             return (68,result)
         case 7:
             guard let surface else { throw HelperFailure.unavailable }

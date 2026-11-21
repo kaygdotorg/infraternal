@@ -33,6 +33,7 @@ import { containedRect, framePoint, modifierBits, movedEnough, scrollDelta, wire
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
 import { AppStream } from "./stream";
 import { shapeStreamWindow } from "./shape";
+import { pointerCss } from "./pointer";
 import type { AppTarget } from "./inventory";
 import type { StreamConnection } from "./adapter";
 
@@ -112,6 +113,7 @@ export class AppBinding implements SessionBinding {
         picture: (size) => { this.picture = size; },
         shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect); },
         surface: (canvas) => this.setSurface(canvas),
+        cursor: (shape) => { this.stage.style.cursor = pointerCss(shape); },
       },
     });
   }

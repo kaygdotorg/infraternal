@@ -92,7 +92,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `HelperFailure.invalid` for an unknown target type; framework errors are rethrown. If `stop()`
     /// runs while this is in progress, the late stream is shut down instead of being used. The
     /// framework captures the whole window; a screen target is cropped to `rect`. The picture is
-    /// converted to sRGB BGRA, scaled to fit `size`, with the pointer shown.
+    /// converted to sRGB BGRA, scaled to fit `size`, without the pointer.
     func start() async throws {
         trace("enumerate_begin")
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -129,7 +129,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let sourceRect { configuration.sourceRect = sourceRect }
         configuration.destinationRect = fittedContent(rect, size)
         configuration.scalesToFit = true; configuration.preservesAspectRatio = true
-        configuration.showsCursor = true
+        // The viewer draws the pointer itself in the Mac's shape (`Cursor.swift`). A pointer inside the
+        // picture arrives a whole pipeline late and shows as a second pointer next to the viewer's.
+        configuration.showsCursor = false
         if measure {
             FileHandle.standardError.write(Data("METRIC source_capture_config pid=\(getpid()) fps=\(fps) queue_depth=\(configuration.queueDepth) interval_value=\(configuration.minimumFrameInterval.value) interval_scale=\(configuration.minimumFrameInterval.timescale) width=\(configuration.width) height=\(configuration.height)\n".utf8))
         }
