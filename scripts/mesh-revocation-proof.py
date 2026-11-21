@@ -80,6 +80,9 @@ async def campaign(args):
         coordinator = await asyncio.create_subprocess_exec(args.coordinator,stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=error_log)
         async def send(value):
             coordinator.stdin.write((json.dumps(value)+'\n').encode());await coordinator.stdin.drain()
+        # The node fixture also reports which engine it runs; the coordinator's
+        # identity record is the public wire contract only, so drop that label.
+        identities=[{key:value for key,value in identity.items() if key!='engine'} for identity in identities]
         await send({'type':'Init','identities':identities,'extra_members':args.extra_members,'change':args.change,'person':args.person_removal})
         initialized = set()
         installed = {}
@@ -254,6 +257,9 @@ def main():
     parser.add_argument('--change',choices=('PeerRetirement','RuleRemoval','DefaultTightening'))
     parser.add_argument('--person-removal',action='store_true',help="Remove a person's host (UUID owner) that never confirms, as an offline host (D166, #515)")
     args=parser.parse_args();args.evidence.mkdir(parents=True,exist_ok=True)
+    # This proof measures kernel WireGuard peers and flushes their kernel filters; Linux
+    # nodes default to the userspace engine, which installs no such filter (#260, D163).
+    os.environ.setdefault('INFRATERNAL_MESH_ENGINE','kernel')
     if args.stateful:
         state_root=args.evidence/'node-state'
         state_root.mkdir(mode=0o700,exist_ok=True)
