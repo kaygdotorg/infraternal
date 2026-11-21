@@ -34,7 +34,10 @@
 //! **Phase 2, [`auto_update_after_reboot`]:** the VM booted and the unit started the
 //! boot pointer, the previous release, cold. It must have undone the `reboot`
 //! release, so one passkey unlock brings the CA back. Then the good release applies
-//! warm with live sessions, passes its trial and becomes the boot pointer.
+//! warm with live sessions, passes its trial and becomes the boot pointer, although
+//! three of the sessions the old release recorded end during the switch (they do not
+//! count, owner 2026-11-21). Last, the `unlisted` release, whose trial lists no
+//! session, is undone warm back to the good release.
 //!
 //! **No data loss.** Before every switch the test writes a marker into the database
 //! (`server_settings.api_key_lifetime_days`). After every undo the marker must read
@@ -47,7 +50,7 @@
 //! outage the switch caused; the VM script collects them into the S4 matrix.
 //!
 //! Inputs (prepared by the VM script, never by this test): signed release folders in
-//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and eight versions, oldest
+//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and nine versions, oldest
 //! first, in `INFRATERNAL_UPDATE_TEST_VERSIONS`: the running release, then the
 //! `unhealthy`, `timeout`, `migration`, `exec`, `kill` and `reboot` releases, then the
 //! good release. No signing key is present.
@@ -76,7 +79,7 @@ const BUCKET: &str = "127.0.0.1:4813";
 /// What phase 1 leaves for phase 2, inside the test root.
 const CARRY: &str = "carry.json";
 
-/// The eight releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
+/// The nine releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Versions {
     /// The release that runs first and must come back after every undo.
@@ -93,14 +96,26 @@ struct Versions {
     kill: String,
     /// On trial when the VM is hard-reset.
     reboot: String,
-    /// The good release, applied last.
+    /// The good release, applied after the reboot.
     good: String,
+    /// Newer than the good release; its trial lists no live session (owner F4 decision).
+    unlisted: String,
 }
 impl Versions {
     /// Read the versions from the environment.
     fn from_environment() -> Self {
         let versions = std::env::var("INFRATERNAL_UPDATE_TEST_VERSIONS").unwrap();
-        let [old, unhealthy, timeout, migration, exec, kill, reboot, good]: [String; 8] = versions
+        let [
+            old,
+            unhealthy,
+            timeout,
+            migration,
+            exec,
+            kill,
+            reboot,
+            good,
+            unlisted,
+        ]: [String; 9] = versions
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>()
@@ -115,14 +130,21 @@ impl Versions {
             kill,
             reboot,
             good,
+            unlisted,
         }
     }
     /// The `INFRATERNAL_STAGING_FAULTS` value: the kill and reboot releases never pass
     /// their health check, so they stay on trial until the test stops them.
     fn faults(&self) -> String {
         format!(
-            "{}=unhealthy {}=timeout {}=migration {}=exec {}=timeout {}=timeout",
-            self.unhealthy, self.timeout, self.migration, self.exec, self.kill, self.reboot
+            "{}=unhealthy {}=timeout {}=migration {}=exec {}=timeout {}=timeout {}=unlisted",
+            self.unhealthy,
+            self.timeout,
+            self.migration,
+            self.exec,
+            self.kill,
+            self.reboot,
+            self.unlisted
         )
     }
 }
@@ -825,6 +847,7 @@ async fn auto_update_failure_matrix() {
     let mut unlocks = 1;
     unlock(address, &f.auth.session, &mut f.auth.software).await;
     let digests = [
+        &versions.unlisted,
         &versions.old,
         &versions.unhealthy,
         &versions.timeout,
@@ -1058,15 +1081,20 @@ async fn auto_update_after_reboot() {
     // before it opened the database.
     let state = wait_outcome(&data, Duration::from_secs(120), &versions.reboot, "undone").await;
     serving(address).await;
-    let digests = [&versions.old, &versions.reboot, &versions.good]
-        .into_iter()
-        .map(|version| {
-            (
-                version.clone(),
-                file_digest(&releases.join(version).join(IMAGE)),
-            )
-        })
-        .collect();
+    let digests = [
+        &versions.old,
+        &versions.reboot,
+        &versions.good,
+        &versions.unlisted,
+    ]
+    .into_iter()
+    .map(|version| {
+        (
+            version.clone(),
+            file_digest(&releases.join(version).join(IMAGE)),
+        )
+    })
+    .collect();
     let mut server = Server {
         address,
         data: data.clone(),
@@ -1094,6 +1122,21 @@ async fn auto_update_after_reboot() {
     let downtime = Downtime::start(address);
     write_marker(&database, 17).await;
     announce(&bucket, Some(&versions.good));
+    // Owner F4 decision: sessions that exit during the switch must not fail the trial.
+    // Once the old release has recorded its sessions in the marker, three of them end.
+    wait_for(Duration::from_secs(240), "good release switching", || {
+        pending_phase(&data).is_some()
+    })
+    .await;
+    let ended: Vec<[u8; 16]> = server.sessions[1..4].to_vec();
+    for pid in shim_pids(&ended) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    server.sessions.retain(|id| !ended.contains(id));
+    server.shims = shim_pids(&server.sessions);
     let state = wait_outcome(&data, Duration::from_secs(240), &versions.good, "applied").await;
     serving(address).await;
     let gap = downtime.take_ms();
@@ -1114,10 +1157,49 @@ async fn auto_update_after_reboot() {
     assert_eq!(read_marker(&database).await, 17);
     let echoed = server.echo("after-update").await;
     println!(
-        "UPDATE case=good_release bucket=warm outcome=applied pointer=releases/{} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} max_healthz_gap_ms={gap:.1} paused={:?}",
+        "UPDATE case=good_release bucket=warm outcome=applied pointer=releases/{} same_pid=true ca_unlocked=true unlocks=0 sessions_ended_during_switch={} shims_unchanged={} echoed_browsers={echoed} max_healthz_gap_ms={gap:.1} paused={:?}",
         versions.good,
+        ended.len(),
         server.shims.len(),
         state.paused
+    );
+
+    // Owner F4 decision: a release that cannot list the live sessions is undone warm.
+    write_marker(&database, 18).await;
+    downtime.take_ms();
+    announce(&bucket, Some(&versions.unlisted));
+    let state = wait_outcome(
+        &data,
+        Duration::from_secs(420),
+        &versions.unlisted,
+        "undone",
+    )
+    .await;
+    serving(address).await;
+    let gap = downtime.take_ms();
+    assert_eq!(
+        state.applied.as_ref().unwrap().reason.as_deref(),
+        Some(infraternal_plugin_release::apply::SESSIONS_MISSING)
+    );
+    assert_eq!(state.paused.as_deref(), Some(versions.unlisted.as_str()));
+    assert_eq!(running_digest(server.pid), server.digests[&versions.good]);
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(shim_pids(&server.sessions), server.shims);
+    assert_eq!(server.pointer(), Path::new("releases").join(&versions.good));
+    assert_eq!(
+        read_marker(&database).await,
+        18,
+        "the pre-switch data is all there"
+    );
+    let echoed = server.echo("after-unlisted").await;
+    println!(
+        "UPDATE case=unlisted bucket=warm outcome=undone reason={:?} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_kept=true max_healthz_gap_ms={gap:.1}",
+        state.applied.as_ref().unwrap().reason,
+        server.shims.len(),
     );
     println!(
         "METRIC name=auto_update_matrix real_pty_sessions={} unlock_ceremonies={} ca_unlocked=true",

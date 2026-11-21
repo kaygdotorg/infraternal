@@ -7,12 +7,13 @@ Run it inside `nix develop` on a build VM, through build-slot:
 
 It writes, into the (new) output folder:
 
-- `releases/<version>/` for eight x86_64 static `staging-trust` builds, each
+- `releases/<version>/` for nine x86_64 static `staging-trust` builds, each
   stamped with its own edge version: the running release, the six faulty ones
-  (unhealthy, timeout, migration, exec, kill, reboot) and the good one. Each holds
+  (unhealthy, timeout, migration, exec, kill, reboot), the good one, and one
+  newer than it whose trial lists no session (unlisted). Each holds
   VERSION, the image, an unused arm placeholder, SHA256SUMS and its OpenSSH
   signature, the format the release signer produces (#211 S1);
-- `versions`: the eight versions in that order, for INFRATERNAL_UPDATE_TEST_VERSIONS;
+- `versions`: the nine versions in that order, for INFRATERNAL_UPDATE_TEST_VERSIONS;
 - `server-tests`: the server crate's test executable with `remote,staging-trust`,
   which holds the proof (`deploy_staging::update_staging`).
 
@@ -36,7 +37,7 @@ import time
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 #: The proof's releases, oldest first; see the harness docs.
-ROLES = ("old", "unhealthy", "timeout", "migration", "exec", "kill", "reboot", "good")
+ROLES = ("old", "unhealthy", "timeout", "migration", "exec", "kill", "reboot", "good", "unlisted")
 #: The static target the proof VM runs.
 TARGET = "x86_64-unknown-linux-musl"
 #: The image name the updater asks for on x86_64.
