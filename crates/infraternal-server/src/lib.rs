@@ -146,6 +146,9 @@ mod remote_startup;
 #[cfg(feature = "remote")]
 mod remote_successor;
 mod runtime;
+/// The server's short-lived, rotating leg-B TLS leaf (#559).
+#[cfg(feature = "remote")]
+mod server_leaf;
 mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]
 mod socket_authority;

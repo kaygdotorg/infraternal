@@ -24,6 +24,7 @@ struct Enrollment {
     server_name: String,
 }
 
+/// Run the desktop latency source against the configured server.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(
@@ -59,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         endpoint: enrollment.endpoint,
         server_name: enrollment.server_name,
         execution_uid: uid,
+        server_leaf: std::sync::Arc::default(),
     };
     let mut registry = PluginRegistry::default();
     #[cfg(feature = "plugin-host-facts")]

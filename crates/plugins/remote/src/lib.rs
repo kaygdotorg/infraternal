@@ -39,6 +39,9 @@ pub mod remote_recovery;
 pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;
+/// Agent-side refusal of server leaves older than the newest one accepted (#559).
+#[cfg(feature = "transport")]
+pub mod server_leaf_floor;
 #[cfg(feature = "native-streams")]
 pub mod wire_datagrams;
 

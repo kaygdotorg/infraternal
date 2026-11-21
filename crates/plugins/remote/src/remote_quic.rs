@@ -81,6 +81,19 @@ fn identity(
     );
     Ok((vec![certificate], key.into()))
 }
+/// The peer's verified leaf certificate on an established connection. On a
+/// dialed connection this is the server's leaf, which the infraternal agent
+/// checks against its [`crate::server_leaf_floor::ServerLeafFloor`] (#559).
+/// # Errors
+/// Refuses a connection without a peer certificate or with an unparsable one.
+pub fn peer_leaf(connection: &quinn::Connection) -> io::Result<X509> {
+    let identity = connection.peer_identity().ok_or_else(denied)?;
+    let chain = identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .map_err(|_| denied())?;
+    X509::from_der(chain.first().ok_or_else(denied)?).map_err(|_| denied())
+}
+
 /// Largest UDP payload a host connection may discover. The connection can move
 /// onto the mesh below QUIC without seeing a path change (`remote_path_socket`),
 /// so its discovered size must also fit the mesh interface: 1380-byte interface

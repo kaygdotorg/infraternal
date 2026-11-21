@@ -15,7 +15,7 @@ use openssl::{
     pkey::PKey,
     x509::{
         X509, X509NameBuilder,
-        extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
+        extension::{BasicConstraints, KeyUsage},
     },
 };
 use std::{
@@ -47,17 +47,25 @@ pub(crate) struct BootstrapRuntime {
     pub(crate) hosts: RemoteHosts,
     /// Database-backed store for host enrollment and revocation.
     pub(crate) store: EnrollmentStore,
+    /// The CA signer; the listeners' leaf rotation signs with it while unlocked (#559).
+    source: Arc<MemoryCaSource>,
     /// Listeners to start on activation; `None` once taken or when remote is off.
     listeners: Mutex<Option<RemoteListeners>>,
 }
 impl BootstrapRuntime {
     /// Construct inactive plugin listener ownership; no work starts here.
     #[must_use]
-    pub(crate) fn new(config: BootstrapConfig, hosts: RemoteHosts, store: EnrollmentStore) -> Self {
+    pub(crate) fn new(
+        config: BootstrapConfig,
+        hosts: RemoteHosts,
+        store: EnrollmentStore,
+        source: Arc<MemoryCaSource>,
+    ) -> Self {
         Self {
             config,
             hosts,
             store,
+            source,
             listeners: Mutex::new(None),
         }
     }
@@ -73,20 +81,28 @@ impl BootstrapRuntime {
             return Ok(());
         }
         let directory = self.config.directory.join("active");
-        let (identity, issuer) = tokio::task::spawn_blocking(move || retained_identity(&directory))
+        let retained = directory.clone();
+        let (identity, issuer) = tokio::task::spawn_blocking(move || retained_identity(&retained))
             .await
             .map_err(|_| CaError)??;
-        *listeners = Some(
-            RemoteListeners::start(
-                self.config.address,
-                &identity,
-                &[issuer],
-                self.store.clone(),
-                self.hosts.clone(),
-            )
-            .await
-            .map_err(|_| CaError)?,
+        let mut started = RemoteListeners::start(
+            self.config.address,
+            &identity,
+            &[issuer],
+            self.store.clone(),
+            self.hosts.clone(),
+        )
+        .await
+        .map_err(|_| CaError)?;
+        started.rotate_server_leaf(
+            crate::server_leaf::Rotation {
+                source: self.source.clone(),
+                directory,
+                name: self.config.name.clone(),
+            },
+            identity.certificate,
         );
+        *listeners = Some(started);
         Ok(())
     }
 }
@@ -104,26 +120,13 @@ pub fn public_issuer(directory: &Path) -> Result<X509, CaError> {
     }
     Ok(issuer)
 }
-/// Load retained public trust and its private remote TLS leaf identity.
+/// Load retained public trust and its private remote TLS leaf identity
+/// (current file or the pre-#559 pair, see `server_leaf`).
 /// # Errors
 /// Refuses unsafe files, invalid certificates or a mismatched leaf key.
 pub fn retained_identity(directory: &Path) -> Result<(Identity, X509), CaError> {
     let issuer = public_issuer(directory)?;
-    let certificate =
-        X509::from_pem(&private_file(&directory.join("remote.pem")).map_err(|_| CaError)?)
-            .map_err(|_| CaError)?;
-    let key = PKey::private_key_from_pem(
-        &private_file(&directory.join("remote.key")).map_err(|_| CaError)?,
-    )
-    .map_err(|_| CaError)?;
-    if !certificate
-        .public_key()
-        .map_err(|_| CaError)?
-        .public_eq(&key)
-    {
-        return Err(CaError);
-    }
-    Ok((Identity { certificate, key }, issuer))
+    Ok((crate::server_leaf::load(directory)?, issuer))
 }
 /// Creates `path` with mode 0600, writes `bytes` and flushes to disk. Fails if the file already exists, so nothing is overwritten.
 fn write_new(path: &Path, bytes: &[u8]) -> Result<(), CaError> {
@@ -174,16 +177,9 @@ pub fn publish_first(
             &material.issuer().to_pem().map_err(|_| CaError)?,
         )?;
         write_new(
-            &stage.join("remote.pem"),
-            &identity.certificate.to_pem().map_err(|_| CaError)?,
+            &stage.join("remote-leaf.pem"),
+            &crate::server_leaf::encode(&identity)?,
         )?;
-        let encoded = zeroize::Zeroizing::new(
-            identity
-                .key
-                .private_key_to_pem_pkcs8()
-                .map_err(|_| CaError)?,
-        );
-        write_new(&stage.join("remote.key"), &encoded)?;
         std::fs::File::open(&stage)
             .and_then(|dir| dir.sync_all())
             .map_err(|_| CaError)?;
@@ -201,77 +197,19 @@ pub fn publish_first(
     }
     result
 }
-/// Creates a new CA and the first host identity certificate, valid from `now` for ten years (`now` must be non-negative). The identity's subject is `name` and is deliberately different from the issuer's, so path building does not treat the leaf as self-issued. Returns the CA material and the identity; nothing is written to disk.
+/// Creates a new CA (valid from `now` for ten years; `now` must be
+/// non-negative) and the server's first leg-B leaf for `name`, which lasts
+/// `server_leaf::LIFETIME` like every later one (#559). Returns the CA
+/// material and the leaf identity; nothing is written to disk.
 fn generate(name: &str, now: i64) -> Result<(CaMaterial, Identity), CaError> {
     let end = now
         .checked_add(315_360_000)
         .filter(|_| now >= 0)
         .ok_or(CaError)?;
     let (key, issuer) = generate_issuer(now, end)?;
-    // A leaf must have a distinct subject: equal issuer/subject names make
-    // cold-start path building classify it as self-issued despite its leaf key.
-    let mut subject = X509NameBuilder::new().map_err(|_| CaError)?;
-    subject
-        .append_entry_by_text("CN", name)
-        .map_err(|_| CaError)?;
-    let subject = subject.build();
-    let remote_key = PKey::generate_ed25519().map_err(|_| CaError)?;
-    let mut leaf = X509::builder().map_err(|_| CaError)?;
-    leaf.set_version(2).map_err(|_| CaError)?;
-    let serial = BigNum::from_slice(uuid::Uuid::new_v4().as_bytes())
-        .and_then(|v| v.to_asn1_integer())
-        .map_err(|_| CaError)?;
-    leaf.set_serial_number(&serial).map_err(|_| CaError)?;
-    leaf.set_subject_name(&subject).map_err(|_| CaError)?;
-    leaf.set_issuer_name(issuer.subject_name())
-        .map_err(|_| CaError)?;
-    leaf.set_pubkey(&remote_key).map_err(|_| CaError)?;
-    leaf.set_not_before(Asn1Time::from_unix(now).map_err(|_| CaError)?.as_ref())
-        .map_err(|_| CaError)?;
-    leaf.set_not_after(Asn1Time::from_unix(end).map_err(|_| CaError)?.as_ref())
-        .map_err(|_| CaError)?;
-    leaf.append_extension(
-        BasicConstraints::new()
-            .critical()
-            .build()
-            .map_err(|_| CaError)?,
-    )
-    .map_err(|_| CaError)?;
-    leaf.append_extension(
-        KeyUsage::new()
-            .critical()
-            .digital_signature()
-            .build()
-            .map_err(|_| CaError)?,
-    )
-    .map_err(|_| CaError)?;
-    leaf.append_extension(
-        ExtendedKeyUsage::new()
-            .server_auth()
-            .build()
-            .map_err(|_| CaError)?,
-    )
-    .map_err(|_| CaError)?;
-    let mut san = SubjectAlternativeName::new();
-    if name.parse::<std::net::IpAddr>().is_ok() {
-        san.ip(name);
-    } else {
-        san.dns(name);
-    }
-    leaf.append_extension(
-        san.build(&leaf.x509v3_context(Some(&issuer), None))
-            .map_err(|_| CaError)?,
-    )
-    .map_err(|_| CaError)?;
-    leaf.sign(&key, MessageDigest::null())
-        .map_err(|_| CaError)?;
-    Ok((
-        CaMaterial::new(key, issuer),
-        Identity {
-            certificate: leaf.build(),
-            key: remote_key,
-        },
-    ))
+    let material = CaMaterial::new(key, issuer);
+    let identity = crate::server_leaf::issue(&material, name, None, now)?;
+    Ok((material, identity))
 }
 
 /// Creates a fresh Ed25519 key and a self-signed CA certificate for it, valid from `now` until `end`.

@@ -228,6 +228,106 @@ impl CertificateAuthority {
         Ok(SignedCertificate { der, record })
     }
 
+    /// Issue the server's own leg-B TLS leaf for `name` (a DNS name or an IP
+    /// address) over `key`, valid from `start` to `end` (Unix seconds).
+    ///
+    /// The leaf is `CA:false`, `digitalSignature`, `serverAuth` only, with one
+    /// SAN and a random serial, and its subject differs from the issuer's so
+    /// path building never treats it as self-issued. The finished chain is
+    /// verified for the server purpose and `name` at `start` before it is
+    /// returned. Lifetime and ordering policy belong to the caller
+    /// (`server_leaf`, #559); this only signs what it is given.
+    /// # Errors
+    /// Refuses an inverted or negative window, a window the issuer does not
+    /// cover, or a chain that does not verify.
+    pub(crate) fn sign_server(
+        &self,
+        name: &str,
+        key: &PKey<Private>,
+        start: i64,
+        end: i64,
+    ) -> Result<X509, CaError> {
+        if start < 0 || end <= start {
+            return Err(CaError);
+        }
+        let start_time = Asn1Time::from_unix(start).map_err(|_| CaError)?;
+        let end_time = Asn1Time::from_unix(end).map_err(|_| CaError)?;
+        if self.0.issuer.not_before() > start_time || self.0.issuer.not_after() < end_time {
+            return Err(CaError);
+        }
+        let leaf = self
+            .build_server(name, key, &start_time, &end_time)
+            .map_err(|_| CaError)?;
+        let mut trust = X509StoreBuilder::new().map_err(|_| CaError)?;
+        trust.add_cert(self.0.issuer.clone()).map_err(|_| CaError)?;
+        let mut parameters = X509VerifyParam::new().map_err(|_| CaError)?;
+        parameters.set_time(start);
+        parameters
+            .set_purpose(openssl::x509::X509PurposeId::SSL_SERVER)
+            .map_err(|_| CaError)?;
+        if let Ok(ip) = name.parse() {
+            parameters.set_ip(ip).map_err(|_| CaError)?;
+        } else {
+            parameters.set_host(name).map_err(|_| CaError)?;
+        }
+        trust.set_param(&parameters).map_err(|_| CaError)?;
+        let chain = Stack::new().map_err(|_| CaError)?;
+        let mut context = X509StoreContext::new().map_err(|_| CaError)?;
+        if !context
+            .init(&trust.build(), &leaf, &chain, |context| {
+                context.verify_cert()
+            })
+            .map_err(|_| CaError)?
+        {
+            return Err(CaError);
+        }
+        Ok(leaf)
+    }
+
+    /// Build and sign the server leaf described in [`Self::sign_server`].
+    fn build_server(
+        &self,
+        name: &str,
+        key: &PKey<Private>,
+        start: &Asn1Time,
+        end: &Asn1Time,
+    ) -> Result<X509, openssl::error::ErrorStack> {
+        let mut subject = X509NameBuilder::new()?;
+        subject.append_entry_by_text("CN", name)?;
+        let mut builder = X509::builder()?;
+        builder.set_version(2)?;
+        // Positive, unpredictable serials fit RFC5280's twenty-octet ceiling.
+        let mut serial = rand::random::<[u8; 20]>();
+        serial[0] = (serial[0] & 0x7f) | 1;
+        let serial = BigNum::from_slice(&serial)?.to_asn1_integer()?;
+        builder.set_serial_number(&serial)?;
+        builder.set_subject_name(&subject.build())?;
+        builder.set_issuer_name(self.0.issuer.subject_name())?;
+        builder.set_pubkey(key)?;
+        builder.set_not_before(start)?;
+        builder.set_not_after(end)?;
+        builder.append_extension(BasicConstraints::new().critical().build()?)?;
+        builder.append_extension(KeyUsage::new().critical().digital_signature().build()?)?;
+        builder.append_extension(ExtendedKeyUsage::new().server_auth().build()?)?;
+        let mut san = SubjectAlternativeName::new();
+        if name.parse::<std::net::IpAddr>().is_ok() {
+            san.ip(name);
+        } else {
+            san.dns(name);
+        }
+        let san = san.build(&builder.x509v3_context(Some(&self.0.issuer), None))?;
+        builder.append_extension(san)?;
+        builder.sign(
+            &self.0.key,
+            if CA_KEY_ALGORITHM == CaAlgorithm::Ed25519 {
+                MessageDigest::null()
+            } else {
+                MessageDigest::sha256()
+            },
+        )?;
+        Ok(builder.build())
+    }
+
     /// The issuer's raw Ed25519 public key, which mesh SSH trusts as its CA
     /// (owner question Q1 on #221: reuse the D168 key).
     /// # Errors

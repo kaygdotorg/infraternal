@@ -35,6 +35,15 @@ impl CaAdministrationConfig {
             bootstrap: None,
         }
     }
+    /// The CA's `active` directory and the server name its leg-B leaf
+    /// certifies, when this server keeps its leaf there (every server set up
+    /// through bootstrap). The listeners' leaf rotation writes there (#559).
+    #[must_use]
+    pub(crate) fn server_leaf(&self) -> Option<(PathBuf, String)> {
+        self.bootstrap
+            .as_ref()
+            .map(|config| (config.directory.join("active"), config.name.clone()))
+    }
     /// Share the configured process-only signer with the trusted exec lifecycle
     /// adapter. This never reads an encrypted copy or authorizes an HTTP unlock.
     #[must_use]
@@ -42,6 +51,8 @@ impl CaAdministrationConfig {
         self.source.clone()
     }
 
+    /// Create the runtime authority with the listener registry and store that
+    /// first-run bootstrap activation needs.
     pub(crate) fn with_runtime(
         &self,
         auth: Auth,
@@ -53,7 +64,10 @@ impl CaAdministrationConfig {
         let mut authority = CaAdministration::new(auth, pool, self.source.clone(), copies);
         authority.bootstrap = self.bootstrap.clone().map(|config| {
             Arc::new(crate::ca_bootstrap::BootstrapRuntime::new(
-                config, hosts, store,
+                config,
+                hosts,
+                store,
+                self.source.clone(),
             ))
         });
         Ok(Arc::new(authority))

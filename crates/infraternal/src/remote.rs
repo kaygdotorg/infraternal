@@ -1097,6 +1097,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         https_root,
         https_system_roots: stored.https_system_roots,
         execution_uid: stored.execution_uid,
+        server_leaf: std::sync::Arc::new(ServerLeafFile::floor(data, stored.host_id)),
     };
     #[cfg(target_os = "linux")]
     let installation =
@@ -1134,6 +1135,114 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         installation.as_ref(),
     )))
     .await
+}
+
+/// Durable record of the newest server leaf this enrollment accepted (#559).
+///
+/// It lives in its own file, `server-leaf`, next to `identity.json` rather
+/// than inside it: the identity document refuses unknown fields, so an older
+/// infraternal agent after an A/B rollback could not read a document carrying
+/// a new one. The file holds one line, `<host id> <notBefore seconds>`. The
+/// host id ties the value to this enrollment: a file left behind by an earlier
+/// enrollment (possibly with another server and CA) is ignored, never used to
+/// refuse the new server.
+///
+/// A missing, unsafe or malformed file reads as "no floor yet". That is no
+/// weaker than a deleted file, which anyone able to write here could arrange,
+/// and it never turns local corruption into a host that cannot connect.
+struct ServerLeafFile {
+    /// The private enrollment data directory that holds `identity.json`.
+    data: PathBuf,
+    /// The enrolled host id the stored value belongs to.
+    host: uuid::Uuid,
+}
+
+impl ServerLeafFile {
+    /// Name of the floor file inside the data directory.
+    const NAME: &'static str = "server-leaf";
+
+    /// Build the enrollment's floor, starting from the stored value.
+    fn floor(
+        data: &Path,
+        host: uuid::Uuid,
+    ) -> infraternal_agent::server_leaf_floor::ServerLeafFloor {
+        let file = Self {
+            data: data.to_owned(),
+            host,
+        };
+        let newest = file.load();
+        infraternal_agent::server_leaf_floor::ServerLeafFloor::new(
+            newest,
+            std::sync::Arc::new(file),
+        )
+    }
+
+    /// Read the stored floor; `None` when absent, unsafe, malformed or from another enrollment.
+    fn load(&self) -> Option<i64> {
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(self.data.join(Self::NAME))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() > 64
+        {
+            return None;
+        }
+        let mut text = String::with_capacity(64);
+        file.take(64).read_to_string(&mut text).ok()?;
+        let (host, seconds) = text.trim_end().split_once(' ')?;
+        if host
+            != self
+                .host
+                .simple()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+        {
+            return None;
+        }
+        seconds.parse().ok().filter(|seconds: &i64| *seconds >= 0)
+    }
+}
+
+impl infraternal_agent::server_leaf_floor::ServerLeafStore for ServerLeafFile {
+    /// Replace the file atomically: write a private pending file, fsync it,
+    /// rename it over `server-leaf`, then fsync the directory.
+    fn remember(&self, not_before: i64) -> io::Result<()> {
+        use std::{
+            io::Write,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let directory = std::fs::symlink_metadata(&self.data)?;
+        if !directory.is_dir()
+            || directory.uid() != nix::unistd::Uid::effective().as_raw()
+            || directory.permissions().mode() & 0o077 != 0
+        {
+            return Err(refused());
+        }
+        let pending = self
+            .data
+            .join(format!("server-leaf-{}.pending", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pending)?;
+            writeln!(file, "{} {not_before}", self.host.simple())?;
+            file.sync_all()?;
+            std::fs::rename(&pending, self.data.join(Self::NAME))?;
+            std::fs::File::open(&self.data)?.sync_all()
+        })();
+        let _ = std::fs::remove_file(pending);
+        result
+    }
 }
 
 /// The existing installation is the publication boundary; no new key is generated.
