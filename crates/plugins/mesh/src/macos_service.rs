@@ -624,6 +624,10 @@ fn service_paths(executable: &Path) -> (&'static str, &'static str) {
 }
 
 /// Describe the launchd job using fixed platform paths.
+///
+/// `ProcessType` is `Interactive` on purpose (#554): the kernel coalesces the timers of every
+/// other class, so an 8.33 ms pacing timer fired at 34-41 ms (and 91 ms under `Background`)
+/// on a real M1, which stretched pacing, deadlines and keepalives. `Interactive` measured 10.5 ms.
 fn render_plist(executable: &Path) -> io::Result<String> {
     if !executable.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -643,7 +647,7 @@ fn render_plist(executable: &Path) -> io::Result<String> {
          <key>RunAtLoad</key><true/>\n\
          <key>KeepAlive</key><true/>\n\
          <key>ThrottleInterval</key><integer>5</integer>\n\
-         <key>ProcessType</key><string>Background</string>\n\
+         <key>ProcessType</key><string>Interactive</string>\n\
          <key>StandardOutPath</key><string>/dev/null</string>\n\
          <key>StandardErrorPath</key><string>/dev/null</string>\n\
          </dict></plist>\n"
@@ -679,6 +683,15 @@ mod tests {
         let legacy = render_plist(Path::new("/usr/local/bin/infraternal")).unwrap();
         assert!(legacy.contains(DATA_DIRECTORY));
         assert!(legacy.contains(STATE_DIRECTORY));
+    }
+
+    /// #554: the job runs as `Interactive` so the kernel does not coalesce its short timers.
+    #[test]
+    fn plist_runs_the_agent_as_an_interactive_process() {
+        let plist = render_plist(Path::new(super::MACHINE_BINARY)).unwrap();
+        assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
+        assert!(!plist.contains("<string>Background</string>"));
+        assert_eq!(plist.matches("<key>ProcessType</key>").count(), 1);
     }
 
     /// A stale removal request cannot claim the new install or its PATH alias.

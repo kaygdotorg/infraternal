@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.3"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=5757403b7867f79176211a1d45bc554baf1d1294#5757403b7867f79176211a1d45bc554baf1d1294"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "gotatun-crypto"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=5757403b7867f79176211a1d45bc554baf1d1294#5757403b7867f79176211a1d45bc554baf1d1294"
 dependencies = [
  "ring",
  "x25519-dalek",
@@ -1609,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "gotatun-packet"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=6db3b519612043a848afa89b68b7d67810e30b55#6db3b519612043a848afa89b68b7d67810e30b55"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=5757403b7867f79176211a1d45bc554baf1d1294#5757403b7867f79176211a1d45bc554baf1d1294"
 dependencies = [
  "bitfield-struct",
  "bytes",
@@ -2432,9 +2432,11 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "clap",
+ "core-foundation",
  "libghostty-vt",
  "nix 0.32.0",
  "openssl",
+ "security-framework",
  "tokio",
  "vt100",
  "vte",

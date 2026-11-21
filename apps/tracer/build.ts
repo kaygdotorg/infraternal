@@ -106,7 +106,10 @@ await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(outputs), n
 const firstScreen = staticClosure(outputs, entryName);
 /** The extra files a device that has signed in before needs next: the core screen and the terminal. */
 const returningVisit = returningVisitChunks(outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
-await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(withHashedReferences(page, names, pageFonts), firstScreen), returningVisit));
+/** The terminal engine's wasm, which the bundler copied under a content-hashed name (src/engine-wasm.ts): preloaded for a returning device, like the terminal's code. */
+const engineFiles = build.outputs.filter((output) => output.kind === "asset" && output.path.endsWith(".wasm")).map((output) => output.path.split("/").at(-1)!);
+if (engineFiles.length !== 1) throw new Error(`expected one engine wasm in the build, found ${engineFiles.length}`);
+await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(withHashedReferences(page, names, pageFonts), firstScreen), returningVisit, engineFiles));
 // Tools ask for /favicon.ico by habit, whatever the page's <link> says; give them a real icon (#518).
 await Bun.write(`${dist}/favicon.ico`, pngToIco(new Uint8Array(await Bun.file("icons/dark-32.png").arrayBuffer())));
 await precompress(dist);

@@ -327,6 +327,10 @@ button { color: inherit; }
 .terminal-screen[data-no-motion] .backdrop { transition: none; }
 /* A theme, card, window or background pick swaps every token at once (core-screen.ts swapLook): nothing may fade from its old value. */
 :root[data-look-swap] *, :root[data-look-swap] *::before, :root[data-look-swap] *::after { transition: none !important; }
+/* The page itself carries the same mesh, fixed to the whole viewport. The screen is shortened while a phone keyboard is up and
+   its backdrop with it; this paints the strip the screen leaves (between the key tray and the keyboard) and the safe areas
+   beside it, so no flat band shows (#560). */
+:root[data-bg="mesh"] { background: var(--mesh-image, none) center / cover no-repeat fixed, var(--bg, #101113); }
 .terminal-screen[data-bg="mesh"] .backdrop { opacity: 1; background: var(--mesh-image, none) center / cover no-repeat, var(--bg); }
 .terminal-screen[data-bg="mesh"] .backdrop::before {
   content: ""; position: absolute; inset: 0; pointer-events: none;

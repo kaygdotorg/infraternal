@@ -249,18 +249,20 @@ fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> io::Result
 
 /// True when `path` names a file whose name contains a hash of its contents, so the bytes behind it can never change.
 ///
-/// Two shapes qualify: Bun's split chunks, `/chunk-<8 alphanumerics>.js`, and the fingerprinted files the tracer build
+/// Three shapes qualify: Bun's split chunks, `/chunk-<8 alphanumerics>.js`, the terminal engine,
+/// `/ghostty-vt-<8 alphanumerics>.wasm` (the bundler's asset name, `apps/tracer/src/engine-wasm.ts`), and the fingerprinted files the tracer build
 /// writes, `<stem>.<10 lowercase hex digits>.<js|css|woff2>` in any folder (`apps/tracer/fingerprint.ts`; keep the two
 /// in step). A file that merely looks like one but is not in the bundle gets the single-page fallback, and [`headers`]
 /// never trusts the name when the response is that HTML.
 fn immutable_name(path: &str) -> bool {
-    let chunk = path
-        .strip_prefix("/chunk-")
-        .and_then(|name| name.strip_suffix(".js"))
-        .is_some_and(|hash| {
-            hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        });
-    chunk || fingerprinted(path)
+    let bundled = |prefix: &str, suffix: &str| {
+        path.strip_prefix(prefix)
+            .and_then(|name| name.strip_suffix(suffix))
+            .is_some_and(|hash| {
+                hash.len() == 8 && hash.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            })
+    };
+    bundled("/chunk-", ".js") || bundled("/ghostty-vt-", ".wasm") || fingerprinted(path)
 }
 
 /// True for a file name ending `.<10 lowercase hex digits>.<js|css|woff2>` with a non-empty stem before the hash.

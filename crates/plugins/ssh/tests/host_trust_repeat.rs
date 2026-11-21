@@ -64,7 +64,7 @@ fn rig(root: &Path) -> (TrustedOpenSsh, Destination) {
     )
     .unwrap();
     // `-G` prints the effective configuration for real; every other call is a connection that the stand-in
-    // refuses the way OpenSSH refuses an unknown key.
+    // refuses as `ssh` does for an unknown host key.
     let ssh = root.join("ssh");
     script(
         &ssh,

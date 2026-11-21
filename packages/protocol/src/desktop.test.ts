@@ -2,6 +2,7 @@
 import {expect,test} from "bun:test";
 import {decodeFrame,encodeFrame,WireDecodeError,WireEncodeError,type DesktopMessage} from "./codec";
 import { desktopCases } from "./desktop-fixtures";
+import { CONSOLE_USER_CHANGED, WINDOW_CLOSED, endReason } from "./desktop";
 test("desktop fixed fields and borrowed video roundtrip",()=>{
  for(const message of desktopCases){const wire=encodeFrame({type:"Desktop",message});const decoded=decodeFrame(wire);expect(decoded.frame).toEqual({type:"Desktop",message});
   if(decoded.frame.type==="Desktop"&&(decoded.frame.message.kind==="video"||decoded.frame.message.kind==="fragment"))expect(decoded.frame.message.bytes.buffer).toBe(wire.buffer);
@@ -30,4 +31,10 @@ test("desktop Rust and TypeScript agree on malformed lengths, flags and mutation
  if(bridge.exitCode!==0)throw new Error(new TextDecoder().decode(bridge.stderr));
  expect(new TextDecoder().decode(bridge.stdout).trim().split("\n").map(line=>JSON.parse(line))).toEqual(expected);
  console.log(`desktop rejection differential: ${requests.length} cases, zero divergences`);
+});
+
+test("endReason maps only the two end-of-session close codes (#146)", () => {
+  expect(endReason(WINDOW_CLOSED)).toBe("window-closed");
+  expect(endReason(CONSOLE_USER_CHANGED)).toBe("console-user-changed");
+  for (const code of [0, 4403, 4404, 4409, 4412, 65535, -1, 4411.5, Number.NaN]) expect(endReason(code)).toBeUndefined();
 });

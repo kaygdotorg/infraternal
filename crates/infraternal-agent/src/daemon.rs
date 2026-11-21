@@ -1503,8 +1503,15 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Ended(stream))?;
                                 continue;
                             }
-                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
-                                return Err(sessions::invalid("terminal stream already attached or limit reached"));
+                            if streams.contains_key(&stream) {
+                                return Err(sessions::invalid("terminal stream already attached"));
+                            }
+                            // A full link refuses this one stream at once and keeps
+                            // its siblings: the server turns the Close into a plain
+                            // sentence for the person (#562).
+                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
+                                reply(&control, Message::Close(stream, "terminal stream limit"))?;
+                                continue;
                             }
                             // The registry only caches shims this process has seen. A miss is not
                             // proof of death, and never a reason to drop every sibling stream: the

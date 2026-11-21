@@ -181,6 +181,12 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = infraternal_shim::session_shell::run_if_requested() {
         return result;
     }
+    // The root agent's desktop helper entry, also before any runtime or
+    // thread: it drops to the console user and execs the helper (D203 C2).
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    if let Some(result) = infraternal_shim::desktop_user::run_if_requested() {
+        return result;
+    }
     #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
@@ -2965,6 +2971,18 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
     // programs and an in-place restart still get it back.
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     let _ = infraternal_shim::disable_process_thp();
+    // The server and the infraternal agent hold a few descriptors per terminal
+    // session, so they raise their soft open-file limit to the hard one; the
+    // programs they start (shims, and through them people's shells) get the
+    // original back (#562). Best effort: on failure the limit stays as it was.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if std::env::args_os()
+        .skip(1)
+        .find(|argument| argument != "--json")
+        .is_some_and(|argument| argument == "server" || argument == "agent")
+    {
+        let _ = infraternal_shim::open_files::raise_open_file_limit();
+    }
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]
@@ -3048,9 +3066,12 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
-                        "REFUSED"
-                    }
+                    Some(
+                        remote::Failure::Refused
+                        | remote::Failure::IdentityMismatch
+                        | remote::Failure::SharedFile,
+                    )
+                    | None => "REFUSED",
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -3160,6 +3181,7 @@ fn run_remote_agent(
                     None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
+                        | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
                         | remote::Failure::Challenge,
                     )

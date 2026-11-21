@@ -40,6 +40,9 @@ export interface LogBody {
 export function mountLogBody(body: HTMLElement, lines: readonly string[]): LogBody {
   const pre = el("pre", "canvas-preview cl-preview cl-logs");
   pre.setAttribute("role", "log");
+  // A scrolling region must be reachable by keyboard (WCAG 2.1.1), and a region needs a name for a screen reader.
+  pre.tabIndex = 0;
+  pre.setAttribute("aria-label", "Log output");
   const jump = el("button", "ui-pill ui-pill-icon cl-log-jump");
   jump.type = "button";
   jump.setAttribute("aria-label", "Jump to latest");

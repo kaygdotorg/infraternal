@@ -1,8 +1,14 @@
-/// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture; latest damage replaces queued surfaces [D204,D266].
+/// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture with a tile lane for small changes; latest damage replaces queued surfaces [D204,D266,#146].
 /// Frames flow capture callback -> `receiveFrame` (a one-slot mailbox) -> `drain` on the encoding
 /// queue -> `Encoder` -> `output` as video packets (kind 70). The mailbox keeps only the newest
 /// frame, so a slow encoder skips old pictures instead of building latency. No pixels are copied
 /// between processes: the framework's own buffer goes straight to the hardware encoder.
+///
+/// Small changes (a typed letter, a caret blink, a checkbox) skip the encoder: `FramePixels` cuts
+/// the changed rectangles out of its exact history and they go, in the same kind-70 packet and the
+/// same sequence, as a tile update (`InfraternalDesktop.tileUpdate`). The viewer paints tiles over
+/// the video, and any later video picture supersedes them, because it is encoded from a newer
+/// capture that already contains those pixels.
 import AppKit
 import CoreMedia
 import ScreenCaptureKit
@@ -47,8 +53,10 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var congested = false
     /// Decides, from changes and results, what kind of picture to encode next.
     private var damageState = DamageEncodingState()
-    /// Exact-pixel history used to tell a blinking cursor from real changes.
+    /// Exact-pixel history used to tell a blinking cursor from real changes and to cut tiles.
     private let pixels = FramePixels()
+    /// Byte budget of the tile lane, shared with the video bit rate; used only on the encoding queue.
+    private var tiles = TileLane()
     /// Adaptive bit rate, in bits per second, for the encoder.
     private var bitrate: AdaptiveBitrate
     /// One-shot timer for the settled sharp refresh and for retrying a dropped keyframe.
@@ -77,6 +85,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
         self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
+        super.init()
+        pixels.tileAreaLimit = TileLane.areaLimit(width: Int(size.width), height: Int(size.height))
     }
 
     /// In measurement mode, logs a lifecycle stage with a timestamp.
@@ -227,6 +237,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             try encoder.configure(width: Int(size.width), height: Int(size.height), hevc: hevc, fps: fps)
             while true {
+                // A tile update cut from this pass's fresh picture, when its change is small.
+                var tile: Data?
                 mailbox.lock()
                 let frame = latest; latest = nil
                 let repair = repairing; repairing = false
@@ -247,15 +259,47 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                         let bounds = pixels.damageBounds.map { "\($0.x),\($0.y),\($0.width),\($0.height)" } ?? "none"
                         FileHandle.standardError.write(Data("METRIC pixel_damage capture_ns=\(nanos(frame.1)) kind=\(pixels.damageKind) bounds=\(bounds) pixels=\(pixels.changedPixels) complete=\(pixels.damageBoundsComplete)\n".utf8))
                     }
+                    // Small exact changes take the tile lane [#146 proposal C]. The tile is
+                    // built before the change is recorded: a tile is exact, so like a caret
+                    // blink it owes no sharp refresh, but a change that falls back to video
+                    // (too large, or over the byte budget) must still schedule one.
+                    let cutBegan = measure ? nanos(mach_absolute_time()) : 0
+                    if let rects = pixels.tileRects, !rects.isEmpty,
+                       let unit = pixels.tileUpdate(rects),
+                       tiles.admits(unit.count, bitsPerSecond: bitrate.current, at: ProcessInfo.processInfo.systemUptime) {
+                        tile = unit
+                    }
+                    if measure, let rects = pixels.tileRects, !rects.isEmpty {
+                        let area = rects.reduce(0) { $0 + $1.width * $1.height }
+                        FileHandle.standardError.write(Data("METRIC tile_cut capture_ns=\(nanos(frame.1)) rects=\(rects.count) area=\(area) bytes=\(tile?.count ?? 0) admitted=\(tile != nil) cut_ns=\(nanos(mach_absolute_time()) - cutBegan)\n".utf8))
+                    }
                     // Framework dirty rectangles can cover an entire window even
                     // when only its insertion caret changed. The retained BGRA
                     // history is the authoritative area for scheduling sharp refresh.
-                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret)
+                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret || tile != nil)
                 }
                 if repair { damageState.repair() }
                 guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
                 if frame == nil, !deferHistoryUntilAfterPaint { _ = pixels.prepare(current.0) }
                 let prepared = measure ? nanos(mach_absolute_time()) : 0
+                // A keyframe owed to the viewer (start, repair) or a refresh still goes to video;
+                // only a plain small change is answered with the tile instead of the encoder.
+                if decision == .caret, let tile {
+                    var stamp = nanos(current.1).bigEndian
+                    let outputBegan = measure ? nanos(mach_absolute_time()) : 0
+                    try output(70, withUnsafeBytes(of: &stamp) { Data($0) } + Data([0]) + tile)
+                    tiles.spend(tile.count)
+                    if measure {
+                        let sent = nanos(mach_absolute_time())
+                        FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=true lane=tile bytes=\(tile.count)\n".utf8))
+                    }
+                    // The viewer now holds this exact picture; the encoder's reference stays at
+                    // the last video picture, and the next video frame encodes from there.
+                    pixels.delivered()
+                    damageState.completed(delivered: true)
+                    damageState.postponeRefresh(at: ProcessInfo.processInfo.systemUptime)
+                    continue
+                }
                 let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
                     pixels.dropped()
@@ -269,7 +313,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     // One write preserves frame identity across concurrent control
                     // receipts; all stamps use the same native monotonic clock.
                     let sent = nanos(mach_absolute_time())
-                    FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil)\n".utf8))
+                    FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil) lane=video bytes=\(body.count - 9)\n".utf8))
                 }
                 if deferHistoryUntilAfterPaint {
                     pixels.seedAfterFirstPaint(current.0)

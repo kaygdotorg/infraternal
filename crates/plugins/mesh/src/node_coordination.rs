@@ -516,6 +516,11 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        // Presence polls the server's own node only while it holds a delivered configuration (#562).
+        // Other nodes' workers never speak for the server.
+        if channel.is_server() {
+            service.set_server_configured(installed.is_some());
+        }
         // Consume our completed finalizer's publication before reading durable receipts.
         // Coalesced peer progress is covered by that read; later progress stays unseen.
         rotation_updates.borrow_and_update();
@@ -1190,6 +1195,7 @@ mod tests {
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
     }
 
+    /// The server's listener lives only while its worker has applied an enabled configuration.
     #[tokio::test]
     async fn server_listener_belongs_to_applied_enabled_worker() {
         let service = service().await;
@@ -1240,6 +1246,40 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+    }
+
+    /// The server's node worker tells presence when its node holds a delivered configuration (#562); an
+    /// ordinary node's worker never speaks for the server.
+    #[tokio::test]
+    async fn the_servers_worker_publishes_that_its_node_has_a_mesh_configuration() {
+        let service = service().await;
+        let mut configured = service.subscribe_server_configured();
+        assert!(!*configured.borrow(), "nothing is delivered yet");
+        let ordinary = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            Channel::new(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        // sleep: an ordinary worker publishes nothing, so there is no event to wait for.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!*configured.borrow(), "an ordinary node does not set it");
+        ordinary.abort();
+        let channel = Channel::with_server(true);
+        let task = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            configured.wait_for(|on| *on),
+        )
+        .await
+        .expect("a delivered configuration is announced")
+        .unwrap();
+        task.abort();
     }
 
     /// A restarted server sends its fresh authority epoch when policy is otherwise identical.
