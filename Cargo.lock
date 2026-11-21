@@ -2432,9 +2432,11 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "clap",
+ "core-foundation",
  "libghostty-vt",
  "nix 0.32.0",
  "openssl",
+ "security-framework",
  "tokio",
  "vt100",
  "vte",

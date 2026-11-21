@@ -267,6 +267,11 @@ export class Picker {
   private notes(machine: HostEntry, state: ReturnType<Machines["state"]>): HTMLElement[] {
     if (!canStream(machine)) return [];
     const out: HTMLElement[] = [];
+    // A Mac added without the server's direct address links over HTTPS only and can never stream; say how to fix it, not "asleep" (#146).
+    if (machine.direct === false) {
+      out.push(el("p", "cl-sx-empty aw-note", `To open app windows on ${machine.name}, add it again. It was added before app windows were available.`));
+      return out;
+    }
     if (!state || (state.status === "loading" && !state.inventory)) {
       const loading = el("div", "cl-sx-state aw-note");
       loading.dataset.kind = "loading";

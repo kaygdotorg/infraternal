@@ -21,10 +21,11 @@ const KIB = 1024;
 /** The compressed size limits per class: critical and deferred for the whole class, on-demand for each chunk. */
 const limits = {
   critical: { gzip: 320 * KIB, brotli: 267 * KIB },
-  // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 sets each cap to
-  // the measured size rounded up to a whole KiB plus a 4 KiB margin: 60 KiB gzip / 54 KiB brotli.
+  // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 defines this class and
+  // its separate budget; the number is set here, to the measured size rounded up to a whole KiB plus a 4 KiB margin:
+  // 60 KiB gzip / 54 KiB brotli.
   deferred: { gzip: 60 * KIB, brotli: 54 * KIB },
-  // On demand (D188): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
+  // On demand (D188 names the class; the numbers are set here): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
   // person asks for it (the Mesh view, the session manager, a Settings window, the add-host wizard), so adding another
   // such feature must not take budget from the others; what the gate guards is that no single one grows without
   // thought. 20 KiB gzip / 18 KiB brotli each (the largest, Mesh, is about 8.5 KB gzip today). The class total is

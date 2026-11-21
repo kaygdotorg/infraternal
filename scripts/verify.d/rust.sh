@@ -253,6 +253,27 @@ rust_check_release_feature_sets() {
     return "$failed"
 }
 
+# The shim's library tests under each shim feature set the product ships (#555).
+# Feature-only tests are compiled out of other builds, so a feature set that no
+# row runs can ship broken tests, and its `cfg(not(...))` tests never run at all.
+# The sets are the shim features each shipped crate enables (scripts/release/feature-sets):
+#   ""                                      plain shim, the `cfg(not(host-login))` login tests
+#   session-image                           infraternal-session, the early executable
+#   session-image,cli,ca-handoff,async-fd   the macOS host, which has no host-login workers
+# The host-login set is run by the workspace "test" row, which unifies it, and
+# process-per-user has its own "shim process-per-user" row.
+rust_shim_feature_sets() {
+    local failed=0 features
+    for features in "" session-image session-image,cli,ca-handoff,async-fd; do
+        if [[ -n "$features" ]]; then
+            cargo test --locked --package infraternal-shim --features "$features" --lib || failed=1
+        else
+            cargo test --locked --package infraternal-shim --lib || failed=1
+        fi
+    done
+    return "$failed"
+}
+
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
 rust_check_static_key_memory() {
     local target="$1"
@@ -324,7 +345,7 @@ rust_static_build_check() {
     return "$failed"
 }
 
-# The `test` row (D345, #509). Runs every workspace test binary even after one
+# The `test` row (#509). Runs every workspace test binary even after one
 # fails: plain `cargo test` stops at the first failing binary, so a flake in an
 # early package hid the results of every later package. `--no-fail-fast` keeps
 # the exit code non-zero when anything failed. Because the log is then huge, the
@@ -378,6 +399,7 @@ rust_verify_fast() {
     # The shared host (#205) patches the native engine and its allocator;
     # the workspace run builds neither. Its shim lib tests are the gate.
     rust_run_gate "shim process-per-user" cargo test --locked --package infraternal-shim --features process-per-user --lib
+    rust_run_gate "shim feature sets" rust_shim_feature_sets
     rust_run_gate "cargo-deny" cargo deny check
     rust_run_gate "gate architecture" python3 scripts/test-verify-architecture.py
     rust_run_gate "doc coverage ratchet" verify_doc_coverage

@@ -19,6 +19,9 @@ pub mod capture;
 /// Runs the helper as a switchable child process.
 #[cfg(feature = "desktop")]
 pub mod component;
+/// Root agent admission of the console user's helper (D203 C2, #146).
+#[cfg(feature = "desktop")]
+pub mod cross_user;
 #[cfg(all(feature = "desktop", test, not(target_os = "macos")))]
 mod macos {
     //! Supplies inert owned capture bindings to Linux unit builds of the helper.

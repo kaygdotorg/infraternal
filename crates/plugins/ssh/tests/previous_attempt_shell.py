@@ -22,6 +22,23 @@ HOST, TRANSACTION = '1' * 32, '2' * 32
 TAKEOVER = '7' * 32
 # The fresh install that follows a Take over: its own host id and transaction.
 NEW_HOST, NEW_TRANSACTION = '6' * 32, '8' * 32
+# Upper bound, in seconds, on every wait for a real signal below (a child
+# started, a file appeared, a process exited). Each wait ends at its signal, so
+# this only bounds a hang. The old 0.5 to 5 s bounds failed on gate hosts whose
+# load is far above their core count, where starting a process alone can take
+# that long (#443).
+HANG_GUARD = 60
+
+
+def wait_for(predicate, seconds=HANG_GUARD, interval=0.01):
+    """Poll `predicate` until it is true; report whether it became true in time."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
 
 class EarlierSetup(unittest.TestCase):
     def setUp(self):
@@ -75,7 +92,7 @@ class EarlierSetup(unittest.TestCase):
         for child in self.children:
             if child.poll() is None:
                 child.terminate()
-                child.wait(timeout=5)
+                child.wait(timeout=HANG_GUARD)
         shutil.rmtree(self.temp)
 
     def guard_file(self):
@@ -297,12 +314,9 @@ transaction={TRANSACTION}
         self.manager_active.touch()
         agent = subprocess.Popen([str(live), '-o', str(lifetime), 'sleep', '60'])
         self.children.append(agent)
-        for _ in range(100):
-            children = Path(f'/proc/{agent.pid}/task/{agent.pid}/children')
-            pids = children.read_text().split() if children.exists() else []
-            if pids:
-                break
-            time.sleep(0.05)
+        children = Path(f'/proc/{agent.pid}/task/{agent.pid}/children')
+        wait_for(lambda: children.exists() and children.read_text().split(), interval=0.05)
+        pids = children.read_text().split() if children.exists() else []
         self.assertTrue(pids, 'the stand-in agent did not start')
         self.agent_main = str(agent.pid)
         return stage, [str(agent.pid)] + pids
@@ -318,10 +332,7 @@ transaction={TRANSACTION}
         child = subprocess.Popen([str(standin), '60'], cwd=cwd)
         self.children.append(child)
         # Until exec, the child is still a (dumpable) copy of this interpreter.
-        for _ in range(250):
-            if Path(f'/proc/{child.pid}/cmdline').read_bytes().startswith(str(standin).encode()):
-                break
-            time.sleep(0.02)
+        wait_for(lambda: Path(f'/proc/{child.pid}/cmdline').read_bytes().startswith(str(standin).encode()))
         with self.assertRaises(PermissionError, msg='precondition: the stand-in must hide its exe'):
             os.readlink(f'/proc/{child.pid}/exe')
         return child, standin
@@ -773,7 +784,7 @@ mock_manager() {{
             boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
             since = datetime.datetime.fromtimestamp(boot_time + int(start_time) / os.sysconf('SC_CLK_TCK'), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
             inspect_now.touch(mode=0o600)
-            stdout, stderr = observer.communicate(timeout=5)
+            stdout, stderr = observer.communicate(timeout=HANG_GUARD)
             fields = stdout.decode().strip().split(' ')
             self.assertEqual(observer.returncode, 0, stderr.decode())
             self.assertEqual(fields[:2], ['INFRATERNAL_SETUP_LOCKED', socket.gethostname()])
@@ -812,7 +823,7 @@ mock_manager() {{
             boot_time = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
             since = datetime.datetime.fromtimestamp(boot_time + int(start_time) / os.sysconf('SC_CLK_TCK'), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
             inspect_now.touch(mode=0o600)
-            stdout, stderr = observer.communicate(timeout=5)
+            stdout, stderr = observer.communicate(timeout=HANG_GUARD)
             fields = stdout.decode().strip().split(' ')
             self.assertEqual(observer.returncode, 0, stderr.decode())
             self.assertEqual(fields[2], str(child.pid))
@@ -1021,7 +1032,7 @@ observe_manager() {{
         ).strftime('%Y-%m-%dT%H:%M:%SZ')
         self.assertEqual(fields[4], since)
         self.assertEqual(fields[5], 'unknown', 'this stage has no transaction record')
-        holder.communicate(b'done\n', timeout=5)
+        holder.communicate(b'done\n', timeout=HANG_GUARD)
 
     def test_replacement_keeps_an_unauthenticated_payload_process_and_stays_retryable(self):
         stage, payload = self.make_upgrade_fixture()
@@ -1064,7 +1075,7 @@ replace_stuck_install "$observed"
         # A later add-host must still see the same stuck install instead of an
         # ownership refusal (#305).
         child.terminate()
-        child.wait(timeout=5)
+        child.wait(timeout=HANG_GUARD)
         retry = self.run_shell('\ninspect_previous')
         self.assertEqual(retry.returncode, 0, retry.stdout.decode())
         self.assertTrue(retry.stdout.decode().startswith(f'INFRATERNAL_SETUP_UPGRADE {HOST} {TRANSACTION} '))
@@ -1149,7 +1160,7 @@ replace_stuck_install "$observed"
                     client.connect(self.socket.name)
             finally:
                 os.chdir(previous)
-            live.settimeout(5)
+            live.settimeout(HANG_GUARD)
             accepted, _ = live.accept()
             accepted.close()
             self.assertEqual(self.mutating_calls()[:2], ['stop infraternal-agent.service', 'disable infraternal-agent.service'])
@@ -1362,13 +1373,10 @@ manager=slow_manager
         set_aside = subprocess.Popen(['/bin/sh', '-c', script], env=dict(os.environ, HOME=str(self.home)),
                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         self.children.append(set_aside)
-        for _ in range(500):
-            if stopping.exists() or set_aside.poll() is not None:
-                break
-            time.sleep(0.01)
+        wait_for(lambda: stopping.exists() or set_aside.poll() is not None)
         self.assertTrue(stopping.exists(), set_aside.stderr.read().decode() if set_aside.poll() is not None else '')
         result = self.run_shell(f'\n{restore} {TRANSACTION}\n')
-        self.assertEqual(set_aside.wait(timeout=30), 0)
+        self.assertEqual(set_aside.wait(timeout=HANG_GUARD), 0)
         self.assertEqual(result.returncode, 0, result.stderr.decode())
         self.assertEqual(result.stdout, b'restored\n')
         self.assertEqual(self.service_state(), (True, True), 'enabled and running, as found')
@@ -1934,10 +1942,7 @@ manager=kill_manager
         """Start a process outside the agent's unit that keeps a file of the install open."""
         holder = subprocess.Popen(['/bin/sh', '-c', f'exec 3< "{self.identity_path}"; exec sleep 30'])
         self.children.append(holder)
-        for _ in range(500):
-            if Path(f'/proc/{holder.pid}/fd/3').exists():
-                break
-            time.sleep(0.01)
+        wait_for(Path(f'/proc/{holder.pid}/fd/3').exists)
         return holder
 
     def test_a_real_finished_root_install_is_ready(self):
@@ -1984,10 +1989,7 @@ manager=kill_manager
             f'mount -t tmpfs none "{self.base}" && mkdir -p "{self.base}/state" && : > "{self.identity_path}" '
             f'&& exec 3< "{self.identity_path}" && : > "{marker}" && exec sleep 30'])
         self.children.append(container)
-        for _ in range(500):
-            if marker.exists():
-                break
-            time.sleep(0.01)
+        wait_for(marker.exists)
         self.assertTrue(marker.exists())
         self.assertEqual(self.run_shell('\nsetup_check=yes\ninspect_previous').stdout, self.installed(takeover='ready'))
         self.hold_a_file()

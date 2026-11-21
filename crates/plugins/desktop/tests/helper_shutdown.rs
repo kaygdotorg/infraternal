@@ -123,7 +123,13 @@ while True:
     let path = executable.clone();
     let (sent, received) = mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let result = helper::session(server, &mut companion, &path, &stop);
+        let result = helper::session(
+            server,
+            &mut companion,
+            &path,
+            &stop,
+            &infraternal_plugin_desktop::socket::Peer::SameUser,
+        );
         drop(companion);
         sent.send(result).unwrap();
     });

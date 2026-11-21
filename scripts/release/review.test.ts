@@ -18,24 +18,24 @@ test("publication with two build directories admits only one writer", async () =
   let uploads = 0;
   let replacements = 0;
   const stored = new Map<string, string>();
-  // REST conditional PUT is explicitly not guaranteed by this pipeline. Keep
+  // The local lock is the same-host guard even though R2 honours If-None-Match. Keep
   // both empty-prefix checks ahead of writes to exercise its claimed local lock.
   const server = Bun.serve({
     hostname: "127.0.0.1", port: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname;
-      if (request.method === "GET" && path.endsWith("/objects")) {
+      if (request.method === "GET" && path === "/s3/infraternal-builds") {
         lists += 1;
         if (lists === 2) releaseAdmission();
         await admission;
-        return Response.json({ success: true, result: [] });
+        return new Response('<ListBucketResult><Name>infraternal-builds</Name><Prefix>releases/x/</Prefix><KeyCount>0</KeyCount><MaxKeys>10</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>');
       }
       if (request.method === "PUT") {
         uploads += 1;
         const body = await request.text();
         if (stored.has(path)) replacements += 1;
         stored.set(path, body);
-        return Response.json({ success: true, result: { key: path } });
+        return new Response("");
       }
       // No signer/trust fixture is necessary: admission must happen before any
       // publication mutation, independently of downstream signing availability.
@@ -60,7 +60,8 @@ test("publication with two build directories admits only one writer", async () =
           ...process.env,
           CARGO_TARGET_DIR: target,
           CLOUDFLARE_ACCOUNT_ID: "fixture",
-          CLOUDFLARE_API_TOKEN: "fixture-publication",
+          R2_ACCESS_KEY_ID: "FIXTUREACCESSKEY",
+          R2_SECRET_ACCESS_KEY: "fixture-secret",
           RELEASE_CALLER_TOKEN: "fixture-publication",
           RELEASE_TEST_ORIGIN: `http://127.0.0.1:${server.port}`,
         },
@@ -88,19 +89,19 @@ test("publication with two build directories admits only one writer", async () =
   }
 }, 30_000);
 
-// An existing-object result and an empty result in one response disagree. The
+// An existing-object entry hidden behind a zero count is ambiguous. The
 // preflight must refuse that state before the publisher receives write permission.
 test("storage preflight refuses ambiguous existing-object results", async () => {
-  const child = Bun.spawn(["python3", join(root, "scripts/release/response.py"), "empty-prefix"], {
+  const child = Bun.spawn(["python3", join(root, "scripts/release/response.py"), "s3-empty-prefix", "infraternal-builds", "releases/0.1.0/"], {
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   });
-  child.stdin.write('{"success":true,"result":[{"key":"releases/0.1.0/infraternal"}],"result":[]}');
+  child.stdin.write('<ListBucketResult><Name>infraternal-builds</Name><Prefix>releases/0.1.0/</Prefix><KeyCount>0</KeyCount><MaxKeys>10</MaxKeys><IsTruncated>false</IsTruncated><Contents><Key>releases/0.1.0/infraternal</Key></Contents></ListBucketResult>');
   child.stdin.end();
   const [exit, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ]);
-  console.log(`STORAGE_PREFLIGHT duplicate_result=true existing_objects=1 exit=${exit} stdout_bytes=${stdout.length} stderr_bytes=${stderr.length}`);
+  console.log(`STORAGE_PREFLIGHT hidden_existing_object=true existing_objects=1 exit=${exit} stdout_bytes=${stdout.length} stderr_bytes=${stderr.length}`);
   expect(exit).not.toBe(0);
 });
