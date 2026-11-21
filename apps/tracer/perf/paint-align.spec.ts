@@ -147,7 +147,7 @@ test(`paint alignment: ${mode}`, async ({ page }) => {
   test.setTimeout(600_000);
   await page.addInitScript(RECORDER);
   const backend = `http://localhost:${Number(process.env.TRACER_BACKEND_PORT ?? String(Number(process.env.TRACER_TEST_PORT ?? "4621") + 1))}`;
-  await signIn(page, mode === "keys");
+  await signIn(page, mode === "keys" || mode === "flood");
   const results: Record<string, number[]> = {};
   let floodWindow: [number, number] | undefined;
   const push = (name: string, value: number): void => { (results[name] ??= []).push(value); };
@@ -259,11 +259,14 @@ test(`paint alignment: ${mode}`, async ({ page }) => {
     inWindow.slice(1).forEach((t, i) => push("flood_frame_interval_ms", t - inWindow[i]!));
     for (const key of rec.keys) {
       if (key.key.length !== 1) continue;
-      const draw = rec.draws.find((d) => !d.overlay && d.t >= key.t + 15 && d.text.includes(key.key));
-      if (!draw) { push("typed_undrawn", 1); continue; }
-      const shown = presentingFrame(frames, draw);
+      // Under a flood the echo scrolls away before any frame draws it (the screen moves ~2000 rows per frame), so the
+      // typing latency that counts is the predicted letter (needs a round trip above 60 ms: run with RTT 300).
+      const overlay = rec.draws.find((d) => d.overlay && d.t >= key.t && d.t < key.t + 100);
+      if (!overlay) { push("typed_no_overlay", 1); continue; }
+      const shown = presentingFrame(frames, overlay);
       push("typed_key_to_frame_start_ms", frames[shown]! - key.t);
-      push("typed_key_to_draw_ms", draw.t - key.t);
+      push("typed_key_to_overlay_draw_ms", overlay.t - key.t);
+      push("typed_extra_frames", shown - firstFrameAfter(frames, key.t));
     }
   } else {
     const msgs = rec.msgs;
