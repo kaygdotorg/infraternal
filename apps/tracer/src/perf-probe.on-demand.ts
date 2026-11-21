@@ -127,6 +127,9 @@ export class PerformanceProbe {
   private readonly samples: ProbeSample[] = [];
   /** The same samples by trace id, so hops reported by the terminal find their key. */
   private readonly samplesById = new Map<string, ProbeSample>();
+  /** Smallest and largest sequence among {@link samplesById}; lets a frame outside them skip the scan (J1065, #569). */
+  private traceLow = Number.POSITIVE_INFINITY;
+  private traceHigh = -1;
   private readonly countInput: HTMLInputElement;
   private readonly runButton: HTMLButtonElement;
   private readonly dropButton: HTMLButtonElement;
@@ -208,6 +211,7 @@ export class PerformanceProbe {
       onDisconnected: (forced) => this.onDisconnected(forced),
       onInput: (data, at, sequence) => this.onInput(data, at, sequence),
       onTrace: (id, hop, at) => this.onTrace(id, hop, at),
+      onTraceRange: (start, length, hop, at) => this.onTraceRange(start, length, hop, at),
       onPaintedOutput: (bytes, at, sequence, kind) => this.onPaintedOutput(bytes, at, kind, sequence),
     };
   }
@@ -227,6 +231,8 @@ export class PerformanceProbe {
     document.removeEventListener("keydown", this.onKeydown, true);
     this.pending.clear();
     this.samplesById.clear();
+    this.traceLow = Number.POSITIVE_INFINITY;
+    this.traceHigh = -1;
   }
 
   private readonly onKeydown = (event: KeyboardEvent): void => {
@@ -271,6 +277,8 @@ export class PerformanceProbe {
     this.latencies.length = 0;
     this.samples.length = 0;
     this.samplesById.clear();
+    this.traceLow = Number.POSITIVE_INFINITY;
+    this.traceHigh = -1;
     this.runTarget = count;
     this.runActive = true;
     this.resumeDuration = undefined;
@@ -462,6 +470,9 @@ export class PerformanceProbe {
     sample.id = id;
     sample.stages.onData = at;
     this.samplesById.set(id, sample);
+    const value = Number(sequence);
+    this.traceLow = Math.min(this.traceLow, value);
+    this.traceHigh = Math.max(this.traceHigh, value);
     return true;
   }
 
@@ -480,6 +491,20 @@ export class PerformanceProbe {
     }
     const sample = this.samplesById.get(id);
     if (sample) sample.stages[hop] = at;
+  }
+
+  /**
+   * Records `hop` for every sample whose id falls in the byte range. Under a flood the range is almost always past
+   * every id, so the bounds check answers without touching the map. Sequences stay below 2^53, so `Number` is exact.
+   */
+  private onTraceRange(start: bigint, length: number, hop: TerminalTraceHop, at: number): void {
+    const first = Number(start);
+    const last = first + length - 1;
+    if (last < this.traceLow || first > this.traceHigh) return;
+    for (const [id, sample] of this.samplesById) {
+      const value = Number(id);
+      if (value >= first && value <= last) sample.stages[hop] = at;
+    }
   }
 
   /**
