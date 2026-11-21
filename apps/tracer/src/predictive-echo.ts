@@ -662,12 +662,21 @@ export class PredictiveEcho {
     }, expectedDelay);
   }
 
-  /** Counts a wrong prediction, mutes prediction after the third, and clears the queue. */
+  /**
+   * Counts a wrong prediction, mutes prediction after the third, and clears the queue.
+   *
+   * Keys queued behind the mismatched one were sent too, and their echoes are still on the way. Until the host's
+   * output has caught up with them (see `echoExpectedAt`), a new key would be placed from a cursor that lacks
+   * them and mispredict in turn; replayed typing at a 300 ms round trip showed that cascade as most of the
+   * mispredictions (#569). So the next key waits for host output in that case, like any other unplaced key.
+   */
   private noteMisprediction(): void {
     this.mispredictions += 1;
     this.lastReason = this.mispredictions >= 3 ? "repeated-mispredictions" : "misprediction";
     if (this.mispredictions >= 3) this.muted = true;
+    const echoesInFlight = this.pending.length > 1;
     this.clearPending(this.lastReason);
+    if (echoesInFlight) this.waitingForOutput = true;
   }
 
   /** Records that the echo of a key sent at `sentAt` cannot arrive before one round trip later (less a jitter margin). */
