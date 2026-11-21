@@ -638,7 +638,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
       human: {
         start: () => performanceProbe?.startHumanRecording(),
         stop: () => performanceProbe?.stopHumanRecording(),
-        trace: () => performanceProbe?.humanTrace() ?? { keys: [], outputs: [], overlay: [], startColumn: 0, lastPaintedAt: 0 },
+        trace: () => performanceProbe?.humanTrace() ?? { keys: [], outputs: [], overlay: [], startColumn: 0, lastPaintedAt: 0, predictor: undefined },
         cursorColumn: () => performanceProbe?.cursorColumn() ?? 0,
         lastPaintedAt: () => performanceProbe?.lastPaintedAt() ?? 0,
       },

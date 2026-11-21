@@ -85,6 +85,8 @@ export interface HumanTrace {
   startColumn: number;
   /** `performance.now()` of the latest painted output, or 0. */
   lastPaintedAt: number;
+  /** Why prediction is on or off right now, and how many keys it sent without a prediction, by reason (empty when it is off). */
+  predictor: { reason: string; muted: boolean; mispredictions: number; fallbacks: Record<string, number> } | undefined;
 }
 
 /** The most output offsets the recorder remembers arrival times for; a typing run is a few kilobytes. */
@@ -527,6 +529,7 @@ export class PerformanceProbe {
       overlay: this.humanOverlay.map((frame) => ({ at: frame.at, glyphs: frame.glyphs.map((glyph) => ({ ...glyph })) })),
       startColumn: this.humanStartColumn,
       lastPaintedAt: this.humanLastPaintedAt,
+      predictor: this.terminal === undefined ? undefined : (({ reason, muted, mispredictions, fallbacks }) => ({ reason, muted, mispredictions, fallbacks }))(this.terminal.predictiveEchoState),
     };
   }
 
