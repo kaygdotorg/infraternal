@@ -1068,11 +1068,37 @@ async fn a_promoted_device_approved_host_refuses_a_later_approval_but_rejoins_by
     )
     .await;
     assert_eq!(joined.status(), StatusCode::OK, "the approved host joins");
-    // The two writes of a finished root handover that matter here
+    // The writes of a finished root handover that matter here
     // (`remote_promotion::handover`): the row becomes root, and its join-token
-    // row, the only other guard against a second receipt, is deleted.
+    // row, the only other guard against a second receipt, is deleted. The
+    // mode trigger allows that change only while an `enrolled` promotion
+    // from this uid exists, so one is seeded in that state and then handed
+    // over; its successor certificate is irrelevant to this check.
+    let attempt = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO remote_host_promotions(attempt,host_id,person,method,account,from_uid,\
+         from_fingerprint,link_generation,state,rooted,successor_fingerprint,successor_key,\
+         started_at,expires_at) VALUES(?,?,'owner','sudo','person',1002,?,?,'enrolled',1,?,?,?,?)",
+    )
+    .bind(attempt.as_bytes().as_slice())
+    .bind(host.as_bytes().as_slice())
+    .bind([1_u8; 32].as_slice())
+    .bind([2_u8; 16].as_slice())
+    .bind([3_u8; 32].as_slice())
+    .bind([4_u8; 32].as_slice())
+    .bind(now - 30)
+    .bind(now + 600)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE remote_hosts SET mode='rootful',execution_uid=0 WHERE id=?")
         .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE remote_host_promotions SET state='handed_over',ended_at=? WHERE attempt=?")
+        .bind(now - 20)
+        .bind(attempt.as_bytes().as_slice())
         .execute(&pool)
         .await
         .unwrap();
