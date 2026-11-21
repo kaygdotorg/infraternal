@@ -21,16 +21,25 @@ const KIB = 1024;
 /** The compressed size limits per class: critical and deferred for the whole class, on-demand for each chunk. */
 const limits = {
   critical: { gzip: 320 * KIB, brotli: 267 * KIB },
-  // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 sets each cap to
-  // the measured size rounded up to a whole KiB plus a 4 KiB margin: 60 KiB gzip / 54 KiB brotli.
+  // Release-6 shared layout and offline drawing measured 56,712 B gzip / 50,322 B brotli. D188 defines this class and
+  // its separate budget; the number is set here, to the measured size rounded up to a whole KiB plus a 4 KiB margin:
+  // 60 KiB gzip / 54 KiB brotli.
   deferred: { gzip: 60 * KIB, brotli: 54 * KIB },
-  // On demand (D188): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
+  // On demand (D188 names the class; the numbers are set here): the limit is per chunk, not for the class. A module named `*.on-demand.ts` costs nothing until the
   // person asks for it (the Mesh view, the session manager, a Settings window, the add-host wizard), so adding another
   // such feature must not take budget from the others; what the gate guards is that no single one grows without
   // thought. 20 KiB gzip / 18 KiB brotli each (the largest, Mesh, is about 8.5 KB gzip today). The class total is
   // reported, not limited.
   onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
+/**
+ * The terminal engine's wasm is a file of its own, outside the JavaScript budget (#573). It is gated here: the file must
+ * carry the content-hashed name the server caches for good, and its Brotli size is reported. The base64 copy this
+ * replaced cost 133 KB of the terminal chunk's Brotli against 99 KB for the raw wasm.
+ */
+const engineFiles = (await readdir(dist)).filter((name) => /^ghostty-vt-[0-9a-z]{8}\.wasm$/.test(name));
+if (engineFiles.length !== 1) throw new Error(`expected one content-hashed engine wasm (ghostty-vt-<hash>.wasm) in ${dist}, found ${engineFiles.length}`);
+console.log(`terminal engine ${engineFiles[0]}: identity=${(await stat(`${dist}/${engineFiles[0]}`)).size} brotli=${await stat(`${dist}/${engineFiles[0]}.br`).then((file) => file.size).catch(() => "none")} bytes`);
 /** The chunk lists the build wrote to `chunks.json`. */
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
 /** The compressed size of each on-demand chunk, checked one by one. */

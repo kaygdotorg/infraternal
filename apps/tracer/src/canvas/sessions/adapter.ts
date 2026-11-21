@@ -85,6 +85,11 @@ export interface HostEntry {
   online?: boolean;
   /** Pending denial stays visible; expired cleanup credentials can never deliver it. */
   state?: "pending" | "retired-unreachable";
+  /**
+   * `false` when the host is connected but its enrollment has no direct address for the server, so it links over HTTPS only and can never
+   * open app windows until it is added again (#146, D349). Absent when it has the address, is offline, or did not say.
+   */
+  direct?: false;
 }
 
 /** What the canvas asks of the sessions: bind a window to a session, make a model for a new shell, and list hosts. Implemented by the live service and by the mock. */

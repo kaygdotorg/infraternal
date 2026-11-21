@@ -12,7 +12,8 @@ bench-probes = []
 parser-checks = []
 # Generic plugin media lanes stay absent from terminal-only builds (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
-desktop = ["native-streams", "dep:infraternal-plugin-desktop"]
+# The root agent starts its helper through the shim's console-user entry (D203 C2).
+desktop = ["native-streams", "dep:infraternal-plugin-desktop", "infraternal-shim/desktop-user"]
 remote = ["infraternal-plugin-api/native-wire", "infraternal-plugin-api/tls-roots", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url", "dep:zeroize"]
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]

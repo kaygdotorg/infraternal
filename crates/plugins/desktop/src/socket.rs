@@ -6,6 +6,11 @@
 //! and every connecting peer must have the same effective user id according to
 //! the kernel ([`admit`]). File permissions alone are not treated as
 //! authentication.
+//!
+//! A helper that a root infraternal agent started as the console user
+//! ([`Peer::Daemon`], D203 C2) admits only root as its client, never its own
+//! user, and sends the agent's one-time token before anything else. So
+//! another process of the same user cannot connect first and learn the token.
 use std::{
     fs, io,
     os::unix::{
@@ -112,10 +117,41 @@ pub fn admit(stream: &UnixStream) -> io::Result<()> {
     admit_uid(stream, nix::unistd::geteuid().as_raw())
 }
 
-/// [`admit`] with the expected user id given explicitly (so it can be tested).
-/// Fails with `PermissionDenied` on a different user, or `Unsupported` on
-/// systems where peer credentials cannot be read.
-fn admit_uid(stream: &UnixStream, expected: u32) -> io::Result<()> {
+/// Who a helper accepts as its one client.
+#[derive(Clone)]
+pub enum Peer {
+    /// A process of this helper's own user: the rootless infraternal agent
+    /// in the person's login session, or the local desktop client.
+    SameUser,
+    /// The root infraternal agent that started this helper as the console
+    /// user. It must be uid 0, and it receives these token bytes first.
+    Daemon([u8; 32]),
+}
+
+impl Peer {
+    /// Admits `stream` by kernel credentials and, for the root agent, sends
+    /// the token before any frame.
+    ///
+    /// # Errors
+    /// `PermissionDenied` for any other uid; write errors pass through.
+    pub fn admit(&self, stream: &UnixStream) -> io::Result<()> {
+        match self {
+            Self::SameUser => admit(stream),
+            Self::Daemon(token) => {
+                admit_uid(stream, 0)?;
+                io::Write::write_all(&mut &*stream, token)
+            }
+        }
+    }
+}
+
+/// [`admit`] with the expected user id given explicitly. Fails with
+/// `PermissionDenied` on a different user, or `Unsupported` on systems where
+/// peer credentials cannot be read.
+///
+/// # Errors
+/// As above.
+pub fn admit_uid(stream: &UnixStream, expected: u32) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     let uid = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
         .map_err(io::Error::from)?
@@ -143,8 +179,26 @@ fn admit_uid(stream: &UnixStream, expected: u32) -> io::Result<()> {
 }
 
 #[cfg(test)]
+/// Peer admission by kernel credentials and safe socket publication.
 mod tests {
     use super::*;
+    /// A root-started helper refuses its own user as the client and sends
+    /// nothing to it; only uid 0 is admitted (the test runs unprivileged).
+    #[test]
+    fn daemon_peer_refuses_the_helpers_own_user_and_sends_nothing() {
+        use std::io::Read;
+        let (helper, mut client) = UnixStream::pair().unwrap();
+        let refused = Peer::Daemon([7; 32]).admit(&helper);
+        if nix::unistd::geteuid().is_root() {
+            refused.unwrap();
+        } else {
+            assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+            drop(helper);
+            let mut received = Vec::new();
+            client.read_to_end(&mut received).unwrap();
+            assert!(received.is_empty(), "the token reached a refused client");
+        }
+    }
     #[test]
     fn kernel_peer_credentials_reject_a_different_expected_user() {
         let (a, _) = UnixStream::pair().unwrap();

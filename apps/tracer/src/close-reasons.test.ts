@@ -29,6 +29,10 @@ test("server and host close reasons identify why a terminal reconnects, in plain
 });
 
 test("routine detach and connection rotation reasons stay neutral", () => {
+  // A full host refuses a new terminal at once and says what to do (#562).
+  const full = "This host already shows as many terminals as it can. Close one to open this one.";
+  expect(plainCloseReason("this host already shows as many terminals as it can; close one to open another")).toBe(full);
+  expect(plainCloseReason("terminal stream limit")).toBe(full);
   expect(plainCloseReason("tracer connection rotation")).toBe("The connection is being refreshed.");
 });
 

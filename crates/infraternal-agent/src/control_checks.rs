@@ -11,8 +11,9 @@
 //! - the saved session-names file and the CLI's reply envelope, which must
 //!   refuse or return only well-formed rows, and whose accepted replies
 //!   survive a serialise and decode round trip unchanged;
-//! - the Hello's `client_info` OS token (`host_os::reported_os`): it names an
-//!   OS only for the exact `infraternal agent os=<token>` form.
+//! - the Hello's `client_info` tokens (`host_os::reported`): an OS is named
+//!   only for the exact `infraternal agent os=<token>` form, and the missing
+//!   direct endpoint only for that form followed by ` direct=none`.
 //!
 //! Only built for tests and the `parser-checks` feature (the fuzz harness).
 
@@ -179,12 +180,27 @@ fn same_shape(left: &serde_json::Value, right: &serde_json::Value) -> bool {
     }
 }
 
-/// The Hello OS token: only the exact form names an OS, and it names it the same way every time.
+/// The Hello's `client_info` tokens: only the exact forms
+/// `infraternal agent os=<token>` and `... os=<token> direct=none` are read,
+/// and reading them is stable: rebuilding the text from what was read gives
+/// the same answer, both as raw text and inside a real Hello frame.
 fn check_hello_os(data: &[u8]) {
+    use crate::host_os::{reported, reported_os};
     let text = String::from_utf8_lossy(data);
-    if let Some(name) = crate::host_os::reported_os(&text) {
-        let Some(token) = text.strip_prefix("infraternal agent os=") else {
+    if let Some(read) = reported(&text) {
+        let Some(rest) = text.strip_prefix("infraternal agent os=") else {
             panic!("an OS was named without the exact Hello prefix");
+        };
+        // The direct-endpoint flag is false exactly when the one suffix is there.
+        let token = match rest.strip_suffix(" direct=none") {
+            Some(token) => {
+                assert!(!read.direct_endpoint);
+                token
+            }
+            None => {
+                assert!(read.direct_endpoint);
+                rest
+            }
         };
         assert!(
             !token.is_empty()
@@ -192,10 +208,16 @@ fn check_hello_os(data: &[u8]) {
                     .bytes()
                     .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
         );
-        assert!(!name.is_empty() && name.len() <= 32);
+        assert!(!read.os.is_empty() && read.os.len() <= 32);
+        assert_eq!(reported_os(&text), Some(read.os));
+        let suffix = if read.direct_endpoint {
+            ""
+        } else {
+            " direct=none"
+        };
         assert_eq!(
-            crate::host_os::reported_os(&format!("infraternal agent os={token}")),
-            Some(name)
+            reported(&format!("infraternal agent os={token}{suffix}")),
+            Some(read)
         );
     }
     // The same text arriving inside a real Hello frame takes the same path on the server.
@@ -209,10 +231,7 @@ fn check_hello_os(data: &[u8]) {
         && let Ok(decoded) = decode_muxed_frame(&wire)
         && let Frame::Hello { client_info, .. } = decoded.frame
     {
-        assert_eq!(
-            crate::host_os::reported_os(client_info),
-            crate::host_os::reported_os(&text)
-        );
+        assert_eq!(reported(client_info), reported(&text));
     }
 }
 

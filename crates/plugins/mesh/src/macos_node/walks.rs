@@ -217,8 +217,8 @@ async fn announce_underlay(
 ///
 /// A changed peer is rewritten whole, endpoint included. A walking peer stays on an address its
 /// new list still holds (J699 P3-3), and any peer stays on an off-list address confirmed by a
-/// recent authenticated session (#483). The caller supplies that one-read snapshot only when a
-/// watched peer changed.
+/// recent authenticated session (#483). The caller supplies that one-read snapshot when any
+/// installed peer changed.
 /// # Errors
 /// Reports invalid host routes or a device that rejected the update; the caller rolls back.
 pub(super) async fn update_peers(
@@ -374,11 +374,10 @@ impl RuntimeState {
     }
 
     /// Where the engine sends each peer's packets before `next` is applied, by device key, for
-    /// [`Self::refresh_walks`] (J602 F1). Read only when `next` re-installs a peer that walks;
+    /// [`Self::refresh_walks`] (J602 F1). Read when `next` re-installs any peer (#483, J1025);
     /// every other snapshot reads nothing here.
     async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, EngineEndpoint> {
-        let walking = |peer: &Peer| !peer.candidates.is_empty();
-        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, walking) {
+        if !crate::candidate_walks::engine_read_needed(self.config.as_ref(), next) {
             return BTreeMap::new();
         }
         let Some(device) = self.device.as_ref() else {

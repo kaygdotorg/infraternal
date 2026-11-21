@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The wheel scrolls what is under it, for terminals (D275, #308), without the input lock. Three windows stacked in one column,
+ * The wheel scrolls what is under it, for terminals (D275 as amended by D374 and D377, #308), without the input lock. Three windows stacked in one column,
  * real PTYs, production server binary and build.
  *
  * - The FOCUSED terminal with scrollback: a vertical wheel over it moves its scrollback and the strip (the column's scroll offset

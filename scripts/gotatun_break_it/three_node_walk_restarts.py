@@ -29,6 +29,9 @@ CLIENTS = ("A", "B", "C")
 RECOVERY_BOUND_SECONDS = 30.0
 ANNOUNCEMENT_BOUND_SECONDS = 5.0
 IDLE_WINDOW_SECONDS = 7.0
+# The quiet-mover cases: a session just made, and one 35 s old.
+QUIET_AGED_WAIT_SECONDS = 35.0
+QUIET_ROW_CAP_SECONDS = 900
 
 
 class ThreeNodeTopology(proof.Topology):
@@ -393,11 +396,91 @@ def restart_node(
         stop_pingers(pingers)
 
 
+class FrozenNode:
+    """Stands in for a stopped node while the observer applies a snapshot: it takes nothing."""
+
+    def request(self, value: Any) -> None:
+        """Drop the chunk; a stopped process cannot answer, and it is replayed on resume."""
+
+
+def quiet_mover_case(
+    label: str,
+    wait_seconds: float,
+    cap_seconds: float,
+    must_move_within: float | None,
+    nodes: dict[str, BinaryNode],
+    observer: proof.Observer,
+    probes: list[dict[str, Any]],
+    addresses: dict[str, str],
+    ports: dict[str, int],
+) -> dict[str, Any]:
+    """A moved peer that then stays quiet (#483, J1025): how long its observers keep the old address.
+
+    C is frozen, so it neither announces nor answers. After `wait_seconds` the coordinator lists
+    a new LAN address for C, as it would after C moved. A and B had C live at its old address,
+    so the time until their engines send to the new one is the cost of the live-endpoint rule
+    for a peer that moved and fell silent. Then C resumes and the coordinator's old list
+    returns, so the next case starts from the same state.
+    """
+    moved_endpoint = f"10.9.0.46:{ports['C']}"
+    result: dict[str, Any] = {"label": label, "wait_seconds": wait_seconds}
+    frozen = nodes["C"].pid
+    live_nodes = list(observer.nodes)
+    observer.nodes = [FrozenNode() if member == "C" else node for member, node in zip(MEMBERS, live_nodes)]
+    os.kill(frozen, signal.SIGSTOP)
+    try:
+        # sleep: the quiet period itself; C is frozen and nothing else runs.
+        time.sleep(wait_seconds)
+        result["counters_before"] = {
+            receiver: peer_rows(nodes[receiver]).get(addresses["C"], {}).get("counters", {})
+            for receiver in ("A", "B")
+        }
+        moved_probe = dict(probes[MEMBERS.index("C")])
+        moved_probe["lan"] = [moved_endpoint]
+        moved_probes = list(probes)
+        moved_probes[MEMBERS.index("C")] = moved_probe
+        started = time.monotonic()
+        observer.request({"mode": "keep", "probes": moved_probes})
+        result["snapshot_apply_ms"] = round((time.monotonic() - started) * 1000, 1)
+        moved: dict[str, float | None] = {"A": None, "B": None}
+        while time.monotonic() - started < cap_seconds and any(v is None for v in moved.values()):
+            for receiver in ("A", "B"):
+                if moved[receiver] is None:
+                    endpoint = peer_rows(nodes[receiver]).get(addresses["C"], {}).get("counters", {}).get("endpoint")
+                    if endpoint == moved_endpoint:
+                        moved[receiver] = round((time.monotonic() - started) * 1000, 1)
+            if any(v is None for v in moved.values()):
+                # sleep: a quiet-mover recovery is a time measurement and C is frozen, so nothing else can move the endpoint.
+                time.sleep(0.1)
+        result["moved_to_new_address_ms"] = moved
+        if must_move_within is not None:
+            late = {
+                receiver: at for receiver, at in moved.items()
+                if at is None or at > must_move_within * 1000
+            }
+            if late:
+                raise AssertionError(
+                    f"{label}: observers did not follow the moved quiet peer within "
+                    f"{must_move_within}s: {moved}"
+                )
+        result["still_on"] = {
+            receiver: peer_rows(nodes[receiver]).get(addresses["C"], {}).get("counters", {}).get("endpoint")
+            for receiver in ("A", "B")
+        }
+    finally:
+        os.kill(frozen, signal.SIGCONT)
+        observer.nodes = live_nodes
+        # C missed the frozen period's snapshots, so replay a complete one with the old list.
+        observer.request({"mode": "keep", "probes": probes, "full_snapshot": True})
+    return result
+
+
 def run_proof(
     binary: str,
     coordinator_path: str,
     scratch: str,
     restart_only: bool = False,
+    quiet_mover: bool = False,
 ) -> dict[str, Any]:
     """Run four real mesh processes, restart checks and optional address roaming."""
     topology = ThreeNodeTopology()
@@ -592,6 +675,33 @@ def run_proof(
             source: peer_rows(nodes[source]).get(addresses["C"])
             for source in ("S", "A", "B")
         }
+        # J1025: a peer with no candidate list. The same stale address arrives as C's only address.
+        # A, B and the server must stay where C's live session is, as the candidate case above does.
+        endpoints_before_single = {
+            source: peer_rows(nodes[source]).get(addresses["C"], {}).get("counters", {}).get("endpoint")
+            for source in ("S", "A", "B")
+        }
+        single_probe = dict(probes[MEMBERS.index("C")])
+        single_probe["lan"] = []
+        single_probes = list(probes)
+        single_probes[MEMBERS.index("C")] = single_probe
+        single_endpoints = list(endpoints)
+        single_endpoints[MEMBERS.index("C")] = f"10.9.0.45:{ports['C']}"
+        observer.request({"mode": "keep", "endpoints": single_endpoints, "probes": single_probes})
+        row["peer_state_after_single_address_snapshot"] = {
+            source: peer_rows(nodes[source]).get(addresses["C"])
+            for source in ("S", "A", "B")
+        }
+        row["endpoints_before_single_address_snapshot"] = endpoints_before_single
+        for source in ("S", "A", "B"):
+            endpoint = peer_rows(nodes[source]).get(addresses["C"], {}).get("counters", {}).get("endpoint")
+            if endpoint != endpoints_before_single[source]:
+                raise AssertionError(
+                    f"{source} left C's authenticated endpoint {endpoints_before_single[source]} for {endpoint} "
+                    "after a stale single-address snapshot"
+                )
+        # Back to the earlier stale candidate list and the real endpoints for the traffic checks.
+        observer.request({"mode": "keep", "endpoints": endpoints, "probes": stale_probes})
         post_snapshot = start_pingers(
             topology,
             addresses,
@@ -633,6 +743,18 @@ def run_proof(
         current_probes = [nodes[member].call("mesh.identity", {"candidates": True}) for member in MEMBERS]
         observer.request({"mode": "keep", "probes": current_probes})
         assert_peer_inventory(nodes, addresses, topology, ports)
+        if quiet_mover:
+            row["quiet_mover"] = []
+            # Measured, not asserted: the live-endpoint rule keeps the old address of a quiet mover
+            # (J1025 finding on #483), so the numbers are the receipt for a design decision.
+            for label, wait, cap, bound in (
+                ("fresh_session", 0.0, 60.0, None),
+                ("aged_session", QUIET_AGED_WAIT_SECONDS, 60.0, None),
+            ):
+                row["quiet_mover"].append(quiet_mover_case(
+                    label, wait, cap, bound, nodes, observer, current_probes, addresses, ports))
+                # Let the resumed C and the restored list settle before the next case.
+                wait_for_direct(nodes, addresses, topology, ports, RECOVERY_BOUND_SECONDS)
         row["outcome"] = "PASS"
         return row
     except Exception as error:
@@ -671,7 +793,7 @@ def inner(args: argparse.Namespace) -> int:
     proof.run("mount", "-t", "tmpfs", "-o", "mode=0700", "tmpfs", "/run")
     Path("/run/netns").mkdir(parents=True, exist_ok=True)
     try:
-        row = run_proof(args.binary, args.coordinator, args.scratch, args.restart_only)
+        row = run_proof(args.binary, args.coordinator, args.scratch, args.restart_only, args.quiet_mover)
     except Exception as error:
         row = {"scenario": "three-node-candidate-walk-restarts", "outcome": "FAIL",
                "error": f"{type(error).__name__}: {error}"}
@@ -699,15 +821,19 @@ def outer(args: argparse.Namespace) -> int:
                "--coordinator", args.coordinator, "--scratch", str(run_scratch)]
     if args.restart_only:
         command.append("--restart-only")
+    if args.quiet_mover:
+        command.append("--quiet-mover")
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, start_new_session=True,
                                env={**os.environ, "TMPDIR": str(run_scratch)})
     try:
-        stdout, stderr = process.communicate(timeout=300)
+        stdout, stderr = process.communicate(
+            timeout=QUIET_ROW_CAP_SECONDS if args.quiet_mover else 300
+        )
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         stdout, stderr = process.communicate()
-        row = {"outcome": "FAIL", "error": "the 300 second row cap expired"}
+        row = {"outcome": "FAIL", "error": "the row cap expired"}
     else:
         lines = [line[4:] for line in stdout.splitlines() if line.startswith("ROW ")]
         row = json.loads(lines[-1]) if lines else {
@@ -733,6 +859,11 @@ def main() -> None:
         "--restart-only",
         action="store_true",
         help="stop after the two mesh restarts and separate server-process restart",
+    )
+    parser.add_argument(
+        "--quiet-mover",
+        action="store_true",
+        help="also time how long observers keep a moved peer's old address while it stays quiet (J1025)",
     )
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()

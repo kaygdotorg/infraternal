@@ -1,7 +1,7 @@
 /**
  * The terminal's live cursor as its own small layer above the renderer's canvas (D249).
  *
- * Why a layer: the renderer parks itself when nothing changes (D81, D112), so a cursor drawn into its canvas can only
+ * Why a layer: the renderer parks itself when nothing changes (D81, D112, as amended by D249), so a cursor drawn into its canvas can only
  * blink while the renderer runs. This layer is one absolutely positioned box, placed once per cursor move and blinked
  * by a Web Animations opacity animation, which the compositor runs without the main thread: no timer, no
  * requestAnimationFrame, no renderer frame while it blinks.

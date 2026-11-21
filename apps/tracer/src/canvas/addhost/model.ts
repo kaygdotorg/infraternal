@@ -50,7 +50,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
     case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
-    case "unproven_files": return "Setup files it can't vouch for";
+    case "unproven_files": return "Setup found files it didn't create";
     case "no_account": return "Couldn't find that account on this host";
     case "authority_locked": return "Host connections are locked";
     case "install":
@@ -170,8 +170,8 @@ export interface Guide { title: string; happened: string; next: string; fix: Fix
 
 /** What to do after an install failure, by the step that stopped. Without a step nothing more is known. */
 export const STEP_ADVICE: Record<NonNullable<FailureDetail["failed_step"]>, string> = {
-  "get-arm64-binary": "Check this server’s release channel and signed arm64 binary, then try again.",
-  "get-x86-64-binary": "Check this server’s release channel and signed x86_64 binary, then try again.",
+  "get-arm64-binary": "Check this server's release channel and signed arm64 binary, then try again.",
+  "get-x86-64-binary": "Check this server's release channel and signed x86_64 binary, then try again.",
   connect: "Check SSH access and the host service, then try again.",
   upload: "Copying the infraternal agent to the host didn't finish. Try again.",
   install: "Installing the infraternal agent stopped partway. Try again, or open the details to see where.",
@@ -296,10 +296,10 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
     // own title; none of them is "set up elsewhere", and trying again would only meet the same files, so there is no
     // retry. The server's sentence says what was found; the location is in Details.
     case "unproven_files": return {
-      title: failure.refusal === "cache" ? `${name}'s download cache isn't setup's own`
-        : failure.refusal === "prepared" ? `An earlier copy of the agent is in the way on ${name}`
-        : failure.refusal === "foreign" ? `${name}'s setup folder has files setup didn't make`
-        : `Setup can't vouch for files on ${name}`,
+      title: failure.refusal === "cache" ? `${name} has a download cache that setup didn't create`
+        : failure.refusal === "prepared" ? `An earlier copy of the infraternal agent is in the way on ${name}`
+        : failure.refusal === "foreign" ? `${name}'s setup folder has files setup didn't create`
+        : `Setup found files on ${name} that it didn't create`,
       happened: failure.message,
       next: "",
       fix: "none", tone: "info",

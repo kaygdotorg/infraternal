@@ -50,6 +50,8 @@ for vector in wire:
 (seeds / 'reply-integer-beyond-u64').write_bytes(b'\x02{"code":0,"message":"","next":"","data":555558558355585583686}')
 for token in ['linux', 'macos', 'freebsd', 'MacOS', '']:
     (seeds / f'hello-{token or "empty"}').write_bytes(b'\x03' + f'infraternal agent os={token}'.encode())
+for text in ['linux direct=none', 'macos direct=none', 'linux direct=none ', 'linux  direct=none', 'direct=none']:
+    (seeds / f"hello-{text.replace(' ', '_')}").write_bytes(b'\x03' + f'infraternal agent os={text}'.encode())
 
 # remote_join_approval: a join body, an approval request with a poll token, a secret.
 seeds = corpus('remote_join_approval')

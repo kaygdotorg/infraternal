@@ -46,6 +46,9 @@ compact-history = ["process-per-user"]
 host-login = ["nix/uio"]
 # Audited transient process-transfer buffers are removed with the remote plugin.
 ca-handoff = ["dep:openssl"]
+# The root agent's per-user desktop helper entry and its peer code-signing
+# check (D203 C2, #146); compiled only with app windows.
+desktop-user = ["dep:security-framework", "dep:core-foundation"]
 # Enables input encoding only for the native mouse ABI probe, not shipping builds.
 vt-test-input = []
 # Exposes `vt_checks` for the workspace fuzz harness crate only; never in shipping builds.
@@ -57,6 +60,10 @@ bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 # shim needs nix's kqueue API there even when built on its own (#328).
 [target.'cfg(target_os = "macos")'.dependencies]
 nix = { workspace = true, features = ["event"] }
+# Already in the tree for the mesh node's keychain key; reused here to read
+# code signatures (D203 C2). Only the desktop-user feature selects them.
+security-framework = { version = "3.7.0", optional = true }
+core-foundation = { version = "0.10.1", optional = true }
 
 [dependencies.libghostty-vt]
 workspace = true

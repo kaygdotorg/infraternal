@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Install the nightly D375 latency run idempotently, as a systemd user timer on hd01 [D375, #447].
+
+Run it as the hd01 operator account (no root): the coordinator holds no secret of its
+own. It uses the account's `fj` login for the one comment on #447, and `netbird ssh`
+network auth for compute01 (the build) and the perf VM (the measurement).
+
+What it installs, all under the account's home:
+- `~/.local/libexec/infraternal-nightly-latency`: a copy of `scripts/nightly-latency.py`
+  from the reviewed checkout this installer runs from (checked against `--ref`);
+- `~/.config/systemd/user/infraternal-nightly-latency.service` and `.timer`.
+The timer runs daily at 03:30 Asia/Kolkata, which is clear of the dev-02 nightlies
+(browser suite 05:00 to 07:45; the run needs no dev-02 at all) and of working hours.
+Repeating the command is safe: files are rewritten only when their content changed, the
+user manager is reloaded only then, and the timer is enabled either way.
+
+Usage, from a clone checked out at the reviewed commit:
+    scripts/install-nightly-latency --ref <full 40-character commit> [--no-preflight] [--no-enable]
+"""
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+
+BUILD_HOST = "claude@infraternal-dev-01-compute01.vpn.kayg.org"
+PERF_HOST = "claude@infraternal-perf-01-backup01.vpn.kayg.org"
+UNIT = "infraternal-nightly-latency"
+SCHEDULE = "*-*-* 03:30:00 Asia/Kolkata"
+
+
+def unit_texts(program, path):
+    """The service and timer unit files, as `{filename: text}`, for a coordinator installed at `program`.
+
+    `path` is the PATH the service gets: a user unit does not read the login shell's, and the
+    coordinator needs `netbird`, `git` and `fj`. The wait for a build slot and the perf lock is
+    bounded inside the script, so the unit's own timeout only has to cover the sum of them.
+    """
+    service = f"""[Unit]
+Description=Nightly D375 latency run on the perf VM (#447)
+Documentation=file://{program}
+
+[Service]
+Type=oneshot
+Environment=PATH={path}
+ExecStart={sys.executable} -I {program} run
+TimeoutStartSec=5h
+Nice=10
+"""
+    timer = f"""[Unit]
+Description=Nightly D375 latency run, 03:30 IST (#447)
+
+[Timer]
+OnCalendar={SCHEDULE}
+RandomizedDelaySec=10m
+Persistent=false
+Unit={UNIT}.service
+
+[Install]
+WantedBy=timers.target
+"""
+    return {f"{UNIT}.service": service, f"{UNIT}.timer": timer}
+
+
+def write_if_changed(path, text, mode):
+    """Write `text` to `path` atomically (same-directory temp file and rename); True when it changed."""
+    if path.exists() and path.read_text(encoding="utf-8") == text and (path.stat().st_mode & 0o777) == mode:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+    return True
+
+
+def install(home, source, path, *, enable=True, systemctl=None):
+    """Install the program and units under `home`; return the names of the files that changed.
+
+    `systemctl` is the command prefix for the user manager (a test passes a recorder); None means
+    `systemctl --user`. The user manager is reloaded only when a unit changed.
+    """
+    systemctl = systemctl or ["systemctl", "--user"]
+    program = home / ".local/libexec" / UNIT
+    changed = []
+    if write_if_changed(program, source.read_text(encoding="utf-8"), 0o755):
+        changed.append(program.name)
+    units = home / ".config/systemd/user"
+    unit_changed = False
+    for name, text in unit_texts(program, path).items():
+        if write_if_changed(units / name, text, 0o644):
+            changed.append(name)
+            unit_changed = True
+    if unit_changed:
+        subprocess.run([*systemctl, "daemon-reload"], check=True)
+    if enable:
+        subprocess.run([*systemctl, "enable", "--now", f"{UNIT}.timer"], check=True)
+    return changed
+
+
+# The perf VM's root-owned `perf-run` (installed at /usr/local/bin) has no status subcommand:
+# its interface is `perf-run [--cold] [--root] [--out DIR] -- <cmd> [args...]`. Running `-- true`
+# takes the shared perf lock for a few milliseconds and proves the tool, the lock and the
+# account work. It can wait behind a benchmark, so a busy perf VM may time out the preflight.
+PERF_PREFLIGHT = "perf-run -- true"
+
+
+def preflight():
+    """Check the tools and both hosts are reachable now; return the list of problems.
+
+    The perf VM check runs `PERF_PREFLIGHT`, a real `perf-run` invocation. It takes the perf lock
+    briefly, so it can fail (after its timeout) while a benchmark holds the lock; rerun it then.
+    """
+    problems = [f"`{tool}` is not on PATH" for tool in ("netbird", "git", "fj") if shutil.which(tool) is None]
+    if problems:
+        return problems
+    checks = ((BUILD_HOST, "$HOME/infraternal-ops/build-slot --status"), (PERF_HOST, PERF_PREFLIGHT))
+    for host, command in checks:
+        try:
+            result = subprocess.run(["netbird", "ssh", host, command], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            problems.append(f"`{command}` on {host} did not finish within 120 s (busy host or unreachable)")
+            continue
+        if result.returncode != 0:
+            problems.append(f"`{command}` on {host} failed: {result.stderr.strip()[:200]}")
+    return problems
+
+
+def main(argv):
+    """Check the reviewed ref, run the preflight and install."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--ref", required=True, help="the full 40-character reviewed commit this checkout must be at")
+    parser.add_argument("--no-preflight", action="store_true", help="skip the reachability checks of the build and perf VMs")
+    parser.add_argument("--no-enable", action="store_true", help="write the files but do not enable the timer")
+    args = parser.parse_args(argv[1:])
+    if not re.fullmatch(r"[0-9a-f]{40}", args.ref):
+        parser.error("--ref must be a full 40-character lowercase commit id")
+    source = Path(__file__).resolve().parent / "nightly-latency.py"
+    head = subprocess.run(["git", "-C", str(source.parent), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    dirty = subprocess.run(["git", "-C", str(source.parent), "status", "--porcelain", "--", "nightly-latency.py"],
+                           capture_output=True, text=True, check=True).stdout.strip()
+    if head != args.ref or dirty:
+        parser.error(f"this checkout is at {head}{' with local edits' if dirty else ''}, not at the reviewed {args.ref}")
+    if not args.no_preflight and (problems := preflight()):
+        print("preflight failed:\n  " + "\n  ".join(problems), file=sys.stderr)
+        return 1
+    path = ":".join(dict.fromkeys(str(Path(found).parent) for tool in ("netbird", "git", "fj") if (found := shutil.which(tool)))) + ":/usr/bin:/bin"
+    changed = install(Path.home(), source, path, enable=not args.no_enable)
+    print("changed: " + (", ".join(changed) if changed else "nothing (already installed)"))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

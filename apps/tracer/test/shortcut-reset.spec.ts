@@ -63,6 +63,14 @@ for (const { w, h, touch, dpr } of SIZES) test(`shortcut reset ${w}x${h}`, async
     await open(page);
     const where = `${w}x${h}`;
 
+    // A phone has no hardware keyboard to hint at (#560): the rows keep their labels and show no caps, so there is no cap edge,
+    // and no rebinding to mark or reset, to measure. The reset flow below is the desktop's.
+    if (touch) {
+      expect(await page.locator(`${WIN} .ui-ss-row`).count(), `${w}x${h}: shortcut rows are listed`).toBeGreaterThan(3);
+      await expect(page.locator(`${WIN} .ui-ss-row kbd`)).toHaveCount(0);
+      return;
+    }
+
     // ---- nothing changed: caps share one edge, no dot, no "Reset all" --------------------------------------------------
     const before = await edges(page);
     expect(before.length, `${where}: shortcut rows are listed`).toBeGreaterThan(3);

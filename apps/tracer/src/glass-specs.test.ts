@@ -18,3 +18,21 @@ test("no glass spec can skip itself", () => {
   const offenders = specs.filter((f) => /\btest\.(skip|fixme|fail)\(|\bexistsSync\(|appwin-scenes|appmock=/.test(readFileSync(join(DIR, f), "utf8")));
   expect(offenders).toEqual([]);
 });
+
+/** The shared stylesheet and the sign-in sheet, where a glow behind glass text used to be drawn. */
+const SHEETS = [join(import.meta.dir, "..", "..", "..", "packages", "ui", "styles.css"), join(import.meta.dir, "..", "auth.css")];
+
+test("no glass surface draws a glow behind its text (#448, TASTE)", () => {
+  for (const file of SHEETS) {
+    const css = readFileSync(file, "utf8");
+    expect(css, `${file} defines the glass halo token`).not.toContain("--ui-overlay-halo");
+    // A text-shadow on glass is a glow; only `none` resets (and the avatar's one-pixel shade on its own solid gradient) remain.
+    for (const line of css.split("\n").filter((l) => /text-shadow:/.test(l) && !/text-shadow:\s*none/.test(l) && !/\.glitch|ui-sidebar-avatar|font: 600 var\(--ui-size-eyebrow\)/.test(l))) expect(line, `${file}`).toBe("");
+  }
+});
+
+test("the glass specs assert the solid fallback and the absence of text shadows", () => {
+  const spec = readFileSync(join(DIR, "glass-surfaces.spec.ts"), "utf8");
+  expect(spec).toContain("paintOf(");
+  expect(spec).toContain("mustBeSolid(");
+});

@@ -614,8 +614,11 @@ input; ordinary retirement still closes only that terminal stream. A stalled
 browser route becomes disconnected before the
 client requests WebSocket closure: an intermediary need not deliver a close
 event. Replacement sockets ignore all late events from the retired route. A
-shared daemon link is replaced independently of graceful child reaping; session
-shims remain alive. Before automatic rebinding, each retained stream receives
+shared daemon link is retired at once, independently of graceful child reaping;
+session shims remain alive. A replacement embedded infraternal agent starts
+only after the retired one has been reaped (at most its 2 s SIGTERM grace), so
+two embedded agents never share the per-user sockets and stop hooks (#562).
+Before automatic rebinding, each retained stream receives
 `{"type":"terminal.reconnecting","session_id":"UUID"}` on its Event channel.
 The window stops advertising readiness and holds input in its existing bounded
 queue; the replacement's painted `terminal.replay_complete` fence confirms
@@ -648,7 +651,7 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | type | name | body (little endian) |
 | ---: | --- | --- |
 | 0x40 | AttachDesktop | 16-byte session UUID, u8 delivery (0 reliable, 1 datagram) |
-| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit |
+| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit or tile update (desktop-helper.md) |
 | 0x42 | VideoSize | u16 width, u16 height, u16 density_milli |
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
