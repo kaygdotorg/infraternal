@@ -79,9 +79,19 @@ test("the canvas is not drawn until its sheets have arrived, and then it is styl
     released = true;
     await route.continue();
   });
+  // Looks at the sheets in the same tick as the first window is added to the page. (Checking visibility afterwards would not do:
+  // an unstyled window has no size, so it only counts as visible once its sheet is in, whatever the guard does.)
+  await page.addInitScript(() => {
+    new MutationObserver(() => {
+      const w = window as unknown as { __atFirstWindow?: string[] };
+      if (w.__atFirstWindow === undefined && document.querySelector(".ui-window")) {
+        w.__atFirstWindow = [...document.querySelectorAll("link[data-deferred]")].map((link) => (link as HTMLLinkElement).media);
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   await page.goto("/?proto=product&fresh=1&bg=none", { waitUntil: "commit" });
   await expect(page.locator(".ui-window").first()).toBeVisible();
   expect(released).toBe(true);
-  // Every deferred sheet is now live: none is left on the print medium.
-  expect(await page.evaluate(() => [...document.querySelectorAll("link[data-deferred]")].map((link) => (link as HTMLLinkElement).media))).toEqual(["all", "all", "all", "all", "all"]);
+  // Every deferred sheet was live (not on the print medium) when the first window appeared.
+  expect(await page.evaluate(() => (window as unknown as { __atFirstWindow?: string[] }).__atFirstWindow)).toEqual(["all", "all", "all", "all", "all"]);
 });
