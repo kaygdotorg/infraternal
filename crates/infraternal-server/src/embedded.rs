@@ -104,6 +104,11 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// The link already carries the most terminal streams it may (#562). The
+    /// browser's attach is refused at once, instead of waiting for a reply the
+    /// host will never send.
+    #[error("terminal stream limit reached")]
+    StreamLimit,
     /// A public terminal admission refusal; transport failures remain generic.
     #[error("terminal open refused")]
     OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
@@ -2428,6 +2433,16 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
             }
+            // The leg-B reserve (D214) bounds the streams of one link. A new
+            // stream past the bound is refused here, before anything is sent,
+            // so the browser hears a Close at once. A reattach of a stream
+            // already routed is not new and passes.
+            if !routes.contains_key(&stream_id)
+                && routes.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+            {
+                let _ = reply.send(Err(AgentError::StreamLimit));
+                return true;
+            }
             #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && !link.admits_terminal(stream_id)
@@ -3617,7 +3632,17 @@ fn spawn_socketpair_agent_with_mesh_state(
         );
     }
     let argv: Vec<_> = arguments.iter().map(CString::as_c_str).collect();
+    // posix_spawn can't change limits, so the child learns the soft open-file
+    // limit this server was started with, and gives it back to the shells it
+    // starts (#562). The server removed the variable from its own environment.
+    let handoff = infraternal_shim::open_files::launcher_soft_limit().map(|soft| {
+        (
+            std::ffi::OsString::from(infraternal_shim::open_files::HANDOFF_ENV),
+            std::ffi::OsString::from(soft.to_string()),
+        )
+    });
     let environment = std::env::vars_os()
+        .chain(handoff)
         .map(|(key, value)| {
             let mut entry = key.as_os_str().as_bytes().to_vec();
             entry.push(b'=');

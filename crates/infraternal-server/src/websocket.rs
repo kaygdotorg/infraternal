@@ -23,9 +23,10 @@ use crate::{
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
-        CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
-        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER, TERMINAL_ROUTE_IDLE,
-        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
+        CloseOwner, CloseReason, CloseRecord, CloseWho, HOST_STREAM_LIMIT, INPUT_QUEUE_FULL,
+        NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER,
+        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
+        safe_websocket_reason,
     },
 };
 use axum::{
@@ -2426,16 +2427,23 @@ where
             };
             #[cfg(test)]
             addhost_timeline("attach_agent_resolved");
-            let Ok(Ok(attachment)) = tokio::time::timeout(
+            let attached = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
-            .await
-            else {
+            .await;
+            let Ok(Ok(attachment)) = attached else {
+                // A full link refuses at once with its own plain sentence (#562);
+                // every other failure keeps the generic one.
+                let refusal = if matches!(attached, Ok(Err(AgentError::StreamLimit))) {
+                    HOST_STREAM_LIMIT
+                } else {
+                    AGENT_CONNECTION_REFUSED
+                };
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::InfraternalAgent,
-                    AGENT_CONNECTION_REFUSED,
+                    refusal,
                     host_id,
                     session,
                     stream_id,
