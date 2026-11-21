@@ -783,14 +783,32 @@ fn validate_name(name: &str) -> Result<(), InstallError> {
 pub(super) fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
     let basename = format!("{name}.service");
     if user {
-        let directory = match env::var_os("XDG_CONFIG_HOME") {
-            Some(path) => PathBuf::from(path).join("systemd/user"),
-            None => PathBuf::from(env::var_os("HOME").ok_or(InstallError::Invalid)?)
-                .join(".config/systemd/user"),
-        };
-        Ok(directory.join(basename))
+        Ok(
+            user_unit_directory(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))?
+                .join(basename),
+        )
     } else {
         Ok(PathBuf::from("/etc/systemd/system").join(basename))
+    }
+}
+
+/// The folder the user's service manager reads units from, given the
+/// `XDG_CONFIG_HOME` and `HOME` values.
+///
+/// An empty or relative `XDG_CONFIG_HOME` is invalid by the XDG rules and is
+/// ignored, as `install_paths` does for `XDG_STATE_HOME`. Using it would put
+/// the unit under the current folder, where systemd never looks (D395,
+/// J1087 #6). `HOME` must be set when the variable is not usable.
+fn user_unit_directory(
+    config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, InstallError> {
+    match config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        Some(path) => Ok(path.join("systemd/user")),
+        None => Ok(PathBuf::from(home.ok_or(InstallError::Invalid)?).join(".config/systemd/user")),
     }
 }
 
@@ -1575,6 +1593,29 @@ mod tests {
         install_in_order(&unit, b"different", &data, true, || Ok(()), |()| Ok(())).unwrap();
         assert_ne!(fs::metadata(&unit).unwrap().ino(), before.ino());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J1087 #6: only an absolute `XDG_CONFIG_HOME` chooses the user unit folder.
+    #[test]
+    fn an_empty_or_relative_config_home_falls_back_to_home() {
+        let home = Some(OsString::from("/home/person"));
+        let fallback = PathBuf::from("/home/person/.config/systemd/user");
+        for ignored in ["", "relative", "./config", "config/../x"] {
+            assert_eq!(
+                user_unit_directory(Some(OsString::from(ignored)), home.clone()).unwrap(),
+                fallback,
+                "{ignored:?}"
+            );
+        }
+        assert_eq!(user_unit_directory(None, home.clone()).unwrap(), fallback);
+        assert_eq!(
+            user_unit_directory(Some(OsString::from("/srv/config")), home).unwrap(),
+            PathBuf::from("/srv/config/systemd/user")
+        );
+        assert!(matches!(
+            user_unit_directory(Some(OsString::from("")), None),
+            Err(InstallError::Invalid)
+        ));
     }
 
     /// A folder under the temporary folder for one ownership test, removed on drop.
