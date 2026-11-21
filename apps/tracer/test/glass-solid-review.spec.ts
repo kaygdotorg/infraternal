@@ -91,7 +91,12 @@ for (const scheme of ["paper", "ink"] as const) {
     expect(await answerOf(page), "solid over the hard end").toBe("solid");
 
     /** Puts the screen at `g` and waits long enough for the glass to have answered; returns the answer. */
-    const at = async (g: number): Promise<string> => { await fill(page, g); await page.waitForTimeout(450); return answerOf(page); };
+    const at = async (g: number): Promise<string> => {
+      await fill(page, g);
+      // sleep: the grid read, the solve and the 160 ms fade take under 450 ms after a write
+      await page.waitForTimeout(450);
+      return answerOf(page);
+    };
 
     // Ramp away from the hard end until the answer changes, then on to the far end, then all the way back.
     const up: Array<[number, string]> = [];
@@ -117,7 +122,11 @@ for (const scheme of ["paper", "ink"] as const) {
       await at(from);
       const before = await at(mid);
       await logFrames(page);
-      for (let i = 0; i < 40; i++) { await fill(page, mid + (i % 2 === 0 ? 4 : -4)); await page.waitForTimeout(80); }
+      for (let i = 0; i < 40; i++) {
+        await fill(page, mid + (i % 2 === 0 ? 4 : -4));
+        // sleep: the pace of text scrolling past the edge of the limit (about 12 changes a second)
+        await page.waitForTimeout(80);
+      }
       const series = await page.evaluate(() => (globalThis as { __series?: Sample[] }).__series!);
       const answers = new Set(series.map((s) => s.answer));
       appendFileSync(`${OUT}/jitter.jsonl`, `${JSON.stringify({ scheme, from, mid, before, answers: [...answers], frames: series.length })}\n`);
