@@ -258,6 +258,21 @@ async fn record_grant(root: &Path, person: uuid::Uuid, user: &User) {
     .await;
 }
 
+/// Forget the grant records of `person` without reading any access file, for
+/// a revoke whose report nobody asked for (a host removal, D398). The returned
+/// value only fills the reply's field and is never sent: the agent leaves
+/// `access` out of the reply when no report was asked for.
+async fn forget_grant_records(root: &Path, person: uuid::Uuid) -> crate::access_files::Access {
+    let store = crate::access_files::store(root);
+    let _ = tokio::task::spawn_blocking(move || crate::access_files::forget(&store, person)).await;
+    crate::access_files::Access {
+        state: crate::access_files::State::NotChecked,
+        reason: Some(crate::access_files::Reason::RecordMissing),
+        omitted_accounts: 0,
+        accounts: Vec::new(),
+    }
+}
+
 /// What changed on every account `person` had a grant on since that grant
 /// (D356), read off the event loop, then the records are forgotten. The
 /// accounts come from the persistent record store, so a reboot that emptied
@@ -929,23 +944,41 @@ fn restore_marker(root: &Path, person: uuid::Uuid) -> io::Result<()> {
 /// Denies access in memory before waiting for disk. Errors reach the caller while
 /// a bounded owner retries independently of caller lifetime and ordinary saves.
 pub async fn revoke(state: &Path, manager: Manager, person: uuid::Uuid) -> io::Result<Revoked> {
-    revoke_at(
+    revoke_reporting(state, manager, person, true).await
+}
+
+/// [`revoke`], saying whether the access report (D356) is wanted. A host
+/// removal does not want it: the owner decided on 2026-11-21 that removal
+/// deletes only infraternal and its state, so nothing scans the person's
+/// files for it, and the grant records are only forgotten (#355, D398).
+/// # Errors
+/// As [`revoke`].
+pub async fn revoke_reporting(
+    state: &Path,
+    manager: Manager,
+    person: uuid::Uuid,
+    report: bool,
+) -> io::Result<Revoked> {
+    revocations::submit(
         runtime_root(state, Uid::effective()),
         manager,
         person,
         !Uid::effective().is_root(),
+        report,
     )
     .await
 }
 
 /// Save the refusal before shell cleanup, keeping one person fence through both stages.
+/// Asks for the access report, like a person's revoke; the tests drive it with their own roots.
+#[cfg(test)]
 async fn revoke_at(
     root: &Path,
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
 ) -> io::Result<Revoked> {
-    revocations::submit(root, manager, person, rootless).await
+    revocations::submit(root, manager, person, rootless, true).await
 }
 
 /// What a completed revocation could not guarantee.
@@ -969,6 +1002,7 @@ async fn revoke_once(
     manager: Manager,
     person: uuid::Uuid,
     rootless: bool,
+    report: bool,
 ) -> io::Result<Revoked> {
     let admission = crate::durable_io::security().await?;
     let person_guard = acquire(root, &format!("{}.person", person.simple())).await?;
@@ -994,14 +1028,18 @@ async fn revoke_once(
         crate::rootless_sessions::revoke(root, person, Some(person_guard), admission).await?;
         let uid = Uid::effective().as_raw();
         return Ok(Revoked {
-            access: access_report(
-                root,
-                person,
-                vec![uid],
-                std::collections::HashMap::new(),
-                true,
-            )
-            .await,
+            access: if report {
+                access_report(
+                    root,
+                    person,
+                    vec![uid],
+                    std::collections::HashMap::new(),
+                    true,
+                )
+                .await
+            } else {
+                forget_grant_records(root, person).await
+            },
             ..Revoked::default()
         });
     }
@@ -1096,6 +1134,11 @@ async fn revoke_once(
     // D356: what each account's access files gained since this person's
     // grant, reported, never edited. Only a completed revocation forgets
     // the records, so a retried attempt compares again.
+    if !report {
+        // A removal's revoke: no scan, only the grant records go (D398).
+        revoked.access = forget_grant_records(root, person).await;
+        return Ok(revoked);
+    }
     revoked.access = access_report(root, person, accounts, known, false).await;
     revoked.background_may_remain |= revoked
         .access
