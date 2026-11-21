@@ -13,7 +13,8 @@ import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedbac
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
-import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { Terminal, type Ghostty, type ITheme } from "../vendor/ghostty-web";
+import { loadEngine } from "./engine-wasm";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -298,6 +299,8 @@ class ByteQueue {
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
   private static rendererPreparation: Promise<void> | undefined;
+  /** The loaded engine; set by `prepareResources`, which every path that builds a renderer awaits first. */
+  private static engine: Ghostty | undefined;
   private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
@@ -635,9 +638,16 @@ export class TerminalClient {
     }
   }
 
+  /** The loaded engine; a renderer built before `prepareResources` finished is a bug, so it throws. */
+  private static requireEngine(): Ghostty {
+    if (!TerminalClient.engine) throw new Error("The terminal engine is not loaded yet");
+    return TerminalClient.engine;
+  }
+
   /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -683,10 +693,15 @@ export class TerminalClient {
     await warmup;
   }
 
+  /**
+   * Loads the font and the terminal engine once and shares the work between every caller: the engine's wasm file is
+   * fetched and compiled here (`src/engine-wasm.ts`), and the loaded engine is kept for the renderers built afterwards.
+   * @param font the face whose upright files gate the first paint
+   */
   private static async prepareResources(font: MonoFont): Promise<void> {
     let renderer = TerminalClient.rendererPreparation;
     if (!renderer) {
-      renderer = init();
+      renderer = loadEngine().then((engine) => { TerminalClient.engine = engine; });
       TerminalClient.rendererPreparation = renderer;
       // Concurrent opens/preparation must share one instance. A failed optional
       // warm-up must not poison the later session's ordinary initialization.
@@ -815,6 +830,7 @@ export class TerminalClient {
     });
     document.body.append(holder);
     const baseline = new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
       cursorBlink: false,
