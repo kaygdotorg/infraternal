@@ -4645,6 +4645,7 @@ mod tests {
         write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None))
             .expect("write slice-1 state");
         write_key(&directory);
+        bind_this_mac(&directory);
 
         Node::restore(&directory.0, Some(&current)).expect("restore unbound state");
         assert!(!directory.join(crate::macos_key::KEY_FILE).exists());
@@ -4660,6 +4661,51 @@ mod tests {
         Node::restore(&directory.0, Some(&current)).expect("restore bound state");
         assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
         assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
+    }
+
+    /// Record this Mac's binding, as an earlier enrolled start would have.
+    fn bind_this_mac(directory: &TestDirectory) {
+        crate::macos_machine::bind(&directory.0, crate::macos_machine::fingerprint())
+            .expect("bind this Mac");
+    }
+
+    /// The names `macos_machine` uses to spot existing Mesh state are the real file names.
+    #[test]
+    fn the_machine_binding_watches_the_real_state_files() {
+        assert_eq!(
+            crate::macos_machine::MESH_STATE,
+            [PUBLIC_STATE, crate::macos_key::KEY_FILE]
+        );
+    }
+
+    /// Mesh state with no binding record is refused as unbound and nothing is changed (#221).
+    #[test]
+    fn an_enrolled_restore_refuses_mesh_state_that_has_no_machine_record() {
+        let directory = test_directory();
+        let current = enrolment(b"coordinator B");
+        write_public_state(
+            &directory.join(PUBLIC_STATE),
+            &bound_state(Some(current.clone())),
+        )
+        .expect("write state");
+        write_key(&directory);
+        for error in [
+            Node::restore(&directory.0, Some(&current))
+                .err()
+                .expect("restore refused"),
+            Node::check_enrolled_machine(&directory.0).expect_err("pre-start check refused"),
+        ] {
+            assert!(
+                matches!(
+                    error.get_ref().and_then(
+                        |inner| inner.downcast_ref::<crate::enrolment::MachineBindingError>()
+                    ),
+                    Some(crate::enrolment::MachineBindingError::UnboundRecord)
+                )
+            );
+        }
+        assert!(directory.join(crate::macos_key::KEY_FILE).is_file());
+        assert!(!directory.join(crate::macos_machine::MACHINE_FILE).exists());
     }
 
     /// Rewrite the recorded fingerprint, as a folder copied from another Mac would carry.
@@ -4683,8 +4729,9 @@ mod tests {
         )
         .expect("write state");
         write_key(&directory);
+        bind_this_mac(&directory);
 
-        Node::restore(&directory.0, Some(&current)).expect("first start binds");
+        Node::restore(&directory.0, Some(&current)).expect("restore keeps the binding");
         assert!(directory.join(crate::macos_machine::MACHINE_FILE).is_file());
         Node::restore(&directory.0, Some(&current)).expect("same Mac restores");
         Node::check_enrolled_machine(&directory.0).expect("same Mac passes the pre-start check");
@@ -4730,6 +4777,7 @@ mod tests {
         )
         .expect("write old state");
         write_key(&directory);
+        bind_this_mac(&directory);
 
         Node::restore(&directory.0, Some(&old)).expect("restore same enrolment");
         assert!(directory.join(crate::macos_key::KEY_FILE).is_file());

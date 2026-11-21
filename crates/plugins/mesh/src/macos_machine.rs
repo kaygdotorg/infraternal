@@ -13,7 +13,9 @@
 //!
 //! Only the SHA-256 of both is stored (`mesh-machine.json`, mode 0600); neither UUID leaves the
 //! machine. The same refusal type and exit code as Linux apply (`MachineBindingError`).
-//! A folder with no record yet is adopted on its first start, like an older Linux state.
+//! A folder with no record is adopted only if it holds no Mesh state yet (a first start). Real
+//! Mesh state with no record is refused as unbound, like Linux refuses an unbound sidecar: there
+//! is no backwards compatibility to keep, and such a folder could be a copy from another Mac.
 
 use crate::enrolment::MachineBindingError;
 use crate::node_state::{read_public, write_public};
@@ -22,6 +24,23 @@ use std::{io, os::unix::fs::MetadataExt as _, path::Path};
 
 /// Private sidecar in the Mesh state folder holding the machine fingerprint.
 pub(crate) const MACHINE_FILE: &str = "mesh-machine.json";
+
+/// Files whose presence shows that a folder already holds this node's Mesh state: the public
+/// snapshot and the WireGuard key (`macos_node::PUBLIC_STATE`, `macos_key::KEY_FILE`; a Mac test
+/// checks these names still match).
+pub(crate) const MESH_STATE: [&str; 2] = ["mesh-public.json", "mesh-wireguard.key"];
+
+/// Whether the folder holds Mesh state of its own (a link is state too, so it is not followed).
+fn has_mesh_state(state: &Path) -> io::Result<bool> {
+    for name in MESH_STATE {
+        match std::fs::symlink_metadata(state.join(name)) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
 
 /// What `mesh-machine.json` stores.
 #[derive(Serialize, Deserialize)]
@@ -92,12 +111,14 @@ pub(crate) fn fingerprint() -> Option<[u8; 32]> {
 
 /// Refuse a state folder whose recorded fingerprint is not `current`.
 ///
-/// No record means no earlier binding and is accepted; [`bind`] then records one.
+/// No record is accepted only for a folder with no Mesh state (a first start); [`bind`] then
+/// records one. Mesh state with no record is refused as unbound.
 /// # Errors
 /// `PermissionDenied` carrying a [`MachineBindingError`], or the read error of the record.
 pub(crate) fn check(state: &Path, current: Option<[u8; 32]>) -> io::Result<()> {
     let record: Option<MachineRecord> = read_public(&state.join(MACHINE_FILE))?;
     let refusal = match (record, current) {
+        (None, _) if has_mesh_state(state)? => Some(MachineBindingError::UnboundRecord),
         (Some(_), None) => Some(MachineBindingError::MissingId),
         (Some(saved), Some(now)) if saved.machine != now => {
             Some(MachineBindingError::ForeignMachine)
@@ -245,6 +266,38 @@ mod tests {
     }
 
     /// A reinstall on the same hardware (new volume) is refused like Linux refuses a new machine ID.
+    /// Mesh state with no record is refused as unbound, and no record is written.
+    #[test]
+    fn mesh_state_with_no_binding_record_is_refused_and_left_untouched() {
+        for name in MESH_STATE {
+            let dir = state();
+            std::fs::write(dir.join(name), b"x").unwrap();
+            let mine = fingerprint_from(IOREG, DISK);
+            for error in [
+                bind(&dir, mine).unwrap_err(),
+                check(&dir, mine).unwrap_err(),
+            ] {
+                assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                assert!(matches!(
+                    refusal(&error),
+                    MachineBindingError::UnboundRecord
+                ));
+            }
+            assert!(!dir.join(MACHINE_FILE).exists());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    /// A folder with other files but no Mesh state (the sessions database, say) is a first start.
+    #[test]
+    fn a_folder_with_no_mesh_state_is_a_first_start() {
+        let dir = state();
+        std::fs::write(dir.join("infraternal.sqlite"), b"x").unwrap();
+        bind(&dir, fingerprint_from(IOREG, DISK)).unwrap();
+        assert!(dir.join(MACHINE_FILE).exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn a_reinstall_on_the_same_hardware_is_refused() {
         let dir = state();
