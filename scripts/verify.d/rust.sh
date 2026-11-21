@@ -324,7 +324,7 @@ rust_static_build_check() {
     return "$failed"
 }
 
-# The `test` row (D345, #509). Runs every workspace test binary even after one
+# The `test` row (#509). Runs every workspace test binary even after one
 # fails: plain `cargo test` stops at the first failing binary, so a flake in an
 # early package hid the results of every later package. `--no-fail-fast` keeps
 # the exit code non-zero when anything failed. Because the log is then huge, the
