@@ -100,9 +100,11 @@ import CoreGraphics
         rawDrop.completed(delivered: true)
         rawDrop.changed(at: 0.1)
         guard rawDrop.next(at: 0.1) == .motion(keyframe: false),
-              !rawDrop.encoderDropped(.motion(keyframe: false)), rawDrop.next(at: 0.11) == nil else {
-            fatalError("a raw encoder drop must not create reference repair or an immediate retry")
+              rawDrop.encoderDropped(.motion(keyframe: false)), rawDrop.next(at: 0.11) == .motion(keyframe: false) else {
+            fatalError("a dropped motion delta is retried at the next tick as a delta, without reference repair")
         }
+        rawDrop.completed(delivered: true)
+        guard rawDrop.next(at: 0.12) == nil else { fatalError("a delivered retry goes idle until the refresh") }
         guard rawDrop.next(at: 0.35) == .refresh, rawDrop.encoderDropped(.refresh),
               rawDrop.next(at: 0.36) == .refresh else { fatalError("a dropped sharp refresh must retain its quality budget") }
         rawDrop.completed(delivered: true)
@@ -134,6 +136,6 @@ import CoreGraphics
         assert(rate.current > 500_000 && rate.current < 12_000_000)
         for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
-        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry encoded_gap=IDR bitrate_feedbacks=1102")
+        print("PASS geometry/local-priority/repair; motion_frames=120 caret=delta refresh_drop=retry motion_drop=retry encoded_gap=IDR bitrate_feedbacks=1102")
     }
 }

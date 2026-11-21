@@ -218,10 +218,11 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Encodes pictures until nothing is due, on the encoding queue.
     ///
     /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, or a
-    /// sharp refresh), encodes it and sends the packet. A dropped keyframe is retried one frame
-    /// interval later; a settled picture schedules its sharp refresh with a timer rather than
-    /// polling. A terminal encoder or output error stops the capture and sends one error packet. When
-    /// it ends it reschedules itself if a newer frame arrived in the meantime.
+    /// sharp refresh), encodes it and sends the packet. A dropped picture is retried one frame
+    /// interval later unless a newer one arrives first; a settled picture schedules its sharp
+    /// refresh with a timer rather than polling. A terminal encoder or output error stops the
+    /// capture and sends one error packet. When it ends it reschedules itself if a newer frame
+    /// arrived in the meantime.
     private func drain() {
         var retryDroppedFrame = false
         do {
@@ -260,6 +261,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
                     pixels.dropped()
                     retryDroppedFrame = damageState.encoderDropped(decision)
+                    if measure { FileHandle.standardError.write(Data("METRIC surface_drop capture_ns=\(nanos(current.1)) decision=\(decision) retry=\(retryDroppedFrame)\n".utf8)) }
                     break
                 }
                 let outputBegan = measure ? nanos(mach_absolute_time()) : 0
@@ -279,9 +281,10 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 damageState.completed(delivered: true)
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
-            // Ordinary raw drops need no reference repair. Retry only an explicit
-            // IDR/refresh that was dropped, including on a now-static window. Reuse
-            // the existing one-shot timer at source cadence, never a hot loop.
+            // No drop needs reference repair, but every dropped picture is retried
+            // (a newer capture replaces it), including on a now-static window, so a
+            // dropped last motion frame shows one tick late rather than 250 ms late.
+            // Reuse the existing one-shot timer at source cadence, never a hot loop.
             let deadline = retryDroppedFrame ? ProcessInfo.processInfo.systemUptime + 1 / Double(fps) : damageState.refreshDeadline
             if let deadline {
                 if refresh == nil {

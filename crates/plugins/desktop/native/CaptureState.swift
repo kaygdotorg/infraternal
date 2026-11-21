@@ -207,17 +207,22 @@ struct DamageEncodingState {
         if let settle, now >= settle { self.settle = nil; return .refresh }
         return nil
     }
-    // A dropped encoder input never became a decoder reference. Only a lost
-    // encoded picture needs repair; raw motion drops preserve the next delta.
-    // Requested IDRs and sharp refreshes must still be fulfilled, even if the
-    // window becomes static before another capture arrives.
-    /// Reports that the encoder dropped a picture that `next` returned. Returns `true` when a
-    /// keyframe is still owed to the viewer (the dropped picture was a keyframe or a refresh, which
-    /// is also queued to be retried); a dropped plain delta returns `false` because the next delta
-    /// still builds on the last picture the decoder received.
+    // A dropped encoder input never became a decoder reference, so no drop needs
+    // reference repair; only a lost encoded picture does. But a dropped picture
+    // is still owed: the viewer would otherwise keep the older one until the
+    // settled refresh, 250 ms later. Every drop is retried at the next source
+    // tick (the caller's timer), and a newer capture replaces the retry.
+    /// Reports that the encoder dropped a picture that `next` returned. Returns `true` when that
+    /// picture is still owed, so the caller retries at the next source tick: always, because a
+    /// dropped motion or caret delta leaves the viewer on an older picture and a dropped keyframe or
+    /// refresh still owes its keyframe. No drop
+    /// forces a keyframe: the next delta still builds on the last picture the decoder received.
     mutating func encoderDropped(_ decision: EncodeDecision) -> Bool {
-        if decision == .refresh { retryRefresh = true; return true }
-        return decision.keyframe
+        switch decision {
+        case .refresh: retryRefresh = true
+        case .motion, .caret: damaged = true; damagedCaret = decision == .caret
+        }
+        return true
     }
     /// Reports that an encoded picture was handled. When it was not `delivered`, the next picture
     /// becomes a keyframe because the viewer's decoder never saw it.
