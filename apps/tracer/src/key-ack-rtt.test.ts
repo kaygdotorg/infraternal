@@ -25,10 +25,10 @@ test("a host 150 ms behind a server 4.6 ms away reads as 150 ms, far above the p
 test("the figure is the 90th percentile, so a Wi-Fi tail shows where a mean would hide it", () => {
   const timer = new KeyAckRtt();
   let sequence = 0n;
-  // Nine keys in ten take 20 ms; one in ten takes 200 ms. The mean is 38 ms (below the threshold), the p90 is not.
+  // Four keys in five take 20 ms; one in five takes 200 ms. The mean is 56 ms (below the 60 ms threshold), the p90 is not.
   for (let i = 0; i < 30; i += 1) {
     timer.sent(sequence, 1, 1000 + i * 100);
-    timer.acked(sequence + 1n, 1000 + i * 100 + (i % 10 === 9 ? 200 : 20));
+    timer.acked(sequence + 1n, 1000 + i * 100 + (i % 5 === 4 ? 200 : 20));
     sequence += 1n;
   }
   expect(timer.p90).toBe(200);
