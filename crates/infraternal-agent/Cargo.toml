@@ -8,6 +8,8 @@ license.workspace = true
 [features]
 # Explicit benchmark instrumentation, absent from shipping feature selections (D351).
 bench-probes = []
+# Exposes `control_checks` for the workspace fuzz harness crate only; never in shipping builds.
+parser-checks = []
 # Generic plugin media lanes stay absent from terminal-only builds (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
 # The root agent starts its helper through the shim's console-user entry (D203 C2).

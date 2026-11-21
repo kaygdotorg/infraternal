@@ -3520,6 +3520,11 @@ where
 #[path = "websocket_receive_tests.rs"]
 mod receive_tests;
 
+/// Fuzz entry point for [`receive_wire`] and the terminal-open bodies (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[path = "websocket_receive_checks.rs"]
+pub(crate) mod receive_checks;
+
 pub(super) async fn receive_wire<S>(
     source: &mut S,
     receive: &mut BytesMut,

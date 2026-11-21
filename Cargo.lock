@@ -2144,6 +2144,7 @@ dependencies = [
  "infraternal-server",
  "infraternal-shim",
  "libfuzzer-sys",
+ "russh",
  "serde_json",
 ]
 
