@@ -25,6 +25,7 @@ import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { parseInventory, type AppTarget } from "./inventory";
 import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
 import { onConnection, type ControlState, type StreamState } from "./status";
+import { parsePointerShape, type PointerShape } from "./pointer";
 import { traceClock, traceEnabled, recordFrame } from "./frame-trace";
 import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 
@@ -53,6 +54,13 @@ const STATUS_WHILE_MS = 4000;
  * reports it too while control is in use). The machine's own window follower runs once a second; this matches it.
  */
 const SHAPE_EVERY_MS = 1000;
+/**
+ * While the person is moving the pointer, the status poll runs this often instead of `STATUS_EVERY_MS`, so a change of
+ * the machine's pointer shape (arrow to text bar over a field) reaches the page within about one round trip more.
+ */
+const POINTER_EVERY_MS = 120;
+/** How long after the last pointer event the faster poll (`POINTER_EVERY_MS`) continues. */
+const POINTER_WHILE_MS = 600;
 /** A shape change smaller than this (relative) is rounding, not a new shape. */
 const SHAPE_EPSILON = 0.005;
 
@@ -66,6 +74,11 @@ export interface StreamEvents {
   surface(canvas: HTMLCanvasElement | undefined): void;
   /** The machine's window (or screen) shape, width / height of what it captures: on the first report and on each change. */
   shape(aspect: number): void;
+  /**
+   * The machine's pointer shape changed (or `undefined`: use the ordinary pointer). Reported only while this window
+   * controls the machine, and on release. Optional so a host that draws no pointer need not implement it.
+   */
+  cursor?(shape: PointerShape | undefined): void;
 }
 
 /** What a stream needs: the connection, which machine and target to stream, and the callbacks. `makeWorker` is a test seam. */
@@ -93,6 +106,8 @@ export interface MachineStatus {
    * that shape is the machine's own: a screen, or a window that does not follow the canvas window's size.
    */
   shape?: number;
+  /** The pointer image the machine is showing, when it reported a usable one (see `pointer.ts`). */
+  cursor?: PointerShape;
 }
 
 /**
@@ -114,6 +129,8 @@ export function parseStatus(value: unknown): MachineStatus {
   // A window that follows the canvas window's size (reason "following") takes the canvas shape, so it reports none:
   // shaping the canvas window to it would undo the person's own resize before the machine catches up.
   const follows = v.reason === "following";
+  const cursor = parsePointerShape(v.cursor);
+  if (cursor) out.cursor = cursor;
   if (!follows && typeof w === "number" && typeof h === "number" && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) out.shape = w / h;
   return out;
 }
@@ -184,6 +201,10 @@ export class AppStream {
   private shapeBusy = false;
   private lastShape: number | undefined;
   private lastInputAt = -Infinity;
+  /** When the last pointer event (move, button, wheel) was sent; drives the faster status poll. */
+  private lastPointerAt = -Infinity;
+  /** The id of the machine pointer shape last handed to the window, so an unchanged shape is not repainted. */
+  private lastCursorId: string | undefined;
   private pausedTimer = 0;
   private statsWaiters: Array<(stats: WorkerStats) => void> = [];
   /** Native sessions to release on Retry/disposal, including retired viewers and disconnected Stops. */
@@ -548,6 +569,7 @@ export class AppStream {
     if (this.streamId === undefined || !this.attached || this.control.kind !== "controlled") return false;
     this.o.connection.send(this.streamId, { type: "Desktop", message: { kind: "input", input } });
     this.lastInputAt = performance.now();
+    if (input.kind === "mouse" || input.kind === "scroll") this.lastPointerAt = this.lastInputAt;
     // The machine's words about this stream are asked only while the person is using it.
     if (!this.statusTimer) this.pollStatus();
     return true;
@@ -587,6 +609,7 @@ export class AppStream {
     this.keepControl = false;
     this.releaseEpoch++;
     this.setControl({ kind: "none" });
+    this.noteCursor(undefined, true);
     window.clearTimeout(this.statusTimer);
     window.clearTimeout(this.pausedTimer);
     this.statusTimer = 0;
@@ -607,6 +630,15 @@ export class AppStream {
 
   /** Whether the person may try to control again (the view-only state shows until the retry window passes). */
   clearViewOnly(): void { if (this.control.kind === "view-only") this.setControl({ kind: "none" }); }
+
+  /** Hands a new machine pointer shape to the window once per change; `undefined` resets to the ordinary pointer. */
+  private noteCursor(shape: PointerShape | undefined, reset = false): void {
+    if (this.disposed) return;
+    if (!shape && !reset) return;
+    if (shape?.id === this.lastCursorId) return;
+    this.lastCursorId = shape?.id;
+    this.o.events.cursor?.(shape);
+  }
 
   private noteShape(shape: number | undefined): void {
     if (shape === undefined || this.disposed) return;
@@ -638,6 +670,11 @@ export class AppStream {
     }, () => { this.shapeBusy = false; again(); });
   }
 
+  /**
+   * Asks the machine for its status while this window is in use: input pause, a closed window or withdrawn permission, the
+   * window's shape and the pointer shape. Runs every `STATUS_EVERY_MS`, every `POINTER_EVERY_MS` while the pointer moves,
+   * and stops `STATUS_WHILE_MS` after the last input or when control is given back.
+   */
   private pollStatus(): void {
     window.clearTimeout(this.statusTimer);
     this.statusTimer = 0;
@@ -653,6 +690,7 @@ export class AppStream {
       if (!current()) return;
       const status = parseStatus(reply);
       this.noteShape(status.shape);
+      this.noteCursor(status.cursor);
       if (status.gone) { this.setState({ kind: "closed" }); return; }
       if (status.permission) { this.setState({ kind: "permission", what: status.permission }); return; }
       window.clearTimeout(this.pausedTimer);
@@ -661,7 +699,8 @@ export class AppStream {
         // The 2 s of D208 A3: the indication clears by itself when the pause ends.
         this.pausedTimer = window.setTimeout(() => { if (this.control.kind === "paused") this.setControl({ kind: "controlled" }); }, status.inputPausedMs);
       } else if (this.control.kind === "paused") this.setControl({ kind: "controlled" });
-      this.statusTimer = window.setTimeout(() => this.pollStatus(), STATUS_EVERY_MS);
+      const moving = performance.now() - this.lastPointerAt < POINTER_WHILE_MS;
+      this.statusTimer = window.setTimeout(() => this.pollStatus(), moving ? POINTER_EVERY_MS : STATUS_EVERY_MS);
     }, () => { this.statusBusy = false; if (current()) this.statusTimer = window.setTimeout(() => this.pollStatus(), STATUS_EVERY_MS * 4); });
   }
 

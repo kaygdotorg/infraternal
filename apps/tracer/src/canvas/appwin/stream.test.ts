@@ -30,6 +30,7 @@ afterAll(() => {
 /** Makes a reattachable stream and records frames without running the worker. */
 async function fixture(deferControl = false, onControl: (control: ControlState) => void = () => undefined) {
   const shapes: number[] = [];
+  const cursors: Array<string | undefined> = [];
   let controlReply: ((allowed: boolean) => void) | undefined;
   let next = 1;
   let controller: number | undefined;
@@ -62,12 +63,12 @@ async function fixture(deferControl = false, onControl: (control: ControlState) 
     send(id, frame) { frames.push({ id, frame }); return true; },
   };
   const stream = new AppStream({ connection, hostId: "host", target: { type: "screen", displayId: 1 }, coarse: false,
-    events: { state() {}, control: onControl, picture() {}, surface() {}, shape(aspect) { shapes.push(aspect); } },
+    events: { state() {}, control: onControl, picture() {}, surface() {}, shape(aspect) { shapes.push(aspect); }, cursor(shape) { cursors.push(shape?.id); } },
     makeWorker: () => worker as unknown as Worker });
   await stream.open({ width: 800, height: 600, density: 1 });
   stream.setVisible(true);
   await Promise.resolve();
-  return { stream, shapes, frames, actions, closed, handlers, worker, chunks, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
+  return { stream, shapes, cursors, frames, actions, closed, handlers, worker, chunks, controller: () => controller, answerControl: (allowed: boolean) => controlReply?.(allowed), reply: (value: Record<string, unknown>) => clockReply?.(value) };
 }
 
 interface BindingProbe {
@@ -483,5 +484,24 @@ test("a live picture learns the remote window's shape without control, and again
     f.reply({ state: "on", capture_rect: { x: 0, y: 0, width: 1600, height: 900 } });
     await new Promise<void>(resolve => setImmediate(resolve));
     expect(f.shapes).toEqual([1600 / 900]);
+  } finally { f.stream.dispose(); }
+});
+
+test("the machine's pointer shape reaches the window once per change and is reset when control is given back", async () => {
+  const f = await fixture();
+  try {
+    await f.stream.takeControl();
+    f.stream.sendInput({ kind: "mouse", x: 1, y: 1, button: 0, state: 0, modifiers: 0 });
+    const arrow = { id: "00000000000000a1", png: "iVBORw0KGgo=", hot_x: 1, hot_y: 1, scale: 2, width: 32, height: 32 };
+    f.reply({ state: "on", cursor: arrow });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.cursors).toEqual(["00000000000000a1"]);
+    // A reply without a shape (an older helper) changes nothing; a malformed one is ignored too.
+    f.stream.sendInput({ kind: "mouse", x: 2, y: 2, button: 0, state: 0, modifiers: 0 });
+    f.reply({ state: "on", cursor: { ...arrow, id: "bad" } });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(f.cursors).toEqual(["00000000000000a1"]);
+    f.stream.releaseControl();
+    expect(f.cursors).toEqual(["00000000000000a1", undefined]);
   } finally { f.stream.dispose(); }
 });
