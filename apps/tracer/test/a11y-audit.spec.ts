@@ -12,9 +12,9 @@
  * dependency (MPL-2.0, which lists the AGPL as a permitted secondary licence); it is never bundled into the product.
  */
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
+import { runAxe } from "./a11y-axe";
 import { tracerEvidencePath } from "./evidence-path";
 import { startRemovalFromPalette } from "./removal-fixture";
 
@@ -26,8 +26,6 @@ test.use({ browserName: BROWSER });
 
 /** Where this run writes its files. */
 const OUT = tracerEvidencePath("a11y", BROWSER);
-/** The path of the axe-core script that is injected into each page. */
-const AXE_PATH = createRequire(import.meta.url).resolve("axe-core/axe.min.js");
 /** A desktop window and a phone (touch). */
 const SIZES = [
   { name: "1440x900", width: 1440, height: 900, touch: false },
@@ -91,23 +89,8 @@ async function probe(page: Page, touch: boolean): Promise<Probe> {
   }, { describeSrc: DESCRIBE, touchTarget: 44, touch });
 }
 
-/** One axe violation, trimmed. */
-interface Violation { rule: string; impact: string | null; help: string; nodes: Array<{ target: string; html: string; summary: string }> }
-
-/** Runs axe on the whole page against WCAG 2.0/2.1/2.2 A and AA plus best practices; returns the violations trimmed. */
-async function axe(page: Page): Promise<Violation[]> {
-  if (!(await page.evaluate(() => "axe" in window))) await page.addScriptTag({ path: AXE_PATH });
-  return page.evaluate(async () => {
-    const results = await (window as unknown as { axe: { run(ctx: unknown, opts: unknown): Promise<{ violations: Array<{ id: string; impact: string | null; help: string; nodes: Array<{ target: unknown[]; html: string; failureSummary?: string }> }> }> } }).axe.run(document, {
-      runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa", "best-practice"] },
-    });
-    return results.violations.map((v) => ({
-      rule: v.id, impact: v.impact, help: v.help,
-      nodes: v.nodes.slice(0, 5).map((n) => ({ target: n.target.join(" "), html: n.html.slice(0, 160), summary: (n.failureSummary ?? "").slice(0, 240) })),
-      count: v.nodes.length,
-    }));
-  });
-}
+/** Runs axe on the whole page against every WCAG 2.2 A/AA and best-practice rule. */
+const axe = (page: Page) => runAxe(page);
 
 /** Opens the clusters canvas at `scene` in `theme`, without a background picture. */
 async function openCanvas(page: Page, theme: string, scene = 1): Promise<void> {
