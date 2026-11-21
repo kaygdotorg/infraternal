@@ -107,7 +107,7 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
         const line = note("This could not be read just now.");
         const retry = el("button", "ui-button");
         retry.type = "button";
-        retry.dataset.button = "secondary";
+        retry.dataset.button = "primary";
         retry.textContent = "Try again";
         pane.append(retry);
         retry.addEventListener("click", () => {

@@ -67,7 +67,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
         const retry = document.createElement("button");
         retry.type = "button";
         retry.className = "ui-button";
-        retry.dataset.button = "secondary";
+        retry.dataset.button = "primary";
         retry.textContent = "Try again";
         retry.addEventListener("click", () => { body.replaceChildren(); load(); }, { once: true });
         body.replaceChildren(line, retry);

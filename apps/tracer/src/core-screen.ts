@@ -1396,7 +1396,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
         const retry = document.createElement("button");
         retry.type = "button";
         retry.className = "ui-button";
-        retry.dataset.button = "secondary";
+        retry.dataset.button = "primary";
         retry.textContent = "Try again";
         retry.addEventListener("click", load, { once: true });
         container.replaceChildren(notice, retry);
