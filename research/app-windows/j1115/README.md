@@ -27,7 +27,9 @@ low-latency mode (`lowlat`, before J1115) and in the ordinary real-time mode
   frame, and the PSNR of what the viewer is shown;
 - `sparse`: one typed change after a 50 ms to 2 s gap;
 - `refine`: after a 250 ms pause, the forced keyframe at 4x against up to 8
-  delta passes at 2x or 4x, scored pass by pass.
+  delta passes at 2x or 4x, scored pass by pass, after typing, after
+  scrolling, and after a lone motion-budget keyframe (`static`: startup,
+  resize, repair).
 
 `ONLY=mode,refine` picks sections; `ARMS=lowlat,realtime` picks arms; `QUICK=1`
 shortens it.
