@@ -842,6 +842,8 @@ mod tests {
             receiver,
         )
     }
+    /// A shadow flight fixture over `socket`: a local connection with no child process and
+    /// one ready slot for session `[7; 16]`.
     pub(super) fn shadow(socket: UnixStream) -> Shadow {
         let (reader, writer) = socket.into_split();
         Shadow {
@@ -850,6 +852,7 @@ mod tests {
                 peer: Peer::Local { reader, writer },
                 execution_uid: 0,
                 pid: None,
+                _child_slot: None,
                 receive: BytesMut::new(),
                 scratch: vec![0; 4096],
                 encode: Vec::new(),
