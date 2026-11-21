@@ -49,6 +49,11 @@ mod release_http;
 mod release_latest;
 mod terminal_queries;
 pub(crate) mod terminal_startup;
+/// When someone last typed or attached, for the update quiet window (#211 S4).
+mod update_activity;
+/// The quiet-window apply, the new release's trial and the D295 undo (#211 S4).
+#[cfg(feature = "release")]
+pub mod update_apply;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]

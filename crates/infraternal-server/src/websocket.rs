@@ -279,6 +279,8 @@ impl WebSocketState {
         let queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>> = Arc::default();
         let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
+        // Update switches record the live sessions, and trials require them (#211 S4).
+        crate::update_apply::set_session_inventory(inventory.clone());
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
         tokio::spawn(async move {
@@ -535,6 +537,8 @@ async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // A new release on trial takes no terminal traffic until the trial commits (#211 S4).
+    crate::update_apply::terminals_admitted().await;
     if headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -2116,6 +2120,11 @@ where
             action_id: action_id @ ("terminal.open" | "ssh.session.open"),
             input_json,
         } if stream_id == CONTROL_STREAM => {
+            // A session opened during an update switch would be missing from the
+            // database copy an undo restores (J1085).
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             let request = if action_id == "ssh.session.open" {
                 serde_json::from_slice::<BrowserTerminalOpen>(input_json)
                     .ok()
@@ -2270,6 +2279,12 @@ where
         } if stream_id != 0 && stream_id % 2 == 1 => {
             #[cfg(test)]
             addhost_timeline("attach_received");
+            // An attach in progress keeps the update quiet window open (D251). During an
+            // update switch the socket closes instead; the browser attaches again later.
+            crate::update_activity::note();
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             if attachments.contains_key(&stream_id) || attachments.len() >= MAX_ATTACHMENTS {
                 return Err(());
             }
@@ -2564,6 +2579,13 @@ where
             Ok(())
         }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
+            // Typing keeps the update quiet window open (D251); one relaxed store. During
+            // an update switch the socket closes: the browser keeps the unacknowledged
+            // input and sends it to the next process.
+            crate::update_activity::note();
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
             let end = in_seq
                 .checked_add(u64::try_from(bytes.len()).map_err(|_| ())?)

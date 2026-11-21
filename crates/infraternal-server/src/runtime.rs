@@ -203,6 +203,10 @@ pub enum ServerError {
     /// System time predates the Unix epoch or does not fit the auth API.
     #[error("system clock is invalid")]
     Clock,
+    /// This is a new release whose update trial could not be recorded, so it must not
+    /// serve; the previous release starts instead (#211 S4).
+    #[error("the update trial could not be recorded")]
+    UpdateTrial,
 }
 
 /// The maximum time server startup waits for a configured listen address to appear.
@@ -662,6 +666,14 @@ async fn build_router_core(
     }
 
     let pool = open_database(&config.data_dir).await?;
+    // The staging proof's broken-migration release fails here, as a real failed
+    // migration would, so its warm undo is proven on a real server (#211 S4).
+    #[cfg(feature = "staging-trust")]
+    if crate::update_apply::staging_migration_fails() {
+        return Err(ServerError::Migration(
+            sqlx::migrate::MigrateError::VersionMissing(0),
+        ));
+    }
     let origin =
         url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
     let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
@@ -699,13 +711,14 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
-    // The periodic update check (#211 S3) belongs to the production process only. It
-    // starts nothing outside root release builds and never applies a release.
+    // The periodic update check and the quiet-window apply (#211 S3, S4) belong to the
+    // production process only. They start nothing outside root release builds.
     #[cfg(feature = "release")]
     if owns_node_workers {
         drop(crate::release_latest::start_updates(
             pool.clone(),
             &config.data_dir,
+            config.listen,
         ));
     }
     #[cfg(feature = "remote")]

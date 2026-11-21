@@ -1,4 +1,7 @@
 //! Owns stable-by-default release settings, explicit edge opt-in and verified metadata as a removable server feature [16,198,201,226].
+/// Switching to a staged release and the D295 undo (#211 S4).
+#[cfg(feature = "server")]
+pub mod apply;
 pub mod descriptor;
 #[cfg(feature = "server")]
 pub mod latest;
