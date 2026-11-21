@@ -125,7 +125,8 @@ test.describe("pinch guard, phone profile", () => {
 });
 
 test("desktop pointer: typing, wheel and scale are untouched by the guard", async ({ browser, baseURL }) => {
-  const context = await browser.newContext({ baseURL, viewport: { width: 1440, height: 900 }, hasTouch: false, isMobile: false });
+  // exactOptionalPropertyTypes: pass baseURL only when the config defines one.
+  const context = await browser.newContext({ ...(baseURL === undefined ? {} : { baseURL }), viewport: { width: 1440, height: 900 }, hasTouch: false, isMobile: false });
   const page = await context.newPage();
   await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });

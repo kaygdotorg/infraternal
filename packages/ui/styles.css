@@ -195,18 +195,24 @@
 .ui-toast {
   --y: calc(var(--i, 0) * -0.5rem);
   --s: calc(1 - var(--i, 0) * 0.05);
+  /* One set of measures for every toast (toast.ts sets the layout, this block draws it). The control slot is the height of the
+     first row: the mark, the first line of text, the actions and the close button all centre in it, whether the message is one
+     line or three. The gap is the space between the mark and the text. */
+  --ui-toast-ctl: 2rem;
+  --ui-toast-gap: 0.625rem;
+  --ui-toast-line: calc(var(--text-body) * 1.4);
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
-  display: flex;
+  display: grid;
+  /* mark | message | actions | choices | close. A column with nothing in it is zero wide: every gap is a margin on the item. */
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: start;
   width: max-content;
   max-width: min(32.5rem, 100%);
-  min-height: 3.375rem;
-  align-items: center;
-  gap: 0.75rem;
   margin-inline: auto;
-  padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem;
+  padding: 0.375rem 0.5rem 0.375rem 0.75rem;
   border-radius: var(--r-md);
   opacity: 1;
   pointer-events: auto;
@@ -232,36 +238,31 @@
 .ui-toast[data-open="false"] { opacity: 0; translate: 0 0.5rem; scale: 0.97; pointer-events: none; }
 /* A fanned-out stack grows upward over a neighbouring persistent notice: it goes above it, whole, never interleaved. */
 .ui-toast-stack[data-expanded="true"] { z-index: calc(var(--z-toast) + 1); }
-/* One type scale per platform (docs/design/TASTE.md): desktop 13 px body, touch 16 px. */
-.ui-toast { min-height: 2.75rem; gap: 0.625rem; padding: 0.375rem 0.5rem 0.375rem 0.75rem; border-radius: var(--r-md); }
-/* A long message with actions stacks them under it (toast.ts sets data-stacked) instead of squeezing the text beside them. */
-/* Explicit cells: mark | message | close on the first row, the actions on the second. Auto-placement left the glyph, text and
-   close in separate rows with an empty column between them at phone width. */
-.ui-toast[data-stacked="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; column-gap: 0.625rem; row-gap: 0; }
-.ui-toast[data-stacked="true"] .ui-toast-marker, .ui-toast[data-stacked="true"] .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-.ui-toast[data-stacked="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; padding-bottom: 0.25rem; }
-.ui-toast[data-stacked="true"] .ui-toast-close { grid-column: 3; grid-row: 1; }
-.ui-toast[data-stacked="true"] .ui-toast-actions { grid-column: 2 / -1; grid-row: 2; justify-self: end; }
-.ui-toast-message { text-wrap: pretty; min-width: 0; color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; }
-.ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; }
+/* A long message with actions stacks them under it. toast.ts decides after measuring (data-stacked): the actions go on a row of their
+   own when the text beside them would wrap, never by counting characters. Explicit cells keep the mark, text and close on row one. */
+.ui-toast > .ui-toast-marker, .ui-toast > .ui-toast-glyph { grid-column: 1; grid-row: 1; margin-inline-end: var(--ui-toast-gap); }
+.ui-toast > .ui-toast-message { grid-column: 2; grid-row: 1; }
+.ui-toast > .ui-toast-actions { grid-column: 3; grid-row: 1; margin-inline-start: var(--ui-toast-gap); }
+.ui-toast > .ui-toast-icons { grid-column: 4; grid-row: 1; margin-inline-start: var(--ui-toast-gap); }
+.ui-toast > .ui-toast-close { grid-column: 5; grid-row: 1; margin-inline-start: 0.125rem; }
+.ui-toast[data-stacked="true"] > .ui-toast-actions, .ui-toast[data-stacked="true"] > .ui-toast-icons { grid-column: 2 / -1; grid-row: 2; justify-self: end; margin-inline-start: 0; }
+/* The text sits in the control slot: its first line is centred on the mark and the close button, and every further line hangs below
+   it. A balanced wrap (toast.ts then trims the box to the longest line) gives two or three even lines and no one-word last line. */
+.ui-toast-message { min-width: 0; padding-block: calc((var(--ui-toast-ctl) - var(--ui-toast-line)) / 2); color: var(--fg); font-size: var(--text-body); font-weight: var(--fw-body); line-height: 1.4; text-wrap: pretty; overflow-wrap: anywhere; }
+.ui-toast[data-lines="many"] .ui-toast-message { text-wrap: balance; }
+/* The mark is the round tick itself (it carries the .tick class), so it keeps its own size and is centred in the control slot by a margin. */
+.ui-toast > .ui-toast-marker { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; margin-top: calc((var(--ui-toast-ctl) - 1.375rem) / 2); }
 .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 .ui-toast-marker .tick-fill { background: var(--ok); }
 .ui-toast-marker .tick svg { width: var(--ui-icon-sm); height: var(--ui-icon-sm); stroke: var(--bg); }
-.ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+.ui-toast-actions { display: flex; flex: none; align-items: center; gap: 2px; min-height: var(--ui-toast-ctl); }
 .ui-toast-actions[hidden] { display: none !important; }
-.ui-toast-action { min-height: 2rem; flex: none; padding: 0 0.5rem; border-radius: var(--r-sm); color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
+.ui-toast-action { min-height: var(--ui-toast-ctl); flex: none; padding: 0 0.5rem; border-radius: var(--r-sm); color: var(--accent) !important; font-size: var(--text-body); font-weight: var(--fw-label); white-space: nowrap; }
 .ui-toast-action[hidden] { display: none !important; }
 /* Icon choices after the message: the same 28 px desktop / 44 px touch size as the confirmation popover's icon buttons, flat and quiet. */
 /* A question with choices gets room for its sentence beside them; on a phone it wraps inside the screen width. */
 .ui-toast[data-choices="true"] { max-width: min(40rem, 100%); }
-/* On a phone the 44 px buttons would squeeze the sentence into a narrow column: the choices take a row of their own under it. */
-@media (max-width: 520px) {
-  .ui-toast[data-choices="true"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; column-gap: 0.625rem; row-gap: 0; }
-  .ui-toast[data-choices="true"] .ui-toast-glyph, .ui-toast[data-choices="true"] .ui-toast-marker { grid-column: 1; grid-row: 1; margin-top: 0.25rem; }
-  .ui-toast[data-choices="true"] .ui-toast-message { grid-column: 2; grid-row: 1; padding-top: 0.25rem; }
-  .ui-toast[data-choices="true"] .ui-toast-icons { grid-column: 1 / -1; grid-row: 2; justify-self: end; }
-}
-.ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; }
+.ui-toast-icons { display: flex; flex: none; align-items: center; gap: 2px; min-height: var(--ui-toast-ctl); }
 .ui-toast-icons[hidden] { display: none !important; }
 .ui-toast-icon { display: grid; width: 1.75rem; min-height: 1.75rem; flex: none; place-items: center; padding: 0; border-radius: var(--r-sm); color: var(--fg-2); }
 .ui-toast-icon svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
@@ -269,21 +270,20 @@
 @media (hover: hover) and (pointer: fine) { .ui-toast-icon:hover { background: var(--hover); color: var(--fg); } }
 .ui-toast-marker .tick { width: 1.125rem; height: 1.125rem; }
 /* A glyph in place of the tick (toast icon): neutral, so a waiting state never reads as success. */
-.ui-toast-glyph { display: grid; width: 1.375rem; height: 1.375rem; flex: none; place-items: center; color: var(--fg-2); }
+.ui-toast-glyph { display: grid; width: 1.375rem; height: var(--ui-toast-ctl); flex: none; place-items: center; color: var(--fg-2); }
 .ui-toast-glyph[hidden] { display: none; }
 .ui-toast[data-tone="error"] .ui-toast-glyph { color: var(--danger); }
 .ui-toast-glyph svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .ui-toast[data-icon="true"] .ui-toast-marker { display: none; }
 /* The optional dismiss control: a quiet icon, the same height as the action. */
-.ui-toast-close { display: grid; width: 2rem; min-height: 2rem; flex: none; place-items: center; padding: 0; border-radius: var(--r-sm); color: var(--fg-3); }
+.ui-toast-close { display: grid; width: var(--ui-toast-ctl); height: var(--ui-toast-ctl); min-height: var(--ui-toast-ctl); flex: none; place-items: center; padding: 0; border-radius: var(--r-sm); color: var(--fg-3); }
 .ui-toast-close[hidden] { display: none; }
 .ui-toast-close svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; }
 @media (hover: hover) and (pointer: fine) { .ui-toast-close:hover { background: var(--hover); color: var(--fg); } }
 @media (pointer: coarse) {
-  .ui-toast-close { width: 2.75rem; min-height: 2.75rem; }
+  .ui-toast { --ui-toast-ctl: 2.75rem; --ui-toast-gap: 0.75rem; padding: 0.3125rem 0.5625rem 0.3125rem 0.75rem; }
   .ui-toast-icon { width: 2.75rem; min-height: 2.75rem; }
-  .ui-toast { min-height: 3.375rem; gap: 0.75rem; padding: 0.4375rem 0.5625rem 0.4375rem 0.75rem; border-radius: var(--r-md); }
-  .ui-toast-action { min-height: 2.75rem; padding: 0 0.625rem; }
+  .ui-toast-action { padding: 0 0.625rem; }
   .ui-toast-marker .tick { width: 1.25rem; height: 1.25rem; }
 }
 /* The card's right padding is smaller than its left because a close button or an action sits there with its own inner space. A

@@ -242,6 +242,24 @@ describe("PerformanceProbe key samples", () => {
     probe.dispose();
   });
 
+  test("a traced byte range stamps the sample whose id it covers and ignores ranges past every id (J1065)", () => {
+    const { probe, terminal, hooks, run, quiet } = setup(20);
+    // The fake terminal reports each injected key as the real one does: through the input hook, with its sequence.
+    terminal.injectInput = (key: string) => { terminal.typed.push(key); hooks.onInput?.(key, 5, 581n); };
+    quiet();
+    run.click();
+
+    hooks.onTraceRange?.(500n, 100, "paint", 42); // covers byte 581
+    hooks.onTraceRange?.(1_000_000n, 1_000_000, "decode", 43); // a flood frame: past every id, no scan
+    hooks.onTraceRange?.(0n, 581, "wsMessage", 44); // ends just before the id
+    const [sample] = probe.traceSamples();
+    expect(sample?.id).toBe("581");
+    expect(sample?.stages.paint).toBe(42);
+    expect(sample?.stages.decode).toBeUndefined();
+    expect(sample?.stages.wsMessage).toBeUndefined();
+    probe.dispose();
+  });
+
   test("keeps a 200-key latency run open long enough for the 300 ms profile", () => {
     const { probe, run, results, quiet } = setup(200);
     quiet();

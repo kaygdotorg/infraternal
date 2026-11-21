@@ -2,6 +2,7 @@
 import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { exitStatusText } from "./canvas/status";
 import { keysIn } from "./input-keys";
+import { concatBytes, hasKeepableContent, keepHistoryVt, SKIPPED_OUTPUT_MARKER, withoutLeadingReset } from "./history-keep";
 import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
@@ -123,6 +124,12 @@ export interface TerminalHooks {
   onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
+  /**
+   * Same facts as {@link onTrace}, for a whole byte range at once: bytes `start` .. `start + length - 1` reached `hop`
+   * at `at`. When set it replaces the per-byte `onTrace` calls for ranges, so a probe costs one call per frame instead
+   * of five BigInt string conversions per output byte (J1065, #569).
+   */
+  onTraceRange?: (start: bigint, length: number, hop: TerminalTraceHop, at: number) => void;
   /** Called after bytes paint; the kind lets paint probes reset when a full screen replaces raw output. */
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint, kind?: "output" | "snapshot") => void;
 }
@@ -350,6 +357,10 @@ export class TerminalClient {
   private lastPaintedOutputAt = 0;
   private snapshotWriteInFlight = false;
   private pendingSnapshot: PendingSnapshot | undefined;
+  /** The last screen a repaint copied into the history; a repeat of it is not copied again (#569). */
+  private lastKeptScreen: string | undefined;
+  /** How long the last history copy took to read and write out, and how many bytes it came to (probe page, #569). */
+  private lastKeep = { ms: 0, bytes: 0 };
   private receivedOutSeq = 0n;
   private lastOutSeq = 0n;
   private nextInSeq = 0n;
@@ -812,6 +823,28 @@ export class TerminalClient {
   readScreenText(): string {
     const maxRows = Math.max(10_000, this.terminal.options.scrollback ?? 10_000);
     return terminalBufferText(this.terminal, maxRows);
+  }
+
+  /**
+   * What the history holds, for the `?probe=1` measurement page (#569): how many rows, how many of them start with
+   * `prefix`, and how many are the "output skipped" marker. It reports counts, never the text itself.
+   */
+  scrollbackSummary(prefix: string): { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } {
+    const wasm = this.terminal.wasmTerm;
+    const rows = wasm?.getScrollbackLength() ?? 0;
+    const text = (offset: number): string => (wasm?.getScrollbackLine(offset) ?? [])
+      .filter((cell) => cell.width !== 0)
+      .map((cell) => (cell.codepoint > 32 ? String.fromCodePoint(cell.codepoint) : " ")).join("").trimEnd();
+    let skippedMarkers = 0;
+    let printedRows = 0;
+    let unreadableRows = 0;
+    for (let offset = 0; offset < rows; offset += 1) {
+      if (!wasm?.getScrollbackLine(offset)) unreadableRows += 1;
+      const row = text(offset);
+      if (row === SKIPPED_OUTPUT_MARKER) skippedMarkers += 1;
+      else if (row.startsWith(prefix)) printedRows += 1;
+    }
+    return { rows, printedRows, skippedMarkers, lastKeepMs: this.lastKeep.ms, lastKeepBytes: this.lastKeep.bytes, unreadableRows };
   }
 
   /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
@@ -1507,6 +1540,7 @@ export class TerminalClient {
     this.clipboardWrites.reset();
     this.synchronizedOutput.reset();
     this.synchronizedOutputBatchPending = false;
+    this.lastKeptScreen = undefined;
     this.terminal.reset();
     this.resumeInputIfRoom();
   }
@@ -1816,7 +1850,20 @@ export class TerminalClient {
       this.snapshotWriteInFlight = true;
       this.prediction?.resetForSnapshot();
       this.parsedOutputVersion += 1;
+      // A repaint replaces the screen, never the history the device already holds (#569, D381, D130). Read the old
+      // rows before `reset()` frees them; they go back in ahead of the repaint, with a marker where output was dropped.
+      const wasm = this.terminal.wasmTerm;
+      const keepStarted = performance.now();
+      const kept = wasm && hasKeepableContent(wasm)
+        ? keepHistoryVt(wasm, { skipped: snapshot.outSeq > this.lastOutSeq, previousScreen: this.lastKeptScreen })
+        : undefined;
+      if (kept) {
+        this.lastKeptScreen = kept.screen;
+        this.lastKeep = { ms: performance.now() - keepStarted, bytes: kept.bytes.byteLength };
+      }
       this.terminal.reset();
+      const paintBytes = kept ? concatBytes(kept.bytes, withoutLeadingReset(snapshot.bytes)) : snapshot.bytes;
+      kept?.bytes.fill(0);
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
@@ -1846,13 +1893,14 @@ export class TerminalClient {
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq, "snapshot");
         snapshot.bytes.fill(0);
+        if (paintBytes !== snapshot.bytes) paintBytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
         this.drainOutput();
         this.tryAttach();
       };
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
-      this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      this.writeSuppressingTerminalResponses(paintBytes, onSnapshotWritten);
       // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
       // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
       // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
@@ -2904,9 +2952,15 @@ export class TerminalClient {
     this.conn.send(streamId, frame, (at) => this.traceRange(traceStart, traceLength, "encode", at), () => this.traceRange(traceStart, traceLength, "wsSend", performance.now()));
   }
 
-  /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
+  /**
+   * Maps byte-stream sequence numbers to probe key IDs without changing wire frames. A probe that offers
+   * `onTraceRange` gets the range in one call; otherwise every byte is reported through `onTrace`, which at a 10 MB/s
+   * flood costs more than the terminal itself and made the probe measure its own overhead (J1065, #569).
+   */
   private traceRange(start: bigint, length: number, hop: TerminalTraceHop, at: number): void {
-    const onTrace = this.config.hooks?.onTrace;
+    const hooks = this.config.hooks;
+    if (hooks?.onTraceRange) { hooks.onTraceRange(start, length, hop, at); return; }
+    const onTrace = hooks?.onTrace;
     if (!onTrace) return;
     for (let offset = 0; offset < length; offset += 1) {
       onTrace((start + BigInt(offset)).toString(), hop, at);
