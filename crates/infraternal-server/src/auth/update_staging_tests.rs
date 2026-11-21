@@ -1032,6 +1032,9 @@ async fn auto_update_failure_matrix() {
     // Phase 2 finds a clean pre-reset state only if nothing else is left running here.
     drop(downtime);
     drop(bucket);
+    // The fixture's drop deletes its root, which holds the data folder the server is
+    // running from and phase 2 needs after the reset. The VM's teardown removes it.
+    std::mem::forget(f);
     println!(
         "UPDATE case=reboot_armed version={} phase=trial reset_next=true",
         versions.reboot
