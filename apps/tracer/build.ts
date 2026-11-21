@@ -4,6 +4,7 @@ import { precompress } from "./precompress";
 import { pngToIco } from "./favicon-ico";
 import { browserFileLoader } from "./browser-build";
 import { classifyChunks, type MetaOutput } from "./chunk-classes";
+import { returningVisitChunks, staticClosure, withModulePreload, withReturningVisitPreload } from "./entry-preload";
 import { buildDocs } from "./docs-build";
 import type { BunPlugin, PluginBuilder } from "bun";
 import { docsDatasetPlugin } from "./docs-dataset";
@@ -54,7 +55,7 @@ if (!build.success) {
   throw new Error(build.logs.map((log) => log.message).join("\n"));
 }
 await Promise.all([
-  cp("index.html", `${dist}/index.html`),
+  // The page is written below, once the build graph says which chunks the entry needs at once.
   cp("style.css", `${dist}/style.css`),
   cp("auth.css", `${dist}/auth.css`),
   cp("canvas.css", `${dist}/canvas.css`),
@@ -84,6 +85,13 @@ await buildDocs(`${dist}/docs`);
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
 const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
 await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));
+// The first screen's code is fetched in parallel with the page instead of one import level per round trip (entry-preload.ts).
+// A device that has signed in before also gets the code of the screen it is about to open, so the terminal does not wait for the session answer.
+/** The files every visit needs at once: `main.js` and its static imports. */
+const firstScreen = staticClosure(meta.outputs, "main.js");
+/** The extra files a device that has signed in before needs next: the core screen and the terminal. */
+const returningVisit = returningVisitChunks(meta.outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
+await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(await Bun.file("index.html").text(), firstScreen), returningVisit));
 // Tools ask for /favicon.ico by habit, whatever the page's <link> says; give them a real icon (#518).
 await Bun.write(`${dist}/favicon.ico`, pngToIco(new Uint8Array(await Bun.file("icons/dark-32.png").arrayBuffer())));
 await precompress(dist);
