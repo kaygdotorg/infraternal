@@ -585,8 +585,23 @@ impl Server {
     async fn echo(&mut self, marker: &str) -> usize {
         println!("UPDATE step=echo marker={marker}");
         tokio::time::timeout(Duration::from_secs(120), async {
-            let mut attached =
-                attach_all(self.address, &self.session, &self.sessions, ORIGIN).await;
+            // Each browser typed only into its first session (index 25 * browser), and
+            // reattaches it at the offset it reached, as a real browser does.
+            let sent = self.sent.clone();
+            let mut attached = crate::ca_handoff::shipping_tests::attach_all_at(
+                self.address,
+                &self.session,
+                &self.sessions,
+                ORIGIN,
+                |session| {
+                    if session % 25 == 0 {
+                        sent.get(&(session / 25)).copied().unwrap_or(0)
+                    } else {
+                        0
+                    }
+                },
+            )
+            .await;
             let echoed = echo_all(&mut attached, &mut self.sent, marker).await;
             attached.clear();
             echoed
@@ -694,10 +709,6 @@ impl Server {
             echoed.ok(),
             case == "timeout",
         );
-        if !self.refused_after_undo.is_empty() {
-            // Carry on with fresh sessions, so the rest of the matrix still runs.
-            self.open_sessions().await;
-        }
     }
 }
 
