@@ -368,6 +368,13 @@ mod terminal_limits;
 mod terminal_memory;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal_native;
+/// Fuzz entry point for the VT stream and its snapshots (tests and `parser-checks` only).
+#[cfg(all(
+    any(test, feature = "parser-checks"),
+    any(target_os = "linux", target_os = "macos")
+))]
+#[doc(hidden)]
+pub mod vt_checks;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session::{Config, run, run_with_retention};
 #[cfg(all(feature = "host-login", target_os = "linux"))]
