@@ -141,6 +141,19 @@ Control acknowledgement adds `control_visible`; acquisition fails unless the
 indicator is visible before injection. Screen Recording and Accessibility
 must be granted by the person using the Mac; refusal produces a fixed error.
 
+Capture omits the pointer. The control companion reports the shape the Mac is
+showing as `cursor` on every Status reply (so `desktop.session.clock` carries
+it): `id` (16 hex characters naming the image), `png` (base64), `hot_x` and
+`hot_y` (hotspot in points from the image's top left), `scale` (pixels per
+point) and `width`/`height` (pixels, at most 128). The field is absent when the
+system reports no image or one larger than browsers accept; readers ignore it
+when missing. The viewer draws its own pointer in that shape, once per `id`
+(#146).
+
+Remote pointer moves and scrolls reuse the followed geometry. Each is refused as
+`occluded` only after a query for the windows above the target; clicks and keys
+still re-read the window first (#146).
+
 The control and encoding companions are separate signed processes launched
 through LaunchServices. They exchange bounded packets with the helper over
 private per-launch Unix sockets, not inherited stdio or a second public socket.
