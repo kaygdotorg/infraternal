@@ -13,26 +13,32 @@
 import { mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 
+/** Where the captures go; the spec writes none unless this is set. */
 const SHOTS = process.env.DEAD_END_SHOTS;
+/** The page the tests open: the production tracer in the test double, with the clusters canvas and the mocha theme. */
 const BASE = "/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&bg=none";
 /** The Keys Last setting's title (definitions.on-demand.ts): the one setting of the Apps window. */
 const KEYS_LAST = "Keys Last";
 /** The message a failed read shows in the row's place. */
 const READ_FAILED = "This could not be read just now.";
 
+/** Opens the page with `query` (which names the Settings window) and waits until that window is up and has drawn. */
 async function open(page: Page, query: string): Promise<void> {
   await page.goto(`${BASE}${query}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
   await expect(page.locator(".cl-crumbs:not([hidden])")).toBeVisible({ timeout: 20_000 });
+  // sleep: the window draws its rows after its on-demand chunks load, and the double settles a frame later; no element marks that moment.
   await page.waitForTimeout(1800);
 }
 
+/** Writes a capture named `name` into `SHOTS` when that is set. */
 async function shot(page: Page, name: string): Promise<void> {
   if (!SHOTS) return;
   mkdirSync(SHOTS, { recursive: true });
   await page.screenshot({ path: `${SHOTS}/${name}.png` });
 }
 
+/** The two viewports the spec runs at, the same as settings-rows-of-windows.spec.ts: a desktop at DPR 2 and a phone at DPR 3. */
 const SIZES = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2, isMobile: false, hasTouch: false },
   phone: { viewport: { width: 393, height: 852 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },

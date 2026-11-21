@@ -38,6 +38,11 @@ const EXAMPLE: Readonly<Record<string, GroupData>> = {
   "about.licences": { facts: [{ title: "infraternal", rows: [{ key: "Licence", value: "AGPL-3.0-only" }, { key: "Commercial Features", value: "separate licence" }] }] },
 };
 
+/**
+ * The test double's Settings source: every setting backed in memory for the session, example facts and keys for the groups
+ * the server cannot list yet, and the `settingread=fail` switch on Keys Last (#568). Its rows and windows come from the same
+ * table the product uses, so the double shows the same layout.
+ */
 export function createMockSettings(world: MockWorld): SettingsSource {
   const rows = createRowsSource({
       admin: () => world.role === "operator",
