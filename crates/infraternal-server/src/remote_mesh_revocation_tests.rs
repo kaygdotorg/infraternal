@@ -1,4 +1,4 @@
-//! Checks committed host revocation wakes the actual Mesh coordinator without another edit [134,166,198], #173.
+//! Checks committed host revocation and pending person removal wake the actual Mesh coordinator without another edit [134,166,198], #173, #515.
 #![allow(clippy::unwrap_used)]
 use crate::{enrollment::EnrollmentStore, plugins::PluginRuntime};
 use infraternal_plugin_api::{PluginOperation, node_channel::NodeChannel};
@@ -58,9 +58,26 @@ impl NodeChannel for PeerChannel {
     }
 }
 
-#[tokio::test]
-async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
-    let (authority, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+/// A server and the host-to-remove as mesh nodes, with one connected peer
+/// recording every `mesh.configure` chunk it is sent.
+struct Watched {
+    /// The host's mesh node, which removal must withdraw.
+    removed: infraternal_plugin_mesh::policy::model::NodeId,
+    /// Keeps the coordinator that pushes chunks to the peer alive.
+    _runtime: PluginRuntime,
+    /// Chunks the peer was sent, in order, after the initial snapshot.
+    deliveries: tokio::sync::mpsc::UnboundedReceiver<Chunk>,
+    /// The peer's initial snapshot, which still lists the host's node.
+    initial: Chunk,
+}
+
+/// Enroll `host` as a mesh node, bind the real mesh coordinator to
+/// `authority`, and attach a peer that already holds the host's key.
+async fn watched_by_peer(
+    authority: &EnrollmentStore,
+    pool: &sqlx::SqlitePool,
+    host: uuid::Uuid,
+) -> Watched {
     let service = infraternal_plugin_mesh::api::MeshService::new(pool.clone());
     let mesh = service.dataplane();
     mesh.attach("server", PublicKey([1; 32]), None, true)
@@ -88,6 +105,41 @@ async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
         .unwrap()
         .unwrap();
     assert!(initial.last && initial.upserted.contains_key(&removed));
+    Watched {
+        removed,
+        _runtime: runtime,
+        deliveries,
+        initial,
+    }
+}
+
+/// How many mesh node rows have this id (0 once retired).
+async fn node_rows(pool: &sqlx::SqlitePool, node: infraternal_plugin_mesh::policy::model::NodeId) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mesh_nodes WHERE id=?")
+        .bind(i64::try_from(node.0).unwrap())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The coordinator's current mesh revision.
+async fn mesh_revision(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT revision FROM mesh_state WHERE singleton=1")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
+    let (authority, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    let Watched {
+        removed,
+        _runtime,
+        mut deliveries,
+        initial,
+    } = watched_by_peer(&authority, &pool, host).await;
+    let mesh = infraternal_plugin_mesh::api::MeshService::new(pool.clone()).dataplane();
     let started = std::time::Instant::now();
     authority.revoke("owner", host, 200).await.unwrap();
     let withdrawal = tokio::time::timeout(std::time::Duration::from_secs(5), deliveries.recv())
@@ -101,14 +153,7 @@ async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
             .await
             .is_err()
     );
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM mesh_nodes WHERE id=?")
-            .bind(i64::try_from(removed.0).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-        0
-    );
+    assert_eq!(node_rows(&pool, removed).await, 0);
     // A reconstructed authority writer needs only the durable tombstone; no live
     // transport registration or remembered coordinator snapshot can restore it.
     assert!(
@@ -120,5 +165,84 @@ async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
     println!(
         "METRIC mesh_revocation_publication peers=1 elapsed_us={}",
         started.elapsed().as_micros()
+    );
+}
+
+/// A person's host (UUID owner) is cut off when its removal commits, before
+/// and without its cleanup receipt, so an offline host loses every peer at
+/// once (D166, #515). Its cleanup-only reconnect is still admitted and its
+/// receipt still completes the removal, without a second mesh revision.
+#[tokio::test]
+async fn pending_person_removal_pushes_peer_withdrawal_before_the_receipt() {
+    let (authority, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+    let person = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,name,username,owner,recovery_hash) VALUES (?,'person','person',0,'test')")
+        .bind(person.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE remote_hosts SET owner_id=? WHERE id=?")
+        .bind(person.to_string())
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let Watched {
+        removed,
+        _runtime,
+        mut deliveries,
+        initial,
+    } = watched_by_peer(&authority, &pool, host).await;
+    let mesh = infraternal_plugin_mesh::api::MeshService::new(pool.clone()).dataplane();
+    let started = std::time::Instant::now();
+    // The Remove-host path: commit the intent and return, as for an offline host.
+    let transaction = pool.begin().await.unwrap();
+    let pending = authority
+        .commit_revocation_intent(transaction, host, 200)
+        .await
+        .unwrap();
+    assert!(pending, "a UUID owner's removal waits for the host's receipt");
+    let withdrawal = tokio::time::timeout(std::time::Duration::from_secs(5), deliveries.recv())
+        .await
+        .expect("peers must be told to drop the key before the host confirms")
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert!(withdrawal.last && withdrawal.removed.contains(&removed));
+    assert!(withdrawal.version > initial.version);
+    assert_eq!(node_rows(&pool, removed).await, 0);
+    // The receipt has not arrived: the host is not revoked yet, only retired from the mesh.
+    let revoked: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!revoked);
+    // The tombstone refuses re-attachment, and ordinary admission stays refused.
+    assert!(
+        mesh.attach(&host.to_string(), PublicKey([3; 32]), None, false)
+            .await
+            .is_err()
+    );
+    assert!(authority.admit(&[1; 32], 201).await.is_err());
+    // The cleanup-only reconnect does not depend on mesh membership.
+    let (_, cleanup_person) = authority.admit_cleanup(&[1; 32], 201).await.unwrap();
+    assert_eq!(cleanup_person, person);
+    let revision = mesh_revision(&pool).await;
+    authority
+        .confirm_removal_cleanup(host, person, None)
+        .await
+        .unwrap();
+    let revoked: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(revoked, "the receipt still completes the removal");
+    assert_eq!(mesh_revision(&pool).await, revision, "retirement bumps once");
+    println!(
+        "METRIC mesh_pending_removal_publication peers=1 elapsed_us={}",
+        elapsed.as_micros()
     );
 }
