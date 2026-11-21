@@ -4,13 +4,34 @@
 //! minutes: no typing, no attach in progress)". The terminal input and attach paths
 //! call [`note`]. The updater asks [`idle_for`] how long it has been since then.
 //!
+//! **Frozen during a switch (J1085).** From the moment the server starts the D295
+//! database copy until it execs the new release, terminal input, attach and open are
+//! refused ([`frozen`]): the socket closes, and the browser keeps its unacknowledged
+//! input and sends it again to the next process. Otherwise input acknowledged after
+//! the copy would be rewound by an undo while the shim keeps the newer cursor, and
+//! the session would refuse to reattach.
+//!
 //! **Cost.** [`note`] runs on every terminal input frame. It reads the coarse monotonic
 //! clock (a vDSO read with no system call, a few nanoseconds) and does one relaxed
 //! atomic store. Nothing waits on it and nothing is allocated.
 use std::{
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Duration,
 };
+
+/// Set while an update switch is between its database copy and its exec.
+static FROZEN: AtomicBool = AtomicBool::new(false);
+
+/// Refuse (or admit again) terminal input, attach and open for an update switch.
+pub(crate) fn freeze(frozen: bool) {
+    FROZEN.store(frozen, Ordering::Relaxed);
+}
+
+/// Whether terminal input, attach and open must be refused now (see the module docs).
+#[must_use]
+pub(crate) fn frozen() -> bool {
+    FROZEN.load(Ordering::Relaxed)
+}
 
 /// The coarse monotonic second of the last terminal input or attach; 0 means none yet.
 static LAST: AtomicU64 = AtomicU64::new(0);
@@ -53,5 +74,15 @@ mod tests {
         assert!(idle_for() <= Duration::from_secs(1));
         let first = idle_for();
         assert!(idle_for() >= first);
+    }
+
+    /// The switch freeze is on only between `freeze(true)` and `freeze(false)`.
+    #[test]
+    fn the_switch_freeze_turns_on_and_off() {
+        assert!(!frozen());
+        freeze(true);
+        assert!(frozen());
+        freeze(false);
+        assert!(!frozen());
     }
 }

@@ -179,3 +179,23 @@ fn a_failed_start_outside_a_trial_asks_for_no_undo() {
     let data = std::env::temp_dir().join(format!("s4-failed-start-{}", std::process::id()));
     assert!(failed_start_undo(&data).is_none());
 }
+
+/// J1085 finding 1: a new release on trial holds browser sockets until the trial
+/// settles, and lets them in at once otherwise.
+#[tokio::test]
+async fn sockets_wait_while_the_new_release_is_on_trial() {
+    // Not on trial: no wait.
+    tokio::time::timeout(Duration::from_secs(1), terminals_admitted())
+        .await
+        .expect("admitted at once outside a trial");
+    TRIAL_OPEN.send_replace(true);
+    let waiting = tokio::spawn(terminals_admitted());
+    // sleep: give the waiting socket a chance to (wrongly) get through.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!waiting.is_finished(), "held during the trial");
+    TRIAL_OPEN.send_replace(false);
+    tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .expect("admitted once the trial commits")
+        .unwrap();
+}

@@ -77,6 +77,26 @@ static SWITCHES: Mutex<Option<mpsc::Sender<SwitchRequest>>> = Mutex::new(None);
 /// set until the trial commits, so [`failed_start_undo`] can still find it if serving
 /// fails after the trial began.
 static TRIAL: Mutex<Option<Pending>> = Mutex::new(None);
+/// `true` while this process is a new release whose trial has not committed: browser
+/// sockets wait in [`terminals_admitted`] until then (J1085).
+static TRIAL_OPEN: std::sync::LazyLock<tokio::sync::watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| tokio::sync::watch::channel(false).0);
+
+/// Wait until this process may serve terminals: at once, unless it is a new release on
+/// trial, which takes no terminal traffic until its trial commits (J1085).
+///
+/// Every terminal write during a trial would be lost by an undo, which restores the
+/// database copy taken before the switch while the shims keep their newer cursors,
+/// and a session opened in the trial would be missing from that copy. Browsers
+/// reconnect after every switch anyway; during a trial their upgrade simply waits,
+/// about 0.2 s for a good release. On an undo the process execs the previous release
+/// and the waiting connections drop, so the browsers reconnect to it. If the undo is
+/// refused and this release keeps serving, the wait ends too.
+pub(crate) async fn terminals_admitted() {
+    let mut open = TRIAL_OPEN.subscribe();
+    let _ = open.wait_for(|open| !*open).await;
+}
+
 /// Answers whether the CA is unlocked right now; see [`set_ca_probe`].
 type CaProbe = Box<dyn Fn() -> bool + Send + Sync>;
 /// The registered [`CaProbe`]; `None` (treated as locked) until the CLI registers one.
@@ -133,6 +153,8 @@ pub fn image_digest(file: &std::fs::File) -> Result<String, &'static str> {
 /// # Errors
 /// [`apply::TRIAL_NOT_RECORDED`]: this process is the new release, untried.
 pub fn startup(data: &Path) -> Result<(), &'static str> {
+    // A server that came back in-process after both execs failed admits terminals again.
+    crate::update_activity::freeze(false);
     if update::availability(crate::release_latest::release_build()).is_err() {
         return Ok(());
     }
@@ -152,6 +174,7 @@ pub fn startup(data: &Path) -> Result<(), &'static str> {
             *TRIAL
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
+            TRIAL_OPEN.send_replace(true);
         }
         Ok(Resume::Finished(outcome)) => tracing::warn!(outcome, "update_switch_finished"),
         Err(apply::TRIAL_NOT_RECORDED) => {
@@ -404,8 +427,12 @@ async fn switch_once(
     let (switch, from_sha256, to_sha256) = prepared.map_err(Retry::Later)?;
     let give_up = |switch: Switch, reason: &'static str| {
         let _ = switch.abandon(infraternal_plugin_api::VERSION, reason);
+        crate::update_activity::freeze(false);
         Retry::Later(reason)
     };
+    // From the copy to the exec no terminal input is taken, so nothing the copy lacks
+    // is acknowledged to a shim (J1085); a refused switch admits it again.
+    crate::update_activity::freeze(true);
     // D295: one online copy of the database, right before the switch.
     if let Err(reason) = copy_database(pool, &switch.database_copy()).await {
         return Err(give_up(switch, reason));
@@ -455,7 +482,10 @@ async fn switch_once(
             switch,
             "the new release was refused for the switch",
         )),
-        Err(_) => Err(Retry::Later("the restart control dropped the switch")),
+        Err(_) => {
+            crate::update_activity::freeze(false);
+            Err(Retry::Later("the restart control dropped the switch"))
+        }
     }
 }
 
@@ -536,18 +566,25 @@ async fn run_trial(
                     *TRIAL
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                    TRIAL_OPEN.send_replace(false);
                     true
                 }
                 Ok(Err(reason)) => {
                     tracing::error!(reason, "update_commit_failed");
+                    TRIAL_OPEN.send_replace(false);
                     false
                 }
-                Err(_) => false,
+                Err(_) => {
+                    TRIAL_OPEN.send_replace(false);
+                    false
+                }
             }
         }
         Err(reason) => {
             tracing::warn!(reason, version = trial.to_version, "update_trial_failed");
             undo(trial, &data, artifact, reason).await;
+            // Still here: the undo was refused, and this release keeps serving.
+            TRIAL_OPEN.send_replace(false);
             false
         }
     }
