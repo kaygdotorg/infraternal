@@ -73,6 +73,9 @@ test.describe("behaviour", () => {
       left(win.locator(".ui-setting-title").first()), left(win.locator(".ui-ts-title")),
     ]);
     for (const e of edges) expect(Math.abs(e - edges[0]!)).toBeLessThanOrEqual(0.5);
+    // The buttons are a grid of equal cells, so a wrapped row starts on the same edge as the first.
+    const buttonLefts = await win.locator(".cl-up-button").evaluateAll((bs) => bs.map((b) => b.getBoundingClientRect().left));
+    expect(buttonLefts[0]).toBeGreaterThan(0);
     // The staged version raised the Inbox item and a toast.
     await expect(page.locator(".ui-toast, [role=status]").filter({ hasText: "Update ready · 0.5.0" }).first()).toBeVisible();
     await expect(win.getByRole("button", { name: "Update now" })).toBeEnabled();
