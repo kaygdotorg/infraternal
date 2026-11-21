@@ -4,11 +4,19 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import time
 import unittest
 import uuid
+
+# A dropped SSH session ends the real shell with SIGHUP, so the signal tests send
+# SIGHUP to a shell and expect it to die. A shell cannot re-enable a signal that
+# was ignored when it started (POSIX), and `nohup` or a detached gate launcher
+# hands us exactly that. Restore the default here so every shell this oracle
+# starts inherits it, whatever launched the oracle (#443).
+signal.signal(signal.SIGHUP, signal.SIG_DFL)
 
 ROOT = Path(__file__).resolve().parents[1]
 # Confirmation programs: the shared guard, the lease (rollback retires it),
