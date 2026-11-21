@@ -58,6 +58,7 @@ interface RunResult {
   predictedKeys: number;
   scoredKeys: number;
 }
+/** Every finished run, read by the closing rows test (the tests run in order in one worker). */
 const results: RunResult[] = [];
 
 /** Resolves after `ms` milliseconds. */
