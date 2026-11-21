@@ -971,9 +971,9 @@ export class Wizard {
     const moved = !changed && !!print && !!job.seenKey && job.seenKey !== print;
     // A new key is an ordinary question (neutral icon). A changed pin, or a key that differs from the one already shown, is a warning (TASTE: the icon matches the news).
     page.innerHTML = `${changed || moved ? this.hero(ICON.warning, "danger") : this.hero(ICON.fingerprint)}<h1 class="ah-title">Check ${escapeHtml(this.nameWithPort(job.entry))}'s key</h1>
-      <p class="ah-lede">${changed ? "Warning: this host’s trusted key changed. Replace it only after you verify the new fingerprint on the host." : moved ? "Warning: this host’s key changed since you last saw it. Compare this new fingerprint with the host before trusting it." : "Compare this fingerprint with the one on the host before trusting it."}</p>
+      <p class="ah-lede">${changed ? "Warning: this host's trusted key changed. Replace it only after you verify the new fingerprint on the host." : moved ? "Warning: this host's key changed since you last saw it. Compare this new fingerprint with the host before trusting it." : "Compare this fingerprint with the one on the host before trusting it."}</p>
       <div class="ah-keyblock" data-kv></div>
-      <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host’s owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
+      <p class="ah-text">${key.command ? `On the host, run <span class="ah-code">${escapeHtml(key.command)}</span> and compare.` : "Ask the host's owner to verify this fingerprint through a trusted connection."}</p>${this.detailsBlock(job)}`;
     const list = createKeyValueList("Host key fingerprint");
     list.set(print ? [{ key: "Host key", value: `${key.label} · ${print}` }] : []);
     page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
