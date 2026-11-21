@@ -1,5 +1,5 @@
 /** Exercises worker presentation through its real message/decoder callbacks without a display clock. */
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type { FromWorker, ToWorker } from "./worker-protocol";
 import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
 
@@ -141,17 +141,30 @@ test("decoder output presents the newest admitted picture immediately and releas
     }
     expect(completed.chunks).toHaveLength(6);
 
-    // Count overload discards the whole unsubmitted chain. Even a repair IDR
-    // arriving while the codec is full waits safely instead of being dropped.
+    // Count overload (more than 32 waiting units, #146) discards the whole unsubmitted
+    // chain. Even a repair IDR arriving while the codec is full waits safely instead of being dropped.
     send({ t: "reset" }); key(1); delta(2);
-    for (let sequence = 3; sequence <= 11; sequence++) delta(sequence);
+    for (let sequence = 3; sequence <= 35; sequence++) delta(sequence);
     const counted = current!;
     expect(counted.chunks).toHaveLength(2);
     const beforeCounted = drawn.length;
-    key(12);
+    key(36);
     for (let index = 0; index < 3; index++) finish(counted, index);
     expect(counted.chunks).toHaveLength(3);
     expect(drawn.length - beforeCounted).toBe(1);
+
+    // Age overload (#146): a decoder that keeps a unit waiting for longer than 100 ms is behind. The
+    // waiting chain is discarded, later deltas are refused, and the next IDR starts again.
+    send({ t: "reset" }); key(1); delta(2); delta(3);
+    const aged = current!;
+    const started = performance.now();
+    const clock = spyOn(performance, "now").mockReturnValue(started + 150);
+    delta(4); delta(5);
+    clock.mockRestore();
+    finish(aged, 0); finish(aged, 1);
+    expect(aged.chunks, "units 3-5 waited past the bound and were discarded").toHaveLength(2);
+    key(6); finish(aged, 2);
+    expect(aged.chunks).toHaveLength(3);
 
     // Byte overload must also refuse a broken chain when its unit count fits.
     send({ t: "reset" }); key(1); delta(2);
@@ -225,7 +238,7 @@ test("decoder output presents the newest admitted picture immediately and releas
       expect(recovered.chunks).toHaveLength(start + 2);
     }
     send({ t: "stats" });
-    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { pendingPeak: 8, pendingBytesPeak: MAX_VIDEO_BYTES } });
+    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { pendingPeak: 32, pendingBytesPeak: MAX_VIDEO_BYTES } });
     expect(messages.filter(m => m.t === "trace")).toHaveLength(0);
     send({ t: "reset" });
     send({ t: "init", canvas, hardware: "no-preference", measure: true });

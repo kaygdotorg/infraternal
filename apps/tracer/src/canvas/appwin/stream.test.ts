@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
 import { MAX_VIDEO_BYTES, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
-import { AppStream, parseStatus, type StreamOptions } from "./stream";
+import { AppStream, MAX_HANDOFF_UNITS, parseStatus, type StreamOptions } from "./stream";
 import type { FromWorker, ToWorker } from "./worker-protocol";
 import type { ControlState } from "./status";
 
@@ -151,7 +151,8 @@ test("stalled worker handoff stays within one maximum access unit and resumes on
     f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
     const tiny = bytes.subarray(0, 1);
     for (let sequence = 24; sequence <= 1000; sequence++) deliver(sequence, sequence === 24, tiny);
-    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, 24, 25, 26, 27]);
+    // The credit admits one stall's burst of small deltas (MAX_HANDOFF_UNITS), then nothing more until the worker answers.
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, ...Array.from({ length: MAX_HANDOFF_UNITS }, (_, i) => 24 + i)]);
   } finally { f.stream.dispose(); }
 });
 

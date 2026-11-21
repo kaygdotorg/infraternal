@@ -5,8 +5,11 @@
  * decoding, drawing and the frame queue never touch the main thread. The page only forwards encoded access units.
  *
  * Bounded admission and frame ownership:
- * - a decoder holds at most two queued access units; up to eight continuous units, bounded together by one wire access-unit
- *   budget, can wait for dequeue. Transport bursts retain their required references without queueing decoded pictures;
+ * - a decoder holds at most two queued access units; up to 32 continuous units, bounded together by one wire access-unit
+ *   budget and by age (the oldest may have waited at most 100 ms, the server's backlog bound, #146), can wait for dequeue.
+ *   A burst after a main-thread stall (5–20 small deltas) is decoded, not repaired with a keyframe; only a decoder that
+ *   stays behind for longer than the bound asks for one. Transport bursts retain their required references without
+ *   queueing decoded pictures;
  * - a gap in the sequence, a decoder error or a count/byte overflow asks the page for a repair keyframe, at most one request
  *   in flight;
  * - an IDR repairs the reference state inside the running decoder, which is only reconfigured when the profile or the
@@ -67,15 +70,20 @@ let waitingKeyframe = true;
 let repairPending = false;
 /** The decoder timestamp of the newest accepted unit. An output older than this is superseded and not drawn. */
 let timestamp = 0;
-/** One encoded access unit waiting for the decoder. `stamp` is its decoder timestamp; `trace` is set only during measurement. */
-interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number; trace?: FrameTrace }
+/**
+ * One encoded access unit waiting for the decoder. `stamp` is its decoder timestamp; `at` is when it started waiting
+ * (`performance.now()`), for the age bound; `trace` is set only during measurement.
+ */
+interface CodedUnit { keyframe: boolean; bytes: Uint8Array; stamp: number; at: number; trace?: FrameTrace }
 // The map exists only for measurement; decoder timestamps keep delayed outputs
 // attached to their own wire sequence, including when a newer unit is queued.
 let traces: Map<number, FrameTrace> | undefined;
 /** Access units admitted but not yet given to the decoder, oldest first. At most `MAX_PENDING_UNITS`, and bounded in bytes. */
 const pending: CodedUnit[] = [];
-/** The most units that may wait in `pending`; going past it asks for a repair keyframe. */
-const MAX_PENDING_UNITS = 8;
+/** The most units that may wait in `pending`; going past it asks for a repair keyframe. Matches the server's backlog bound. */
+const MAX_PENDING_UNITS = 32;
+/** How long the oldest unit in `pending` may wait before the decoder counts as behind and a keyframe is asked for (#146). */
+const MAX_PENDING_AGE_MS = 100;
 /** The total size in bytes of `pending`. */
 let pendingBytes = 0;
 /** Guards `pump` against running inside itself (an output can call it). */
@@ -216,8 +224,8 @@ function pump(): void {
 
 /**
  * Accepts one unit from the page. Repeats are ignored. A delta unit that follows a gap, or arrives while a keyframe is awaited, drops
- * the waiting units and asks for a repair. A keyframe replaces everything not yet submitted. Going over the unit or byte bound also asks
- * for a repair.
+ * the waiting units and asks for a repair. A keyframe replaces everything not yet submitted. Going over the unit, byte or age bound
+ * also asks for a repair.
  */
 function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt?: ReceiveTrace): void {
   const receivedAt = traces ? traceClock() : 0;
@@ -240,7 +248,9 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt
     pump();
     if (!keyframe && waitingKeyframe) { stats.dropped++; return; }
   }
-  if (!buffer.byteLength || buffer.byteLength > MAX_VIDEO_BYTES || pending.length >= MAX_PENDING_UNITS || pendingBytes + buffer.byteLength > MAX_VIDEO_BYTES) {
+  const now = performance.now();
+  const stale = pending.length > 0 && now - pending[0]!.at > MAX_PENDING_AGE_MS;
+  if (!buffer.byteLength || buffer.byteLength > MAX_VIDEO_BYTES || stale || pending.length >= MAX_PENDING_UNITS || pendingBytes + buffer.byteLength > MAX_VIDEO_BYTES) {
     stats.dropped += pending.length + 1;
     discardPending();
     if (keyframe) repairPending = false;
@@ -257,7 +267,7 @@ function chunk(sequence: number, keyframe: boolean, buffer: ArrayBuffer, receipt
     decodeUnit(keyframe, bytes, stamp, trace);
     return;
   }
-  pending.push({ keyframe, bytes, stamp, ...(trace ? { trace } : {}) });
+  pending.push({ keyframe, bytes, stamp, at: now, ...(trace ? { trace } : {}) });
   pendingBytes += buffer.byteLength;
   stats.pendingPeak = Math.max(stats.pendingPeak, pending.length);
   stats.pendingBytesPeak = Math.max(stats.pendingBytesPeak, pendingBytes);
