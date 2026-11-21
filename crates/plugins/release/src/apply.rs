@@ -553,6 +553,10 @@ struct Previous {
 /// Write `previous/from.json` (private, flushed). `previous/` exists: [`Switch::save_previous`] made it.
 fn write_from(lock: &Locked, version: &str, path: &Path) -> Result<(), &'static str> {
     let saved = "the previous release could not be recorded";
+    // Without a kept release there is nothing to record (and nothing to roll back to).
+    if !lock.directory().join("previous").is_dir() {
+        return Ok(());
+    }
     let target = lock.directory().join("previous").join(FROM);
     let temporary = target.with_extension("tmp");
     let _ = std::fs::remove_file(&temporary);
