@@ -34,6 +34,8 @@ IDLE_WINDOW_SECONDS = 7.0
 OFF_LIST_RETENTION_SECONDS = 25.0
 QUIET_AGED_WAIT_SECONDS = OFF_LIST_RETENTION_SECONDS + 10.0
 QUIET_CAP_SECONDS = 200.0
+# With the retention in place, a peer whose session is older than it must be followed at once.
+QUIET_AGED_BOUND_SECONDS = 5.0
 QUIET_ROW_CAP_SECONDS = 900
 
 
@@ -410,6 +412,7 @@ def quiet_mover_case(
     label: str,
     wait_seconds: float,
     cap_seconds: float,
+    must_move_within: float | None,
     nodes: dict[str, BinaryNode],
     observer: proof.Observer,
     probes: list[dict[str, Any]],
@@ -455,6 +458,16 @@ def quiet_mover_case(
                 # sleep: a quiet-mover recovery is a time measurement and C is frozen, so nothing else can move the endpoint.
                 time.sleep(0.1)
         result["moved_to_new_address_ms"] = moved
+        if must_move_within is not None:
+            late = {
+                receiver: at for receiver, at in moved.items()
+                if at is None or at > must_move_within * 1000
+            }
+            if late:
+                raise AssertionError(
+                    f"{label}: observers did not follow the moved quiet peer within "
+                    f"{must_move_within}s: {moved}"
+                )
         result["still_on"] = {
             receiver: peer_rows(nodes[receiver]).get(addresses["C"], {}).get("counters", {}).get("endpoint")
             for receiver in ("A", "B")
@@ -737,9 +750,14 @@ def run_proof(
         assert_peer_inventory(nodes, addresses, topology, ports)
         if quiet_mover:
             row["quiet_mover"] = []
-            for label, wait in (("fresh_session", 0.0), ("aged_session", QUIET_AGED_WAIT_SECONDS)):
+            # A fresh session is inside the retention, so its observers keep the old address; that
+            # window is measured, not asserted. An aged session must be followed at once.
+            for label, wait, cap, bound in (
+                ("fresh_session", 0.0, 60.0, None),
+                ("aged_session", QUIET_AGED_WAIT_SECONDS, QUIET_CAP_SECONDS, QUIET_AGED_BOUND_SECONDS),
+            ):
                 row["quiet_mover"].append(quiet_mover_case(
-                    label, wait, QUIET_CAP_SECONDS, nodes, observer, current_probes, addresses, ports))
+                    label, wait, cap, bound, nodes, observer, current_probes, addresses, ports))
                 # Let the resumed C and the restored list settle before the next case.
                 wait_for_direct(nodes, addresses, topology, ports, RECOVERY_BOUND_SECONDS)
         row["outcome"] = "PASS"
