@@ -576,3 +576,141 @@ async fn terminal_exit_on_the_d379_writer_keeps_the_sqlx_rules() {
     assert_eq!(again, first, "the first closure time and status stay");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The D379 branch of `terminal_input_ack::record` (#562): one transaction that
+/// advances the writer row and the session row together. It succeeds for the
+/// right stream and session; refuses a wrong stream, a wrong session, a
+/// backwards offset and a logged-out session; rolls the writer row back when
+/// the session row refuses; and leaves the signed legacy column alone for an
+/// offset above `i64::MAX`.
+#[tokio::test]
+async fn input_ack_on_the_d379_writer_is_one_transaction_with_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let token = "ack-token";
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'ack',?,?,1)")
+        .bind(crate::auth::hash(token)).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let connection = new_connection(&pool, &user, 0, None, None)
+        .await
+        .unwrap()
+        .connection_id;
+    claim_on_writer(&auth, &user, &connection, 1, &session, None, 32)
+        .await
+        .unwrap();
+    let ack = |stream: u32, session: [u8; 16], offset: u64, token: &'static str| {
+        let (auth, pool, user) = (auth.clone(), pool.clone(), user.clone());
+        async move {
+            crate::terminal_input_ack::record(
+                &auth,
+                &pool,
+                crate::terminal_input_ack::InputAck {
+                    connection_id: &connection,
+                    client_stream: stream,
+                    session_id: session,
+                    in_seq_acked: offset,
+                    user_id: &user,
+                    session_token: token,
+                    now: 4242,
+                },
+            )
+            .await
+        }
+    };
+    // (writer.input_acked, session.input_acked_u64, session.input_acked, session.last_seen)
+    let rows = || async {
+        let writer: Vec<u8> = sqlx::query_scalar(
+            "SELECT input_acked FROM terminal_writers WHERE connection_id=? AND client_stream=1",
+        )
+        .bind(connection.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (unsigned, signed, seen): (Vec<u8>, i64, i64) = sqlx::query_as(
+            "SELECT input_acked_u64,input_acked,last_seen FROM terminal_sessions WHERE id=?",
+        )
+        .bind(session.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (
+            u64::from_be_bytes(writer.try_into().unwrap()),
+            u64::from_be_bytes(unsigned.try_into().unwrap()),
+            signed,
+            seen,
+        )
+    };
+    let before = rows().await;
+    assert_eq!(before.0, 0);
+
+    assert!(
+        ack(1, session, 100, token).await,
+        "the right stream and session succeed"
+    );
+    assert_eq!(
+        rows().await,
+        (100, 100, 100, 4242),
+        "both rows moved together"
+    );
+
+    assert!(
+        !ack(3, session, 110, token).await,
+        "no writer on that stream"
+    );
+    assert!(
+        !ack(1, [8; 16], 110, token).await,
+        "not this writer's session"
+    );
+    assert!(
+        !ack(1, session, 90, token).await,
+        "an offset cannot move backwards"
+    );
+    assert_eq!(
+        rows().await,
+        (100, 100, 100, 4242),
+        "refusals change nothing"
+    );
+
+    // The session row refuses (another account owns it) after the writer row
+    // matched: the transaction rolls back, so the writer row stays at 100.
+    sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES ('other','o','o','O',0,'x')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE terminal_sessions SET user_id='other' WHERE id=?")
+        .bind(session.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!ack(1, session, 120, token).await);
+    assert_eq!(
+        rows().await.0,
+        100,
+        "the writer row was rolled back with the session row"
+    );
+    sqlx::query("UPDATE terminal_sessions SET user_id=? WHERE id=?")
+        .bind(&user)
+        .bind(session.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Above i64::MAX the legacy signed column is left alone (the statement gets -1).
+    let high = u64::MAX - 1;
+    assert!(ack(1, session, high, token).await);
+    assert_eq!(
+        rows().await,
+        (high, high, 100, 4242),
+        "unsigned column moved, signed column kept"
+    );
+
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !ack(1, session, u64::MAX, token).await,
+        "a logged-out session is refused"
+    );
+    assert_eq!(rows().await.0, high, "and rolled back");
+    let _ = std::fs::remove_dir_all(dir);
+}
