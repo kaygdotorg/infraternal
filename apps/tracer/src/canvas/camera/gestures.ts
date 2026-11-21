@@ -182,6 +182,8 @@ export function installGestures(cx: Ctx): void {
   //   terminal): the canvas has it, and a trackpad or Magic Mouse swipe there moves to the next window or column.
   // - the canvas modifier (canvas-wheel-modifier.ts) or Ctrl/Cmd (zoom) is held: always the canvas's, from anywhere.
   //   Shift is not a canvas key: Shift+wheel over content scrolls it sideways, the way browsers do.
+  // - an open overlay (the palette and its scrim, a popover, the sidebar) takes the canvas modifier's wheel and the canvas
+  //   behind it does not move (#444, overlayTakesWheel).
   // Zoomed out to thumbnails there is no content to scroll, so the canvas has everything. The input lock is how a person
   // keeps every gesture in one window.
   let lastWheel = 0, lastSign = 0;
@@ -248,6 +250,15 @@ export function installGestures(cx: Ctx): void {
     }
     return false;
   };
+  /**
+   * Whether an open overlay takes the wheel at `target` (#444): the command palette and its scrim, a popover (the anchored
+   * ones and the window details popover), the sidebar and the other floating surfaces that carry the overlay class. The
+   * palette is modal, so while it is open nothing behind it takes a wheel either. Only the canvas modifier consults this:
+   * a plain wheel over a popover keeps its native scrolling, as it always did.
+   */
+  const overlayTakesWheel = (target: EventTarget | null): boolean =>
+    (target instanceof Element && target.closest(".ui-overlay-surface, .palette-scrim, .canvas-popover") !== null) ||
+    document.querySelector(".palette:not([hidden])") !== null;
   /** Which side the current gesture belongs to, decided once by its first event. */
   let owner: "canvas" | "content" = "canvas";
   /**
@@ -255,6 +266,9 @@ export function installGestures(cx: Ctx): void {
    * True: the canvas handled it, or the content could not use it and it was cancelled (nothing is left to carry on).
    */
   const routeWheel = (e: WheelEvent): boolean => {
+    // An Alt+wheel over an open overlay is the overlay's: it is cancelled here and the canvas behind it stays put (#444). The
+    // browser's own Alt action is cancelled with it, as everywhere else. A true return ends the event, as for content.
+    if (canvasModifierHeld(e) && overlayTakesWheel(e.target)) { e.preventDefault(); return true; }
     // Shift turns a vertical wheel into a sideways one, for content as the browser does and for bare canvas as the canvas does.
     const swap = e.shiftKey && !e.deltaX, dx = swap ? e.deltaY : e.deltaX, dy = swap ? 0 : e.deltaY;
     const now = performance.now(), horizontal = Math.abs(dx) > Math.abs(dy), sign = Math.sign(horizontal ? dx : dy);
