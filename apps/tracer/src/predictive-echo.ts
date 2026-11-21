@@ -861,15 +861,37 @@ export class PredictiveEcho {
 
 /**
  * Whether the text left of the cursor ends like a prompt for a secret ("Password:", "[sudo] password for kayg:",
- * "Enter passphrase for key '…':", "PIN:", "Verification code:"). The host's own echo setting is not visible to the
- * client, and inside a remote login (a raw terminal relaying another host) it never would be, so the prompt text is
- * the signal that also works there. A false match only costs prediction for that key.
+ * "Enter passphrase for key '…':", "PIN:", "API key:", "Enter password> ", "Kennwort:", "パスワード:"). The host's
+ * own echo setting is not visible to the client, and inside a remote login (a raw terminal relaying another host)
+ * it never would be, so the prompt text is the signal that also works there. A false match only costs prediction
+ * for that key. A terminal-mode signal from the host is the planned primary rule for direct sessions (#569); this
+ * list stays as the rule for nested logins.
  */
 export function isSecretPrompt(text: string): boolean {
   return SECRET_PROMPT.test(text);
 }
-/** A secret-asking word, at most 60 more characters on the row, then `:` or `?` and only spaces before the cursor. */
-const SECRET_PROMPT = /(pass(word|phrase|code)?|\bpin\b|secret|token|\botp\b|one-time|verification code)[^\n]{0,60}[:?]\s*$/i;
+/**
+ * Words that ask for a secret: English ones, and "password" in the languages most often seen in terminal prompts
+ * (German, Spanish, Portuguese, French, Italian, Dutch, the Nordic languages, Polish, Czech/Slovak, Hungarian,
+ * Turkish, Russian/Ukrainian, Greek, Japanese, Chinese, Korean, Vietnamese).
+ */
+const SECRET_WORDS = [
+  "pass(?:word|phrase|code)?", "\\bpin\\b", "secret", "token", "\\botp\\b", "one-time", "verification code",
+  "(?:api|access|private|secret|license) key", "recovery (?:words|phrase|code)", "seed phrase", "mnemonic",
+  "passwort", "kennwort", "contrase\u00f1a", "senha", "mot de passe", "wachtwoord", "l\u00f6senord", "passord",
+  "adgangskode", "salasana", "has\u0142o", "heslo", "jelsz\u00f3", "\u015fifre", "\u043f\u0430\u0440\u043e\u043b\u044c",
+  "\u03ba\u03c9\u03b4\u03b9\u03ba\u03cc\u03c2", "\u30d1\u30b9\u30ef\u30fc\u30c9", "\u6697\u8a3c", "\u5bc6\u7801", "\u5bc6\u78bc",
+  "\u53e3\u4ee4", "\ube44\ubc00\ubc88\ud638", "m\u1eadt kh\u1ea9u",
+];
+/**
+ * A secret word, then at most 60 more characters and `:` `：` `?`; or a secret word that starts the row or follows
+ * a space, then at most 20 characters without a path separator and `>` (so a shell prompt such as
+ * `~/src/token-service> ` is not taken for one). Only spaces follow before the cursor.
+ */
+const SECRET_PROMPT = new RegExp(
+  `(?:${SECRET_WORDS.join("|")})[^\\n]{0,60}[:\uff1a?]\\s*$|(?:^|\\s)(?:${SECRET_WORDS.join("|")})[^\\n/~]{0,20}>\\s*$`,
+  "iu",
+);
 
 /** The characters of `data` when it is all printable (no control, surrogate or line-separator characters), otherwise `undefined`. */
 function printableGraphemes(data: string): string[] | undefined {

@@ -93,11 +93,13 @@ test("keys at a password prompt are never predicted, even when the host still ec
 
 test("the secret-prompt rule matches prompts for secrets and nothing else", () => {
   for (const prompt of ["Password: ", "[sudo] password for kayg: ", "Enter passphrase for key '/home/k/.ssh/id_ed25519': ",
-    "Password for 'https://kayg@example.com': ", "Verifying - Password:", "PIN: ", "Verification code: ", "Token? "]) {
+    "Password for 'https://kayg@example.com': ", "Verifying - Password:", "PIN: ", "Verification code: ", "Token? ",
+    "Contraseña: ", "Senha: ", "Пароль: ", "パスワード: ", "密码：", "Kennwort:", "Mot de passe : ", "API key: ",
+    "Enter password> ", "Recovery words: ", "[sudo] Passwort für kayg: "]) {
     expect(isSecretPrompt(prompt)).toBe(true);
   }
   for (const prompt of ["kayg@box:~$ ", "% ", ">>> ", "Username for 'https://example.com': ", "~/passwords$ ",
-    "pinhead:~$ ", "$ echo password: hello"]) {
+    "pinhead:~$ ", "$ echo password: hello", "kayg@box ~/src/token-service> ", "> ", "kayg@secret-box:~/x% "]) {
     expect(isSecretPrompt(prompt)).toBe(false);
   }
 });
