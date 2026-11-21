@@ -77,6 +77,11 @@ pub const DID_NOT_START: &str = "the new release could not start";
 /// stays paused.
 pub const RESTORE_PENDING: &str =
     "the previous release runs again, but its database copy could not be restored yet";
+/// Recorded when the previous release served on the new release's database because
+/// its copy could not be restored at start: restoring it later would drop everything
+/// written since, so the marker is dropped instead (J1085).
+pub const NOT_RESTORED: &str =
+    "the previous release runs again, but its database copy could not be restored";
 /// Why a new release on trial refuses to open the database: it could not record
 /// its trial in the marker, so nothing would check it or undo it (J1085).
 pub const TRIAL_NOT_RECORDED: &str = "the new release could not record its trial";
@@ -381,6 +386,57 @@ pub fn undo_reason(reason: Option<&str>) -> &'static str {
         .into_iter()
         .find(|known| Some(*known) == reason)
         .unwrap_or(STOPPED_IN_TRIAL)
+}
+
+/// Settle a marker that outlived its switch, once this release serves (J1085).
+///
+/// Call it when the server is serving and is not itself on trial. A marker is still
+/// there only if this start could not finish it: the previous release could not
+/// restore its database copy, or the new release gave up undoing itself
+/// ([`UNDO_FAILED`]). Either way this process now serves on the database as it is.
+/// Restoring the copy at some later start would silently drop everything written
+/// since, which D295 never accepted, so the marker is removed here and the outcome
+/// recorded: [`NOT_RESTORED`] (the new release stays paused) or [`UNDO_FAILED`].
+/// `own` returns this process's image digest. Returns the recorded outcome, or `None`
+/// when no marker is left.
+/// # Errors
+/// The update folder is unsafe, or the marker or state could not be saved.
+pub fn settle_served(
+    data: &Path,
+    current: &str,
+    own: impl FnOnce() -> Result<String, &'static str>,
+) -> Result<Option<&'static str>, &'static str> {
+    let updates = data.join("updates");
+    if std::fs::symlink_metadata(updates.join(PENDING)).is_err() {
+        return Ok(None);
+    }
+    let lock = Locked::open(&updates)?;
+    let Some(pending) = read_pending(&updates) else {
+        remove_pending(&lock)?;
+        return Ok(None);
+    };
+    let own = own()?;
+    let mut state = status_of(&updates, current);
+    let reason = if own == pending.from_sha256 {
+        let reason = if pending.phase == Phase::Switching {
+            DID_NOT_START
+        } else {
+            NOT_RESTORED
+        };
+        remove_entry(&lock, &updates.join("releases").join(&pending.to_version))?;
+        state.paused = Some(pending.to_version.clone());
+        state.applied = Some(record(&pending.to_version, UNDONE, Some(reason)));
+        reason
+    } else if own == pending.to_sha256 {
+        state.applied = Some(record(&pending.to_version, NOT_APPLIED, Some(UNDO_FAILED)));
+        UNDO_FAILED
+    } else {
+        state.applied = Some(record(&pending.to_version, NOT_APPLIED, Some(INTERRUPTED)));
+        INTERRUPTED
+    };
+    remove_pending(&lock)?;
+    lock.write_state(&state)?;
+    Ok(Some(reason))
 }
 
 /// Whether a switch is in flight here (`pending.json` exists). A server never starts

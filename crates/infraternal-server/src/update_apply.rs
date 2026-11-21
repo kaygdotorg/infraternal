@@ -181,6 +181,9 @@ pub(crate) fn start(
         .clone();
     let timing = Timing::from_environment();
     tokio::spawn(async move {
+        if trial.is_none() {
+            settle_served(&data).await;
+        }
         if let Some(trial) = trial {
             // A trial ends in an exec (undo) or a commit; only after a commit does this
             // release go on to apply later updates.
@@ -190,6 +193,26 @@ pub(crate) fn start(
         }
         quiet_window(&updater, &pool, &data, artifact, timing.quiet).await;
     });
+}
+
+/// This release serves and is not on trial: settle any marker its start could not
+/// finish, so no later start restores a stale database copy (J1085).
+async fn settle_served(data: &Path) {
+    let data = data.to_owned();
+    let settled = tokio::task::spawn_blocking(move || {
+        apply::settle_served(&data, infraternal_plugin_api::VERSION, || {
+            std::fs::File::open("/proc/self/exe")
+                .map_err(|_| "the running image could not be read")
+                .and_then(|file| apply::digest(&file))
+        })
+    })
+    .await;
+    match settled {
+        Ok(Ok(Some(outcome))) => tracing::warn!(outcome, "update_switch_settled"),
+        Ok(Ok(None)) => {}
+        Ok(Err(reason)) => tracing::error!(reason, "update_switch_settle_failed"),
+        Err(_) => tracing::error!("update_switch_settle_failed"),
+    }
 }
 
 /// The warm undo for a new release on trial that could not start serving (#211 S4).

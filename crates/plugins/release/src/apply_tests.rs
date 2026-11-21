@@ -426,6 +426,75 @@ fn a_failed_restore_pauses_the_new_release_and_retries_at_the_next_start() {
     assert!(!in_flight(&data.0));
 }
 
+/// J1085 finding 2 (its experiment 2): once the previous release has served on the
+/// un-restored database, a later start never restores the old copy over what was
+/// written since. Serving settles the marker instead and records why.
+#[test]
+fn a_release_that_served_unrestored_never_restores_a_stale_copy_later() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = Data::new();
+    write_file(&data.0.join(DATABASE), b"written-by-b");
+    let previous = data.updates().join("previous");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&previous)
+        .unwrap();
+    write_file(&previous.join(DATABASE), b"a-copy");
+    // The restore fails once (the copy is not private), and A starts anyway.
+    std::fs::set_permissions(
+        previous.join(DATABASE),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    data.mark(Phase::Rollback);
+    assert!(resume(&data.0, A, || Ok("aa".repeat(32))).is_err());
+    // A serves, and its users write to the database it has.
+    assert_eq!(
+        settle_served(&data.0, A, || Ok("aa".repeat(32))),
+        Ok(Some(NOT_RESTORED))
+    );
+    std::fs::write(data.0.join(DATABASE), b"written-by-a-later").unwrap();
+    let state = data.state();
+    assert_eq!(state.paused.as_deref(), Some(B));
+    assert_eq!(state.applied.unwrap().reason.as_deref(), Some(NOT_RESTORED));
+    assert!(!in_flight(&data.0), "the marker is settled");
+    // Days later the copy is readable again; the next start must leave the data alone.
+    std::fs::set_permissions(
+        previous.join(DATABASE),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(resume(&data.0, A, || Ok("aa".repeat(32))), Ok(Resume::Idle));
+    assert_eq!(
+        std::fs::read(data.0.join(DATABASE)).unwrap(),
+        b"written-by-a-later"
+    );
+}
+
+/// J1085 finding 2, the other way in: B gave up undoing itself and serves; its
+/// marker is settled as undo-failed, so the previous release's next start restores
+/// nothing.
+#[test]
+fn a_new_release_that_gave_up_its_undo_settles_the_marker_when_it_serves() {
+    let data = Data::new();
+    let mut marker = pending(Phase::Rollback);
+    marker.undo_attempts = MAX_UNDO_ATTEMPTS;
+    let lock = Locked::open(&data.updates()).unwrap();
+    write_pending(&lock, &marker).unwrap();
+    drop(lock);
+    assert_eq!(
+        resume(&data.0, B, || Ok("bb".repeat(32))),
+        Ok(Resume::Finished(UNDO_FAILED))
+    );
+    assert_eq!(
+        settle_served(&data.0, B, || Ok("bb".repeat(32))),
+        Ok(Some(UNDO_FAILED))
+    );
+    assert!(!in_flight(&data.0));
+    // Nothing is left to settle on the next start.
+    assert_eq!(settle_served(&data.0, B, || Ok("bb".repeat(32))), Ok(None));
+}
+
 /// J1085 finding 3 (its experiment 3): a new release that cannot record its trial
 /// (here `pending.json.tmp` is blocked by a folder, as a full or failing disk would)
 /// gets TRIAL_NOT_RECORDED, so its startup stays off the database.
