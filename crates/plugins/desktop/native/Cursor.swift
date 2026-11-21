@@ -19,6 +19,10 @@ private let cursorSeed: (@convention(c) () -> Int32)? = {
 /// images, so a larger shape is reported as absent and the viewer keeps its ordinary pointer.
 private let maxCursorPixels = 128
 
+/// Largest PNG the viewer accepts, before base64 (24 000 characters after it). Real system pointers
+/// are a few kilobytes; this only bounds a pathological image so a status reply stays small.
+private let maxCursorPNGBytes = 18_000
+
 /// Reads and remembers the current pointer shape. Use from the main thread only (AppKit).
 final class MachineCursor {
     /// Seed value when `cached` was made; `nil` before the first read.
@@ -57,7 +61,8 @@ final class MachineCursor {
               best.pixelsWide > 0, best.pixelsHigh > 0,
               best.pixelsWide <= maxCursorPixels, best.pixelsHigh <= maxCursorPixels,
               let picture = best.cgImage(forProposedRect: nil, context: nil, hints: nil),
-              let png = NSBitmapImageRep(cgImage: picture).representation(using: .png, properties: [:]) else { return nil }
+              let png = NSBitmapImageRep(cgImage: picture).representation(using: .png, properties: [:]),
+              png.count <= maxCursorPNGBytes else { return nil }
         let scale = Double(best.pixelsWide) / Double(image.size.width)
         let hot = cursor.hotSpot
         var digest = SHA256()
