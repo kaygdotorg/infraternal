@@ -661,6 +661,39 @@ pub(super) fn service_program() -> std::io::Result<PathBuf> {
     env::current_exe().and_then(fs::canonicalize)
 }
 
+/// Check that the binary a root-run service will start is one only root can change (#146).
+///
+/// `server init --system` (and root installing a per-user service for
+/// itself) writes units that root runs: the server, the boot-time firewall
+/// loader and the data-move hooks, and it links `/usr/local/bin/infraternal`.
+/// All of them name [`service_program`], the running binary itself, because
+/// `server init` does not copy it anywhere. So that file and every folder
+/// above it must be ones only root can change. Otherwise the account that
+/// owns, for example, a release unpacked in its home folder could replace
+/// the file and run its own code as root at the next restart or boot (J1087).
+/// The rule is the shared [`crate::trusted_program::trusted_program`] check
+/// that `infraternal up` applies to the tools it runs.
+///
+/// `owner` is the account trusted besides root: 0 in production, the test
+/// user in tests. The error is a complete sentence that says what to do.
+pub(super) fn check_root_service_program(program: &Path, owner: u32) -> Result<(), String> {
+    use crate::trusted_program::{ToolError, trusted_program};
+    match trusted_program(&[program], owner) {
+        Ok(_) => Ok(()),
+        Err(ToolError::Missing) => Err(format!(
+            "{} is gone, so a service cannot run it; run server init from the installed binary",
+            program.display()
+        )),
+        Err(ToolError::Untrusted) => Err(format!(
+            "root would run {}, but an account other than root can replace it, because it or \
+             a folder above it is not owned by root or can be written by others; move the \
+             release folder (the binary and its web folder) somewhere only root can change, \
+             such as /opt/infraternal, and run server init from there",
+            program.display()
+        )),
+    }
+}
+
 /// Whether `binary` lives under the temporary folder, where it may vanish.
 fn in_temporary_folder(binary: &Path) -> bool {
     fs::canonicalize(env::temp_dir()).is_ok_and(|temporary| binary.starts_with(temporary))
@@ -750,14 +783,32 @@ fn validate_name(name: &str) -> Result<(), InstallError> {
 pub(super) fn unit_path(user: bool, name: &str) -> Result<PathBuf, InstallError> {
     let basename = format!("{name}.service");
     if user {
-        let directory = match env::var_os("XDG_CONFIG_HOME") {
-            Some(path) => PathBuf::from(path).join("systemd/user"),
-            None => PathBuf::from(env::var_os("HOME").ok_or(InstallError::Invalid)?)
-                .join(".config/systemd/user"),
-        };
-        Ok(directory.join(basename))
+        Ok(
+            user_unit_directory(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))?
+                .join(basename),
+        )
     } else {
         Ok(PathBuf::from("/etc/systemd/system").join(basename))
+    }
+}
+
+/// The folder the user's service manager reads units from, given the
+/// `XDG_CONFIG_HOME` and `HOME` values.
+///
+/// An empty or relative `XDG_CONFIG_HOME` is invalid by the XDG rules and is
+/// ignored, as `install_paths` does for `XDG_STATE_HOME`. Using it would put
+/// the unit under the current folder, where systemd never looks (D395,
+/// J1087 #6). `HOME` must be set when the variable is not usable.
+fn user_unit_directory(
+    config_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf, InstallError> {
+    match config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        Some(path) => Ok(path.join("systemd/user")),
+        None => Ok(PathBuf::from(home.ok_or(InstallError::Invalid)?).join(".config/systemd/user")),
     }
 }
 
@@ -1542,5 +1593,136 @@ mod tests {
         install_in_order(&unit, b"different", &data, true, || Ok(()), |()| Ok(())).unwrap();
         assert_ne!(fs::metadata(&unit).unwrap().ino(), before.ino());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    /// J1087 #6: only an absolute `XDG_CONFIG_HOME` chooses the user unit folder.
+    #[test]
+    fn an_empty_or_relative_config_home_falls_back_to_home() {
+        let home = Some(OsString::from("/home/person"));
+        let fallback = PathBuf::from("/home/person/.config/systemd/user");
+        for ignored in ["", "relative", "./config", "config/../x"] {
+            assert_eq!(
+                user_unit_directory(Some(OsString::from(ignored)), home.clone()).unwrap(),
+                fallback,
+                "{ignored:?}"
+            );
+        }
+        assert_eq!(user_unit_directory(None, home.clone()).unwrap(), fallback);
+        assert_eq!(
+            user_unit_directory(Some(OsString::from("/srv/config")), home).unwrap(),
+            PathBuf::from("/srv/config/systemd/user")
+        );
+        assert!(matches!(
+            user_unit_directory(Some(OsString::from("")), None),
+            Err(InstallError::Invalid)
+        ));
+    }
+
+    /// A folder under the temporary folder for one ownership test, removed on drop.
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        /// Make `<tmp>/<unique>/bin/infraternal` with the given folder and file modes.
+        fn new(tag: &str, folder_mode: u32, file_mode: u32) -> (Self, PathBuf) {
+            use std::os::unix::fs::PermissionsExt;
+            let root = env::temp_dir().join(format!(
+                "infraternal-init-owner-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&root);
+            let bin = root.join("bin");
+            fs::create_dir_all(&bin).unwrap();
+            fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(folder_mode)).unwrap();
+            let program = bin.join("infraternal");
+            fs::write(&program, "#!/bin/sh\n").unwrap();
+            fs::set_permissions(&program, fs::Permissions::from_mode(file_mode)).unwrap();
+            (Self(root), program)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The test account, standing in for root as the one trusted owner.
+    fn me() -> u32 {
+        nix::unistd::geteuid().as_raw()
+    }
+
+    /// #146: a binary only the trusted owner can change is accepted; the same
+    /// binary seen by root, when another account owns it, is refused.
+    #[test]
+    fn a_root_service_binary_must_be_one_only_root_can_change() {
+        let (_fixture, program) = Fixture::new("owned", 0o755, 0o755);
+        assert_eq!(check_root_service_program(&program, me()), Ok(()));
+        if me() != 0 {
+            // Root's view of a release unpacked in a user's folder (J1087 receipt A).
+            let refusal = check_root_service_program(&program, 0).unwrap_err();
+            assert!(
+                refusal.contains(&program.display().to_string()),
+                "{refusal}"
+            );
+            assert!(refusal.contains("/opt/infraternal"), "{refusal}");
+        }
+    }
+
+    /// #146: a writable folder anywhere above, or a writable file, is refused.
+    #[test]
+    fn a_writable_binary_or_folder_above_it_is_refused() {
+        for (tag, folder_mode, file_mode) in [
+            ("group-folder", 0o775, 0o755),
+            ("world-folder", 0o777, 0o755),
+            ("group-file", 0o755, 0o775),
+            ("world-file", 0o755, 0o757),
+        ] {
+            let (_fixture, program) = Fixture::new(tag, folder_mode, file_mode);
+            assert!(
+                check_root_service_program(&program, me()).is_err(),
+                "{tag}: folder {folder_mode:o}, file {file_mode:o}"
+            );
+        }
+        // An ancestor two levels up, not only the binary's own folder.
+        let (fixture, program) = Fixture::new("ancestor", 0o755, 0o755);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        assert!(check_root_service_program(&program, me()).is_err());
+    }
+
+    /// #146: links cannot launder a binary. A link in a writable folder is
+    /// refused even when it points at a trusted file, and a trusted-looking
+    /// path whose real file sits in a writable folder is refused too.
+    #[test]
+    fn symlinks_through_writable_folders_are_refused() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let (_trusted, program) = Fixture::new("link-target", 0o755, 0o755);
+        let (open, _) = Fixture::new("link-open", 0o755, 0o755);
+        fs::set_permissions(open.0.join("bin"), fs::Permissions::from_mode(0o777)).unwrap();
+        let link = open.0.join("bin/link");
+        symlink(&program, &link).unwrap();
+        assert!(check_root_service_program(&link, me()).is_err());
+
+        let (_writable, replaceable) = Fixture::new("real-open", 0o777, 0o755);
+        let (protected, _) = Fixture::new("link-protected", 0o755, 0o755);
+        let link = protected.0.join("bin/link");
+        symlink(&replaceable, &link).unwrap();
+        assert!(check_root_service_program(&link, me()).is_err());
+        // A folder link pointing into the writable folder fails the same way.
+        let folder_link = protected.0.join("folder");
+        symlink(replaceable.parent().unwrap(), &folder_link).unwrap();
+        assert!(check_root_service_program(&folder_link.join("infraternal"), me()).is_err());
+    }
+
+    /// A binary that vanished cannot back a service, and the message says so.
+    #[test]
+    fn a_missing_binary_is_refused_by_name() {
+        let (fixture, _) = Fixture::new("missing", 0o755, 0o755);
+        let gone = fixture.0.join("bin/absent");
+        let refusal = check_root_service_program(&gone, me()).unwrap_err();
+        assert!(refusal.contains("is gone"), "{refusal}");
     }
 }

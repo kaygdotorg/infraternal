@@ -106,12 +106,29 @@ impl EnrollmentStore {
 
     /// Finalize retirement only on a durable daemon reply; lost replies stay pending.
     /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
+    /// For a confirmation that carries no D356 report (the agent is gone): the
+    /// kept report says it was not checked.
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,
         person: Uuid,
     ) -> Result<(), EnrollmentError> {
-        self.confirm_removal_cleanup(host, person, None).await
+        self.confirm_removal_cleanup(host, person, None, None).await
+    }
+
+    /// [`Self::confirm_login_cleanup`] with the host's D356 report of access
+    /// files changed since the grant, in the same transaction as the
+    /// #409 uninstall answer. Only tests call it
+    /// directly; the outbox passes the report to `confirm_removal_cleanup`.
+    #[cfg(test)]
+    pub(crate) async fn confirm_login_cleanup_with_report(
+        &self,
+        host: Uuid,
+        person: Uuid,
+        report: Option<&crate::access_report::AccessReport>,
+    ) -> Result<(), EnrollmentError> {
+        self.confirm_removal_cleanup(host, person, None, report)
+            .await
     }
 
     /// Wait up to `wait` for this host's removal to be confirmed by its
@@ -172,6 +189,7 @@ impl EnrollmentStore {
         host: Uuid,
         person: Uuid,
         answer: Option<(&'static str, &[&'static str])>,
+        report: Option<&crate::access_report::AccessReport>,
     ) -> Result<(), EnrollmentError> {
         let mut transaction = self.0.begin().await?;
         // Like the receipt below, only this person's unconfirmed cleanup may
@@ -185,6 +203,35 @@ impl EnrollmentStore {
                 .bind(person.to_string())
                 .execute(&mut *transaction)
                 .await?;
+        }
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_login_cleanup WHERE host_id=? AND person_id=? AND confirmed=0)")
+            .bind(host.as_bytes().as_slice())
+            .bind(person.to_string())
+            .fetch_one(&mut *transaction)
+            .await?;
+        if pending {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| {
+                    i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+                });
+            // Every confirmed revocation keeps a report. Without a host
+            // reply (the agent was removed), it says that nothing was checked.
+            // The outcome is decided here, by the server's rule, with the
+            // host's mode from the server's own record (J334 P1-3).
+            let mode: Option<String> =
+                sqlx::query_scalar("SELECT mode FROM remote_hosts WHERE id=?")
+                    .bind(host.as_bytes().as_slice())
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            let rootless = mode.as_deref() != Some("rootful");
+            let report = report.cloned().unwrap_or_else(|| {
+                crate::access_report::AccessReport::not_checked(
+                    crate::access_report::Reason::AgentRemoved,
+                )
+            });
+            let report = report.decided(rootless);
+            crate::access_report::store(&mut transaction, host, person, &report, now).await?;
         }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.

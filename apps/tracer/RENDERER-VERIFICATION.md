@@ -4,17 +4,17 @@
 ## Source build and license
 
 The tracer uses the ESM build from `ghostty-web` source commit
-`5f0c6b7720e5ac241208afe7a2335981ded1b486` (0.5.0-rc.0). It includes fix
-`bec9e162b137478fb032d7edf60a2f29a6e5f04b` from #180. The embedded Ghostty
-submodule is pinned to `5714ed07a1012573261b7b7e3ed2add9c1504496`. Build tools
-are Bun 1.4.2 and Zig 0.15.2. `vendor/ghostty-web/build.sh` checks these exact
-versions, builds from those immutable source revisions, and compares the output
-to `vendor/ghostty-web/SHA256SUMS`.
+`835eb2749f640a139693bb64fd67de3c1b50a598` (upstream `main`, 2026-11-18). It includes
+fix `bec9e162b137478fb032d7edf60a2f29a6e5f04b` from #180. The Ghostty core is
+`e75f8956c576ea8acf6ee4e70d45f918738e7512` (2026-03-13), the newest one upstream's WASM
+API still fits (`vendor/ghostty-web/README.md` says why). Build tools are Bun 1.4.2 and
+Zig 0.15.2. `vendor/ghostty-web/build.sh` checks these exact versions, builds from those
+immutable source revisions, and compares the output to `vendor/ghostty-web/SHA256SUMS`.
 
-The checked-in ESM artifact is 702,145 B (197,079 B gzip at level 9) and embeds
-its WASM. The separately retained WASM is 423,939 B; its digest and the ESM and
-declaration digests are in the manifest. `scripts/verify fast` verifies all
-three files. The source rebuild command is:
+The checked-in ESM artifact is 771,128 B and embeds its WASM. The separately retained
+WASM is 470,694 B (136,634 B gzip at level 9); its digest and the ESM and declaration
+digests are in the manifest. `scripts/verify fast` verifies all three files. The source
+rebuild command is:
 
 ```sh
 nix shell nixpkgs#zig_0_15 -c apps/tracer/vendor/ghostty-web/build.sh --check
@@ -176,3 +176,47 @@ used above.
   `$HOME/.cache/codex-scratch/tracer-<pid>/evidence/playwright/`; historical files
   were removed under D262. Attach selected screenshots for external review; this
   checklist does not claim visual approval.
+
+## Engine update: ghostty-web `835eb27` on Ghostty `e75f8956c` (#575, J1110, 2026-11-21)
+
+The previous pin was ghostty-web `5f0c6b7` on Ghostty `5714ed07` (2025-12-01). Upstream
+`main` has no library or build change since that pin, so the real update is the Ghostty
+core: 662 first-parent commits newer (2026-03-13), built with the same Bun 1.4.2 and
+Zig 0.15.2. Ghostty v1.4.0 (needs Zig 0.17, and a terminal C API that replaces the one
+ghostty-web patches in) is not reachable without rewriting the WASM binding; that is a
+foundational choice for the owner, not made here. Reproduce with
+`build.sh --check` (verified bit-for-bit on compute01).
+
+All numbers below are from `~/j1110-perf/` on the perf VM (under `perf-run`, alternating
+old and new artifacts) unless noted; the harnesses and logs are attached to #575.
+
+| Measure | Old (`5714ed07`) | New (`e75f8956c`) |
+|---|---:|---:|
+| `ghostty-vt.wasm` | 424,337 B (124,301 B gzip) | 470,694 B (136,634 B gzip), +10.9 % |
+| WASM linear memory after the 50 MB behemoth (Chromium) | 1,053,818,880 B | 12,124,160 B |
+| Same, 20 MB mixed / binary | 414,187,520 / 11,534,336 B | 14,680,064 / 11,534,336 B |
+| Headless parse of the 50 MB behemoth, median of 2 | 1,794 ms | 1,615 ms (-10 %) |
+| 20 MB mixed / 20 MB binary | 739 / 1,251 ms | 656 / 1,264 ms (-11 % / +1 %) |
+| `write` 8 MB mixed, 64 KiB chunks (3 rounds) | 290-299 ms | 259-267 ms (-10 %) |
+| `createTerminal`+`free` x300 | 72-104 ms | 58-59 ms |
+| resize 80x24 to 205x56 and back, x200 | 166-177 ms | 189-195 ms (+11 %) |
+| D375 `d375_render_10mbps` (unthrottled, 2 runs each) | 416.67 / 416.67 fps (gate 120) | 400.00 / 400.00 fps |
+| Same row, write CPU for the 10 MB | 187 / 188 ms | 197 / 201 ms (+6 %) |
+
+The WASM memory row is the large change: the old core grew linear memory to 1 GiB while
+streaming the behemoth and never gave it back (renderer RSS about 750 MiB per session),
+the new one stays at 11 MiB. The other D375 rows (first paint, returning sign-in, reconnect,
+predicted glyph, own overhead, real echo) match the old artifact within the run-to-run
+spread; their changes follow the proxy's measured round trip, not the engine.
+
+What is worse: the wasm is 46 KB larger, the 10 MB/s render row is a consistent 4 % lower
+(still 3.3 x its gate), and a resize costs 11 % more.
+
+Correctness: the seven reproducers and three full fixtures pass in Node (headless
+terminal, canary painted) and in Chromium (`test/renderer-regression.spec.ts`, 12/12).
+Upstream's own 359 tests pass against both WASM files. A differential run of 23 inputs
+(synthetic sequences, the ten fixtures) at 80x24 and 205x56 gives identical viewports and
+cursors in 46 of 46 cases; 3 of them differ in their scrollback lines. The one dissected
+(205x56, `binary-no-esc-context.bin`) is a single cell: U+06DD gets width 2 instead of 1. Of 167 further terminal and renderer Chromium specs, 166 pass;
+`terminal-theme.spec.ts:209` (theme switch p99 10.6-13.1 ms against the 8.33 ms frame)
+fails identically on the old artifact (10.6-11.2 ms, 3 of 3 runs).

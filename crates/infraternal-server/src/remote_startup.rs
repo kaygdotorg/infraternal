@@ -74,7 +74,10 @@ impl RemoteStartup {
     ) -> Result<RemoteService, ServerError> {
         let (identity, issuer) = crate::ca_bootstrap::retained_identity(&ca_dir.join("active"))
             .map_err(|_| ServerError::TlsConfiguration)?;
-        verify_server(&issuer, &identity.certificate, name)?;
+        // An expired leaf must not stop the server: the web app and the CA
+        // unlock still have to come up, and the first unlock reissues the
+        // leaf at once (#559). Chain, purpose and name are still checked.
+        verify_server_at_any_time(&issuer, &identity.certificate, name)?;
         let https = config
             .tls
             .as_ref()
@@ -272,11 +275,34 @@ fn https_identity(config: &ServerConfig) -> Result<Option<Identity>, ServerError
         .transpose()
 }
 
+/// Check that `leaf` chains to `issuer` for the server purpose and `name`, valid now.
 fn verify_server(issuer: &X509, leaf: &X509, name: &str) -> Result<(), ServerError> {
+    verify_server_with(issuer, leaf, name, false)
+}
+
+/// [`verify_server`] without the validity-time check: the retained leg-B leaf
+/// may have expired while the server was down or locked, and only an unlock
+/// can replace it (#559).
+fn verify_server_at_any_time(issuer: &X509, leaf: &X509, name: &str) -> Result<(), ServerError> {
+    verify_server_with(issuer, leaf, name, true)
+}
+
+/// Shared chain, purpose and name check; `any_time` skips validity dates.
+fn verify_server_with(
+    issuer: &X509,
+    leaf: &X509,
+    name: &str,
+    any_time: bool,
+) -> Result<(), ServerError> {
     let error = || ServerError::TlsConfiguration;
     let mut trust = X509StoreBuilder::new().map_err(|_| error())?;
     trust.add_cert(issuer.clone()).map_err(|_| error())?;
     let mut params = X509VerifyParam::new().map_err(|_| error())?;
+    if any_time {
+        params
+            .set_flags(openssl::x509::verify::X509VerifyFlags::NO_CHECK_TIME)
+            .map_err(|_| error())?;
+    }
     params
         .set_purpose(openssl::x509::X509PurposeId::SSL_SERVER)
         .map_err(|_| error())?;

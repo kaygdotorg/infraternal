@@ -121,6 +121,7 @@ the PTY output stream since the session started.
 | 0x1C | shim → agent | `SnapshotWithFlags` | u64 seq, u8 flags, bytes VT (cap bit 2; see additive section) |
 | 0x1D | agent → shim | `SelectSharedWriter` | u32 existing nonzero writer identity (cap bit 4; see additive section) |
 | 0x20 | shim → agent  | `Exited`   | i32 status or −signal, u64 final_seq |
+| 0x24 | shim → agent | `EchoState` | u64 head_seq, u8 flags (cap bit 8; see additive section) |
 | 0x21 | agent → shim  | `ExitAck`  | (empty). Optional acknowledgement after `Exited`; closes this peer. |
 | 0x7F | both          | `Error`    | u16 code, utf-8 message |
 
@@ -387,6 +388,35 @@ the link cannot combine it with viewer, writer or other capability bits.
 `StopShell` (opcode `0x22`) asks the shim to stop and reap that shell, and
 `ShellStopped` (`0x23`) confirms reaping. The shim advertises this capability
 only for the host-login runtime, never for root or readiness sessions.
+
+### Echo state (#569, D130)
+
+Capability bit 8 (`ECHO_STATE`, value 256) asks the shim to report the PTY's
+echo mode with `EchoState` (opcode `0x24`): u64 `head_seq`, the output head when
+the mode was read, then one flag byte. Flag bit 0 (`ECHO_HIDDEN`) means the
+terminal reads a line with echo off: termios `ICANON` set and `ECHO` clear. That
+is the mode getpass, `read -s`, sudo and the ssh client's own passphrase prompt
+use, whatever language the prompt is in. A shell's line editor clears both
+flags and a running program usually has both set, so neither reads as hidden.
+Any other flag bit, and any payload other than exactly nine bytes, is a framing
+error.
+
+- The shim sends `EchoState` only to a link that selected the bit and that is
+  streaming (it has a cursor after `ReadFrom` or a Snapshot), so it never
+  interleaves with handshake replies such as `InputState`. It is queued between
+  whole frames, before the next `Output`, and only when the state differs from
+  what that link was last told. A new link starts at "echo on", so it hears
+  `ECHO_HIDDEN` once it streams if a hidden line is being read.
+- The shim samples the mode with one `tcgetattr` on the PTY master, at most
+  once per pump pass, and only after PTY traffic (output read, input written)
+  and only when some link can take a report. There is no timer: a program that
+  turns echo off without printing is seen at the next key the person types.
+- The report is a hint for the viewer's predictive echo, never a security
+  boundary or a cursor fence. A failed `tcgetattr` reads as "echo on". Inside a
+  nested login (ssh to another machine) the outer PTY is raw, so the remote
+  prompt is not seen here; viewers keep their prompt-text rule for that.
+- The infraternal agent forwards it as the leg-B notice `terminal.echo`
+  (wire.md §4).
 
 ### Readiness probe lifetime (test-only override, #355)
 

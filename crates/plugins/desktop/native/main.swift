@@ -176,6 +176,10 @@ private final class Session {
     var output: CGSize = .zero
     /// Remote keyboard and mouse input.
     let control = RemoteControl()
+    /// Tells the encoding processes which target is being controlled (`EncoderPriority.swift`).
+    let priority = EncoderPriority()
+    /// The pointer shape the Mac is showing, reported on every status reply for the viewer to draw.
+    let cursor = MachineCursor()
     /// The video encoder used in `--encoder` mode and for pixels sent by the caller.
     let encoder = Encoder()
     /// Once a second, re-reads the window's frame and state so it is followed while idle.
@@ -243,7 +247,10 @@ private final class Session {
                 screen = CGDisplayBounds(displayID)
             }
             guard geometry?.exists != false, geometry != nil || screen != nil else { throw HelperFailure.invalid }
-            return (67,try control.inject(body,geometry:geometry,screen:screen,output:output))
+            let result = try control.inject(body,geometry:geometry,screen:screen,output:output)
+            // The window or screen the person is driving is encoded first when several move at once.
+            if result["accepted"] as? Bool == true { priority.claim(target: EncoderPriority.targetKey(windowID: geometry?.id, displayID: displayID)) }
+            return (67,result)
         case 5: return (68,stop())
         case 6:
             if let displayID {
@@ -256,6 +263,7 @@ private final class Session {
             }
             let ticks = mach_absolute_time()
             var result = state(); result["capture_ticks"] = ticks; result["capture_ns"] = nanos(ticks)
+            if !surfaceMode, let shape = cursor.current() { result["cursor"] = shape }
             return (68,result)
         case 7:
             guard let surface else { throw HelperFailure.unavailable }

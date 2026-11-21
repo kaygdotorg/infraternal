@@ -98,8 +98,6 @@ export interface ToastOptions {
   aboveNotifications?: boolean;
 }
 
-/** Messages longer than this stack their actions beneath the text; shorter ones keep the actions beside it. */
-const STACK_AFTER = 36;
 /** How many toasts are drawn at once. Older ones keep their clocks out of sight. */
 const VISIBLE = 3;
 /** How long a leaving toast keeps its place for the exit animation before it is removed. */
@@ -378,6 +376,58 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     card.addEventListener("pointercancel", end);
   };
 
+  /**
+   * The one layout rule for every toast, decided from what the browser actually laid out (never from a character count).
+   * 1. Beside: the message shares a row with its actions or choices. One line is done.
+   * 2. A message that wraps while its actions sit beside it moves them to a row of their own under it, and the text gets the full width.
+   * 3. A message still on two or more lines wraps balanced (`data-lines="many"`) and the box is trimmed to its longest line, so the
+   *    card hugs the text: even lines, no one-word last line, no empty strip on the right.
+   * The mark and the close button centre on the first line in every case (styles.css). One batched read per message or per width
+   * change: nothing here runs per frame.
+   */
+  const fit = (it: Item): void => {
+    const { card, label } = it;
+    if (!card.isConnected || wrap.hidden) return;
+    const trailing = !it.actions.hidden || !it.icons.hidden;
+    card.dataset.stacked = "false";
+    card.dataset.lines = "one";
+    label.style.width = "";
+    const line = Number.parseFloat(getComputedStyle(label).lineHeight) || 0;
+    const rows = (): number => (line > 0 ? Math.round((label.clientHeight - paddingY(label)) / line) : 1);
+    if (rows() > 1 && trailing) {
+      card.dataset.stacked = "true";
+    }
+    if (rows() <= 1) return;
+    card.dataset.lines = "many";
+    const balanced = rows();
+    // Trim the box to its longest balanced line: the narrowest width that keeps the same number of lines (the number of lines can
+    // only go up as the box narrows, so a binary search finds it in a handful of layouts). The browser's own wrapping is the
+    // measure, so no text-metric guess or transform scale can leave a strip beside the text.
+    const full = label.clientWidth;
+    let lo = Math.ceil(full / balanced / 2), hi = full;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      label.style.width = `${mid}px`;
+      if (rows() <= balanced) hi = mid; else lo = mid;
+    }
+    label.style.width = hi >= full ? "" : `${hi}px`;
+  };
+  /** A new viewport width changes where lines break, so every live message is fitted again once. */
+  let fittedWidth = 0;
+  const onResize = (): void => {
+    const width = wrap.clientWidth;
+    if (!width || width === fittedWidth) return;
+    fittedWidth = width;
+    for (const it of live()) fit(it);
+    measure();
+  };
+  window.addEventListener("resize", onResize);
+  /** The vertical padding of an element in pixels (the message keeps its first line centred in the control slot with it). */
+  const paddingY = (el: HTMLElement): number => {
+    const s = getComputedStyle(el);
+    return (Number.parseFloat(s.paddingTop) || 0) + (Number.parseFloat(s.paddingBottom) || 0);
+  };
+
   const fill = (it: Item, value: ToastMessage): void => {
     it.closeHandler = value.onClose;
     it.error = value.tone === "error";
@@ -425,7 +475,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       if (value.actionGroupKeyShortcuts) it.actions.setAttribute("aria-keyshortcuts", value.actionGroupKeyShortcuts);
       else it.actions.removeAttribute("aria-keyshortcuts");
     }
-    it.card.dataset.stacked = String(Boolean(value.action || value.secondaryAction) && value.message.length > STACK_AFTER);
     const duration = value.duration ?? 4200;
     it.left = duration > 0 ? duration : Number.POSITIVE_INFINITY;
   };
@@ -480,6 +529,8 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       fill(it, value);
       it.card.dataset.open = it.card.dataset.open ?? "false";
       arrange();
+      fit(it);
+      fittedWidth = wrap.clientWidth;
       // The newest toast is unclamped (it is the front), so this is its natural height: one forced layout per toast.
       it.height = it.card.offsetHeight || it.height;
       clocks();
@@ -505,6 +556,7 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     },
     dispose() {
       disposed = true;
+      window.removeEventListener("resize", onResize);
       window.clearTimeout(leaveTimer);
       if (frame) cancelAnimationFrame(frame);
       for (const it of items) { window.clearTimeout(it.timer); window.clearTimeout(it.exitTimer); }

@@ -24,6 +24,15 @@ Solicited control requests share one three-second send/reply deadline, including
 silence before the first reply byte. Unsolicited idle video has no silence timer;
 partial frames retain their deadline. Blocked output ends capture instead of queuing.
 Frame payloads are `capture_ns:u64be | keyframe:u8 | H.264 Annex-B bytes`.
+The bytes after the keyframe flag are either an Annex-B access unit (always
+starting with a zero byte) or, with keyframe 0, a **tile update** starting
+`0xF7 'T'` (#146 proposal C): exact pixels of up to eight small changed
+rectangles, sent instead of an encoded frame when the change is small. Layout,
+big-endian: `0xF7 0x54 | version u8=1 | encoding u8 (0 raw, 1 raw DEFLATE) |
+width u16 | height u16 | count u8 (1-8) | count x (x,y,w,h u16) | pixel bytes u32 |
+data`, where the pixels are each rectangle's RGBA rows in turn. A tile update
+takes its place in the sequence like a delta: losing it needs the same repair,
+and any later video picture supersedes it.
 SPS/PPS precede each IDR, making saved `.h264` streams directly decodable.
 Monotonic timestamps mark the owned-pixel capture request in the native host clock, before capture/copy/encoding. Stream notices are scheduling hints; they do not timestamp these subsequently captured pixels.
 
@@ -140,6 +149,19 @@ or injecting input. Its `input.pause_remaining_ms` is clamped to 0–2000;
 Control acknowledgement adds `control_visible`; acquisition fails unless the
 indicator is visible before injection. Screen Recording and Accessibility
 must be granted by the person using the Mac; refusal produces a fixed error.
+
+Capture omits the pointer. The control companion reports the shape the Mac is
+showing as `cursor` on every Status reply (so `desktop.session.clock` carries
+it): `id` (16 hex characters naming the image), `png` (base64), `hot_x` and
+`hot_y` (hotspot in points from the image's top left), `scale` (pixels per
+point) and `width`/`height` (pixels, at most 128). The field is absent when the
+system reports no image or one larger than browsers accept; readers ignore it
+when missing. The viewer draws its own pointer in that shape, once per `id`
+(#146).
+
+Remote pointer moves and scrolls reuse the followed geometry. Each is refused as
+`occluded` only after a query for the windows above the target; clicks and keys
+still re-read the window first (#146).
 
 The control and encoding companions are separate signed processes launched
 through LaunchServices. They exchange bounded packets with the helper over

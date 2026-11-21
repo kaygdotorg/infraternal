@@ -133,7 +133,7 @@ impl Revocations {
         let Some(actor) = actor else {
             return false;
         };
-        durable_cleanup(actor, person).await
+        durable_cleanup(actor, person).await.is_some()
     }
 
     /// Cut every epoch of `host`, then wait until each one's admitted writes
@@ -219,13 +219,14 @@ impl Revocations {
 /// Wait for an actual durable reply rather than treating a short timeout as
 /// completion. The bounded transport owner supplies the whole-attempt deadline;
 /// errors may retry, but an unanswered save is never duplicated in its queue.
+/// `None` means not confirmed; a confirmation carries the host's D356 report.
 pub(crate) async fn durable_cleanup(
     actor: crate::embedded::WeakEmbeddedAgent,
     person: Uuid,
-) -> bool {
+) -> Option<crate::embedded::Revoked> {
     loop {
         match actor.revoke_login(person).await {
-            Ok(()) => return true,
+            Ok(revoked) => return Some(revoked),
             Err(crate::embedded::AgentError::Rejected) => {
                 // Busy capacity and failed persistence leave server authority
                 // pending. Yield between active retries; never retire on a
@@ -233,7 +234,7 @@ pub(crate) async fn durable_cleanup(
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             // A lost transport leaves the persisted intent for reconnect.
-            Err(_) => return false,
+            Err(_) => return None,
         }
     }
 }
