@@ -8,6 +8,7 @@ import { returningVisitChunks, staticClosure, withModulePreload, withReturningVi
 import { buildDocs } from "./docs-build";
 import type { BunPlugin, PluginBuilder } from "bun";
 import { docsDatasetPlugin } from "./docs-dataset";
+import { fingerprintAssets, withHashedReferences } from "./fingerprint";
 
 // TRACER_DIST builds elsewhere (a build next to a running preview server must not replace its files).
 const dist = process.env.TRACER_DIST ?? "dist";
@@ -82,16 +83,24 @@ await Promise.all([
 ]);
 // The pages for the version this build is (the app's ? links open them); plain HTML and CSS, outside the JS budget.
 await buildDocs(`${dist}/docs`);
+// Files the page loads on every visit get content-hashed names, so the server can cache them for good (fingerprint.ts, #573).
+// Only what index.html links is renamed; the sheets that code loads by name later (account, appwin, ...) keep theirs.
+const page = await Bun.file("index.html").text();
+const pageSheets = [...page.matchAll(/<link rel="stylesheet" href="\.\/([^"]+\.css)"/g)].map((match) => match[1]!);
+const pageFonts = [...page.matchAll(/<link rel="preload" href="\.\/(fonts\/[^"]+\.woff2)"/g)].map((match) => match[1]!);
+const names = await fingerprintAssets(dist, pageSheets, "main.js");
+const entryName = names.get("main.js")!;
+// The bundler's lists name the entry `main.js`; follow the rename so the chunk classes and the preload hints are about real files.
+const outputs = Object.fromEntries(Object.entries((build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile.outputs).map(([path, out]) => [path.replace(/^\.\/main\.js$/, `./${entryName}`).replace(/^main\.js$/, entryName), out]));
 // The budget gate reads this: which chunks the first screen needs and which load later (D188).
-const meta = (build as unknown as { metafile: { outputs: Record<string, MetaOutput> } }).metafile;
-await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(meta.outputs), null, 1));
+await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(outputs), null, 1));
 // The first screen's code is fetched in parallel with the page instead of one import level per round trip (entry-preload.ts).
 // A device that has signed in before also gets the code of the screen it is about to open, so the terminal does not wait for the session answer.
-/** The files every visit needs at once: `main.js` and its static imports. */
-const firstScreen = staticClosure(meta.outputs, "main.js");
+/** The files every visit needs at once: the entry and its static imports. */
+const firstScreen = staticClosure(outputs, entryName);
 /** The extra files a device that has signed in before needs next: the core screen and the terminal. */
-const returningVisit = returningVisitChunks(meta.outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
-await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(await Bun.file("index.html").text(), firstScreen), returningVisit));
+const returningVisit = returningVisitChunks(outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
+await Bun.write(`${dist}/index.html`, withReturningVisitPreload(withModulePreload(withHashedReferences(page, names, pageFonts), firstScreen), returningVisit));
 // Tools ask for /favicon.ico by habit, whatever the page's <link> says; give them a real icon (#518).
 await Bun.write(`${dist}/favicon.ico`, pngToIco(new Uint8Array(await Bun.file("icons/dark-32.png").arrayBuffer())));
 await precompress(dist);

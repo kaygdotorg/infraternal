@@ -8,10 +8,10 @@ import { expect, test } from "playwright/test";
 test("the page hints its first-screen chunks and each hint is served", async ({ page }) => {
   const html = await (await page.request.get("/")).text();
   const hinted = [...html.matchAll(/<link rel="modulepreload" href="\.\/([^"]+)"/g)].map((match) => match[1]!);
-  expect(hinted[0]).toBe("main.js");
+  expect(hinted[0]).toMatch(/^main\.[0-9a-f]{10}\.js$/);
   expect(hinted.length).toBeGreaterThan(1);
   for (const file of hinted) {
-    expect(file === "main.js" || /^chunk-[0-9a-z]{8}\.js$/.test(file)).toBe(true);
+    expect(/^main\.[0-9a-f]{10}\.js$/.test(file) || /^chunk-[0-9a-z]{8}\.js$/.test(file)).toBe(true);
     expect((await page.request.get(`/${file}`)).status()).toBe(200);
   }
 });
