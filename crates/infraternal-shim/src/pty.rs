@@ -2717,9 +2717,18 @@ mod inherited_login_process_tests {
     fn reserved_ready_source_survives_process_pin_transfer() {
         const FIXTURE: &str = "INFRATERNAL_READY_PIN_FIXTURE";
         if std::env::var_os(FIXTURE).is_none() {
-            assert!(Command::new(std::env::current_exe().unwrap())
+            // Capture the fixture's output so a failure names the child's
+            // message instead of only the exit status (#553, J1047).
+            let output = Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "pty::inherited_login_process_tests::reserved_ready_source_survives_process_pin_transfer"])
-                .env(FIXTURE, "1").status().unwrap().success());
+                .env(FIXTURE, "1").output().unwrap();
+            assert!(
+                output.status.success(),
+                "ready-pin fixture failed with {}\n--- fixture stdout ---\n{}\n--- fixture stderr ---\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
             return;
         }
         let (parent, ready) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -2740,9 +2749,15 @@ mod inherited_login_process_tests {
         child.args(["-c", "test -d \"$1\" && printf r >&4", "pin-ready"]);
         child.arg(pin);
         inherit_login_ready(&mut child, &ready).unwrap();
+        // output() instead of status(): the shell's own stderr says which
+        // step failed when the pin or the readiness descriptor is missing.
+        let output = child.output().unwrap();
         assert!(
-            child.status().unwrap().success(),
-            "readiness source was replaced by the process pin"
+            output.status.success(),
+            "readiness source was replaced by the process pin: shell exited with {}\n--- shell stdout ---\n{}\n--- shell stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
         );
         let mut response = [0];
         (&parent_copy).read_exact(&mut response).unwrap();
