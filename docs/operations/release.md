@@ -281,8 +281,9 @@ boot pointer) moves to `releases/<new>`. Other installed releases are removed,
 and `previous/` is kept until the next update, so S5's manual roll back can use
 it.
 
-**The undo (D295).** If the check fails or times out, the new release execs the
-previous image again, warm, and gives it back its own path. Before the database
+**The undo (D295).** If the check fails or times out, or the new release cannot
+start serving at all (a failed database migration, for example), the new release
+execs the previous image again, warm, and gives it back its own path. Before the database
 opens, the previous release puts the database copy back (removing the WAL and
 shared-memory files of the database it replaces) and records the update as
 `undone`. It also **pauses** that version, so the timer never stages it again.
@@ -305,6 +306,11 @@ Data written during the trial is lost, as D295 accepts.
 `<data>/updates/current/infraternal-<arch>-musl` (S6 points the production unit
 there). A unit that starts a fixed path runs the updated release only until its
 next cold start.
+
+The undo is recorded with its reason: `the new release failed its health check`,
+`… did not pass its health check in time`, `… could not start serving`, `… stopped
+during its health check` (crash, kill or reboot, the cold case) or `… could not
+start` (the exec was refused).
 
 **Staging proof.** `staging-trust` builds (never production;
 `check-production-trust.py` refuses them) read three more variables:

@@ -18,6 +18,10 @@
 //!   unlocked if it was before. On a pass it commits the boot pointer. Otherwise it
 //!   asks the loop to exec the previous release warm, which restores the database
 //!   copy at its own startup (D295).
+//! - **A new release that cannot start.** If the server fails to start serving while
+//!   it is on trial (a database migration error, for example), the CLI asks
+//!   [`failed_start_undo`] for the same warm undo instead of exiting. An exit would
+//!   bring the previous release back cold, which costs a passkey unlock (D217).
 //!
 //! The quiet-window task and the trial run only where the S3 check runs: a root,
 //! signed release build on Linux.
@@ -69,7 +73,9 @@ pub enum SwitchRequest {
 
 /// The restart loop's inbox; `None` until the CLI registers with [`switch_requests`].
 static SWITCHES: Mutex<Option<mpsc::Sender<SwitchRequest>>> = Mutex::new(None);
-/// The trial [`startup`] found, for [`start`] to run once the server serves.
+/// The trial [`startup`] found, for [`start`] to run once the server serves. It stays
+/// set until the trial commits, so [`failed_start_undo`] can still find it if serving
+/// fails after the trial began.
 static TRIAL: Mutex<Option<Pending>> = Mutex::new(None);
 /// Answers whether the CA is unlocked right now; see [`set_ca_probe`].
 type CaProbe = Box<dyn Fn() -> bool + Send + Sync>;
@@ -159,7 +165,7 @@ pub(crate) fn start(
     let trial = TRIAL
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take();
+        .clone();
     let timing = Timing::from_environment();
     tokio::spawn(async move {
         if let Some(trial) = trial {
@@ -171,6 +177,32 @@ pub(crate) fn start(
         }
         quiet_window(&updater, &pool, &data, artifact, timing.quiet).await;
     });
+}
+
+/// The warm undo for a new release on trial that could not start serving (#211 S4).
+///
+/// The CLI calls this when the server's serving future returns an error. If this
+/// process is a release on trial, the marker moves to phase `rollback` with
+/// [`apply::FAILED_TO_START`], and the returned [`Undo`] is what the restart loop
+/// needs to exec the previous release warm, exactly like a failed health check. The
+/// previous release then restores its database copy before opening the database
+/// (D295). Returns `None` when this process is not on trial (the error then ends the
+/// process as before) or the marker could not be updated.
+#[must_use]
+pub fn failed_start_undo(data: &Path) -> Option<Undo> {
+    let trial = TRIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()?;
+    let artifact = update::availability(crate::release_latest::release_build()).ok()?;
+    tracing::warn!(
+        version = trial.to_version,
+        reason = apply::FAILED_TO_START,
+        "update_trial_failed"
+    );
+    apply::begin_rollback(data, &trial, artifact, apply::FAILED_TO_START)
+        .inspect_err(|reason| tracing::error!(reason, "update_undo_not_marked"))
+        .ok()
 }
 
 /// The quiet window and the check timing, shortened only by the staging hook.
@@ -372,19 +404,19 @@ async fn run_trial(
     // A marker with a reason means B started again mid-trial or after a failed undo
     // exec: undo again, keeping the reason.
     let verdict = if trial.reason.is_some() {
-        Err(if trial.reason.as_deref() == Some(apply::UNHEALTHY) {
-            apply::UNHEALTHY
-        } else {
-            apply::STOPPED_IN_TRIAL
-        })
+        Err(apply::undo_reason(trial.reason.as_deref()))
     } else {
-        tokio::time::timeout(TRIAL_LIMIT, healthy(pool, listen, trial.ca_warm))
-            .await
-            .unwrap_or(Err("the health check did not pass in time"))
-            .map_err(|reason| {
+        match tokio::time::timeout(TRIAL_LIMIT, healthy(pool, listen, trial.ca_warm)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => {
                 tracing::warn!(reason, "update_health_failed");
-                apply::UNHEALTHY
-            })
+                Err(apply::UNHEALTHY)
+            }
+            Err(_) => {
+                tracing::warn!(reason = apply::TIMED_OUT, "update_health_failed");
+                Err(apply::TIMED_OUT)
+            }
+        }
     };
     let data = data.to_owned();
     match verdict {
@@ -396,6 +428,9 @@ async fn run_trial(
             match committed {
                 Ok(Ok(())) => {
                     tracing::info!(version = trial.to_version, "update_applied");
+                    *TRIAL
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     true
                 }
                 Ok(Err(reason)) => {

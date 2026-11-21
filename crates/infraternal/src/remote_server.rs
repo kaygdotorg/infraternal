@@ -127,7 +127,17 @@ pub(crate) async fn serve(
             #[cfg(not(feature = "release"))]
             let switch = std::future::pending::<Option<()>>();
             tokio::select! {
-                result = &mut serving => return result.map(|()| Outcome::Stopped),
+                result = &mut serving => {
+                    // A new release on trial that cannot serve (a failed migration, for
+                    // example) undoes itself warm instead of exiting cold (#211 S4).
+                    #[cfg(feature = "release")]
+                    if result.is_err()
+                        && let Some(replacement) = crate::restart::failed_start(source.as_deref(), &data_dir)
+                    {
+                        return Ok(Outcome::Restart(replacement));
+                    }
+                    return result.map(|()| Outcome::Stopped);
+                }
                 Some(request) = switch => {
                     #[cfg(feature = "release")]
                     if let Some(replacement) = crate::restart::switch(request, source.as_deref(), &data_dir) {

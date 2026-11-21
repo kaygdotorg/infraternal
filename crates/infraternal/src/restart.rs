@@ -808,6 +808,26 @@ pub(crate) fn switch(
     }
 }
 
+/// The warm undo for a new release on trial whose serving failed at startup (#211 S4).
+///
+/// Builds the same undo request a failed health check sends and admits it with
+/// [`switch`], so the previous release comes back in this process with the CA (D217)
+/// and restores its database copy (D295). Returns `None` when this process is not on
+/// trial or the undo was refused; the caller then returns the serving error as before.
+#[cfg(feature = "release")]
+pub(crate) fn failed_start(
+    source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    data: &Path,
+) -> Option<Replacement> {
+    let undo = infraternal_server::update_apply::failed_start_undo(data)?;
+    let (reply, _answer) = tokio::sync::oneshot::channel();
+    switch(
+        infraternal_server::update_apply::SwitchRequest::Undo { undo, reply },
+        source,
+        data,
+    )
+}
+
 /// Report one local restart request using the shared action definition.
 pub(crate) fn run(
     runtime: &tokio::runtime::Runtime,

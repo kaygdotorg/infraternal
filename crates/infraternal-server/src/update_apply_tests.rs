@@ -156,3 +156,11 @@ async fn the_database_copy_is_private_and_complete() {
     let _ = std::fs::remove_dir_all(&folder);
     let _ = std::fs::remove_file(&source);
 }
+
+/// A server that is not a release on trial never asks for an undo when serving fails:
+/// its error ends the process as before.
+#[test]
+fn a_failed_start_outside_a_trial_asks_for_no_undo() {
+    let data = std::env::temp_dir().join(format!("s4-failed-start-{}", std::process::id()));
+    assert!(failed_start_undo(&data).is_none());
+}
