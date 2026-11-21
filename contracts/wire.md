@@ -653,6 +653,7 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
 | 0x45 | VideoFragment | 16-byte session UUID, u64 sequence, u64 capture_ns, u8 keyframe, u32 total, u32 offset, fragment bytes |
+| 0x46 | VideoPressure | u16 waited_ms (leg B only, server to host) |
 
 Video sequence starts at 1 and never decreases within a session. `capture_ns`
 is the Mac host's monotonic capture-request clock, converted to nanoseconds;
@@ -682,14 +683,19 @@ viewer controls a session; taking control is an explicit handover.
 
 The server holds the session independently of viewers and checks live grants
 for view and control. At most five viewers attach. It retains the latest IDR
-and one pending access unit, sharing immutable bytes between viewers. A new
+and the access units of the last 100 ms (at most 32 units and 1 MiB, always
+including the newest; an IDR replaces those before it), sharing immutable
+bytes between viewers. Each viewer reads them in order from its own position,
+so a viewer briefly behind catches up with deltas; one whose next unit is no
+longer retained discards deltas until IDR and coalesces one repair (#146). A new
 viewer receives the cached IDR immediately, requests a fresh IDR and waits for
 it before consuming current deltas. Replaying a stale IDR followed by a current
 P-frame is forbidden. A viewer that misses a sequence discards deltas until IDR.
 
-Reliable mode has one pending frame at the sender and a bounded in-flight
-write. A stale pending frame is dropped; its dependent deltas are discarded
-until IDR. Once any bytes of a reliable frame are written it must be completed
+Reliable mode queues frames at the sender within the same bound (oldest
+waiting frame at most 100 ms old, 32 units, 1 MiB) and has a bounded in-flight
+write. Past the bound every waiting frame is dropped, deltas are discarded
+until IDR, and the sender asks for one. Once any bytes of a reliable frame are written it must be completed
 or its dedicated video stream reset: partial-frame cancellation cannot splice
 the next frame into it. Control and input use an independently driven reliable
 control direction; they are never queued behind video writes.
@@ -704,6 +710,13 @@ VideoRepair on the reliable control stream. Duplicate identical fragments are
 idempotent; conflicting fragments and metadata are errors. Idle
 receivers have no repair timer. A skipped delta forces IDR recovery; an IDR
 supersedes prior incomplete frames. No unbounded retransmission backlog.
+
+VideoPressure tells the host that video waited at least 50 ms at the server
+for one of the session's viewers (leg A is backed up); `waited_ms` is that
+wait, saturating at 65535, and is informational. The host's encoder lowers its
+bit rate as for its own congestion signal. The server sends at most one per
+250 ms per session and never fills the last two slots of its bounded host
+command queue with one. Browsers neither send nor receive it.
 
 Path selection consumes the same measured relay/direct observations as terminals.
 The server session and grant authority remain stable across path changes.

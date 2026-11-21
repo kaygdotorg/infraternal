@@ -1026,13 +1026,20 @@ async fn send_viewer_close(replies: &ReplySender, stream: u32, closed: bool, att
         }
     }
 }
+/// How long a frame may wait at the server for its viewer before the viewer
+/// reports pressure. Half the backlog's 100 ms bound, so the encoder slows
+/// down before frames have to be dropped; above the 36 ms a 450 KB sharp
+/// refresh takes on a 100 Mbit/s link, so a fast link never reports one.
+const PRESSURE_WAIT: Duration = Duration::from_millis(50);
 /// The task behind one attached viewer: forwards commands from the browser to
 /// the session and the session's frames back to the browser on `stream`.
 ///
 /// Input and size changes wait for room in the host queue but give way to a
-/// stop. Frames are sent one at a time, each waiting for its socket write (1
-/// second limit), so a slow browser never accumulates a queue; the latest-frame
-/// source skips ahead instead. Keyframes carry only the parameter sets chosen
+/// stop. Frames are sent one at a time, in order, each waiting for its socket
+/// write (1 second limit), so the socket never holds a queue of its own; frames
+/// wait in the session's short recent-frame window instead, and a viewer that
+/// falls beyond it skips ahead. Frames that waited [`PRESSURE_WAIT`] or longer
+/// make the viewer report pressure to the host. Keyframes carry only the parameter sets chosen
 /// with the `Parameters` command. Returns `Ok` on normal end and `Err` on a
 /// protocol or delivery failure.
 async fn viewer_loop(
@@ -1084,6 +1091,10 @@ async fn viewer_loop(
             frame = viewer.next(), if delivery.is_none() => {
                 let frame = frame.map_err(|_| ())?;
                 crate::measurement::frame("viewer_dequeue", &frame);
+                // Video waiting this long for the browser leg means the link or
+                // the page cannot keep up: lower the shared bit rate before the
+                // backlog bound is reached and a keyframe becomes necessary.
+                if viewer.waited() >= PRESSURE_WAIT { viewer.report_pressure().map_err(|_| ())?; }
                 if frame.keyframe && let Some(choice) = pending_parameters.take() { parameters = choice; }
                 let bytes = if frame.keyframe { crate::parameter_sets::select(&frame.bytes, parameters)? } else { frame.bytes.clone() };
                 let mut encoded = Vec::new();

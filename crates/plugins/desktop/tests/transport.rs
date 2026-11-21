@@ -58,7 +58,36 @@ async fn cached_idr_is_immediate_but_current_deltas_wait_for_fresh_idr() {
     session.publish(video(12, false, 100)).unwrap();
     assert_eq!(viewer.next().await.unwrap().sequence, 12);
 }
-#[tokio::test]
+/// A viewer a moment behind its sibling catches up with every delta, in order,
+/// and costs no keyframe (#146): the session keeps the last ~100 ms of frames.
+#[tokio::test(start_paused = true)]
+async fn briefly_stalled_viewer_catches_up_with_deltas_and_costs_no_keyframe() {
+    let (session, mut commands, _) = session();
+    let mut fast = session.attach("owner".into()).unwrap();
+    let mut slow = session.attach("watcher".into()).unwrap();
+    assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
+    session.publish(video(1, true, 100)).unwrap();
+    assert_eq!(fast.next().await.unwrap().sequence, 1);
+    assert_eq!(slow.next().await.unwrap().sequence, 1);
+    for sequence in 2..=10 {
+        tokio::time::advance(Duration::from_millis(8)).await;
+        session.publish(video(sequence, false, 100)).unwrap();
+        assert_eq!(fast.next().await.unwrap().sequence, sequence);
+    }
+    for sequence in 2..=10 {
+        assert_eq!(slow.next().await.unwrap().sequence, sequence);
+        if sequence == 2 {
+            // Published at 8 ms, taken at 72 ms.
+            assert_eq!(slow.waited(), Duration::from_millis(64));
+        }
+    }
+    assert_eq!(fast.waited(), Duration::ZERO);
+    assert!(commands.try_recv().is_err(), "no repair was needed");
+    assert_eq!(session.retained_bytes(), 1000, "frames 1..=10 are retained");
+}
+/// A viewer further behind than the bound skips to the next keyframe without
+/// stalling its sibling, asks for one repair, and the session survives detach.
+#[tokio::test(start_paused = true)]
 async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_detach() {
     let (session, mut commands, _) = session();
     let mut fast = session.attach("owner".into()).unwrap();
@@ -68,6 +97,8 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
     assert_eq!(fast.next().await.unwrap().sequence, 1);
     assert_eq!(slow.next().await.unwrap().sequence, 1);
     for sequence in 2..=10 {
+        // 9 × 20 ms: frame 2 is older than the 100 ms bound when frame 10 arrives.
+        tokio::time::advance(Duration::from_millis(20)).await;
         session.publish(video(sequence, false, 100)).unwrap();
         assert_eq!(fast.next().await.unwrap().sequence, sequence);
     }
@@ -77,13 +108,46 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
             .is_err()
     );
     assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
-    assert_eq!(session.retained_bytes(), 200);
+    // The keyframe (still cached) and frames 5..=10, the last 100 ms.
+    assert_eq!(session.retained_bytes(), 700);
     session.publish(video(11, true, 100)).unwrap();
     assert_eq!(slow.next().await.unwrap().sequence, 11);
+    assert_eq!(
+        session.retained_bytes(),
+        100,
+        "a keyframe replaces older frames"
+    );
     drop(fast);
     drop(slow);
     let mut reconnect = session.attach("owner".into()).unwrap();
     assert_eq!(reconnect.next().await.unwrap().sequence, 11);
+}
+/// A viewer whose frames wait reports pressure for the host, at most once per
+/// 250 ms, as the `Pressure` host command (#146).
+#[tokio::test(start_paused = true)]
+async fn waiting_viewer_reports_pressure_at_most_every_250_ms() {
+    let (session, mut commands, _) = session();
+    let mut viewer = session.attach("owner".into()).unwrap();
+    assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
+    session.publish(video(1, true, 100)).unwrap();
+    assert_eq!(viewer.next().await.unwrap().sequence, 1);
+    session.publish(video(2, false, 100)).unwrap();
+    tokio::time::advance(Duration::from_millis(60)).await;
+    assert_eq!(viewer.next().await.unwrap().sequence, 2);
+    assert_eq!(viewer.waited(), Duration::from_millis(60));
+    viewer.report_pressure().unwrap();
+    viewer.report_pressure().unwrap();
+    assert_eq!(
+        commands.try_recv(),
+        Ok(HostCommand::Pressure { waited_ms: 60 })
+    );
+    assert!(commands.try_recv().is_err(), "merged within 250 ms");
+    tokio::time::advance(Duration::from_millis(250)).await;
+    viewer.report_pressure().unwrap();
+    assert!(matches!(
+        commands.try_recv(),
+        Ok(HostCommand::Pressure { .. })
+    ));
 }
 #[tokio::test]
 async fn viewer_cap_live_access_rules_handover_and_disable_are_enforced() {
