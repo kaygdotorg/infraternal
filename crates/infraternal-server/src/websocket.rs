@@ -735,39 +735,8 @@ async fn run_socket(
         drop(sink);
         drop(source);
         if let Some(connection_id) = resume_attempt {
-            // After the socket is closed, so a busy database never delays the refusal;
-            // bounded, so it never holds the task either. A timeout only loses lines.
-            let rows = tokio::time::timeout(
-                REFUSAL_LOG_TIMEOUT,
-                sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
-                    .bind(connection_id.as_slice())
-                    .bind(&user_id)
-                    .fetch_all(&state.pool),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-            for row in rows {
-                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
-                else {
-                    continue;
-                };
-                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
-                let host_id = host_bytes
-                    .as_deref()
-                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
-                let stream_id =
-                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
-                state.close_logs.record(&CloseRecord::new(
-                    CloseOwner::of(&user_id),
-                    CloseWho::Server,
-                    RESUME_REFUSED,
-                    host_id,
-                    session_id,
-                    stream_id,
-                ));
-            }
+            // After the socket is closed, so a busy database never delays the refusal.
+            log_refused_resume_writers(&state, &user_id, connection_id).await;
         }
         if let Some(welcome) = pending_welcome.take() {
             rollback_connection(&state.pool, &user_id, &welcome).await;
@@ -776,6 +745,16 @@ async fn run_socket(
     };
     // Welcome was sent while authorized; subsequent drops use the normal resume cleanup.
     pending_welcome.take();
+    // True when this socket asked to resume but was welcomed as a fresh connection (#569). Attaches the browser sent
+    // right behind its Resume still name the old connection's input acknowledgement; see `handle_client_frame`.
+    let fresh_after_resume = resume_attempt.is_some_and(|asked| asked != connection_id);
+    if let Some(stale) = resume_attempt.filter(|asked| *asked != connection_id) {
+        // A stale resume was welcomed as a fresh connection: the old connection's writers ended here. Log them
+        // without holding up this socket's first frames.
+        let state = state.clone();
+        let user_id = user_id.clone();
+        tokio::spawn(async move { log_refused_resume_writers(&state, &user_id, stale).await });
+    }
     // The socket owns this task and aborts it on drop. Polling preparation
     // only inside select can hold a SQLite connection while a selected frame
     // awaits authority from the same bounded pool, so it must progress during
@@ -1042,6 +1021,7 @@ async fn run_socket(
                                 owner,
                                 &mut pending_plugin_calls,
                                 &connection_id,
+                                fresh_after_resume,
                                 &mut attachments,
                                 &mut ended,
                                 &output_tx,
@@ -1753,6 +1733,46 @@ fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'s
     }
 }
 
+/// Records one close line for each terminal writer of a connection whose resume was refused, so the session's close
+/// log says why that writer ended. Called after a refused handshake has closed its socket, and in the background when
+/// a stale resume was welcomed as a fresh connection instead (#569): either way the old connection's writers are gone.
+/// Bounded, so it never holds the task: a timeout only loses lines.
+async fn log_refused_resume_writers(
+    state: &WebSocketState,
+    user_id: &str,
+    connection_id: [u8; 16],
+) {
+    let rows = tokio::time::timeout(
+            REFUSAL_LOG_TIMEOUT,
+            sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
+                .bind(connection_id.as_slice())
+                .bind(user_id)
+                .fetch_all(&state.pool),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    for row in rows {
+        let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice()) else {
+            continue;
+        };
+        let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
+        let host_id = host_bytes
+            .as_deref()
+            .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
+        let stream_id = u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
+        state.close_logs.record(&CloseRecord::new(
+            CloseOwner::of(user_id),
+            CloseWho::Server,
+            RESUME_REFUSED,
+            host_id,
+            session_id,
+            stream_id,
+        ));
+    }
+}
+
 async fn handshake<S, K>(
     source: &mut S,
     sink: &mut K,
@@ -1807,7 +1827,7 @@ where
             _ => return Err(()),
         };
         *resume_attempt = Some(id);
-        resume_connection(
+        match resume_connection(
             &state.pool,
             user_id,
             id,
@@ -1817,7 +1837,31 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|error| *over_limit = is_connection_limit(&error))?
+        {
+            Ok(welcome) => welcome,
+            // The resume itself is stale (its window ran out, the id is unknown, the token does not match, the old
+            // socket still holds it, or a parallel resume won). The cookie session was checked at the upgrade and
+            // is checked again inside `new_connection`, so the same socket is welcomed as a fresh connection: the
+            // browser gets exactly what it would get by closing and reconnecting without the token, one handshake
+            // and a backoff sooner (#569, D265). The resume token grants nothing here: a fresh connection never
+            // inherits the old one's writers, and the browser sees the new connection id.
+            Err(error) if is_stale_resume(&error) => {
+                *pending_welcome = None;
+                new_connection(
+                    &state.pool,
+                    user_id,
+                    unix_seconds()?,
+                    Some(&crate::auth::hash(session_token)),
+                    Some(pending_welcome),
+                )
+                .await
+                .map_err(|error| *over_limit = is_connection_limit(&error))?
+            }
+            Err(error) => {
+                *over_limit = is_connection_limit(&error);
+                return Err(());
+            }
+        }
     } else {
         new_connection(
             &state.pool,
@@ -2023,6 +2067,26 @@ async fn resume_connection(
     Ok(welcome)
 }
 
+/// The [`resume_refused`] categories that say only that this resume cannot continue, not that the socket may not
+/// connect at all. A handshake that meets one of them welcomes the socket as a fresh connection instead of closing it
+/// (#569). Left out on purpose: the account's connection limit ([`RESUME_CAPACITY_CHECK`]), which the browser must
+/// keep its capability for (#523); a cookie session that ended (`session_authority`); and storage errors.
+const STALE_RESUME_CHECKS: [&str; 8] = [
+    "connection_owner",
+    "connection_active",
+    "resume_expired",
+    "connection_state",
+    "connection_missing",
+    "token_mismatch",
+    "token_shape",
+    "rotation_conflict",
+];
+
+/// True when a refused resume is only stale (see [`STALE_RESUME_CHECKS`]), so the socket may still start fresh.
+fn is_stale_resume(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Protocol(check) if STALE_RESUME_CHECKS.contains(&check.as_str()))
+}
+
 /// Fixed diagnostic categories only: clients retain the generic refusal and
 /// administrators can distinguish expiry, overlap and a lost rotation (#244).
 fn resume_refused(check: &'static str) -> sqlx::Error {
@@ -2066,6 +2130,7 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
 
 /// Validates one browser frame and routes it without allocating a second terminal payload. A plugin call goes
 /// to `pending_plugin_calls`, which runs it now or queues it behind the busy ones (#556); only a full queue refuses.
+/// `fresh_after_resume` says the socket asked to resume but was welcomed as a fresh connection (#569).
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
@@ -2074,6 +2139,7 @@ async fn handle_client_frame<K>(
     owner: bool,
     pending_plugin_calls: &mut PluginCalls,
     connection_id: &[u8; 16],
+    fresh_after_resume: bool,
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
@@ -2359,7 +2425,13 @@ where
                 )
                 .await;
             };
-            if last_in_seq > input_acked {
+            // A browser resuming sends its AttachTerm right behind the Resume, before it has seen the Welcome, with the
+            // input its old writer had acknowledged. When the resume was stale and the socket got a fresh connection,
+            // that writer no longer exists: the fresh one starts at zero, and the browser starts its own input at zero
+            // when the fresh Welcome arrives, before this attach's Ack. So the bound below cannot apply to such an
+            // attach. Nothing else reads `last_in_seq`: the infraternal agent gets the server's own `input_acked`,
+            // so no input can be skipped or repeated (contracts/wire.md section 5).
+            if last_in_seq > input_acked && !fresh_after_resume {
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,

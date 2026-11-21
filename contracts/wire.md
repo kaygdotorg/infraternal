@@ -261,6 +261,17 @@ frames are binary, because they carry each keystroke and each output chunk.
 - **Window.** A connection can resume for `resume window seconds` (default
   120). After that, the client opens a new connection and attaches by
   session id. The session itself lives in the shim, without a time limit.
+- **Stale resume (#569).** When a `Resume` cannot continue its connection
+  (the window ran out, the id is unknown or still held by the old socket, the
+  token does not match, or a parallel resume won), the server welcomes the
+  same socket as a fresh connection instead of closing it. The fresh
+  `Welcome` carries a new connection id; a resumed one keeps the id the client
+  sent, which is how the client tells them apart. A fresh connection never
+  inherits the old connection's writers, so the client starts each writer's
+  input at zero, but it keeps its screen and attaches with its own
+  `last_out_seq`, since output offsets belong to the session. The account's
+  connection limit, an ended sign-in session and storage errors still close
+  with 1008 as before.
 - Target: < 300 ms from network return to a usable terminal (DECISIONS 41).
 
 ## 6. Flow control and catch-up

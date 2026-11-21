@@ -77,6 +77,11 @@ export interface Bridge {
   closed: boolean;
   /** Whether this socket requested resume in Hello; no capability bytes are retained. */
   helloResume?: boolean;
+  /**
+   * The connection id of the Welcome on this socket, as hex. It is not a capability (the resume token is, and is never
+   * kept): a resumed Welcome repeats the id of the connection it resumed, a fresh one has a new id (#569).
+   */
+  welcomeId?: string;
   /** Which side ended the socket first, and its close code. */
   closedBy?: string;
   /** UTF-8 close reason from the first socket close event. */
@@ -549,6 +554,7 @@ export async function startRealServer(options: {
             bridge.outputRanges?.push({ stream, outSeq: f.outSeq.toString(), bytes: f.bytes.byteLength, at: Date.now() });
           }
           if (f.type === "Ack") bridge.acked.set(stream, f.inSeqAcked);
+          if (f.type === "Welcome" && stream === 0) bridge.welcomeId = Buffer.from(f.connectionId).toString("hex");
           if (f.type === "Event" && stream !== 0 && f.eventJson.byteLength <= 1024
             && JSON.parse(text.decode(f.eventJson)).type === "terminal.replay_complete") bridge.replays++;
           if (f.type === "Event" && stream !== 0 && bridge.terminalEvents && f.eventJson.byteLength <= 1024) {
