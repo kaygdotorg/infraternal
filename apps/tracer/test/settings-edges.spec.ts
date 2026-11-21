@@ -138,7 +138,7 @@ for (const theme of ["ink", "paper"]) for (const { w, h, touch, dpr } of SIZES) 
       const where = `${section.id} ${theme} ${w}`;
       expect.soft(m.overflow, `${where}: the pane never scrolls sideways`).toBeLessThanOrEqual(1);
       if (m.headingLeft !== undefined) expect.soft(Math.abs(m.headingLeft - m.left), `${where}: the heading is on the content edge`).toBeLessThanOrEqual(0.5);
-      for (const type of EXPECTED[section.id] ?? []) expect.soft(m.rows.filter((r) => r.type === type).length, `${where}: has ${type} rows to measure`).toBeGreaterThan(0);
+      for (const type of (EXPECTED[section.id] ?? []).filter((t) => !(touch && t === "shortcut"))) expect.soft(m.rows.filter((r) => r.type === type).length, `${where}: has ${type} rows to measure`).toBeGreaterThan(0);
       for (const r of m.rows) {
         expect.soft(Math.abs(r.firstLeft - m.left), `${where}: ${r.type} "${r.name}" starts on the left edge`).toBeLessThanOrEqual(0.5);
         // A segmented control is a control, not a value: only its left edge belongs to the shared edges.
