@@ -41,7 +41,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -57,8 +57,56 @@ pub(super) struct Metadata {
     /// Last video sequence number used. Shared with the worker so a later lane
     /// carries on counting instead of repeating numbers.
     pub sequence: AtomicU64,
-    /// Latches only when the native companion confirms the target window closed.
+    /// Latches when the native companion confirms the target window closed,
+    /// or when the person at a root agent's screen changed (D203 C2).
     pub gone: AtomicBool,
+    /// The console uid whose screen this session first showed, for a root
+    /// agent's cross-user helper; 0 until then (root is never a console
+    /// user). See [`Metadata::bind_console`].
+    console: AtomicU32,
+}
+impl Metadata {
+    /// Metadata for a newly prepared session showing `start`, counting video
+    /// sequence numbers from `sequence`.
+    pub fn new(start: Start, sequence: u64) -> Self {
+        Self {
+            start: Mutex::new(start),
+            sequence: AtomicU64::new(sequence),
+            gone: AtomicBool::new(false),
+            console: AtomicU32::new(0),
+        }
+    }
+    /// Ties this session to the person whose screen its helper captures
+    /// (`uid`, from a root agent's cross-user helper; `None` for a same-user
+    /// helper, which never changes person).
+    ///
+    /// The first cross-user leg binds the session to its console user. A
+    /// later leg for anyone else ends the session for good: its `gone` latch
+    /// is set and `false` is returned, so the leg must stop before it sends
+    /// `Start` and nothing of the new person's screen is captured. The owner
+    /// decided (2026-11-20, #146) that every session, whole-screen ones
+    /// included, ends when the person at the screen changes, for privacy.
+    pub fn bind_console(&self, uid: Option<u32>) -> bool {
+        let Some(uid) = uid else { return true };
+        match self
+            .console
+            .compare_exchange(0, uid, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => true,
+            Err(bound) if bound == uid => true,
+            Err(_) => {
+                self.console_changed();
+                false
+            }
+        }
+    }
+    /// Ends the session for good because the person at the screen changed
+    /// while one of its legs was running (see [`Metadata::bind_console`]).
+    /// The server then sees `gone` at its next prepare and closes the
+    /// session instead of attaching again.
+    pub fn console_changed(&self) {
+        self.gone.store(true, Ordering::Release);
+    }
 }
 /// A session that has been prepared by the server.
 struct Prepared {
@@ -211,6 +259,20 @@ impl Drop for WireLease {
         self.0.retire();
     }
 }
+/// The body of a window-list request: `{}`, or the icons `icons` already
+/// holds as `known_icons`, so the helper leaves their images out (#146).
+///
+/// `Helper::send` checks it with `protocol::validate_command` before it
+/// leaves, so the store must never hold a key the validator refuses: one such
+/// key made every later window list fail until the agent restarted.
+fn list_request(icons: &crate::app_icons::IconStore) -> Result<Vec<u8>, PluginError> {
+    let known = icons.known();
+    let mut request = json!({});
+    if !known.is_empty() {
+        request["known_icons"] = json!(known);
+    }
+    serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)
+}
 /// Cancels the worker when dropped. Held while awaiting it so that a cancelled
 /// caller does not leave the helper running.
 struct Wait(Arc<Worker>);
@@ -225,11 +287,19 @@ impl SourceBridge {
     /// sessions (never more than the lane definition's maximum streams).
     #[must_use]
     pub fn new(runtime: PathBuf, executable: PathBuf, limit: usize) -> Self {
-        Self(Arc::new(Inner {
-            config: Config {
+        Self::build(
+            Config {
                 runtime,
                 executable,
+                cross_user: None,
             },
+            limit,
+        )
+    }
+    /// The bridge for `config`, disabled, with at most `limit` sessions.
+    fn build(config: Config, limit: usize) -> Self {
+        Self(Arc::new(Inner {
+            config,
             lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(State {
                 enabled: false,
@@ -241,6 +311,28 @@ impl SourceBridge {
                 icons: IconStore::default(),
             }),
         }))
+    }
+    /// A disabled bridge for a root agent: every helper starts as the
+    /// console user and is admitted through the cross-user checks (D203 C2,
+    /// #146). `runtime` should be [`crate::cross_user::BASE`].
+    ///
+    /// A constructor rather than a builder on a shared bridge, so a root
+    /// agent can never end up on the same-user path by accident.
+    #[must_use]
+    pub fn new_cross_user(
+        runtime: PathBuf,
+        executable: PathBuf,
+        limit: usize,
+        cross_user: crate::cross_user::CrossUser,
+    ) -> Self {
+        Self::build(
+            Config {
+                runtime,
+                executable,
+                cross_user: Some(cross_user),
+            },
+            limit,
+        )
     }
     /// Registers session `id` for `start` and returns its current size and
     /// sequence as JSON. Starts no helper.
@@ -298,11 +390,7 @@ impl SourceBridge {
             state.prepared.insert(
                 id,
                 Prepared {
-                    metadata: Arc::new(Metadata {
-                        start: Mutex::new(start),
-                        sequence: AtomicU64::new(sequence_floor),
-                        gone: AtomicBool::new(false),
-                    }),
+                    metadata: Arc::new(Metadata::new(start, sequence_floor)),
                     worker: None,
                     stopping: false,
                 },
@@ -463,18 +551,14 @@ impl SourceBridge {
             }
             return snapshot.page();
         }
-        let known = self
-            .0
-            .state
-            .lock()
-            .map_err(|_| PluginError::Rejected)?
-            .icons
-            .known();
-        let mut request = json!({});
-        if !known.is_empty() {
-            request["known_icons"] = json!(known);
-        }
-        let body = serde_json::to_vec(&request).map_err(|_| PluginError::Rejected)?;
+        let body = list_request(
+            &self
+                .0
+                .state
+                .lock()
+                .map_err(|_| PluginError::Rejected)?
+                .icons,
+        )?;
         let mut inventory = self.idle_request(Kind::List, body).await?;
         let mut state = self.0.state.lock().map_err(|_| PluginError::Rejected)?;
         if !state.enabled {

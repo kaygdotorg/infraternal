@@ -12,7 +12,7 @@
  * One shortcut per action: `keys` is a single string, or one string per platform
  * (`{ mac: "⌘K", other: "Ctrl+Shift+K" }`), and only the one that works here is ever shown.
  */
-import { isMacPlatform, shortcutLabel, type PlatformKeys } from "./platform";
+import { isMacPlatform, keyboardLikely, shortcutLabel, type PlatformKeys } from "./platform";
 import { readLocal, writeLocal } from "./local-pref";
 
 /**
@@ -95,8 +95,10 @@ export function shortcutSections(areas: string[]): ShortcutSection[] {
   return [...areas, GLOBAL_AREA].flatMap((area) => all.filter((section) => section.area === area));
 }
 
-/** The caps of one shortcut: "Ctrl+Shift+L" → Ctrl, Shift, L; "⌘K" → ⌘, K; "Esc" → Esc. */
+/** The caps of one shortcut (none where no hardware keyboard is likely, see `keyboardLikely`): "Ctrl+Shift+L" → Ctrl, Shift, L; "⌘K" → ⌘, K; "Esc" → Esc. */
 export function keyCaps(keys: PlatformKeys | string): string[] {
+  // No hardware keyboard likely (a phone): no caps anywhere, so no surface needs its own rule.
+  if (!keyboardLikely()) return [];
   const label = shortcutLabel(keys);
   // A label that ends in the plus key ("Ctrl++", "⌘+") keeps that key as its own cap, not an empty one between separators.
   if (label.length > 1 && label.endsWith("+")) {

@@ -29,6 +29,8 @@ interface ProbeSample {
   startedAt: number;
   kind: "key" | "resume";
   stages: Partial<Record<ProbeStage, number>>;
+  /** The typing recorder's keys only: the `KeyboardEvent.key` that went down. */
+  key?: string;
 }
 
 /** A point in a key's path: the keydown, the terminal's input callback, or a hop reported by the terminal. */
@@ -39,6 +41,56 @@ export interface ProbeTraceSample {
   id: string;
   stages: Partial<Record<ProbeStage, number>>;
 }
+
+/**
+ * What the typing recorder saw for one trusted key (a person's or a driver's real key event, never the probe's own
+ * synthetic keys): when it went down, its place in the input stream, and when its glyph first showed.
+ */
+export interface HumanKeyRecord {
+  /** The key's `KeyboardEvent.key`: one printable character, or `Backspace`. */
+  key: string;
+  /** `performance.now()` in the keydown capture listener. */
+  keydownAt: number;
+  /** The input byte-stream sequence the terminal gave the key; undefined until its `onData` ran. */
+  sequence: string | undefined;
+  /** When the key's bytes were handed to the socket. */
+  wsSendAt: number | undefined;
+  /** When a predicted glyph for the key first became visible (predictive echo on). */
+  predictedAt: number | undefined;
+  /** When the host's own echo of the key painted (matched by visible character, like the probe's key runs). */
+  echoPaintedAt: number | undefined;
+}
+
+/** One painted output region: its first byte's stream offset, size, when its first byte arrived and when it painted. */
+export interface HumanOutputRecord {
+  sequence: string;
+  bytes: number;
+  /** The socket message arrival of the region's first byte; undefined when it was not seen. */
+  wsMessageAt: number | undefined;
+  paintedAt: number;
+}
+
+/** The prediction overlay as one frame saw it, when the set of drawn glyphs changed: glyph text and column. */
+export interface HumanOverlayFrame {
+  at: number;
+  glyphs: Array<{ text: string; column: number }>;
+}
+
+/** Everything the typing recorder holds, for {@link PerformanceProbe.humanTrace}. */
+export interface HumanTrace {
+  keys: HumanKeyRecord[];
+  outputs: HumanOutputRecord[];
+  overlay: HumanOverlayFrame[];
+  /** The host cursor's column when recording started (where the first typed glyph belongs). */
+  startColumn: number;
+  /** `performance.now()` of the latest painted output, or 0. */
+  lastPaintedAt: number;
+  /** Why prediction is on or off right now, and how many keys it sent without a prediction, by reason (empty when it is off). */
+  predictor: { reason: string; muted: boolean; mispredictions: number; fallbacks: Record<string, number> } | undefined;
+}
+
+/** The most output offsets the recorder remembers arrival times for; a typing run is a few kilobytes. */
+const MAX_HUMAN_ARRIVALS = 200_000;
 
 /** The stages that are reported as a span: a label with the stage the span starts and ends at. */
 const BROWSER_HOPS: ReadonlyArray<readonly [string, ProbeStage, ProbeStage]> = [
@@ -118,6 +170,22 @@ export class PerformanceProbe {
   private resumeDuration: number | undefined;
   /** The text of the last report, which the copy button copies. */
   private lastReport = "No probe has run yet.";
+  /** Whether the typing recorder runs ({@link PerformanceProbe.startHumanRecording}). */
+  private humanRecording = false;
+  /** Trusted keys seen by keydown that have not reached `onData` yet, oldest first. */
+  private readonly humanAwaitingData: ProbeSample[] = [];
+  /** Every recorded trusted key, in order. */
+  private readonly humanSamples: ProbeSample[] = [];
+  /** The recorded keys by input sequence, so the terminal's send and prediction hops find them. */
+  private readonly humanBySequence = new Map<string, ProbeSample>();
+  /** Socket arrival time of every output byte offset seen while recording. */
+  private readonly humanArrivals = new Map<string, number>();
+  private readonly humanOutputs: HumanOutputRecord[] = [];
+  private readonly humanOverlay: HumanOverlayFrame[] = [];
+  private humanFrame = 0;
+  private humanOverlayKey = "";
+  private humanStartColumn = 0;
+  private humanLastPaintedAt = 0;
 
   /** Finds the panel's controls (`#probe-count`, `#probe-run`, `#probe-drop`, `#probe-copy`, `#probe-results`, `#probe-message`) and wires them. Throws if one is missing. */
   constructor(private readonly panel: HTMLElement, initialCount: number) {
@@ -144,7 +212,7 @@ export class PerformanceProbe {
       onInput: (data, at, sequence) => this.onInput(data, at, sequence),
       onTrace: (id, hop, at) => this.onTrace(id, hop, at),
       onTraceRange: (start, length, hop, at) => this.onTraceRange(start, length, hop, at),
-      onPaintedOutput: (bytes, at, _sequence, kind) => this.onPaintedOutput(bytes, at, kind),
+      onPaintedOutput: (bytes, at, sequence, kind) => this.onPaintedOutput(bytes, at, kind, sequence),
     };
   }
 
@@ -168,6 +236,14 @@ export class PerformanceProbe {
   }
 
   private readonly onKeydown = (event: KeyboardEvent): void => {
+    if (this.humanRecording && event.isTrusted && !this.syntheticKey) {
+      // A chord (Ctrl-U and the like) is a command to the shell, not a typed letter.
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && (event.key.length === 1 || event.key === "Backspace")) {
+        const startedAt = performance.now();
+        this.humanAwaitingData.push({ id: undefined, startedAt, kind: "key", stages: { keydown: startedAt }, key: event.key });
+      }
+      return;
+    }
     if (!this.syntheticKey || event.key !== this.syntheticKey) return;
     const startedAt = performance.now();
     this.syntheticSample = {
@@ -292,9 +368,10 @@ export class PerformanceProbe {
   }
 
   /** Matches visible painted characters, records their latency and sends the next key when the previous ones are done. */
-  private onPaintedOutput(bytes: Uint8Array, paintedAt: number, kind: "output" | "snapshot" = "output"): void {
+  private onPaintedOutput(bytes: Uint8Array, paintedAt: number, kind: "output" | "snapshot" = "output", sequence = 0n): void {
     this.waitForOutputQuiet();
     if (kind === "snapshot") this.visibleOutputState = "text";
+    if (this.humanRecording && kind === "output") this.recordHumanOutput(bytes, paintedAt, sequence);
     let paintedSample = false;
     for (const byte of bytes) {
       const visibleByte = this.visibleByte(byte);
@@ -386,6 +463,7 @@ export class PerformanceProbe {
 
   /** Attaches the byte-stream sequence as a stable key ID at Ghostty's onData boundary. */
   private onInput(data: string, at: number, sequence: bigint): boolean {
+    if (this.humanRecording && !this.syntheticSample) return this.onHumanInput(data, at, sequence);
     const sample = this.syntheticSample;
     if (!sample || sample.kind !== "key" || data.length !== 1) return false;
     const id = sequence.toString();
@@ -400,6 +478,17 @@ export class PerformanceProbe {
 
   /** Records when the key with trace `id` reached `hop`. */
   private onTrace(id: string, hop: TerminalTraceHop, at: number): void {
+    if (this.humanRecording) {
+      // Output hops carry output offsets and input hops carry input sequences; the two numbering schemes overlap, so
+      // while recording each hop goes only where it belongs.
+      if (hop === "wsMessage") {
+        if (this.humanArrivals.size < MAX_HUMAN_ARRIVALS) this.humanArrivals.set(id, at);
+      } else if (hop === "wsSend" || hop === "prediction" || hop === "encode") {
+        const keySample = this.humanBySequence.get(id);
+        if (keySample) keySample.stages[hop] = at;
+      }
+      return;
+    }
     const sample = this.samplesById.get(id);
     if (sample) sample.stages[hop] = at;
   }
@@ -416,6 +505,108 @@ export class PerformanceProbe {
       const value = Number(id);
       if (value >= first && value <= last) sample.stages[hop] = at;
     }
+  }
+
+  /**
+   * Starts the typing recorder: from now on every trusted key, every painted output region and every change of the
+   * prediction overlay is recorded, so a driver that types like a person (overlapping keys, real shell) can be
+   * measured without the probe's own one-key-at-a-time synthetic run. Idempotent; {@link PerformanceProbe.humanTrace} reads it.
+   * Call it only once the terminal is quiet, and bind the terminal first (the overlay and cursor are read from it).
+   */
+  startHumanRecording(): void {
+    if (this.humanRecording) return;
+    this.humanRecording = true;
+    this.humanAwaitingData.length = 0;
+    this.humanSamples.length = 0;
+    this.humanBySequence.clear();
+    this.humanArrivals.clear();
+    this.humanOutputs.length = 0;
+    this.humanOverlay.length = 0;
+    this.humanOverlayKey = "";
+    this.humanLastPaintedAt = 0;
+    this.humanStartColumn = this.terminal?.rendererMetrics.cursorX ?? 0;
+    const sample = (): void => {
+      if (!this.humanRecording) return;
+      this.sampleOverlay();
+      this.humanFrame = window.requestAnimationFrame(sample);
+    };
+    this.humanFrame = window.requestAnimationFrame(sample);
+  }
+
+  /** Stops the typing recorder; what it recorded stays readable. */
+  stopHumanRecording(): void {
+    this.humanRecording = false;
+    window.cancelAnimationFrame(this.humanFrame);
+  }
+
+  /** A copy of what the typing recorder holds: the keys (with their stage times), the output regions and the overlay frames. */
+  humanTrace(): HumanTrace {
+    return {
+      keys: this.humanSamples.map((sample) => ({
+        key: sample.key ?? "",
+        keydownAt: sample.startedAt,
+        sequence: sample.id,
+        wsSendAt: sample.stages.wsSend,
+        predictedAt: sample.stages.prediction,
+        echoPaintedAt: sample.stages.paint,
+      })),
+      outputs: this.humanOutputs.map((output) => ({ ...output })),
+      overlay: this.humanOverlay.map((frame) => ({ at: frame.at, glyphs: frame.glyphs.map((glyph) => ({ ...glyph })) })),
+      startColumn: this.humanStartColumn,
+      lastPaintedAt: this.humanLastPaintedAt,
+      // A terminal (or a test double) may expose no prediction state yet; the trace then records none.
+      predictor: ((state) => state === undefined ? undefined : { reason: state.reason, muted: state.muted, mispredictions: state.mispredictions, fallbacks: state.fallbacks })(this.terminal?.predictiveEchoState),
+    };
+  }
+
+  /** The host cursor's column now (0 before a terminal is bound); a driver reads it to know where its typing starts. */
+  cursorColumn(): number {
+    return this.terminal?.rendererMetrics.cursorX ?? 0;
+  }
+
+  /** `performance.now()` of the latest painted output while recording, or 0: a driver waits for it to go quiet. */
+  lastPaintedAt(): number {
+    return this.humanLastPaintedAt;
+  }
+
+  /** Pairs a trusted key's `onData` with its keydown and starts tracing its hops; true tells the terminal to trace it. */
+  private onHumanInput(data: string, at: number, sequence: bigint): boolean {
+    const sample = this.humanAwaitingData[0];
+    if (!sample) return false;
+    // Terminal-generated replies (cursor reports and the like) arrive through `onData` too; only the key's own bytes pair with it.
+    const expected = sample.key === "Backspace" ? "\x7f" : sample.key;
+    if (data !== expected) return false;
+    this.humanAwaitingData.shift();
+    const id = sequence.toString();
+    sample.id = id;
+    sample.stages.onData = at;
+    this.humanSamples.push(sample);
+    this.humanBySequence.set(id, sample);
+    // A printable key's host echo is matched by its visible character, as in the probe's key runs.
+    if (sample.key !== undefined && sample.key.length === 1) this.enqueue(sample.key, sample);
+    return true;
+  }
+
+  /** Records one painted output region with the socket arrival of its first byte. */
+  private recordHumanOutput(bytes: Uint8Array, paintedAt: number, sequence: bigint): void {
+    this.humanLastPaintedAt = paintedAt;
+    const id = sequence.toString();
+    this.humanOutputs.push({ sequence: id, bytes: bytes.byteLength, wsMessageAt: this.humanArrivals.get(id), paintedAt });
+  }
+
+  /** Notes the overlay's glyphs when they differ from the last frame's, with each glyph's column. */
+  private sampleOverlay(): void {
+    const terminal = this.terminal;
+    if (!terminal) return;
+    const overlay = terminal.predictiveEchoState.overlay;
+    const cellWidth = terminal.rendererMetrics.cellWidth;
+    const glyphs = overlay?.visible && cellWidth > 0
+      ? overlay.glyphs.map((glyph) => ({ text: glyph.text, column: Math.round(glyph.x / cellWidth) }))
+      : [];
+    const signature = glyphs.map((glyph) => `${glyph.text}${glyph.column}`).join("|");
+    if (signature === this.humanOverlayKey) return;
+    this.humanOverlayKey = signature;
+    this.humanOverlay.push({ at: performance.now(), glyphs });
   }
 
   /** Sends one key, then waits for its painted echo before measuring the next key. */

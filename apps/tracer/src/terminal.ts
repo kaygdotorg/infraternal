@@ -8,11 +8,13 @@ import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
 import { Osc52Scanner } from "./osc52";
 import { readProgramCopy } from "./program-copy";
+import { KeyAckRtt } from "./key-ack-rtt";
 import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
-import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { Terminal, type Ghostty, type ITheme } from "../vendor/ghostty-web";
+import { loadEngine } from "./engine-wasm";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -219,7 +221,7 @@ export interface TerminalConfig {
   getEndedSession?: () => { status?: number } | undefined;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
-  /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
+  /** Turns predictive echo on (`?predict=1`, or the default once the host echo signal ships: see `host-echo-signal.ts`). */
   predictiveEcho?: boolean;
 }
 
@@ -303,6 +305,8 @@ class ByteQueue {
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
   private static rendererPreparation: Promise<void> | undefined;
+  /** The loaded engine; set by `prepareResources`, which every path that builds a renderer awaits first. */
+  private static engine: Ghostty | undefined;
   private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
@@ -408,6 +412,8 @@ export class TerminalClient {
   /** D309: after a reattach, silence from the program means its screen may be out of date; see stale-screen.ts. */
   private staleWatch: StaleScreenWatch | undefined;
   private roundTripMs: number | undefined;
+  /** This terminal's own key -> Ack time; what prediction decides on once it has a sample (#569). */
+  private readonly keyAck = new KeyAckRtt();
   private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
@@ -430,6 +436,8 @@ export class TerminalClient {
   /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
   private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  /** A tap is as good as a key for cutting a reconnect backoff short. */
+  private readonly onTapRetry = (): void => this.conn.retryForInput();
   private readonly onBlinkInput = (): void => this.restartCursorBlink();
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
@@ -493,6 +501,7 @@ export class TerminalClient {
         // and a stall between keydown and the draw (a slow input handler) would not show in the row at all (#447).
         onVisible: (sequence) => config.hooks?.onTrace?.(sequence, "prediction", performance.now()),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
+        textBeforeCursor: () => this.textBeforeCursor(),
       })
       : undefined;
     this.cursorLayer = mountTerminalCursorLayer(config.host);
@@ -500,6 +509,7 @@ export class TerminalClient {
     this.staleWatch = new StaleScreenWatch((stale) => config.hooks?.onStaleScreen?.(stale), { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
+    config.host.addEventListener("pointerdown", this.onTapRetry, { passive: true });
     document.addEventListener("visibilitychange", this.onBlinkEnvironment);
     window.addEventListener("blur", this.onBlinkEnvironment);
     window.addEventListener("focus", this.onBlinkEnvironment);
@@ -574,7 +584,8 @@ export class TerminalClient {
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
     this.offRoundTrip = this.conn.onRoundTrip((ms) => {
       this.roundTripMs = ms;
-      this.prediction?.setRoundTrip(ms);
+      // A terminal that has timed its own keys keeps that figure: the ping stops at the server, the host may be far behind it.
+      this.prediction?.setRoundTrip(ms === undefined ? undefined : this.keyAck.p90 ?? ms);
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
@@ -633,9 +644,16 @@ export class TerminalClient {
     }
   }
 
+  /** The loaded engine; a renderer built before `prepareResources` finished is a bug, so it throws. */
+  private static requireEngine(): Ghostty {
+    if (!TerminalClient.engine) throw new Error("The terminal engine is not loaded yet");
+    return TerminalClient.engine;
+  }
+
   /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -681,10 +699,15 @@ export class TerminalClient {
     await warmup;
   }
 
+  /**
+   * Loads the font and the terminal engine once and shares the work between every caller: the engine's wasm file is
+   * fetched and compiled here (`src/engine-wasm.ts`), and the loaded engine is kept for the renderers built afterwards.
+   * @param font the face whose upright files gate the first paint
+   */
   private static async prepareResources(font: MonoFont): Promise<void> {
     let renderer = TerminalClient.rendererPreparation;
     if (!renderer) {
-      renderer = init();
+      renderer = loadEngine().then((engine) => { TerminalClient.engine = engine; });
       TerminalClient.rendererPreparation = renderer;
       // Concurrent opens/preparation must share one instance. A failed optional
       // warm-up must not poison the later session's ordinary initialization.
@@ -813,6 +836,7 @@ export class TerminalClient {
     });
     document.body.append(holder);
     const baseline = new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
       cursorBlink: false,
@@ -1042,6 +1066,7 @@ export class TerminalClient {
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
+    this.config.host.removeEventListener("pointerdown", this.onTapRetry);
     document.removeEventListener("visibilitychange", this.onBlinkEnvironment);
     window.removeEventListener("blur", this.onBlinkEnvironment);
     window.removeEventListener("focus", this.onBlinkEnvironment);
@@ -1528,6 +1553,8 @@ export class TerminalClient {
     if (this.inputModifiers.alt === "armed") this.inputModifiers.alt = "off";
     this.config.onInputActivity?.();
     this.sampleRoundTrip();
+    // A key typed while the connection waits out a reconnect backoff retries at once (#569).
+    this.conn.retryForInput();
     data = applyInputModifiers(data, ctrl, alt);
     const at = performance.now();
     const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
@@ -1554,6 +1581,7 @@ export class TerminalClient {
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
     if (this.attachmentConfirmed) {
+      this.keyAck.sent(firstSequence, encoded.byteLength, performance.now());
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1713,6 +1741,8 @@ export class TerminalClient {
     }
     this.inputQueue.consume(acknowledged);
     this.ackedInSeq = sequence;
+    const keyRoundTrip = this.keyAck.acked(sequence, performance.now());
+    if (keyRoundTrip !== undefined) this.prediction?.setRoundTrip(keyRoundTrip);
     this.resumeInputIfRoom();
   }
 
@@ -2808,6 +2838,16 @@ export class TerminalClient {
     return { y, bufferType: active.type, wrapped: line.isWrapped, wrapKnown: active.type === "alternate" || y >= scrollback, cells };
   }
 
+  /**
+   * The live screen's text on the cursor's row, left of the cursor, for the secret-prompt check of predictive echo.
+   * Prediction only runs at the live (bottom) viewport, where the cursor row is `rows` from the end of the buffer.
+   */
+  private textBeforeCursor(): string | undefined {
+    const buffer = this.terminal.buffer.active;
+    const row = buffer.length - this.terminal.rows + buffer.cursorY;
+    return buffer.getLine(row)?.translateToString(false, 0, buffer.cursorX);
+  }
+
   /** Uses the same viewport slice the renderer uses for its cursor row. */
   private cursorLine(y: number): unknown[] | null {
     const buffer = this.terminal.wasmTerm;
@@ -2876,6 +2916,7 @@ export class TerminalClient {
 
   /** Attachment and typing refresh the latency sample; connection liveness continues at idle [D265]. */
   private startPings(): void {
+    this.keyAck.reset();
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
     // The readout was just blanked above, so this probe's answer must be allowed to refill it (#430).

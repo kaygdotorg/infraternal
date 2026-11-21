@@ -546,6 +546,14 @@ async fn device_code_machine_join_returns_the_same_key_bound_receipt_on_retry() 
     assert_eq!(first.host_id, host_id);
     assert_eq!(first.mode, Mode::Rootful);
     assert_eq!(first.execution_uid, 0);
+    // A device-code join carries the server's direct QUIC listener exactly as
+    // an Add-host invitation does: App Windows lanes exist only on QUIC, so a
+    // Mac approved by code would otherwise link over HTTPS for ever (#146, D349).
+    assert_eq!(
+        first.endpoint,
+        Some("127.0.0.1:4443".parse().unwrap()),
+        "the approved machine learns the direct endpoint"
+    );
     let receipt_expiry: i64 =
         sqlx::query_scalar("SELECT expires_at FROM remote_join_tokens WHERE host_id=?")
             .bind(host_id.as_bytes().as_slice())

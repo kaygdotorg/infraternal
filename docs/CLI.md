@@ -38,6 +38,25 @@ argument at fault and never its value. `next_step` repeats the first entry of
 `unknown`. A test walks the whole command tree and fails when a command lacks
 `--json` or prints anything that is not this envelope.
 
+## Commands
+
+`infraternal --help` and `infraternal <command> --help` are the authority for
+flags and wording. This is the map:
+
+| Command | For |
+|---------|-----|
+| `status` | what runs on this machine; exits 5 when an installed service is down |
+| `skill` | the generated instructions for AI agents (below) |
+| `sign-in <server>` | authorise this device on a server with a passkey |
+| `hosts list`, `hosts add`, `hosts remove`, `hosts forget` | manage the hosts a server admits |
+| `remove-host <HOST>` | remove a host (needs `--server`) |
+| `sessions` | saved-session automation on this machine (below) |
+| `up <server>` | join this Linux machine or Mac to a server |
+| `agent join`, `agent run` | enrol this machine and keep the infraternal agent connected |
+| `mesh status`, `mesh peers`, `mesh up`, `mesh down` | this machine's Mesh node |
+| `publish`, `unpublish` | expose a local service through the node proxy |
+| `server` and `server init`, `setup-token`, `channel`, `release`, `restart`, `mesh` | run and manage the server |
+
 ## Command shape
 
 Bare `infraternal` is the same overview as `infraternal status`, plus one line
@@ -171,9 +190,11 @@ envelope. Hidden internal actions are not listed or written.
 ## Hosted plugin actions
 
 The production Mesh and host-facts descriptors register in the same action
-registry as node lifecycle commands. For example, `infraternal mesh node rename
---help` and `infraternal skill host facts read` use the plugin's own descriptions
-and instructions. Skills include the original wire schema references and exact
+registry as node lifecycle commands. A plugin action that has a CLI command
+uses the plugin's own description and instructions: `infraternal mesh peers
+--help` and `infraternal skill mesh peers` print them. Mesh node management
+actions such as `mesh.node.rename`, and host-facts reads, have no API scope
+yet, so they are not CLI commands and `infraternal skill` does not list them. Skills include the original wire schema references and exact
 permission alternatives; destructive actions retain required dry-run guidance.
 The `mesh` Cargo feature remains an alias for `plugin-mesh`.
 
@@ -187,13 +208,15 @@ passkey tap. The stored credential powers hosted actions through
 `Authorization: Bearer`. `--server https://…` selects a stored server
 credential when more than one is present.
 
-The hosted key actions are `status`, `hosts list`, `hosts add`, `hosts remove`
-and `sessions list`. `hosts add` streams each setup step and the captured
+The hosted key actions are `status`, `hosts list`, `hosts add`, `hosts remove`,
+`hosts forget` and `sessions list`. `hosts add` streams each setup step and the captured
 remote setup failure detail. `hosts remove <id> --dry-run` shows what would be
 removed and changes nothing. `hosts remove <id>` first shows that same dry run, asks
 `Type yes to confirm`, and only then removes the host and uninstalls its
 infraternal agent (D28). `--yes` skips the question for scripts; `--json` and
-pipes need it. Inside its `hosts:write` scope the key needs no further passkey tap
+pipes need it. `hosts forget <id>` is for a host that was retired and cannot be
+reached: it drops the list entry and its pending cleanup, keeps the audit record
+and does not touch the machine. It has the same `--dry-run` and `--yes`. Inside its `hosts:write` scope the key needs no further passkey tap
 (D333); the tap was the key's approval, and every call is audited. Reads are
 counted per key and minute rather than logged one row per call.
 

@@ -3,6 +3,14 @@
 //! The enrollment, running image and launchd job are separate publications.
 //! Each path created by this attempt is tracked by inode until launchd runs
 //! the job. An interrupted install can only roll back its own paths.
+//!
+//! A build with app windows also publishes the per-user desktop helper and
+//! the signed capture app beside the service binary, root-owned, when the
+//! release folder `up` runs from holds them. Both must be signed by the same
+//! signer as this binary (the root service admits only such a helper), and
+//! the copies carry no set-id bit or access-control list. The root service
+//! starts that helper as the console user (D203 C2, #146); root ownership
+//! keeps the person from swapping either one.
 use super::{hash_stream, termination};
 /// Data passed to the enrollment client before the system daemon starts.
 pub(super) use infraternal_plugin_mesh::macos_service::MACHINE_DATA as SERVICE_DATA;
@@ -25,6 +33,12 @@ pub(super) const SERVICE_NAME: &str = "org.infraternal.mesh";
 const PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
 /// How long `up` waits for launchd to report the started service as running.
 const START_WAIT: Duration = Duration::from_secs(15);
+/// The desktop helper's file name, in the release folder and beside the service.
+#[cfg(feature = "desktop")]
+const DESKTOP_HELPER: &str = "infraternal-desktop-helper";
+/// The signed capture app's folder name, in the release folder and beside the service.
+#[cfg(feature = "desktop")]
+const CAPTURE_APP: &str = "InfraternalCaptureHelper.app";
 
 /// Explain a local refusal in words a person can act on, with no private input.
 fn refused(message: String) -> io::Error {
@@ -173,7 +187,11 @@ impl Install {
 
     /// Copy the running image to the service binary path, verified and never over an existing file.
     fn binary(&mut self, source: &Path) -> io::Result<()> {
-        let destination = Path::new(MACHINE_BINARY);
+        self.publish(source, Path::new(MACHINE_BINARY))
+    }
+
+    /// Copy one executable to `destination`, verified and never over an existing file.
+    fn publish(&mut self, source: &Path, destination: &Path) -> io::Result<()> {
         let mut input = fs::File::open(source)?;
         if !input.metadata()?.is_file() {
             return Err(io::Error::new(
@@ -193,6 +211,107 @@ impl Install {
         let _ = fs::remove_file(&staging);
         result?;
         self.record(destination, false)
+    }
+
+    /// Publish the desktop helper and the signed capture app beside the
+    /// service binary, when the release folder `up` runs from has both.
+    /// Without them the Mac still enrolls, with terminals only, and `up` says so.
+    #[cfg(feature = "desktop")]
+    fn desktop(&mut self, source: &Path) -> io::Result<()> {
+        let bin = Path::new(MACHINE_BINARY)
+            .parent()
+            .ok_or_else(|| io::Error::other("missing service folder"))?;
+        let release = source.parent().unwrap_or_else(|| Path::new("/"));
+        let helper = release.join(DESKTOP_HELPER);
+        let app = release.join(CAPTURE_APP);
+        if !existing(&helper)?.is_some_and(|metadata| metadata.is_file())
+            || !existing(&app)?.is_some_and(|metadata| metadata.is_dir())
+        {
+            eprintln!(
+                "infraternal: app windows skipped; {DESKTOP_HELPER} and {CAPTURE_APP} were not next to this binary."
+            );
+            return Ok(());
+        }
+        // The root agent admits only a helper from its own signer, so a
+        // build without a certificate would install a helper it then refuses.
+        let Ok(signer) = infraternal_shim::code_identity::own_signer() else {
+            eprintln!(
+                "infraternal: app windows skipped; this infraternal build is not signed with a certificate."
+            );
+            return Ok(());
+        };
+        let destination = bin.join(DESKTOP_HELPER);
+        self.publish(&helper, &destination)?;
+        // Checked on the root-owned copy, which nobody else can change; a
+        // failure rolls the published file back with the rest of the install.
+        verify_signature(
+            &destination,
+            &infraternal_shim::code_identity::requirement(DESKTOP_HELPER, &signer)?,
+        )?;
+        self.check_interruption()?;
+        self.capture_app(
+            &app,
+            &bin.join(CAPTURE_APP),
+            &infraternal_shim::code_identity::signed_by(&signer),
+        )
+    }
+
+    /// Copy the capture app bundle with its signature intact, make it root's
+    /// with no group or other write bit, no set-id bit and no access-control
+    /// list, check that it is signed by `requirement` (this binary's own
+    /// signer), then publish it under its final name, never over an existing
+    /// path.
+    #[cfg(feature = "desktop")]
+    fn capture_app(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        requirement: &str,
+    ) -> io::Result<()> {
+        if existing(destination)?.is_some() {
+            return Err(refused(format!(
+                "{} already exists.",
+                destination.display()
+            )));
+        }
+        // The staging name keeps the `.app` extension so codesign reads it as
+        // a bundle, and a leading dot so nothing lists it as an app.
+        let staging =
+            destination.with_file_name(format!(".capture-{}.app", uuid::Uuid::new_v4().simple()));
+        let result = (|| {
+            // ditto copies the bundle with its extended attributes and
+            // signature; chown and chmod then take it away from the person.
+            // Access-control lists are not copied: an entry granting the
+            // person write access would outlive the chown, and the signature
+            // seal does not cover it.
+            run_tool(
+                "/usr/bin/ditto",
+                &["--noacl".as_ref(), source.as_os_str(), staging.as_os_str()],
+            )?;
+            run_tool(
+                "/usr/sbin/chown",
+                &[
+                    "-R".as_ref(),
+                    "-h".as_ref(),
+                    "root:wheel".as_ref(),
+                    staging.as_os_str(),
+                ],
+            )?;
+            // Root's chown keeps set-id bits, and the signature seal does not
+            // cover file modes: a set-uid bit planted in the release folder
+            // would otherwise become a set-uid root program here.
+            run_tool(
+                "/bin/chmod",
+                &["-R".as_ref(), "go-w,ug-s".as_ref(), staging.as_os_str()],
+            )?;
+            verify_signature(&staging, requirement)?;
+            fs::rename(&staging, destination)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result?;
+        self.record(destination, true)
     }
 
     /// Add `/usr/local/bin/infraternal` (and `infra` beside it) pointing at the service binary.
@@ -228,6 +347,9 @@ impl Install {
     pub(super) fn activate(mut self, source: &Path, host: uuid::Uuid) -> io::Result<()> {
         self.check_interruption()?;
         self.binary(source)?;
+        self.check_interruption()?;
+        #[cfg(feature = "desktop")]
+        self.desktop(source)?;
         self.check_interruption()?;
         self.command_links()?;
         self.check_interruption()?;
@@ -305,6 +427,42 @@ impl Install {
                 );
             }
         }
+    }
+}
+
+/// Check that the code at `path` has a valid, strict signature that meets
+/// `requirement` (code requirement language), through `codesign`.
+#[cfg(feature = "desktop")]
+fn verify_signature(path: &Path, requirement: &str) -> io::Result<()> {
+    run_tool(
+        "/usr/bin/codesign",
+        &[
+            "--verify".as_ref(),
+            "--strict".as_ref(),
+            "-R".as_ref(),
+            format!("={requirement}").as_ref(),
+            path.as_os_str(),
+        ],
+    )
+}
+
+/// Run a system tool by absolute path with an empty environment and no
+/// output; any failure, including a non-zero exit, is an error.
+#[cfg(feature = "desktop")]
+fn run_tool(program: &str, arguments: &[&std::ffi::OsStr]) -> io::Result<()> {
+    let status = std::process::Command::new(program)
+        .args(arguments)
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "{program} failed while installing app windows"
+        )))
     }
 }
 

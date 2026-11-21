@@ -1,8 +1,14 @@
 //! Per-user desktop helper entrypoint; no daemon or server is created [D203,D201].
 //!
 //! Usage: `infraternal-desktop-helper <private-runtime-directory> [--json]
-//! [--once] [--companion-runtime <dir>]`, or `--check-permissions` to test the
-//! macOS privacy permissions.
+//! [--once] [--companion-runtime <dir>] [--daemon-peer]`, or
+//! `--check-permissions` to test the macOS privacy permissions.
+//!
+//! `--daemon-peer` is set only by a root infraternal agent that started this
+//! helper as the console user (D203 C2, #146). The helper then reads a 32-byte
+//! token from standard input, admits only root as its client, and sends the
+//! token before anything else. It refuses to run as root itself: capture
+//! always runs as the person at the screen.
 //!
 //! The helper binds a Unix socket in the runtime directory and serves one client
 //! at a time with `infraternal_plugin_desktop::helper::session`, using a signed
@@ -64,7 +70,11 @@ fn main() -> std::io::Result<()> {
 #[cfg(target_os = "macos")]
 #[tokio::main]
 async fn run() -> std::io::Result<()> {
-    use infraternal_plugin_desktop::{helper, native::Native, socket::Endpoint};
+    use infraternal_plugin_desktop::{
+        helper,
+        native::Native,
+        socket::{Endpoint, Peer},
+    };
     use std::{
         io,
         path::PathBuf,
@@ -75,11 +85,16 @@ async fn run() -> std::io::Result<()> {
     };
     let json = std::env::args_os().any(|arg| arg == "--json");
     let once = std::env::args_os().any(|arg| arg == "--once");
+    let peer = if std::env::args_os().any(|arg| arg == "--daemon-peer") {
+        daemon_peer()?
+    } else {
+        Peer::SameUser
+    };
     let mut args = std::env::args_os().skip(1);
     let mut runtime = None;
     let mut companion_runtime = None;
     while let Some(argument) = args.next() {
-        if argument == "--json" || argument == "--once" {
+        if argument == "--json" || argument == "--once" || argument == "--daemon-peer" {
             continue;
         }
         if argument == "--companion-runtime" {
@@ -134,7 +149,8 @@ async fn run() -> std::io::Result<()> {
             let shutdown = socket.try_clone()?;
             let encoder_path = native_path.clone();
             let mut companion = native.take().ok_or_else(|| io::Error::other("Desktop companion unavailable."))?; let stop = Arc::clone(&stopping);
-            let mut task = tokio::task::spawn_blocking(move || { let result = helper::session(socket,&mut companion,&encoder_path,&stop); (companion,result) });
+            let peer = peer.clone();
+            let mut task = tokio::task::spawn_blocking(move || { let result = helper::session(socket,&mut companion,&encoder_path,&stop,&peer); (companion,result) });
             tokio::select! {
                 result = &mut task => {
                     if let Ok((companion, session_result)) = result {
@@ -163,6 +179,30 @@ async fn run() -> std::io::Result<()> {
     result
 }
 
+/// The client policy for a helper the root agent started as the console user:
+/// reads the 32-byte token from standard input (a pipe only the agent wrote),
+/// and refuses to run as root, so capture never runs with root's rights.
+#[cfg(target_os = "macos")]
+fn daemon_peer() -> std::io::Result<infraternal_plugin_desktop::socket::Peer> {
+    use std::io::Read as _;
+    if nix::unistd::geteuid().is_root() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "The desktop helper does not capture as root.",
+        ));
+    }
+    let mut token = [0_u8; 32];
+    let mut input = std::io::stdin().lock();
+    input.read_exact(&mut token)?;
+    // Exactly 32 bytes, then end of input: a longer stream is not the agent's.
+    if input.read(&mut [0_u8; 1])? != 0 {
+        return Err(std::io::Error::other(
+            "The desktop helper token is malformed.",
+        ));
+    }
+    Ok(infraternal_plugin_desktop::socket::Peer::Daemon(token))
+}
+
 /// Starts a new native companion on a blocking thread, replacing one that
 /// stopped or whose session task failed.
 #[cfg(target_os = "macos")]
@@ -188,7 +228,9 @@ fn configured_companion() -> std::io::Result<Option<std::path::PathBuf>> {
 
 /// Checks that `path` is the executable inside a companion app bundle and is
 /// safe to run: absolute, a regular file (not a symlink), owned by the current
-/// user, executable by its owner, and not writable by group or others.
+/// user or by root, executable by its owner, and not writable by group or
+/// others. Root ownership is what `infraternal up` installs next to the root
+/// agent (D203 C2); the person cannot change such a file.
 #[cfg(target_os = "macos")]
 fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
@@ -196,7 +238,7 @@ fn validate_companion(path: &std::path::Path) -> std::io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !path.is_absolute()
         || !metadata.is_file()
-        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || (metadata.uid() != nix::unistd::geteuid().as_raw() && metadata.uid() != 0)
         || metadata.mode() & 0o022 != 0
         || metadata.mode() & 0o100 == 0
     {

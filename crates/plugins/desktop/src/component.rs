@@ -6,7 +6,14 @@
 //! the helper to restore any window geometry it changed, then SIGKILL, and
 //! only then does it report success. Waiting on the whole group matters because
 //! native child processes can outlive the helper itself.
-use crate::manifest::DESCRIPTOR;
+//!
+//! A root infraternal agent starts its one-shot helpers as the console user
+//! ([`DesktopComponent::for_console_user`], D203 C2): through the shim's
+//! placement entry, with a cleared environment that carries only the capture
+//! app's path and the capture-callback timeout, and with the one-time token
+//! written to the helper's standard input. Root may signal that user's
+//! process group, so retirement is unchanged.
+use crate::{cross_user::Launch, manifest::DESCRIPTOR};
 use infraternal_plugin_api::{
     ComponentPlugin, PluginDescriptor, PluginOperation, PluginState, PluginStatus,
 };
@@ -31,6 +38,20 @@ pub struct DesktopComponent {
     once: bool,
     /// Passed as `--companion-runtime` when set.
     companion_runtime: Option<PathBuf>,
+    /// Set by a root agent: start the helper as the console user.
+    console_user: Option<ConsoleLaunch>,
+}
+/// What a root agent needs to start one helper as the console user.
+#[derive(Clone)]
+struct ConsoleLaunch {
+    /// Builds the placement command for `uid`.
+    launch: Launch,
+    /// The console user's uid.
+    uid: u32,
+    /// The one-time token, written to the helper's standard input.
+    token: [u8; 32],
+    /// The capture app's executable inside its signed bundle.
+    companion: PathBuf,
 }
 impl DesktopComponent {
     /// A long-running component: the helper serves connections until disabled.
@@ -44,6 +65,7 @@ impl DesktopComponent {
             child: Arc::new(Mutex::new(None)),
             once: false,
             companion_runtime: None,
+            console_user: None,
         }
     }
     /// A trusted per-source executable exits after its one owned IPC client.
@@ -60,6 +82,24 @@ impl DesktopComponent {
     #[must_use]
     pub fn with_companion_runtime(mut self, runtime: PathBuf) -> Self {
         self.companion_runtime = Some(runtime);
+        self
+    }
+    /// Start the helper as the console user `uid` (a root agent, D203 C2).
+    /// The helper is told `--daemon-peer`: it reads `token` from standard
+    /// input, admits only root as its client, and sends the token first.
+    #[must_use]
+    pub(crate) fn for_console_user(
+        mut self,
+        cross: &crate::cross_user::CrossUser,
+        uid: u32,
+        token: [u8; 32],
+    ) -> Self {
+        self.console_user = Some(ConsoleLaunch {
+            launch: cross.launch.clone(),
+            uid,
+            token,
+            companion: cross.companion.clone(),
+        });
         self
     }
 }
@@ -103,6 +143,7 @@ impl ComponentPlugin for DesktopComponent {
         let executable = self.executable.clone();
         let once = self.once;
         let companion_runtime = self.companion_runtime.clone();
+        let console_user = self.console_user.clone();
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 #[cfg(not(target_os = "macos"))]
@@ -123,7 +164,20 @@ impl ComponentPlugin for DesktopComponent {
                         retire(child)?;
                     }
                     guard.take();
-                    let mut command = Command::new(executable);
+                    let mut command = match &console_user {
+                        Some(console) => {
+                            let mut command = (console.launch)(console.uid)
+                                .map_err(|_| "Desktop helper could not start.")?;
+                            command
+                                .arg(&executable)
+                                .env("INFRATERNAL_DESKTOP_COMPANION", &console.companion)
+                                // Set here so the helper never re-executes
+                                // itself to add it (helper.rs main).
+                                .env("SCREENCAPTUREKIT_COMPLETION_TIMEOUT_SECS", "3");
+                            command
+                        }
+                        None => Command::new(executable),
+                    };
                     command.arg(runtime);
                     if once {
                         command.arg("--once");
@@ -131,13 +185,31 @@ impl ComponentPlugin for DesktopComponent {
                     if let Some(runtime) = companion_runtime {
                         command.arg("--companion-runtime").arg(runtime);
                     }
-                    let child = command
+                    if console_user.is_some() {
+                        command.arg("--daemon-peer");
+                    }
+                    let mut child = command
                         .process_group(0)
-                        .stdin(Stdio::null())
+                        .stdin(if console_user.is_some() {
+                            Stdio::piped()
+                        } else {
+                            Stdio::null()
+                        })
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
                         .spawn()
                         .map_err(|_| "Desktop helper could not start.")?;
+                    if let Some(console) = &console_user {
+                        // 32 bytes fit any pipe buffer, so this never blocks;
+                        // closing the pipe tells the helper the token is whole.
+                        let written = child.stdin.take().ok_or(()).and_then(|mut input| {
+                            std::io::Write::write_all(&mut input, &console.token).map_err(|_| ())
+                        });
+                        if written.is_err() {
+                            retire(&mut child)?;
+                            return Err("Desktop helper could not start.");
+                        }
+                    }
                     *guard = Some(child);
                 } else if let Some(child) = guard.as_mut() {
                     // Keep ownership after a partial failure so status and a later
