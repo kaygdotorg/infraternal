@@ -189,6 +189,19 @@ impl JoinMachineRequest {
     }
 }
 
+/// Whether a requester-chosen device label is safe to show on the approval page.
+///
+/// The label is the name the owner reads before tapping, and later the name of the
+/// key in the key list. It is 1–128 bytes of printable ASCII (space to `~`), the
+/// set the CLI already sends. Control, bidi, zero-width and other non-ASCII
+/// characters are refused so a label cannot render as a different device or hide
+/// part of itself (#559 F3, the same rule as the join host name, J134 P3-3).
+fn readable_label(device: &str) -> bool {
+    !device.is_empty()
+        && device.len() <= 128
+        && device.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+}
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Start device-code approval with the default key lifetime. `source` is the caller's
@@ -228,8 +241,7 @@ impl Auth {
         if !(MIN_KEY_LIFETIME_SECONDS..=policy.max(MIN_KEY_LIFETIME_SECONDS)).contains(&lifetime) {
             return Err(Error::Invalid);
         }
-        if device.is_empty()
-            || device.len() > 128
+        if !readable_label(device)
             || scopes.is_empty()
             || scopes.len() > 32
             || scopes.iter().any(|s| {
@@ -273,7 +285,7 @@ impl Auth {
         source: IpAddr,
         now: i64,
     ) -> Result<Value> {
-        if device.is_empty() || device.len() > 128 || now < 0 {
+        if !readable_label(device) || now < 0 {
             return Err(Error::Invalid);
         }
         request.validate()?;
