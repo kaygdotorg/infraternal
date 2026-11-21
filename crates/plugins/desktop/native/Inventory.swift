@@ -194,6 +194,23 @@ func windowSnapshot(applicationMetadata: Bool = true, windowID: CGWindowID? = ni
     }
 }
 
+/// The process that owns the topmost on-screen window at `point` among the windows above window `id`,
+/// or `nil` when no window above it covers the point.
+///
+/// One WindowServer query for "windows above this one" replaces a read of the whole window list;
+/// the order is front to back and desktop elements are left out. Used to decide whether a remote
+/// pointer event would land on another app's window.
+func topmostOwner(above id: CGWindowID, at point: CGPoint) -> Int32? {
+    let entries = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow, .excludeDesktopElements], id) as? [[String: Any]] ?? []
+    for entry in entries {
+        guard let raw = entry[kCGWindowBounds as String] as? NSDictionary,
+              let frame = CGRect(dictionaryRepresentation: raw as CFDictionary),
+              frame.contains(point), let pid = entry[kCGWindowOwnerPID as String] as? Int32 else { continue }
+        return pid
+    }
+    return nil
+}
+
 /// Confirms that WindowServer no longer lists this exact window of this process.
 /// An unavailable list is inconclusive and leaves the capture eligible to retry.
 func windowIsGone(id: CGWindowID, pid: pid_t) -> Bool {

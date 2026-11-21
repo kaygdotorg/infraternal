@@ -106,13 +106,11 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
   }
   if (m.kind === "containers") {
     const list = el("div", "cl-list");
-    list.setAttribute("role", "list");
     for (const row of cx.adapters.containers?.rows() ?? []) {
       const b = el("button", "cl-row");
       b.type = "button";
       b.dataset.name = row.name;
       b.dataset.state = row.state;
-      b.setAttribute("role", "listitem");
       b.setAttribute("aria-label", `${row.name}, ${row.state}. Open a shell`);
       b.innerHTML = '<span class="cl-state" aria-hidden="true"></span><span class="cl-name"></span><span class="cl-image"></span><span class="cl-cpu"></span>';
       (b.querySelector(".cl-name") as HTMLElement).textContent = row.name;

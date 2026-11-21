@@ -28,6 +28,10 @@ mod access_write;
 mod account_processes;
 #[path = "daemon_portable.rs"]
 pub mod control;
+/// Fuzz entry point for local control-socket messages and the Hello OS token (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[doc(hidden)]
+pub mod control_checks;
 mod daemon_writer;
 /// Admit bounded durable work before moving it off the async runtime.
 mod durable_io;
@@ -79,6 +83,8 @@ pub use infraternal_plugin_remote::remote_quic;
 pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::server_leaf_floor;
 // Session automation authenticates callers by walking /proc ancestry; it has
 // no macOS process-tree check yet, so it stays Linux-only (#328).
 #[cfg(target_os = "linux")]
@@ -127,6 +133,9 @@ pub fn run_embedded_with_mesh_state(
     state: Option<std::path::PathBuf>,
     mesh_state: Option<std::path::PathBuf>,
 ) -> std::io::Result<()> {
+    // This thread is the agent's whole runtime and relays every terminal byte, so it asks for a
+    // fast core. Timer coalescing is fixed by launchd's `ProcessType`, not here (#554).
+    let _ = infraternal_shim::qos::set_current_thread(infraternal_shim::qos::Qos::UserInteractive);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

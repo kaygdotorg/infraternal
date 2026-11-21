@@ -51,6 +51,8 @@ impl NodeChannel for Channel {
         })
     }
 }
+/// One line of the proof's stdin protocol: set up the mesh, answer a
+/// `mesh.configure` call, retire the host, or make an access change.
 #[derive(Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Request {
@@ -59,6 +61,10 @@ enum Request {
         extra_members: u64,
         #[serde(default)]
         change: Option<Change>,
+        /// Make the retired host a person's host (UUID owner) that never sends
+        /// its cleanup receipt, as an offline host does (D166, #515).
+        #[serde(default)]
+        person: bool,
     },
     Ack {
         call: u64,
@@ -75,8 +81,13 @@ enum Change {
     RuleRemoval,
     DefaultTightening,
 }
+/// The fixture's server side after `Init`: the authority writer, the plugin
+/// runtime driving live peers, the mesh service and its database.
 struct State {
     authority: EnrollmentStore,
+    /// The retired host's owner: `owner` (a legacy identity, retired at once)
+    /// or a person's UUID, whose removal waits for a receipt that never comes.
+    retiring_owner: String,
     runtime: PluginRuntime,
     service: MeshService,
     pool: sqlx::SqlitePool,
@@ -87,6 +98,7 @@ async fn initialize(
     extra: u64,
     frames: tokio::sync::mpsc::Sender<Apply>,
     change: Option<Change>,
+    person: bool,
 ) -> Result<State, Error> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(4)
@@ -95,7 +107,14 @@ async fn initialize(
     sqlx::migrate!("./migrations").run(&pool).await?;
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES('owner','owner',1,'fixture','owner','Owner')").execute(&pool).await?;
     let host = uuid::Uuid::from_u128(42);
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)").bind(host.as_bytes().as_slice()).execute(&pool).await?;
+    let retiring_owner = if person {
+        let person = uuid::Uuid::from_u128(7).to_string();
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES(?,'person',0,'fixture','person','Person')").bind(&person).execute(&pool).await?;
+        person
+    } else {
+        "owner".to_owned()
+    };
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootful',0,1)").bind(host.as_bytes().as_slice()).bind(&retiring_owner).execute(&pool).await?;
     let service = MeshService::new(pool.clone());
     let mesh = service.dataplane();
     mesh.attach("server", PublicKey([1; 32]), None, true)
@@ -189,11 +208,14 @@ async fn initialize(
     }
     Ok(State {
         authority,
+        retiring_owner,
         runtime,
         service,
         pool,
     })
 }
+/// Serve the proof: requests arrive as JSON lines on stdin; `apply` frames
+/// for each peer and the `revoked` result leave as JSON lines on stdout.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let (frames, mut deliveries) = tokio::sync::mpsc::channel::<Apply>(32);
@@ -226,9 +248,9 @@ async fn main() -> Result<(), Error> {
                 let Some(line)=line else { break; };
                 let line=line?;
                 match serde_json::from_str::<Request>(&line)? {
-                    Request::Init {identities,extra_members,change} => {
+                    Request::Init {identities,extra_members,change,person} => {
                         if state.is_some() { return Err("already initialized".into()); }
-                        state=Some(initialize(identities,extra_members,frames.clone(),change).await?);
+                        state=Some(initialize(identities,extra_members,frames.clone(),change,person).await?);
                         None
                     },
                     Request::Ack {call,reply} => {
@@ -267,12 +289,42 @@ async fn main() -> Result<(), Error> {
                         None
                     },
                     Request::Revoke => {
-                        let authority=state.as_ref().ok_or("not initialized")?.authority.clone();
+                        let state=state.as_ref().ok_or("not initialized")?;
+                        let authority=state.authority.clone();
+                        let owner=state.retiring_owner.clone();
+                        let pool=state.pool.clone();
                         let committed=committed.clone();
-                        tokio::spawn(async move {
-                            let success=authority.revoke("owner",uuid::Uuid::from_u128(42),1_800_000_001).await.is_ok();
-                            let _=committed.send(success).await;
-                        });
+                        let host=uuid::Uuid::from_u128(42);
+                        if uuid::Uuid::parse_str(&owner).is_ok() {
+                            // A person's removal commits its intent, publishes, then waits for
+                            // the host's receipt, which this offline host never sends. Report
+                            // success once the intent is durable and the host is still
+                            // unconfirmed, so the proof shows peers cut it without a receipt.
+                            tokio::spawn(async move {
+                                let _ = authority.revoke(&owner,host,1_800_000_001).await;
+                            });
+                            tokio::spawn(async move {
+                                let success = async {
+                                    loop {
+                                        let pending: Option<bool> = sqlx::query_scalar("SELECT h.revoked_at IS NULL FROM remote_login_cleanup q JOIN remote_hosts h ON h.id=q.host_id WHERE q.host_id=? AND q.confirmed=0")
+                                            .bind(host.as_bytes().as_slice()).fetch_optional(&pool).await?;
+                                        if let Some(pending) = pending {
+                                            return Ok::<bool,Error>(pending);
+                                        }
+                                        // sleep: the intent commits on another task; this
+                                        // fixture has no commit hook, and 5 ms is far below
+                                        // the peer-refusal time being measured.
+                                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                                    }
+                                }.await.unwrap_or(false);
+                                let _=committed.send(success).await;
+                            });
+                        } else {
+                            tokio::spawn(async move {
+                                let success=authority.revoke(&owner,host,1_800_000_001).await.is_ok();
+                                let _=committed.send(success).await;
+                            });
+                        }
                         None
                     }
                 }

@@ -530,25 +530,42 @@ pub(crate) async fn request(
     }
 }
 
-/// Holds the selected image and its recovery input until the restart decision is final.
-/// Every restart into a named binary mirrors Mesh state to the legacy path once writers stop; a
-/// rollback is acknowledged only after that mirror is complete.
+/// A checked successor image, ready for the same-PID exec, plus the way back.
+///
+/// `binary` is the sealed image to exec and `input` the CA frame it receives on stdin
+/// (only when both sides are handoff-capable and the CA is unlocked). `recovery` is the
+/// running image, pinned before anything is exported, so a failed exec can exec it again
+/// with its own separate frame. Every restart into a named binary mirrors Mesh state to
+/// the legacy path once writers stop; a rollback is acknowledged only after that mirror
+/// is complete.
 pub(crate) struct Replacement {
     binary: crate::restart_binary::Opened,
     input: Option<std::os::unix::net::UnixStream>,
     recovery: crate::restart_binary::Opened,
     recovery_input: Option<std::os::unix::net::UnixStream>,
+    /// Held until the exec: the auto-update's folder lock and verified file (#211 S4).
+    /// Both are close-on-exec, so the exec itself releases them.
+    hold: Option<Box<dyn Send>>,
     /// Durable and legacy Mesh directories to mirror after quiescence, when a binary was named.
     mesh_handoff: Option<(PathBuf, PathBuf)>,
     /// Deferred reply to an explicit rollback request, sent only after the mirror finished.
     rollback_reply: Option<std::os::unix::net::UnixStream>,
+    /// An auto-update undo (#211 S4, D295): like an explicit rollback, a failed Mesh mirror
+    /// refuses the older image, which must never start without its Mesh identity.
+    mesh_required: bool,
+    /// The staging proof's `exec` fault: the exec of the new image is refused as if the
+    /// kernel had refused it, so the late-exec recovery runs (#211 S4).
+    #[cfg(feature = "staging-trust")]
+    refuse_exec: bool,
 }
 impl Replacement {
     /// Describe whether the selected image can receive a warm CA handoff.
     fn outcome(&self) -> &'static str {
         if self.input.is_some() { "warm" } else { "cold" }
     }
-    /// Prepare the requested executable and pin the current image for recovery.
+    /// Prepare the requested executable and pin the current image for recovery, with one
+    /// CA frame for each side that can take it. A locked or absent CA source prepares none,
+    /// which makes the switch cold.
     ///
     /// Both images and any warm-start input stay open until the selected image is executed.
     /// # Errors
@@ -574,8 +591,12 @@ impl Replacement {
             input,
             recovery,
             recovery_input,
+            hold: None,
             mesh_handoff: None,
             rollback_reply: None,
+            mesh_required: false,
+            #[cfg(feature = "staging-trust")]
+            refuse_exec: false,
         })
     }
 
@@ -587,7 +608,7 @@ impl Replacement {
     /// # Errors
     /// Returns the recovery exec error when a rollback is refused or its requester disconnected.
     fn handoff_after_quiescence(mut self) -> Result<Self, io::Error> {
-        let rollback = self.rollback_reply.is_some();
+        let rollback = self.rollback_reply.is_some() || self.mesh_required;
         let result = self
             .mesh_handoff
             .take()
@@ -637,7 +658,18 @@ impl Replacement {
         error
     }
 
+    /// Exec the successor; if that is refused, exec the pinned running image instead.
+    /// Returns only when both execs failed. Anything in `hold` (an update's folder lock and
+    /// verified file) lives until then and is closed by the exec.
     pub(crate) fn exec(self) -> io::Error {
+        let _hold = self.hold;
+        #[cfg(feature = "staging-trust")]
+        let error = if self.refuse_exec {
+            io::ErrorKind::PermissionDenied.into()
+        } else {
+            execute_image(&self.binary, self.input.as_ref())
+        };
+        #[cfg(not(feature = "staging-trust"))]
         let error = execute_image(&self.binary, self.input.as_ref());
         drop(self.input);
         tracing::warn!(error_kind = ?error.kind(), outcome = "recovering", "invalid image refused; recovering current image");
@@ -647,9 +679,10 @@ impl Replacement {
     }
 }
 
-/// Replace this process with the checked `binary`, passing the same arguments
-/// and environment and `input` (or `/dev/null`) as stdin. Only returns when the
-/// kernel refused the exec, with the reason, so the caller can recover.
+/// Replace this process with exactly the checked inode of `binary`, passing the
+/// same arguments and environment and `input` (or `/dev/null`) as stdin. Only
+/// returns when the kernel refused the exec, with the reason, so the caller can
+/// recover.
 fn execute_image(
     binary: &crate::restart_binary::Opened,
     input: Option<&std::os::unix::net::UnixStream>,
@@ -704,6 +737,114 @@ fn execute_image(
     execute()
         .err()
         .unwrap_or_else(|| io::ErrorKind::Other.into())
+}
+
+/// Turn the auto-updater's switch request into a warm replacement (#211 S4; D217, D295).
+///
+/// **Forward:** the installed release is admitted from the updater's verified open
+/// file (never reopened by path), with its signature checked again on the sealed copy.
+/// **Undo:** the kept previous image is admitted only if its SHA-256 is the one the
+/// previous release recorded for itself, and it gets its own argv\[0\] back.
+///
+/// Either way, if this process holds the unlocked CA, the replacement must receive it
+/// (an update never locks the CA, D217). Otherwise the request is refused and the
+/// server keeps serving. Returns the replacement to exec, or `None` after a refusal
+/// (which has already been answered).
+#[cfg(feature = "release")]
+pub(crate) fn switch(
+    request: infraternal_server::update_apply::SwitchRequest,
+    source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    data: &Path,
+) -> Option<Replacement> {
+    use infraternal_server::update_apply::{SwitchRequest, ca_warm, image_digest};
+    let keeps_ca = |replacement: &Replacement| !ca_warm() || replacement.input.is_some();
+    // Like any restart into a named binary, both directions mirror the durable Mesh state
+    // to the legacy runtime path once writers stop (#489), so an older build finds its
+    // identity. An undo cannot go ahead without that mirror.
+    let mesh = |mut replacement: Replacement, required: bool| -> Option<Replacement> {
+        match infraternal_agent::sessions::state_path(None) {
+            Ok(volatile) => {
+                replacement.mesh_handoff = Some((data.join("mesh"), volatile));
+                replacement.mesh_required = required;
+                Some(replacement)
+            }
+            Err(error) => {
+                tracing::warn!(error_kind = ?error.kind(), "update switch Mesh runtime path unavailable");
+                (!required).then_some(replacement)
+            }
+        }
+    };
+    match request {
+        SwitchRequest::Apply { switch, reply } => {
+            let admitted = crate::restart_binary::Opened::from_verified(
+                switch.file(),
+                switch.path().to_owned(),
+            )
+            .and_then(|binary| Replacement::new(binary, source))
+            .ok()
+            .filter(keeps_ca)
+            .and_then(|replacement| mesh(replacement, false));
+            let Some(mut replacement) = admitted else {
+                record_request("update", None, Some(switch.path()), "refused");
+                let _ = reply.send(Err(switch));
+                return None;
+            };
+            record_request("update", None, Some(switch.path()), replacement.outcome());
+            #[cfg(feature = "staging-trust")]
+            {
+                use infraternal_server::update_apply::{StagingFault, staging_fault};
+                replacement.refuse_exec =
+                    staging_fault(switch.version()) == Some(StagingFault::Exec);
+            }
+            let _ = reply.send(Ok(()));
+            replacement.hold = Some(Box::new(switch));
+            Some(replacement)
+        }
+        SwitchRequest::Undo { undo, reply } => {
+            let admitted =
+                crate::restart_binary::Opened::open_with(undo.image.clone(), |file, _| {
+                    (image_digest(file).map_err(|_| io::ErrorKind::InvalidData)? == undo.sha256)
+                        .then_some(())
+                        .ok_or_else(|| io::ErrorKind::PermissionDenied.into())
+                })
+                .map(|mut binary| {
+                    binary.path.clone_from(&undo.path);
+                    binary
+                })
+                .and_then(|binary| Replacement::new(binary, source))
+                .ok()
+                .filter(keeps_ca)
+                .and_then(|replacement| mesh(replacement, true));
+            let Some(replacement) = admitted else {
+                record_request("update-undo", None, Some(&undo.image), "refused");
+                let _ = reply.send(Err(()));
+                return None;
+            };
+            record_request("update-undo", None, Some(&undo.path), replacement.outcome());
+            let _ = reply.send(Ok(()));
+            Some(replacement)
+        }
+    }
+}
+
+/// The warm undo for a new release on trial whose serving failed at startup (#211 S4).
+///
+/// Builds the same undo request a failed health check sends and admits it with
+/// [`switch`], so the previous release comes back in this process with the CA (D217)
+/// and restores its database copy (D295). Returns `None` when this process is not on
+/// trial or the undo was refused; the caller then returns the serving error as before.
+#[cfg(feature = "release")]
+pub(crate) fn failed_start(
+    source: Option<&dyn infraternal_server::ca::CaKeySource>,
+    data: &Path,
+) -> Option<Replacement> {
+    let undo = infraternal_server::update_apply::failed_start_undo(data)?;
+    let (reply, _answer) = tokio::sync::oneshot::channel();
+    switch(
+        infraternal_server::update_apply::SwitchRequest::Undo { undo, reply },
+        source,
+        data,
+    )
 }
 
 /// Report one local restart request using the shared action definition.

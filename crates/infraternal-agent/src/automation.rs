@@ -60,12 +60,29 @@ impl Reply {
             data,
         }
     }
+    /// A refusal with result `code`, a message for the caller and the `next` step to try.
     pub(super) fn error(code: u8, message: impl Into<String>, next: &str) -> Self {
         Self {
             code,
             message: message.into(),
             next: next.into(),
             data: json!({}),
+        }
+    }
+}
+
+/// Fuzz hook: the saved-names decoder must refuse or return only valid rows.
+#[cfg(any(test, feature = "parser-checks"))]
+pub(crate) fn check_names_sample(bytes: &[u8]) {
+    if let Ok(names) = operations::decode_names(bytes) {
+        for (id, entry) in &names {
+            assert!(uuid::Uuid::parse_str(id).is_ok());
+            assert!(entry["name"].as_str().is_some_and(name));
+            assert!(
+                entry["uid"]
+                    .as_u64()
+                    .is_some_and(|uid| u32::try_from(uid).is_ok())
+            );
         }
     }
 }

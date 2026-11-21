@@ -13,6 +13,7 @@
 //! | `0x43` | [`Message::Input`] | viewer to host (`Control` is added by the server) |
 //! | `0x44` | [`Message::Repair`] | viewer to host |
 //! | `0x45` | [`Message::Fragment`] | host to viewer, over QUIC datagrams |
+//! | `0x46` | [`Message::Pressure`] | server to host, for a backed-up viewer connection |
 //!
 //! Relay streams and QUIC datagrams share this one encoding [D12, D104, D232].
 use crate::{
@@ -32,6 +33,64 @@ pub const MAX_VIDEO_BYTES: usize = MAX_FRAME_LEN - 42;
 
 /// Viewer Close code for an authoritative native window retirement.
 pub const WINDOW_CLOSED: u16 = 4410;
+/// Viewer Close code for a session the machine ended because the person at its screen changed.
+pub const CONSOLE_USER_CHANGED: u16 = 4411;
+
+/// Why the machine ended a desktop session for good. It is a closed set: the host never sends free
+/// text, so a viewer can say why in its own words and an unknown value can only be the safe default.
+/// On the wire it is the code of the viewer's final `Close` frame (no extra bytes), see
+/// [`EndReason::close_code`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    /// The window is gone: it was closed, or its app quit. This is the default for anything unknown.
+    WindowClosed,
+    /// Someone else (or nobody) is now at the Mac's screen, so every session ended for privacy.
+    ConsoleUserChanged,
+}
+impl EndReason {
+    /// The `Close` code that carries this reason to the viewer.
+    #[must_use]
+    pub const fn close_code(self) -> u16 {
+        match self {
+            Self::WindowClosed => WINDOW_CLOSED,
+            Self::ConsoleUserChanged => CONSOLE_USER_CHANGED,
+        }
+    }
+    /// Reads a `Close` code, or `None` when it is not an end-of-session reason.
+    #[must_use]
+    pub const fn from_close_code(code: u16) -> Option<Self> {
+        match code {
+            WINDOW_CLOSED => Some(Self::WindowClosed),
+            CONSOLE_USER_CHANGED => Some(Self::ConsoleUserChanged),
+            _ => None,
+        }
+    }
+    /// The short fixed text that goes in the `Close` frame's reason field (never shown as is).
+    #[must_use]
+    pub const fn close_text(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window closed",
+            Self::ConsoleUserChanged => "console user changed",
+        }
+    }
+    /// Reads the helper's `reason` word from its `gone` reply. Any other word, or none, is
+    /// [`EndReason::WindowClosed`]: a host that says something new can never invent a message.
+    #[must_use]
+    pub fn from_helper_word(word: Option<&str>) -> Self {
+        match word {
+            Some("console_user_changed") => Self::ConsoleUserChanged,
+            _ => Self::WindowClosed,
+        }
+    }
+    /// The word the helper puts in its `gone` reply for this reason.
+    #[must_use]
+    pub const fn helper_word(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window_closed",
+            Self::ConsoleUserChanged => "console_user_changed",
+        }
+    }
+}
 
 /// How video reaches the viewer. The viewer picks one in [`Message::Attach`]. Both candidates
 /// stay available until the owner selects one from measurements.
@@ -148,12 +207,20 @@ pub enum Message<'a> {
         offset: u32,
         bytes: &'a [u8],
     },
+    /// Server to host, tag `0x46`, 2 bytes: a viewer's connection is backed up, so the host's
+    /// encoder should lower its bit rate. `waited_ms` is how long video waited for that viewer
+    /// at the server, in milliseconds (saturating at 65 535); it is informational, any value is
+    /// valid, and the host may treat every report the same. The server sends at most a few per
+    /// second (#146).
+    Pressure {
+        waited_ms: u16,
+    },
 }
 impl Message<'_> {
     /// Stable additive frame tag; none overlaps the frozen upgrade range.
     ///
     /// The tag is the byte after the frame length: `0x40` Attach, `0x41` Video, `0x42` Size,
-    /// `0x43` Input, `0x44` Repair, `0x45` Fragment.
+    /// `0x43` Input, `0x44` Repair, `0x45` Fragment, `0x46` Pressure.
     #[must_use]
     pub const fn tag(self) -> u8 {
         match self {
@@ -163,6 +230,7 @@ impl Message<'_> {
             Self::Input(_) => 0x43,
             Self::Repair { .. } => 0x44,
             Self::Fragment { .. } => 0x45,
+            Self::Pressure { .. } => 0x46,
         }
     }
     /// Length of the encoded body in bytes (without tag or frame length). Fails with
@@ -182,6 +250,7 @@ impl Message<'_> {
             },
             Self::Repair { .. } => 8,
             Self::Fragment { bytes, .. } => 41 + bytes.len(),
+            Self::Pressure { .. } => 2,
         })
     }
     /// Rejects invalid dimensions, coordinates, flags and fragment arithmetic before any
@@ -191,7 +260,7 @@ impl Message<'_> {
     /// Returns a fixed layout error; it contains no payload bytes.
     pub fn validate(self) -> Result<(), DecodeError> {
         let valid = match self {
-            Self::Attach { .. } | Self::Repair { .. } => true,
+            Self::Attach { .. } | Self::Repair { .. } | Self::Pressure { .. } => true,
             Self::Video {
                 sequence, bytes, ..
             } => sequence > 0 && !bytes.is_empty() && bytes.len() <= MAX_VIDEO_BYTES,
@@ -346,6 +415,7 @@ impl Message<'_> {
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(bytes);
             }
+            Self::Pressure { waited_ms } => output.extend_from_slice(&waited_ms.to_le_bytes()),
         }
     }
 }
@@ -365,7 +435,7 @@ fn flag(tag: u8, body: &[u8], offset: usize) -> Result<bool, DecodeError> {
 }
 /// Decodes the body of a desktop frame with the given `tag`.
 ///
-/// Returns `UnknownType` for a tag outside `0x40..=0x45`, and an invalid-body error for a body
+/// Returns `UnknownType` for a tag outside `0x40..=0x46`, and an invalid-body error for a body
 /// that is too short or too long, has a bad flag or input kind, or fails validation. The result
 /// borrows its byte slices from `body`.
 pub(crate) fn decode(tag: u8, body: &[u8]) -> Result<Message<'_>, DecodeError> {
@@ -457,6 +527,12 @@ pub(crate) fn decode(tag: u8, body: &[u8]) -> Result<Message<'_>, DecodeError> {
                 .get(41..)
                 .ok_or_else(|| invalid_body(tag, "missing fragment"))?,
         },
+        0x46 => {
+            ensure_end(tag, body, 2)?;
+            Message::Pressure {
+                waited_ms: body_u16(tag, body, 0)?,
+            }
+        }
         _ => return Err(DecodeError::UnknownType(tag)),
     };
     message.validate()?;

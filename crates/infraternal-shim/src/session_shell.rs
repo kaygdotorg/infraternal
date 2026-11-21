@@ -51,11 +51,12 @@ use std::{
 /// The private argv verb; the parser accepts only the shape `command` emits.
 pub const VERB: &str = "__session-shell";
 /// The system launchd control tool, by absolute path.
-const LAUNCHCTL: &str = "/bin/launchctl";
+pub(crate) const LAUNCHCTL: &str = "/bin/launchctl";
 /// The fixed readiness probe: wait for one line of input, then confirm.
 const READINESS: &str = "read -r line; printf 'infraternal-ready\\n'";
-// macOS shells rebuild PATH from /etc/paths through path_helper at login.
-const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// The fixed search path for programs the entries start; macOS shells
+/// rebuild PATH from /etc/paths through `path_helper` at login.
+pub(crate) const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 // The only variables the entry takes from its caller, the root shim, which
 // sets each of them itself: TERM and COLORTERM are fixed terminal values,
 // INFRATERNAL_SESSION is this terminal's marker. Locale variables (LANG, LC_*)
@@ -65,8 +66,8 @@ const PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 // TMPDIR are set from the account, and SSH_AUTH_SOCK only from a verified
 // GUI login.
 const PASSED: [&str; 3] = ["TERM", "COLORTERM", "INFRATERNAL_SESSION"];
-// <bsm/audit.h>: AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS.
-const GRAPHIC_ACCESS: u64 = 0x10;
+/// `<bsm/audit.h>`: `AU_SESSION_FLAG_HAS_GRAPHIC_ACCESS`.
+pub(crate) const GRAPHIC_ACCESS: u64 = 0x10;
 /// The literal program arrives on the entry's argv after `--`; the shim already
 /// bounds it to 8 KiB (`startup::read_command`).
 const MAX_PROGRAM: usize = 8192;
@@ -315,20 +316,13 @@ fn locale(key: &OsStr) -> bool {
     key == "LANG" || key.as_bytes().starts_with(b"LC_")
 }
 
-/// Record the login name for the session, join the account's groups, then
-/// drop gid before uid. Verifies the result and that root cannot come back.
+/// Record the login name for the session, give the shell the default core
+/// limit back, then join the account's groups and drop gid before uid
+/// ([`drop_to_account`]).
 fn drop_privileges(name: &CString, uid: Uid, gid: Gid) -> io::Result<()> {
-    // SAFETY: `name` is a valid NUL-terminated string that outlives each call;
-    // neither function retains the pointer. This process is single-threaded.
+    // SAFETY: `name` is a valid NUL-terminated string that outlives the call;
+    // setlogin does not retain the pointer. This process is single-threaded.
     if unsafe { setlogin(name.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // initgroups registers the account for dynamic membership, so groups past
-    // the kernel's 16-entry list still resolve; setgroups alone would drop them.
-    #[allow(clippy::cast_possible_wrap)]
-    let group = gid.as_raw() as nix::libc::c_int;
-    // SAFETY: as above; the call copies the name and gid.
-    if unsafe { nix::libc::initgroups(name.as_ptr(), group) } != 0 {
         return Err(io::Error::last_os_error());
     }
     // Every infraternal process starts with a hard core limit of 0 (main's
@@ -340,6 +334,26 @@ fn drop_privileges(name: &CString, uid: Uid, gid: Gid) -> io::Result<()> {
     };
     // SAFETY: setrlimit copies the live, initialized record.
     if unsafe { nix::libc::setrlimit(nix::libc::RLIMIT_CORE, &raw const core) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    drop_to_account(name, uid, gid)
+}
+
+/// Join the account's groups, then drop gid before uid. Verifies the result
+/// and that root cannot come back. Call only from a fresh single-threaded
+/// entry that still runs as root.
+///
+/// Shared by the shell entry and the desktop helper entry (D203 C2), which
+/// must not record a login name: it is not a session leader, and `setlogin`
+/// would rename the session it shares with the daemon.
+pub(crate) fn drop_to_account(name: &CString, uid: Uid, gid: Gid) -> io::Result<()> {
+    // initgroups registers the account for dynamic membership, so groups past
+    // the kernel's 16-entry list still resolve; setgroups alone would drop them.
+    #[allow(clippy::cast_possible_wrap)]
+    let group = gid.as_raw() as nix::libc::c_int;
+    // SAFETY: `name` is a valid NUL-terminated string that outlives the call;
+    // initgroups copies the name and gid. This process is single-threaded.
+    if unsafe { nix::libc::initgroups(name.as_ptr(), group) } != 0 {
         return Err(io::Error::last_os_error());
     }
     unistd::setgid(gid).map_err(io::Error::from)?;
@@ -359,7 +373,7 @@ fn drop_privileges(name: &CString, uid: Uid, gid: Gid) -> io::Result<()> {
 }
 
 /// This process's audit user and session flags (`getaudit_addr`).
-fn audit_record() -> io::Result<(u32, u64)> {
+pub(crate) fn audit_record() -> io::Result<(u32, u64)> {
     let mut info = AuditInfo {
         auid: 0,
         mask: [0; 2],

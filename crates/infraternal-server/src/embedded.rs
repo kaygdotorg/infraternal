@@ -26,7 +26,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{mpsc, oneshot, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
 };
 
 const CONTROL_STREAM: u32 = 0;
@@ -104,6 +104,11 @@ pub(crate) enum AgentError {
     /// The terminal action was rejected by the embedded infraternal agent.
     #[error("terminal action failed")]
     Rejected,
+    /// The link already carries the most terminal streams it may (#562). The
+    /// browser's attach is refused at once, instead of waiting for a reply the
+    /// host will never send.
+    #[error("terminal stream limit reached")]
+    StreamLimit,
     /// A public terminal admission refusal; transport failures remain generic.
     #[error("terminal open refused")]
     OpenRefused(infraternal_plugin_api::admission::OpenRefusal),
@@ -304,9 +309,11 @@ pub(crate) struct EmbeddedAgent {
     restarts: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
-    /// The OS the host's infraternal agent named in its latest Hello ("macOS" or
-    /// "Linux"), or `None` before a Hello, for the server itself and for older agents.
-    reported_os: watch::Sender<Option<&'static str>>,
+    /// What the host's infraternal agent said about itself in its latest Hello:
+    /// its OS ("macOS" or "Linux") and whether its enrollment has the server's
+    /// direct address. `None` before a Hello, for the server itself and for
+    /// older agents.
+    reported_os: watch::Sender<Option<infraternal_agent::host_os::Reported>>,
 }
 
 /// Weak retirement routing never keeps a remote infraternal agent actor alive.
@@ -410,6 +417,7 @@ impl EmbeddedAgent {
                 executable,
                 mesh_state,
                 initial: None,
+                slot: child_slot(),
             },
             receiver,
             #[cfg(feature = "remote")]
@@ -757,7 +765,17 @@ impl EmbeddedAgent {
 
     /// The OS the host's infraternal agent named in its latest Hello, if it named one.
     pub(crate) fn reported_os(&self) -> Option<&'static str> {
-        *self.reported_os.borrow()
+        self.reported_os.borrow().map(|reported| reported.os)
+    }
+
+    /// True when the host's latest Hello said its enrollment has no direct
+    /// server address, so it links only over HTTPS and can never open App
+    /// Windows lanes until it is added again (#146, D349). False when it has
+    /// the address, before a Hello, and for agents that do not say.
+    pub(crate) fn lacks_direct_endpoint(&self) -> bool {
+        self.reported_os
+            .borrow()
+            .is_some_and(|reported| !reported.direct_endpoint)
     }
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
@@ -847,6 +865,7 @@ impl EmbeddedAgent {
                 executable: PathBuf::new(),
                 mesh_state: None,
                 initial: Some(stream),
+                slot: child_slot(),
             },
             receiver,
             #[cfg(feature = "remote")]
@@ -998,6 +1017,8 @@ enum Source {
         executable: PathBuf,
         mesh_state: Option<PathBuf>,
         initial: Option<UnixStream>,
+        /// One permit: the embedded child that may run now (#562). See [`child_slot`].
+        slot: Arc<Semaphore>,
     },
     #[cfg(feature = "remote")]
     Remote {
@@ -1005,7 +1026,7 @@ enum Source {
         uid: u32,
         pending: Option<Box<RemoteLink>>,
         /// Where each greeted link publishes the OS its agent named (#146).
-        reported_os: watch::Sender<Option<&'static str>>,
+        reported_os: watch::Sender<Option<infraternal_agent::host_os::Reported>>,
     },
 }
 
@@ -1029,7 +1050,8 @@ impl Source {
                 executable,
                 mesh_state,
                 initial,
-            } => connect_agent(executable, initial.take(), mesh_state.as_deref()).await,
+                slot,
+            } => connect_agent(executable, initial.take(), mesh_state.as_deref(), slot).await,
             #[cfg(feature = "remote")]
             Self::Remote {
                 incoming,
@@ -1082,7 +1104,7 @@ impl Source {
 async fn connect_remote(
     link: RemoteLink,
     uid: u32,
-    reported_os: &watch::Sender<Option<&'static str>>,
+    reported_os: &watch::Sender<Option<infraternal_agent::host_os::Reported>>,
 ) -> Result<AgentConnection, AgentError> {
     let mut receive = BytesMut::with_capacity(4096);
     let mut scratch = vec![0; READ_CHUNK];
@@ -1118,8 +1140,7 @@ async fn connect_remote(
                         .map_err(|_| AgentError::Protocol)?;
                     if let Frame::Hello { client_info, .. } = decoded.frame {
                         // Only the exact forms the agent sends are kept (#146).
-                        reported_os
-                            .send_replace(infraternal_agent::host_os::reported_os(client_info));
+                        reported_os.send_replace(infraternal_agent::host_os::reported(client_info));
                     }
                     receive.advance(decoded.wire_len);
                     return Ok(());
@@ -1149,6 +1170,7 @@ async fn connect_remote(
         peer: Peer::Remote(link),
         execution_uid: uid,
         pid: None,
+        _child_slot: None,
         receive,
         scratch,
         encode: Vec::new(),
@@ -1160,12 +1182,18 @@ async fn connect_remote(
     })
 }
 
+/// One greeted link to an infraternal agent (the embedded child or an admitted remote host),
+/// with its read/encode buffers and call ids. Dropping it fences the link at once and, for an
+/// embedded child, stops and reaps that child before its child slot frees (#562).
 struct AgentConnection {
     peer: Peer,
     #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
     wire_jobs: tokio::task::JoinSet<()>,
     execution_uid: u32,
     pid: Option<nix::unistd::Pid>,
+    /// The embedded child's turn in its supervisor's one-child slot, if this connection started
+    /// one. It is released only when the connection is gone and `pid` has been reaped (#562).
+    _child_slot: Option<OwnedSemaphorePermit>,
     receive: BytesMut,
     scratch: Vec<u8>,
     encode: Vec<u8>,
@@ -1193,6 +1221,7 @@ impl Drop for AgentConnection {
         if let Some(pid) = self.pid.take() {
             stop_child_sync(pid);
         }
+        // `_child_slot` drops after this body, so the next child can start only now.
     }
 }
 #[cfg(feature = "remote")]
@@ -1753,14 +1782,45 @@ fn after_loss(backoff: Duration, connected_at: std::time::Instant) -> Duration {
     }
 }
 
+/// The embedded supervisor's one-child slot: at most one embedded infraternal agent per
+/// supervisor runs at a time (#562).
+///
+/// A lost link retires its child on a detached task (SIGTERM, a 2 s grace, then SIGKILL and
+/// reap), so the actor can tell windows and refuse calls at once. The replacement, though, must
+/// not start while the old child lives: the old child still owns the infraternal agent's
+/// per-user sockets (`plugins.sock`), so a replacement started beside it found that socket
+/// answering and exited with `address in use`. Under CPU starvation (J1034: load ~60, 1,000
+/// sessions) the old child took most of its grace to exit, and every replacement started within
+/// that window failed. Each connection that started a child holds this slot's permit until the
+/// child is reaped; the next `connect_agent` waits for it. The wait overlaps the reconnect pause
+/// and is bounded by `stop_child`'s grace plus the reap.
+///
+/// Waiting also keeps the old child's stop hooks (#221: for example mesh SSH removing its
+/// firewall redirect) from running while its replacement installs the same host state.
+///
+/// Rejected: retrying the bind in the new child (it would still run beside a live predecessor
+/// and its stop hooks), and SIGKILL without grace (the stop hooks need the SIGTERM window,
+/// `infraternal-agent/src/shutdown.rs`).
+fn child_slot() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(1))
+}
+
 /// Start or attach to the embedded infraternal agent and finish its handshake.
 /// # Errors
 /// Returns unavailable when the child cannot start or the channel handshake fails.
+///
+/// A new child starts only after the previous one has been reaped: it waits for `slot`, which the
+/// previous connection holds until its child is gone (see [`child_slot`], #562).
 async fn connect_agent(
     executable: &Path,
     initial: Option<UnixStream>,
     mesh_state: Option<&Path>,
+    slot: &Arc<Semaphore>,
 ) -> Result<AgentConnection, AgentError> {
+    let child_slot = Arc::clone(slot)
+        .acquire_owned()
+        .await
+        .map_err(|_| AgentError::Unavailable)?;
     let (mut socket, pid) = if let Some(socket) = initial {
         (socket, None)
     } else {
@@ -1801,6 +1861,7 @@ async fn connect_agent(
         if let Some(pid) = pid {
             stop_child(pid).await;
         }
+        // `child_slot` is released here, after the failed child was reaped.
         return Err(AgentError::Unavailable);
     };
     let (reader, writer) = socket.into_split();
@@ -1810,6 +1871,7 @@ async fn connect_agent(
         wire_jobs: tokio::task::JoinSet::new(),
         execution_uid: nix::unistd::Uid::effective().as_raw(),
         pid,
+        _child_slot: Some(child_slot),
         receive,
         scratch,
         encode: Vec::with_capacity(4096),
@@ -2453,6 +2515,16 @@ async fn process_command(
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
             }
+            // The leg-B reserve (D214) bounds the streams of one link. A new
+            // stream past the bound is refused here, before anything is sent,
+            // so the browser hears a Close at once. A reattach of a stream
+            // already routed is not new and passes.
+            if !routes.contains_key(&stream_id)
+                && routes.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS
+            {
+                let _ = reply.send(Err(AgentError::StreamLimit));
+                return true;
+            }
             #[cfg(feature = "remote")]
             if let Peer::Remote(link) = &connection.peer
                 && !link.admits_terminal(stream_id)
@@ -2815,9 +2887,19 @@ enum TerminalNotice {
         #[serde(default)]
         retired: bool,
     },
+    /// The host terminal stopped or resumed echoing typed keys (#569). It
+    /// only stops the viewer's predictive echo, so it is forwarded as is.
+    #[serde(rename = "terminal.echo")]
+    Echo {
+        session_id: String,
+        seq: u64,
+        hidden: bool,
+    },
 }
 
 impl TerminalNotice {
+    /// The session the notice names, checked against the attachment before
+    /// it is forwarded; the other fields are only shape-checked here.
     fn session_id(&self) -> &str {
         // Cursor/status fields validate JSON shape; wire Snapshot/Ack remain authoritative.
         match self {
@@ -2843,6 +2925,14 @@ impl TerminalNotice {
                 session_id
             }
             Self::QueryRepliesUnavailable { session_id } => session_id,
+            Self::Echo {
+                session_id,
+                seq,
+                hidden,
+            } => {
+                let _ = (seq, hidden);
+                session_id
+            }
             Self::Exited {
                 session_id,
                 status,
@@ -3599,6 +3689,8 @@ fn notify_reconnecting(attachments: &mut HashMap<u64, AttachmentState>) {
     });
 }
 
+/// Retire a lost or replaced connection: stop its wire jobs, then stop and reap its child.
+/// Its child slot is released when `connection` drops at the end, after the reap (#562).
 async fn cleanup_connection(mut connection: AgentConnection) {
     #[cfg(feature = "remote")]
     connection.retire_wire_jobs().await;
@@ -3659,7 +3751,17 @@ fn spawn_socketpair_agent_with_mesh_state(
         );
     }
     let argv: Vec<_> = arguments.iter().map(CString::as_c_str).collect();
+    // posix_spawn can't change limits, so the child learns the soft open-file
+    // limit this server was started with, and gives it back to the shells it
+    // starts (#562). The server removed the variable from its own environment.
+    let handoff = infraternal_shim::open_files::launcher_soft_limit().map(|soft| {
+        (
+            std::ffi::OsString::from(infraternal_shim::open_files::HANDOFF_ENV),
+            std::ffi::OsString::from(soft.to_string()),
+        )
+    });
     let environment = std::env::vars_os()
+        .chain(handoff)
         .map(|(key, value)| {
             let mut entry = key.as_os_str().as_bytes().to_vec();
             entry.push(b'=');

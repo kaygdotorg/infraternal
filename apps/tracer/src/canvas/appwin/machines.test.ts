@@ -44,3 +44,29 @@ test("polls carry only the host; an icon hash is fetched once and its arrival no
     else Reflect.deleteProperty(globalThis, "window");
   }
 });
+
+/** A Mac enrolled without the server's direct address can never answer, so it is never asked (#146, D349). */
+test("a machine without a direct address is not asked for windows", async () => {
+  const calls: string[] = [];
+  const connection = {
+    isWelcomed: true,
+    call(action: string) { calls.push(action); return Promise.resolve({ windows: [] }); },
+    /** Already welcomed, as in the scenario above. */
+    onWelcome() { return () => undefined; },
+  } as unknown as StreamConnection;
+  const priorWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+  try {
+    const old = { ...host, direct: false } as HostEntry;
+    const machines = new Machines(connection, () => [old]);
+    await machines.refresh(old);
+    machines.refreshAll();
+    await Promise.resolve();
+    expect(calls).toEqual([]);
+    expect(machines.state("mac")).toBeUndefined();
+    machines.dispose();
+  } finally {
+    if (priorWindow) Object.defineProperty(globalThis, "window", priorWindow);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});

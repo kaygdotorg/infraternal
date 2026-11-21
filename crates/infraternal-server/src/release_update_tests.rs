@@ -726,3 +726,89 @@ async fn refusals_and_disabled_updates_never_back_off() {
     assert_eq!(image_requests(&bucket), requests, "no request while off");
     assert_eq!(state(&release, OLD).failures, 0);
 }
+
+/// Updates switched off win over a held explicit stage (J734 P3-a): the owner turned
+/// the release plugin off after staging a rollback, so the apply-time confirmation
+/// refuses it and nothing applies. The stage itself is kept for when updates return.
+#[tokio::test]
+async fn switched_off_updates_refuse_even_a_held_stage() {
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let switch = Arc::clone(&enabled);
+    let running_new = Updater::new(
+        &release.root,
+        bucket.origin.clone(),
+        NEW.into(),
+        artifact().into(),
+        Arc::new(Engine {
+            trust: Some(format!("{}{}", release.trust, old.trust)),
+        }),
+        Arc::new(move || {
+            let on = switch.load(Ordering::Relaxed);
+            Box::pin(async move { Ok((on, "edge".to_owned())) })
+        }),
+    );
+    assert_eq!(
+        running_new.check(Some(OLD), Admission::Explicit).await,
+        Ok(Outcome::Staged(OLD.into()))
+    );
+    enabled.store(false, Ordering::Relaxed);
+    assert_eq!(running_new.confirm_staged().await.err(), Some(UPDATES_OFF));
+    let saved = state(&release, NEW);
+    assert_eq!(
+        (saved.staged.as_deref(), saved.hold.as_deref()),
+        (Some(OLD), Some(OLD))
+    );
+    enabled.store(true, Ordering::Relaxed);
+    assert_eq!(running_new.confirm_staged().await.unwrap().version(), OLD);
+}
+
+/// A pointer that moves on to a newer release keeps the staged one until the newer one
+/// is staged (J734 P3-c). Here the newer release's signed metadata is published but its
+/// image is not there yet, so the check verifies the pointer, then fails the download:
+/// the older release stays staged and nothing calls it withdrawn. At apply time the
+/// confirmation refuses it, because the channel now offers something newer, but keeps
+/// it; once the newer image arrives it replaces the staged one.
+#[tokio::test]
+async fn a_superseded_release_stays_staged_until_its_successor_is_ready() {
+    use infraternal_plugin_release::update::SUPERSEDED;
+    let (release, bucket) = channel(NEW);
+    // NEWER is signed by its own fixture key; the updater trusts both (D224 spare key).
+    let newer = Release::with_version(4096, NEWER);
+    let updater = updater_with_trust(
+        &release,
+        &bucket.origin,
+        OLD,
+        &format!("{}{}", release.trust, newer.trust),
+    );
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    let image = format!("/releases/{NEWER}/{}", artifact());
+    bucket.files.lock().unwrap().extend(
+        newer
+            .files
+            .iter()
+            .filter(|(path, _)| **path != image)
+            .map(|(path, bytes)| (path.clone(), bytes.clone())),
+    );
+    point(&bucket, NEWER);
+    assert!(updater.check(None, Admission::Forward).await.is_err());
+    let saved = state(&release, OLD);
+    assert_eq!(saved.available.as_deref(), Some(NEWER));
+    assert_eq!((saved.staged.as_deref(), saved.removed), (Some(NEW), None));
+    assert_eq!(updater.confirm_staged().await.err(), Some(SUPERSEDED));
+    let saved = state(&release, OLD);
+    assert_eq!((saved.staged.as_deref(), saved.removed), (Some(NEW), None));
+    // NEWER's image arrives: it replaces NEW.
+    bucket
+        .files
+        .lock()
+        .unwrap()
+        .insert(image.clone(), newer.files[&image].clone());
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Staged(NEWER.into()))
+    );
+    assert_eq!(state(&release, OLD).removed, None);
+}

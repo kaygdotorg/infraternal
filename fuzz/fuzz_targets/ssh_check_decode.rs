@@ -47,7 +47,15 @@ fuzz_target!(|bytes: &[u8]| {
                 );
                 assert!(failure.message.len() <= 160);
                 assert_eq!(failure.fingerprints, Vec::<String>::new());
-                if !ssh_failure {
+                // A command failure is an install failure, except the one
+                // line the NetBird SSH server ends a session with when the
+                // login name has no account (#394): that whole stderr, and
+                // only that, is NoAccount whatever the exit path.
+                let no_account = String::from_utf8_lossy(&bytes[..bytes.len().min(8192)]).trim()
+                    == "User authentication failed";
+                if no_account {
+                    assert_eq!(failure.kind, FailureKind::NoAccount);
+                } else if !ssh_failure {
                     assert_eq!(failure.kind, FailureKind::Install);
                 }
             }

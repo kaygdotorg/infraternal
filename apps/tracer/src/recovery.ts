@@ -177,15 +177,15 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       });
       list.append(item);
     }
+    /** Says how many words are unknown, never which: the words are secret, so no field is marked (TASTE.md, errors reveal nothing secret). */
     function validate(): void {
       error.textContent = "";
-      let invalid = -1;
+      let invalidCount = 0;
       list.querySelectorAll<HTMLInputElement>("input").forEach((field, index) => {
         const bad = Boolean(words[index]) && !dictionary.has(words[index]!);
-        field.setAttribute("aria-invalid", String(bad));
-        if (bad && invalid < 0) invalid = index;
+        if (bad) invalidCount += 1;
       });
-      body.querySelector<HTMLElement>("#recovery-word-error")!.textContent = invalid >= 0 ? `Word ${invalid + 1} is not in the recovery word list.` : words.every(Boolean) && !validWords() ? "These words do not make a valid recovery key. Check their order." : "";
+      body.querySelector<HTMLElement>("#recovery-word-error")!.textContent = invalidCount > 0 ? `${invalidCount === 1 ? "1 word is" : `${invalidCount} words are`} not in the recovery word list.` : words.every(Boolean) && !validWords() ? "These words do not make a valid recovery key. Check their order." : "";
       update();
     }
   }

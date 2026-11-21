@@ -193,10 +193,28 @@ pub(crate) async fn rootless_launch_guard(
     Ok(guard)
 }
 
-async fn ready(endpoint: &Path, uid: u32) -> io::Result<()> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+/// How long a login worker has to answer one readiness exchange.
+///
+/// The worker runs as the host account, so the account can stop it with
+/// `SIGSTOP` or queue its own connections ahead of ours. Every exchange with it
+/// is therefore bounded: an unanswered one fails with `TimedOut` instead of
+/// holding the caller, and with it the person lock that revocation needs
+/// (#572 finding 3, D353). Two seconds is ample for a live worker, which
+/// answers from memory.
+const WORKER_ANSWER: Duration = Duration::from_secs(2);
+
+/// Ask the login worker at `endpoint` whether it is ready, within
+/// [`WORKER_ANSWER`], and return the kernel's credentials for its end.
+///
+/// The peer must run as `uid`. The worker answers one `?` with one `R`.
+/// # Errors
+/// `TimedOut` when the worker does not answer in time, `PermissionDenied`
+/// when another account owns the endpoint, and any socket error.
+async fn worker_exchange(endpoint: &Path, uid: u32) -> io::Result<tokio::net::unix::UCred> {
+    tokio::time::timeout(WORKER_ANSWER, async {
         let mut peer = UnixStream::connect(endpoint).await?;
-        if peer.peer_cred()?.uid() != uid {
+        let credentials = peer.peer_cred()?;
+        if credentials.uid() != uid {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "login worker account differs",
@@ -209,10 +227,15 @@ async fn ready(endpoint: &Path, uid: u32) -> io::Result<()> {
         if response != *b"R" {
             return Err(io::Error::other("invalid login worker readiness"));
         }
-        Ok(())
+        Ok(credentials)
     })
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+/// Whether the login worker at `endpoint` answers as account `uid`.
+async fn ready(endpoint: &Path, uid: u32) -> io::Result<()> {
+    worker_exchange(endpoint, uid).await.map(|_| ())
 }
 
 /// Unit identity is independent of infraternal agent PID or version, so upgrades adopt the same login.
@@ -717,23 +740,10 @@ pub(crate) async fn cgroup(
     person: uuid::Uuid,
     uid: u32,
 ) -> io::Result<Option<crate::login_auth::Identity>> {
-    let peer = UnixStream::connect(endpoint).await?;
-    let credentials = peer.peer_cred()?;
-    if credentials.uid() != uid {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "login worker account differs",
-        ));
-    }
-    peer.writable().await?;
-    let mut peer = peer;
-    peer.write_all(b"?").await?;
-    peer.shutdown().await?;
-    let mut ready = [0];
-    peer.read_exact(&mut ready).await?;
-    if ready != *b"R" {
-        return Err(io::Error::other("invalid login readiness"));
-    }
+    // Bounded: `ensure` calls this while it holds the person lock, and a
+    // worker frozen after answering `ready()` must not hold that lock, and
+    // so the person's revocation, forever (#572 finding 3).
+    let credentials = worker_exchange(endpoint, uid).await?;
     let pid = credentials
         .pid()
         .filter(|pid| *pid > 0)
@@ -2470,6 +2480,103 @@ exit 0
         assert!(
             !scope_record(&root, &unit).exists(),
             "the scope record outlived the login"
+        );
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// #572 finding 3 (J1082): a host account can freeze its own login worker
+    /// right after the worker answered `ensure`'s readiness check. `ensure`
+    /// then asks the same worker for its cgroup while it holds the person
+    /// lock; that exchange had no timer, so the lock was held forever and
+    /// every revocation of the person timed out on it and retried without
+    /// end. This drives the same order as `ensure` (person lock, `ready()`,
+    /// then `remember_scope()`) against a real worker process that is
+    /// stopped with `SIGSTOP` between the two exchanges, and requires that the open
+    /// gives up and the revocation still kills the login's session scope.
+    #[tokio::test]
+    async fn a_worker_stopped_after_readiness_cannot_block_its_persons_revocation() {
+        use tokio::io::AsyncBufReadExt as _;
+        let (root, person, uid, unit) = system_login_fixture().await;
+        let endpoint = root.join(&unit).join("login.sock");
+        std::fs::create_dir(endpoint.parent().unwrap()).unwrap();
+        // A stand-in worker in its own process, so it can really be stopped:
+        // it answers every `?` with `R` until SIGSTOP freezes it.
+        let mut worker = tokio::process::Command::new("python3")
+            .args([
+                "-I",
+                "-c",
+                "import socket,sys\n\
+                 s=socket.socket(socket.AF_UNIX)\n\
+                 s.bind(sys.argv[1])\n\
+                 s.listen(128)\n\
+                 print('listening',flush=True)\n\
+                 while True:\n    c=s.accept()[0]\n    c.recv(1)\n    c.sendall(b'R')\n    c.close()\n",
+            ])
+            .arg(&endpoint)
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut started = String::new();
+        tokio::io::BufReader::new(worker.stdout.take().unwrap())
+            .read_line(&mut started)
+            .await
+            .unwrap();
+        assert_eq!(started, "listening\n");
+        let host = ScriptedHost::new(&root, &unit, uid, true, true);
+        record_scope(
+            &root,
+            &unit,
+            uid,
+            &format!("/user.slice/user-{uid}.slice/session-7.scope"),
+        )
+        .unwrap();
+
+        let person_lock = acquire(&root, &format!("{}.person", person.simple()))
+            .await
+            .unwrap();
+        ready(&endpoint, uid)
+            .await
+            .expect("the live worker answers readiness");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(worker.id().unwrap()).unwrap()),
+            nix::sys::signal::Signal::SIGSTOP,
+        )
+        .unwrap();
+        let opening = tokio::spawn({
+            let (root, unit, endpoint) = (root.clone(), unit.clone(), endpoint.clone());
+            async move {
+                let _person = person_lock;
+                remember_scope(&root, &unit, &endpoint, person, uid).await
+            }
+        });
+        // Hang guards only: the fixed code gives up on the worker after
+        // `WORKER_ANSWER`; the broken code never let go of the person lock.
+        let revoked = tokio::time::timeout(
+            Duration::from_secs(60),
+            revoke_at(&root, Manager::System, person, false),
+        )
+        .await;
+        let opened = tokio::time::timeout(Duration::from_secs(60), opening).await;
+        worker.kill().await.unwrap();
+        let calls = host.calls();
+        let revoked = revoked.expect("revocation hung behind a frozen login worker");
+        assert!(
+            opened
+                .expect("the open hung on a frozen login worker")
+                .unwrap()
+                .is_err_and(|error| error.kind() == io::ErrorKind::TimedOut),
+            "the open must give up on the frozen worker"
+        );
+        assert!(
+            revoked.is_ok(),
+            "revocation failed: {revoked:?}; calls: {calls:?}"
+        );
+        assert_eq!(
+            std::fs::read(host.scope.join("cgroup.kill")).unwrap(),
+            b"1",
+            "the login's session scope was not killed; calls: {calls:?}"
         );
         drop(host);
         std::fs::remove_dir_all(root).unwrap();

@@ -98,8 +98,12 @@ perf lock when its command ends. If something is left behind, look for
 
 Install on hd01, as the operator account, from a clone at the reviewed full commit.
 The installer checks the checkout is at that commit, checks that `netbird`, `git` and
-`fj` are on PATH and that both VMs answer, writes the program and the two units, reloads the
-user manager only if a unit changed, and enables the timer. Repeating it is safe.
+`fj` are on PATH, and runs two preflight checks: `build-slot --status` on compute01, and
+`perf-run -- true` on the perf VM (the VM's `perf-run` takes `[--cold] [--root] [--out DIR] -- <cmd>`
+and has no `status` subcommand). The perf check takes the perf lock for a moment, so while a
+benchmark holds the lock it can time out after 120 s; rerun the installer then. It then writes the
+program and the two units, reloads the user manager only if a unit changed, and enables the timer.
+Repeating it is safe. `--no-preflight` skips both checks.
 
 ```sh
 d=$(mktemp -d) && git clone -q https://git.kayg.org/kayg/infraternal.git "$d/src" \
