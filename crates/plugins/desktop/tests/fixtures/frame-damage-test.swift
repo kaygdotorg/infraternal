@@ -37,6 +37,19 @@ import CoreGraphics
             expect(captureFrameHasDamage([empty, changed], initial: false), "changed corpus \(n)")
             expect(captureFrameHasDamage([zero, "unknown"], initial: false), "unknown corpus \(n)")
         }
+        // Tile lane budget [#146 C]: area limit by picture size, and a byte bucket refilled at
+        // the video bit rate with a burst of a quarter second (at least 64 KiB).
+        expect(TileLane.areaLimit(width: 1520, height: 1026) == 62_380, "4% of a 1.56 MP window")
+        expect(TileLane.areaLimit(width: 4000, height: 1000) == 65_536, "absolute tile area cap")
+        expect(TileLane.areaLimit(width: 0, height: 10) == 0, "empty picture has no tiles")
+        var lane = TileLane()
+        expect(lane.admits(64 * 1024, bitsPerSecond: 1_000_000, at: 0), "initial burst")
+        lane.spend(64 * 1024)
+        expect(!lane.admits(1_000, bitsPerSecond: 1_000_000, at: 0), "empty bucket falls back to video")
+        expect(lane.admits(12_000, bitsPerSecond: 1_000_000, at: 0.1), "refilled at the bit rate")
+        expect(!lane.admits(13_000, bitsPerSecond: 1_000_000, at: 0.1), "never more than the bit rate")
+        expect(!lane.admits(0, bitsPerSecond: 1_000_000, at: 0.2), "empty update is not a tile")
+        expect(lane.admits(64 * 1024, bitsPerSecond: 1_000_000, at: 10) && !lane.admits(64 * 1024 + 1, bitsPerSecond: 1_000_000, at: 10), "burst is capped")
         print("PASS native damage metadata: empty sentinels, caret, content motion and unknown corpus")
     }
 }

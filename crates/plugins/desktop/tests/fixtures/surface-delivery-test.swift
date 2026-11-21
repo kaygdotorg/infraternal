@@ -13,10 +13,11 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
     static func main() {
         let lock = NSLock()
         var keys: [Bool] = []
+        var tiles: [Bool] = []
         var failed = false
         let source = SurfaceCapture(target: [:], rect: CGRect(x: 0, y: 0, width: 64, height: 48), size: CGSize(width: 64, height: 48), hevc: false, fps: 120) { kind, body in
             lock.withLock {
-                if kind == 70 && body.count > 9 { keys.append(body[8] == 1) }
+                if kind == 70 && body.count > 9 { keys.append(body[8] == 1); tiles.append(body[9] == 0xF7) }
                 else { failed = true }
             }
         }
@@ -53,12 +54,27 @@ enum HelperFailure: Error { case invalid, permission, unavailable }
             source.receiveFrame(pixel, ticks: mach_absolute_time(), damage: damage)
             awaitCount(next)
         }
+        // sleep: the sharp refresh owed after the last whole-picture change fires 0.25 s later; let it go out first.
+        Thread.sleep(forTimeInterval: 0.4)
+        expect(!lock.withLock { tiles.contains(true) }, "whole-picture changes stay video")
+        // A 3x3 change in a 64x48 picture is within the tile lane's 4% area limit [#146 C].
+        expect(CVPixelBufferLockBaseAddress(pixel, []) == kCVReturnSuccess, "tile write lock")
+        let stride = CVPixelBufferGetBytesPerRow(pixel)
+        for row in 10..<13 { CVPixelBufferGetBaseAddress(pixel)!.advanced(by: row * stride + 40).initializeMemory(as: UInt8.self, repeating: 250, count: 12) }
+        CVPixelBufferUnlockBaseAddress(pixel, [])
+        let beforeTile = count()
+        source.receiveFrame(pixel, ticks: mach_absolute_time(), damage: damage)
+        awaitCount(beforeTile + 1)
+        expect(lock.withLock { tiles.last == true && keys.last == false }, "small change is a tile update, not a keyframe")
+        // sleep: a refresh would be due 0.25 s after the tile; wait past it to prove none comes.
+        Thread.sleep(forTimeInterval: 0.4)
+        expect(count() == beforeTile + 1, "a tile owes no sharp refresh")
         let beforeRepair = count()
         source.repair(); awaitCount(beforeRepair + 1)
         expect(lock.withLock { keys.last == true }, "static repair emits IDR")
         source.stop()
         Thread.sleep(forTimeInterval: 0.1)
         expect(!lock.withLock { failed }, "no native error")
-        print("PASS production surface delivery: identical_callbacks=8 idle_pictures=2 distinct_changes=8 static_repair=IDR")
+        print("PASS production surface delivery: identical_callbacks=8 idle_pictures=2 distinct_changes=8 tile=1 static_repair=IDR")
     }
 }
