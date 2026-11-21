@@ -116,7 +116,7 @@ test("a duplicate name is refused in plain words and the old name comes back; no
   // While the server thinks, the card already says the new name (and is marked as waiting).
   await expect(hostName(page, "build-01")).toHaveText("nix-cache");
   await expect(card(page, "build-01")).toHaveAttribute("data-renaming", "pending");
-  await expect(toast(page)).toContainText("Could not rename build-01: another host is already called nix-cache.");
+  await expect(toast(page).last()).toContainText("Could not rename build-01: another host is already called nix-cache.");
   await expect(hostName(page, "build-01")).toHaveText("build-01");
   await expect(card(page, "build-01")).not.toHaveAttribute("data-renaming", /./);
   await shoot(page, "refused-duplicate-desktop-ink");
@@ -124,7 +124,7 @@ test("a duplicate name is refused in plain words and the old name comes back; no
   await hostName(page, "build-01").dblclick();
   await page.keyboard.type("build-02");
   await page.keyboard.press("Enter");
-  await expect(toast(page)).toContainText("you are not allowed to rename hosts");
+  await expect(toast(page).last()).toContainText("you are not allowed to rename hosts");
   await expect(hostName(page, "build-01")).toHaveText("build-01");
 });
 
@@ -152,7 +152,7 @@ test("the Views tree renames a Mesh host the same way, and a single click still 
   await page.keyboard.type("nix-cache");
   await page.keyboard.press("Enter");
   await expect(page.locator('#tree .bm-leaf[data-id="n-build-07"] .bm-label')).toHaveText("build-07");
-  await expect(toast(page)).toContainText("Could not rename build-07");
+  await expect(toast(page).last()).toContainText("Could not rename build-07");
 });
 
 test("the palette finds 'rename <host>' and opens the field on that card", async ({ page }) => {

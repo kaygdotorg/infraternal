@@ -15,11 +15,12 @@ use std::{
     process::{Command, Stdio},
 };
 
-/// Recognize the two CLI spellings and the named binaries distributed with an installation.
+/// Recognize exact installed executable names, including the memfd form used by `/proc`.
 fn image_name(path: &Path) -> bool {
     let name = path.file_name().unwrap_or_default().as_encoded_bytes();
     let name = name.strip_suffix(b" (deleted)").unwrap_or(name);
-    name == b"infra" || name.starts_with(b"infraternal") || name.starts_with(b"memfd:infraternal")
+    let name = name.strip_prefix(b"memfd:").unwrap_or(name);
+    name == b"infra" || name == b"infraternal" || name == b"infraternal-session"
 }
 
 /// One pinned known build; hashes are lazy and reused across a host scan.
@@ -858,6 +859,43 @@ mod tests {
             );
         }
     }
+
+    /// A helper whose basename starts with infraternal is not the installed CLI or daemon.
+    #[test]
+    fn fuzz_service_name_is_not_mistaken_for_an_infraternal_binary() {
+        let output = "LoadState=loaded\nExecStart={ path=/usr/local/libexec/infraternal-fuzz-service ; argv[]=/usr/local/libexec/infraternal-fuzz-service ; }\n";
+        assert!(
+            resolved_service(OsStr::new("infraternal-fuzz.service"), output).is_ok(),
+            "the fuzz service is unrelated to the installed CLI and daemon"
+        );
+    }
+
+    /// Match only executable names distributed by an installation, including deleted memfd images.
+    #[test]
+    fn image_name_matches_only_installed_executable_names() {
+        for name in [
+            "infra",
+            "/usr/local/bin/infraternal",
+            "/var/lib/infraternal/bin/infraternal-session",
+            "/memfd:infraternal (deleted)",
+        ] {
+            assert!(
+                image_name(Path::new(name)),
+                "installed image missed: {name}"
+            );
+        }
+        for name in [
+            "/usr/local/libexec/infraternal-fuzz-service",
+            "/usr/local/bin/infraternal-session-helper",
+            "/memfd:infraternal-fuzz-service (deleted)",
+        ] {
+            assert!(
+                !image_name(Path::new(name)),
+                "foreign image matched: {name}"
+            );
+        }
+    }
+
     /// Stopped wrappers and secondary startup commands cannot conceal our executable.
     #[test]
     fn indirect_service_commands_are_refused() {
@@ -874,7 +912,7 @@ mod tests {
         }
         let fixture = crate::restart_binary::fixture::Directory::new();
         let named = fixture.0.join("infraternal-old");
-        fs::write(&named, b"different fixture build").unwrap();
+        fs::copy(std::env::current_exe().unwrap(), &named).unwrap();
         let alias = fixture.0.join("ctl");
         std::os::unix::fs::symlink(&named, &alias).unwrap();
         assert!(

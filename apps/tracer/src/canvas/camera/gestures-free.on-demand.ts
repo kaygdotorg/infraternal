@@ -10,6 +10,7 @@ import type { Ctx } from "../context";
 import type { Pt } from "../layout/geometry";
 import type { ViewId } from "../model/types";
 import { clamp } from "./camera";
+import { canvasDeltas } from "./canvas-wheel-modifier";
 import { setActivity } from "../../perf-activity";
 
 export function installFreeGestures(cx: Ctx): { wheel(e: WheelEvent): void } {
@@ -86,7 +87,7 @@ export function installFreeGestures(cx: Ctx): { wheel(e: WheelEvent): void } {
       e.preventDefault();
       camera.takeOver();
       if (e.ctrlKey || e.metaKey) { setActivity("zoom"); camera.zoomAt(e.clientX, e.clientY, cam.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0025))); return; }
-      const dx = e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX, dy = e.shiftKey ? 0 : e.deltaY;
+      const { dx, dy } = canvasDeltas(e); // Shift or the canvas modifier (D377) make it a sideways move
       setActivity("pan");
       camera.drive({ cx: cam.cx + dx / cam.z, cy: cam.cy + dy / cam.z });
     },

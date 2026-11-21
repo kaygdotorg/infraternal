@@ -60,7 +60,7 @@ test("three stacked windows, the middle focused and locked", async () => {
   await page.evaluate(() => { for (const w of document.querySelectorAll<HTMLElement>('.cl[data-view="console"] .ui-window')) { w.style.height = "560px"; w.style.flex = "none"; } });
   await expect.poll(() => page.evaluate(() => { const c = document.querySelector<HTMLElement>('.cl[data-view="console"] .cl-col')!; return c.scrollHeight - c.clientHeight; })).toBeGreaterThan(200);
   await windows().nth(1).locator(".terminal-host").click({ position: { x: 60, y: 60 } });
-  await expect(windows().nth(1).locator(".terminal-host")).toBeFocused();
+  await expect(windows().nth(1).locator(".terminal-host textarea")).toBeFocused();
   await page.keyboard.press("Control+Shift+L");
   await expect(windows().nth(1)).toHaveAttribute("data-locked", "");
   await expect(page.locator(".cl-viewport")).toHaveAttribute("data-input-lock", "");

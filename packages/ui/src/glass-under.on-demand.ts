@@ -83,7 +83,8 @@ export function registerGlassGrid(grid: GlassGrid): () => void {
   grids.set(grid.element, grid);
   grid.element.dataset.glassGrid = "";
   const idle = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback ?? ((cb: () => void) => window.setTimeout(cb, 2000));
-  idle(() => void import("./glass-adapt.on-demand"));
+  // A failed load is harmless here: the same import is made, and caught, when a card first needs the trackers.
+  idle(() => void import("./glass-adapt.on-demand").catch(() => undefined));
   // A card that opened before this screen registered (a terminal that mounts or reconnects under an open card) looks again now,
   // instead of waiting for it to move.
   queueMicrotask(() => { for (const [surface, box] of watched) if (box) evaluate(surface); });
@@ -117,6 +118,9 @@ function whatIsUnder(surface: HTMLElement): Found {
   }
   return found;
 }
+
+/** Whether the failed tracker load has been reported already. */
+let trackerWarned = false;
 
 /** What a surface is tracking: the thing it is over, how to nudge the tracker, how to stop it, and its last box. */
 interface Tracked { key: Element; refresh(): void; stop(): void }
@@ -160,7 +164,8 @@ function evaluate(surface: HTMLElement): void {
     if (cancelled || !surface.isConnected) return;
     inner = picture ? m.trackPicture(surface, picture) : m.trackGrid(surface, grid!);
     inner?.refresh();
-  });
+    // Without the trackers the surface stays on the static floor, which is correct over anything; say so once and do not retry.
+  }).catch((error: unknown) => { if (!trackerWarned) { trackerWarned = true; console.warn("infraternal: the glass trackers did not load; glass uses its static floor", error); } });
 }
 
 /** Rechecks every watched surface that moved; drops those that are gone; stops itself when none are on screen. */

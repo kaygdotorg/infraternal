@@ -18,7 +18,7 @@ async function boot(page: Page): Promise<void> {
 }
 const count = (page: Page): Promise<number> => page.evaluate(() => document.querySelectorAll('.cl[data-view="console"] .ui-window').length);
 
-test("a key press splits at once, and holding it splits once with short frames", async ({ page }) => {
+test("a key press splits at once, and holding it splits once with short frames", { tag: "@perf" }, async ({ page }) => {
   test.setTimeout(60_000);
   await boot(page);
   await page.evaluate(() => {
