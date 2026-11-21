@@ -1,0 +1,983 @@
+io.systemd.credentials.decrypt:
+  description:       Allow decryption of system credentials.
+  message:           Authentication is required for an application to decrypt a system credential.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+io.systemd.credentials.encrypt:
+  description:       Allow encryption and signing of system credentials.
+  message:           Authentication is required for an application to encrypt and sign a system credential.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.dpkg.pkexec.update-alternatives:
+  description:       Run update-alternatives to modify system alternative selections
+  message:           Authentication is required to run update-alternatives
+  vendor:            The Dpkg Project
+  vendor_url:        https://wiki.debian.org/Teams/Dpkg
+  icon:              update-alternatives
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.exec.path -> /usr/bin/update-alternatives
+
+org.freedesktop.hostname1.get-description:
+  description:       Get system description
+  message:           Authentication is required to get system description.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.hostname1.get-hardware-serial:
+  description:       Get hardware serial number
+  message:           Authentication is required to get hardware serial number.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.hostname1.get-product-uuid:
+  description:       Get product UUID
+  message:           Authentication is required to get product UUID.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.hostname1.set-hostname:
+  description:       Set hostname
+  message:           Authentication is required to set the local hostname.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.hostname1.set-machine-info:
+  description:       Set machine information
+  message:           Authentication is required to set local machine information.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.hostname1.set-static-hostname:
+  description:       Set static hostname
+  message:           Authentication is required to set the statically configured local hostname, as well as the pretty hostname.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.hostname1.set-hostname org.freedesktop.hostname1.set-machine-info
+
+org.freedesktop.locale1.set-keyboard:
+  description:       Set system keyboard settings
+  message:           Authentication is required to set the system keyboard settings.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.locale1.set-locale:
+  description:       Set system locale
+  message:           Authentication is required to set the system locale.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.locale1.set-keyboard
+
+org.freedesktop.login1.attach-device:
+  description:       Allow attaching devices to seats
+  message:           Authentication is required to attach a device to a seat.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.flush-devices
+
+org.freedesktop.login1.chvt:
+  description:       Change Session
+  message:           Authentication is required to change the virtual terminal.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.flush-devices:
+  description:       Flush device to seat attachments
+  message:           Authentication is required to reset how devices are attached to seats.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.login1.halt:
+  description:       Halt the system
+  message:           Authentication is required to halt the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.set-wall-message
+
+org.freedesktop.login1.halt-ignore-inhibit:
+  description:       Halt the system while an application is inhibiting this
+  message:           Authentication is required to halt the system while an application is inhibiting this.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.halt
+
+org.freedesktop.login1.halt-multiple-sessions:
+  description:       Halt the system while other users are logged in
+  message:           Authentication is required to halt the system while other users are logged in.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.halt
+
+org.freedesktop.login1.hibernate:
+  description:       Hibernate the system
+  message:           Authentication is required to hibernate the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+
+org.freedesktop.login1.hibernate-ignore-inhibit:
+  description:       Hibernate the system while an application is inhibiting this
+  message:           Authentication is required to hibernate the system while an application is inhibiting this.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.hibernate
+
+org.freedesktop.login1.hibernate-multiple-sessions:
+  description:       Hibernate the system while other users are logged in
+  message:           Authentication is required to hibernate the system while other users are logged in.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.hibernate
+
+org.freedesktop.login1.inhibit-block-idle:
+  description:       Allow applications to inhibit automatic system suspend
+  message:           Authentication is required for an application to inhibit automatic system suspend.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      yes
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.inhibit-block-shutdown:
+  description:       Allow applications to inhibit system shutdown
+  message:           Authentication is required for an application to inhibit system shutdown.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-delay-shutdown org.freedesktop.login1.inhibit-block-sleep org.freedesktop.login1.inhibit-delay-sleep org.freedesktop.login1.inhibit-block-idle
+
+org.freedesktop.login1.inhibit-block-sleep:
+  description:       Allow applications to inhibit system sleep
+  message:           Authentication is required for an application to inhibit system sleep.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-delay-sleep org.freedesktop.login1.inhibit-block-idle
+
+org.freedesktop.login1.inhibit-delay-shutdown:
+  description:       Allow applications to delay system shutdown
+  message:           Authentication is required for an application to delay system shutdown.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      yes
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-delay-sleep
+
+org.freedesktop.login1.inhibit-delay-sleep:
+  description:       Allow applications to delay system sleep
+  message:           Authentication is required for an application to delay system sleep.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      yes
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.inhibit-handle-hibernate-key:
+  description:       Allow applications to inhibit system handling of the hibernate key
+  message:           Authentication is required for an application to inhibit system handling of the hibernate key.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.inhibit-handle-lid-switch:
+  description:       Allow applications to inhibit system handling of the lid switch
+  message:           Authentication is required for an application to inhibit system handling of the lid switch.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.inhibit-handle-power-key:
+  description:       Allow applications to inhibit system handling of the power key
+  message:           Authentication is required for an application to inhibit system handling of the power key.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-handle-suspend-key org.freedesktop.login1.inhibit-handle-hibernate-key org.freedesktop.login1.inhibit-handle-lid-switch
+
+org.freedesktop.login1.inhibit-handle-reboot-key:
+  description:       Allow applications to inhibit system handling of the reboot key
+  message:           Authentication is required for an application to inhibit system handling of the reboot key.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-handle-suspend-key org.freedesktop.login1.inhibit-handle-hibernate-key org.freedesktop.login1.inhibit-handle-lid-switch
+
+org.freedesktop.login1.inhibit-handle-suspend-key:
+  description:       Allow applications to inhibit system handling of the suspend key
+  message:           Authentication is required for an application to inhibit system handling of the suspend key.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: yes
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.inhibit-handle-hibernate-key org.freedesktop.login1.inhibit-handle-lid-switch
+
+org.freedesktop.login1.lock-sessions:
+  description:       Lock or unlock active sessions
+  message:           Authentication is required to lock or unlock active sessions.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.login1.manage:
+  description:       Manage active sessions, users and seats
+  message:           Authentication is required to manage active sessions, users and seats.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.login1.power-off:
+  description:       Power off the system
+  message:           Authentication is required to power off the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.set-wall-message
+
+org.freedesktop.login1.power-off-ignore-inhibit:
+  description:       Power off the system while an application is inhibiting this
+  message:           Authentication is required to power off the system while an application is inhibiting this.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.power-off
+
+org.freedesktop.login1.power-off-multiple-sessions:
+  description:       Power off the system while other users are logged in
+  message:           Authentication is required to power off the system while other users are logged in.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.power-off
+
+org.freedesktop.login1.reboot:
+  description:       Reboot the system
+  message:           Authentication is required to reboot the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.set-wall-message
+
+org.freedesktop.login1.reboot-ignore-inhibit:
+  description:       Reboot the system while an application is inhibiting this
+  message:           Authentication is required to reboot the system while an application is inhibiting this.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.reboot-multiple-sessions:
+  description:       Reboot the system while other users are logged in
+  message:           Authentication is required to reboot the system while other users are logged in.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.set-reboot-parameter:
+  description:       Set the reboot "reason" in the kernel
+  message:           Authentication is required to set the reboot "reason" in the kernel.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.set-reboot-to-boot-loader-entry:
+  description:       Indicate to the boot loader to boot a specific entry
+  message:           Authentication is required to indicate to the boot loader to boot into a specific boot loader entry.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.set-reboot-to-boot-loader-menu:
+  description:       Indicate to the boot loader to boot to the boot loader menu
+  message:           Authentication is required to indicate to the boot loader to boot to the boot loader menu.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.set-reboot-to-firmware-setup:
+  description:       Indicate to the firmware to boot to setup interface
+  message:           Authentication is required to indicate to the firmware to boot to setup interface.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.reboot
+
+org.freedesktop.login1.set-self-linger:
+  description:       Allow non-logged-in user to run programs
+  message:           Explicit request is required to run programs as a non-logged-in user.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      yes
+  implicit inactive: yes
+  implicit active:   yes
+
+org.freedesktop.login1.set-user-linger:
+  description:       Allow non-logged-in users to run programs
+  message:           Authentication is required to run programs as a non-logged-in user.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.login1.set-wall-message:
+  description:       Set a wall message
+  message:           Authentication is required to set a wall message.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.login1.suspend:
+  description:       Suspend the system
+  message:           Authentication is required to suspend the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+
+org.freedesktop.login1.suspend-ignore-inhibit:
+  description:       Suspend the system while an application is inhibiting this
+  message:           Authentication is required to suspend the system while an application is inhibiting this.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.suspend
+
+org.freedesktop.login1.suspend-multiple-sessions:
+  description:       Suspend the system while other users are logged in
+  message:           Authentication is required to suspend the system while other users are logged in.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   yes
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.login1.suspend
+
+org.freedesktop.network1.forcerenew:
+  description:       DHCP server sends force renew message
+  message:           Authentication is required to send force renew message.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.reconfigure:
+  description:       Reconfigure network interface
+  message:           Authentication is required to reconfigure network interface.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.reload:
+  description:       Reload network settings
+  message:           Authentication is required to reload network settings.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.renew:
+  description:       Renew dynamic addresses
+  message:           Authentication is required to renew dynamic addresses.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.revert-dns:
+  description:       Revert DNS settings
+  message:           Authentication is required to reset DNS settings.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.revert-ntp:
+  description:       Revert NTP settings
+  message:           Authentication is required to reset NTP settings.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-default-route:
+  description:       Set default route
+  message:           Authentication is required to set default route.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-dns-over-tls:
+  description:       Enable/disable DNS over TLS
+  message:           Authentication is required to enable or disable DNS over TLS.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-dns-servers:
+  description:       Set DNS servers
+  message:           Authentication is required to set DNS servers.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-dnssec:
+  description:       Enable/disable DNSSEC
+  message:           Authentication is required to enable or disable DNSSEC.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-dnssec-negative-trust-anchors:
+  description:       Set DNSSEC Negative Trust Anchors
+  message:           Authentication is required to set DNSSEC Negative Trust Anchors.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-domains:
+  description:       Set domains
+  message:           Authentication is required to set domains.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-llmnr:
+  description:       Enable/disable LLMNR
+  message:           Authentication is required to enable or disable LLMNR.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-mdns:
+  description:       Enable/disable multicast DNS
+  message:           Authentication is required to enable or disable multicast DNS.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-ntp-servers:
+  description:       Set NTP servers
+  message:           Authentication is required to set NTP servers.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.network1.set-persistent-storage:
+  description:       Specify whether persistent storage for systemd-networkd is available
+  message:           Authentication is required to specify whether persistent storage for systemd-networkd is available.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-network
+
+org.freedesktop.policykit.exec:
+  description:       Run a program as another user
+  message:           Authentication is required to run a program as another user
+  vendor:            The polkit project
+  vendor_url:        http://www.freedesktop.org/wiki/Software/polkit/
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin
+
+org.freedesktop.resolve1.dump-cache:
+  description:       Dump cache
+  message:           Authentication is required to dump cache.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.dump-server-state:
+  description:       Dump server state
+  message:           Authentication is required to dump server state.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.dump-statistics:
+  description:       Dump statistics
+  message:           Authentication is required to dump statistics.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.register-service:
+  description:       Register a DNS-SD service
+  message:           Authentication is required to register a DNS-SD service.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.reset-statistics:
+  description:       Reset statistics
+  message:           Authentication is required to reset statistics.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.revert:
+  description:       Revert name resolution settings
+  message:           Authentication is required to reset name resolution settings.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-default-route:
+  description:       Set default route
+  message:           Authentication is required to set default route.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-dns-over-tls:
+  description:       Enable/disable DNS over TLS
+  message:           Authentication is required to enable or disable DNS over TLS.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-dns-servers:
+  description:       Set DNS servers
+  message:           Authentication is required to set DNS servers.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-dnssec:
+  description:       Enable/disable DNSSEC
+  message:           Authentication is required to enable or disable DNSSEC.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-dnssec-negative-trust-anchors:
+  description:       Set DNSSEC Negative Trust Anchors
+  message:           Authentication is required to set DNSSEC Negative Trust Anchors.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-domains:
+  description:       Set domains
+  message:           Authentication is required to set domains.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-llmnr:
+  description:       Enable/disable LLMNR
+  message:           Authentication is required to enable or disable LLMNR.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.set-mdns:
+  description:       Enable/disable multicast DNS
+  message:           Authentication is required to enable or disable multicast DNS.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.subscribe-query-results:
+  description:       Subscribe query results
+  message:           Authentication is required to subscribe query results.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.resolve1.unregister-service:
+  description:       Unregister a DNS-SD service
+  message:           Authentication is required to unregister a DNS-SD service.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-resolve
+
+org.freedesktop.systemd1.bypass-dump-ratelimit:
+  description:       Dump the systemd state without rate limits
+  message:           Authentication is required to dump the systemd state without rate limits.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+
+org.freedesktop.systemd1.manage-unit-files:
+  description:       Manage system service or unit files
+  message:           Authentication is required to manage system service or unit files.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.systemd1.reload-daemon org.freedesktop.systemd1.manage-units
+
+org.freedesktop.systemd1.manage-units:
+  description:       Manage system services or other units
+  message:           Authentication is required to manage system services or other units.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+
+org.freedesktop.systemd1.reload-daemon:
+  description:       Reload the systemd state
+  message:           Authentication is required to reload the systemd state.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+
+org.freedesktop.systemd1.reply-password:
+  description:       Send passphrase back to system
+  message:           Authentication is required to send the entered passphrase back to the system.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      no
+  implicit inactive: no
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.exec.path -> /usr/lib/systemd/systemd-reply-password
+
+org.freedesktop.systemd1.set-environment:
+  description:       Set or unset system and service manager environment variables
+  message:           Authentication is required to set or unset system and service manager environment variables.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+
+org.freedesktop.timedate1.set-local-rtc:
+  description:       Set RTC to local timezone or UTC
+  message:           Authentication is required to control whether the RTC stores the local or UTC time.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.timedate1.set-ntp:
+  description:       Turn network time synchronization on or off
+  message:           Authentication is required to control whether network time synchronization shall be enabled.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.timedate1.set-time:
+  description:       Set system time
+  message:           Authentication is required to set the system time.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.imply -> org.freedesktop.timedate1.set-timezone org.freedesktop.timedate1.set-ntp
+
+org.freedesktop.timedate1.set-timezone:
+  description:       Set system timezone
+  message:           Authentication is required to set the system timezone.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin_keep
+  implicit inactive: auth_admin_keep
+  implicit active:   auth_admin_keep
+
+org.freedesktop.timesync1.set-runtime-servers:
+  description:       Set runtime NTP servers
+  message:           Authentication is required to set runtime NTP servers.
+  vendor:            The systemd Project
+  vendor_url:        https://systemd.io
+  icon:              
+  implicit any:      auth_admin
+  implicit inactive: auth_admin
+  implicit active:   auth_admin_keep
+  annotation:        org.freedesktop.policykit.owner -> unix-user:systemd-timesync
+

@@ -6,12 +6,20 @@
 //! Swift runtime needs. In every other build it does nothing. It needs the
 //! macOS Swift toolchain (`xcrun`, `swiftc`) and panics with a short message
 //! if that is missing.
+//!
+//! With `DOCS_RS` set it does nothing either, the same switch the Swift
+//! framework crates we depend on honour. scripts/verify's "macOS compile"
+//! row sets it to type-check the macOS code from Linux, where no Swift
+//! toolchain exists (#260). Nothing compiles against the companion, so a
+//! check-only build loses nothing; a real build never sets it.
 use std::{env, path::PathBuf, process::Command};
 /// Build-script entry point; see the module docs for what it does and when.
 fn main() {
     println!("cargo:rerun-if-changed=native");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     if env::var_os("CARGO_FEATURE_DESKTOP").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+        || env::var_os("DOCS_RS").is_some()
     {
         return;
     }
@@ -61,8 +69,10 @@ fn main() {
             "native/Inventory.swift",
             "native/Geometry.swift",
             "native/Input.swift",
+            "native/Cursor.swift",
             "native/LowDelaySPS.swift",
             "native/Encoder.swift",
+            "native/EncoderPriority.swift",
             "native/SurfaceCapture.swift",
             "native/main.swift",
             "-o",

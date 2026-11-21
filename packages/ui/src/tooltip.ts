@@ -147,8 +147,6 @@ function build() {
 
 /** What a trigger-anchored confirmation says and does: its title and effect lines, the two actions, and where focus goes afterwards. */
 export interface ConfirmTipOptions {
-  /** Accessible name for the small, trigger-anchored confirmation group. */
-  label: string;
   /**
    * The shape every confirmation uses (TASTE: messages say what happens, in plain words):
    * - `title`: the question as a plain sentence about the thing, e.g. "Remove asha's access to build-01?" No arrows,
@@ -222,7 +220,6 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   tip.id = `ui-confirm-tip-${++confirmTipSerial}`;
   tip.hidden = true;
   tip.setAttribute("role", "dialog");
-  tip.setAttribute("aria-label", options.label);
   tip.dataset.open = "false";
 
   const arrow = document.createElement("span");
@@ -234,7 +231,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   message.className = "ui-confirm-tip-message";
   message.id = `${tip.id}-title`;
   tip.setAttribute("aria-labelledby", message.id);
-  if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? options.label;
+  if (options.titleNode) message.append(options.titleNode); else message.textContent = options.title ?? options.message ?? "";
   text.append(message);
   const effectText = options.effect ?? options.detail;
   if (effectText || options.effectNode) {

@@ -146,6 +146,11 @@ pub mod macos_node;
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
 
+/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind the crate's one scoped `allow(unsafe_code)`
+/// (#221). Request building is safe code, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+mod macos_utun_ioctl;
+
 #[cfg(feature = "server")]
 pub mod settings;
 

@@ -224,6 +224,32 @@ test("a delta before the startup keyframe requests one repair and renders the re
   expect(report[0]!.stats.painted).toBeGreaterThan(0);
 });
 
+/**
+ * A busy page thread must not cost a keyframe (#146, J1078 finding 2). While the main thread is blocked, the socket's video
+ * messages queue up and then all run before the worker's acknowledgements: at 120 fps a 40 ms stall hands over 5 units at
+ * once and 80 ms about 10. They are small deltas that the worker can still decode; refusing them used to ask the machine for
+ * a 41–251 KB keyframe. Prints one METRIC line per stall length so the same spec measures a tree without the fix.
+ */
+test("a 40–80 ms main-thread stall costs no repair keyframe", async ({ page }) => {
+  await openCanvas(page, "&appwin=1", { fps: 120 });
+  await openEditor(page);
+  const painted = async () => (await page.evaluate(() => (window as unknown as { __appwin: { report(): Promise<Array<{ stats: { painted: number } }>> } }).__appwin.report()))[0]!.stats.painted;
+  /** Waits for `count` more pictures: the stream is flowing again (an event wait, no fixed sleep). */
+  const flowing = async (count: number) => { const from = await painted(); await expect.poll(painted, { timeout: 15_000 }).toBeGreaterThanOrEqual(from + count); };
+  await flowing(30);
+  const refused: Record<number, number> = {};
+  for (const ms of [40, 80]) {
+    const before = (await machineState(page)).repairs;
+    for (let round = 0; round < 3; round++) {
+      await page.evaluate((stall) => { const end = performance.now() + stall; while (performance.now() < end) { /* the stall under test */ } }, ms);
+      await flowing(20);
+    }
+    refused[ms] = (await machineState(page)).repairs - before;
+  }
+  console.log(`METRIC appwin_stall_repairs fps=120 stall40=${refused[40]} stall80=${refused[80]} rounds=3`);
+  expect(refused).toEqual({ 40: 0, 80: 0 });
+});
+
 test("a window the machine keeps at its own size gives the canvas window its shape, and follows when it changes", async ({ page }) => {
   await openCanvas(page, "&appwin=1", { windowShape: { width: 1600, height: 900 } });
   await openEditor(page);
@@ -282,6 +308,21 @@ test("the machine's local-input pause shows for as long as it lasts, then contro
   await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Paused while someone uses studio-mac", { timeout: 10_000 });
   await config(page, { inputPauseMs: 0 });
   await expect(page.locator(".aw-pillmark")).toHaveAttribute("data-tip", "Controlled from infraternal", { timeout: 10_000 });
+});
+
+/** After a console-user change the card says who changed, not that the still-open app was closed (#146). */
+test("a console user change ends the window with its own words, and the app is still open", async ({ page }) => {
+  test.setTimeout(120_000);
+  await openCanvas(page, "&appwin=1", { startDelayMs: 0 });
+  await requireFixtureH264(page);
+  await plus(page).click();
+  await page.getByRole("option", { name: /Editor, stream\.ts/ }).click();
+  await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "live", { timeout: 20_000 });
+  await page.request.post("/__mock/appwin/end", { data: { window_id: 201, reason: "console_user_changed" } });
+  await expect(appWindow(page).locator(".aw-card")).toContainText("The person at studio-mac changed");
+  await expect(appWindow(page).locator(".aw-card")).toContainText("Editor is still open on studio-mac");
+  await expect(appWindow(page).locator(".aw-card")).not.toContainText("was closed");
+  await expect(appWindow(page).locator(".aw-stage")).toHaveAttribute("data-picture", "none");
 });
 
 test("every state is honest: closed, permission missing, connecting, reconnecting, unsupported", async ({ page, browser }) => {

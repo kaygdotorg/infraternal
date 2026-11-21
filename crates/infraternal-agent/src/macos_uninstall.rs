@@ -55,6 +55,9 @@ impl Uninstall {
         std::thread::Builder::new()
             .name("macos-uninstall".to_owned())
             .spawn(move || {
+                // Only waits for the helper; nobody is waiting on it (#554).
+                let _ =
+                    infraternal_shim::qos::set_current_thread(infraternal_shim::qos::Qos::Utility);
                 let _ = child.wait();
                 pending.store(false, Ordering::Release);
             })

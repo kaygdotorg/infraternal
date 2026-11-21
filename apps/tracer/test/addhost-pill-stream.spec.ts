@@ -24,7 +24,8 @@ async function addHost(page: Page, name: string, theme = "ink"): Promise<void> {
  * The setup explanation popover of `host`. Found by its `aria-label` attribute, not by accessible name: since #391 the
  * confirmation names itself by its title through `aria-labelledby`, which wins over `aria-label` in the name computation.
  */
-const setupTip = (page: Page, host: string) => page.locator(`[role="dialog"][aria-label="Setup of ${host}"]`);
+// The confirm tip is named by its message (aria-labelledby), so that is the name to look it up by.
+const setupTip = (page: Page, host: string) => page.getByRole("dialog", { name: `${host} couldn't join this server` });
 
 const pillOf = (page: Page, name: string) => page.locator(".ui-window-pill", { hasText: name }).first();
 const arcs = (page: Page) => page.locator(".ui-window .ui-setup-ring .ui-setup-fill").evaluateAll((els) => els.map((e) => (e as HTMLElement).dataset.state));

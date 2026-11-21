@@ -78,6 +78,53 @@ due before exercising the real infraternal agent's rotation actions. These
 fixture boundaries are recorded in the case details so they are not mistaken
 for an independently scheduled background worker.
 
+## Three-client candidate walk and restart proof (#483)
+
+`three_node_walk_restarts.py` uses four real mesh agents: the server's mesh
+node and three clients behind one non-hairpin NAT. It requires all six
+client-to-client directions and the server links to settle on direct paths,
+using the shared NAT's per-host public mappings while all clients bind the
+default listener port. It then checks idle handshake counters. It kills and
+starts one client process and the server mesh-node process separately,
+requiring all affected routes and traffic to recover within 30 seconds. It
+also restarts the actual server process and checks its health endpoint, changes
+one client's LAN address, and checks that the other clients learn the new
+endpoint from the live-session announcement without user traffic. The server
+continues to use C's public NAT mapping, while A and B learn its new LAN address.
+A changed stale candidate snapshot then checks that a still-authenticated
+endpoint is retained, and a second stale snapshot that gives C no candidate list
+and one stale address checks the same for peers without candidates (J1025). The
+runner deletes all
+of its named namespaces before it exits.
+Use `--restart-only` to repeat the direct-path and restart checks without the
+later underlay-change phase.
+`--quiet-mover` adds two measured (not asserted) cases for a peer that moved and then
+stays quiet (J1025). C is frozen (SIGSTOP), the coordinator lists a new LAN address for
+it, and the proof times how long A and B keep sending to the old one, after a fresh
+session and after a 35 s old one. The row cap grows to 900 s for it.
+Set `J967_CAPTURE_UNDERLAY=1` to save UDP captures from C, S and the shared
+router around the address change; the report lists each capture and its decoded
+packets. This diagnostic mode needs `tcpdump` in the root proof's `PATH`.
+
+Run this root-only proof on compute01. Build the product and four-identity
+coordinator fixture with the job target, then use a private short scratch path
+for the row and its report:
+
+```sh
+mkdir -m 700 -p ~/.j967
+~/infraternal-ops/build-slot nice -n10 nix develop . -c cargo build --release --locked \
+  -p infraternal --bin infraternal \
+  -p infraternal-plugin-mesh --example coordinator_fixture \
+  --features infraternal-plugin-mesh/agent
+
+~/infraternal-ops/build-slot nice -n10 nix shell \
+  nixpkgs#iproute2 nixpkgs#nftables nixpkgs#conntrack-tools nixpkgs#util-linux \
+  --command python3 scripts/gotatun_break_it/three_node_walk_restarts.py \
+    --binary /mnt/build/targets/J967/release/infraternal \
+    --coordinator /mnt/build/targets/J967/release/examples/coordinator_fixture \
+    --scratch /root/.j967 --report /root/.j967/three-node-report.json
+```
+
 ## Continuous loaded-latency soak
 
 Run the one-to-two-hour leak and latency soak on compute01 under one build-slot

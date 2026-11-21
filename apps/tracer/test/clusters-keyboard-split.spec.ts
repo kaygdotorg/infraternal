@@ -18,7 +18,7 @@ async function boot(page: Page): Promise<void> {
 }
 const count = (page: Page): Promise<number> => page.evaluate(() => document.querySelectorAll('.cl[data-view="console"] .ui-window').length);
 
-test("a key press splits at once, and holding it splits once with short frames", async ({ page }) => {
+test("a key press splits at once, and holding it splits once with short frames", { tag: "@perf" }, async ({ page }) => {
   test.setTimeout(60_000);
   await boot(page);
   await page.evaluate(() => {
@@ -38,7 +38,7 @@ test("a key press splits at once, and holding it splits once with short frames",
     return { late: w.__gaps.filter((g) => g > 25).length, max: Math.max(0, ...w.__gaps), ms: w.__gaps.reduce((a, b) => a + b, 0) };
   });
   const before = await count(page);
-  // Split right is Ctrl+Shift+D here (Linux); on a Mac it is Command+D (D212).
+  // Split right is Ctrl+Shift+D here (Linux); on a Mac it is Command+D (D222).
   await page.keyboard.down("Control"); await page.keyboard.down("Shift");
   await page.evaluate(() => { (window as unknown as { __t0: number }).__t0 = performance.now(); });
   await page.keyboard.down("KeyD");

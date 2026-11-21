@@ -1671,3 +1671,102 @@ fn try_read(peer: &mut UnixStream) -> Option<Frame> {
     peer.read_exact(&mut bytes).ok()?;
     Frame::decode(&bytes).ok()
 }
+
+/// Read frames until `needle` appears in the output, returning the output and every
+/// echo-state report in arrival order, each with how many output bytes preceded it.
+fn output_and_echo_reports(
+    peer: &mut UnixStream,
+    seq: &mut u64,
+    needle: &[u8],
+) -> (Vec<u8>, Vec<(usize, u8)>) {
+    let mut output = Vec::new();
+    let mut reports = Vec::new();
+    while !output.windows(needle.len()).any(|w| w == needle) {
+        match read(peer) {
+            Frame::Output(offset, bytes) => {
+                assert_eq!(offset, *seq);
+                *seq += bytes.len() as u64;
+                output.extend(bytes);
+            }
+            Frame::EchoState(head, flags) => {
+                assert!(head >= *seq, "a report names the head when it was read");
+                reports.push((output.len(), flags));
+            }
+            other => panic!("expected Output or EchoState, got {other:?}"),
+        }
+    }
+    (output, reports)
+}
+
+/// A line read with echo off (the termios state of every password prompt) is
+/// reported to a link that selected `ECHO_STATE`, whatever the prompt says, and
+/// the end of it is reported too; the shell's own prompt is never reported as
+/// hidden. A viewer that attaches while the secret is being read hears the state
+/// at once, with nothing else to send. Links without the capability never see
+/// the frame: every other test here would fail on it (#569, D130).
+#[test]
+fn echo_state_reports_a_hidden_line_in_any_language() {
+    use infraternal_shim::frame::{ECHO_HIDDEN, ECHO_STATE, MULTI_WRITER, SEQUENCED_INPUT};
+    let session = Session::new(8 * 1024 * 1024, false);
+    let mut peer = session.attach_with_caps(0, ECHO_STATE);
+    let mut seq = 0;
+    send(
+        &mut peer,
+        Frame::Input(b"printf 'ECHO_%s\\n' READY\n".to_vec()),
+    );
+    let (_, reports) = output_and_echo_reports(&mut peer, &mut seq, b"ECHO_READY\r\n");
+    assert!(
+        reports.iter().all(|&(_, flags)| flags == 0),
+        "the shell prompt read as hidden: {reports:?}"
+    );
+    // No English word anywhere: only the terminal mode says this is a secret.
+    send(
+        &mut peer,
+        Frame::Input(
+            // Split in two, so the shell's echo of this command line never holds the prompt.
+            "stty -echo; printf '%s%s' '\u{41f}\u{430}\u{440}' '\u{43e}\u{43b}\u{44c}\u{ff1a}'; read x; stty echo; printf 'ECHO_%s\\n' DONE\n"
+                .as_bytes()
+                .to_vec(),
+        ),
+    );
+    let prompt = "\u{41f}\u{430}\u{440}\u{43e}\u{43b}\u{44c}\u{ff1a}".as_bytes();
+    let (output, reports) = output_and_echo_reports(&mut peer, &mut seq, prompt);
+    let at = output
+        .windows(prompt.len())
+        .position(|w| w == prompt)
+        .unwrap();
+    // `stty -echo` runs before the prompt is printed, so the report is at or
+    // before the prompt's end; any later and the first key could be drawn.
+    assert!(
+        reports
+            .iter()
+            .any(|&(before, flags)| flags == ECHO_HIDDEN && before <= at + prompt.len()),
+        "no hidden report by the prompt: {reports:?}"
+    );
+
+    // A second viewer (its own writer, so the first link stays), attached at
+    // the head mid-secret, gets the state alone.
+    let head = output_head(&session);
+    let mut late = session.connect();
+    assert!(matches!(read(&mut late), Frame::Hello { caps, .. } if caps & ECHO_STATE != 0));
+    send(
+        &mut late,
+        Frame::Attach(SEQUENCED_INPUT | MULTI_WRITER | ECHO_STATE),
+    );
+    send(&mut late, Frame::SelectWriter(9));
+    send(&mut late, Frame::ReadFrom(head));
+    assert_eq!(read(&mut late), Frame::EchoState(head, ECHO_HIDDEN));
+    drop(late);
+
+    send(&mut peer, Frame::Input(b"hunter2\n".to_vec()));
+    let (output, reports) = output_and_echo_reports(&mut peer, &mut seq, b"ECHO_DONE\r\n");
+    assert!(
+        !output.windows(7).any(|w| w == b"hunter2"),
+        "the terminal echoed the secret"
+    );
+    assert_eq!(
+        reports.last().map(|&(_, flags)| flags),
+        Some(0),
+        "echo coming back was not reported: {reports:?}"
+    );
+}

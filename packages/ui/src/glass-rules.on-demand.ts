@@ -12,8 +12,8 @@
  * point, and the opacity is raised above it only where 4.5:1 cannot otherwise be reached (D365 wins only where it is needed). The
  * text colours are solved against that same fill, so the rules and the look can never disagree about what a card is painted with.
  */
-import { CARD_LEVELS, activeGlass, GLASS_ADAPT_VARS, TINT_USERS, glassTint, levelName, levelOpacity, mix, type Theme } from "./themes";
-import { ANY_BACKDROP, MAX_DRIFT, MAX_SHIFT, hexToRgb, luminanceOf, solveGlass, type BackdropRange, type GlassFills, type GlassRole, type GlassSolution } from "./glass-contrast";
+import { CARD_LEVELS, activeGlass, GLASS_ADAPT_VARS, TINT_USERS, THEMES, glassTint, levelName, levelOpacity, mix, type Theme } from "./themes";
+import { ADAPT_LIMIT, ANY_BACKDROP, MAX_DRIFT, MAX_SHIFT, hexToRgb, luminanceOf, solveGlass, type BackdropRange, type GlassFills, type GlassRole, type GlassSolution } from "./glass-contrast";
 
 /**
  * The fill opacity a glass card starts from: the active look's tint (0 to 1) when the root carries a look, else `undefined`.
@@ -34,8 +34,7 @@ export const nominalOpacity = (active: Theme, level: number): number => lookTint
  * How much of a glass card's area a single block of one of the terminal's own colours is assumed to cover, at most (20%).
  * A card blurs what is behind it, so a block shows as its average: a status line, a few highlighted rows or a progress
  * bar are a small share of a popover. This is a bound chosen on measured trade-offs, not a law: over a whole card of
- * a bright colour (inverse video, a full-screen pager) the approved thin levels cannot hold 4.5:1 and the glass's own
- * text halo carries what it can. Raising it to 30% raises 8 of 30 theme and level pairs, 50% raises 16 and puts Clear on
+ * a bright colour (inverse video, a full-screen pager) the approved thin levels cannot hold 4.5:1 and the card turns solid. Raising it to 30% raises 8 of 30 theme and level pairs, 50% raises 16 and puts Clear on
  * Frosted's opacity on ink, mocha, rosepine, nord and dracula (the sweep is in the audit's note and on #448). The audit
  * (`glass-contrast.test.ts`) holds every theme and level over every one of its 18 terminal colours up to this bound.
  */
@@ -89,13 +88,65 @@ export function glassFor(active: Theme, level: number, range: BackdropRange = th
 }
 
 /**
+ * The answer for a backdrop that was *seen* (a sampled picture or the cells of a terminal), as opposed to the theme's own
+ * palette. It varies opacity only up to {@link ADAPT_LIMIT}, and keeps the fill within {@link MAX_DRIFT} of the tint's own
+ * lightness; when the line cannot be held inside that (a light card over a black picture, a dark one over white) the
+ * answer is the theme's solid card ({@link GlassSolution.solid}), never a flat grey slab and never a glow behind the text.
+ */
+export function glassSeen(active: Theme, level: number, range: BackdropRange, nominal = nominalOpacity(active, level)): GlassSolution {
+  return solveGlass(hexToRgb(glassTint(active)), nominal, active.dark, glassRoles(active), { range, fills: glassFills(active), maxAlpha: ADAPT_LIMIT, maxDrift: MAX_DRIFT });
+}
+
+/**
  * The static floor for `level` of `active`: holds over any backdrop from pure black to pure white, for a picture the
  * theme knows nothing about. Text moves at most {@link MAX_SHIFT} so its tiers stay apart and the tint raises
- * instead, and the tint's lightness stays within {@link MAX_DRIFT} of its own over either extreme (so a light theme over
- * a dark picture is a pale card, not a grey slab).
+ * instead, up to {@link ADAPT_LIMIT}, and the tint's lightness stays within {@link MAX_DRIFT} of its own over either
+ * extreme. Where that cannot hold the line (a light theme over black, a dark one over white) the answer is the solid card.
  */
 export function glassFloor(active: Theme, level: number, nominal = nominalOpacity(active, level)): GlassSolution {
-  return solveGlass(hexToRgb(glassTint(active)), nominal, active.dark, glassRoles(active), { range: ANY_BACKDROP, fills: glassFills(active), maxShift: MAX_SHIFT, maxDrift: MAX_DRIFT });
+  return solveGlass(hexToRgb(glassTint(active)), nominal, active.dark, glassRoles(active), { range: ANY_BACKDROP, fills: glassFills(active), maxShift: MAX_SHIFT, maxAlpha: ADAPT_LIMIT, maxDrift: MAX_DRIFT });
+}
+
+/** Removes what `writeSolution` in `glass-adapt.on-demand.ts` wrote, which puts the surface back on the static floor. */
+export function clearSolution(surface: HTMLElement): void {
+  surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
+  delete surface.dataset.glassAnswer;
+  for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
+}
+
+/** Solved answers for the rules, by kind, theme, level and starting opacity. A theme's answer never changes, so a switch back is a lookup. */
+const solutions = new Map<string, GlassSolution>();
+function memo(kind: string, active: Theme, level: number, solve: () => GlassSolution): GlassSolution {
+  // The starting opacity is in the key because a look's tint moves it (see `nominalOpacity`).
+  const key = `${kind}|${active.name}|${level}|${nominalOpacity(active, level)}`;
+  let hit = solutions.get(key);
+  if (!hit) {
+    if (solutions.size > 512) solutions.clear();
+    hit = solve();
+    solutions.set(key, hit);
+  }
+  return hit;
+}
+
+/**
+ * Solves the answers for the other themes at the level in force, one theme per idle slice, so a later theme switch finds them
+ * in the memo and its click does no contrast arithmetic (#567). Nothing waits on this: a theme that is not ready yet is solved
+ * in the switch itself, as before. Started once; the rest of the page's work always goes first.
+ */
+let warming = false;
+function warmThemes(level: number): void {
+  if (warming || typeof requestIdleCallback === "undefined") return;
+  warming = true;
+  const queue = Object.values(THEMES);
+  const step = (deadline: IdleDeadline): void => {
+    while (queue.length && deadline.timeRemaining() > 1.5) {
+      const next = queue.shift()!;
+      memo("themed", next, level, () => glassFor(next, level));
+      memo("floor", next, level, () => glassFloor(next, level));
+    }
+    if (queue.length) requestIdleCallback(step);
+  };
+  requestIdleCallback(step);
 }
 
 /** The one adopted sheet that holds the glass contrast rules; created on first use and rewritten when its inputs change. */
@@ -128,20 +179,35 @@ export function installGlassRules(): void {
   if (key === glassSheetKey) return;
   glassSheetKey = key;
   glassSheetLook = look;
+  // What the trackers wrote on surfaces was solved for the theme that is going away: until a tracker answers again (up to a sample
+  // interval later) the surface would show the old theme's text colours on the new tint (2.1:1 measured, #567). Back on the floor,
+  // which holds over anything, it is safe in the first frame; the tracker's next answer is for the new theme.
+  for (const surface of document.querySelectorAll<HTMLElement>("[data-glass-answer]")) clearSolution(surface);
   const tint = hexToRgb(glassTint(active)).join(" ");
-  const write = (sol: GlassSolution, fallback?: GlassSolution): string => {
+  // A solid answer is the opaque tint with no blur. The blur is switched by the surface's `data-glass-answer` (written by the
+  // trackers in `glass-adapt.on-demand.ts`), not by a custom property: a glass answer must leave the card's own blur alone
+  // (the palette sets its own), which a property that the floor defaults to 0 could not do.
+  const write = (sol: GlassSolution, level: number, fallback?: GlassSolution): string => {
     const own = `--overlay: ${fallback ? `var(${GLASS_ADAPT_VARS.overlay}, rgb(${tint} / ${sol.alpha}))` : `rgb(${tint} / ${sol.alpha})`};`;
-    return own + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
+    const blurRule = !fallback && sol.solid ? " --ui-overlay-blur: 0px;" : "";
+    return own + blurRule + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
   };
   const css: string[] = [];
-  // Without a look every level is written (a level can be chosen by `data-card` alone). With a look the product pins the card level, so
-  // only that one is solved: a tint slider moves this on every frame, and eight solves cost about 3 ms where two cost under 1 ms.
-  for (const level of look ? [String(cardLevel)] : Object.keys(CARD_LEVELS)) {
+  // Only the level in force is solved and written. `applyTheme` is the one writer of `data-card` and always asks for these rules in
+  // the same task, so no other level can be on the root, and a theme switch solves one level, not eight (the eight cost about 2 ms
+  // of the click, #567). Each answer is memoised, so returning to a theme costs nothing. The rules are on the root before the
+  // browser paints, so there is no frame in which a card shows the previous theme's text colours: the cut is not deferred.
+  for (const level of [String(cardLevel)]) {
     const name = levelName(Number(level)).toLowerCase();
-    css.push(`:where(:root[data-card="${name}"]) :where(${TINT_USERS}) { ${write(glassFor(active, Number(level)))} }`);
+    const themed = memo("themed", active, Number(level), () => glassFor(active, Number(level)));
+    css.push(`:where(:root[data-card="${name}"]) :where(${TINT_USERS}) { ${write(themed, Number(level))} }`);
+    // A themed card that cannot hold the line is the solid card; it has to beat a look's fill rule, so it is written at the floor's specificity.
+    if (themed.solid) css.push(`:root[data-card="${name}"] :is(${TINT_USERS}) { ${write(themed, Number(level))} }`);
     // On the surface itself: `glass-under.on-demand.ts` marks the surface it finds over a picture or a terminal.
-    const floor = glassFloor(active, Number(level));
-    css.push(`:root[data-card="${name}"] :is(${TINT_USERS})[data-glass-under] { ${write(floor, floor)} }`);
+    const floor = memo("floor", active, Number(level), () => glassFloor(active, Number(level)));
+    css.push(`:root[data-card="${name}"] :is(${TINT_USERS})[data-glass-under] { ${write(floor, Number(level), floor)} }`);
+    // Solid means no blur: on the floor until a tracker answers with glass, and whenever a tracker answers solid.
+    css.push(`:root[data-card="${name}"] :is(${TINT_USERS})${floor.solid ? '[data-glass-under]:not([data-glass-answer="glass"])' : '[data-glass-answer="solid"]'} { --ui-overlay-blur: 0px; }`);
   }
   if (!glassSheet) {
     glassSheet = new CSSStyleSheet();
@@ -149,6 +215,7 @@ export function installGlassRules(): void {
     followLook();
   }
   glassSheet.replaceSync(css.join("\n"));
+  warmThemes(cardLevel);
   document.documentElement.setAttribute("data-glass-rules", "");
 }
 

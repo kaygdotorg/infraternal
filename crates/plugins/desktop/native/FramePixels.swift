@@ -1,11 +1,16 @@
-/// Role: bounded exact BGRA history classifies caret cadence so idle blink deltas do not restart sharp refresh [D254,D266,#146].
+/// Role: bounded exact BGRA history classifies caret cadence and cuts small changes into exact tiles [D254,D266,#146].
 /// The capture framework reports damage regions, but a blinking text cursor can still look like
 /// real content. This file compares the exact pixels of consecutive frames and recognizes a cursor
 /// that blinks at a steady rate, so an idle editor does not keep restarting the sharp refresh.
 /// Anything it cannot positively identify as a cursor is `content`: a wrong guess in that
 /// direction only costs bandwidth, never a stale picture. Pixels are 32-bit BGRA.
+///
+/// The same comparison also finds the changed rows. When they fit a few small rectangles, the
+/// tile lane (#146 proposal C) sends those exact pixels as a tile update instead of encoding a
+/// whole video frame; `tileUpdate` builds that message from the stored history.
 import CoreVideo
 import Darwin
+import Compression
 import Foundation
 
 /// How the latest frame differs from the previous delivered one.
@@ -203,10 +208,48 @@ final class FramePixels {
     private(set) var changedPixels = 0
     /// False when scanning stopped early because the change was too large to be a cursor.
     private(set) var damageBoundsComplete = true
+    /// Largest changed area, in pixels, that `prepare` still describes as tile rectangles, counted
+    /// after splitting them at unchanged columns. Zero (the default) turns the tile pass off, so
+    /// only the caret scan runs.
+    var tileAreaLimit = 0
+    /// The changed rectangles of the latest prepared picture, at most `TileBands.maximumRectangles`
+    /// of them with a total area within `tileAreaLimit`, top to bottom. `nil` when the picture is
+    /// unchanged, has no comparable history, or changed too much to be sent as tiles.
+    private(set) var tileRects: [PixelDamageBounds]?
+    /// Rows found changed by the latest comparison, reused between calls to avoid allocation.
+    private var changedRows: [Int] = []
     /// Cursor-tracking state.
     private var caretRecognition = CaretRecognition.empty
     /// Tracking state from before the latest `prepare`, restored if that picture is dropped.
     private var recognitionBeforePrepare: CaretRecognition?
+
+    /// Rows changed since the last sharp picture (`markSharp`), one flag per row of `height`.
+    private var touched: [Bool] = []
+    /// How many flags in `touched` are set.
+    private var touchedCount = 0
+    /// True when every row counts as touched: no sharp picture yet, a size change, or a
+    /// comparison that was not against the delivered picture (after a drop or reset).
+    private var touchedAll = true
+
+    /// Fraction (0...1) of picture rows that changed since the last sharp picture. Pictures are
+    /// counted when prepared, so an undelivered picture can only over-count, which errs towards
+    /// a full keyframe refresh, never towards a stale picture.
+    var touchedFraction: Double { touchedAll || height == 0 ? 1 : Double(touchedCount) / Double(height) }
+    /// Records that the delivered picture is now sharp everywhere (a sharp refresh or the last
+    /// refinement pass reached the stream), so touched rows count from zero again.
+    func markSharp() {
+        guard valid, height > 0 else { touchedAll = true; return }
+        if touched.count != height { touched = [Bool](repeating: false, count: height) }
+        else { for row in touched.indices { touched[row] = false } }
+        touchedCount = 0; touchedAll = false
+    }
+    /// Records that every row is at motion quality again (a keyframe at the motion budget).
+    func markAllTouched() { touchedAll = true }
+    /// Counts `row` as changed since the last sharp picture.
+    private func touch(_ row: Int) {
+        guard !touchedAll, row < touched.count, !touched[row] else { return }
+        touched[row] = true; touchedCount += 1
+    }
 
     /// True only after a picture has been successfully delivered to the stream.
     var hasDeliveredHistory: Bool { valid }
@@ -230,6 +273,7 @@ final class FramePixels {
         prepared = false; alreadyDelivered = false
         recognitionBeforePrepare = nil
         damageKind = .content; damageBounds = nil; changedPixels = 0; damageBoundsComplete = true
+        tileRects = nil
         let w = CVPixelBufferGetWidth(pixel), h = CVPixelBufferGetHeight(pixel)
         let stride = CVPixelBufferGetBytesPerRow(pixel)
         guard CVPixelBufferGetPixelFormatType(pixel) == kCVPixelFormatType_32BGRA,
@@ -245,6 +289,12 @@ final class FramePixels {
         var same = comparable
         var minX = w, minY = h, maxX = -1, maxY = -1
         var transition: PixelTransition?
+        // Row bands are tracked up to four times the limit: two changes on nearby rows (the caret left
+        // at the end of a line and the letter typed at the start of the next) form one wide band that
+        // the column split below cuts back to two small rectangles. The limit applies after the split.
+        var bands = TileBands(limit: tileAreaLimit * 4)
+        var splitRectangles: [PixelDamageBounds]?
+        changedRows.removeAll(keepingCapacity: true)
         if comparable {
             bytes.withUnsafeBytes { old in
                 let previous = old.baseAddress!
@@ -253,7 +303,19 @@ final class FramePixels {
                     let previousRow = previous.advanced(by: row * rowBytes)
                     if memcmp(currentRow, previousRow, rowBytes) == 0 { continue }
                     same = false
-                    for column in 0..<w {
+                    changedRows.append(row)
+                    touch(row)
+                    // Every changed row is recorded so only those rows are copied into the history
+                    // below; once neither the caret scan nor the tile bands need detail, the rest of
+                    // the frame is still compared, never copied.
+                    if !damageBoundsComplete && !bands.tracking { continue }
+                    // Pixels outside [first, last] are equal, so skipping them keeps the caret
+                    // scan's raster-order counts and limits exactly as a full-row walk.
+                    let first = Self.firstDifferentPixel(currentRow, previousRow, width: w)
+                    let last = Self.lastDifferentPixel(currentRow, previousRow, width: w)
+                    bands.add(row: row, first: first, last: last)
+                    guard damageBoundsComplete else { continue }
+                    for column in first...last {
                         let currentPixel = currentRow.advanced(by: column * 4)
                         let previousPixel = previousRow.advanced(by: column * 4)
                         guard memcmp(currentPixel, previousPixel, 4) != 0 else { continue }
@@ -267,7 +329,9 @@ final class FramePixels {
                             break
                         }
                     }
-                    if !damageBoundsComplete { break }
+                }
+                if let rectangles = bands.rectangles {
+                    splitRectangles = Self.splitAtUnchangedColumns(rectangles, current: base, currentStride: stride, previous: previous, previousStride: rowBytes)
                 }
                 if changedPixels > 0, damageBoundsComplete {
                     let bounds = PixelDamageBounds(
@@ -286,7 +350,11 @@ final class FramePixels {
                 }
             }
         }
+        if !comparable { touchedAll = true }
         prepared = true; alreadyDelivered = same
+        tileRects = comparable && !same ? splitRectangles.flatMap { rects in
+            rects.reduce(0) { $0 + $1.width * $1.height } <= tileAreaLimit ? rects : nil
+        } : nil
         if same { damageKind = .unchanged; return false }
         if comparable, changedPixels > 0 {
             let bounds = PixelDamageBounds(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
@@ -303,10 +371,14 @@ final class FramePixels {
         }
         // Overwriting history invalidates it until this exact prepared input is
         // delivered. A raw drop must never suppress an unconfirmed new picture.
-        valid = false; width = w; height = h
+        valid = false
+        // Comparable history already holds every unchanged row, so only changed rows are copied;
+        // a small change then costs one read of the frame instead of a read plus a full copy.
+        let rows: [Int] = comparable ? changedRows : Array(0..<h)
+        width = w; height = h
         if bytes.count != rowBytes * h { bytes = Data(count: rowBytes * h) }
         bytes.withUnsafeMutableBytes { destination in
-            for row in 0..<h {
+            for row in rows {
                 destination.baseAddress!.advanced(by: row * rowBytes).copyMemory(from: base.advanced(by: row * stride), byteCount: rowBytes)
             }
         }
@@ -339,7 +411,85 @@ final class FramePixels {
         bytes = Data(); width = 0; height = 0
         valid = false; prepared = false; alreadyDelivered = false
         damageKind = .content; damageBounds = nil; changedPixels = 0; damageBoundsComplete = true
+        tileRects = nil
         caretRecognition = .empty; recognitionBeforePrepare = nil
+        touchedAll = true
+    }
+
+    /// Index of the leftmost pixel that differs between two rows of `width` BGRA pixels. The rows
+    /// must differ somewhere; whole pixels are compared as 32-bit words.
+    private static func firstDifferentPixel(_ current: UnsafeRawPointer, _ previous: UnsafeRawPointer, width: Int) -> Int {
+        var column = 0
+        while column < width - 1,
+              current.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self)
+                == previous.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self) { column += 1 }
+        return column
+    }
+
+    /// Index of the rightmost pixel that differs between two rows of `width` BGRA pixels. The rows
+    /// must differ somewhere.
+    private static func lastDifferentPixel(_ current: UnsafeRawPointer, _ previous: UnsafeRawPointer, width: Int) -> Int {
+        var column = width - 1
+        while column > 0,
+              current.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self)
+                == previous.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self) { column -= 1 }
+        return column
+    }
+
+    /// Unchanged columns that split one tile rectangle in two. Narrower gaps cost less to send
+    /// than the extra rectangle header and the lost DEFLATE context.
+    private static let tileColumnGap = 32
+
+    /// Splits each rectangle where at least `tileColumnGap` columns are unchanged in all its rows,
+    /// and trims each part to the rows that changed inside it. A row band holding two separate
+    /// changes (a clock at the left of a status bar and a spinner at its right) becomes two small
+    /// rectangles instead of one as wide as the window. If splitting would need more than
+    /// `TileBands.maximumRectangles`, the rectangles are returned unsplit. The rectangles are
+    /// within the tile area limit, so this compares at most that many pixels.
+    private static func splitAtUnchangedColumns(
+        _ rectangles: [PixelDamageBounds],
+        current: UnsafeRawPointer, currentStride: Int,
+        previous: UnsafeRawPointer, previousStride: Int
+    ) -> [PixelDamageBounds] {
+        func differs(_ x: Int, _ y: Int) -> Bool {
+            current.loadUnaligned(fromByteOffset: y * currentStride + x * 4, as: UInt32.self)
+                != previous.loadUnaligned(fromByteOffset: y * previousStride + x * 4, as: UInt32.self)
+        }
+        var result: [PixelDamageBounds] = []
+        for rect in rectangles {
+            var changed = [Bool](repeating: false, count: rect.width)
+            for y in rect.y..<(rect.y + rect.height) {
+                for column in 0..<rect.width where !changed[column] && differs(rect.x + column, y) { changed[column] = true }
+            }
+            var column = 0
+            while column < rect.width {
+                guard changed[column] else { column += 1; continue }
+                var end = column, gap = 0, probe = column + 1
+                while probe < rect.width, gap < tileColumnGap {
+                    if changed[probe] { end = probe; gap = 0 } else { gap += 1 }
+                    probe += 1
+                }
+                let left = rect.x + column, width = end - column + 1
+                var top = rect.y + rect.height, bottom = rect.y - 1
+                for y in rect.y..<(rect.y + rect.height) where (left..<(left + width)).contains(where: { differs($0, y) }) {
+                    top = min(top, y); bottom = max(bottom, y)
+                }
+                result.append(PixelDamageBounds(x: left, y: top, width: width, height: bottom - top + 1))
+                column = end + 1
+            }
+        }
+        return result.count <= TileBands.maximumRectangles ? result : rectangles
+    }
+
+    /// Builds a tile update (see `tileUpdate(width:height:rects:pixels:)`) for `rects` from the
+    /// picture the latest `prepare` stored. Call it after `prepare` and before the next one, with
+    /// rectangles inside that picture (normally `tileRects`). Returns `nil` when there is no stored
+    /// picture or a rectangle falls outside it.
+    func tileUpdate(_ rects: [PixelDamageBounds]) -> Data? {
+        guard prepared, width > 0, height > 0 else { return nil }
+        return bytes.withUnsafeBytes { stored in
+            InfraternalDesktop.tileUpdate(width: width, height: height, rects: rects, pixels: stored)
+        }
     }
 
     /// Copies the before and after pixels of `bounds` out of the two buffers, each with its own row
@@ -502,5 +652,124 @@ final class FramePixels {
     /// Same as `isBlinkInterval`, for use from nested types; also rejects non-finite values.
     private static func blinkInterval(_ interval: Double) -> Bool {
         interval.isFinite && interval >= minimumBlinkInterval && interval <= maximumBlinkInterval
+    }
+}
+
+/// Collects the changed rows of one picture into at most `maximumRectangles` rectangles for the
+/// tile lane [#146 proposal C].
+///
+/// Feed it each changed row top to bottom with its first and last changed column. Rows closer than
+/// `rowGap` unchanged rows join the current rectangle, which widens to cover both. Tracking stops
+/// for good (`tracking` becomes false) once the total area passes `limit` or more rectangles would
+/// be needed; the picture then goes to video. A `limit` of zero never tracks.
+struct TileBands {
+    /// The most rectangles one tile update carries; more scattered changes go to video.
+    static let maximumRectangles = 8
+    /// Unchanged rows that may sit inside one rectangle. Text lines changing together (a letter
+    /// and its caret, a wrapped word) stay one rectangle instead of several thin ones.
+    static let rowGap = 4
+    /// Largest total area in pixels.
+    let limit: Int
+    /// Finished rectangles, top to bottom.
+    private var closed: [PixelDamageBounds] = []
+    /// Total area of `closed`.
+    private var closedArea = 0
+    /// The rectangle still growing: top row, bottom row, left and right columns (inclusive).
+    private var open: (top: Int, bottom: Int, left: Int, right: Int)?
+    /// False once the change is too large or scattered for tiles, or when `limit` is zero.
+    private(set) var tracking: Bool
+
+    /// Starts empty. `limit` is the largest total area, in pixels, still worth tracking.
+    init(limit: Int) { self.limit = limit; tracking = limit > 0 }
+
+    /// Adds one changed row. `first` and `last` are its outermost changed columns, inclusive.
+    mutating func add(row: Int, first: Int, last: Int) {
+        guard tracking else { return }
+        if var current = open, row - current.bottom - 1 <= Self.rowGap {
+            current.bottom = row; current.left = min(current.left, first); current.right = max(current.right, last)
+            open = current
+        } else {
+            if let current = open {
+                closed.append(PixelDamageBounds(x: current.left, y: current.top, width: current.right - current.left + 1, height: current.bottom - current.top + 1))
+                closedArea += closed.last!.width * closed.last!.height
+            }
+            open = (row, row, first, last)
+        }
+        let current = open!
+        let area = closedArea + (current.right - current.left + 1) * (current.bottom - current.top + 1)
+        if closed.count + 1 > Self.maximumRectangles || area > limit { tracking = false; closed = []; open = nil }
+    }
+
+    /// The rectangles, or `nil` when tracking stopped. Empty when no row was added.
+    var rectangles: [PixelDamageBounds]? {
+        guard tracking else { return nil }
+        guard let current = open else { return closed }
+        return closed + [PixelDamageBounds(x: current.left, y: current.top, width: current.right - current.left + 1, height: current.bottom - current.top + 1)]
+    }
+}
+
+/// Namespace so the free tile builder can be named from inside `FramePixels`, whose method has the
+/// same base name.
+enum InfraternalDesktop {
+    /// First byte of a tile update. An H.264 or HEVC Annex B access unit always starts with a zero
+    /// byte (its start code), so one byte tells the two kinds apart.
+    static let tileMagic: UInt8 = 0xF7
+    /// Second byte of a tile update ("T").
+    static let tileMagic2: UInt8 = 0x54
+    /// Format version of the tile update.
+    static let tileVersion: UInt8 = 1
+    /// Tile pixels are stored as they are.
+    static let tileRaw: UInt8 = 0
+    /// Tile pixels are compressed as raw DEFLATE (RFC 1951, no zlib or gzip wrapper).
+    static let tileDeflate: UInt8 = 1
+
+    /// Builds one tile update: exact pixels for a few changed rectangles of a picture, sent in the
+    /// video stream instead of an encoded frame when the change is small [#146 proposal C].
+    ///
+    /// Layout, big-endian:
+    /// `0xF7 'T' | version u8 = 1 | encoding u8 (0 raw, 1 raw DEFLATE) | width u16 | height u16 |
+    ///  count u8 (1...8) | count × (x u16, y u16, w u16, h u16) | pixel bytes u32 | data`.
+    /// `width`/`height` is the picture the rectangles belong to; a viewer showing another size
+    /// ignores the update. The pixel bytes are every rectangle's RGBA rows (alpha 255), rectangle
+    /// after rectangle, and `pixel bytes` is their length before compression. DEFLATE is used only
+    /// when it is smaller. Returns `nil` for no rectangles, too many, or one outside the picture.
+    /// - Parameters:
+    ///   - width: Picture width in pixels.
+    ///   - height: Picture height in pixels.
+    ///   - rects: Changed rectangles in picture pixels.
+    ///   - pixels: The picture as packed BGRA rows (`width * 4` bytes per row).
+    static func tileUpdate(width: Int, height: Int, rects: [PixelDamageBounds], pixels: UnsafeRawBufferPointer) -> Data? {
+        guard !rects.isEmpty, rects.count <= TileBands.maximumRectangles,
+              width > 0, height > 0, width <= 4096, height <= 4096,
+              pixels.count >= width * height * 4,
+              rects.allSatisfy({ $0.x >= 0 && $0.y >= 0 && $0.width > 0 && $0.height > 0 && $0.x + $0.width <= width && $0.y + $0.height <= height })
+        else { return nil }
+        let rawLength = rects.reduce(0) { $0 + $1.width * $1.height * 4 }
+        var raw = [UInt8](repeating: 0, count: rawLength)
+        var offset = 0
+        let source = pixels.bindMemory(to: UInt8.self)
+        for rect in rects {
+            for row in rect.y..<(rect.y + rect.height) {
+                var index = (row * width + rect.x) * 4
+                for _ in 0..<rect.width {
+                    // Capture delivers BGRA; canvas image data is RGBA. Alpha is forced opaque
+                    // because the picture is opaque and the canvas has no alpha.
+                    raw[offset] = source[index + 2]; raw[offset + 1] = source[index + 1]
+                    raw[offset + 2] = source[index]; raw[offset + 3] = 255
+                    offset += 4; index += 4
+                }
+            }
+        }
+        var compressed = [UInt8](repeating: 0, count: rawLength)
+        // COMPRESSION_ZLIB is raw DEFLATE; 0 means "did not fit", so DEFLATE is never larger.
+        let deflated = compression_encode_buffer(&compressed, rawLength, raw, rawLength, nil, COMPRESSION_ZLIB)
+        var unit = Data([tileMagic, tileMagic2, tileVersion, deflated > 0 ? tileDeflate : tileRaw])
+        func u16(_ value: Int) { unit.append(UInt8(value >> 8)); unit.append(UInt8(value & 0xFF)) }
+        u16(width); u16(height)
+        unit.append(UInt8(rects.count))
+        for rect in rects { u16(rect.x); u16(rect.y); u16(rect.width); u16(rect.height) }
+        for shift in [24, 16, 8, 0] { unit.append(UInt8((rawLength >> shift) & 0xFF)) }
+        if deflated > 0 { unit.append(contentsOf: compressed[0..<deflated]) } else { unit.append(contentsOf: raw) }
+        return unit
     }
 }

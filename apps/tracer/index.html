@@ -5,6 +5,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="theme-color" content="#101113" id="theme-color" />
+    <!-- Home-screen app (#560): iOS opens it without Safari's bars (apple-mobile-web-app-capable). "black-translucent" lets the page
+         reach under the status bar, so the canvas paints that area itself (the top bar already pads with env(safe-area-inset-top));
+         without it iOS paints its own flat band there. iOS reads this once at launch, so it cannot follow the theme: the status-bar
+         text is always light, which suits the dark themes. -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="infraternal" />
+    <!-- Before first paint: the last applied theme (written by core-screen.ts as "tracer.chrome") picks the status-bar style and
+         the theme colour, so a light theme gets dark status-bar text ("default") and a dark theme keeps the translucent bar.
+         iOS reads the style at launch, so a theme change shows on the next launch. Without a saved value nothing changes. -->
+    <script>
+      try {
+        var chrome = JSON.parse(localStorage.getItem("tracer.chrome") || "null");
+        if (chrome && typeof chrome.bg === "string" && /^#[0-9a-f]{6}$/i.test(chrome.bg)) {
+          document.getElementById("theme-color").setAttribute("content", chrome.bg);
+          if (chrome.dark === false) document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]').setAttribute("content", "default");
+        }
+      } catch (e) { /* storage may be blocked: keep the defaults */ }
+    </script>
     <title>infraternal</title>
     <!-- App icons (owner-supplied, 2026-11-14): the tab follows the system scheme; the home-screen icon is the dark variant. -->
     <link rel="icon" href="./icons/light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
@@ -16,11 +36,27 @@
     <link rel="stylesheet" href="./style.css" />
     <link rel="stylesheet" href="./ui.css" />
     <link rel="stylesheet" href="./auth.css" />
-    <link rel="stylesheet" href="./canvas.css" />
-    <link rel="stylesheet" href="./clusters.css" />
-    <link rel="stylesheet" href="./mesh.css" />
-    <link rel="stylesheet" href="./sessions.css" />
-    <link rel="stylesheet" href="./addhost.css" />
+    <link rel="stylesheet" href="./canvas.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./clusters.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./mesh.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./sessions.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./addhost.css" media="print" data-deferred />
+    <!-- The five sheets above are for the signed-in canvas only, so they must not hold back the first paint (#573). `media="print"` makes
+         the browser fetch them at low priority without blocking rendering; each one is switched to `all` when it arrives, and
+         `window.__deferredStyles` settles once all have (or failed: an unstyled canvas beats none). `mountCoreScreen`'s caller waits
+         for it (src/deferred-styles.ts), so the canvas never shows unstyled. -->
+    <script>
+      (function () {
+        var pending = [].map.call(document.querySelectorAll("link[data-deferred]"), function (link) {
+          return new Promise(function (done) {
+            function ready() { link.media = "all"; done(); }
+            if (link.sheet) ready();
+            else { link.addEventListener("load", ready); link.addEventListener("error", done); }
+          });
+        });
+        window.__deferredStyles = Promise.all(pending);
+      })();
+    </script>
   </head>
   <body>
     <!-- No interim "loading" text: the page stays a calm empty surface for the few

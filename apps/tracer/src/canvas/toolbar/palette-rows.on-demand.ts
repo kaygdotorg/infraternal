@@ -17,7 +17,7 @@ import { ICON, SESSION_ICON, viewIcon } from "../views/icons";
 import { byFrecency } from "../sessions/inventory";
 import { isTerminal } from "../views/body";
 import { viewKeys } from "./viewlist";
-import { bindingText } from "./shortcuts";
+import { bindingText, hintWithKeys } from "./shortcuts";
 import { hostEntries } from "./palette-hosts.on-demand";
 
 /**
@@ -37,7 +37,7 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
   const { state, views } = cx;
     const out: PaletteEntry[] = [];
     [...views.values()].forEach((c, i) => {
-      out.push({ group: "Views", glyph: "▦", icon: viewIcon(c.view.id), label: `Go to ${c.view.name}`, hint: `view · ${shortcutLabel(viewKeys(i))}`, action: `canvas:view:${c.view.id}` });
+      out.push({ group: "Views", glyph: "▦", icon: viewIcon(c.view.id), label: `Go to ${c.view.name}`, hint: hintWithKeys("view", shortcutLabel(viewKeys(i))), action: `canvas:view:${c.view.id}` });
     });
     const settings = views.get("settings");
     const outline = cx.adapters.settings.outline;
@@ -50,7 +50,7 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
     }
     if (cx.sharing) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.next, label: "Share layout…", hint: "send views to a person or a group", action: "canvas:share" });
     if (views.get(state.currentView)?.view.team) out.push({ group: "Canvas", glyph: "⇪", icon: ICONS.unlock, label: "Unlink team layout to edit", hint: "keep your own copy", action: "canvas:unlink" });
-    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.canvas, label: "Canvas lock on", hint: `${state.canvasLock ? "on now · " : ""}${bindingText("canvas-lock")}`, action: "canvas:canvaslock:on" });
+    out.push({ group: "Canvas", glyph: "▦", icon: ICONS.canvas, label: "Canvas lock on", hint: hintWithKeys(state.canvasLock ? "on now" : "", bindingText("canvas-lock")), action: "canvas:canvaslock:on" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "Canvas lock off", hint: "free pan and zoom, in place", action: "canvas:canvaslock:off" });
     out.push({ group: "Canvas", glyph: "▦", icon: ICONS.overview, label: "All views", hint: "fit every view · Esc", action: "canvas:overview" });
     if (state.activeWin && isTerminal(state.activeWin)) {
@@ -67,14 +67,14 @@ export function canvasEntries(cx: Ctx): PaletteEntry[] {
           action: `canvas:openlink:${encodeURIComponent(link.target)}`,
         });
       }
-      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: `divides this window · ${bindingText("split-right")}`, action: "canvas:split:right" });
-      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: `divides this window · ${bindingText("split-down")}`, action: "canvas:split:down" });
-      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.newRight, label: "New window right", hint: `full size, beside · ${bindingText("new-window-right")}`, action: "canvas:new:right" });
-      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.newBelow, label: "New window below", hint: `full size, under · ${bindingText("new-window-below")}`, action: "canvas:new:below" });
+      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.splitRight, label: "Split right", hint: hintWithKeys("divides this window", bindingText("split-right")), action: "canvas:split:right" });
+      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.splitDown, label: "Split down", hint: hintWithKeys("divides this window", bindingText("split-down")), action: "canvas:split:down" });
+      out.push({ group: "Canvas", glyph: "▥", icon: ICONS.newRight, label: "New window right", hint: hintWithKeys("full size, beside", bindingText("new-window-right")), action: "canvas:new:right" });
+      out.push({ group: "Canvas", glyph: "▤", icon: ICONS.newBelow, label: "New window below", hint: hintWithKeys("full size, under", bindingText("new-window-below")), action: "canvas:new:below" });
     }
-    if (state.activeWin && cx.adapters.docs?.for(state.activeWin.model)) out.push({ group: "Canvas", glyph: "?", icon: ICON.help, label: "Read about this window", hint: `docs · ${bindingText("window-docs")}`, action: "canvas:windowdocs" });
-    if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: `the session keeps running · ${bindingText("close-window")}`, action: "canvas:close" });
-    out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: `the active window only · ${bindingText("input-lock")}`, action: "canvas:inputlock" });
+    if (state.activeWin && cx.adapters.docs?.for(state.activeWin.model)) out.push({ group: "Canvas", glyph: "?", icon: ICON.help, label: "Read about this window", hint: hintWithKeys("docs", bindingText("window-docs")), action: "canvas:windowdocs" });
+    if (state.activeWin) out.push({ group: "Canvas", glyph: "▢", icon: ICONS.close, label: "Close window", hint: hintWithKeys("the session keeps running", bindingText("close-window")), action: "canvas:close" });
+    out.push({ group: "Canvas", glyph: "▦", icon: cx.inputLock.state ? withLockBadge(ICONS.terminal) : ICONS.terminal, label: cx.inputLock.state ? "Input lock off" : "Input lock on", hint: hintWithKeys("the active window only", bindingText("input-lock")), action: "canvas:inputlock" });
     out.push(...openShellEntries(cx));
     // Remove, rename and full-access rows for hosts.
     out.push(...hostEntries(cx));

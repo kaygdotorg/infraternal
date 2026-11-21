@@ -22,7 +22,6 @@ export const REMOVAL_EFFECT = "Revokes its access, then uninstalls the infratern
  */
 export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
-    label: `Remove ${name}`,
     title: `Remove ${name}?`,
     effect: REMOVAL_EFFECT,
     named: true,
@@ -36,7 +35,6 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
 /** Confirm D369's server-only forgetting, explicitly distinguishing it from machine cleanup. */
 export function confirmHostForget(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
-    label: `Forget ${name}`,
     title: `Forget ${name}?`,
     effect: "Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it.",
     named: true,

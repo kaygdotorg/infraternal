@@ -58,7 +58,7 @@ export function showStartupNotice(input: StartupNoticeInput): void {
     const anchor = event?.currentTarget as HTMLElement | undefined;
     if (disposed() || !anchor) return;
     const sentence = `${other} will stop starting in Infraternal terminals. This terminal keeps running, and you can undo it.`;
-    setTip(confirm(anchor, { label: "Switch to the Infraternal Multiplexer", title: `Switch to the Infraternal Multiplexer in ${proposal.file}?`,
+    setTip(confirm(anchor, { title: `Switch to the Infraternal Multiplexer in ${proposal.file}?`,
       // The line sits on its own row: the confirmation keeps a line break in its effect text.
       effect: `${proposal.guard}\n${sentence}`,
       confirmLabel: "Switch", cancelLabel: "Keep as is", onConfirm: () => { void change("apply"); },

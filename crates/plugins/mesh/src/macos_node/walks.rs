@@ -26,7 +26,10 @@ use super::{
     underlay::UnderlayAnnouncer,
 };
 use crate::{
-    candidate_walks::{HANDSHAKE_WAIT, Observed, active_peer_key, kept_address, walking_peers},
+    candidate_walks::{
+        EngineEndpoint, HANDSHAKE_WAIT, Observed, active_peer_key, engine_endpoint, kept_address,
+        walking_peers,
+    },
     dataplane::{Config, Peer, PeerPolicy},
     policy::model::PublicKey,
 };
@@ -78,7 +81,7 @@ pub(super) async fn run_worker(
                         reply,
                     } => {
                         let before = state.engine_addresses(&config).await;
-                        let result = state.apply(*config, budgets).await;
+                        let result = state.apply(*config, budgets, &before).await;
                         // The apply writes routes while the listener is outside the select.
                         if let Some(announcer) = announcer.as_mut() {
                             announcer.resync();
@@ -212,12 +215,10 @@ async fn announce_underlay(
 /// device with no installed peer yet gets the full re-install instead, which is what starts its
 /// connection.
 ///
-/// A changed peer is rewritten whole, endpoint included, the same known limit as on Linux (J555,
-/// #483): a NAT rebind the engine learned is replaced by the coordinator's address until the
-/// peer's next packet. A walking peer is the exception, as on Linux: while its new list still
-/// holds the address the engine sends to, it stays there ([`kept_address`], J699 P3-3), so a
-/// change to the tail of its list does not cost a found peer a walk step. The engine's addresses
-/// are read for that only when such a peer changed.
+/// A changed peer is rewritten whole, endpoint included. A walking peer stays on an address its
+/// new list still holds (J699 P3-3), and any peer stays on an off-list address confirmed by a
+/// recent authenticated session (#483). The caller supplies that one-read snapshot when any
+/// installed peer changed.
 /// # Errors
 /// Reports invalid host routes or a device that rejected the update; the caller rolls back.
 pub(super) async fn update_peers(
@@ -225,6 +226,7 @@ pub(super) async fn update_peers(
     applied: Option<&Config>,
     next: &Config,
     admitted: &BTreeSet<PublicKey>,
+    before: &BTreeMap<PublicKey, EngineEndpoint>,
 ) -> io::Result<()> {
     let previous = installed_by_key(applied);
     if previous.is_empty() {
@@ -235,31 +237,18 @@ pub(super) async fn update_peers(
         return super::replace_peers(device, peers_for_config(next)?).await;
     }
     let is_changed = |policy: &&PeerPolicy| previous.get(&policy.peer.key) != Some(&&policy.peer);
-    let walking_changed = installed_peers(next)
-        .filter(is_changed)
-        .any(|policy| !policy.peer.candidates.is_empty());
-    let engine: BTreeMap<PublicKey, SocketAddr> = if walking_changed {
-        device
-            .read(async |read| read.peers().await)
-            .await
-            .into_iter()
-            .filter_map(|stats| {
-                let key = PublicKey(*stats.peer.public_key.as_bytes());
-                stats.peer.endpoint.map(|endpoint| (key, endpoint))
-            })
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
     let changed = installed_peers(next)
         .filter(is_changed)
         .map(|policy| {
             let mut peers = peer_for_policy(policy)?;
             let key = active_peer_key(&policy.peer);
-            if let Some(at) = kept_address(&policy.peer, engine.get(&key).copied(), None)
-                && let Some(active) = peers
-                    .iter_mut()
-                    .find(|peer| peer.public_key.as_bytes() == &key.0)
+            if let Some(at) = kept_address(
+                &policy.peer,
+                before.get(&key).copied().unwrap_or_default(),
+                None,
+            ) && let Some(active) = peers
+                .iter_mut()
+                .find(|peer| peer.public_key.as_bytes() == &key.0)
             {
                 active.endpoint = Some(at);
             }
@@ -339,11 +328,7 @@ impl RuntimeState {
     /// After a successful apply, the walks follow the snapshot ([`Self::refresh_walks`]). After a
     /// failed one, `rollback_device` has re-installed every peer at its first address, so no
     /// walk's position holds any more: they all start again from there.
-    async fn after_apply(
-        &mut self,
-        applied: bool,
-        before: &BTreeMap<PublicKey, Option<SocketAddr>>,
-    ) {
+    async fn after_apply(&mut self, applied: bool, before: &BTreeMap<PublicKey, EngineEndpoint>) {
         if applied {
             self.refresh_walks(before).await;
         } else {
@@ -358,7 +343,7 @@ impl RuntimeState {
     /// Each walk that starts running is moved to its address if the engine is elsewhere, then
     /// gets a real handshake there ([`Self::rehandshake`]); a walk that starts finished sends
     /// nothing, and a working peer that the snapshot left unchanged is never walked again.
-    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, Option<SocketAddr>>) {
+    async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, EngineEndpoint>) {
         let Some(config) = self.config.as_ref() else {
             self.walks.clear();
             return;
@@ -389,22 +374,30 @@ impl RuntimeState {
     }
 
     /// Where the engine sends each peer's packets before `next` is applied, by device key, for
-    /// [`Self::refresh_walks`] (J602 F1). Read only when `next` re-installs a peer that walks;
+    /// [`Self::refresh_walks`] (J602 F1). Read when `next` re-installs any peer (#483, J1025);
     /// every other snapshot reads nothing here.
-    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, Option<SocketAddr>> {
-        let walking = |peer: &Peer| !peer.candidates.is_empty();
-        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, walking) {
+    async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, EngineEndpoint> {
+        if !crate::candidate_walks::engine_read_needed(self.config.as_ref(), next) {
             return BTreeMap::new();
         }
-        self.counters()
+        let Some(device) = self.device.as_ref() else {
+            return BTreeMap::new();
+        };
+        device
+            .read(async |read| read.peers().await)
             .await
-            .map(|counters| {
-                counters
-                    .into_iter()
-                    .map(|(key, counters)| (key, counters.endpoint))
-                    .collect()
+            .into_iter()
+            .filter(|peer| !peer.peer.allowed_ips.is_empty())
+            .map(|peer| {
+                let key = PublicKey(*peer.peer.public_key.as_bytes());
+                let endpoint = engine_endpoint(
+                    peer.peer.endpoint,
+                    peer.stats.confirmed_endpoint,
+                    peer.stats.last_handshake,
+                );
+                (key, endpoint)
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Step every due walk with the device's counters and install the addresses they move to,

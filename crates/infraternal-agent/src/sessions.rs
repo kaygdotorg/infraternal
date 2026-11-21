@@ -355,7 +355,9 @@ pub async fn connect_writer(path: PathBuf, id: [u8; 16], writer: u32) -> io::Res
             | MULTI_WRITER
             | APPROXIMATE_SNAPSHOT
             | SHARED_WRITER
-            | infraternal_shim::frame::QUERY_REPLIES,
+            | infraternal_shim::frame::QUERY_REPLIES
+            // The relay turns echo reports into `terminal.echo` (#569).
+            | infraternal_shim::frame::ECHO_STATE,
     )
     .await?;
     if session.caps & MULTI_WRITER == 0 || writer == 0 {
@@ -403,7 +405,9 @@ pub async fn connect_shared_writer(
             | MULTI_WRITER
             | APPROXIMATE_SNAPSHOT
             | SHARED_WRITER
-            | infraternal_shim::frame::QUERY_REPLIES,
+            | infraternal_shim::frame::QUERY_REPLIES
+            // The relay turns echo reports into `terminal.echo` (#569).
+            | infraternal_shim::frame::ECHO_STATE,
     )
     .await?;
     let required = SEQUENCED_INPUT | MULTI_WRITER | SHARED_WRITER;

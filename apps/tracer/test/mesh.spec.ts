@@ -190,7 +190,7 @@ async function gesture(page: Page, kind: "zoom" | "pan", x: number, y: number): 
 }
 
 for (const rate of [1, 4]) {
-  test(`frames: zooming and panning a 1,000-node mesh with 4,000 grants keeps its frame time at ${rate}x CPU`, async ({ page, browser }) => {
+  test(`frames: zooming and panning a 1,000-node mesh with 4,000 grants keeps its frame time at ${rate}x CPU`, { tag: "@perf" }, async ({ page, browser }) => {
     test.setTimeout(120_000);
     await open(page, "&mesh=1000&meshgrants=3500");
     await probe(page, (p) => p.flyView("mesh"));
@@ -373,7 +373,7 @@ test.describe("editing arrows", () => {
     await server(page, (s) => s.failNext("mesh.grant.move", "refuse"));
     await dragEnd(page, "g3", "head", "edge-arm");
     await page.locator(".ui-confirm-yes").click();
-    await expect(page.locator(".ui-toast[data-front=\"true\"]")).toContainText("Could not change who nix-cache can reach. You may not be allowed to");
+    await expect(page.locator(".ui-toast[data-front=\"true\"]")).toContainText("Could not change who nix-cache can reach. Your account may not allow it");
     await expect.poll(async () => (await grant("g3"))?.to).toBe("studio-mac");
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach studio-mac");
     await page.waitForTimeout(3600);

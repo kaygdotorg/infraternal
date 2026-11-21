@@ -424,7 +424,8 @@ fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
 /// Callers pass a staging MTU no smaller than either the old or new peer budget until route
 /// metrics have been updated. No other tunnel or resolver is changed.
 fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string(), "up"])?;
+    // Kernel ioctls, not an `ifconfig` process: the spawn cost about 3.5 ms per start (#221).
+    crate::macos_utun_ioctl::set_mtu_and_up(interface, mtu)?;
     if let Some(config) = config {
         run_ifconfig([
             interface,
@@ -448,9 +449,9 @@ fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io
 
 /// Change the packet size on the already-owned utun interface.
 /// # Errors
-/// Reports a rejected `ifconfig` request.
+/// Reports a rejected kernel request (`SIOCSIFMTU`).
 fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string()])
+    crate::macos_utun_ioctl::set_mtu(interface, mtu)
 }
 
 fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
@@ -1595,8 +1596,14 @@ impl RuntimeState {
     /// Apply one accepted snapshot, its endpoint-derived route MTUs, and its DNS names.
     /// # Errors
     /// Restores the old peer, route and interface MTU state when one update fails.
-    async fn apply(&mut self, config: Config, budgets: PathBudgets) -> io::Result<RuntimeInfo> {
-        self.apply_with_rollback(config, budgets, true).await
+    async fn apply(
+        &mut self,
+        config: Config,
+        budgets: PathBudgets,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
+    ) -> io::Result<RuntimeInfo> {
+        self.apply_with_rollback(config, budgets, true, before)
+            .await
     }
 
     /// Replace a complete authority snapshot without restoring the previous authority on failure.
@@ -1647,7 +1654,9 @@ impl RuntimeState {
         // Full replacement retires the old engine sessions and their walk positions.
         self.handshakes.abort_all();
         self.walks.clear();
-        self.apply_with_rollback(config, budgets, false).await
+        let before = BTreeMap::new();
+        self.apply_with_rollback(config, budgets, false, &before)
+            .await
     }
 
     /// Refresh MTUs without suspending the device or replacing any established peer.
@@ -1708,6 +1717,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
         rollback_on_failure: bool,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -1754,7 +1764,7 @@ impl RuntimeState {
         // An authority replacement may have reached this path because the installed keys
         // disagreed with the snapshot. Rebuild from the complete list in that case.
         let peers_applied = if rollback_on_failure {
-            walks::update_peers(device, old_config.as_ref(), &config, &admitted).await
+            walks::update_peers(device, old_config.as_ref(), &config, &admitted, before).await
         } else {
             replace_peers(device, peers).await
         };
@@ -4098,6 +4108,54 @@ mod tests {
             !macos_snapshot_binding_is_authorized(&store, unrelated_public).expect("unrelated"),
             "a completed marker does not authorize an unrelated saved binding"
         );
+    }
+
+    /// A fresh utun comes up at the requested MTU through ioctls alone, and a later MTU change
+    /// keeps it up (#221). `ifconfig` is used only to read the result back.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn utun_ioctls_set_mtu_and_bring_the_interface_up() {
+        let open = super::OpenUtun::open().expect("open a utun (needs root)");
+        // A new utun is already up at MTU 1500 on current macOS, so take it down first: that is
+        // the state in which setting IFF_UP has to work.
+        let down = std::process::Command::new("/sbin/ifconfig")
+            .args([open.name.as_str(), "down"])
+            .status()
+            .expect("run ifconfig down");
+        assert!(down.success(), "ifconfig down failed");
+        let before = ifconfig_text(&open.name);
+        assert!(
+            !before.contains("<UP,"),
+            "the utun is down before: {before}"
+        );
+        assert!(
+            !before.contains("mtu 1280"),
+            "MTU is not 1280 before: {before}"
+        );
+        super::configure_interface(&open.name, None, 1280).expect("mtu and up by ioctl");
+        let after = ifconfig_text(&open.name);
+        assert!(after.contains("mtu 1280"), "MTU 1280 expected: {after}");
+        assert!(after.contains("<UP,"), "interface up expected: {after}");
+        super::set_interface_mtu(&open.name, 1400).expect("mtu change by ioctl");
+        let changed = ifconfig_text(&open.name);
+        assert!(changed.contains("mtu 1400"), "MTU 1400 expected: {changed}");
+        assert!(
+            changed.contains("<UP,"),
+            "still up after the change: {changed}"
+        );
+        assert!(
+            super::set_interface_mtu("utun999999", 1280).is_err(),
+            "no such interface"
+        );
+    }
+
+    /// `ifconfig <name>` output, for reading a result back.
+    fn ifconfig_text(name: &str) -> String {
+        let output = std::process::Command::new("/sbin/ifconfig")
+            .arg(name)
+            .output()
+            .expect("run ifconfig");
+        String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.

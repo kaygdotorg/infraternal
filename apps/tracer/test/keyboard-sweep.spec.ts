@@ -121,6 +121,9 @@ async function sweep(page: Page, act: () => Promise<void>): Promise<Finding[]> {
   return found.filter((finding) => !NOT_PRODUCT.test(finding));
 }
 
+/** A key cap Playwright can press: one character (a letter, digit or symbol, including a bracket or a slash), or a named key. */
+const PRESSABLE_CAP = /^(?:.|Control|Shift|Alt|Meta|Escape|Enter|Tab|Space|Backspace|Delete|Home|End|PageUp|PageDown|Arrow(?:Left|Right|Up|Down)|F\d{1,2})$/u;
+
 /** The pressable chords of the `?` panel: its rows' first run of key caps, as Playwright key names. */
 async function chordsOfPanel(page: Page): Promise<Array<{ label: string; key: string }>> {
   // Ctrl+Shift+/ works from inside a focused terminal, where a bare "?" is typed into the shell.
@@ -135,8 +138,10 @@ async function chordsOfPanel(page: Page): Promise<Array<{ label: string; key: st
   const chords: Array<{ label: string; key: string }> = [];
   for (const row of rows) {
     const caps = row.caps.map((cap) => names[cap] ?? cap);
-    // Patterns and pointer entries ("Ctrl+Shift+1–3", "Scroll", "Alt+click") are not one pressable chord.
-    if (!caps.length || caps.some((cap) => /[–]|click|Scroll/i.test(cap)) || /^Show these shortcuts$|^Close the open panel$/.test(row.label)) continue;
+    // Patterns and pointer entries ("Ctrl+Shift+1–3", "Scroll", "Alt+click", and gesture help such as "Swipe on empty canvas") are not
+    // one pressable chord. A row counts only when every cap is a key Playwright knows by name, so a help sentence that
+    // someone words differently later (D377, #443) cannot be pressed as a key.
+    if (!caps.length || !caps.every((cap) => PRESSABLE_CAP.test(cap)) || /^Show these shortcuts$|^Close the open panel$/.test(row.label)) continue;
     chords.push({ label: row.label, key: caps.join("+") });
   }
   return chords;

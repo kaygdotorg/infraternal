@@ -16,6 +16,8 @@ test("the browser renderer has no unresolved Vite Node-file shim request", async
   const outputs = await Promise.all(result.outputs.map((output) => output.text()));
   expect(outputs.join("\n")).not.toContain("__vite-browser-external-2447137e.js");
   expect(outputs.join("\n")).toContain("Node filesystem unavailable in browser");
+  // The engine's wasm is a file of its own (src/engine-wasm.ts): the artifact's base64 copy must not ride in the bundle.
+  expect(outputs.join("\n")).not.toMatch(/data:application\/wasm;base64,[A-Za-z0-9+/=]{100}/);
 });
 
 test("layout review fixtures ship only in explicitly enabled preview builds", async () => {

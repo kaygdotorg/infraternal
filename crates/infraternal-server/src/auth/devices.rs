@@ -189,6 +189,63 @@ impl JoinMachineRequest {
     }
 }
 
+/// Fuzz hook: a machine-join approval request either fails validation or
+/// carries exactly the facts the approval page may show, and its receipt is
+/// a pure function of the request and a canonical 32-byte poll token.
+///
+/// The first input byte is the length of the poll token that follows; the
+/// rest is the request JSON.
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+pub(crate) fn check_join_machine_sample(data: &[u8]) {
+    let [token_len, rest @ ..] = data else {
+        return;
+    };
+    let (token, json) = rest.split_at(usize::from(*token_len).min(rest.len()));
+    let token = String::from_utf8_lossy(token);
+    let Ok(request) = serde_json::from_slice::<JoinMachineRequest>(json) else {
+        return;
+    };
+    let Ok(digest) = request.validate() else {
+        return;
+    };
+    assert!((1..=128).contains(&request.hostname.len()));
+    assert!(request.hostname.bytes().all(|byte| byte.is_ascii_graphic()));
+    assert_eq!(request.mode == "system", request.execution_uid == 0);
+    assert_eq!(
+        request.key_fingerprint,
+        format!("SHA256:{}", FingerprintB64.encode(digest))
+    );
+    assert_eq!(
+        request.fingerprint().ok().as_ref(),
+        Some(&request.key_fingerprint)
+    );
+    match (request.receipt_token(&token), request.receipt_token(&token)) {
+        (Ok(first), Ok(second)) => {
+            assert_eq!(first, second);
+            assert_eq!(B64.decode(&first).map(|bytes| bytes.len()).ok(), Some(32));
+            assert_eq!(
+                B64.decode(token.as_ref()).map(|bytes| bytes.len()).ok(),
+                Some(32)
+            );
+        }
+        (Err(_), Err(_)) => {}
+        _ => panic!("the receipt token is not a pure function of its input"),
+    }
+}
+
+/// Whether a requester-chosen device label is safe to show on the approval page.
+///
+/// The label is the name the owner reads before tapping, and later the name of the
+/// key in the key list. It is 1–128 bytes of printable ASCII (space to `~`), the
+/// set the CLI already sends. Control, bidi, zero-width and other non-ASCII
+/// characters are refused so a label cannot render as a different device or hide
+/// part of itself (#559 F3, the same rule as the join host name, J134 P3-3).
+fn readable_label(device: &str) -> bool {
+    !device.is_empty()
+        && device.len() <= 128
+        && device.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+}
+
 #[allow(clippy::missing_errors_doc)]
 impl Auth {
     /// Start device-code approval with the default key lifetime. `source` is the caller's
@@ -228,8 +285,7 @@ impl Auth {
         if !(MIN_KEY_LIFETIME_SECONDS..=policy.max(MIN_KEY_LIFETIME_SECONDS)).contains(&lifetime) {
             return Err(Error::Invalid);
         }
-        if device.is_empty()
-            || device.len() > 128
+        if !readable_label(device)
             || scopes.is_empty()
             || scopes.len() > 32
             || scopes.iter().any(|s| {
@@ -273,7 +329,7 @@ impl Auth {
         source: IpAddr,
         now: i64,
     ) -> Result<Value> {
-        if device.is_empty() || device.len() > 128 || now < 0 {
+        if !readable_label(device) || now < 0 {
             return Err(Error::Invalid);
         }
         request.validate()?;

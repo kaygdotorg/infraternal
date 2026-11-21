@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Run the S4 auto-update proof in a throwaway NixOS microVM (#211 S4).
+#
+#   scripts/update-proof-vm/run <inputs folder> <evidence folder>
+#
+# <inputs folder> is what scripts/update-proof-vm/build-inputs wrote (releases/,
+# versions, server-tests). The script builds the VM from vm.nix, boots it under
+# KVM (4 vCPUs, 4 GiB, no network device), waits until the in-VM runner reports
+# DONE (the proof includes a hard reset of the VM, so it boots twice), copies the
+# logs into <evidence folder> and prints the S4 matrix.
+#
+# Everything it creates lives in one private scratch folder: the share, the VM's
+# disk image and qemu's temporary files. A trap kills the VM's process group and
+# deletes that folder on any exit, so nothing is left behind on the host. It
+# changes no host network, route or system file; the VM has no network at all.
+#
+# Run as an unprivileged user in the `kvm` group (claude on compute01), through
+# build-slot, since the VM keeps 4 cores busy for about 25 minutes.
+set -euo pipefail
+[[ $# == 2 ]] || { printf 'usage: %s <inputs folder> <evidence folder>\n' "$0" >&2; exit 2; }
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+inputs=$(cd -- "$1" && pwd)
+evidence=$2
+mkdir -p -- "$evidence"
+evidence=$(cd -- "$evidence" && pwd)
+for file in versions server-tests releases; do
+    [[ -e "$inputs/$file" ]] || { printf 'inputs: %s is missing\n' "$file" >&2; exit 2; }
+done
+[[ -r /dev/kvm && -w /dev/kvm ]] || { printf 'no access to /dev/kvm\n' >&2; exit 2; }
+
+scratch=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/update-proof-vm.XXXXXX")
+chmod 700 "$scratch"
+vm_pgid=""
+cleanup() {
+    if [[ -n "$vm_pgid" ]] && kill -0 -- "-$vm_pgid" 2>/dev/null; then
+        kill -TERM -- "-$vm_pgid" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 -- "-$vm_pgid" 2>/dev/null || break; sleep 0.5; done
+        kill -KILL -- "-$vm_pgid" 2>/dev/null || true
+    fi
+    rm -rf -- "$scratch"
+    printf 'UPDATE_VM teardown scratch_removed=%s\n' "$([[ -e $scratch ]] && echo false || echo true)"
+}
+trap cleanup EXIT HUP INT TERM
+
+started=$(date +%s)
+vm=$(nix build --no-link --print-out-paths -f "$here/vm.nix")
+printf 'UPDATE_VM built=%s seconds=%s\n' "$vm" "$(( $(date +%s) - started ))"
+
+share=$scratch/share
+mkdir -m 700 "$share" "$share/out"
+cp -a "$inputs/releases" "$share/releases"
+cp "$inputs/versions" "$inputs/server-tests" "$share/"
+cp "$here/in-vm.sh" "$share/in-vm.sh"
+mkdir -m 700 "$scratch/tmp"
+
+# The VM gets its own process group, so the trap stops qemu and nothing else.
+IPROOF_SHARE=$share NIX_DISK_IMAGE=$scratch/iproof.qcow2 TMPDIR=$scratch/tmp \
+    setsid "$vm/bin/run-iproof-vm" < /dev/null > "$evidence/console.log" 2>&1 &
+vm_pid=$!
+vm_pgid=$vm_pid
+printf 'UPDATE_VM booted pid=%s pgid=%s\n' "$vm_pid" "$vm_pgid"
+
+# The proof takes about 25 minutes; give it 50, then stop it.
+deadline=$(( $(date +%s) + 3000 ))
+while [[ ! -s "$share/out/DONE" ]]; do
+    if ! kill -0 "$vm_pid" 2>/dev/null; then
+        printf 'UPDATE_VM the VM exited before the proof finished\n' >&2
+        break
+    fi
+    if (( $(date +%s) > deadline )); then
+        printf 'UPDATE_VM timed out\n' >&2
+        break
+    fi
+    sleep 5
+done
+# The runner powers the VM off after DONE; give it a minute.
+for _ in $(seq 1 60); do kill -0 "$vm_pid" 2>/dev/null || break; sleep 1; done
+cp -a "$share/out/." "$evidence/" 2>/dev/null || true
+printf 'UPDATE_VM finished seconds=%s\n' "$(( $(date +%s) - started ))"
+grep -hE '^(UPDATE|METRIC) |test result|failure_' "$evidence"/phase1.log "$evidence"/phase2.log 2>/dev/null || true
+cat "$evidence/DONE" 2>/dev/null || { printf 'PROOF_DONE missing\n'; exit 1; }
+grep -q '^PROOF_DONE rc=0 phase=2$' "$evidence/DONE"

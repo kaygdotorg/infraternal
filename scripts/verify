@@ -9,6 +9,9 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 # Exported so unit tests that place private fixtures under the target folder
 # (release staging tests) find it whether or not the caller set it.
 export CARGO_TARGET_DIR="$target_dir"
+# A gate builds each crate once, so incremental caches never get reused but cost about a fifth of
+# the target (12 of 56 GB, #574). Callers that iterate on one checkout may still set it to 1.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Cargo does not make a target directory safe to share between source roots.
 # Remember the last checkout and revision so a comparison with reused artifacts
@@ -34,18 +37,26 @@ source_marker_tmp="${source_marker}.tmp.$$"
 printf '%s\n%s\n' "$repo_root" "$source_revision" > "$source_marker_tmp"
 mv -f -- "$source_marker_tmp" "$source_marker"
 
-"$repo_root/scripts/auth-toolchain"
-export PATH="$target_dir/auth-tools/zig:$PATH"
+# The latency profile can measure a binary built elsewhere (INFRATERNAL_LATENCY_BINARY, #447):
+# the perf VM never builds, so it has no Zig, no cargo and no OpenSSL build drivers to prepare.
+prebuilt_latency=0
+if [[ "${1:-}" == latency && -n "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+    prebuilt_latency=1
+fi
 
-# Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
-# these explicitly; the documented Nix invocation supplies them here when absent.
-if ! command -v make >/dev/null || ! command -v perl >/dev/null; then
-    if command -v nix >/dev/null; then
-        exec nix shell nixpkgs#gnumake nixpkgs#perl -c "$0" "$@"
+if [[ "$prebuilt_latency" == 0 ]]; then
+    "$repo_root/scripts/auth-toolchain"
+    export PATH="$target_dir/auth-tools/zig:$PATH"
+
+    # Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
+    # these explicitly; the documented Nix invocation supplies them here when absent.
+    if ! command -v make >/dev/null || ! command -v perl >/dev/null; then
+        if command -v nix >/dev/null; then
+            exec nix shell nixpkgs#gnumake nixpkgs#perl -c "$0" "$@"
+        fi
+        printf 'verify requires make and perl for vendored OpenSSL\n' >&2
+        exit 1
     fi
-    printf 'verify requires make and perl for vendored OpenSSL
-' >&2
-    exit 1
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,7 +108,11 @@ verify_latency_steps() {
     # The host's own target: the native rows run the agent, so they need a binary this
     # machine executes (the profile runs on compute01 x86_64 and dev-02 aarch64).
     local native_target="$(uname -m)-unknown-linux-musl"
-    if scripts/static-cargo build --locked --release --package infraternal --target "$native_target"; then
+    if [[ -n "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+        # A binary built elsewhere (the nightly perf-VM run, #447): measure exactly these bytes.
+        report_environment native
+        python3 "${script_dir}/verify-latency.py" --binary "$INFRATERNAL_LATENCY_BINARY" || failed=1
+    elif scripts/static-cargo build --locked --release --package infraternal --target "$native_target"; then
         report_environment native
         python3 "${script_dir}/verify-latency.py" \
             --binary "$CARGO_TARGET_DIR/$native_target/release/infraternal" || failed=1
@@ -105,8 +120,12 @@ verify_latency_steps() {
         failed=1
     fi
 
-    report_environment auth-browser
-    "${script_dir}/verify-auth-browser" || failed=1
+    # The auth-browser check is a functional gate, not a D375 row producer, and it builds a Rust example:
+    # a prebuilt-binary run (the perf VM has no cargo) leaves it to `verify fast` and the nightly suite.
+    if [[ -z "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+        report_environment auth-browser
+        "${script_dir}/verify-auth-browser" || failed=1
+    fi
     # `set -e` does not apply inside a subshell on the left of `||`, so the steps are
     # chained: a failed install or typecheck must fail the row, not only the browser run.
     # Only the specs that print D375 rows run here; the whole functional browser suite
@@ -114,7 +133,7 @@ verify_latency_steps() {
     # They run twice: unthrottled (vsync and the frame-rate limit off, so frame-bound rows
     # measure our own work; this run gates) and at headless Chromium's normal 60 Hz pacing
     # (reported beside it). The report checks the unthrottled run really ran above 60 Hz.
-    local row_specs=(test/terminal.spec.ts test/latency-profile.spec.ts)
+    local row_specs=(test/terminal.spec.ts test/latency-profile.spec.ts test/second-burst.spec.ts)
     local unthrottled_flags="--disable-renderer-backgrounding --disable-gpu-vsync --disable-frame-rate-limit"
     (
         cd -- "$repo_dir/apps/tracer" &&
@@ -131,6 +150,30 @@ verify_latency_steps() {
     (
         cd -- "$repo_dir/apps/tracer" &&
             INFRATERNAL_LATENCY_DISPLAY=60hz TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test "${row_specs[@]}"
+    ) || failed=1
+    # The rows a person sees (#569 finding 2, #573): overlapping typing into a real shell and first paint on 4G and
+    # fast 3G, on the production server and a production build of the tracer. The typing spec runs unthrottled (this
+    # gates: paint minus message measures our own work) and at 60 Hz (reported); first paint runs once. The server
+    # is the binary measured above; RTT is the profile's own. The bridge delays in user space, so no network
+    # setting on the machine changes.
+    local real_binary="${INFRATERNAL_LATENCY_BINARY:-$CARGO_TARGET_DIR/$native_target/release/infraternal}"
+    local one_way=$(( ${INFRATERNAL_TEST_RTT:-300} / 2 ))
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            bun run build
+    ) || failed=1
+    report_environment realistic-typing-unthrottled
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_BIN="$real_binary" REAL_ONE_WAY_MS="$one_way" INFRATERNAL_LATENCY_DISPLAY=unthrottled \
+                TRACER_CHROMIUM_FLAGS="$unthrottled_flags" \
+                bun x playwright test -c playwright.real.config.ts real/realistic-typing.spec.ts
+    ) || failed=1
+    report_environment realistic-typing-60hz
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_BIN="$real_binary" REAL_ONE_WAY_MS="$one_way" \
+                bun x playwright test -c playwright.real.config.ts real/realistic-typing.spec.ts real/first-paint-network.spec.ts
     ) || failed=1
     report_environment finish
     return "$failed"

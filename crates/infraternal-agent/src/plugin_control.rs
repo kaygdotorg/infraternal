@@ -809,8 +809,17 @@ impl Drop for Local {
 }
 // Reuse the frozen mux/action codec rather than introducing a local framing
 // parser. Action payload + bounded id + two wire prefixes fit this resource bound.
-const LOCAL_WIRE_BYTES: usize = MAX_ACTION_BYTES + 256;
-async fn read_one(socket: &mut UnixStream) -> io::Result<Vec<u8>> {
+/// Most bytes one local request may take: the largest action payload plus
+/// its bounded action id and the mux and frame prefixes.
+pub(crate) const LOCAL_WIRE_BYTES: usize = MAX_ACTION_BYTES + 256;
+/// Reads exactly one stream-0 mux frame from a local caller, refusing
+/// trailing bytes, other streams and anything past [`LOCAL_WIRE_BYTES`].
+///
+/// Generic over the reader so the control-socket fuzz hook can feed it
+/// input-chosen read sizes; production passes the accepted `UnixStream`.
+pub(crate) async fn read_one<R: tokio::io::AsyncRead + Unpin>(
+    socket: &mut R,
+) -> io::Result<Vec<u8>> {
     let mut wire = Vec::new();
     let mut buffer = [0; 1024];
     loop {

@@ -79,6 +79,10 @@ impl Opened {
         })
     }
 
+    /// Open `path` (never following a final symlink) and admit it with `verify` as the
+    /// signature check; see [`Opened::from_file`] for the checks every admission runs.
+    /// # Errors
+    /// The path is relative or climbs, or the file fails any admission check.
     pub(crate) fn open_with(
         path: PathBuf,
         verify: impl FnOnce(&File, &Path) -> io::Result<()>,
@@ -95,10 +99,38 @@ impl Opened {
         // Refuse FIFO/device candidates without waiting for a writer before
         // fstat can validate the inode. Never follow the final symlink, and keep
         // the checked image close-on-exec until fexecve consumes this exact fd.
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
             .open(&path)?;
+        Self::from_file(file, path, verify)
+    }
+
+    /// Admit an image the auto-updater already holds open (#211 S4, J734 P3-b).
+    ///
+    /// `file` is the update's verified image, and `path` is where it is installed
+    /// (`updates/releases/<v>/<image>`). `path` becomes argv\[0\] and names the folder
+    /// whose signed metadata is checked again. The image is never reopened by path.
+    /// The same checks as [`Opened::open`] apply to the open file: owner, mode, root
+    /// protected parents, a signature check on the sealed copy, and the probe.
+    pub(crate) fn from_verified(file: &File, path: PathBuf) -> io::Result<Self> {
+        Self::from_file(file.try_clone()?, path, verify_release_fd)
+    }
+
+    /// The checks shared by [`Opened::open_with`] and [`Opened::from_verified`] on an
+    /// already open `file` that `path` names.
+    fn from_file(
+        mut file: File,
+        path: PathBuf,
+        verify: impl FnOnce(&File, &Path) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, Component::ParentDir))
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
         let metadata = file.metadata()?;
         let owner = nix::unistd::Uid::effective().as_raw();
         if !metadata.is_file()

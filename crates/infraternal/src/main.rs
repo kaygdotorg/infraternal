@@ -46,6 +46,9 @@ mod ssh_askpass;
 mod ssh_internal;
 #[cfg(test)]
 mod test_executable;
+/// The one check that a program root will run is one only root can replace (#146).
+#[cfg(any(machine_up, feature = "plugin-server"))]
+mod trusted_program;
 #[cfg(machine_up)]
 mod up;
 
@@ -179,6 +182,12 @@ fn run_invocation() -> ExitCode {
     // exists: it drops privileges and execs the person's shell (D335, #328).
     #[cfg(target_os = "macos")]
     if let Some(result) = infraternal_shim::session_shell::run_if_requested() {
+        return result;
+    }
+    // The root agent's desktop helper entry, also before any runtime or
+    // thread: it drops to the console user and execs the helper (D203 C2).
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    if let Some(result) = infraternal_shim::desktop_user::run_if_requested() {
         return result;
     }
     #[cfg(target_os = "linux")]
@@ -1574,6 +1583,26 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             );
         }
     }
+    // Root runs the units init writes, so they may only name a binary that
+    // only root can change (#146, J1087). A dry run shows the problem and
+    // still prints the plan; a real run stops here, before anything changes.
+    // Without root a real `--system` run was already refused above.
+    if scope == install_paths::Scope::System || environment.is_root {
+        let checked = install::service_program()
+            .map_err(|error| format!("the running binary cannot be found: {error}"))
+            .and_then(|program| install::check_root_service_program(&program, 0));
+        if let Err(problem) = checked {
+            if !dry_run {
+                return report_failure(
+                    "server init",
+                    "The infraternal binary is not safe for a service that root runs.",
+                    problem,
+                    json_output,
+                );
+            }
+            eprintln!("warning: {problem}; a real install refuses this binary");
+        }
+    }
     // An existing unit's non-standard folder moves to the D395 one (owner,
     // 2026-11-15: "change for existing installs too"); `--data` keeps any folder.
     let relocation = match plan_server_data_move(
@@ -2043,6 +2072,24 @@ fn block_on<T>(
     runtime.block_on(operation)
 }
 
+/// How long a stopping server waits for blocking work nobody awaits any more.
+#[cfg(feature = "plugin-server")]
+const SERVER_STOP_BLOCKING_GRACE: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Drop the server's runtime with a bound once `serve` has returned.
+///
+/// By then the server has closed its listener and database, and every step a
+/// stop needs has finished. What can remain are detached blocking tasks, for
+/// example the payload warm-up hashing a release binary, which Tokio cannot
+/// cancel. A plain drop waits for them without limit: a "stopped normally"
+/// server then lived on for seconds, and for more than the service manager's
+/// patience on a loaded host with a large debug binary (#516). The grace is
+/// the same 4 s the same-PID restart gives its own runtime.
+#[cfg(feature = "plugin-server")]
+fn stop_server_runtime(runtime: tokio::runtime::Runtime) {
+    runtime.shutdown_timeout(SERVER_STOP_BLOCKING_GRACE);
+}
+
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     mut args: ServerArgs,
@@ -2068,13 +2115,18 @@ fn run_server_foreground(
         "public_origin": config.public_origin,
     });
     infraternal_server::configure_logging(json_output);
-    match block_on(&runtime, remote_server::serve(config, options)) {
+    let stopped = match block_on(&runtime, remote_server::serve(config, options)) {
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
             // Same-PID exec consumes the runtime after cancelling server tasks.
-            restart::replace(runtime, replacement, json_output)
+            return restart::replace(runtime, replacement, json_output);
         }
-        Ok(remote_server::Outcome::Stopped) => {
+        Ok(remote_server::Outcome::Stopped) => Ok(()),
+        Err(error) => Err(error),
+    };
+    stop_server_runtime(runtime);
+    match stopped {
+        Ok(()) => {
             print_result(
                 &CommandResult::new(
                     "server",
@@ -2965,6 +3017,18 @@ fn harden_startup() -> Result<(), nix::errno::Errno> {
     // programs and an in-place restart still get it back.
     #[cfg(all(target_os = "linux", target_env = "musl"))]
     let _ = infraternal_shim::disable_process_thp();
+    // The server and the infraternal agent hold a few descriptors per terminal
+    // session, so they raise their soft open-file limit to the hard one; the
+    // programs they start (shims, and through them people's shells) get the
+    // original back (#562). Best effort: on failure the limit stays as it was.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if std::env::args_os()
+        .skip(1)
+        .find(|argument| argument != "--json")
+        .is_some_and(|argument| argument == "server" || argument == "agent")
+    {
+        let _ = infraternal_shim::open_files::raise_open_file_limit();
+    }
     #[cfg(target_os = "linux")]
     nix::sys::prctl::set_dumpable(false)?;
     #[cfg(target_os = "macos")]
@@ -3022,6 +3086,9 @@ fn run_remote_agent(
             Exit::Failed,
         );
     };
+    // D356: access records persist beside the identity, inside the install
+    // (an installed root agent's data directory is under /var/lib/infraternal).
+    infraternal_agent::access_files::keep_records_in(&data.join("access-records"));
     if let AgentAction::PrepareJoinKey { origin } = &action {
         let result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3048,9 +3115,12 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
-                        "REFUSED"
-                    }
+                    Some(
+                        remote::Failure::Refused
+                        | remote::Failure::IdentityMismatch
+                        | remote::Failure::SharedFile,
+                    )
+                    | None => "REFUSED",
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -3160,6 +3230,7 @@ fn run_remote_agent(
                     None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
+                        | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
                         | remote::Failure::Challenge,
                     )
@@ -3262,7 +3333,10 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     .or_else(|| matches.get_one::<String>("server"))
                     .map_or("", String::as_str),
                 host,
-                matches.get_flag("finish"),
+                host_remove::Step::from_flags(
+                    matches.get_flag("finish"),
+                    matches.get_flag("access_report"),
+                ),
                 matches.get_flag("retain"),
                 json,
             );
@@ -3290,5 +3364,40 @@ fn run_local_action(
     {
         let _ = matches;
         run_unavailable(action, json_output)
+    }
+}
+
+#[cfg(all(test, feature = "plugin-server"))]
+mod server_stop_tests {
+    //! Pins the bound on a stopping server's runtime (#516).
+
+    /// A blocking task nobody awaits must not keep a stopped server alive. The
+    /// task blocks on a channel the test holds, so a plain runtime drop would
+    /// never return; the test then fails at its deadline instead of hanging.
+    #[test]
+    fn a_stopped_server_does_not_wait_for_detached_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .build()
+            .expect("build a test runtime");
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, entered) = std::sync::mpsc::channel();
+        runtime.spawn_blocking(move || {
+            started.send(()).expect("report the blocking task start");
+            let _ = blocked.recv();
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the blocking task started");
+        let (done, stopped) = std::sync::mpsc::channel();
+        let began = std::time::Instant::now();
+        std::thread::spawn(move || {
+            super::stop_server_runtime(runtime);
+            let _ = done.send(());
+        });
+        let result = stopped.recv_timeout(super::SERVER_STOP_BLOCKING_GRACE * 5);
+        drop(release);
+        result.expect("the runtime stop waited for detached blocking work");
+        assert!(began.elapsed() < super::SERVER_STOP_BLOCKING_GRACE * 5);
     }
 }

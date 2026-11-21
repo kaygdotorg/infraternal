@@ -323,10 +323,11 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
       };
     }
 
+    /** The markup of one discovered or typed host's row in the list, with a labelled mark for each source it was found by. */
     private hostRow(host: AddHostFixture): string {
       const typed = this.typed.includes(host);
       const status = typed ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
-      const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
+      const sources = host.sources.map((source) => `<span class="ah-src" role="img" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
       const checked = this.selected.some((item) => item.id === host.id);
       const mark = typed ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(platformOf(host), "ah-os-mark");
       return `<label class="ah-row${host.alreadyAdded ? " is-added" : ""}" data-host="${escapeHtml(host.id)}">
@@ -797,7 +798,6 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     pill.addEventListener("click", () => {
       confirmTip?.close(false);
       confirmTip = mountConfirmTip(pill, {
-        label: "Install as root",
         boundary: pill.closest(".ui-window"),
         title: `Install as root on ${host.id}?`,
         effect: "The infraternal agent on this host will run as root, so it can change anything there.",

@@ -41,17 +41,33 @@ mod embedded;
 /// Moves embedded server mesh state between durable storage and rollback runtime paths [J501, #489].
 pub mod embedded_mesh_state;
 mod node_bridge;
+/// The bounded run-and-wait queue of one socket's plugin calls (#556).
+mod plugin_calls;
 #[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;
 #[cfg(feature = "release")]
 mod release_latest;
 mod terminal_queries;
 pub(crate) mod terminal_startup;
+/// When someone last typed or attached, for the update quiet window (#211 S4).
+mod update_activity;
+/// The quiet-window apply, the new release's trial and the D295 undo (#211 S4).
+#[cfg(feature = "release")]
+pub mod update_apply;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]
 #[doc(hidden)]
 pub use terminal_queries::verify_terminal_query_sample;
+#[cfg(feature = "parser-checks")]
+#[doc(hidden)]
+pub use websocket::receive_checks::verify_receive_wire_sample;
+/// Fuzz entry point for the machine join and approval parsers (`parser-checks` only).
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+mod remote_join_checks;
+#[cfg(all(feature = "remote", feature = "parser-checks"))]
+#[doc(hidden)]
+pub use remote_join_checks::verify_remote_join_sample;
 mod liveness;
 pub mod login_access;
 #[cfg(all(feature = "ssh", feature = "mesh", feature = "remote"))]
@@ -62,6 +78,9 @@ pub mod release_verify;
 /// Compatibility path for existing Rust adapters; implementation belongs to the plugin.
 #[cfg(feature = "mesh")]
 pub use infraternal_plugin_mesh::api as mesh_api;
+/// D356: the access report a host returns when it revokes a login (#355).
+#[cfg(feature = "remote")]
+mod access_report;
 #[cfg(feature = "remote")]
 mod api_actions;
 #[cfg(feature = "remote")]
@@ -132,6 +151,8 @@ mod server_tls;
 mod socket_authority;
 mod stream_close;
 mod terminal_exit;
+/// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
+mod terminal_input_ack;
 mod web_assets;
 mod websocket;
 mod websocket_input;

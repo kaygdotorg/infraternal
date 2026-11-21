@@ -1,11 +1,21 @@
 //! Server-held sessions fan out immutable access units without letting a viewer stall capture [D104,D200,D208].
 //!
 //! A [`Session`] is the server's record of one capture. The producer side calls
-//! [`Session::publish`] with each encoded frame; the session keeps only the
-//! newest frame and the latest keyframe, and shares them (without copying) with
-//! up to five [`Viewer`]s. A slow viewer skips to the newest frame instead of
-//! building a backlog, and if it misses a delta it waits for a keyframe, which
-//! the session requests from the host once.
+//! [`Session::publish`] with each encoded frame; the session keeps the recent
+//! frames (up to 1 s, within [`crate::backlog`]'s unit and byte bounds) and the
+//! latest keyframe, and shares them (without copying) with up to five
+//! [`Viewer`]s. Each viewer reads them in order from its own position, so a
+//! viewer that is a moment behind (a slow socket write, a busy browser)
+//! catches up with small delta frames. A viewer whose next frame waited longer
+//! than the 100 ms bound for it, or is gone, skips to the newest frames, waits
+//! for a keyframe, and the session asks the host for one, once (D254's
+//! drop-to-newest, beyond the bound). As in [`crate::backlog`], the time a
+//! viewer spends writing a keyframe does not age the deltas behind it.
+//!
+//! A viewer also measures how far behind it is ([`Viewer::take_lag`]: the
+//! longest any frame it took or skipped had waited); the socket adapter turns
+//! a long lag into [`Viewer::report_pressure`], which lowers the shared
+//! encoder's bit rate.
 //!
 //! The session also decides who may steer the capture. One viewer at a time is
 //! the controller; its input and resize commands go to the host through a small
@@ -17,10 +27,11 @@
 //! Access decisions come from an [`AccessRules`] implementation and, per viewer,
 //! the viewer's own login (an `Authority`).
 use infraternal_plugin_api::streams::Authority;
-use infraternal_protocol::desktop::Input;
+use infraternal_protocol::desktop::{EndReason, Input};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, watch};
 
@@ -68,6 +79,9 @@ pub enum HostCommand {
     Control { viewer: u64, lease: u64 },
     /// Ask for a new keyframe.
     Keyframe,
+    /// A viewer's connection is backed up: the encoder should lower its bit rate.
+    /// `waited_ms` is how long video waited for that viewer (informational).
+    Pressure { waited_ms: u16 },
     /// Resize the captured output. `density_milli` is pixels per point times 1000.
     Size {
         viewer: u64,
@@ -91,10 +105,32 @@ struct Principal {
     /// The viewer's own login, when attached through a socket.
     authority: Option<Arc<dyn Authority>>,
 }
+/// One frame kept for viewers that are a little behind, and when it was published.
+struct Published {
+    frame: Arc<Video>,
+    /// When [`Session::publish`] took it; its age bounds how long it is kept.
+    at: Instant,
+}
+/// The least time between two pressure reports sent to the host. The encoder
+/// lowers its rate at most every 500 ms; reporting twice as often keeps it
+/// informed without filling the bounded command queue.
+const PRESSURE_INTERVAL: Duration = Duration::from_millis(250);
+/// The oldest a recent frame may be and still be kept: the 1 s a viewer's
+/// write may take. Which frames a viewer may still use is decided per viewer
+/// with the shorter [`crate::backlog::MAX_AGE`].
+const RECENT_AGE: Duration = Duration::from_secs(1);
 /// Mutable session state, behind one mutex that is never held across an `await`.
 struct State {
     /// The latest keyframe, given to viewers that attach later.
     keyframe: Option<Arc<Video>>,
+    /// The frames published in the last second, oldest first, within
+    /// [`crate::backlog`]'s unit and byte bounds. Always holds the newest frame
+    /// while the session is open. A keyframe replaces everything before it.
+    recent: VecDeque<Published>,
+    /// The total size of `recent`.
+    recent_bytes: usize,
+    /// When the last pressure report was queued for the host.
+    last_pressure: Option<Instant>,
     /// Sequence number of the newest published frame.
     last_sequence: u64,
     /// Last size the host has accepted, used to restore it after a reconnect.
@@ -109,8 +145,26 @@ struct State {
     /// A keyframe request is already queued, so another is not needed.
     repair_pending: bool,
     closed: bool,
-    /// The source confirmed destruction of the native window.
-    window_closed: bool,
+    /// Why the source ended the session for good (the window was destroyed, or the person at the Mac changed).
+    ended: Option<EndReason>,
+}
+impl State {
+    /// Lets go of the oldest recent frames while they are older than
+    /// [`RECENT_AGE`], or while there are too many or too many bytes. The
+    /// newest frame always stays, whatever its age or size, so a viewer that
+    /// keeps up never misses one.
+    fn trim(&mut self, now: Instant) {
+        use crate::backlog::{MAX_BYTES, MAX_UNITS};
+        while self.recent.len() > 1 {
+            let oldest = &self.recent[0];
+            let expired = now.saturating_duration_since(oldest.at) > RECENT_AGE;
+            if !(expired || self.recent.len() > MAX_UNITS || self.recent_bytes > MAX_BYTES) {
+                break;
+            }
+            self.recent_bytes -= oldest.frame.bytes.len();
+            self.recent.pop_front();
+        }
+    }
 }
 /// No task, listener or timer is created by construction. The owner keeps this
 /// object in the server registry even when every viewer detaches.
@@ -122,7 +176,8 @@ pub struct Session {
     owner: String,
     access: Arc<dyn AccessRules>,
     state: Mutex<State>,
-    /// Holds only the newest frame; viewers wake when it changes.
+    /// Holds the newest frame; viewers wake when it changes and then read
+    /// the frames they missed from `State::recent`.
     frames: watch::Sender<Option<Arc<Video>>>,
     /// Bounded queue (8) of commands for the host.
     commands: mpsc::Sender<HostCommand>,
@@ -152,6 +207,9 @@ impl Session {
                 access,
                 state: Mutex::new(State {
                     keyframe: None,
+                    recent: VecDeque::new(),
+                    recent_bytes: 0,
+                    last_pressure: None,
                     last_sequence: 0,
                     last_forwarded_size: None,
                     viewers: HashMap::new(),
@@ -160,7 +218,7 @@ impl Session {
                     next_viewer: 1,
                     repair_pending: false,
                     closed: false,
-                    window_closed: false,
+                    ended: None,
                 }),
                 frames: watch::channel(None).0,
                 commands,
@@ -250,6 +308,9 @@ impl Session {
             cached,
             last_sequence: 0,
             waiting_keyframe: true,
+            lag: Duration::ZERO,
+            keyframe_taken: false,
+            aged_from: None,
         })
     }
     /// The command that re-announces the current controller to a reconnected
@@ -271,8 +332,10 @@ impl Session {
             _ => Ok(None),
         }
     }
-    /// Makes a new encoded frame available to all viewers, replacing the previous
-    /// newest frame. A keyframe is also kept for viewers who attach later.
+    /// Makes a new encoded frame available to all viewers. It joins the recent
+    /// frames, and frames older than the backlog bound are let go (always
+    /// keeping the newest); a keyframe replaces all of them and is also kept
+    /// for viewers who attach later.
     ///
     /// Producer ordering is session-global. Immutable payloads are shared with all viewers.
     /// # Errors
@@ -291,7 +354,17 @@ impl Session {
         if frame.keyframe {
             state.keyframe = Some(Arc::clone(&frame));
             state.repair_pending = false;
+            state.recent.clear();
+            state.recent_bytes = 0;
         }
+        // Paused test time and real time both read through tokio's clock.
+        let now = tokio::time::Instant::now().into_std();
+        state.recent_bytes += frame.bytes.len();
+        state.recent.push_back(Published {
+            frame: Arc::clone(&frame),
+            at: now,
+        });
+        state.trim(now);
         self.frames.send_replace(Some(frame));
         Ok(())
     }
@@ -318,7 +391,9 @@ impl Session {
             HostCommand::Control { viewer, lease }
             | HostCommand::Input { viewer, lease, .. }
             | HostCommand::Size { viewer, lease, .. } => (viewer, lease),
-            HostCommand::Keyframe | HostCommand::ReleaseInput => return Ok(true),
+            HostCommand::Keyframe | HostCommand::Pressure { .. } | HostCommand::ReleaseInput => {
+                return Ok(true);
+            }
         };
         let Some(principal) = state.viewers.get(&viewer) else {
             return Ok(false);
@@ -350,7 +425,7 @@ impl Session {
             HostCommand::Control { viewer, .. }
             | HostCommand::Input { viewer, .. }
             | HostCommand::Size { viewer, .. } => viewer,
-            HostCommand::Keyframe | HostCommand::ReleaseInput => {
+            HostCommand::Keyframe | HostCommand::Pressure { .. } | HostCommand::ReleaseInput => {
                 std::future::pending::<()>().await;
                 return;
             }
@@ -405,7 +480,9 @@ impl Session {
                     .ok_or(Error::Forbidden)?
                     .authority
                     .clone(),
-                HostCommand::Keyframe | HostCommand::ReleaseInput => None,
+                HostCommand::Keyframe
+                | HostCommand::Pressure { .. }
+                | HostCommand::ReleaseInput => None,
             }
         };
         if !self.command_allowed(command)? {
@@ -468,25 +545,27 @@ impl Session {
     ///
     /// Runtime disable clears retained video and closes pending receivers, without timers.
     pub fn close(&self) {
-        self.close_with_reason(false);
+        self.close_with_reason(None);
     }
 
-    /// Ends the capture and preserves confirmation that its native window was destroyed.
-    pub(crate) fn close_window(&self) {
-        self.close_with_reason(true);
+    /// Ends the capture and preserves the source's confirmation of why it ended for good.
+    pub(crate) fn close_for(&self, reason: EndReason) {
+        self.close_with_reason(Some(reason));
     }
 
-    /// Reports authoritative destruction even after later cleanup calls.
-    pub(crate) fn window_closed(&self) -> bool {
-        self.state.lock().is_ok_and(|state| state.window_closed)
+    /// Reports the source's reason even after later cleanup calls; the first one stays.
+    pub(crate) fn end_reason(&self) -> Option<EndReason> {
+        self.state.lock().ok().and_then(|state| state.ended)
     }
 
     /// Publishes the terminal reason before waking viewers to retire.
-    fn close_with_reason(&self, window_closed: bool) {
+    fn close_with_reason(&self, reason: Option<EndReason>) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
-            state.window_closed |= window_closed;
+            state.ended = state.ended.or(reason);
             state.keyframe = None;
+            state.recent.clear();
+            state.recent_bytes = 0;
             state.viewers.clear();
             state.controller = None;
             let _ = self.commands.try_send(HostCommand::ReleaseInput);
@@ -507,13 +586,15 @@ impl Session {
         let Ok(state) = self.state.lock() else {
             return 0;
         };
-        let latest = self.frames.borrow();
         let key = state.keyframe.as_ref();
-        let mut bytes = key.map_or(0, |frame| frame.bytes.len());
-        if let Some(latest) = latest.as_ref()
-            && key.is_none_or(|key| !Arc::ptr_eq(key, latest))
+        let mut bytes = state.recent_bytes;
+        if let Some(key) = key
+            && !state
+                .recent
+                .iter()
+                .any(|recent| Arc::ptr_eq(key, &recent.frame))
         {
-            bytes += latest.bytes.len();
+            bytes += key.bytes.len();
         }
         bytes
     }
@@ -532,6 +613,16 @@ pub struct Viewer {
     last_sequence: u64,
     /// A frame was missed, so deltas are skipped until a keyframe arrives.
     waiting_keyframe: bool,
+    /// The longest any frame returned or skipped by [`Viewer::next`] had
+    /// waited for this viewer since it was published, since the last
+    /// [`Viewer::take_lag`].
+    lag: Duration,
+    /// The last frame returned was a keyframe, so the caller is (or was)
+    /// writing it: the frames behind it do not age meanwhile.
+    keyframe_taken: bool,
+    /// Frames count their age for the bound from this moment, if it is later
+    /// than their publication: when the caller came back from a keyframe.
+    aged_from: Option<Instant>,
 }
 impl Viewer {
     /// Retain identity, never the Viewer itself, across a bounded transport queue.
@@ -570,56 +661,119 @@ impl Viewer {
             Err(Error::Forbidden)
         }
     }
-    /// Receive one decodable access unit; missed deltas trigger one coalesced repair.
-    /// Cached IDR is returned first, then only a fresh IDR can start current deltas.
+    /// Receive the next decodable access unit, in order from this viewer's
+    /// position among the recent frames. The cached IDR is returned first. A
+    /// viewer whose next frame was let go, or waited longer than
+    /// [`crate::backlog::MAX_AGE`] for it (not counting the time it spent
+    /// writing the keyframe before), skips the deltas after the gap, and the
+    /// session asks the host for a keyframe once; the next keyframe resumes it.
+    /// Calling it means the previous frame has been written.
     /// # Errors
     /// Refuses ended sessions or withdrawn access before exposing any bytes.
     pub async fn next(&mut self) -> Result<Arc<Video>, Error> {
+        if std::mem::take(&mut self.keyframe_taken) {
+            self.aged_from = Some(tokio::time::Instant::now().into_std());
+        }
         loop {
             self.allowed(false)?;
-            if self
-                .session
-                .state
-                .lock()
-                .map_err(|_| Error::Unavailable)?
-                .closed
-            {
-                return Err(Error::Unavailable);
-            }
-            if let Some(cached) = self.cached.take() {
-                self.last_sequence = cached.sequence;
-                return Ok(cached);
-            }
-            tokio::select! { biased;
-                () = async {
-                    match &self.authority {
-                        Some(authority) => authority.cancelled().await,
-                        None => std::future::pending().await,
-                    }
-                } => return Err(Error::Forbidden),
-                changed = self.frames.changed() => changed.map_err(|_| Error::Unavailable)?,
-            }
-            self.allowed(false)?;
-            let frame = self
-                .frames
-                .borrow_and_update()
-                .clone()
-                .ok_or(Error::Unavailable)?;
-            if frame.sequence <= self.last_sequence {
+            // Mark the newest frame seen before reading the recent frames: a
+            // publish after the read then always wakes the wait below.
+            drop(self.frames.borrow_and_update());
+            let found = {
+                let state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
+                if state.closed {
+                    return Err(Error::Unavailable);
+                }
+                if let Some(cached) = self.cached.take() {
+                    self.last_sequence = cached.sequence;
+                    self.keyframe_taken = true;
+                    return Ok(cached);
+                }
+                state
+                    .recent
+                    .iter()
+                    .find(|recent| recent.frame.sequence > self.last_sequence)
+                    .map(|recent| (Arc::clone(&recent.frame), recent.at))
+            };
+            let Some((frame, published)) = found else {
+                tokio::select! { biased;
+                    () = async {
+                        match &self.authority {
+                            Some(authority) => authority.cancelled().await,
+                            None => std::future::pending().await,
+                        }
+                    } => return Err(Error::Forbidden),
+                    changed = self.frames.changed() => changed.map_err(|_| Error::Unavailable)?,
+                }
                 continue;
-            }
+            };
             let continuous = self.last_sequence.checked_add(1) == Some(frame.sequence);
+            // Step past this frame whatever happens: a skipped delta is never
+            // looked at again, and only a later keyframe can resume. A skipped
+            // frame counts towards the lag too: a viewer that fell beyond the
+            // bound is the one most behind.
+            self.last_sequence = frame.sequence;
+            let now = tokio::time::Instant::now().into_std();
+            let waited = now.saturating_duration_since(published);
+            self.lag = self.lag.max(waited);
+            let late = now.saturating_duration_since(
+                self.aged_from.map_or(published, |from| from.max(published)),
+            ) > crate::backlog::MAX_AGE;
             if frame.keyframe {
                 self.waiting_keyframe = false;
-            } else if self.waiting_keyframe || !continuous {
+                self.keyframe_taken = true;
+            } else if self.waiting_keyframe || !continuous || late {
                 self.waiting_keyframe = true;
                 let mut state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
                 self.session.repair(&mut state)?;
                 continue;
             }
-            self.last_sequence = frame.sequence;
             return Ok(frame);
         }
+    }
+    /// Returns, and starts again from zero, the longest time any frame that
+    /// [`Viewer::next`] returned or skipped had waited for this viewer since
+    /// it was published. Zero while the viewer keeps up; it grows when the
+    /// viewer's connection or browser falls behind. The cached keyframe given
+    /// at attach does not count.
+    pub fn take_lag(&mut self) -> Duration {
+        std::mem::take(&mut self.lag)
+    }
+    /// Tells the host that this viewer's connection is backed up by `lag`
+    /// (informational), so the shared encoder lowers its bit rate. One encode serves every viewer, so
+    /// the slowest viewer sets the rate: the alternative, skipping and repairing
+    /// with keyframes, costs every viewer far more bytes. Reports are merged to
+    /// at most one per 250 ms per session, and a full host queue drops one
+    /// rather than waiting (it is only a hint).
+    /// # Errors
+    /// Refuses withdrawn access.
+    pub fn report_pressure(&self, lag: Duration) -> Result<(), Error> {
+        self.allowed(false)?;
+        let mut state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
+        if state.closed {
+            return Ok(());
+        }
+        let now = tokio::time::Instant::now().into_std();
+        if state
+            .last_pressure
+            .is_some_and(|last| now.saturating_duration_since(last) < PRESSURE_INTERVAL)
+        {
+            return Ok(());
+        }
+        // Leave room for a keyframe or input release: a hint never takes the
+        // last slots of the bounded host queue.
+        if self.session.commands.capacity() > 2
+            && self
+                .session
+                .commands
+                .try_send(HostCommand::Pressure {
+                    waited_ms: u16::try_from(lag.as_millis()).unwrap_or(u16::MAX),
+                })
+                .is_ok()
+        {
+            state.last_pressure = Some(now);
+        }
+        Ok(())
     }
     /// Makes this viewer the controller, taking over from any other. Does nothing
     /// if it already is.
@@ -788,6 +942,8 @@ impl Drop for Viewer {
                 {
                     state.closed = true;
                     state.keyframe = None;
+                    state.recent.clear();
+                    state.recent_bytes = 0;
                     state.viewers.clear();
                     self.session.frames.send_replace(None);
                     self.session.stopping.send_replace(true);

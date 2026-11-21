@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Adaptive glass density (D365): when the app can see what is behind a glass card, the card asks for only as much tint
- * and text colour as that content needs, so the approved levels stay distinct whenever the backdrop allows it.
+ * and text colour as that content needs, so the approved levels stay distinct whenever the backdrop allows it. When no glass reaches the line over what is behind (a light card over a dark picture, a dark one over a light picture) the card turns solid: the theme's opaque card colour, no blur, its own text colours; the solver never reaches for a glow behind the text.
  *
  * `glass-under.on-demand.ts` finds what a surface is over and starts one of two trackers here. Until the first value arrives the
  * surface is on the static floor (set by the CSS from `data-glass-under`), which is correct over anything, so this module
@@ -12,12 +12,16 @@
  *    frame at most, only after the screen changed or the card moved, and only while the card is open.
  *  - {@link trackPicture}, over a stream canvas, a video that fills its box or an image: {@link watchBackdrop} reads an 8x8
  *    average of the part of the picture under the card, at most every 250 ms, on a timer and never in an input handler.
+ *    A card that straddles the picture and the page around it (a window's ⋯ menu hangs over the window's edge) is solved for
+ *    both: the picture part is sampled, the part outside is read from the colours the page paints there ({@link outsideRange},
+ *    cached per box and theme, so it never runs in the frame a theme switch lands in), and the two ranges are merged, so the
+ *    worst contrast of either decides glass or solid.
  *
  * The cost of both is measured in `apps/tracer/test/glass-sample-cost.spec.ts` and `glass-terminal.spec.ts`; setting
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
  */
 import { activeGlass, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
-import { glassFor, nominalOpacity } from "./glass-rules.on-demand";
+import { clearSolution, glassSeen, nominalOpacity } from "./glass-rules.on-demand";
 // The rules are written by the same chunk: `themes.ts` requests this module at the start of boot and calls `installGlassRules`.
 export { installGlassRules } from "./glass-rules.on-demand";
 import { hexToRgb, luminanceOf, type BackdropRange, type Rgb } from "./glass-contrast";
@@ -47,31 +51,51 @@ export function rangeOfSample(rgba: ArrayLike<number>): BackdropRange {
   return { dark: lo.map((v) => pad(v, -1)) as unknown as Rgb, light: hi.map((v) => pad(v, 1)) as unknown as Rgb };
 }
 
+/** The range that covers both `a` and `b`: per channel the lower dark and the higher light, as {@link rangeOfSample} takes it. */
+export function mergeRanges(a: BackdropRange, b: BackdropRange): BackdropRange {
+  const pick = (x: Rgb, y: Rgb, f: (p: number, q: number) => number): Rgb => x.map((v, i) => f(v, y[i]!)) as unknown as Rgb;
+  return { dark: pick(a.dark, b.dark, Math.min), light: pick(a.light, b.light, Math.max) };
+}
+
 /** What {@link watchBackdrop} needs to know about one card and the picture behind it. */
 export interface BackdropWatch {
   /** The glass surface to adapt: it carries `data-glass-under` (set by `glass-under.on-demand.ts`) and is written the sampled opacity and colours. */
   marker: HTMLElement;
   /** The picture behind the card: a playing video, a canvas or an image. */
   source: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
-  /** The part of `source` under the card, in the source's own pixels. Called on each sample, not on each frame. */
-  region: () => { x: number; y: number; width: number; height: number } | null;
+  /**
+   * The part of `source` under the card, in the source's own pixels. Called on each sample, not on each frame. `outside` is the
+   * backdrop range of the part of the card that is not over `source`, when the card straddles its edge.
+   */
+  region: () => { x: number; y: number; width: number; height: number; outside?: BackdropRange } | null;
   /** The active theme and the card level, read on each sample so a change is picked up. */
   theme: () => Theme;
   level: () => number;
 }
 
-/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level, the starting opacity (a look's tint moves it) and range. */
-const solved = new Map<string, ReturnType<typeof glassFor>>();
-/** The solved glass for a theme, level and sampled range, from the memo or the solver. */
-const solveFor = (theme: Theme, level: number, range: BackdropRange): ReturnType<typeof glassFor> => {
+/**
+ * How much wider (0 to 255 per channel) the backdrop range is taken while a card is solid, before it may turn back to glass.
+ * A card that went solid over a backdrop returns to glass only when the content is clearly easier than the line it crossed,
+ * so text scrolling under the edge of the limit does not flicker the card between the two.
+ */
+export const SOLID_HYSTERESIS = 24;
+
+/** Remembers solved ranges: a steady picture asks the solver once, not four times a second. Keyed by theme, level, the starting opacity (a look's tint moves it), range and whether the card is solid now. */
+const solved = new Map<string, ReturnType<typeof glassSeen>>();
+/**
+ * The solved glass for a theme, level and sampled range, from the memo or the solver. `wasSolid` is whether the card is solid
+ * now: then the range is widened by {@link SOLID_HYSTERESIS} first, so the card only goes back to glass with margin to spare.
+ */
+export const solveFor = (theme: Theme, level: number, range: BackdropRange, wasSolid = false): ReturnType<typeof glassSeen> => {
   // Quantised to 8/255 so a flicker of a few levels in a video reuses the answer.
   const q = (rgb: Rgb): string => rgb.map((v) => v >> 3).join(",");
   const nominal = nominalOpacity(theme, level);
-  const key = `${theme.name}|${level}|${nominal}|${q(range.dark)}|${q(range.light)}`;
+  const key = `${theme.name}|${level}|${nominal}|${q(range.dark)}|${q(range.light)}|${wasSolid}`;
   let hit = solved.get(key);
   if (!hit) {
     if (solved.size > 256) solved.clear();
-    hit = glassFor(theme, level, range, nominal);
+    const widen = (rgb: Rgb, sign: number): Rgb => rgb.map((v) => Math.min(255, Math.max(0, v + sign * SOLID_HYSTERESIS))) as unknown as Rgb;
+    hit = glassSeen(theme, level, wasSolid ? { dark: widen(range.dark, -1), light: widen(range.light, 1) } : range, nominal);
     solved.set(key, hit);
   }
   return hit;
@@ -110,6 +134,7 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
   const { marker } = watch;
   let timer = 0;
   let last = "";
+  let solid = false;
   const tick = (): void => {
     // The card is gone (closed, removed): stop for good, nobody will call the disposer.
     if (!marker.isConnected) return;
@@ -118,10 +143,12 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
     const region = watch.region();
     const rgba = region ? readSample(watch.source, region) : null;
     if (!rgba) return;
-    const sol = solveFor(watch.theme(), watch.level(), rangeOfSample(rgba));
-    const signature = `${sol.alpha}|${Object.values(sol.colours).join()}`;
+    const sampled = rangeOfSample(rgba);
+    const sol = solveFor(watch.theme(), watch.level(), region!.outside ? mergeRanges(sampled, region!.outside) : sampled, solid);
+    const signature = `${sol.solid}|${sol.alpha}|${Object.values(sol.colours).join()}`;
     if (signature === last) return;
     last = signature;
+    solid = sol.solid;
     writeSolution(marker, sol, watch.theme());
   };
   // First sample off the current task, so opening the card never waits on it.
@@ -132,16 +159,47 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
   };
 }
 
-/** Writes a solved opacity and text colours onto `surface`, where the glass rules read them in place of the static floor. */
-function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassFor>, theme: Theme): void {
-  surface.style.setProperty(GLASS_ADAPT_VARS.overlay, `rgb(${hexToRgb(glassTint(theme)).join(" ")} / ${sol.alpha})`);
-  for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
+/** How long the fill and blur take to cross-fade between glass and solid, in milliseconds. */
+export const FADE_MS = 160;
+
+/**
+ * Runs `change` (which rewrites the glass custom properties on `surface`) and cross-fades the fill and the blur from what
+ * the card showed to what it shows now, so glass turning solid (or back) never pops. It uses the Web Animations API, which
+ * layers over whatever transitions the card already has (opening, hiding), so none of those is touched. Skipped for a
+ * card that is not drawn yet and for reduced motion. Only text colours, which are a few percent apart, change at once.
+ */
+function crossFade(surface: HTMLElement, change: () => void): void {
+  const drawn = surface.isConnected && !surface.hidden && typeof surface.animate === "function" && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const before = drawn ? getComputedStyle(surface) : undefined;
+  // What the card shows now, read while any earlier fade is still running (so a change that lands mid-fade continues from where the eye is).
+  const from = before && { backgroundColor: before.backgroundColor, backdropFilter: before.backdropFilter };
+  // An earlier fade must end before the new value is read: a running animation overrides the computed style, so `after` would be the
+  // earlier fade's value and the card would pop to the real one when that fade ended (J1020).
+  const earlier = drawn ? surface.getAnimations().filter((a) => fades.has(a)) : [];
+  for (const a of earlier) a.cancel();
+  change();
+  if (!from) return;
+  const after = getComputedStyle(surface);
+  if (after.backgroundColor === from.backgroundColor && after.backdropFilter === from.backdropFilter) return;
+  const fade = surface.animate(
+    [{ backgroundColor: from.backgroundColor, backdropFilter: from.backdropFilter, webkitBackdropFilter: from.backdropFilter }, { backgroundColor: after.backgroundColor, backdropFilter: after.backdropFilter, webkitBackdropFilter: after.backdropFilter }],
+    { duration: FADE_MS, easing: "ease-out" },
+  );
+  fades.add(fade);
+  fade.finished.then(() => fades.delete(fade), () => fades.delete(fade));
 }
 
-/** Removes what {@link writeSolution} wrote, which puts the surface back on the static floor. */
-function clearSolution(surface: HTMLElement): void {
-  surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
-  for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
+/** The cross-fades this module started and that are still running, so a later change can end them before it reads the new value. */
+const fades = new WeakSet<Animation>();
+
+/** Writes a solved opacity, blur and text colours onto `surface`, where the glass rules read them in place of the static floor. */
+function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, theme: Theme): void {
+  crossFade(surface, () => {
+    surface.style.setProperty(GLASS_ADAPT_VARS.overlay, `rgb(${hexToRgb(glassTint(theme)).join(" ")} / ${sol.alpha})`);
+    // The answer, for the rules that drop the blur of a solid card and keep a glass card's own (see `installGlassRules`).
+    surface.dataset.glassAnswer = sol.solid ? "solid" : "glass";
+    for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
+  });
 }
 
 /** What a tracker hands back to `glass-under.on-demand.ts`: nudge it to look again, or stop it and restore the floor. */
@@ -224,6 +282,7 @@ function blurOf(surface: HTMLElement): number {
 export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
   let frame = 0;
   let last = "";
+  let solid = false;
   const run = (): void => {
     frame = 0;
     if (!surface.isConnected || surface.hidden) return;
@@ -232,9 +291,9 @@ export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
     const read = grid.read(surface.getBoundingClientRect(), hexToRgb(theme.bg));
     const readMs = performance.now() - started;
     if (!read) return;
-    const sol = solveFor(theme, level, rangeOfGrid(read, blurOf(surface)));
-    const signature = `${sol.alpha}|${Object.values(sol.colours).join()}`;
-    if (signature !== last) { last = signature; writeSolution(surface, sol, theme); }
+    const sol = solveFor(theme, level, rangeOfGrid(read, blurOf(surface)), solid);
+    const signature = `${sol.solid}|${sol.alpha}|${Object.values(sol.colours).join()}`;
+    if (signature !== last) { last = signature; solid = sol.solid; writeSolution(surface, sol, theme); }
     stat(started, readMs);
   };
   const refresh = (): void => { if (!frame) frame = requestAnimationFrame(run); };
@@ -242,25 +301,87 @@ export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
   return { refresh, stop(): void { cancelAnimationFrame(frame); unsubscribe(); clearSolution(surface); } };
 }
 
+/** A 1x1 canvas that does the colour maths for {@link paintedAt}: it parses any CSS colour and composites layers exactly as the page does. */
+let swatch: CanvasRenderingContext2D | null | undefined;
+
 /**
- * Tracks a picture under `surface` if it can be sampled faithfully: a stream canvas, an image or a video that fills its box,
- * with the card wholly inside it. Otherwise returns `undefined` and the card stays on the static floor.
+ * The colour the page paints at client point (`x`, `y`) outside `surface`: the background colours of the element there and
+ * its ancestors, layered over the theme's page colour `base`. Returns `null` when the point is over something this cannot
+ * read (another picture, a terminal screen), so the caller keeps the static floor rather than guess. Gradients and images
+ * are not read: only plain background colours.
+ */
+function paintedAt(surface: HTMLElement, x: number, y: number, base: Rgb): Rgb | null {
+  swatch ??= document.createElement("canvas").getContext("2d", { willReadFrequently: true }) ?? null;
+  if (!swatch) return null;
+  const hit = document.elementsFromPoint(x, y).find((el) => el !== surface && !surface.contains(el) && !el.classList.contains("ui-glass-bed"));
+  const layers: string[] = [];
+  for (let el: Element | null = hit ?? null; el; el = el.parentElement) {
+    if (el.matches("video, img, canvas, [data-glass-picture], [data-glass-grid]")) return null;
+    const bg = getComputedStyle(el).backgroundColor;
+    if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") layers.push(bg);
+  }
+  swatch.clearRect(0, 0, 1, 1);
+  swatch.fillStyle = `rgb(${base.join(",")})`;
+  swatch.fillRect(0, 0, 1, 1);
+  for (const colour of layers.reverse()) { swatch.fillStyle = colour; swatch.fillRect(0, 0, 1, 1); }
+  const d = swatch.getImageData(0, 0, 1, 1).data;
+  return [d[0]!, d[1]!, d[2]!];
+}
+
+/** How many points per side of the card's box {@link outsideRange} looks at. */
+const OUTSIDE_POINTS = 5;
+
+/**
+ * The backdrop range of the part of `surface` that lies outside `picture` (a card hanging over the picture's edge), from the
+ * colours the page paints there, or `undefined` when the card is wholly inside the picture, `null` when some part cannot be read.
+ */
+export function outsideRange(surface: HTMLElement, picture: DOMRect, base: Rgb): BackdropRange | null | undefined {
+  const s = surface.getBoundingClientRect();
+  const colours: number[] = [];
+  let any = false;
+  for (let i = 0; i < OUTSIDE_POINTS; i++) for (let j = 0; j < OUTSIDE_POINTS; j++) {
+    const x = s.left + 1 + (s.width - 2) * (i / (OUTSIDE_POINTS - 1)), y = s.top + 1 + (s.height - 2) * (j / (OUTSIDE_POINTS - 1));
+    if (x >= picture.left && x <= picture.right && y >= picture.top && y <= picture.bottom) continue;
+    any = true;
+    const c = paintedAt(surface, x, y, base);
+    if (!c) return null;
+    colours.push(c[0], c[1], c[2], 255);
+  }
+  return any ? rangeOfSample(colours) : undefined;
+}
+
+/**
+ * Tracks a picture under `surface` if it can be sampled faithfully: a stream canvas, an image or a video that fills its box.
+ * A card wholly inside the picture is sampled there; one that straddles the picture's edge is sampled over the part inside
+ * and read over the part outside ({@link outsideRange}), and the worst of the two decides. Otherwise (the card is not over
+ * the picture, or the part outside cannot be read) returns a tracker that leaves the card on the static floor.
  */
 export function trackPicture(surface: HTMLElement, picture: HTMLElement): Tracker | undefined {
   const ok = picture instanceof HTMLCanvasElement || ((picture instanceof HTMLVideoElement || picture instanceof HTMLImageElement) && getComputedStyle(picture).objectFit === "fill");
   if (!ok) return undefined;
   const source = picture as HTMLCanvasElement | HTMLVideoElement | HTMLImageElement;
+  // The outside answer is kept while the two boxes and the theme stay as they were: it reads computed styles, which is work for a timer tick, not for every one.
+  let cached: { key: string; range: BackdropRange | null | undefined } | undefined;
   const stop = watchBackdrop({
     marker: surface,
     source,
     region: () => {
       const p = picture.getBoundingClientRect(), s = surface.getBoundingClientRect();
-      // Wholly inside the picture, or the part outside is something else (bars, the page): then the floor stays.
-      if (s.left < p.left || s.right > p.right || s.top < p.top || s.bottom > p.bottom) return null;
+      const left = Math.max(s.left, p.left), right = Math.min(s.right, p.right), top = Math.max(s.top, p.top), bottom = Math.min(s.bottom, p.bottom);
+      if (right - left < 1 || bottom - top < 1) return null;
+      let outside: BackdropRange | null | undefined;
+      if (s.left < p.left || s.right > p.right || s.top < p.top || s.bottom > p.bottom) {
+        const theme = activeGlass().theme;
+        const key = `${theme.name}|${[s, p].map((r) => [r.left, r.top, r.width, r.height].map(Math.round).join(",")).join("|")}`;
+        if (cached?.key !== key) cached = { key, range: outsideRange(surface, p, hexToRgb(theme.bg)) };
+        outside = cached.range;
+        // Something under the outside part that cannot be read: the floor stays.
+        if (outside === null) return null;
+      }
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source instanceof HTMLImageElement ? source.naturalWidth : source.width;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source instanceof HTMLImageElement ? source.naturalHeight : source.height;
       const sx = width / p.width, sy = height / p.height;
-      return { x: (s.left - p.left) * sx, y: (s.top - p.top) * sy, width: s.width * sx, height: s.height * sy };
+      return { x: (left - p.left) * sx, y: (top - p.top) * sy, width: (right - left) * sx, height: (bottom - top) * sy, ...(outside ? { outside } : {}) };
     },
     theme: () => activeGlass().theme,
     level: () => activeGlass().level,
