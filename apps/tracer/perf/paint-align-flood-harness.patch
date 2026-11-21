@@ -1,0 +1,75 @@
+diff --git a/apps/tracer/src/main.ts b/apps/tracer/src/main.ts
+index 43ea22f9c..0039c1b9a 100644
+--- a/apps/tracer/src/main.ts
++++ b/apps/tracer/src/main.ts
+@@ -31,6 +31,7 @@ declare global {
+     __tracerPerformanceProbe?: {
+       /** Returns content-free probe stage times for the current synthetic key run. */
+       trace: () => ProbeTraceSample[];
++      floodForTest: (options: { bytesPerSecond: number; durationMs: number }) => Promise<{ bytes: number; stalls: number; renderPasses: number; messages: number }> | undefined;
+     };
+     __tracerTestDouble?: {
+       isConnected: () => boolean;
+@@ -716,6 +717,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
+           }).benchmarkOutputAt10MBps();
+         },
+         trace: () => performanceProbe?.traceSamples() ?? [],
++        floodForTest: (options) => (currentTerminal as unknown as { floodForTest: (o: typeof options) => Promise<{ bytes: number; stalls: number; renderPasses: number; messages: number }> } | undefined)?.floodForTest(options),
+       };
+     }
+   } catch (error: unknown) {
+diff --git a/apps/tracer/src/terminal.ts b/apps/tracer/src/terminal.ts
+index 51df23b67..2f267020a 100644
+--- a/apps/tracer/src/terminal.ts
++++ b/apps/tracer/src/terminal.ts
+@@ -2420,6 +2420,50 @@ export class TerminalClient {
+     renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+   }
+ 
++  /**
++   * MEASUREMENT ONLY (#569, never merged): feeds `bytesPerSecond` of output through the real receive path (`acceptOutput`,
++   * output queue, credit, `drainOutput`) for `durationMs`, as many small messages, and echoes every key typed meanwhile
++   * as its own message 20 ms later. Credit frames are not sent to the server (it never sent these bytes). Returns the
++   * render passes and bytes it moved.
++   */
++  async floodForTest(options: { bytesPerSecond: number; durationMs: number }): Promise<{ bytes: number; stalls: number; renderPasses: number; messages: number }> {
++    const self = this as unknown as { sendFrame: (id: number, frame: { type: string }) => void };
++    const originalSend = self.sendFrame.bind(this);
++    self.sendFrame = (id, frame) => { if (frame.type !== "Credit") originalSend(id, frame); };
++    const line = new TextEncoder().encode(`${"x".repeat(78)}\r\n`);
++    const onKey = (event: KeyboardEvent): void => {
++      if (event.key.length !== 1) return;
++      const byte = new TextEncoder().encode(event.key);
++      window.setTimeout(() => this.acceptOutput(this.receivedOutSeq, byte, byte), 20);
++    };
++    window.addEventListener("keydown", onKey, { capture: true });
++    const passesBefore = this.renderPasses;
++    let bytes = 0, stalls = 0, messages = 0;
++    const startedAt = performance.now();
++    let last = startedAt;
++    const channel = new MessageChannel();
++    await new Promise<void>((resolve) => {
++      const step = (): void => {
++        const now = performance.now();
++        if (now - startedAt >= options.durationMs) { resolve(); return; }
++        if (now - last >= 2) {
++          const want = Math.min(32 * 1024, Math.floor(options.bytesPerSecond * (now - last) / 1000));
++          const lines = Math.max(1, Math.floor(want / line.length));
++          const chunk = new Uint8Array(lines * line.length);
++          for (let index = 0; index < lines; index += 1) chunk.set(line, index * line.length);
++          if (chunk.byteLength <= this.creditAvailable) { this.acceptOutput(this.receivedOutSeq, chunk, chunk); bytes += chunk.byteLength; messages += 1; } else stalls += 1;
++          last = now;
++        }
++        window.setTimeout(() => channel.port2.postMessage(0), 0);
++      };
++      channel.port1.onmessage = step;
++      step();
++    });
++    window.removeEventListener("keydown", onKey, { capture: true });
++    self.sendFrame = originalSend;
++    return { bytes, stalls, renderPasses: this.renderPasses - passesBefore, messages };
++  }
++
+   /** Feeds a paced 10 MB/s text stream through Ghostty and waits for its last paint. */
+   async benchmarkOutputAt10MBps(): Promise<{
+     bytes: number;

@@ -139,6 +139,7 @@ async function recording(page: Page): Promise<Recording> {
 }
 
 const mode = process.env.PA_MODE ?? "chunks";
+/** `flood` is the 10 MB/s output + typing probe (needs the harness patch). */
 const rounds = Number(process.env.PA_ROUNDS ?? "150");
 const outFile = process.env.PA_OUT;
 
@@ -148,13 +149,42 @@ test(`paint alignment: ${mode}`, async ({ page }) => {
   const backend = `http://localhost:${Number(process.env.TRACER_BACKEND_PORT ?? String(Number(process.env.TRACER_TEST_PORT ?? "4621") + 1))}`;
   await signIn(page, mode === "keys");
   const results: Record<string, number[]> = {};
+  let floodWindow: [number, number] | undefined;
   const push = (name: string, value: number): void => { (results[name] ??= []).push(value); };
   const post = (text: string) => page.context().request.post(`${backend}/__mock/live-output`, { data: { text } });
   let nextId = 1000;
   /** The marker id of the first message of every pair round; the second has the next id. */
   const pairFirst = new Set<number>();
 
-  if (mode === "chunks") {
+  if (mode === "flood") {
+    // Needs the measurement-only harness (perf/paint-align-flood-harness.patch) in the build. 10 MB/s of output through the
+    // real receive path while keys are typed; each key is echoed 20 ms later as its own message.
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Performance.enable");
+    const metricOf = async (name: string): Promise<number> =>
+      ((await cdp.send("Performance.getMetrics")).metrics.find((m) => m.name === name)?.value ?? Number.NaN);
+    const durationMs = 4000;
+    const startedFrames = (await recording(page)).frames.length;
+    const taskBefore = await metricOf("TaskDuration");
+    const scriptBefore = await metricOf("ScriptDuration");
+    const windowStart = await page.evaluate(() => performance.now());
+    const flood = page.evaluate((ms) => window.__tracerTestDouble?.floodForTest({ bytesPerSecond: 10_000_000, durationMs: ms }), durationMs);
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    for (let index = 0; index < 24; index += 1) {
+      await page.waitForTimeout(130 + Math.random() * 20);
+      await page.keyboard.press(letters[index]!);
+    }
+    const outcome = await flood;
+    floodWindow = [windowStart, await page.evaluate(() => performance.now())];
+    const taskMs = ((await metricOf("TaskDuration")) - taskBefore) * 1000;
+    const scriptMs = ((await metricOf("ScriptDuration")) - scriptBefore) * 1000;
+    const framesDuring = (await recording(page)).frames.length - startedFrames;
+    console.log(`PAROW name=flood_totals bytes=${outcome?.bytes} messages=${outcome?.messages} stalls=${outcome?.stalls} frames=${framesDuring} render_passes=${outcome?.renderPasses} passes_per_frame=${((outcome?.renderPasses ?? 0) / framesDuring).toFixed(2)} main_thread_task_ms=${taskMs.toFixed(0)} script_ms=${scriptMs.toFixed(0)} mb_per_s=${((outcome?.bytes ?? 0) / durationMs / 1000).toFixed(2)}`);
+    push("flood_task_ms", taskMs);
+    push("flood_passes_per_frame", (outcome?.renderPasses ?? 0) / framesDuring);
+    push("flood_fps", framesDuring / (durationMs / 1000));
+    push("flood_mbps", (outcome?.bytes ?? 0) / durationMs / 1000);
+  } else if (mode === "chunks") {
     // One marker per message, written on its own row so a draw of it is easy to find.
     const gaps = (process.env.PA_GAPS ?? "0,2,4,6,8,12").split(",").map(Number);
     let expected = 0;
@@ -222,6 +252,18 @@ test(`paint alignment: ${mode}`, async ({ page }) => {
       const shown = presentingFrame(frames, draw);
       push(`second_extra_frames_gap_${bucket}`, shown - minFrame);
       push(`second_arrival_to_frame_start_ms_gap_${bucket}`, frames[shown]! - b.t);
+    }
+  } else if (mode === "flood") {
+    const [from, to] = floodWindow!;
+    const inWindow = frames.filter((t) => t >= from && t <= to);
+    inWindow.slice(1).forEach((t, i) => push("flood_frame_interval_ms", t - inWindow[i]!));
+    for (const key of rec.keys) {
+      if (key.key.length !== 1) continue;
+      const draw = rec.draws.find((d) => !d.overlay && d.t >= key.t + 15 && d.text.includes(key.key));
+      if (!draw) { push("typed_undrawn", 1); continue; }
+      const shown = presentingFrame(frames, draw);
+      push("typed_key_to_frame_start_ms", frames[shown]! - key.t);
+      push("typed_key_to_draw_ms", draw.t - key.t);
     }
   } else {
     const msgs = rec.msgs;
