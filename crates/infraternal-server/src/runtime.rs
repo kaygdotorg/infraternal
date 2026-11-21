@@ -401,13 +401,30 @@ async fn serve_inner(
     auth.checkpoint_recovery_clock()
         .await
         .map_err(ServerError::Auth)?;
-    // Last: finish the D379 pool's queued writes and fold its WAL into the
-    // main file (#473). The listener has stopped, but `select!` only dropped
-    // the serve future: connection tasks it spawned may still be running. A
-    // request still in flight then gets the pool's `Closed` (a 503, or a
-    // socket renewal that silently doesn't happen), which is harmless at exit.
-    auth.close_database().await;
+    // Last: close every connection to the database file (see `close_storage`).
+    // The listener has stopped, but `select!` only dropped the serve future:
+    // connection tasks it spawned may still be running. A request still in
+    // flight then gets the pool's `Closed` (a 503, or a socket renewal that
+    // silently doesn't happen), which is harmless at exit.
+    close_storage(&auth).await;
     result
+}
+
+/// Close both pools on the server's database file at a normal stop, so a
+/// stopped data folder holds only `infraternal.sqlite`.
+///
+/// The D379 pool goes first: it finishes its queued session writes and folds
+/// the WAL into the main file (#473). The sqlx pool goes second and is awaited.
+/// SQLite removes `-wal` and `-shm` only when the last connection to the file
+/// closes. Before this step existed, the sqlx connections closed only when
+/// their handles dropped, which raced process exit. A "normal" stop then
+/// sometimes left both sidecars behind, and a D395 move recorded them as
+/// original server entries that vanished when anything later opened and
+/// closed the original database (#516). `Pool::close` waits for checked-out
+/// connections, which only requests that are still finishing hold.
+async fn close_storage(auth: &Auth) {
+    auth.close_database().await;
+    auth.pool().close().await;
 }
 
 // Both service-manager termination and interactive shutdown flush before exit.
@@ -1853,6 +1870,48 @@ mod tests {
             "WAL retained {retained} bytes after reuse"
         );
         assert!(limits.iter().all(|limit| *limit == 8 * 1024 * 1024));
+    }
+
+    /// #516 (D395): a normal stop leaves only `infraternal.sqlite` in the data
+    /// folder. The sqlx pool stays open here through a held clone, as the
+    /// server's routes hold it, and has written through the WAL. Closing only
+    /// the D379 pool left `-wal` and `-shm` behind, and a move journal then
+    /// recorded two entries that later vanished.
+    #[tokio::test]
+    async fn a_normal_stop_leaves_no_sqlite_sidecars() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open private server database");
+        let auth = crate::auth::Auth::new(pool.clone(), "localhost", "https://localhost:443")
+            .await
+            .expect("initialize auth against the server database");
+        sqlx::query("CREATE TABLE j1119_stop(v TEXT)")
+            .execute(&pool)
+            .await
+            .expect("write through the sqlx pool");
+        auth.shutdown_recovery_clock()
+            .await
+            .expect("stop the recovery checkpoint writer");
+        super::close_storage(&auth).await;
+        let left: Vec<String> = std::fs::read_dir(&data_dir)
+            .expect("list the stopped data folder")
+            .map(|entry| {
+                entry
+                    .expect("data folder entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("infraternal.sqlite"))
+            .collect();
+        drop((auth, pool));
+        std::fs::remove_dir_all(&data_dir).expect("remove temporary server database");
+        assert_eq!(
+            left,
+            ["infraternal.sqlite"],
+            "a stopped server left SQLite sidecars"
+        );
     }
 
     /// J696 P3 (#473): with `server --data ./x` (and the `./data` default)
