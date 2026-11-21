@@ -49,18 +49,38 @@ const AWAY_LINES = Number(process.env.EXPIRED_RESUME_AWAY_LINES ?? 0);
 /** How long after wake the canvas is sampled; a return slower than this is a failure in its own right. */
 const WATCH_MS = 30_000;
 
-/** What the browser saw on its sockets, from CDP, with browser-side receive times. */
-interface Seen { welcomes: number[]; outputs: Array<{ at: number; bytes: number; text: string }> }
+/**
+ * What the browser saw on its sockets, from CDP: Welcome and terminal output receive times, and, for the first-key
+ * breakdown, when each terminal Input left the page and when Acks and Snapshots arrived.
+ */
+interface Seen {
+  welcomes: number[];
+  outputs: Array<{ at: number; bytes: number; text: string }>;
+  inputs: Array<{ at: number; inSeq: bigint; bytes: number }>;
+  acks: Array<{ at: number; inSeqAcked: bigint }>;
+  snapshots: number[];
+}
 
 /** Decodes every app frame the page receives on `/v1/ws` and keeps Welcome times and terminal output. */
 function watchSockets(cdp: CDPSession): Seen {
-  const seen: Seen = { welcomes: [], outputs: [] };
+  const seen: Seen = { welcomes: [], outputs: [], inputs: [], acks: [], snapshots: [] };
   const decoders = new Map<string, WebSocketFrameDecoder>();
+  const sentDecoders = new Map<string, WebSocketFrameDecoder>();
   const text = new TextDecoder();
   cdp.on("Network.webSocketCreated", ({ requestId, url }) => {
-    if (new URL(url).pathname === "/v1/ws") decoders.set(requestId, new WebSocketFrameDecoder());
+    if (new URL(url).pathname !== "/v1/ws") return;
+    decoders.set(requestId, new WebSocketFrameDecoder());
+    sentDecoders.set(requestId, new WebSocketFrameDecoder());
   });
-  cdp.on("Network.webSocketClosed", ({ requestId }) => decoders.delete(requestId));
+  cdp.on("Network.webSocketClosed", ({ requestId }) => { decoders.delete(requestId); sentDecoders.delete(requestId); });
+  cdp.on("Network.webSocketFrameSent", ({ requestId, response }) => {
+    const decoder = sentDecoders.get(requestId);
+    if (!decoder || response.opcode !== 2) return;
+    const at = Date.now();
+    decoder.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (stream, frame) => {
+      if (frame.type === "Input" && stream !== 0) seen.inputs.push({ at, inSeq: frame.inSeq, bytes: frame.bytes.byteLength });
+    });
+  });
   cdp.on("Network.webSocketFrameReceived", ({ requestId, response }) => {
     const decoder = decoders.get(requestId);
     if (!decoder || response.opcode !== 2) return;
@@ -68,6 +88,8 @@ function watchSockets(cdp: CDPSession): Seen {
     decoder.feed(new Uint8Array(Buffer.from(response.payloadData, "base64")), (stream, frame) => {
       if (frame.type === "Welcome") seen.welcomes.push(at);
       if (frame.type === "Output" && stream !== 0) seen.outputs.push({ at, bytes: frame.bytes.byteLength, text: text.decode(frame.bytes) });
+      if (frame.type === "Ack" && stream !== 0) seen.acks.push({ at, inSeqAcked: frame.inSeqAcked });
+      if (frame.type === "Snapshot" && stream !== 0) seen.snapshots.push(at);
     });
   });
   return seen;
@@ -195,6 +217,12 @@ test("coming back after the resume window keeps the screen and resumes in one ha
       // A missing echo is reported as NaN rather than failing the sample, so the other fields still print.
       await expect.poll(() => echoed() !== undefined, { timeout: 15_000 }).toBe(true).catch(() => undefined);
       const echoAt = echoed()?.at ?? Number.NaN;
+      // Where the first key's time goes: still in the page, on the way to the shell, or waiting for the echo.
+      const sentAt = seen.inputs.find((input) => input.at >= keyAt)?.at ?? Number.NaN;
+      const ackAt = seen.acks.find((ack) => ack.at >= sentAt && ack.inSeqAcked > 0n)?.at ?? Number.NaN;
+      const snapshotsAfterKey = seen.snapshots.filter((at) => at >= keyAt && at <= echoAt).length;
+      const firstOutputAfterKey = seen.outputs.slice(outputsBefore).find((output) => output.at >= keyAt);
+      const firstKey = `key_to_send_ms=${sentAt - keyAt} send_to_ack_ms=${ackAt - sentAt} send_to_echo_ms=${echoAt - sentAt} snapshots_before_echo=${snapshotsAfterKey} first_output_after_key_ms=${(firstOutputAfterKey?.at ?? Number.NaN) - keyAt} first_output_has_key=${firstOutputAfterKey?.text.includes("x") === true}`;
       const { frames, liveMs } = await watch;
       const blank = (ink: number): boolean => ink < baseline / 2;
       let blankMs = 0;
@@ -204,7 +232,7 @@ test("coming back after the resume window keeps the screen and resumes in one ha
       const opened = server.bridges.slice(socketsBefore);
       const refusals = opened.filter((bridge) => bridge.serverClose === "s0 the server refused to resume the connection").length;
       const replayBytes = seen.outputs.slice(outputsBefore).filter((output) => output.at < keyAt).reduce((sum, output) => sum + output.bytes, 0);
-      console.log(`METRIC expired_resume sample=${sample} one_way_ms=${ONE_WAY_MS} away_ms=${AWAY_MS} away_lines=${AWAY_LINES} sockets_opened=${opened.length} resume_refusals=${refusals} hello_resume=${opened.map((bridge) => bridge.helloResume ? 1 : 0).join("")} welcome_ms=${(seen.welcomes[welcomesBefore] ?? Number.NaN) - wokeAt} blank_ms=${blankMs.toFixed(1)} last_screen_ms=${lastScreenMs.toFixed(1)} live_ms=${liveMs.toFixed(1)} typable_ms=${echoAt - wokeAt} replay_bytes=${replayBytes} frames=${frames.length} baseline_ink=${baseline}`);
+      console.log(`METRIC expired_resume sample=${sample} one_way_ms=${ONE_WAY_MS} away_ms=${AWAY_MS} away_lines=${AWAY_LINES} sockets_opened=${opened.length} resume_refusals=${refusals} hello_resume=${opened.map((bridge) => bridge.helloResume ? 1 : 0).join("")} welcome_ms=${(seen.welcomes[welcomesBefore] ?? Number.NaN) - wokeAt} blank_ms=${blankMs.toFixed(1)} last_screen_ms=${lastScreenMs.toFixed(1)} live_ms=${liveMs.toFixed(1)} typable_ms=${echoAt - wokeAt} replay_bytes=${replayBytes} frames=${frames.length} baseline_ink=${baseline} ${firstKey}`);
       await page.keyboard.press("Backspace");
       if (AWAY_LINES > 0) await expect.poll(outputText, { timeout: 60_000 }).toContain(`away-${sample}-42`);
       // sleep: let the erase echo settle before the next sample's command.
