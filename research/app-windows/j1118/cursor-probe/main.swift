@@ -1,21 +1,26 @@
-// J1118 check (not product code): the pointer shape the product reports (Cursor.swift), read from a second process
-// while a test window shows different shapes under the pointer. Run as the logged-in GUI user:
-//   swiftc -O -swift-version 5 -o cursor-probe main.swift ../../../../crates/plugins/desktop/native/Cursor.swift
-//   ./cursor-probe window &          # shows a strip window and moves the pointer over each strip in turn
-//   ./cursor-probe read OUTDIR 12    # prints each reported shape and saves it as OUTDIR/shape-<id>.png
+/// J1118 check (not product code): the pointer shape the product reports (Cursor.swift), read from a second process
+/// while a test window shows different shapes under the pointer. Run as the logged-in GUI user:
+///   swiftc -O -swift-version 5 -o cursor-probe main.swift ../../../../crates/plugins/desktop/native/Cursor.swift
+///   ./cursor-probe window &          # shows a strip window and moves the pointer over each strip in turn
+///   ./cursor-probe read OUTDIR 12    # prints each reported shape and saves it as OUTDIR/shape-<id>.png
 import AppKit
 import Foundation
 
+/// The product's `main.swift` defines this; the harness needs only the name.
 enum HelperFailure: Error { case invalid, permission, gone, unavailable }
 
+/// The test window's strips: a name and the cursor its cursor rect shows.
 let strips: [(String, NSCursor)] = [("arrow", .arrow), ("iBeam", .iBeam), ("pointingHand", .pointingHand), ("resizeLeftRight", .resizeLeftRight),
                                     ("crosshair", .crosshair), ("openHand", .openHand), ("notAllowed", .operationNotAllowed)]
 
+/// A row of coloured strips, each with a cursor rect for one shape.
 final class Strips: NSView {
+    /// One cursor rect per strip.
     override func resetCursorRects() {
         let w = bounds.width / CGFloat(strips.count)
         for (i, strip) in strips.enumerated() { addCursorRect(NSRect(x: CGFloat(i) * w, y: 0, width: w, height: bounds.height), cursor: strip.1) }
     }
+    /// Paints the strips and their names.
     override func draw(_ dirtyRect: NSRect) {
         let w = bounds.width / CGFloat(strips.count)
         for (i, strip) in strips.enumerated() {
@@ -26,6 +31,7 @@ final class Strips: NSView {
     }
 }
 
+/// `window` shows the strips and moves the pointer; `read` reports the shapes another process sees.
 let mode = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
 if mode == "window" {
     let app = NSApplication.shared; app.setActivationPolicy(.regular)

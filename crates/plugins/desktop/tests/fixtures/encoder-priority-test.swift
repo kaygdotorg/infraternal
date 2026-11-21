@@ -2,7 +2,9 @@
 import Darwin
 import Foundation
 
+/// Runs the checks below and exits non-zero at the first that fails.
 @main struct EncoderPriorityTest {
+    /// Stops the test with the label of the failed check.
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
     }
@@ -12,6 +14,7 @@ import Foundation
         let begin = mach_absolute_time(); body()
         return Double(mach_absolute_time() - begin) * Double(base.numer) / Double(base.denom) / 1e6
     }
+    /// Checks claim, lease, bounded wait and fail-open behaviour over a private shared file.
     static func main() {
         let segment = (EncoderPriority.sharedDirectory() ?? "/tmp/") + "infraternal-ep-test-\(getpid())"
         defer { unlink(segment) }

@@ -1,10 +1,10 @@
-// J1118 measurement harness (not product code): several App Window encoder processes sharing one hardware
-// encoder, and whether the controlled window can be served first (#146). Build with the product encoder:
-//   swiftc -O -swift-version 5 -o share main.swift ../../../../crates/plugins/desktop/native/{CaptureState,LowDelaySPS,Encoder,EncoderPriority}.swift
-//   ./share N MECH SECONDS     MECH: none | nice | bg | qos | coop:<hold_ms>:<wait_ms> | product
-// `product` uses the product's own EncoderPriority (claim by the "control companion", lease, bounded wait).
-// Process 0 is the controlled window; the others are windows that move at the same time. Every process encodes a
-// 1520x1026 scrolling picture at 120 Hz with the product's own `Encoder`, one frame in flight, like the product.
+/// J1118 measurement harness (not product code): several App Window encoder processes sharing one hardware
+/// encoder, and whether the controlled window can be served first (#146). Build with the product encoder:
+///   swiftc -O -swift-version 5 -o share main.swift ../../../../crates/plugins/desktop/native/{CaptureState,LowDelaySPS,Encoder,EncoderPriority}.swift
+///   ./share N MECH SECONDS     MECH: none | nice | bg | qos | coop:<hold_ms>:<wait_ms> | product
+/// `product` uses the product's own EncoderPriority (claim by the "control companion", lease, bounded wait).
+/// Process 0 is the controlled window; the others are windows that move at the same time. Every process encodes a
+/// 1520x1026 scrolling picture at 120 Hz with the product's own `Encoder`, one frame in flight, like the product.
 import AppKit
 import CoreVideo
 import Foundation
@@ -12,12 +12,18 @@ import Foundation
 /// The product's `main.swift` defines this; the harness needs only the name.
 enum HelperFailure: Error { case invalid, permission, gone, unavailable }
 
+/// Converts mach ticks to nanoseconds.
 var timebase = mach_timebase_info_data_t(); mach_timebase_info(&timebase)
+/// Milliseconds in `t` mach ticks.
 func ms(_ t: UInt64) -> Double { Double(t) * Double(timebase.numer) / Double(timebase.denom) / 1e6 }
+/// Mach ticks in `ms` milliseconds.
 func ticks(ms: Double) -> UInt64 { UInt64(ms * 1e6 * Double(timebase.denom) / Double(timebase.numer)) }
+/// The `p` quantile (0 to 1) of `v`, or NaN for an empty list.
 func pct(_ v: [Double], _ p: Double) -> Double { let s = v.sorted(); return s.isEmpty ? .nan : s[min(s.count - 1, Int(Double(s.count) * p))] }
+/// Two-decimal text for a number.
 func f(_ v: Double) -> String { String(format: "%.2f", v) }
 
+/// The command line: `child ...` for a worker, otherwise `N MECH SECONDS` for the parent.
 let args = CommandLine.arguments
 if args.count >= 2 && args[1] == "child" {
     // child IDX N MECH SECONDS SHM
@@ -88,11 +94,16 @@ if args.count >= 2 && args[1] == "child" {
 }
 
 // parent: share N MECH SECONDS
+/// How many windows (processes) take part.
 let n = Int(args[1])!, mech = args[2], seconds = Double(args[3])!
+/// The shared file the processes use as their start signal and, for the harness mechanisms, their lease.
 let shm = NSTemporaryDirectory() + "j1118-share-\(getpid())"
+/// Descriptor of the shared file.
 let fd = open(shm, O_RDWR | O_CREAT, 0o600); ftruncate(fd, 4096)
+/// The shared words: [0] lease end, [1] common start time.
 let map = mmap(nil, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)!.bindMemory(to: UInt64.self, capacity: 8)
 for i in 0..<8 { map[i] = 0 }
+/// The child processes and the pipes their results come back on.
 var processes: [(Process, Pipe)] = []
 for i in 0..<n {
     let p = Process(); p.executableURL = URL(fileURLWithPath: args[0]); p.arguments = ["child", "\(i)", "\(n)", mech, "\(seconds)", shm]

@@ -2,6 +2,7 @@
 import { expect, test } from "bun:test";
 import { applyPointer, parsePointerShape, pointerCss, DEFAULT_POINTER } from "./pointer";
 
+/** A complete shape as the machine reports it. */
 const good = { id: "0123456789abcdef", png: "iVBORw0KGgo=", hot_x: 4, hot_y: 3.5, scale: 2, width: 48, height: 48 };
 
 test("a complete shape is read as it was sent", () => {

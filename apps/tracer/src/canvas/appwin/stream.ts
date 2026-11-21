@@ -663,6 +663,11 @@ export class AppStream {
     }, () => { this.shapeBusy = false; again(); });
   }
 
+  /**
+   * Asks the machine for its status while this window is in use: input pause, a closed window or withdrawn permission, the
+   * window's shape and the pointer shape. Runs every `STATUS_EVERY_MS`, every `POINTER_EVERY_MS` while the pointer moves,
+   * and stops `STATUS_WHILE_MS` after the last input or when control is given back.
+   */
   private pollStatus(): void {
     window.clearTimeout(this.statusTimer);
     this.statusTimer = 0;
