@@ -1,8 +1,10 @@
 /**
  * Dead-end messages in Settings (#568), run against the production build in the test double (`?mock=1`).
  *
- * - An empty Settings window names the settings that will appear there. It never says "Not available yet.".
- * - A Settings read that fails says what happened and offers Try again; Try again draws the setting back in place.
+ * A Settings read that fails says what happened and offers Try again; Try again draws the setting back in place.
+ *
+ * The empty-window line (`emptyGroupNote`) is not checked here: the test double backs every setting and supplies data for
+ * every other group, so no window of the double is empty. Its wording is pinned by `empty-note.test.ts`.
  *
  * `DEAD_END_SHOTS=<dir>` also writes the captures (1440x900 at DPR 2, 393x852 at DPR 3), before and after the
  * assertions, so the same spec makes the before/after evidence on origin/dev and on the branch.
@@ -12,12 +14,10 @@ import { expect, test, type Page } from "playwright/test";
 
 const SHOTS = process.env.DEAD_END_SHOTS;
 const BASE = "/?mock=1&proto=clusters&docs=1&scene=3&theme=mocha&bg=none";
-/** The Keys Last setting's title (definitions.on-demand.ts); it is the one backed setting of the Apps window. */
+/** The Keys Last setting's title (definitions.on-demand.ts): the one setting of the Apps window. */
 const KEYS_LAST = "Keys Last";
 /** The message a failed read shows in the row's place. */
 const READ_FAILED = "This could not be read just now.";
-/** The empty Names window: its one setting has no store yet. */
-const EMPTY_LINE = "Nothing to set here yet. Machine Names End In will appear here once the server can save it.";
 
 async function open(page: Page, at: string): Promise<void> {
   await page.goto(`${BASE}&at=${at}`);
@@ -41,20 +41,20 @@ for (const [size, use] of Object.entries(SIZES)) {
   test.describe(size, () => {
     test.use(use);
 
-    test("an empty window names what is waiting for the server, not 'Not available yet.'", async ({ page }) => {
-      await open(page, "mesh.names");
-      await shot(page, `${size}-01-empty-window`);
-      await expect(page.getByText(EMPTY_LINE, { exact: true })).toBeVisible({ timeout: 10_000 });
-      await expect(page.getByText("Not available yet.")).toHaveCount(0);
-    });
-
     test("a failed Settings read offers Try again, and Try again draws the setting back", async ({ page }) => {
-      // The first read fails; later reads go through to the test double.
-      let failures = 1;
-      await page.route("**/security-settings", (route) => (failures-- > 0 ? route.abort() : route.continue()));
+      // Every read fails until the test lets one through, so the Apps window's own read is among the failures.
+      let failing = true;
+      let aborted = 0;
+      await page.route("**/security-settings", (route) => {
+        if (!failing) return route.continue();
+        aborted += 1;
+        return route.abort();
+      });
       await open(page, "you.apps");
       await shot(page, `${size}-02-read-failed`);
       await expect(page.getByText(READ_FAILED, { exact: true })).toBeVisible({ timeout: 10_000 });
+      expect(aborted, "the window's read reached the network and was refused").toBeGreaterThan(0);
+      failing = false;
       const again = page.locator("button.ui-button", { hasText: "Try again" });
       await expect(again).toHaveCount(1);
       await again.click();
