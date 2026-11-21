@@ -44,6 +44,12 @@ const FLOOD_RATE_MBS = Number(process.env.REAL_FLOOD_RATE_MBS ?? 0);
 const FLOOD_COMMAND = FLOOD_RATE_MBS > 0
   ? `perl -e \"\\$|=1; while (1) { print qq(!\\n) x ${Math.round(FLOOD_RATE_MBS * 500)}; select(undef,undef,undef,0.001); }\"`
   : "yes \\!";
+/**
+ * Whether the flood phase starts only once the flood has spent the whole bulk window. That holds at a 300 ms round trip,
+ * where credit is slow to return. At a short round trip a fast browser keeps up with a 10 MB/s flood and the window
+ * never empties, so `REAL_WAIT_FOR_EXHAUSTED_WINDOW=0` starts measuring once 1 MiB of flood output has arrived (J1065, #569).
+ */
+const WAIT_FOR_EXHAUSTED_WINDOW = process.env.REAL_WAIT_FOR_EXHAUSTED_WINDOW !== "0";
 /** Keep each probe key in one overwritten cell outside the independent flood scroll region. */
 const PAINT_PROGRAM =
   "bash --norc -c 'stty raw -echo; printf \"\\033[2J\\033[11r\\033[11;1HREADY\\n\"; flood_pid=; " +
@@ -360,7 +366,7 @@ test("measures 200 same-session keydown-to-paint samples through the 300 ms prof
       const rawBytes = (rawOutput.get(stream) ?? 0) - floodStartBytes;
       const creditBalance = serverCreditBalance(bridge, stream);
       return rawBytes >= BULK_WINDOW_BYTES
-        && creditBalance <= REPAINT_RESERVE_BYTES
+        && (!WAIT_FOR_EXHAUSTED_WINDOW || creditBalance <= REPAINT_RESERVE_BYTES)
         && activeTerminalBridge()?.id === bridge.id
         && bridge.attached.has(stream);
     }, { timeout: FREEZE_MS, intervals: [5, 10, 25] }).toBe(true);
