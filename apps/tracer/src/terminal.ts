@@ -1184,6 +1184,12 @@ export class TerminalClient {
               this.setStatus("Reconnected. The screen may be slightly out of date.");
               this.config.hooks?.onApproximate?.();
             }
+          } else if (notice.type === "terminal.echo") {
+            // The shim read the PTY's mode: a line is read with echo off (a password
+            // prompt, in any language) or echo is back. It only gates prediction (#569).
+            // `seq` is for relays; above 2^53 it only loses precision here, so its type alone is checked.
+            if (typeof notice.hidden !== "boolean" || typeof notice.seq !== "number" || !(notice.seq >= 0)) throw new Error("invalid echo state");
+            this.prediction?.hostEcho(notice.hidden);
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
@@ -1303,6 +1309,8 @@ export class TerminalClient {
     this.attachRequested = false;
     this.attached = true;
     this.attachedAt = performance.now();
+    // A new link starts at "echo on"; the shim reports a hidden line right after replay starts.
+    this.prediction?.hostEcho(false);
     this.sendFrame(this.streamId, {
       type: "AttachTerm",
       sessionId: this.sessionId,
