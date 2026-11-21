@@ -46,6 +46,9 @@ mod ssh_askpass;
 mod ssh_internal;
 #[cfg(test)]
 mod test_executable;
+/// The one check that a program root will run is one only root can replace (#146).
+#[cfg(any(machine_up, feature = "plugin-server"))]
+mod trusted_program;
 #[cfg(machine_up)]
 mod up;
 
@@ -1578,6 +1581,26 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
                 error.to_string(),
                 json_output,
             );
+        }
+    }
+    // Root runs the units init writes, so they may only name a binary that
+    // only root can change (#146, J1087). A dry run shows the problem and
+    // still prints the plan; a real run stops here, before anything changes.
+    // Without root a real `--system` run was already refused above.
+    if scope == install_paths::Scope::System || environment.is_root {
+        let checked = install::service_program()
+            .map_err(|error| format!("the running binary cannot be found: {error}"))
+            .and_then(|program| install::check_root_service_program(&program, 0));
+        if let Err(problem) = checked {
+            if !dry_run {
+                return report_failure(
+                    "server init",
+                    "The infraternal binary is not safe for a service that root runs.",
+                    problem,
+                    json_output,
+                );
+            }
+            eprintln!("warning: {problem}; a real install refuses this binary");
         }
     }
     // An existing unit's non-standard folder moves to the D395 one (owner,
