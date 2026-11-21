@@ -1,6 +1,8 @@
 //! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
-//! removal, inside the browser's admin window [16][168], #87, D339.
-//! D369 Forget uses that same window to cancel unreachable cleanup without a machine-side effect.
+//! removal, inside the browser's admin window [16][168], #87, D339. Also the owner's Inbox
+//! reports of the access a revoked person left behind while the host stayed (D356, D398); a
+//! removal itself keeps none. D369 Forget uses that same window to cancel unreachable cleanup
+//! without a machine-side effect.
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -37,7 +39,8 @@ pub struct Finish {
     host_id: Uuid,
     review: String,
 }
-/// Mount the bounded same-origin removal and Forget routes with shared owner authority.
+/// Mount the bounded same-origin removal and Forget routes and the owner's Inbox access
+/// reports, all with shared owner authority and bounded in body size, time and concurrency.
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
@@ -45,6 +48,11 @@ pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
         .route("/remote/hosts/remove/finish", post(finish))
         .route("/remote/hosts/reauth/start", post(reauth_start))
         .route("/remote/hosts/reauth/finish", post(reauth_finish))
+        .route("/remote/hosts/access-reports", post(access_reports))
+        .route(
+            "/remote/hosts/access-reports/dismiss",
+            post(dismiss_access_report),
+        )
         .route("/remote/hosts/forget", post(forget))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
@@ -94,9 +102,7 @@ async fn body(
         return Err(StatusCode::FORBIDDEN);
     }
     if fresh {
-        session
-            .require_admin_window(now)
-            .map_err(|_| StatusCode::PRECONDITION_REQUIRED)?;
+        session.require_admin_window(now).map_err(|e| failure(&e))?;
     }
     let permit = api
         .admission
@@ -139,6 +145,8 @@ async fn finish(
 fn failure(error: &crate::auth::Error) -> StatusCode {
     match error {
         crate::auth::Error::Denied | crate::auth::Error::Webauthn => StatusCode::FORBIDDEN,
+        // The one answer for a closed admin window (#563): the page renews with a passkey tap.
+        crate::auth::Error::FreshRequired => StatusCode::PRECONDITION_REQUIRED,
         crate::auth::Error::Throttled => StatusCode::TOO_MANY_REQUESTS,
         crate::auth::Error::Invalid | crate::auth::Error::Json => StatusCode::BAD_REQUEST,
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -182,6 +190,48 @@ async fn reauth_finish(
     Ok(Json(serde_json::json!({"ok":true})))
 }
 
+/// D398: the owner's Inbox reports. Read-only; POST like the other routes in this module, so that
+/// the browser always sends the Origin the shared admission checks.
+async fn access_reports(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    // The request says nothing; an empty object is the only body.
+    let _: serde_json::Map<String, Value> = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    api.removal
+        .access_reports(&token, now)
+        .await
+        .map(Json)
+        .map_err(|error| failure(&error))
+}
+
+/// The report the owner dismisses, by the host and person it names.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Dismiss {
+    host_id: Uuid,
+    person_id: Uuid,
+}
+
+/// D398: dismiss one Inbox report. Answers 404 when it is not the owner's or is already gone.
+async fn dismiss_access_report(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    let input: Dismiss = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match api
+        .removal
+        .dismiss_access_report(&token, input.host_id, input.person_id, now)
+        .await
+    {
+        Ok(true) => Ok(Json(serde_json::json!({"dismissed": true}))),
+        Ok(false) => Err(StatusCode::NOT_FOUND),
+        Err(error) => Err(failure(&error)),
+    }
+}
+
 /// A Forget selection carries only a host UUID; the transaction derives ownership and state.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,17 +240,21 @@ struct Forget {
 }
 
 /// Forget only within the same-origin owner's admin window, with the existing bounded decoder.
+/// A closed window answers 428 like removal, so the page can renew and retry (#563).
 async fn forget(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
     let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .forget_browser(&token, input.host_id, now)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
+        .map_err(|error| match error {
+            crate::auth::Error::FreshRequired => StatusCode::PRECONDITION_REQUIRED,
+            _ => StatusCode::FORBIDDEN,
+        })
 }
 
 async fn actions(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

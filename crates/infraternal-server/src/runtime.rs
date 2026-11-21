@@ -203,6 +203,10 @@ pub enum ServerError {
     /// System time predates the Unix epoch or does not fit the auth API.
     #[error("system clock is invalid")]
     Clock,
+    /// This is a new release whose update trial could not be recorded, so it must not
+    /// serve; the previous release starts instead (#211 S4).
+    #[error("the update trial could not be recorded")]
+    UpdateTrial,
 }
 
 /// The maximum time server startup waits for a configured listen address to appear.
@@ -401,13 +405,30 @@ async fn serve_inner(
     auth.checkpoint_recovery_clock()
         .await
         .map_err(ServerError::Auth)?;
-    // Last: finish the D379 pool's queued writes and fold its WAL into the
-    // main file (#473). The listener has stopped, but `select!` only dropped
-    // the serve future: connection tasks it spawned may still be running. A
-    // request still in flight then gets the pool's `Closed` (a 503, or a
-    // socket renewal that silently doesn't happen), which is harmless at exit.
-    auth.close_database().await;
+    // Last: close every connection to the database file (see `close_storage`).
+    // The listener has stopped, but `select!` only dropped the serve future:
+    // connection tasks it spawned may still be running. A request still in
+    // flight then gets the pool's `Closed` (a 503, or a socket renewal that
+    // silently doesn't happen), which is harmless at exit.
+    close_storage(&auth).await;
     result
+}
+
+/// Close both pools on the server's database file at a normal stop, so a
+/// stopped data folder holds only `infraternal.sqlite`.
+///
+/// The D379 pool goes first: it finishes its queued session writes and folds
+/// the WAL into the main file (#473). The sqlx pool goes second and is awaited.
+/// SQLite removes `-wal` and `-shm` only when the last connection to the file
+/// closes. Before this step existed, the sqlx connections closed only when
+/// their handles dropped, which raced process exit. A "normal" stop then
+/// sometimes left both sidecars behind, and a D395 move recorded them as
+/// original server entries that vanished when anything later opened and
+/// closed the original database (#516). `Pool::close` waits for checked-out
+/// connections, which only requests that are still finishing hold.
+async fn close_storage(auth: &Auth) {
+    auth.close_database().await;
+    auth.pool().close().await;
 }
 
 // Both service-manager termination and interactive shutdown flush before exit.
@@ -543,19 +564,36 @@ async fn remote_router(
     let listeners = if let Some(remote) = remote.filter(|remote| remote.identity.is_some()) {
         let source = remote.enrollment.source.clone();
         let clock_health = remote.clock_health.clone();
-        Some(
-            crate::remote_runtime::RemoteListeners::start_with_recovery(
-                remote.enrollment.endpoint.endpoint,
-                &remote.identity.ok_or(ServerError::TlsConfiguration)?,
-                &remote.roots,
-                enrollment_store.clone(),
-                hosts.clone(),
-                source,
-                clock_health,
-            )
-            .await
-            .map_err(ServerError::Listener)?,
+        // Servers set up through bootstrap keep their leaf in the CA's
+        // `active` directory and rotate it while unlocked (#559).
+        let rotation = remote
+            .ca_administration
+            .as_ref()
+            .and_then(|administration| {
+                administration
+                    .server_leaf()
+                    .map(|(directory, name)| crate::server_leaf::Rotation {
+                        source: administration.memory_source(),
+                        directory,
+                        name,
+                    })
+            });
+        let identity = remote.identity.ok_or(ServerError::TlsConfiguration)?;
+        let mut listeners = crate::remote_runtime::RemoteListeners::start_with_recovery(
+            remote.enrollment.endpoint.endpoint,
+            &identity,
+            &remote.roots,
+            enrollment_store.clone(),
+            hosts.clone(),
+            source,
+            clock_health,
         )
+        .await
+        .map_err(ServerError::Listener)?;
+        if let Some(rotation) = rotation {
+            listeners.rotate_server_leaf(rotation, identity.certificate);
+        }
+        Some(listeners)
     } else {
         None
     };
@@ -645,6 +683,14 @@ async fn build_router_core(
     }
 
     let pool = open_database(&config.data_dir).await?;
+    // The staging proof's broken-migration release fails here, as a real failed
+    // migration would, so its warm undo is proven on a real server (#211 S4).
+    #[cfg(feature = "staging-trust")]
+    if crate::update_apply::staging_migration_fails() {
+        return Err(ServerError::Migration(
+            sqlx::migrate::MigrateError::VersionMissing(0),
+        ));
+    }
     let origin =
         url::Url::parse(&config.public_origin).map_err(|_| ServerError::InvalidConfiguration)?;
     let rp_id = origin.host_str().ok_or(ServerError::InvalidConfiguration)?;
@@ -682,13 +728,14 @@ async fn build_router_core(
     // An injected actor's caller owns node-worker startup. Production starts
     // the process and binds admitted node workers after persisted switches load.
     let owns_node_workers = supplied_agent.is_none();
-    // The periodic update check (#211 S3) belongs to the production process only. It
-    // starts nothing outside root release builds and never applies a release.
+    // The periodic update check and the quiet-window apply (#211 S3, S4) belong to the
+    // production process only. They start nothing outside root release builds.
     #[cfg(feature = "release")]
     if owns_node_workers {
         drop(crate::release_latest::start_updates(
             pool.clone(),
             &config.data_dir,
+            config.listen,
         ));
     }
     #[cfg(feature = "remote")]
@@ -1853,6 +1900,48 @@ mod tests {
             "WAL retained {retained} bytes after reuse"
         );
         assert!(limits.iter().all(|limit| *limit == 8 * 1024 * 1024));
+    }
+
+    /// #516 (D395): a normal stop leaves only `infraternal.sqlite` in the data
+    /// folder. The sqlx pool stays open here through a held clone, as the
+    /// server's routes hold it, and has written through the WAL. Closing only
+    /// the D379 pool left `-wal` and `-shm` behind, and a move journal then
+    /// recorded two entries that later vanished.
+    #[tokio::test]
+    async fn a_normal_stop_leaves_no_sqlite_sidecars() {
+        let data_dir = temp_dir();
+        let pool = super::open_database(&data_dir)
+            .await
+            .expect("open private server database");
+        let auth = crate::auth::Auth::new(pool.clone(), "localhost", "https://localhost:443")
+            .await
+            .expect("initialize auth against the server database");
+        sqlx::query("CREATE TABLE j1119_stop(v TEXT)")
+            .execute(&pool)
+            .await
+            .expect("write through the sqlx pool");
+        auth.shutdown_recovery_clock()
+            .await
+            .expect("stop the recovery checkpoint writer");
+        super::close_storage(&auth).await;
+        let left: Vec<String> = std::fs::read_dir(&data_dir)
+            .expect("list the stopped data folder")
+            .map(|entry| {
+                entry
+                    .expect("data folder entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with("infraternal.sqlite"))
+            .collect();
+        drop((auth, pool));
+        std::fs::remove_dir_all(&data_dir).expect("remove temporary server database");
+        assert_eq!(
+            left,
+            ["infraternal.sqlite"],
+            "a stopped server left SQLite sidecars"
+        );
     }
 
     /// J696 P3 (#473): with `server --data ./x` (and the `./data` default)

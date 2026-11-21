@@ -6,8 +6,9 @@
 #![forbid(unsafe_code)]
 use crate::{
     frame::{
-        APPROXIMATE_SNAPSHOT, CLOSE_SESSION, Decoder, Frame, FrameRef, MAX_FRAME, MULTI_WRITER,
-        QUERY_REPLIES, SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER, SHELL_CLEANUP,
+        APPROXIMATE_SNAPSHOT, CLOSE_SESSION, Decoder, ECHO_HIDDEN, ECHO_STATE, Frame, FrameRef,
+        MAX_FRAME, MULTI_WRITER, QUERY_REPLIES, SEQUENCED_INPUT, SESSION_OWNER, SHARED_WRITER,
+        SHELL_CLEANUP,
     },
     pty::Pty,
     ring::{DEFAULT_CAPACITY, Ring},
@@ -193,6 +194,9 @@ struct Peer {
     /// session's (once a viewer has ever sized it), the viewer gets a Snapshot
     /// of the engine instead (#521).
     replay_awaits_size: bool,
+    /// The echo state this peer was last told with [`Frame::EchoState`]; a new
+    /// link starts at "echo on" (false), so only a hidden state needs a report.
+    echo_hidden_told: bool,
 }
 /// Gives up the session size once the writer that owns it has no attached
 /// peer left (D74 as amended by the owner on 2026-11-16, #521).
@@ -271,7 +275,8 @@ impl Peer {
                 | SHARED_WRITER
                 | QUERY_REPLIES
                 | CLOSE_SESSION
-                | SHELL_CLEANUP);
+                | SHELL_CLEANUP
+                | ECHO_STATE);
         if self.caps & (SESSION_OWNER | SHELL_CLEANUP) != 0 {
             if self.caps != SESSION_OWNER && self.caps != SHELL_CLEANUP {
                 return Err(invalid_input());
@@ -319,6 +324,9 @@ impl Peer {
         }
         Ok(queued)
     }
+    /// Queue a repaint of the screen valid at `head` and start streaming from
+    /// there. An engine that cannot restore exactly sends the approximate repaint
+    /// to a link that negotiated it, and a bounded Error to any other link.
     fn snapshot(&mut self, terminal: &impl SessionTerminal, head: u64) -> io::Result<()> {
         match terminal.snapshot() {
             Ok(bytes) => {
@@ -344,6 +352,25 @@ impl Peer {
                 self.queue(&Frame::Error(code, error.to_string()))?;
                 self.cursor = None;
             }
+        }
+        Ok(())
+    }
+    /// Tell this link the terminal's echo mode if it changed since its last report.
+    ///
+    /// Only a streaming link (it has a cursor, so its handshake replies are
+    /// over) that selected [`ECHO_STATE`] hears it, and only between whole
+    /// frames, so the report is ordered with output and is never split. `cache`
+    /// holds the pass's sample; the ioctl runs only when the cache was cleared
+    /// by PTY traffic and some link can take a report (#569).
+    fn report_echo(&mut self, pty: &Pty, head: u64, cache: &mut Option<bool>) -> io::Result<()> {
+        if self.caps & ECHO_STATE == 0 || self.cursor.is_none() || !self.pending.is_empty() {
+            return Ok(());
+        }
+        let hidden = *cache.get_or_insert_with(|| echo_is_hidden(&pty.master));
+        if hidden != self.echo_hidden_told {
+            let flags = if hidden { ECHO_HIDDEN } else { 0 };
+            self.queue(&Frame::EchoState(head, flags))?;
+            self.echo_hidden_told = hidden;
         }
         Ok(())
     }
@@ -489,6 +516,7 @@ mod input_ack_order_tests {
             stopping: false,
             request: None,
             replay_awaits_size: false,
+            echo_hidden_told: false,
         };
         (peer, client)
     }
@@ -807,6 +835,8 @@ fn run_configured(
     group: Option<&Path>,
     prestarted: Option<Pty>,
 ) -> io::Result<()> {
+    // The shim's one loop moves every key and every byte of output: keep it on a fast core (#554).
+    let _ = crate::qos::set_current_thread(crate::qos::Qos::UserInteractive);
     #[cfg(feature = "host-login")]
     let placement = group
         .map(|path| {
@@ -916,6 +946,11 @@ fn run_configured(
         .readiness
         .then(|| Instant::now() + readiness_lifetime(&config));
     let mut next_deferred = 0_u64;
+    // The PTY's echo mode as last sampled, or None once PTY traffic may have
+    // changed it. It is sampled lazily, at most once per pass and only for a
+    // peer that can take a report, so idle sessions and links without
+    // ECHO_STATE never pay for the ioctl (#569).
+    let mut echo_hidden: Option<bool> = None;
     loop {
         if readiness_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             if exit.is_none() {
@@ -989,6 +1024,10 @@ fn run_configured(
             // reservation before polling; another deferred frame may now fit.
             continue;
         }
+        if std::mem::take(&mut cursors.wrote_to_pty) {
+            // The key may be the first one a silent `read -s` sees.
+            echo_hidden = None;
+        }
         for p in &mut peers {
             // Cleanup is independent of output credit and a retained owner.
             // SIGCHLD/try_wait supplies proof; sending a signal alone does not.
@@ -1009,6 +1048,8 @@ fn run_configured(
                 let state = cursors.get(p.writer)?;
                 p.queue_input_reply(state.written, state.accepted)?;
             }
+            // Before output, so a flood cannot starve the report.
+            p.report_echo(&pty, ring.head(), &mut echo_hidden)?;
             if p.pending.is_empty()
                 && let Some(request) = p.request.take()
             {
@@ -1036,6 +1077,9 @@ fn run_configured(
                     p.exited_sent = true;
                 }
             }
+            // A link whose replay just started with nothing to send hears the
+            // current state now rather than at the next PTY event.
+            p.report_echo(&pty, ring.head(), &mut echo_hidden)?;
         }
         // Private probes are not resumable: retire once confirmed exit delivery
         // has drained. Ordinary terminal ownership and exit acknowledgment stay unchanged.
@@ -1255,6 +1299,7 @@ fn run_configured(
                             stopping: false,
                             request: None,
                             replay_awaits_size: false,
+                            echo_hidden_told: false,
                         };
                         next.queue(&Frame::Hello {
                             version: 1,
@@ -1264,6 +1309,7 @@ fn run_configured(
                                 | SHARED_WRITER
                                 | QUERY_REPLIES
                                 | CLOSE_SESSION
+                                | ECHO_STATE
                                 // A private probe has no durable ended record.
                                 // Its ownership EOF could otherwise overtake
                                 // buffered output/Exited in the host relay.
@@ -1343,6 +1389,8 @@ fn run_configured(
             if used > 0 {
                 terminal.process(&bytes[..used]);
                 ring.append(&bytes[..used])?;
+                // A prompt usually turns echo off just before printing itself.
+                echo_hidden = None;
             }
         }
 
@@ -1781,6 +1829,22 @@ impl InputCursors {
 #[cfg(test)]
 #[path = "../tests/unit/sequenced_input.rs"]
 mod sequenced_checks;
+
+/// Whether the terminal reads a hidden line: canonical (line) mode with echo
+/// off, the termios state every password prompt (getpass, `read -s`, sudo,
+/// ssh's own passphrase prompt) sets regardless of the prompt's language. A
+/// shell's line editor turns both flags off, and a running program usually
+/// has both on, so neither is mistaken for a secret (#569, D130).
+///
+/// This is one `tcgetattr` ioctl with no allocation. A failure (the PTY hung
+/// up) reads as "not hidden": the report only stops predictions, it is never a
+/// security boundary, and the client keeps its own prompt-text check.
+fn echo_is_hidden(master: &impl AsFd) -> bool {
+    use nix::sys::termios::{LocalFlags, tcgetattr};
+    tcgetattr(master).is_ok_and(|modes| {
+        modes.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO) == LocalFlags::ICANON
+    })
+}
 
 /// An opaque error kind keeps invalid writer data out of diagnostics without allocation.
 fn invalid_input() -> io::Error {

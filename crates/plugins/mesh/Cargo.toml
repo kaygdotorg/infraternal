@@ -59,16 +59,22 @@ url = { workspace = true, optional = true }
 # ring remains the one crypto backend (D289).
 # The pinned fork commit (#260) runs receive batches inline on macOS by default
 # (GOTATUN_BENCH_RX_INLINE_MAX=0 turns that off; Linux keeps it off). Connected
-# per-endpoint sends on macOS stay opt-in (GOTATUN_BENCH_MAC_CONNECTED=1): while
-# they bind, another local user can take over the WireGuard port, so they wait
-# for a design without that window. With them off, the Mac binds the WireGuard
-# port as two exclusive sockets, AF_INET and IPv6-only, so no other local user
-# can bind beside it before or after start (#260, J826, J834). A port another
-# socket already holds is refused (EADDRINUSE), the same as a port taken
-# outright. The Mac route listener and immediate keepalive request also run
-# only with S enabled, which preserves default roaming behavior when it is off
-# (J920, #260).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "6db3b519612043a848afa89b68b7d67810e30b55", default-features = false, features = ["device", "ring"], optional = true }
+# per-endpoint sends (S) on macOS are on by default (owner, 2026-11-21, after
+# J1108 on #260); GOTATUN_BENCH_MAC_CONNECTED=0 turns them off. The node passes
+# that choice to the engine's socket factory and starts the route listener with
+# it. The pool shares the WireGuard port only inside one audited startup window;
+# where the kernel's socket list cannot prove nobody joined (macOS 27 shows a
+# program only its own sockets), the engine opens no window and keeps sendto. A
+# refused or failing connected send falls back to sendto and never loses the
+# datagram. With S off, the Mac binds the WireGuard port as two exclusive
+# sockets, AF_INET and IPv6-only, so no other local user can bind beside it
+# before or after start (#260, J826, J834). A port another socket already holds
+# is refused (EADDRINUSE), the same as a port taken outright. On macOS 14+ runs
+# of datagrams leave through the private
+# sendmsg_x and, from 15.6, arrive through recvmsg_x, on every socket where that
+# measured faster; both are looked up at run time and fall back to one datagram
+# per call. GOTATUN_MAC_BATCH=off turns them off (#554, J1036).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "4e20c3d9ed40c0faa013ed5717b3649ee5679ae6", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -102,4 +108,9 @@ required-features = ["server"]
 # Namespace fixture for the seam C relay proof (scripts/mesh-relay-proof.py).
 [[example]]
 name = "relay_fixture"
+required-features = ["relay", "test-support"]
+
+# Userspace key-echo through relayed pairs, for relay-choice measurements (#201, J1105).
+[[example]]
+name = "relay_echo"
 required-features = ["relay", "test-support"]

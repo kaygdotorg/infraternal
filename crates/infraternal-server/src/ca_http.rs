@@ -22,7 +22,16 @@ struct Api {
     clock_health: Arc<crate::clock_health::ClockHealth>,
     admission: Arc<Semaphore>,
     starts: Arc<Mutex<HashMap<String, crate::runtime::SourceBucket>>>,
+    /// Requests per client network per minute, across every CA route (#559, J1099).
+    sources: Arc<Mutex<HashMap<std::net::IpAddr, crate::runtime::SourceBucket>>>,
 }
+
+/// How many CA requests one client network may send per minute, on all routes together.
+///
+/// The interface reads status on demand and never polls. One unlock is a status read, a start and
+/// a finish, and a test fixture polling for the unlock sends about twenty status reads in 15
+/// seconds. 120 leaves room for both while capping what one network can make the server read.
+pub(crate) const SOURCE_BUDGET: u8 = 120;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Parsed secret request material grants no authority. No debug, clone or
@@ -59,6 +68,7 @@ pub fn router(
         clock_health,
         admission: Arc::new(Semaphore::new(8)),
         starts: Arc::default(),
+        sources: Arc::default(),
     };
     Router::new()
         .route("/remote/ca/status", post(status))
@@ -69,21 +79,45 @@ pub fn router(
         .route("/remote/ca/unlock/start", post(start))
         .route("/remote/ca/unlock/finish", post(finish))
         .layer(DefaultBodyLimit::max(32768))
-        .layer(axum::middleware::from_fn_with_state(
-            api.clone(),
-            start_budget,
-        ))
+        .layer(axum::middleware::from_fn_with_state(api.clone(), budget))
         .layer(axum::middleware::from_fn(deadline))
         .with_state(api)
 }
-/// The three start routes share one budget per authenticated principal, across
-/// cookies and ceremony kinds. Finish/status remain available at exhaustion.
-async fn start_budget(
+/// Two budgets in front of the CA routes, both checked before any route touches SQLite.
+///
+/// Every CA route first counts against its client network's budget (`SOURCE_BUDGET` per
+/// minute). The network is the IPv4 address or the IPv6 /64 the server attributed to the caller,
+/// so a flood from one network cannot keep the server reading sessions for everyone (#559). A
+/// request without an attributed address (an in-process caller, not a socket peer) skips that
+/// budget, as it does for the auth routes.
+///
+/// The three start routes then share one budget per administrator, across cookies and ceremony
+/// kinds. Finish and status stay available when it is spent. The administrator comes from a
+/// plain read, so an unknown or non-administrator cookie is refused without a write (J1099).
+async fn budget(
     State(api): State<Api>,
     incoming: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
+    if let Some(crate::runtime::ClientAddress(source)) = incoming
+        .extensions()
+        .get::<crate::runtime::ClientAddress>()
+        .copied()
+    {
+        let Ok(now) = request_time() else {
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        };
+        let mut sources = api.sources.lock().await;
+        if let Err(response) = crate::runtime::admit_temporal_request(
+            &mut sources,
+            crate::runtime::device_source(source),
+            now,
+            SOURCE_BUDGET,
+        ) {
+            return response.into_response();
+        }
+    }
     if !matches!(
         incoming.uri().path(),
         "/remote/ca/unlock/start"
@@ -96,8 +130,8 @@ async fn start_budget(
         Ok(request) => request,
         Err(status) => return status.into_response(),
     };
-    let principal = match api.auth.session(token, now).await {
-        Ok(session) => session.user_id,
+    let principal = match api.administration.administrator(token, now).await {
+        Ok(administrator) => administrator.user().to_owned(),
         Err(_) => return StatusCode::FORBIDDEN.into_response(),
     };
     let mut starts = api.starts.lock().await;
@@ -118,6 +152,10 @@ async fn deadline(
         .await
         .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
 }
+/// Check the exact same-origin header and extract the session cookie and the request time.
+///
+/// Pure header work, no database: a foreign or missing `Origin` is 403 and a missing or malformed
+/// cookie is 401, before any route reads a session.
 fn request<'a>(api: &Api, headers: &'a HeaderMap) -> Result<(&'a str, i64), StatusCode> {
     if headers
         .get(header::ORIGIN)
@@ -128,12 +166,16 @@ fn request<'a>(api: &Api, headers: &'a HeaderMap) -> Result<(&'a str, i64), Stat
     }
     let token =
         crate::auth::session_cookie_from_headers(headers).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let now = std::time::SystemTime::now()
+    Ok((token, request_time()?))
+}
+
+/// The request's wall-clock time in Unix seconds, the clock the session rows are written in.
+fn request_time() -> Result<i64, StatusCode> {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
         .and_then(|time| i64::try_from(time.as_secs()).ok())
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok((token, now))
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
 }
 async fn start(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
     let (token, now) = request(&api, &headers)?;
@@ -319,7 +361,9 @@ async fn status(
     headers: HeaderMap,
 ) -> Result<Json<crate::ca_status::CaStatus>, StatusCode> {
     let (token, now) = request(&api, &headers)?;
-    api.administration
+    // One plain read both authorizes and returns the lock bit; nothing here writes.
+    let locked = api
+        .administration
         .status(token, now)
         .await
         .map_err(|_| StatusCode::FORBIDDEN)?;
@@ -327,11 +371,6 @@ async fn status(
         .admission
         .try_acquire()
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-    let locked = api
-        .administration
-        .status(token, now)
-        .await
-        .map_err(|_| StatusCode::FORBIDDEN)?;
     let mut status = api
         .administration
         .public_status(Some(&api.clock_health))

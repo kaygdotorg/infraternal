@@ -3,6 +3,8 @@
  * bubbling, style custom properties) and fake timers and frames, so stack order, the cap, holds and swipes are
  * tested without a browser. Browser behaviour (layout, transitions) is covered by the Playwright specs.
  */
+
+/** A function that handles one fake event. */
 type Listener = (event: any) => void;
 
 /** A stand-in for a DOM element with only what the toast code touches. Events bubble through `fire`. */
@@ -94,7 +96,7 @@ export function withFakeDom(body: (parent: FakeElement, clock: FakeClock) => voi
   };
   const overrides = {
     document: { createElement: (tag: string) => new FakeElement(tag) },
-    window: { setTimeout: (run: () => void) => { timers.set(++serial, run); return serial; }, clearTimeout: (id: number) => { timers.delete(id); } },
+    window: { setTimeout: (run: () => void) => { timers.set(++serial, run); return serial; }, clearTimeout: (id: number) => { timers.delete(id); }, addEventListener() {}, removeEventListener() {} },
     requestAnimationFrame: (callback: FrameRequestCallback) => frames.push(callback),
     cancelAnimationFrame() {},
   };

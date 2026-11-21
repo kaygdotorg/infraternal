@@ -321,3 +321,37 @@ fn extra_or_missing_files_are_refused() {
         "legacy MANIFEST only",
     );
 }
+
+/// An auto-update switches from the file the updater verified, never from the path
+/// (#211 S4, J734 P3-b). Swapping other bytes onto the path after verification changes
+/// nothing: the sealed copy holds the verified bytes and its signature still checks,
+/// while a path admission of the swapped file is refused.
+#[test]
+fn an_update_switch_runs_the_verified_file_even_if_the_path_is_swapped() {
+    use std::os::unix::fs::FileExt;
+    let original = image_bytes();
+    let bundle = Bundle::new(&original);
+    let trust = bundle.sign();
+    let verified = std::fs::File::open(bundle.image()).unwrap();
+    let swapped = bundle.root.join("swapped");
+    let mut other = original.clone();
+    *other.last_mut().unwrap() ^= 0xff;
+    crate::test_executable::write(&swapped, &other, 0o700);
+    std::fs::rename(&swapped, bundle.image()).unwrap();
+    let admitted = Opened::from_file(verified, bundle.image(), |file, path| {
+        verify_metadata(file, path, |version, image, name, sums, signature| {
+            infraternal_server::release_verify::verify_identity_with_trust(
+                version, image, name, sums, signature, &trust,
+            )
+        })
+    })
+    .expect("the verified file is admitted");
+    let mut sealed = vec![0; original.len()];
+    admitted.image.file.read_exact_at(&mut sealed, 0).unwrap();
+    assert_eq!(sealed, original, "the sealed copy holds the verified bytes");
+    assert_eq!(admitted.path, bundle.image());
+    assert!(
+        admit(bundle.image(), &trust).is_err(),
+        "reopening the path would have found other bytes"
+    );
+}

@@ -10,6 +10,7 @@
 import { allShortcuts, bindCombo, bindShortcut, bindingOf, comboLabel, matchesCombo, onBindingsChange, platformCombo, registerShortcuts, type Combo } from "../../../../../packages/ui/src/shortcuts";
 import { isTypingTarget } from "../../../../../packages/ui/src/shortcuts-view";
 import { isKeyboardLocked } from "../../../../../packages/ui/src/keyboard-lock";
+import { keyboardLikely } from "../../../../../packages/ui/src/platform";
 import { bindTerminalFont } from "../../terminal-font-shortcuts";
 import type { Ctx, WinRec } from "../context";
 import { isTerminal } from "../views/body";
@@ -19,6 +20,9 @@ import { canvasModifierKeys } from "../camera/canvas-wheel-modifier";
 
 /** The digit-row chord that flies to view `n` (1 to 9): ⌘n on a Mac, Ctrl+Shift+n elsewhere. A position, so the digit row is matched by physical key. */
 const viewCombo = (n: number): Combo => platformCombo({ code: `Digit${n}`, mod: true }, { code: `Digit${n}`, mod: true, shift: true });
+
+/** `text · keys` for a palette hint, or just `text` where no hardware keyboard is likely (a phone shows no key hints). */
+export const hintWithKeys = (text: string, keys: string): string => (keys && keyboardLikely() ? (text ? `${text} · ${keys}` : keys) : text);
 
 /** The current key combination of a shortcut as text ("" when unbound). */
 export const bindingText = (id: string): string => {
@@ -60,7 +64,7 @@ export function installShortcuts(cx: Ctx): () => void {
     ...(cx.adapters.docs ? [{ id: "window-docs", label: "Read about this window", keys: "", combo: platformCombo(WINDOW_DOCS_KEYS.mac, WINDOW_DOCS_KEYS.other) }] : []),
     { id: "overview", label: "All views (overview)", keys: "Esc" },
     // A swipe that starts on empty canvas or a window's chrome moves to the next window or column (D377); plain scrolling over content never does.
-    { id: "pan", label: "Next window or column", keys: "Swipe on empty canvas" },
+    { id: "pan", label: "Next window or column", keys: "Swipe on a window's header or edge" },
     // Moving the canvas with a mouse wheel on purpose (D374, D377): the modifier lives in camera/canvas-wheel-modifier.ts, and the
     // words follow it ("⌥ + scroll" on a Mac, "Alt + scroll" elsewhere).
     { id: "wheel-canvas", label: "Move the canvas with the wheel", keys: canvasModifierKeys() },

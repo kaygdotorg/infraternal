@@ -423,6 +423,13 @@ fn launcher_thp() -> Option<nix::libc::c_int> {
 /// with this process's current policy, which is the behaviour without a record.
 #[cfg(target_os = "linux")]
 pub(crate) fn with_launcher_thp<T>(exec: impl FnOnce() -> T) -> T {
+    // The restart's new image also records the original open-file limit (#562).
+    super::open_files::with_launcher_limit(|| with_launcher_policy(exec))
+}
+
+/// The THP half of [`with_launcher_thp`].
+#[cfg(target_os = "linux")]
+fn with_launcher_policy<T>(exec: impl FnOnce() -> T) -> T {
     let Some(launcher) = launcher_thp() else {
         return exec();
     };
@@ -1122,6 +1129,13 @@ pub(super) fn prepare_child(command: &mut Command) {
     // only sigaction/sigprocmask and stack storage; errors abort this child's exec.
     unsafe {
         command.pre_exec(reset_child_signals);
+    }
+    // The server and infraternal agent raise their own open-file limit (#562);
+    // what they start, shims and through them people's shells, gets the
+    // original back. No-op in a process that never raised it.
+    // SAFETY: the hook is two rlimit syscalls on stack storage; no allocation or lock.
+    unsafe {
+        command.pre_exec(super::open_files::restore_in_child);
     }
     #[cfg(target_os = "linux")]
     if let Some(launcher) = launcher_thp() {

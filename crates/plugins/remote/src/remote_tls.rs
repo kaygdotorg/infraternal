@@ -22,12 +22,22 @@ pub struct Connection {
     pub channel: TcpTls,
     /// SHA256 of the exact leaf DER, for the server authority ledger.
     pub peer_fingerprint: [u8; 32],
+    /// The server's verified leaf on a dialed connection, which the
+    /// infraternal agent checks against its
+    /// [`crate::server_leaf_floor::ServerLeafFloor`] before using the channel.
+    /// `None` on accepted connections: the server keeps one `Connection` per
+    /// TCP host link and needs only the fingerprint, so it does not retain a
+    /// parsed certificate per host.
+    pub peer_leaf: Option<X509>,
 }
 
 /// A TLS exchange that cannot enter ordinary host admission or control dispatch.
 pub struct RecoveryConnection {
     /// Restricted raw channel used only by the recovery request parser.
     pub channel: TcpTls,
+    /// The server's verified leaf on a dialed recovery connection (`None` on
+    /// the accepting side, where the peer sends no certificate).
+    pub server_leaf: Option<X509>,
 }
 
 /// The selected ALPN determines which single purpose may use an accepted TLS socket.
@@ -252,7 +262,7 @@ pub async fn dial(
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
-    finish(stream)
+    finish(stream, true)
 }
 
 /// Dial the server-authenticated recovery ALPN without offering an expired client certificate.
@@ -283,8 +293,10 @@ pub async fn dial_recovery(
     }
     // This connector is built without a local identity; its peer certificate is
     // the verified server leaf and cannot prove which client certificate was sent.
+    let server_leaf = stream.ssl().peer_certificate().ok_or_else(denied)?;
     Ok(RecoveryConnection {
         channel: channel(stream),
+        server_leaf: Some(server_leaf),
     })
 }
 /// Keep connection construction separate so OS liveness can be verified on the
@@ -329,7 +341,7 @@ pub async fn accept(socket: tokio::net::TcpStream, config: &SslAcceptor) -> io::
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
-    finish(stream)
+    finish(stream, false)
 }
 
 /// Accept either unchanged mTLS host transport or the certificate-free recovery ALPN.
@@ -363,11 +375,13 @@ pub async fn accept_recovery_aware(
             Ok(AcceptedConnection::Host(Connection {
                 channel: channel(stream),
                 peer_fingerprint,
+                peer_leaf: None,
             }))
         }
         Some(RECOVERY_PROTOCOL) if stream.ssl().peer_certificate().is_none() => {
             Ok(AcceptedConnection::Recovery(RecoveryConnection {
                 channel: channel(stream),
+                server_leaf: None,
             }))
         }
         _ => Err(denied()),
@@ -375,7 +389,12 @@ pub async fn accept_recovery_aware(
 }
 
 /// Finish an accepted TLS connection: require the negotiated ALPN and a verified client certificate.
-fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result<Connection> {
+/// `dialed` keeps the verified peer leaf (the server's) for the caller's
+/// server-leaf check; an accepted connection keeps only its fingerprint.
+fn finish(
+    stream: tokio_openssl::SslStream<tokio::net::TcpStream>,
+    dialed: bool,
+) -> io::Result<Connection> {
     use openssl::{hash::MessageDigest, x509::X509VerifyResult};
     // Missing ALPN and missing client certificates cannot silently downgrade
     // this endpoint to another protocol. No application bytes escape this check.
@@ -394,6 +413,7 @@ fn finish(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> io::Result
     Ok(Connection {
         channel: channel(stream),
         peer_fingerprint,
+        peer_leaf: dialed.then_some(peer),
     })
 }
 

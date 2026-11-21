@@ -44,7 +44,10 @@ struct StoredIdentity {
     https_system_roots: bool,
     ca_der: String,
     certificate_der: String,
-    key_der: String,
+    /// The active private key (PKCS#8, base64). Held in a buffer wiped on drop,
+    /// like the rotation candidate's, so the copy serde makes on every load and
+    /// the one a rotation replaces are not left in freed memory (#559 L1).
+    key_der: Zeroizing<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_rotation: Option<StoredRotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +115,9 @@ fn decode_candidate_key(encoded: &str) -> io::Result<Zeroizing<Vec<u8>>> {
 const IDENTITY_MISMATCH: &str =
     "This machine's saved private key does not match its enrollment certificate.";
 
+/// Public refusal for identity or key files that others can read. No path: it is public text.
+const SHARED_FILE: &str = "A saved identity or key file is readable by other users, so the infraternal agent refuses to use it. Make the files private (`chmod 600`) and their directory `chmod 700`, then try again.";
+
 const PENDING_JOIN_KEY: &str = "join-key.pk8";
 
 /// Why a join step failed, in the classes a caller acts on.
@@ -135,6 +141,11 @@ pub(crate) enum Failure {
     Challenge,
     /// The saved private key differs from the key certified at enrollment.
     IdentityMismatch,
+    /// A saved identity or key file (or its directory) can be read by the group or by everyone.
+    ///
+    /// Named on its own because the fix is one `chmod`, and "operation failed" sent a person
+    /// who copied the files to another machine (mode 0644) hunting through network settings (#554).
+    SharedFile,
 }
 
 impl std::fmt::Display for Failure {
@@ -146,6 +157,7 @@ impl std::fmt::Display for Failure {
             Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
             Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
             Self::IdentityMismatch => IDENTITY_MISMATCH,
+            Self::SharedFile => SHARED_FILE,
             Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
@@ -164,8 +176,24 @@ impl Failure {
     }
 }
 
+/// The plain, detail-free refusal: the reason is deliberately not reported.
 fn refused() -> io::Error {
     Failure::Refused.error(io::ErrorKind::PermissionDenied)
+}
+
+/// The refusal for a file or directory that is not private to its owner.
+fn shared_file() -> io::Error {
+    Failure::SharedFile.error(io::ErrorKind::PermissionDenied)
+}
+
+/// Pick the refusal for a checked file: the group/world-readable case gets its own sentence,
+/// but only when the file is otherwise ours, so a foreign file is still plainly refused.
+fn unsafe_file(owned: bool, mode: u32) -> io::Error {
+    if owned && mode & 0o077 != 0 {
+        shared_file()
+    } else {
+        refused()
+    }
 }
 
 pub(crate) fn default_data() -> io::Result<PathBuf> {
@@ -293,7 +321,9 @@ async fn join_with_key_inner(
         https_system_roots: invitation.https_system_roots,
         ca_der: invitation.ca_der,
         certificate_der: response.certificate_der,
-        key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
+        key_der: encode_candidate_key(&Zeroizing::new(
+            key.private_key_to_pkcs8().map_err(|_| refused())?,
+        )),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -367,10 +397,8 @@ fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
     match std::fs::symlink_metadata(data.join("identity.json")) {
         Ok(_) => {
             let (stored, _) = load_snapshot(data)?;
-            return PKey::private_key_from_pkcs8(
-                &B64.decode(&stored.key_der).map_err(|_| refused())?,
-            )
-            .map_err(|_| refused());
+            return PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
+                .map_err(|_| refused());
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused()),
@@ -386,6 +414,8 @@ fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
     }
 }
 
+/// Read the join key saved before elevation, if one exists and is private to this account.
+/// Returns `Ok(None)` when there is none; a shared or foreign file is refused.
 fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Private>>> {
     use std::{
         io::Read,
@@ -407,7 +437,10 @@ fn read_pending_key(data: &Path) -> io::Result<Option<PKey<openssl::pkey::Privat
         || metadata.len() == 0
         || metadata.len() > 4096
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_file() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     let capacity = usize::try_from(metadata.len()).map_err(|_| refused())?;
     let mut bytes = Zeroizing::new(Vec::with_capacity(capacity));
@@ -558,7 +591,8 @@ fn enrolled_key(
             return Err(refused());
         }
     }
-    let key = PKey::private_key_from_pkcs8(&der(&stored.key_der)?).map_err(|_| refused())?;
+    let key = PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
+        .map_err(|_| refused())?;
     Ok(Some((key, snapshot)))
 }
 
@@ -769,12 +803,54 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
         tls.set_cert_store(trust.build());
     } else {
         // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        #[cfg(not(feature = "test-trust-anchor"))]
         tls.set_cert_store(
             infraternal_plugin_api::tls_roots::public_root_store()
                 .map_err(|_| ClientFailure::TlsConfiguration)?,
         );
+        #[cfg(feature = "test-trust-anchor")]
+        tls.set_cert_store(test_trust_anchor::store()?);
     }
     Ok(tls.build())
+}
+
+/// A test-only way to trust the CA of a disposable test server (#355, #483).
+///
+/// Release builds trust only the fixed public bundle, and since #483 they ignore
+/// `SSL_CERT_FILE` and `SSL_CERT_DIR`. A live test that runs the real CLI against
+/// its own throwaway server needs that server's CA trusted without touching the
+/// host's bundle. This module exists only when the non-default `test-trust-anchor`
+/// Cargo feature is on, so no runtime switch exists in a shipped binary: the
+/// variable name below is not in the image, and the production-trust gate
+/// (`scripts/release/check-production-trust.py`) refuses any image that has it.
+/// The named PEM file's certificates are added to the public store; nothing is
+/// replaced, and an unreadable or invalid file fails closed.
+#[cfg(feature = "test-trust-anchor")]
+mod test_trust_anchor {
+    use super::{ClientFailure, X509};
+    use openssl::x509::store::X509Store;
+
+    /// Names the PEM file whose certificates are trusted in addition to the public bundle.
+    const VARIABLE: &str = "INFRATERNAL_TEST_TRUST_ANCHOR";
+
+    /// The public-root store plus the certificates in `$INFRATERNAL_TEST_TRUST_ANCHOR`, if set.
+    pub(super) fn store() -> Result<X509Store, ClientFailure> {
+        let mut builder = infraternal_plugin_api::tls_roots::public_root_store_builder()
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        if let Some(path) = std::env::var_os(VARIABLE) {
+            let pem = std::fs::read(path).map_err(|_| ClientFailure::TlsConfiguration)?;
+            let roots = X509::stack_from_pem(&pem).map_err(|_| ClientFailure::TlsConfiguration)?;
+            if roots.is_empty() {
+                return Err(ClientFailure::TlsConfiguration);
+            }
+            for root in roots {
+                builder
+                    .add_cert(root)
+                    .map_err(|_| ClientFailure::TlsConfiguration)?;
+            }
+        }
+        Ok(builder.build())
+    }
 }
 
 /// Recognize authored Linux Mesh restore messages without exposing raw local errors.
@@ -813,6 +889,7 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
             "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
         }
         Some(Failure::IdentityMismatch) => IDENTITY_MISMATCH,
+        Some(Failure::SharedFile) => SHARED_FILE,
         Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
@@ -876,6 +953,7 @@ fn prepare(data: &Path) -> io::Result<()> {
     }
 }
 
+/// Create the data directory as `0700` and refuse one that is shared, foreign or a symlink.
 fn prepare_directory(data: &Path) -> io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     std::fs::DirBuilder::new()
@@ -887,7 +965,10 @@ fn prepare_directory(data: &Path) -> io::Result<()> {
         || metadata.uid() != nix::unistd::Uid::effective().as_raw()
         || metadata.permissions().mode() & 0o077 != 0
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_dir() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     Ok(())
 }
@@ -940,7 +1021,10 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() > 8192
     {
-        return Err(refused());
+        return Err(unsafe_file(
+            metadata.is_file() && metadata.uid() == nix::unistd::Uid::effective().as_raw(),
+            metadata.permissions().mode(),
+        ));
     }
     let mut bytes = Zeroizing::new(Vec::with_capacity(8192));
     file.take(8193).read_to_end(&mut bytes)?;
@@ -1010,6 +1094,14 @@ async fn direct_endpoint(
 /// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
+    // An enrollment without the server's direct address can only link over
+    // HTTPS, so it never gets App Windows lanes. The Hello says so, and the
+    // canvas asks the person to add the machine again (#146, D349). This
+    // reads the stored enrollment, not the lookup below, which can fail for a
+    // moment without meaning anything.
+    if stored.endpoint.is_none() {
+        infraternal_agent::host_os::enrolled_without_direct_endpoint();
+    }
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
     let https_root = if stored.https_system_roots {
         None
@@ -1023,7 +1115,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     };
     let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
-    let key_der = Zeroizing::new(B64.decode(&stored.key_der).map_err(|_| refused())?);
+    let key_der = decode_candidate_key(&stored.key_der)?;
     let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
     // A mismatched pair can never reconnect. Check it before starting the
     // supervisor, so the service reports the local problem immediately.
@@ -1047,6 +1139,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         https_root,
         https_system_roots: stored.https_system_roots,
         execution_uid: stored.execution_uid,
+        server_leaf: std::sync::Arc::new(ServerLeafFile::floor(data, stored.host_id)),
     };
     #[cfg(target_os = "linux")]
     let installation =
@@ -1084,6 +1177,114 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         installation.as_ref(),
     )))
     .await
+}
+
+/// Durable record of the newest server leaf this enrollment accepted (#559).
+///
+/// It lives in its own file, `server-leaf`, next to `identity.json` rather
+/// than inside it: the identity document refuses unknown fields, so an older
+/// infraternal agent after an A/B rollback could not read a document carrying
+/// a new one. The file holds one line, `<host id> <notBefore seconds>`. The
+/// host id ties the value to this enrollment: a file left behind by an earlier
+/// enrollment (possibly with another server and CA) is ignored, never used to
+/// refuse the new server.
+///
+/// A missing, unsafe or malformed file reads as "no floor yet". That is no
+/// weaker than a deleted file, which anyone able to write here could arrange,
+/// and it never turns local corruption into a host that cannot connect.
+struct ServerLeafFile {
+    /// The private enrollment data directory that holds `identity.json`.
+    data: PathBuf,
+    /// The enrolled host id the stored value belongs to.
+    host: uuid::Uuid,
+}
+
+impl ServerLeafFile {
+    /// Name of the floor file inside the data directory.
+    const NAME: &'static str = "server-leaf";
+
+    /// Build the enrollment's floor, starting from the stored value.
+    fn floor(
+        data: &Path,
+        host: uuid::Uuid,
+    ) -> infraternal_agent::server_leaf_floor::ServerLeafFloor {
+        let file = Self {
+            data: data.to_owned(),
+            host,
+        };
+        let newest = file.load();
+        infraternal_agent::server_leaf_floor::ServerLeafFloor::new(
+            newest,
+            std::sync::Arc::new(file),
+        )
+    }
+
+    /// Read the stored floor; `None` when absent, unsafe, malformed or from another enrollment.
+    fn load(&self) -> Option<i64> {
+        use std::{
+            io::Read,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+            .open(self.data.join(Self::NAME))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.len() > 64
+        {
+            return None;
+        }
+        let mut text = String::with_capacity(64);
+        file.take(64).read_to_string(&mut text).ok()?;
+        let (host, seconds) = text.trim_end().split_once(' ')?;
+        if host
+            != self
+                .host
+                .simple()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+        {
+            return None;
+        }
+        seconds.parse().ok().filter(|seconds: &i64| *seconds >= 0)
+    }
+}
+
+impl infraternal_agent::server_leaf_floor::ServerLeafStore for ServerLeafFile {
+    /// Replace the file atomically: write a private pending file, fsync it,
+    /// rename it over `server-leaf`, then fsync the directory.
+    fn remember(&self, not_before: i64) -> io::Result<()> {
+        use std::{
+            io::Write,
+            os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        };
+        let directory = std::fs::symlink_metadata(&self.data)?;
+        if !directory.is_dir()
+            || directory.uid() != nix::unistd::Uid::effective().as_raw()
+            || directory.permissions().mode() & 0o077 != 0
+        {
+            return Err(refused());
+        }
+        let pending = self
+            .data
+            .join(format!("server-leaf-{}.pending", uuid::Uuid::new_v4()));
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&pending)?;
+            writeln!(file, "{} {not_before}", self.host.simple())?;
+            file.sync_all()?;
+            std::fs::rename(&pending, self.data.join(Self::NAME))?;
+            std::fs::File::open(&self.data)?.sync_all()
+        })();
+        let _ = std::fs::remove_file(pending);
+        result
+    }
 }
 
 /// The existing installation is the publication boundary; no new key is generated.
@@ -1206,7 +1407,7 @@ impl infraternal_plugin_remote::identity_rotation::RotationPublisher for Identit
         {
             return Err(refused());
         }
-        stored.key_der = std::mem::take(&mut *pending.candidate_key_der);
+        stored.key_der = Zeroizing::new(std::mem::take(&mut *pending.candidate_key_der));
         stored.certificate_der = certificate_der;
         stored.completed_identity_rotation = Some(completed.clone());
         let bytes = serialize_identity_document(&stored)?;

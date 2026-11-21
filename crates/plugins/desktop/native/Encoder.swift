@@ -162,12 +162,20 @@ final class Encoder {
     private var lastBitrate = 0
     /// Chooses the bit rate from congestion feedback.
     private var adaptation = AdaptiveBitrate(maximum: 500_000)
+    /// Rate control of every session this encoder builds; fixed for the encoder's lifetime.
+    let mode: EncoderRateMode
 
-    /// Creates (or keeps) a low-latency hardware session for the given picture size.
+    /// Makes an encoder; no session exists until `configure`.
+    /// - Parameter mode: Rate control; by default the `EncoderRateMode.settingKey` user default.
+    init(mode: EncoderRateMode = EncoderRateMode(setting: UserDefaults.standard.string(forKey: EncoderRateMode.settingKey))) {
+        self.mode = mode
+    }
+
+    /// Creates (or keeps) a real-time hardware session for the given picture size.
     ///
     /// If the session already matches size, codec and frame rate, nothing happens. Otherwise the old
-    /// session is stopped and a new one built with no frame reordering, no periodic keyframes (they
-    /// waste bandwidth on a still desktop) and sRGB colour tagging. Throws `HelperFailure.invalid`
+    /// session is stopped and a new one built with `mode`'s rate control, no frame reordering, no
+    /// periodic keyframes (they waste bandwidth on a still desktop) and sRGB colour tagging. Throws `HelperFailure.invalid`
     /// for sizes outside 2...4096 per side, more than 4 Mi pixels, or a frame rate outside 1...240;
     /// throws `HelperFailure.unavailable` if no hardware encoder is available.
     /// - Parameters:
@@ -182,10 +190,10 @@ final class Encoder {
         if session != nil && self.width == width && self.height == height && codec == requestedCodec && frameRate == fps { return }
         stop(); self.width = width; self.height = height; codec = requestedCodec; frameRate = fps
         adaptation = AdaptiveBitrate(maximum: max(500_000, width * height * 3))
-        let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String:true,
-                    kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String:true] as CFDictionary
+        var spec: [String: Any] = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder as String:true]
+        if mode == .lowLatency { spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl as String] = true }
         let creation = VTCompressionSessionCreate(allocator:kCFAllocatorDefault,width:Int32(width),height:Int32(height),codecType:codec,
-            encoderSpecification:spec,imageBufferAttributes:nil,compressedDataAllocator:nil,outputCallback:encodedCallback,refcon:nil,compressionSessionOut:&session)
+            encoderSpecification:spec as CFDictionary,imageBufferAttributes:nil,compressedDataAllocator:nil,outputCallback:encodedCallback,refcon:nil,compressionSessionOut:&session)
         fputs("ENCODER creation_status=\(creation)\n",stderr)
         guard creation == noErr, let session else { throw HelperFailure.unavailable }
         do {
@@ -200,7 +208,7 @@ final class Encoder {
             // Periodic keyframes waste bandwidth on a static desktop.
             try set(kVTCompressionPropertyKey_MaxKeyFrameInterval,NSNumber(value:Int32.max))
             try set(kVTCompressionPropertyKey_ExpectedFrameRate,NSNumber(value:fps))
-            try set(kVTCompressionPropertyKey_AverageBitRate,NSNumber(value:max(500_000,width*height*3)))
+            try applyRate(max(500_000,width*height*3))
             guard VTCompressionSessionPrepareToEncodeFrames(session) == noErr else { throw HelperFailure.unavailable }
             let property = UnsafeMutablePointer<Unmanaged<CFTypeRef>?>.allocate(capacity:1)
             property.initialize(to:nil)
@@ -213,9 +221,20 @@ final class Encoder {
             // an explicit false or any other query error remains a refusal.
             let hardware = status == noErr ? reportedHardware : status == kVTPropertyNotSupportedErr
             let proof = status == noErr ? "property" : "required_spec"
-            fputs("METRIC hardware=\(hardware) hardware_status=\(status) hardware_proof=\(proof) fps=\(fps) codec=\(hevc ? "hevc" : "h264")\n",stderr)
+            fputs("METRIC hardware=\(hardware) hardware_status=\(status) hardware_proof=\(proof) fps=\(fps) codec=\(hevc ? "hevc" : "h264") rate_mode=\(mode.rawValue)\n",stderr)
             guard hardware else { throw HelperFailure.unavailable }
         } catch { stop(); throw error }
+    }
+
+    /// Sets the average bit rate and, in the ordinary real-time mode, the hard cap scaled to it,
+    /// so a raised sharp-refresh budget raises its cap too and the motion budget restores both.
+    private func applyRate(_ bitsPerSecond: Int) throws {
+        try set(kVTCompressionPropertyKey_AverageBitRate,NSNumber(value:bitsPerSecond))
+        let limits = mode.dataRateLimits(bitsPerSecond:bitsPerSecond)
+        if !limits.isEmpty {
+            try set(kVTCompressionPropertyKey_DataRateLimits,limits.flatMap { [NSNumber(value:$0.bytes),NSNumber(value:$0.seconds)] } as CFArray)
+        }
+        lastBitrate = bitsPerSecond
     }
 
     /// Sets one session property, logging and throwing `HelperFailure.unavailable` on failure.
@@ -280,9 +299,7 @@ final class Encoder {
         let rateChanged = lastBitrate != bitrate
         // A settled refresh gets a larger intra-frame budget; restore the motion
         // budget on the next submission instead of queueing quality work.
-        if lastBitrate != bitrate {
-            try set(kVTCompressionPropertyKey_AverageBitRate,NSNumber(value:bitrate)); lastBitrate = bitrate
-        }
+        if lastBitrate != bitrate { try applyRate(bitrate) }
         let configured = measure ? mach_absolute_time() : 0
         let result = EncodeResult(parameters:parameters, measure:measure)
         // The C callback owns only an unretained pointer. ARC may otherwise end
