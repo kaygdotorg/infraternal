@@ -2599,7 +2599,7 @@ export class TerminalClient {
         subscribe: (listener) => { this.glassListeners.add(listener); return () => { this.glassListeners.delete(listener); }; },
         read: (rect, base) => glass.readGlassCells(this.terminal, this.ghostty.renderer, rect, base),
       });
-    });
+    }).catch((error: unknown) => console.warn("infraternal: the glass cell reader did not load; cards over this terminal keep the static floor", error));
   }
 
   /** Wraps the renderer once: the cursor draw honours the hidden flag, and the cursor layer follows every pass. */

@@ -7,7 +7,7 @@
  * may throw, the layout must not move, and the chunk's arrival must not repaint a card that is already open with a different
  * box. (3) A look switch in a running page: the rules follow `--look-tint`. The files go to the evidence directory.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 import { glassReady, settled } from "./glass-settled";
@@ -15,6 +15,8 @@ import { SIZES, SURFACES, openScene, putPicture, removePicture, type Size } from
 
 /** Where the screenshots and the report lines land. */
 const OUT = tracerEvidencePath("glass-review");
+// `tracerEvidencePath` creates the parent only: the first append into a fresh evidence directory (looks.txt) failed with ENOENT.
+mkdirSync(OUT, { recursive: true });
 /** Looks under review: the product always has one active (the default is Tinted, 75% tint 25% blur), so "none" is not a state a page can be in. */
 const LOOKS = [["tinted", "&look=tinted"], ["frosted", "&look=frosted"], ["solid", "&look=solid"]] as const;
 
@@ -89,7 +91,8 @@ test("glass chunk fails to load: no error, no layout change, surfaces still open
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(String(e)));
-  page.on("console", (m) => { if (m.type() === "error") errors.push(`console: ${m.text()}`); });
+  // The browser itself logs "Failed to load resource" for every request the test refuses; that line is the refusal, not an app error.
+  page.on("console", (m) => { if (m.type() === "error" && !m.text().startsWith("Failed to load resource")) errors.push(`console: ${m.text()}`); });
   await interceptGlass(page, (route) => route.abort("failed"));
   await ctx.request.post("/__mock/reset");
   await page.goto("/?mock=1&proto=clusters&scene=1&fps=0&removal=1&bg=none&theme=ink");
@@ -104,6 +107,8 @@ test("glass chunk fails to load: no error, no layout change, surfaces still open
   appendFileSync(`${OUT}/chunk-failure.txt`, `${JSON.stringify({ errors, state })}\n`);
   expect(state.rules, "the rules chunk was blocked").toBe(false);
   expect(errors, `errors with the glass chunk blocked: ${errors.join(" | ")}`).toEqual([]);
+  // A request still in flight when the context closes would fail its route callback and be reported as an error of the run.
+  await page.unrouteAll({ behavior: "ignoreErrors" });
   await ctx.close();
 });
 
