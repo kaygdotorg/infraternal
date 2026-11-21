@@ -12,6 +12,10 @@
  *    frame at most, only after the screen changed or the card moved, and only while the card is open.
  *  - {@link trackPicture}, over a stream canvas, a video that fills its box or an image: {@link watchBackdrop} reads an 8x8
  *    average of the part of the picture under the card, at most every 250 ms, on a timer and never in an input handler.
+ *    A card that straddles the picture and the page around it (a window's ⋯ menu hangs over the window's edge) is solved for
+ *    both: the picture part is sampled, the part outside is read from the colours the page paints there ({@link outsideRange},
+ *    cached per box and theme, so it never runs in the frame a theme switch lands in), and the two ranges are merged, so the
+ *    worst contrast of either decides glass or solid.
  *
  * The cost of both is measured in `apps/tracer/test/glass-sample-cost.spec.ts` and `glass-terminal.spec.ts`; setting
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
@@ -47,14 +51,23 @@ export function rangeOfSample(rgba: ArrayLike<number>): BackdropRange {
   return { dark: lo.map((v) => pad(v, -1)) as unknown as Rgb, light: hi.map((v) => pad(v, 1)) as unknown as Rgb };
 }
 
+/** The range that covers both `a` and `b`: per channel the lower dark and the higher light, as {@link rangeOfSample} takes it. */
+export function mergeRanges(a: BackdropRange, b: BackdropRange): BackdropRange {
+  const pick = (x: Rgb, y: Rgb, f: (p: number, q: number) => number): Rgb => x.map((v, i) => f(v, y[i]!)) as unknown as Rgb;
+  return { dark: pick(a.dark, b.dark, Math.min), light: pick(a.light, b.light, Math.max) };
+}
+
 /** What {@link watchBackdrop} needs to know about one card and the picture behind it. */
 export interface BackdropWatch {
   /** The glass surface to adapt: it carries `data-glass-under` (set by `glass-under.on-demand.ts`) and is written the sampled opacity and colours. */
   marker: HTMLElement;
   /** The picture behind the card: a playing video, a canvas or an image. */
   source: HTMLVideoElement | HTMLCanvasElement | HTMLImageElement;
-  /** The part of `source` under the card, in the source's own pixels. Called on each sample, not on each frame. */
-  region: () => { x: number; y: number; width: number; height: number } | null;
+  /**
+   * The part of `source` under the card, in the source's own pixels. Called on each sample, not on each frame. `outside` is the
+   * backdrop range of the part of the card that is not over `source`, when the card straddles its edge.
+   */
+  region: () => { x: number; y: number; width: number; height: number; outside?: BackdropRange } | null;
   /** The active theme and the card level, read on each sample so a change is picked up. */
   theme: () => Theme;
   level: () => number;
@@ -130,7 +143,8 @@ export function watchBackdrop(watch: BackdropWatch): () => void {
     const region = watch.region();
     const rgba = region ? readSample(watch.source, region) : null;
     if (!rgba) return;
-    const sol = solveFor(watch.theme(), watch.level(), rangeOfSample(rgba), solid);
+    const sampled = rangeOfSample(rgba);
+    const sol = solveFor(watch.theme(), watch.level(), region!.outside ? mergeRanges(sampled, region!.outside) : sampled, solid);
     const signature = `${sol.solid}|${sol.alpha}|${Object.values(sol.colours).join()}`;
     if (signature === last) return;
     last = signature;
@@ -294,25 +308,87 @@ export function trackGrid(surface: HTMLElement, grid: GlassGrid): Tracker {
   return { refresh, stop(): void { cancelAnimationFrame(frame); unsubscribe(); clearSolution(surface); } };
 }
 
+/** A 1x1 canvas that does the colour maths for {@link paintedAt}: it parses any CSS colour and composites layers exactly as the page does. */
+let swatch: CanvasRenderingContext2D | null | undefined;
+
 /**
- * Tracks a picture under `surface` if it can be sampled faithfully: a stream canvas, an image or a video that fills its box,
- * with the card wholly inside it. Otherwise returns `undefined` and the card stays on the static floor.
+ * The colour the page paints at client point (`x`, `y`) outside `surface`: the background colours of the element there and
+ * its ancestors, layered over the theme's page colour `base`. Returns `null` when the point is over something this cannot
+ * read (another picture, a terminal screen), so the caller keeps the static floor rather than guess. Gradients and images
+ * are not read: only plain background colours.
+ */
+function paintedAt(surface: HTMLElement, x: number, y: number, base: Rgb): Rgb | null {
+  swatch ??= document.createElement("canvas").getContext("2d", { willReadFrequently: true }) ?? null;
+  if (!swatch) return null;
+  const hit = document.elementsFromPoint(x, y).find((el) => el !== surface && !surface.contains(el) && !el.classList.contains("ui-glass-bed"));
+  const layers: string[] = [];
+  for (let el: Element | null = hit ?? null; el; el = el.parentElement) {
+    if (el.matches("video, img, canvas, [data-glass-picture], [data-glass-grid]")) return null;
+    const bg = getComputedStyle(el).backgroundColor;
+    if (bg && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") layers.push(bg);
+  }
+  swatch.clearRect(0, 0, 1, 1);
+  swatch.fillStyle = `rgb(${base.join(",")})`;
+  swatch.fillRect(0, 0, 1, 1);
+  for (const colour of layers.reverse()) { swatch.fillStyle = colour; swatch.fillRect(0, 0, 1, 1); }
+  const d = swatch.getImageData(0, 0, 1, 1).data;
+  return [d[0]!, d[1]!, d[2]!];
+}
+
+/** How many points per side of the card's box {@link outsideRange} looks at. */
+const OUTSIDE_POINTS = 5;
+
+/**
+ * The backdrop range of the part of `surface` that lies outside `picture` (a card hanging over the picture's edge), from the
+ * colours the page paints there, or `undefined` when the card is wholly inside the picture, `null` when some part cannot be read.
+ */
+export function outsideRange(surface: HTMLElement, picture: DOMRect, base: Rgb): BackdropRange | null | undefined {
+  const s = surface.getBoundingClientRect();
+  const colours: number[] = [];
+  let any = false;
+  for (let i = 0; i < OUTSIDE_POINTS; i++) for (let j = 0; j < OUTSIDE_POINTS; j++) {
+    const x = s.left + 1 + (s.width - 2) * (i / (OUTSIDE_POINTS - 1)), y = s.top + 1 + (s.height - 2) * (j / (OUTSIDE_POINTS - 1));
+    if (x >= picture.left && x <= picture.right && y >= picture.top && y <= picture.bottom) continue;
+    any = true;
+    const c = paintedAt(surface, x, y, base);
+    if (!c) return null;
+    colours.push(c[0], c[1], c[2], 255);
+  }
+  return any ? rangeOfSample(colours) : undefined;
+}
+
+/**
+ * Tracks a picture under `surface` if it can be sampled faithfully: a stream canvas, an image or a video that fills its box.
+ * A card wholly inside the picture is sampled there; one that straddles the picture's edge is sampled over the part inside
+ * and read over the part outside ({@link outsideRange}), and the worst of the two decides. Otherwise (the card is not over
+ * the picture, or the part outside cannot be read) returns a tracker that leaves the card on the static floor.
  */
 export function trackPicture(surface: HTMLElement, picture: HTMLElement): Tracker | undefined {
   const ok = picture instanceof HTMLCanvasElement || ((picture instanceof HTMLVideoElement || picture instanceof HTMLImageElement) && getComputedStyle(picture).objectFit === "fill");
   if (!ok) return undefined;
   const source = picture as HTMLCanvasElement | HTMLVideoElement | HTMLImageElement;
+  // The outside answer is kept while the two boxes and the theme stay as they were: it reads computed styles, which is work for a timer tick, not for every one.
+  let cached: { key: string; range: BackdropRange | null | undefined } | undefined;
   const stop = watchBackdrop({
     marker: surface,
     source,
     region: () => {
       const p = picture.getBoundingClientRect(), s = surface.getBoundingClientRect();
-      // Wholly inside the picture, or the part outside is something else (bars, the page): then the floor stays.
-      if (s.left < p.left || s.right > p.right || s.top < p.top || s.bottom > p.bottom) return null;
+      const left = Math.max(s.left, p.left), right = Math.min(s.right, p.right), top = Math.max(s.top, p.top), bottom = Math.min(s.bottom, p.bottom);
+      if (right - left < 1 || bottom - top < 1) return null;
+      let outside: BackdropRange | null | undefined;
+      if (s.left < p.left || s.right > p.right || s.top < p.top || s.bottom > p.bottom) {
+        const theme = activeGlass().theme;
+        const key = `${theme.name}|${[s, p].map((r) => [r.left, r.top, r.width, r.height].map(Math.round).join(",")).join("|")}`;
+        if (cached?.key !== key) cached = { key, range: outsideRange(surface, p, hexToRgb(theme.bg)) };
+        outside = cached.range;
+        // Something under the outside part that cannot be read: the floor stays.
+        if (outside === null) return null;
+      }
       const width = source instanceof HTMLVideoElement ? source.videoWidth : source instanceof HTMLImageElement ? source.naturalWidth : source.width;
       const height = source instanceof HTMLVideoElement ? source.videoHeight : source instanceof HTMLImageElement ? source.naturalHeight : source.height;
       const sx = width / p.width, sy = height / p.height;
-      return { x: (s.left - p.left) * sx, y: (s.top - p.top) * sy, width: s.width * sx, height: s.height * sy };
+      return { x: (left - p.left) * sx, y: (top - p.top) * sy, width: (right - left) * sx, height: (bottom - top) * sy, ...(outside ? { outside } : {}) };
     },
     theme: () => activeGlass().theme,
     level: () => activeGlass().level,
