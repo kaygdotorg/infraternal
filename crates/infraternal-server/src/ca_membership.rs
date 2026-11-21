@@ -1,7 +1,7 @@
 //! Reads explicit current CA-administrator generations under live passkey-session authority; the owner flag is bootstrap-only [168], #78.
 
 use crate::ca::CaError;
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 /// A copy's membership binding is public metadata, never a signing key.
 pub struct Membership {
@@ -65,9 +65,53 @@ async fn require_session(
     // and session revocation with the caller's eventual in-memory installation.
     sqlx::query("UPDATE ca_administrators SET generation=generation WHERE user_id=(SELECT user_id FROM sessions WHERE token_hash=?)")
         .bind(token_hash).execute(&mut **tx).await.map_err(|_|CaError)?;
-    let row=sqlx::query("SELECT a.user_id,a.generation FROM ca_administrators a JOIN sessions s ON s.user_id=a.user_id JOIN passkeys p ON p.id=s.passkey_id AND p.user_id=s.user_id WHERE s.token_hash=? AND a.active=1 AND s.unlocked=1 AND s.expires>MAX(?,unixepoch()) AND (?=0 OR s.fresh>MAX(?,unixepoch())-300) AND s.fresh<=MAX(?,unixepoch())")
-        .bind(token_hash).bind(now).bind(fresh).bind(now).bind(now)
-        .fetch_optional(&mut **tx).await.map_err(|_|CaError)?.ok_or(CaError)?;
+    let row = sqlx::query(MEMBERSHIP)
+        .bind(token_hash)
+        .bind(now)
+        .bind(fresh)
+        .bind(now)
+        .bind(now)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| CaError)?
+        .ok_or(CaError)?;
+    Ok(Membership {
+        user: row.get("user_id"),
+        generation: row.get("generation"),
+    })
+}
+
+/// The one membership query behind every check: an active administrator whose session is
+/// unlocked and unexpired and whose passkey still belongs to them. The third bind turns on the
+/// 300-second freshness requirement.
+const MEMBERSHIP: &str = "SELECT a.user_id,a.generation FROM ca_administrators a JOIN sessions s ON s.user_id=a.user_id JOIN passkeys p ON p.id=s.passkey_id AND p.user_id=s.user_id WHERE s.token_hash=? AND a.active=1 AND s.unlocked=1 AND s.expires>MAX(?,unixepoch()) AND (?=0 OR s.fresh>MAX(?,unixepoch())-300) AND s.fresh<=MAX(?,unixepoch())";
+
+/// Check a live administrator session with a plain read, outside any transaction.
+///
+/// Every CA route runs this gate first, so a request without a live administrator session is
+/// refused before anything takes SQLite's writer lock (#559, J1099). The read runs on the pool,
+/// not inside the caller's later transaction: a read that opened a deferred transaction and then
+/// wrote would fail with a busy snapshot whenever another writer committed in between. It grants
+/// nothing by itself. Every mutation still repeats [`require_live`] or [`require_current`] under
+/// the writer lock, which is what serializes it with revocation.
+/// # Errors
+/// Refuses absent or revoked roles, expired or pending sessions, deleted credentials, or a
+/// storage failure, all as the same opaque `CaError`.
+pub async fn peek_live(
+    pool: &SqlitePool,
+    token_hash: &str,
+    now: i64,
+) -> Result<Membership, CaError> {
+    let row = sqlx::query(MEMBERSHIP)
+        .bind(token_hash)
+        .bind(now)
+        .bind(false)
+        .bind(now)
+        .bind(now)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| CaError)?
+        .ok_or(CaError)?;
     Ok(Membership {
         user: row.get("user_id"),
         generation: row.get("generation"),
