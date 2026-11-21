@@ -102,6 +102,11 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 const REFUSAL_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
+/// Disconnected, still-resumable rows one account keeps. A new connection evicts that account's oldest beyond
+/// this, so one account's connect-and-drop loop can no longer fill [`MAX_RESUME_ROWS`] and refuse every other
+/// account's new sockets (#572 finding 4). 64 is four times the live limit: a person whose 16 tabs all drop and
+/// reconnect several times inside the 120 s window still resumes each of them. The global cap stays the backstop.
+const MAX_USER_RESUME_ROWS: i64 = 64;
 // Reject further AttachTerm requests on a socket at this bound.
 pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
@@ -1904,6 +1909,14 @@ async fn new_connection(
     if active >= MAX_USER_CONNECTION_ROWS {
         return Err(sqlx::Error::Protocol(CONNECTION_LIMIT_ERROR.into()));
     }
+    // Keep only this account's newest resumable rows (by disconnect time), so its own churn evicts its own
+    // oldest resume first and never spends another account's share of the global cap.
+    sqlx::query("DELETE FROM websocket_connections WHERE user_id=? AND active=0 AND connection_id NOT IN (SELECT connection_id FROM websocket_connections WHERE user_id=? AND active=0 ORDER BY expires_at DESC LIMIT ?)")
+        .bind(user_id)
+        .bind(user_id)
+        .bind(MAX_USER_RESUME_ROWS - 1)
+        .execute(&mut *transaction)
+        .await?;
     let retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE active=1 OR expires_at>=?",
     )
