@@ -7,7 +7,7 @@
  * may throw, the layout must not move, and the chunk's arrival must not repaint a card that is already open with a different
  * box. (3) A look switch in a running page: the rules follow `--look-tint`. The files go to the evidence directory.
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { expect, test, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 import { glassReady, settled } from "./glass-settled";
@@ -15,6 +15,8 @@ import { SIZES, SURFACES, openScene, putPicture, removePicture, type Size } from
 
 /** Where the screenshots and the report lines land. */
 const OUT = tracerEvidencePath("glass-review");
+// `tracerEvidencePath` creates the parent only: the first append into a fresh evidence directory (looks.txt) failed with ENOENT.
+mkdirSync(OUT, { recursive: true });
 /** Looks under review: the product always has one active (the default is Tinted, 75% tint 25% blur), so "none" is not a state a page can be in. */
 const LOOKS = [["tinted", "&look=tinted"], ["frosted", "&look=frosted"], ["solid", "&look=solid"]] as const;
 
