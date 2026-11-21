@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.3"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462#bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044#ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "gotatun-crypto"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462#bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044#ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044"
 dependencies = [
  "ring",
  "x25519-dalek",
@@ -1609,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "gotatun-packet"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462#bd6eaebbdc34eb9a7c30e52c70e94a9bb38aa462"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044#ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044"
 dependencies = [
  "bitfield-struct",
  "bytes",
