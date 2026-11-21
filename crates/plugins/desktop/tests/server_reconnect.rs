@@ -41,14 +41,22 @@ impl WireLane for Lane {
     }
     fn retire(&self) {}
 }
+/// What the simulated source answers when the server re-prepares after the first lane ended.
+#[derive(Clone, Copy)]
+enum Reprepare {
+    /// The window is still open, so the re-preparation proceeds.
+    Open,
+    /// The window is gone; the reply carries this `reason` word, or none when `None`.
+    Gone(Option<&'static str>),
+}
+
 /// Simulates the host source before and after its first capture lane ends.
 struct Node {
     lane: Arc<Lane>,
     opens: AtomicUsize,
     second_lane: Option<Arc<Lane>>,
-    /// Reports the captured Mac window gone on the first re-preparation.
-    /// When set, a re-prepare after the first lane answers `gone`, with this `reason` word (`Some(None)` sends none).
-    closed_during_disconnect: Option<Option<&'static str>>,
+    /// What a re-preparation after the first lane answers about the captured Mac window.
+    closed_during_disconnect: Reprepare,
     floors: Mutex<Vec<u64>>,
     preparations: Mutex<Vec<Start>>,
     prepared: Notify,
@@ -84,7 +92,7 @@ impl NodeHost for Node {
                         .unwrap_or(0),
                 );
                 self.prepared.notify_one();
-                if let (Some(word), true) = (
+                if let (Reprepare::Gone(word), true) = (
                     self.closed_during_disconnect,
                     self.opens.load(Ordering::Relaxed) > 0,
                 ) {
@@ -169,7 +177,7 @@ async fn source_restart_reprepares_the_last_forwarded_size_instead_of_the_initia
         }),
         opens: AtomicUsize::new(0),
         second_lane: None,
-        closed_during_disconnect: None,
+        closed_during_disconnect: Reprepare::Open,
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
         prepared: Notify::new(),
@@ -279,7 +287,7 @@ async fn source_restart_receives_the_server_video_floor_and_continues_live_media
             media: tokio::sync::Mutex::new(second_rx),
             controls,
         })),
-        closed_during_disconnect: None,
+        closed_during_disconnect: Reprepare::Open,
         floors: Mutex::new(Vec::new()),
         opens: AtomicUsize::new(0),
         preparations: Mutex::new(Vec::new()),
@@ -371,7 +379,7 @@ async fn ended_while_disconnected(reason_word: Option<&'static str>, expected: u
             controls,
         }),
         second_lane: None,
-        closed_during_disconnect: Some(reason_word),
+        closed_during_disconnect: Reprepare::Gone(reason_word),
         opens: AtomicUsize::new(0),
         floors: Mutex::new(Vec::new()),
         preparations: Mutex::new(Vec::new()),
