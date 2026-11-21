@@ -82,6 +82,24 @@ import Foundation
         expect(history.prepare(surface, at: 2), "near change")
         expect(history.tileRects == [PixelDamageBounds(x: 40, y: 50, width: 24, height: 7)], "close rows merge, got \(String(describing: history.tileRects))")
         history.delivered()
+        // Two changes on the same rows, far apart: split at the unchanged columns between them.
+        paint(surface, x: 2, y: 100, width: 3, height: 3, byte: 5)
+        paint(surface, x: 150, y: 101, width: 3, height: 2, byte: 5)
+        expect(history.prepare(surface, at: 2.5), "same-row change")
+        expect(history.tileRects == [PixelDamageBounds(x: 2, y: 100, width: 3, height: 3), PixelDamageBounds(x: 150, y: 101, width: 3, height: 2)],
+               "a wide band splits at unchanged columns, got \(String(describing: history.tileRects))")
+        history.delivered()
+        // Only changed rows are copied into the history, and the history stays exact.
+        expect(!history.prepare(surface, at: 2.6), "history equals the picture after a partial copy")
+        history.delivered()
+        // A wrap: the caret leaves the end of one line and a letter starts the next. The rows merge
+        // into one band wider than the limit, which the column split cuts to two small rectangles.
+        paint(surface, x: 180, y: 60, width: 2, height: 10, byte: 6)
+        paint(surface, x: 1, y: 72, width: 6, height: 10, byte: 6)
+        expect(history.prepare(surface, at: 2.7), "wrap change")
+        expect(history.tileRects == [PixelDamageBounds(x: 1, y: 72, width: 6, height: 10), PixelDamageBounds(x: 180, y: 60, width: 2, height: 10)],
+               "a wrap stays tiles, got \(String(describing: history.tileRects))")
+        history.delivered()
         // Past the area limit the picture goes to video.
         paint(surface, x: 0, y: 0, width: 100, height: 30, byte: 3)
         expect(history.prepare(surface, at: 3), "large change")

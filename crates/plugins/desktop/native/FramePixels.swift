@@ -208,8 +208,9 @@ final class FramePixels {
     private(set) var changedPixels = 0
     /// False when scanning stopped early because the change was too large to be a cursor.
     private(set) var damageBoundsComplete = true
-    /// Largest changed area, in pixels, that `prepare` still describes as tile rectangles.
-    /// Zero (the default) turns the tile pass off, so only the caret scan runs.
+    /// Largest changed area, in pixels, that `prepare` still describes as tile rectangles, counted
+    /// after splitting them at unchanged columns. Zero (the default) turns the tile pass off, so
+    /// only the caret scan runs.
     var tileAreaLimit = 0
     /// The changed rectangles of the latest prepared picture, at most `TileBands.maximumRectangles`
     /// of them with a total area within `tileAreaLimit`, top to bottom. `nil` when the picture is
@@ -260,7 +261,11 @@ final class FramePixels {
         var same = comparable
         var minX = w, minY = h, maxX = -1, maxY = -1
         var transition: PixelTransition?
-        var bands = TileBands(limit: tileAreaLimit)
+        // Row bands are tracked up to four times the limit: two changes on nearby rows (the caret left
+        // at the end of a line and the letter typed at the start of the next) form one wide band that
+        // the column split below cuts back to two small rectangles. The limit applies after the split.
+        var bands = TileBands(limit: tileAreaLimit * 4)
+        var splitRectangles: [PixelDamageBounds]?
         changedRows.removeAll(keepingCapacity: true)
         if comparable {
             bytes.withUnsafeBytes { old in
@@ -296,6 +301,9 @@ final class FramePixels {
                         }
                     }
                 }
+                if let rectangles = bands.rectangles {
+                    splitRectangles = Self.splitAtUnchangedColumns(rectangles, current: base, currentStride: stride, previous: previous, previousStride: rowBytes)
+                }
                 if changedPixels > 0, damageBoundsComplete {
                     let bounds = PixelDamageBounds(
                         x: minX,
@@ -314,7 +322,9 @@ final class FramePixels {
             }
         }
         prepared = true; alreadyDelivered = same
-        tileRects = comparable && !same ? bands.rectangles : nil
+        tileRects = comparable && !same ? splitRectangles.flatMap { rects in
+            rects.reduce(0) { $0 + $1.width * $1.height } <= tileAreaLimit ? rects : nil
+        } : nil
         if same { damageKind = .unchanged; return false }
         if comparable, changedPixels > 0 {
             let bounds = PixelDamageBounds(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
@@ -393,6 +403,51 @@ final class FramePixels {
               current.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self)
                 == previous.loadUnaligned(fromByteOffset: column * 4, as: UInt32.self) { column -= 1 }
         return column
+    }
+
+    /// Unchanged columns that split one tile rectangle in two. Narrower gaps cost less to send
+    /// than the extra rectangle header and the lost DEFLATE context.
+    private static let tileColumnGap = 32
+
+    /// Splits each rectangle where at least `tileColumnGap` columns are unchanged in all its rows,
+    /// and trims each part to the rows that changed inside it. A row band holding two separate
+    /// changes (a clock at the left of a status bar and a spinner at its right) becomes two small
+    /// rectangles instead of one as wide as the window. If splitting would need more than
+    /// `TileBands.maximumRectangles`, the rectangles are returned unsplit. The rectangles are
+    /// within the tile area limit, so this compares at most that many pixels.
+    private static func splitAtUnchangedColumns(
+        _ rectangles: [PixelDamageBounds],
+        current: UnsafeRawPointer, currentStride: Int,
+        previous: UnsafeRawPointer, previousStride: Int
+    ) -> [PixelDamageBounds] {
+        func differs(_ x: Int, _ y: Int) -> Bool {
+            current.loadUnaligned(fromByteOffset: y * currentStride + x * 4, as: UInt32.self)
+                != previous.loadUnaligned(fromByteOffset: y * previousStride + x * 4, as: UInt32.self)
+        }
+        var result: [PixelDamageBounds] = []
+        for rect in rectangles {
+            var changed = [Bool](repeating: false, count: rect.width)
+            for y in rect.y..<(rect.y + rect.height) {
+                for column in 0..<rect.width where !changed[column] && differs(rect.x + column, y) { changed[column] = true }
+            }
+            var column = 0
+            while column < rect.width {
+                guard changed[column] else { column += 1; continue }
+                var end = column, gap = 0, probe = column + 1
+                while probe < rect.width, gap < tileColumnGap {
+                    if changed[probe] { end = probe; gap = 0 } else { gap += 1 }
+                    probe += 1
+                }
+                let left = rect.x + column, width = end - column + 1
+                var top = rect.y + rect.height, bottom = rect.y - 1
+                for y in rect.y..<(rect.y + rect.height) where (left..<(left + width)).contains(where: { differs($0, y) }) {
+                    top = min(top, y); bottom = max(bottom, y)
+                }
+                result.append(PixelDamageBounds(x: left, y: top, width: width, height: bottom - top + 1))
+                column = end + 1
+            }
+        }
+        return result.count <= TileBands.maximumRectangles ? result : rectangles
     }
 
     /// Builds a tile update (see `tileUpdate(width:height:rects:pixels:)`) for `rects` from the
