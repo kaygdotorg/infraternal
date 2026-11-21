@@ -39,3 +39,48 @@ test("a session answer asked for early is dropped when the server needs first-ru
   await expect(page.locator("#setup-card")).toBeVisible();
   await expect(page.locator("#login-passkey")).toHaveCount(0);
 });
+
+const CANVAS_SHEETS = ["canvas", "clusters", "mesh", "sessions", "addhost"];
+
+test("the page links fingerprinted sheets, and the five canvas sheets are off the render-blocking path", async ({ page }) => {
+  const html = await (await page.request.get("/")).text();
+  const sheets = [...html.matchAll(/<link rel="stylesheet" href="\.\/([^"]+)"([^>]*)>/g)].map((match) => ({ file: match[1]!, rest: match[2]! }));
+  expect(sheets).toHaveLength(8);
+  for (const { file, rest } of sheets) {
+    expect(file).toMatch(/^[a-z]+\.[0-9a-f]{10}\.css$/);
+    const deferred = CANVAS_SHEETS.some((name) => file.startsWith(`${name}.`));
+    expect(rest.includes('media="print"') && rest.includes("data-deferred")).toBe(deferred);
+    const response = await page.request.get(`/${file}`);
+    expect(response.status()).toBe(200);
+  }
+});
+
+test("the sign-in screen does not wait for the canvas sheets", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: false } }));
+  await page.route("**/auth/session", (route) => route.fulfill({ status: 401, json: {} }));
+  let released = false;
+  await page.route(/\/(?:canvas|clusters|mesh|sessions|addhost)\.[0-9a-f]{10}\.css$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    released = true;
+    await route.continue();
+  });
+  await page.goto("/");
+  await expect(page.locator("#login-passkey")).toBeVisible();
+  expect(released).toBe(false);
+});
+
+test("the canvas is not drawn until its sheets have arrived, and then it is styled", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  let released = false;
+  await page.route(/\/clusters\.[0-9a-f]{10}\.css$/, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    released = true;
+    await route.continue();
+  });
+  await page.goto("/?proto=product&fresh=1&bg=none");
+  await expect(page.locator(".ui-window").first()).toBeVisible();
+  expect(released).toBe(true);
+  // Every deferred sheet is now live: none is left on the print medium.
+  expect(await page.evaluate(() => [...document.querySelectorAll("link[data-deferred]")].map((link) => (link as HTMLLinkElement).media))).toEqual(["all", "all", "all", "all", "all"]);
+});
