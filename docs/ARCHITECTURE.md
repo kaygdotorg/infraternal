@@ -56,7 +56,7 @@ docs/user      user docs, published at /docs and shown in the app's Docs view (D
 packages/protocol  the browser side of the wire protocol: codec and stream decoder (TypeScript)
 packages/ui    shared tokens and components (vendored from calternal until @kayg/ui exists)
 contracts/     protocol, plugin and action specs (written before code)
-scripts/       verify (fast | integration | browser | bench), deploy, sync
+scripts/       verify (quick | iterate | fast | nightly | integration | browser | latency | bench), release/ (build, publish and deploy)
 ```
 
 Planned, not in the tree yet: `apps/website` (infraternal.com) and `apps/docs`
