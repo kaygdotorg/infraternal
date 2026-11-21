@@ -7,6 +7,9 @@
  * ships (`glass-scenes.ts`): no mockup, nothing to skip. Each case also asserts, from a per-frame log, that the surface already
  * carried `data-glass-under="picture"` in the first frame it was visible, so the very first thing a person sees is the safe one.
  *
+ * Every case also asserts that no element of the surface carries a text shadow (no glow behind text), and that the surface is the
+ * solid card where glass cannot hold the line (the floor, and a sampled hard backdrop) and glass elsewhere (#448, 2026-11-20).
+ *
  * Two passes per case. `adaptive`: a picture the glass can sample, measured once the glass has settled (nothing animating, the
  * tint and text colours unchanged over a sample interval). `floor`: a picture it cannot sample, so the surface never leaves the
  * static floor; that is the surface exactly as the first frame shows it, and it must reach 4.5:1 on its own.
@@ -15,7 +18,7 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { expect, test } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
-import { frames, LINE, openScene, PICTURES, putPicture, removePicture, SIZES, surfacesFor, watchFirstFrame } from "./glass-scenes";
+import { frames, LINE, mustBeSolid, openScene, paintOf, PICTURES, putPicture, removePicture, SIZES, surfacesFor, watchFirstFrame } from "./glass-scenes";
 import { measure } from "./glass-pixels";
 import { settled } from "./glass-settled";
 
@@ -44,6 +47,14 @@ for (const size of SIZES) {
               const first = (await frames(page)).find((f) => f.shown);
               expect.soft(first, `${picture}: the surface was painted`).toBeDefined();
               expect.soft(first?.under, `${picture}: marked as over a picture in the first frame it is visible`).toBe("picture");
+              // No glow, ever (TASTE): nothing in the surface carries a text shadow. And the surface is solid where glass cannot hold the
+              // line (the floor is solid over any picture; a sampled one only over a hard backdrop), glass otherwise.
+              const paint = await paintOf(page, surface.selector);
+              expect.soft(paint.shadowed, `${picture}: elements with a text shadow`).toEqual([]);
+              // Sampled pictures: solid over a hard backdrop, glass over a matching or middling one. The ⋯ menu mounts in the window, not wholly
+              // inside the picture, so it stays on the static floor (solid) and says nothing about the sampled glass; a split picture likewise.
+              if (pass === "floor" || mustBeSolid(scheme, picture)) { expect.soft(paint.alpha, `${picture}: solid fill`).toBe(1); expect.soft(paint.blur, `${picture}: solid has no blur`).toBe(0); }
+              else if (surface.id !== "menu" && picture !== "split") expect.soft(paint.alpha, `${picture}: stays glass`).toBeLessThan(1);
               const results = await measure(page, surface.selector);
               expect(results.length, "text runs found").toBeGreaterThan(0);
               if (results[0]!.ratio < LINE) writeFileSync(`${OUT}/low-${size.id}-${scheme}-${surface.id}-${picture}-${pass}-card${card}.png`, results.hidden);
