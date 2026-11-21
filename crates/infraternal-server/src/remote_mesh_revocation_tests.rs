@@ -239,7 +239,7 @@ async fn pending_person_removal_pushes_peer_withdrawal_before_the_receipt() {
     assert_eq!(cleanup_person, person);
     let revision = mesh_revision(&pool).await;
     authority
-        .confirm_removal_cleanup(host, person, None)
+        .confirm_removal_cleanup(host, person, None, None)
         .await
         .unwrap();
     let revoked: bool =

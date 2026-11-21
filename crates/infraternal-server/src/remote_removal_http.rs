@@ -1,6 +1,7 @@
 //! Bounded same-origin adapters for the remote plugin's removal action: a dry run, then the
-//! removal, inside the browser's admin window [16][168], #87, D339.
-//! D369 Forget uses that same window to cancel unreachable cleanup without a machine-side effect.
+//! removal, inside the browser's admin window [16][168], #87, D339. Also the owner's read-only
+//! view of the access files a removal's revocation reported (D356). D369 Forget uses that same
+//! window to cancel unreachable cleanup without a machine-side effect.
 use crate::{auth::Auth, remote_removal::Removal};
 use axum::{
     Json, Router,
@@ -37,7 +38,8 @@ pub struct Finish {
     host_id: Uuid,
     review: String,
 }
-/// Mount the bounded same-origin removal and Forget routes with shared owner authority.
+/// Mount the bounded same-origin removal and Forget routes and the owner's read-only access
+/// report, all with shared owner authority and bounded in body size, time and concurrency.
 pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
     Router::new()
         .route("/remote/hosts/actions", post(actions))
@@ -45,6 +47,7 @@ pub(crate) fn router(auth: Auth, removal: Removal) -> Router {
         .route("/remote/hosts/remove/finish", post(finish))
         .route("/remote/hosts/reauth/start", post(reauth_start))
         .route("/remote/hosts/reauth/finish", post(reauth_finish))
+        .route("/remote/hosts/access-report", post(access_report))
         .route("/remote/hosts/forget", post(forget))
         .layer(axum::extract::DefaultBodyLimit::max(32768))
         .layer(axum::middleware::from_fn(deadline))
@@ -180,6 +183,33 @@ async fn reauth_finish(
         .await
         .map_err(|error| failure(&error))?;
     Ok(Json(serde_json::json!({"ok":true})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+/// The host whose D356 access report the owner reads.
+pub struct ReportRequest {
+    /// The host to read.
+    host_id: Uuid,
+}
+
+/// D356: read-only. POST like the other removal routes, so that the browser
+/// always sends the Origin this checks; it changes nothing.
+async fn access_report(
+    State(api): State<Api>,
+    incoming: axum::extract::Request,
+) -> Result<Json<Value>, StatusCode> {
+    // The shared owner admission answers an ended session 401, a non-owner
+    // 403 and an expired admin window 428 (#498), so the browser can ask for
+    // a passkey tap instead of treating the report as forbidden.
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
+    let input: ReportRequest = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    match api.removal.access_report(&token, input.host_id, now).await {
+        Ok(Some(report)) => Ok(Json(report)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(crate::auth::Error::Storage(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(_) => Err(StatusCode::FORBIDDEN),
+    }
 }
 
 /// A Forget selection carries only a host UUID; the transaction derives ownership and state.

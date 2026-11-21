@@ -33,7 +33,7 @@ infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optio
 infraternal-protocol.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-shim = { workspace = true, features = ["async-fd"] }
-nix = { workspace = true, features = ["inotify", "event"] }
+nix = { workspace = true, features = ["inotify", "event", "dir"] }
 tokio = { workspace = true, features = ["net", "io-util", "process", "time"] }
 uuid.workspace = true
 serde.workspace = true

@@ -30,6 +30,8 @@ struct Removed {
     /// A clone of the server's own enrollment store: it shares the change
     /// signal a removal waits on.
     store: crate::enrollment::EnrollmentStore,
+    /// Live host registry shared with the removal publisher.
+    hosts: RemoteHosts,
     /// The removed host.
     host: Uuid,
     /// The host's enrolled certificate, still valid and individually unrevoked.
@@ -109,8 +111,9 @@ async fn removed() -> Removed {
         .await
         .unwrap();
     let waiter = store.clone();
+    let hosts = RemoteHosts::default();
     let api = Api {
-        hosts: RemoteHosts::default(),
+        hosts: hosts.clone(),
         store,
         admission: Arc::new(Semaphore::new(4)),
         sources: Arc::new(crate::remote_admission::SourceSlots::new(4)),
@@ -131,6 +134,7 @@ async fn removed() -> Removed {
     Removed {
         pool,
         store: waiter,
+        hosts,
         host,
         certificate,
         key,
@@ -279,13 +283,28 @@ async fn receipt(socket: &mut Socket) {
 
 /// Reply to a `terminal.login.revoke` call with a durable receipt.
 async fn answer_receipt(socket: &mut Socket, call_id: u32, action: &str) {
+    answer_receipt_reporting(socket, call_id, action, None).await;
+}
+
+/// Keep the host's access report in the same reply as its durable receipt.
+async fn answer_receipt_reporting(
+    socket: &mut Socket,
+    call_id: u32,
+    action: &str,
+    report: Option<&crate::access_report::AccessReport>,
+) {
     assert_eq!(action, "terminal.login.revoke", "the receipt comes first");
+    let mut reply = serde_json::json!({"revoked":true});
+    if let Some(report) = report {
+        reply["access"] = serde_json::to_value(report).unwrap();
+    }
+    let json = serde_json::to_vec(&reply).unwrap();
     send(
         socket,
         &Frame::Result {
             call_id,
             ok: true,
-            json: br#"{"revoked":true}"#,
+            json: &json,
         },
     )
     .await;
@@ -297,13 +316,21 @@ impl Removed {
     /// then give it. Until the server's previous cleanup task has seen the
     /// old link go, it refuses a second one for the same host.
     async fn reconnect_until_receipt(&self) -> Socket {
+        self.reconnect_until_receipt_reporting(None).await
+    }
+
+    /// Retry the authenticated reconnect and attach optional access evidence.
+    async fn reconnect_until_receipt_reporting(
+        &self,
+        report: Option<&crate::access_report::AccessReport>,
+    ) -> Socket {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             let mut socket = self.reconnect().await;
             if let Some((call_id, action, _)) =
                 try_next_call(&mut socket, Duration::from_secs(2)).await
             {
-                answer_receipt(&mut socket, call_id, &action).await;
+                answer_receipt_reporting(&mut socket, call_id, &action, report).await;
                 return socket;
             }
             assert!(
@@ -424,5 +451,146 @@ async fn refused_uninstall_retires_with_the_install_recorded_as_left() {
     )
     .await;
     removed.settles((true, true, "unreachable")).await;
+    removed.server.abort();
+}
+
+/// A connected removal must leave its receipt pending until the reconnect has
+/// requested uninstall. An early receipt would retire that delivery forever.
+#[tokio::test]
+async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
+    let removed = removed().await;
+    let person: String = sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
+        .bind(removed.host.as_bytes().as_slice())
+        .fetch_one(&removed.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM remote_login_cleanup WHERE host_id=?")
+        .bind(removed.host.as_bytes().as_slice())
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM remote_host_removals WHERE host_id=?")
+        .bind(removed.host.as_bytes().as_slice())
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET owner=0")
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET owner=1 WHERE id=?")
+        .bind(&person)
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    let auth = crate::auth::Auth::new(
+        removed.pool.clone(),
+        "removal.test",
+        "https://removal.test/",
+    )
+    .await
+    .unwrap();
+    let now = crate::runtime::unix_seconds().unwrap();
+    let token = "connected-removal-test-session";
+    sqlx::query(
+        "INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES(?,?,'test',?,?)",
+    )
+    .bind(crate::auth::hash(token))
+    .bind(&person)
+    .bind(now + 300)
+    .bind(now)
+    .execute(&removed.pool)
+    .await
+    .unwrap();
+    let service = crate::remote_removal::Removal::new(
+        auth,
+        removed.pool.clone(),
+        removed.store.clone(),
+        removed.hosts.clone(),
+        std::path::PathBuf::new(),
+    );
+    let mut original = removed.reconnect().await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while removed.hosts.actor(removed.host).await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let review = service.start(token, removed.host, true, now).await.unwrap();
+    let host = removed.host;
+    let review = review["review"].as_str().unwrap().to_owned();
+    let publishing =
+        tokio::spawn(async move { service.finish_host(token, host, &review, now).await });
+    // A broken early-revoke path asks on the old link. Give it a durable
+    // reply, so the regression cannot pass merely because the host is quiet.
+    if let Some((id, action, _)) = try_next_call(&mut original, Duration::from_secs(2)).await {
+        answer_receipt(&mut original, id, &action).await;
+    }
+    drop(original);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let committed: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM remote_host_removals WHERE host_id=?)",
+            )
+            .bind(removed.host.as_bytes().as_slice())
+            .fetch_one(&removed.pool)
+            .await
+            .unwrap();
+            if committed {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !removed.ledger().await.0,
+        "early revoke retired the uninstall outbox before reconnect"
+    );
+    let report = crate::access_report::AccessReport {
+        accounts: vec![crate::access_report::AccountReport {
+            account: "fixture".to_owned(),
+            files: vec![crate::access_report::AccessFile {
+                path: "~/.ssh/authorized_keys".to_owned(),
+                change: crate::access_report::ChangeKind::Added,
+                lines: vec!["fixture access retained".to_owned()],
+                note: None,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut reconnected = removed
+        .reconnect_until_receipt_reporting(Some(&report))
+        .await;
+    assert_eq!(removed.ledger().await, (false, false, "pending".to_owned()));
+    let (call_id, action, _) = next_call(&mut reconnected).await;
+    assert_eq!(action, infraternal_plugin_remote::UNINSTALL.id);
+    send(
+        &mut reconnected,
+        &Frame::Result {
+            call_id,
+            ok: true,
+            json: br#"{"state":"accepted","cleanup":"pending","left":[]}"#,
+        },
+    )
+    .await;
+    removed.settles((true, true, "requested")).await;
+    let result = publishing.await.unwrap().unwrap();
+    assert_eq!(result["state"], "removed");
+    assert_eq!(result["host_cleanup"], "requested");
+    let Some(crate::access_report::Reading::Reported { reports, .. }) =
+        crate::access_report::read(&removed.pool, &person, removed.host)
+            .await
+            .unwrap()
+    else {
+        panic!("uninstall confirmation lost its access report");
+    };
+    assert_eq!(
+        reports[0].1.accounts[0].files[0].lines,
+        ["fixture access retained"]
+    );
     removed.server.abort();
 }

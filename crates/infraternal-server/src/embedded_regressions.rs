@@ -1931,6 +1931,34 @@ async fn a_revocation_with_the_d353_warning_confirms_cleanup() {
     );
 }
 
+/// A revocation carrying D356's `access` report is confirmed like any
+/// other; an unknown field (the old `changed`) or a malformed report is
+/// still a protocol error.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn a_revocation_with_changed_access_files_confirms_cleanup() {
+    for (json, confirmed) in [
+        (br#"{"revoked":true,"access":{"state":"changed","accounts":[{"account":"deploy","state":"changed","files":[{"path":"~/.ssh/authorized_keys","change":"changed","lines":["ssh-ed25519 AAAA left"]}],"truncated":false,"unscanned":[],"omitted_files":0}]}}"#.as_slice(), true),
+        (br#"{"revoked":true,"changed":{"files":[],"truncated":false}}"#.as_slice(), false),
+        (br#"{"revoked":true,"access":{"state":"bogus","accounts":[]}}"#.as_slice(), false),
+    ] {
+        let (mut link, _peer) = connection();
+        let (reply, result) = oneshot::channel();
+        let mut pending = HashMap::from([(1, PendingCall::Revoke(reply))]);
+        assert!(
+            process_incoming(
+                Incoming::Result { call_id: 1, ok: true, json: json.to_vec() },
+                &mut link,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+                &mut pending
+            )
+            .await
+        );
+        assert_eq!(result.await.unwrap().is_ok(), confirmed, "{}", String::from_utf8_lossy(json));
+    }
+}
+
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn invalid_login_revocation_ack_never_confirms_cleanup() {

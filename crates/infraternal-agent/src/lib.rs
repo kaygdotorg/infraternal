@@ -10,6 +10,22 @@ pub mod cli;
 pub mod daemon;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use control as daemon;
+/// Resolve bounded direct scheduler executables and file arguments (D367).
+mod access_command;
+/// Fingerprints of an account's access files at grant, compared on revoke (D356).
+pub mod access_files;
+/// Observe future system-account work without stopping it (D367).
+mod access_jobs;
+/// Conservative inspection of current and legacy polkit policy.
+mod access_polkit;
+/// Host policy checks for accounts that can exercise root authority.
+mod access_privilege;
+/// Read typed systemd lifecycle commands without losing argument boundaries.
+mod access_units;
+/// Kernel permission checks for bounded system-job targets.
+mod access_write;
+/// Kernel UID observations that verify session shutdown and report leftovers.
+mod account_processes;
 #[path = "daemon_portable.rs"]
 pub mod control;
 /// Fuzz entry point for local control-socket messages and the Hello OS token (tests and `parser-checks` only).
