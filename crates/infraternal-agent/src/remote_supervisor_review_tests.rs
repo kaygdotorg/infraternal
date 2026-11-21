@@ -120,6 +120,7 @@ fn enrolled(
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     tokio::spawn(crate::plugin_control::TEST_FACTORY.scope(
         factory,

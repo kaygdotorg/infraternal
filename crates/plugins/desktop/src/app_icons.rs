@@ -33,7 +33,7 @@ pub const MAX_ICON_PNG_BYTES: usize = 16 * 1024;
 pub const ICON_CHUNK_BYTES: usize = 4 * 1024;
 /// The most icon identities the agent tells the helper it already holds; the
 /// helper reads at most this many.
-pub const MAX_KNOWN_ICON_KEYS: usize = 32;
+pub const MAX_KNOWN_ICON_KEYS: usize = crate::protocol::MAX_KNOWN_ICONS;
 /// The most icons the agent keeps (at most 1 MiB of PNG).
 #[cfg(feature = "source")]
 const MAX_STORED_ICONS: usize = 64;
@@ -55,12 +55,17 @@ pub struct IconKey {
 
 impl IconKey {
     /// True when both parts are non-empty, bounded and free of control characters.
+    ///
+    /// The bundle identifier's bound is the List validator's own
+    /// (`protocol::MAX_ICON_KEY_TEXT`): the agent sends every stored key back
+    /// in `known_icons`, so a key the store keeps but the validator refuses
+    /// would make every later window list fail.
     #[must_use]
     pub fn valid(&self) -> bool {
         let part = |text: &str, max: usize| {
             !text.is_empty() && text.len() <= max && !text.chars().any(char::is_control)
         };
-        part(&self.bundle_id, 256) && part(&self.app_version, 128)
+        part(&self.bundle_id, crate::protocol::MAX_ICON_KEY_TEXT) && part(&self.app_version, 128)
     }
 }
 

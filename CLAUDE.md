@@ -60,7 +60,7 @@ Decisions are referenced by their number. Only the owner (kayg) can change one.
 - Code comments are the documentation. Each module starts with a doc comment
   that explains its role. Non-obvious code explains its invariants and the
   reason for it, not only what it does.
-- Forgejo issues (`kayg/infraternal` on git.kayg.org, through `scripts/fj`)
+- Forgejo issues (`kayg/infraternal` on git.kayg.org, through the `fj` CLI)
   record every request, decision and piece of work. Open an issue before you
   start work. Comment when you start (branch and base SHA), for each finding
   (with evidence), when you are blocked, and when you finish (head SHA and the

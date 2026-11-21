@@ -220,6 +220,8 @@ fn start(index: usize) -> Start {
     }
 }
 
+/// Ten source workers through the real server relay each deliver a keyframe first, each on its own
+/// lane, with one Start and at least one keyframe request per stream at the synthetic companion.
 #[tokio::test]
 async fn ten_concurrent_streams_deliver_their_first_keyframe_through_the_server_relay() {
     // The job target path is longer than Linux's AF_UNIX limit once the source UUID is appended.
@@ -303,7 +305,11 @@ async fn ten_concurrent_streams_deliver_their_first_keyframe_through_the_server_
     let mut delivery_failures = Vec::new();
     while let Some(result) = deliveries.join_next().await {
         match result {
-            Ok(Ok(video)) if video.sequence == 1 && video.keyframe => delivered += 1,
+            // In fixture mode every unit is a keyframe: Start sends one and each
+            // repair request another. A newer keyframe that arrives before the
+            // viewer runs replaces older ones in the source and server backlogs
+            // (#146), so the first delivered unit is a keyframe, not always #1.
+            Ok(Ok(video)) if video.keyframe => delivered += 1,
             Ok(Ok(video)) => delivery_failures.push(format!(
                 "unexpected first access unit sequence={} keyframe={}",
                 video.sequence, video.keyframe

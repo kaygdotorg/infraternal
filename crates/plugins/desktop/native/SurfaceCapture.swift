@@ -1,8 +1,14 @@
-/// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture; latest damage replaces queued surfaces [D204,D266].
+/// Role: same-process ScreenCaptureKit IOSurface → hardware encoder capture with a tile lane for small changes; latest damage replaces queued surfaces [D204,D266,#146].
 /// Frames flow capture callback -> `receiveFrame` (a one-slot mailbox) -> `drain` on the encoding
 /// queue -> `Encoder` -> `output` as video packets (kind 70). The mailbox keeps only the newest
 /// frame, so a slow encoder skips old pictures instead of building latency. No pixels are copied
 /// between processes: the framework's own buffer goes straight to the hardware encoder.
+///
+/// Small changes (a typed letter, a caret blink, a checkbox) skip the encoder: `FramePixels` cuts
+/// the changed rectangles out of its exact history and they go, in the same kind-70 packet and the
+/// same sequence, as a tile update (`InfraternalDesktop.tileUpdate`). The viewer paints tiles over
+/// the video, and any later video picture supersedes them, because it is encoded from a newer
+/// capture that already contains those pixels.
 import AppKit
 import CoreMedia
 import ScreenCaptureKit
@@ -25,6 +31,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private let callbacks = DispatchQueue(label: "infraternal.desktop.surface.capture", qos: .userInteractive)
     /// The hardware encoder; used only from the encoding queue.
     private let encoder = Encoder()
+    /// Lets the controlled window use the shared encoder first (`EncoderPriority.swift`).
+    private let encoderPriority: EncoderPriority
     /// The running capture stream, or `nil` before start and after stop.
     private var stream: SCStream?
     // Only the serial callback queue touches this bounded diagnostic counter.
@@ -47,8 +55,10 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var congested = false
     /// Decides, from changes and results, what kind of picture to encode next.
     private var damageState = DamageEncodingState()
-    /// Exact-pixel history used to tell a blinking cursor from real changes.
+    /// Exact-pixel history used to tell a blinking cursor from real changes and to cut tiles.
     private let pixels = FramePixels()
+    /// Byte budget of the tile lane, shared with the video bit rate; used only on the encoding queue.
+    private var tiles = TileLane()
     /// Adaptive bit rate, in bits per second, for the encoder.
     private var bitrate: AdaptiveBitrate
     /// One-shot timer for the settled sharp refresh and for retrying a dropped keyframe.
@@ -76,7 +86,11 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     ///   - output: Receives each packet to send.
     init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
         self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
+        encoderPriority = EncoderPriority(key: EncoderPriority.targetKey(windowID: target["window_id"] as? UInt32, displayID: target["display_id"] as? UInt32))
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
+        super.init()
+        pixels.tileAreaLimit = TileLane.areaLimit(width: Int(size.width), height: Int(size.height))
+        damageState.plan = SharpRefreshPlan(mode: encoder.mode)
     }
 
     /// In measurement mode, logs a lifecycle stage with a timestamp.
@@ -92,7 +106,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// `HelperFailure.invalid` for an unknown target type; framework errors are rethrown. If `stop()`
     /// runs while this is in progress, the late stream is shut down instead of being used. The
     /// framework captures the whole window; a screen target is cropped to `rect`. The picture is
-    /// converted to sRGB BGRA, scaled to fit `size`, with the pointer shown.
+    /// converted to sRGB BGRA, scaled to fit `size`, without the pointer.
     func start() async throws {
         trace("enumerate_begin")
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -129,7 +143,9 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         if let sourceRect { configuration.sourceRect = sourceRect }
         configuration.destinationRect = fittedContent(rect, size)
         configuration.scalesToFit = true; configuration.preservesAspectRatio = true
-        configuration.showsCursor = true
+        // The viewer draws the pointer itself in the Mac's shape (`Cursor.swift`). A pointer inside the
+        // picture arrives a whole pipeline late and shows as a second pointer next to the viewer's.
+        configuration.showsCursor = false
         if measure {
             FileHandle.standardError.write(Data("METRIC source_capture_config pid=\(getpid()) fps=\(fps) queue_depth=\(configuration.queueDepth) interval_value=\(configuration.minimumFrameInterval.value) interval_scale=\(configuration.minimumFrameInterval.timescale) width=\(configuration.width) height=\(configuration.height)\n".utf8))
         }
@@ -217,16 +233,20 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Encodes pictures until nothing is due, on the encoding queue.
     ///
-    /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, or a
-    /// sharp refresh), encodes it and sends the packet. A dropped keyframe is retried one frame
-    /// interval later; a settled picture schedules its sharp refresh with a timer rather than
-    /// polling. A terminal encoder or output error stops the capture and sends one error packet. When
-    /// it ends it reschedules itself if a newer frame arrived in the meantime.
+    /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, a
+    /// sharp keyframe refresh, or a refinement delta), encodes it and sends the packet. A dropped
+    /// picture is retried one frame interval later unless a newer one arrives first; a settled
+    /// picture schedules its sharp refresh with a timer rather than polling. Refinement passes
+    /// run back to back, each checking the mailbox first, so new motion always wins. A terminal
+    /// encoder or output error stops the capture and sends one error packet. When it ends it
+    /// reschedules itself if a newer frame arrived in the meantime.
     private func drain() {
         var retryDroppedFrame = false
         do {
             try encoder.configure(width: Int(size.width), height: Int(size.height), hevc: hevc, fps: fps)
             while true {
+                // A tile update cut from this pass's fresh picture, when its change is small.
+                var tile: Data?
                 mailbox.lock()
                 let frame = latest; latest = nil
                 let repair = repairing; repairing = false
@@ -247,19 +267,55 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                         let bounds = pixels.damageBounds.map { "\($0.x),\($0.y),\($0.width),\($0.height)" } ?? "none"
                         FileHandle.standardError.write(Data("METRIC pixel_damage capture_ns=\(nanos(frame.1)) kind=\(pixels.damageKind) bounds=\(bounds) pixels=\(pixels.changedPixels) complete=\(pixels.damageBoundsComplete)\n".utf8))
                     }
+                    // Small exact changes take the tile lane [#146 proposal C]. The tile is
+                    // built before the change is recorded: a tile is exact, so like a caret
+                    // blink it owes no sharp refresh, but a change that falls back to video
+                    // (too large, or over the byte budget) must still schedule one.
+                    let cutBegan = measure ? nanos(mach_absolute_time()) : 0
+                    if let rects = pixels.tileRects, !rects.isEmpty,
+                       let unit = pixels.tileUpdate(rects),
+                       tiles.admits(unit.count, bitsPerSecond: bitrate.current, at: ProcessInfo.processInfo.systemUptime) {
+                        tile = unit
+                    }
+                    if measure, let rects = pixels.tileRects, !rects.isEmpty {
+                        let area = rects.reduce(0) { $0 + $1.width * $1.height }
+                        FileHandle.standardError.write(Data("METRIC tile_cut capture_ns=\(nanos(frame.1)) rects=\(rects.count) area=\(area) bytes=\(tile?.count ?? 0) admitted=\(tile != nil) cut_ns=\(nanos(mach_absolute_time()) - cutBegan)\n".utf8))
+                    }
                     // Framework dirty rectangles can cover an entire window even
                     // when only its insertion caret changed. The retained BGRA
                     // history is the authoritative area for scheduling sharp refresh.
-                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret)
+                    damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret || tile != nil)
                 }
                 if repair { damageState.repair() }
-                guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
+                guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime, touched: pixels.touchedFraction) else { break }
                 if frame == nil, !deferHistoryUntilAfterPaint { _ = pixels.prepare(current.0) }
                 let prepared = measure ? nanos(mach_absolute_time()) : 0
-                let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
-                guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
+                // A keyframe owed to the viewer (start, repair) or a refresh still goes to video;
+                // only a plain small change is answered with the tile instead of the encoder.
+                if decision == .caret, let tile {
+                    var stamp = nanos(current.1).bigEndian
+                    let outputBegan = measure ? nanos(mach_absolute_time()) : 0
+                    try output(70, withUnsafeBytes(of: &stamp) { Data($0) } + Data([0]) + tile)
+                    tiles.spend(tile.count)
+                    if measure {
+                        let sent = nanos(mach_absolute_time())
+                        FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=true lane=tile bytes=\(tile.count)\n".utf8))
+                    }
+                    // The viewer now holds this exact picture; the encoder's reference stays at
+                    // the last video picture, and the next video frame encodes from there.
+                    pixels.delivered()
+                    damageState.completed(delivered: true)
+                    damageState.postponeRefresh(at: ProcessInfo.processInfo.systemUptime)
+                    continue
+                }
+                let budget = decision.sharp ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
+                encoderPriority.beforeEncode()
+                let encoded = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget)
+                encoderPriority.afterEncode()
+                guard let body = encoded else {
                     pixels.dropped()
                     retryDroppedFrame = damageState.encoderDropped(decision)
+                    if measure { FileHandle.standardError.write(Data("METRIC surface_drop capture_ns=\(nanos(current.1)) decision=\(decision) retry=\(retryDroppedFrame)\n".utf8)) }
                     break
                 }
                 let outputBegan = measure ? nanos(mach_absolute_time()) : 0
@@ -269,7 +325,7 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     // One write preserves frame identity across concurrent control
                     // receipts; all stamps use the same native monotonic clock.
                     let sent = nanos(mach_absolute_time())
-                    FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil)\n".utf8))
+                    FileHandle.standardError.write(Data("METRIC surface_delivery pid=\(getpid()) capture_ns=\(nanos(current.1)) callback_ns=\(current.2) dequeued_ns=\(dequeued) prepared_ns=\(prepared) output_begin_ns=\(outputBegan) output_end_ns=\(sent) fresh=\(frame != nil) lane=video bytes=\(body.count - 9)\n".utf8))
                 }
                 if deferHistoryUntilAfterPaint {
                     pixels.seedAfterFirstPaint(current.0)
@@ -277,11 +333,19 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     pixels.delivered()
                 }
                 damageState.completed(delivered: true)
+                // Touched rows count from the last sharp picture: a delivered refresh or last
+                // refinement pass is sharp everywhere; a motion keyframe is not sharp anywhere.
+                if decision == .refresh || (decision == .refine && !damageState.refining) { pixels.markSharp() }
+                else if decision.keyframe { pixels.markAllTouched() }
+                if measure && decision.sharp {
+                    FileHandle.standardError.write(Data("METRIC sharp_refresh decision=\(decision) bytes=\(body.count - 9) capture_ns=\(nanos(current.1))\n".utf8))
+                }
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
-            // Ordinary raw drops need no reference repair. Retry only an explicit
-            // IDR/refresh that was dropped, including on a now-static window. Reuse
-            // the existing one-shot timer at source cadence, never a hot loop.
+            // No drop needs reference repair, but every dropped picture is retried
+            // (a newer capture replaces it), including on a now-static window, so a
+            // dropped last motion frame shows one tick late rather than 250 ms late.
+            // Reuse the existing one-shot timer at source cadence, never a hot loop.
             let deadline = retryDroppedFrame ? ProcessInfo.processInfo.systemUptime + 1 / Double(fps) : damageState.refreshDeadline
             if let deadline {
                 if refresh == nil {

@@ -375,6 +375,7 @@ mod http_tests;
 #[path = "ca_shipping_cli_tests.rs"]
 mod shipping_cli_tests;
 
+/// An unlock fixture whose CA directory is still pending its first bootstrap.
 async fn bootstrap_fixture() -> UnlockFixture {
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = unlock_fixture().await;
@@ -405,11 +406,13 @@ async fn bootstrap_fixture() -> UnlockFixture {
         },
         crate::remote_runtime::RemoteHosts::default(),
         crate::enrollment::EnrollmentStore::new(f.auth.auth.pool.clone()),
+        source.clone(),
     )));
     f.administration = administration;
     f.source = source;
     f
 }
+/// Bootstrap needs a fresh real proof and publishes only wrapped CA material and the leaf file.
 #[tokio::test]
 async fn bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_material() {
     struct Unlocked(crate::ca::CaMaterial);
@@ -475,10 +478,7 @@ async fn bootstrap_requires_a_fresh_real_proof_and_publishes_only_wrapped_ca_mat
         .map(|v| v.unwrap().file_name().to_str().unwrap().to_owned())
         .collect::<Vec<_>>();
     names.sort();
-    assert_eq!(
-        names,
-        ["administrators", "issuer.pem", "remote.key", "remote.pem"]
-    );
+    assert_eq!(names, ["administrators", "issuer.pem", "remote-leaf.pem"]);
 }
 #[tokio::test]
 async fn concurrent_bootstrap_ceremonies_retain_one_issuer_and_replay_is_refused() {

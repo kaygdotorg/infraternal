@@ -78,7 +78,16 @@ $manager is-active infraternal-agent.service >/dev/null 2>&1 && : > "$stage/was-
 for replacement in "$base/bin/current.new" "$launcher.new" "$unit.new"; do
     [ ! -e "$replacement" ] && [ ! -L "$replacement" ] || exit 71
 done
-mkdir -p "$base/bin" "$(dirname "$launcher")" "$(dirname "$unit")"
+mkdir -p "$base/bin" "$(dirname "$unit")"
+"##,
+    // The launcher's folder (`/usr/local/bin` in root mode) is for every
+    // account. Under this script's umask 077 a missing one, or a missing
+    // folder above it, would be created 0700 and hide the command from
+    // everyone but root, so it is made with umask 022 (J1087 #7); `mkdir -m`
+    // would cover only the last folder. Kept to one shell line outside this
+    // comment: the root command is within bytes of the 128 KiB single
+    // argument limit (`every_setup_command_fits_one_kernel_argument_in_both_modes`).
+    r##"(umask 022; mkdir -p "$(dirname "$launcher")")
 # SELinux: systemd starts the service only from an executable file type, and
 # the payload inherited /var/lib's var_lib_t (203/EXEC, #401). Keep its user,
 # role and level, set bin_t and check it, before the running service stops.

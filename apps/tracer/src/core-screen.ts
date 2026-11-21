@@ -8,7 +8,7 @@ import { Spring } from "../../../packages/ui/src/spring";
 import { markMotion, triggeredByKeyboard } from "../../../packages/ui/src/input-source";
 import { readClipboard } from "../../../packages/ui/src/copy-feedback";
 import { mountToast, type ToastController } from "../../../packages/ui/src/toast";
-import { isMacPlatform, shortcutLabel } from "../../../packages/ui/src/platform";
+import { isMacPlatform, keyboardLikely, shortcutLabel } from "../../../packages/ui/src/platform";
 import { bindTerminalFont, TERMINAL_FONT_SHORTCUTS } from "./terminal-font-shortcuts";
 import { bindShortcut, bindingLabel, keyCaps, PALETTE_KEYS, paletteAlternate, paletteCombo, platformCombo, registerShortcuts } from "../../../packages/ui/src/shortcuts";
 import { isTypingTarget, mountShortcutsView } from "../../../packages/ui/src/shortcuts-view";
@@ -220,7 +220,7 @@ const SCREEN = `
     </section>
     ` : ""}
     <div class="keyblur" aria-hidden="true"></div>
-    <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
+    <div class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
         <div class="keyrows" id="keyrows">
           <div class="keyrow" id="keyrow-canvas" data-row="canvas" role="group" aria-label="Canvas" hidden></div>
@@ -243,7 +243,7 @@ const SCREEN = `
         </div>
         <span class="keydots" aria-hidden="true"><i></i><i></i></span>
       </div>
-    </aside>
+    </div>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
     <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
     <aside id="probe-panel" class="probe-panel ui-overlay-surface" data-overlay-size="large" aria-label="Terminal latency probe" hidden>
@@ -503,6 +503,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     applyTheme(active, ROOT, cardLevel, windowLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
+    // The next launch of a home-screen app reads this before first paint (index.html) to pick its status-bar style.
+    try { localStorage.setItem("tracer.chrome", JSON.stringify({ bg: active.bg, dark: active.dark })); } catch { /* storage may be blocked */ }
     // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
     // switch. It runs in its own task, right after the tokens above, so the interface answers at once
     // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
@@ -571,7 +573,7 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       { group: "Actions", glyph: "+", label: "Add hosts", hint: "", action: "proto:addhost" },
     ] : []),
     ...(options.canvas ? [
-      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: bindingLabel("shortcuts") || "?", action: "shortcuts:open" },
+      { group: "Help", glyph: "?", label: "Show keyboard shortcuts", hint: keyboardLikely() ? bindingLabel("shortcuts") || "?" : "", action: "shortcuts:open" },
       // The hint carries the aliases, so "version", "build" and "commit" find it.
       { group: "Help", glyph: "⌨", label: "Settings: Shortcuts", hint: "keys · rebind · reset", action: "settings:shortcuts" },
       ...(canvasItems.size ? [{ group: "Help", glyph: "▭", label: "Settings: Toolbar", hint: "rows · order · show · hide", action: "settings:toolbar" }] : []),

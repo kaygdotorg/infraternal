@@ -41,3 +41,14 @@ The terminal scenario and paired throughput samples use the default 300 ms
 proxy profile. The access first-paint check uses the direct backend (0 ms
 injected latency): its existing 1000 ms budget measures local rendering,
 including the compositor screenshot, rather than repeated asset round trips.
+
+## Paint-frame alignment probe (#569)
+
+`perf/paint-align.spec.ts` is a probe, not a budget: it asserts nothing and
+prints `PAROW` lines. It records which animation frame shows a byte that has
+just arrived and which frame shows a key just pressed. `PA_MODE=chunks`
+(with `INFRATERNAL_TEST_RTT=0`) sends single and paired output chunks;
+`PA_MODE=keys` (default round trip, prediction on) types real keys. "Extra
+frames" of 0 is the best any code can do. Frame counts do not depend on the
+display rate, so they are valid on a 60 Hz venue; milliseconds there are
+frame-quantised.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
- * The wheel scrolls what is under it, for terminals (D275, #308), without the input lock. Three windows stacked in one column,
+ * The wheel scrolls what is under it, for terminals (D275 as amended by D374 and D377, #308), without the input lock. Three windows stacked in one column,
  * real PTYs, production server binary and build.
  *
  * - The FOCUSED terminal with scrollback: a vertical wheel over it moves its scrollback and the strip (the column's scroll offset
@@ -8,6 +8,8 @@
  * - The same terminal at the bottom of its scrollback: a FRESH gesture (after a quiet moment) stays with the terminal and the column does not step (D377).
  * - A focused terminal with nothing to scroll, and an UNFOCUSED terminal even with scrollback, belong to the canvas (D275).
  * - The wheel over a window's header strip (nothing scrolls there) still pans.
+ * - Option/Alt plus the wheel over the focused terminal with scrollback moves the canvas from over the terminal, and the
+ *   scrollback does not move (D377).
  * Captures at 1440×900 (DPR 2) go to the external evidence directory.
  */
 import { mkdirSync } from "node:fs";
@@ -159,4 +161,26 @@ test("the wheel over a window's header strip pans the canvas", async () => {
   await page.mouse.wheel(0, 240);
   await page.waitForTimeout(900);
   expect(await strip()).not.toBe(before);
+});
+
+test("Option/Alt plus the wheel over the focused terminal moves the canvas and its scrollback stays (D377)", async () => {
+  // The terminal goes back into its scrollback first, so the test has scrollback that a stray wheel could move.
+  await focus(1);
+  // sleep: the focused terminal settles after the click; no event marks that it has taken the keyboard
+  await page.waitForTimeout(800);
+  const mid = await centre(1);
+  await page.mouse.move(mid.x, mid.y);
+  await page.mouse.wheel(0, -300);
+  await expect.poll(scrolled.bind(null, 1), "the scrollback moved back").toBe("true");
+  await quiet();
+  const before = await strip();
+  await page.keyboard.down("Alt");
+  await page.mouse.wheel(0, 300);
+  // sleep: the canvas step animates after the wheel; no event marks it at rest
+  await page.waitForTimeout(900);
+  await page.keyboard.up("Alt");
+  expect(await strip(), "Alt+wheel over the terminal moves the canvas, as D377 says").not.toBe(before);
+  // The terminal stays scrolled back: the modifier's wheel is the canvas's, so it never reaches the scrollback.
+  expect(await scrolled(1), "the terminal's scrollback did not move").toBe("true");
+  await page.screenshot({ path: `${OUT}/alt-wheel-over-terminal.png` });
 });

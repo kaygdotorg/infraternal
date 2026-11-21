@@ -297,6 +297,49 @@ test("mutes when the host stops echoing, then resumes after an echo proof", asyn
     .toBe(false);
 });
 
+test("draws nothing while the host reads a hidden line, then predicts again", async ({ page, context }) => {
+  await context.request.post("/__mock/reset");
+  await context.request.post("/__mock/open-terminal");
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(() => sessionStorage.clear());
+  await page.goto("/?mock=1&predict=1");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.roundTripMs ?? 0), { timeout: 30_000 })
+    .toBeGreaterThan(60);
+  await page.evaluate(() => window.__tracerTestDouble?.seedPrompt());
+  await expect.poll(() => page.evaluate(() =>
+    window.__tracerTestDouble?.isConnected() === true
+      && window.__tracerTestDouble.predictiveEcho()?.enabled === true,
+  ), { timeout: 30_000 }).toBe(true);
+
+  // A key in flight when the prompt starts is withdrawn the moment the host reports it.
+  await page.evaluate(() => window.__tracerTestDouble?.injectInput("a"));
+  expect(await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("a");
+  const told = await (await context.request.post("/__mock/host-echo", { data: { hidden: true } })).json() as { told: number };
+  expect(told.told).toBeGreaterThan(0);
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.reason)).toBe("host-echo-off");
+  // No word list is involved: the prompt text is whatever the program printed.
+  const secret = await page.evaluate(() => {
+    const keys = "\u043f\u0430\u0440\u043e\u043b\u044c42";
+    const seen: string[] = [];
+    for (const key of keys) {
+      window.__tracerTestDouble?.injectInput(key);
+      const state = window.__tracerTestDouble?.predictiveEcho();
+      seen.push((state?.pendingText ?? "") + (state?.overlay?.text ?? ""));
+    }
+    return { seen, fallbacks: window.__tracerTestDouble?.predictiveEcho()?.fallbacks ?? {} };
+  });
+  expect(secret.seen.every((text) => text === "")).toBe(true);
+  expect(secret.fallbacks["host-echo-off"]).toBe(8);
+
+  await context.request.post("/__mock/host-echo", { data: { hidden: false } });
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.reason)).not.toBe("host-echo-off");
+  await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.enabled === true), { timeout: 5000 })
+    .toBe(true);
+  await page.evaluate(() => window.__tracerTestDouble?.injectInput("z"));
+  expect(await page.evaluate(() => window.__tracerTestDouble?.predictiveEcho()?.overlay?.text ?? "")).toBe("z");
+});
+
 test("predicted cursor advances across a pending multi-character line", async ({ page, context }) => {
   await context.request.post("/__mock/reset");
   await context.request.post("/__mock/open-terminal");

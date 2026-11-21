@@ -1,4 +1,4 @@
-/// Role: classify native frame damage and report geometry-only diagnostics in opt-in measurements [D254,D266,#146].
+/// Role: classify native frame damage, decide what goes to the tile lane, and report geometry-only diagnostics in opt-in measurements [D254,D266,#146].
 /// ScreenCaptureKit attaches a list of changed rectangles (the damage) to every captured frame.
 /// These functions decide from that list whether the picture really changed, and avoid sending
 /// duplicate frames to the encoder.
@@ -92,4 +92,53 @@ func captureFrameDamageDiagnostics(_ metadata: Any?) -> String {
         guard let rectangle else { return "invalid-\(kind)" }
         return "\(kind):\(rectangle.minX),\(rectangle.minY),\(rectangle.width),\(rectangle.height)"
     }.joined(separator: ";")
+}
+
+/// When a small change goes to the tile lane instead of the video encoder [#146 proposal C].
+///
+/// Encoding a typed letter costs the hardware encoder a fixed ~4.6 ms plus ~2.9 ms per megapixel
+/// on an M1 (J1078), while cutting and compressing a letter-sized tile costs ~0.04 ms. Tiles are
+/// therefore used for small changes only: at most 4% of the picture and at most 65,536 pixels in
+/// total, where raw DEFLATE still takes about 2 ms. Larger changes (scrolling, video, resizing)
+/// stay video, which also keeps tile bytes near what a video delta would cost.
+///
+/// Tile bytes come out of the same bit rate the video uses. A token bucket refills at the
+/// adaptive bit rate and holds at most a quarter second of it (at least 64 KiB); a tile that does
+/// not fit goes to video instead, so a burst of tiles can never outrun the link the encoder is
+/// already being throttled to. Times are monotonic seconds, passed in for deterministic tests.
+struct TileLane {
+    /// Largest total tile area in pixels, whatever the picture size.
+    static let maximumArea = 65_536
+    /// Smallest burst the bucket allows, in bytes: a few full tile updates.
+    static let minimumBurst = 64 * 1024
+    /// Bytes available right now.
+    private var tokens = Double(TileLane.minimumBurst)
+    /// When `tokens` was last refilled, or `nil` before the first use.
+    private var refilled: Double?
+
+    /// The largest changed area, in pixels, that may go as tiles for a picture of this size.
+    static func areaLimit(width: Int, height: Int) -> Int {
+        guard width > 0, height > 0 else { return 0 }
+        return min(maximumArea, width * height / 25)
+    }
+
+    /// Refills the bucket for the time since the last call. The burst is a quarter second at
+    /// `bitsPerSecond`, never below `minimumBurst`.
+    private mutating func refill(bitsPerSecond: Int, at now: Double) {
+        let rate = Double(max(0, bitsPerSecond)) / 8
+        let burst = max(Double(Self.minimumBurst), rate / 4)
+        if let refilled, now.isFinite, now > refilled { tokens = min(burst, tokens + (now - refilled) * rate) }
+        tokens = min(tokens, burst)
+        if now.isFinite { refilled = max(refilled ?? now, now) }
+    }
+
+    /// True when a tile update of `bytes` fits the budget now. Spends nothing; call `spend` when
+    /// the update is actually sent.
+    mutating func admits(_ bytes: Int, bitsPerSecond: Int, at now: Double) -> Bool {
+        refill(bitsPerSecond: bitsPerSecond, at: now)
+        return bytes > 0 && Double(bytes) <= tokens
+    }
+
+    /// Takes `bytes` out of the budget for an update that was sent.
+    mutating func spend(_ bytes: Int) { tokens = max(0, tokens - Double(bytes)) }
 }

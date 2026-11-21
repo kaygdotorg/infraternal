@@ -169,6 +169,7 @@ async fn send(
     }
     let message = match command {
         HostCommand::Keyframe => Message::Repair { last_sequence: 0 },
+        HostCommand::Pressure { waited_ms } => Message::Pressure { waited_ms },
         HostCommand::ReleaseInput => Message::Input(Input::Control { active: false }),
         HostCommand::Control { .. } => Message::Input(Input::Control { active: true }),
         HostCommand::Input { input, .. } => Message::Input(input),

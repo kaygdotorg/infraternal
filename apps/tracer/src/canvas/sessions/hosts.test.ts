@@ -9,7 +9,7 @@ const previousDocument = Object.getOwnPropertyDescriptor(globalThis, "document")
 Object.defineProperty(globalThis, "document", { configurable: true, value: { querySelectorAll: () => [] } });
 afterAll(async () => {
   // Keep the DOM available until the real artwork import has finished, then restore the next suite's environment.
-  await ensureHostMarks(["debian"]);
+  await ensureHostMarks(["debian", "apple"]);
   if (previousDocument) Object.defineProperty(globalThis, "document", previousDocument);
   else Reflect.deleteProperty(globalThis, "document");
 });
@@ -91,4 +91,16 @@ test("pending removals retain their server cleanup status", async () => {
   }
   f.set({ hosts: [], next: null }); f.event(); await settle();
   expect(f.hosts.size).toBe(0); f.stop();
+});
+
+/** A live Mac enrolled without the server's direct address keeps that fact; any other value refuses the page (#146, D349). */
+test("a host linked without a direct address is marked, and only false is accepted", async () => {
+  const mac = { ...row, os: "macOS", online: true, direct: false };
+  const f = fixture(mac); await settle();
+  expect(f.hosts.get(id)).toMatchObject({ id, os: "apple", online: true, direct: false });
+  f.set({ hosts: [{ ...mac, direct: true }], next: null }); f.event(); await settle();
+  expect(f.hosts.get(id)?.direct).toBe(false);
+  f.set({ hosts: [{ ...mac, direct: undefined }], next: null }); f.event(); await settle();
+  expect(f.hosts.get(id)).not.toHaveProperty("direct");
+  f.stop();
 });

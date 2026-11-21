@@ -128,19 +128,17 @@ async fn deliver_login_cleanup(
             tokio::select! {
                 biased;
                 delivered = async {
-                    if !crate::remote_guard::durable_cleanup(actor.downgrade(), person).await {
-                        return None;
-                    }
+                    let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person).await?;
                     if !uninstall {
-                        return Some(None);
+                        return Some((revoked, None));
                     }
                     match crate::remote_removal::ask_uninstall(&actor, host).await {
                         // Its report of the kernel objects it leaves is kept
                         // with the answer, for the removal result (#235, #409).
-                        crate::remote_removal::UninstallReply::Accepted(left) => Some(Some(("requested", left))),
+                        crate::remote_removal::UninstallReply::Accepted(left) => Some((revoked, Some(("requested", left)))),
                         // The host answered no: the install stays, and the
                         // removal toast already handed over the manual command.
-                        crate::remote_removal::UninstallReply::Refused => Some(Some(("unreachable", Vec::new()))),
+                        crate::remote_removal::UninstallReply::Refused => Some((revoked, Some(("unreachable", Vec::new())))),
                         crate::remote_removal::UninstallReply::Lost => None,
                     }
                 } => delivered,
@@ -152,7 +150,7 @@ async fn deliver_login_cleanup(
         },
     )
     .await;
-    if let Ok(Some(answer)) = result {
+    if let Ok(Some((revoked, answer))) = result {
         store
             .confirm_removal_cleanup(
                 host,
@@ -160,6 +158,7 @@ async fn deliver_login_cleanup(
                 answer
                     .as_ref()
                     .map(|(cleanup, left)| (*cleanup, left.as_slice())),
+                revoked.report.as_ref(),
             )
             .await
             .map_err(io::Error::other)?;
@@ -324,11 +323,41 @@ impl Drop for TerminalPromotionGuard {
     }
 }
 
+/// The TCP/TLS acceptor every listener of one server uses, replaceable when
+/// the server's leaf rotates (#559).
+///
+/// Each accepted socket takes the acceptor current at its first byte, so a
+/// replacement applies to new handshakes only and never touches a connection
+/// already established. A read costs one uncontended lock and an `Arc` clone.
+pub(crate) struct ServerTls(std::sync::RwLock<Arc<openssl::ssl::SslAcceptor>>);
+impl ServerTls {
+    /// Hold `acceptor` as the current configuration.
+    pub(crate) fn new(acceptor: openssl::ssl::SslAcceptor) -> Self {
+        Self(std::sync::RwLock::new(Arc::new(acceptor)))
+    }
+    /// The configuration for a handshake starting now.
+    pub(crate) fn current(&self) -> Arc<openssl::ssl::SslAcceptor> {
+        // A poisoned lock still holds a complete Arc; nothing is half-written.
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    /// Make `acceptor` the configuration for every later handshake.
+    fn replace(&self, acceptor: openssl::ssl::SslAcceptor) {
+        *self
+            .0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(acceptor);
+    }
+}
+
 /// Identity and admission limits are shared; this factory never retains its host map.
 struct ListenerFactory {
-    /// One immutable TLS configuration per startup identity/root epoch. Leased
-    /// destinations use the same handshake settings and durable admission checks.
-    tls: Arc<openssl::ssl::SslAcceptor>,
+    /// The TLS configuration shared with the primary listener. Leased
+    /// destinations use the same handshake settings and durable admission
+    /// checks, and see a rotated leaf at the same moment (#559).
+    tls: Arc<ServerTls>,
     store: EnrollmentStore,
     address: SocketAddr,
     destinations: std::sync::Mutex<HashMap<std::net::IpAddr, usize>>,
@@ -1081,6 +1110,13 @@ pub(crate) struct RemoteListeners {
     tasks: JoinSet<()>,
     endpoint: quinn::Endpoint,
     bindings: Arc<infraternal_plugin_remote::remote_bindings::Bindings>,
+    /// What a leaf rotation replaces: the TCP/TLS acceptor (the QUIC endpoint
+    /// takes a new server configuration directly).
+    tls: Arc<ServerTls>,
+    /// Client-certificate trust both transports keep across a rotation.
+    roots: Vec<X509>,
+    /// Whether the TCP/TLS acceptor also offers the recovery ALPN.
+    recovery: bool,
     #[cfg(test)]
     pub(crate) diagnostic_hosts: RemoteHosts,
 }
@@ -1096,8 +1132,46 @@ impl RemoteListeners {
         self.endpoint.close(0u32.into(), b"");
     }
 
+    /// The address both transports are bound to.
     pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
         self.endpoint.local_addr()
+    }
+
+    /// Keep the served leaf fresh for the listeners' lifetime (#559): start
+    /// the `server_leaf` rotation task, which reissues the leaf while the CA
+    /// is unlocked and installs each durable new leaf here. `current` is the
+    /// leaf the listeners were started with. Dropping the listeners stops it.
+    pub(crate) fn rotate_server_leaf(
+        &mut self,
+        rotation: crate::server_leaf::Rotation,
+        current: X509,
+    ) {
+        let swap = LeafSwap {
+            endpoint: self.endpoint.clone(),
+            tls: self.tls.clone(),
+            roots: self.roots.clone(),
+            recovery: self.recovery,
+        };
+        self.tasks.spawn(crate::server_leaf::run(
+            rotation,
+            current,
+            move |identity| swap.install(identity),
+        ));
+    }
+
+    /// Serve `identity` to every new QUIC and TCP/TLS handshake from now on.
+    /// # Errors
+    /// Refuses an identity either transport cannot be configured with; then
+    /// neither transport changes.
+    #[cfg(test)]
+    pub(crate) fn install_server_leaf(&self, identity: &Identity) -> io::Result<()> {
+        LeafSwap {
+            endpoint: self.endpoint.clone(),
+            tls: self.tls.clone(),
+            roots: self.roots.clone(),
+            recovery: self.recovery,
+        }
+        .install(identity)
     }
 
     /// Start the remote listeners on `address` with this identity and its trust roots.
@@ -1154,7 +1228,7 @@ impl RemoteListeners {
         )
         .await?;
         let factory = ListenerFactory {
-            tls,
+            tls: tls.clone(),
             store,
             address: listener.local_addr()?,
             destinations: std::sync::Mutex::default(),
@@ -1175,7 +1249,7 @@ impl RemoteListeners {
         hosts: RemoteHosts,
         limits: Arc<crate::remote_accept::Limits>,
         recovery: Option<Arc<crate::remote_recovery::Service>>,
-    ) -> io::Result<(Self, Arc<openssl::ssl::SslAcceptor>)> {
+    ) -> io::Result<(Self, Arc<ServerTls>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
         let (endpoint, tcp, bindings) = reserve_transports(
@@ -1184,11 +1258,12 @@ impl RemoteListeners {
             |_| Ok(()),
         )
         .await?;
-        let tls = Arc::new(if recovery.is_some() {
-            remote_tls::recovery_server_config(identity, roots)?
-        } else {
-            remote_tls::server_config(identity, roots)?
-        });
+        let tls = Arc::new(ServerTls::new(tcp_acceptor(
+            identity,
+            roots,
+            recovery.is_some(),
+        )?));
+        let recovering = recovery.is_some();
         let mut tasks = JoinSet::new();
         tasks.spawn(crate::remote_accept::quic(
             endpoint.clone(),
@@ -1209,11 +1284,51 @@ impl RemoteListeners {
                 tasks,
                 endpoint,
                 bindings,
+                tls: tls.clone(),
+                roots: roots.to_vec(),
+                recovery: recovering,
                 #[cfg(test)]
                 diagnostic_hosts,
             },
             tls,
         ))
+    }
+}
+
+/// The TCP/TLS acceptor for `identity`, with or without the recovery ALPN.
+fn tcp_acceptor(
+    identity: &Identity,
+    roots: &[X509],
+    recovery: bool,
+) -> io::Result<openssl::ssl::SslAcceptor> {
+    if recovery {
+        remote_tls::recovery_server_config(identity, roots)
+    } else {
+        remote_tls::server_config(identity, roots)
+    }
+}
+
+/// Installs a rotated server leaf into both transports of one listener set.
+struct LeafSwap {
+    /// The QUIC endpoint, which takes a new server configuration in place.
+    endpoint: quinn::Endpoint,
+    /// The TCP/TLS acceptor shared by the primary and leased listeners.
+    tls: Arc<ServerTls>,
+    /// Client-certificate trust, unchanged by a rotation.
+    roots: Vec<X509>,
+    /// Whether the TCP/TLS acceptor also offers the recovery ALPN.
+    recovery: bool,
+}
+impl LeafSwap {
+    /// Build both configurations first, then switch both, so a failure leaves
+    /// the previous leaf on both transports. Established connections keep
+    /// the leaf they were made with.
+    fn install(&self, identity: &Identity) -> io::Result<()> {
+        let quic = remote_quic::server_config(identity, &self.roots)?;
+        let tcp = tcp_acceptor(identity, &self.roots, self.recovery)?;
+        self.endpoint.set_server_config(Some(quic));
+        self.tls.replace(tcp);
+        Ok(())
     }
 }
 

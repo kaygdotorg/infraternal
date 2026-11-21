@@ -38,14 +38,26 @@ pub mod login;
 pub mod login_handoff;
 // The macOS record codec stays for the agent's Linux login code paths; its
 // receive refuses there, because host-login workers are Linux-only (D247).
+/// Code-signing identity of this process and of a local socket peer, for the
+/// root agent's desktop helper admission (D203 C2, #146).
+#[cfg(all(feature = "desktop-user", target_os = "macos"))]
+pub mod code_identity;
+/// Private macOS entry that starts the desktop helper as the console user (D203 C2, #146).
+#[cfg(all(feature = "desktop-user", target_os = "macos"))]
+pub mod desktop_user;
 #[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
+/// The open-file limit of the server and the infraternal agent, and the shells that must not inherit a raised one (#562).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod open_files;
 /// A terminal no other process of the account can open, for the password
 /// of a root upgrade (#399, D274).
 #[cfg(target_os = "linux")]
 pub mod private_pty;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod pty;
+/// Thread quality-of-service classes on macOS, a no-op elsewhere (#554).
+pub mod qos;
 #[cfg(feature = "async-fd")]
 pub mod readiness;
 pub mod ring;
@@ -368,6 +380,13 @@ mod terminal_limits;
 mod terminal_memory;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal_native;
+/// Fuzz entry point for the VT stream and its snapshots (tests and `parser-checks` only).
+#[cfg(all(
+    any(test, feature = "parser-checks"),
+    any(target_os = "linux", target_os = "macos")
+))]
+#[doc(hidden)]
+pub mod vt_checks;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session::{Config, run, run_with_retention};
 #[cfg(all(feature = "host-login", target_os = "linux"))]
