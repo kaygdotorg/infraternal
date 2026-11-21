@@ -88,12 +88,16 @@ test.describe("pinch guard, phone profile", () => {
       await page.waitForTimeout(1300);
       report[view] = check(view, await sweep(page));
     }
-    // The cost of the one extra rule: a full-tree style recalculation, timed with the rule and without it (reported, not asserted).
-    report["styleRecalcMs"] = await page.evaluate(() => {
-      const guard = Array.from(document.styleSheets).flatMap((sheet) => Array.from(sheet.cssRules).map((rule, index) => ({ sheet, rule, index }))).find((e) => e.rule instanceof CSSStyleRule && e.rule.selectorText === ":where(*)")!;
-      const run = (): number => { const t0 = performance.now(); for (let i = 0; i < 300; i++) { document.documentElement.toggleAttribute("data-probe"); void document.body.offsetHeight; getComputedStyle(document.body).color; } return (performance.now() - t0) / 300; };
-      const text = guard.rule.cssText; run();
-      const withRule = run(); guard.sheet.deleteRule(guard.index); run(); const without = run(); guard.sheet.insertRule(text, guard.index);
+    // The cost of the one extra rule: adding a no-op rule to a sheet makes the engine restyle every element, so time that with the
+    // guard present and absent (reported, not asserted).
+    report["restyleMs"] = await page.evaluate(() => {
+      const sheet = Array.from(document.styleSheets).find((sh) => Array.from(sh.cssRules).some((r) => r instanceof CSSStyleRule && r.selectorText === ":where(*)"))!;
+      const index = Array.from(sheet.cssRules).findIndex((r) => r instanceof CSSStyleRule && r.selectorText === ":where(*)");
+      const run = (): number => { const t0 = performance.now(); for (let i = 0; i < 100; i++) { const n = sheet.insertRule(`.restyle-probe-${i} { color: red; }`, 0); void document.body.offsetHeight; getComputedStyle(document.body).color; sheet.deleteRule(n); } return (performance.now() - t0) / 100; };
+      run();
+      const withRule = run();
+      const text = sheet.cssRules[index]!.cssText; sheet.deleteRule(index); run();
+      const without = run(); sheet.insertRule(text, index);
       return { withRule, without, elements: document.querySelectorAll("*").length };
     });
     await testInfo.attach("touch-action-sweep.json", { body: JSON.stringify(report, null, 2), contentType: "application/json" });
@@ -126,9 +130,8 @@ test("desktop pointer: typing, wheel and scale are untouched by the guard", asyn
   const before = await page.evaluate(() => window.visualViewport?.scale);
   await page.mouse.wheel(0, 200);
   expect(await page.evaluate(() => window.visualViewport?.scale)).toBe(before);
-  // `touch-action` only ever affects touch input, so for a mouse the app must simply still respond: a click on a window focuses it.
-  const win = page.locator(".ui-window").first();
-  await win.click({ position: { x: 20, y: 20 } });
-  await expect(win).toBeVisible();
+  // `touch-action` only ever affects touch input, so for a mouse the app must simply still respond: a click leaves the app up.
+  await page.mouse.click(720, 450);
+  await expect(page.locator(".cl-mockup")).toBeVisible();
   await context.close();
 });
