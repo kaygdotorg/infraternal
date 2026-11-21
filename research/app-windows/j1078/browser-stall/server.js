@@ -1,7 +1,12 @@
-// J1078 experiment (not product code): after a main-thread stall, do the decode worker's credit
-// returns interleave with the queued socket messages? Mirrors the handoff credit of
-// apps/tracer/src/canvas/appwin/stream.ts (MAX_HANDOFF_UNITS = 4) with a real WebSocket and Worker.
+/**
+ * J1078 experiment (not product code): after a main-thread stall, do the decode worker's credit
+ * returns interleave with the queued socket messages? Mirrors the handoff credit of
+ * apps/tracer/src/canvas/appwin/stream.ts (MAX_HANDOFF_UNITS = 4) with a real WebSocket and Worker.
+ */
+
+/** Node's HTTP server and hashing (for the WebSocket handshake). */
 const http = require("http"), crypto = require("crypto");
+/** The test page: a socket, a decode worker with the product's credit, and timed stalls. */
 const PAGE = `<!doctype html><script>
 const MAX = 4; let credit = 0, seq = 0, overflow = 0, log = [], phase = "run", results = [];
 const worker = new Worker("/worker.js");
@@ -27,7 +32,9 @@ ws.onopen = async () => {
   await fetch("/done", { method: "POST", body: JSON.stringify({ ua: navigator.userAgent, interval_ms: INTERVAL, frames: seq, refused_before_any_stall: quiet, results }) });
 };
 </script>`;
+/** Milliseconds between frames the server sends (argv[2], default 8). */
 const interval = Number(process.argv[2] || 8);
+/** Serves the page and speaks a minimal WebSocket that streams numbered frames. */
 const server = http.createServer((req, res) => {
   if (req.url === "/worker.js") { res.setHeader("content-type", "text/javascript"); res.end("onmessage = (e) => postMessage(e.data.byteLength);"); return; }
   if (req.url === "/done") { let body = ""; req.on("data", (c) => body += c); req.on("end", () => { console.log("RESULT " + body); res.end("ok"); setTimeout(() => process.exit(0), 100); }); return; }

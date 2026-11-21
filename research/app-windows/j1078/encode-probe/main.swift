@@ -1,7 +1,7 @@
-// J1078 measurement probe (not product code): hardware H.264/HEVC encode latency with the
-// production session settings of crates/plugins/desktop/native/Encoder.swift, against picture
-// size, content, input format, in-flight depth and parallel sessions; plus the per-frame cost of
-// the production FramePixels.prepare (compiled from the repo file) and of a raw-tile fast lane.
+/// J1078 measurement probe (not product code): hardware H.264/HEVC encode latency with the
+/// production session settings of crates/plugins/desktop/native/Encoder.swift, against picture
+/// size, content, input format, in-flight depth and parallel sessions; plus the per-frame cost of
+/// the production FramePixels.prepare (compiled from the repo file) and of a raw-tile fast lane.
 import Compression
 import CoreMedia
 import CoreVideo
@@ -9,17 +9,25 @@ import Foundation
 import IOSurface
 import VideoToolbox
 
+/// The machine's tick-to-nanosecond ratio, read once.
 var timebase = mach_timebase_info_data_t(); mach_timebase_info(&timebase)
+/// Milliseconds for a `mach_absolute_time` span.
 func ms(_ ticks: UInt64) -> Double { Double(ticks) * Double(timebase.numer) / Double(timebase.denom) / 1e6 }
+/// The monotonic clock in ticks.
 func now() -> UInt64 { mach_absolute_time() }
+/// Nearest-rank percentile of `values` (unsorted); NaN when empty.
 func pct(_ values: [Double], _ p: Double) -> Double {
     guard !values.isEmpty else { return .nan }
     let s = values.sorted(); return s[min(s.count - 1, Int((Double(s.count) * p).rounded(.down)))]
 }
+/// Three decimals.
 func f(_ v: Double) -> String { String(format: "%.3f", v) }
+/// True for the short run (QUICK set): fewer sizes and frames.
 let quick = ProcessInfo.processInfo.environment["QUICK"] != nil
+/// The sections named in ONLY, comma separated; nil runs the default set.
 let only = ProcessInfo.processInfo.environment["ONLY"]
 
+/// Deterministic xorshift, so every run and every arm sees the same pictures.
 struct RNG { var s: UInt64; mutating func next() -> UInt64 { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s } }
 
 /// A UI-like BGRA picture: a toolbar gradient and rows of glyph-like dark marks on white.
@@ -42,12 +50,14 @@ func basePicture(_ w: Int, _ h: Int) -> [UInt8] {
     }
     return p
 }
+/// An IOSurface-backed pixel buffer of `format`, as the capture framework hands out.
 func buffer(_ w: Int, _ h: Int, _ format: OSType = kCVPixelFormatType_32BGRA) -> CVPixelBuffer {
     var out: CVPixelBuffer?
     let attrs = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary
     precondition(CVPixelBufferCreate(kCFAllocatorDefault, w, h, format, attrs, &out) == kCVReturnSuccess)
     return out!
 }
+/// Copies rows into `pixel`; `rows` returns the source of each row.
 func fill(_ pixel: CVPixelBuffer, _ w: Int, _ h: Int, rows: (Int) -> UnsafeRawPointer) {
     CVPixelBufferLockBaseAddress(pixel, []); let base = CVPixelBufferGetBaseAddress(pixel)!; let stride = CVPixelBufferGetBytesPerRow(pixel)
     for row in 0..<h { base.advanced(by: row * stride).copyMemory(from: rows(row), byteCount: w * 4) }
@@ -72,10 +82,12 @@ func frames(_ w: Int, _ h: Int, scenario: String, count: Int) -> [CVPixelBuffer]
     }
     return out
 }
+/// The same pictures converted to another pixel format (for the 420v/420f arms).
 func converted(_ source: [CVPixelBuffer], _ w: Int, _ h: Int, _ format: OSType) -> [CVPixelBuffer] {
     var transfer: VTPixelTransferSession?; VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &transfer)
     return source.map { let d = buffer(w, h, format); precondition(VTPixelTransferSessionTransferImage(transfer!, from: $0, to: d) == noErr); return d }
 }
+/// Horizontal band `index` of `n` cut from each picture (for the split-encoder arms).
 func band(_ source: [CVPixelBuffer], _ w: Int, _ h: Int, index: Int, of n: Int) -> [CVPixelBuffer] {
     let bh = (h / n) & ~1
     return source.map { s in
@@ -86,8 +98,11 @@ func band(_ source: [CVPixelBuffer], _ w: Int, _ h: Int, index: Int, of n: Int) 
     }
 }
 
+/// One session configuration under test: codec, rate-control mode, cadence and extra properties.
 struct Variant {
+    /// The label, codec, rate-control mode and frame rate of the variant.
     var name = "prod"; var hevc = false; var lowLatency = true; var fps = 120
+    /// Extra session properties set after the production ones.
     var extra: [(String, CFTypeRef)] = []
 }
 /// The session of Encoder.configure (same properties, same order), plus a variant's extras.
@@ -112,7 +127,9 @@ func session(_ w: Int, _ h: Int, _ v: Variant) -> VTCompressionSession? {
     return s
 }
 
+/// Collected latencies, bytes and drops of one run; `lock` guards callback writes.
 final class Tally { let lock = NSLock(); var latency: [Double] = []; var bytes: [Int] = []; var drops = 0; var last: UInt64 = 0; var keys = 0 }
+/// Submits one frame and calls `done` with the callback time, bytes and whether it was dropped.
 func submit(_ s: VTCompressionSession, _ pixel: CVPixelBuffer, index: Int, fps: Int, key: Bool = false, _ done: @escaping (UInt64, Int, Bool) -> Void) {
     let options = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
     let st = VTCompressionSessionEncodeFrame(s, imageBuffer: pixel, presentationTimeStamp: CMTime(value: Int64(index), timescale: Int32(fps)), duration: CMTime(value: 1, timescale: Int32(fps)), frameProperties: options, infoFlagsOut: nil) { status, flags, sample in
@@ -121,7 +138,9 @@ func submit(_ s: VTCompressionSession, _ pixel: CVPixelBuffer, index: Int, fps: 
     }
     if st != noErr { done(now(), 0, true) }
 }
+/// Sleeps until the absolute tick `deadline`.
 func sleepUntil(_ deadline: UInt64) { let n = now(); if deadline > n { mach_wait_until(deadline) } }
+/// Ticks per source frame at a frame rate.
 let tickNs = { (fps: Int) -> UInt64 in UInt64(1e9 / Double(fps) * Double(timebase.denom) / Double(timebase.numer)) }
 
 /// One frame in flight, as production does: submit, wait for the callback, then the next source tick.
@@ -152,14 +171,18 @@ func runPipelined(_ s: VTCompressionSession, _ input: [CVPixelBuffer], fps: Int,
     let seconds = ms(tally.last - first) / 1000
     return (tally, Double(tally.latency.count) / max(seconds, 1e-9))
 }
+/// Prints one RESULT line for a run.
 func report(_ kind: String, _ label: String, _ w: Int, _ h: Int, _ scenario: String, _ t: Tally, extra: String = "") {
     let mean = t.bytes.isEmpty ? 0 : t.bytes.reduce(0, +) / t.bytes.count
     print("RESULT kind=\(kind) variant=\(label) size=\(w)x\(h) mp=\(f(Double(w * h) / 1e6)) scenario=\(scenario) n=\(t.latency.count) drops=\(t.drops) p50_ms=\(f(pct(t.latency, 0.5))) p95_ms=\(f(pct(t.latency, 0.95))) min_ms=\(f(t.latency.min() ?? .nan)) mean_bytes=\(mean)\(extra)")
     fflush(stdout)
 }
+/// True when the section is in ONLY, or ONLY is unset.
 func want(_ section: String) -> Bool { only == nil || only!.split(separator: ",").contains(Substring(section)) }
 
+/// Timed frames, warm-up frames, and distinct pictures per run.
 let N = quick ? 40 : 160, WARM = quick ? 10 : 30, FRAMES = 12
+/// The hardware model name (hw.model), for the log header.
 var host = [CChar](repeating: 0, count: 256); var hostSize = 256; sysctlbyname("hw.model", &host, &hostSize, nil, 0)
 print("INFO model=\(String(cString: host)) os=\(ProcessInfo.processInfo.operatingSystemVersionString) cores=\(ProcessInfo.processInfo.activeProcessorCount) n=\(N) warm=\(WARM) thermal=\(ProcessInfo.processInfo.thermalState.rawValue) low_power=\(ProcessInfo.processInfo.isLowPowerModeEnabled)")
 
@@ -177,6 +200,7 @@ if want("size") {
     }
 }
 // Settings and input-format variants at the measured fixture size.
+/// The fixture window size the variant rows use (1.56 MP).
 let W = 1520, H = 1026
 if want("variant") {
     let variants: [Variant] = [
@@ -272,6 +296,7 @@ if want("tile") {
 // Settled sharp refresh: a forced keyframe at 4x the bit rate (production) against re-encoding the
 // same settled picture as ordinary delta frames. Every sample is decoded; quality is PSNR against
 // the source pixels, so both arms pay the same colour conversion.
+/// Encodes one picture and waits for it; nil when the encoder dropped it.
 func encodeOne(_ s: VTCompressionSession, _ pixel: CVPixelBuffer, index: Int, key: Bool) -> CMSampleBuffer? {
     let done = DispatchSemaphore(value: 0); var out: CMSampleBuffer?
     let options = key ? [kVTEncodeFrameOptionKey_ForceKeyFrame as String: true] as CFDictionary : nil
@@ -280,8 +305,11 @@ func encodeOne(_ s: VTCompressionSession, _ pixel: CVPixelBuffer, index: Int, ke
     }
     if st != noErr { return nil }; done.wait(); return out
 }
+/// A VideoToolbox decoder producing BGRA, for scoring.
 final class Decoder {
+    /// The decoding session, made from the first sample's format.
     var session: VTDecompressionSession?
+    /// Decodes one sample synchronously; nil when it cannot.
     func decode(_ sample: CMSampleBuffer) -> CVPixelBuffer? {
         if session == nil, let format = CMSampleBufferGetFormatDescription(sample) {
             let attrs = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA] as CFDictionary
@@ -294,6 +322,7 @@ final class Decoder {
         return picture
     }
 }
+/// PSNR in dB over the RGB channels of two BGRA pictures (99 when identical).
 func psnr(_ a: CVPixelBuffer, _ b: CVPixelBuffer, _ w: Int, _ h: Int) -> Double {
     CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
@@ -342,6 +371,7 @@ if only?.contains("refresh") == true {
 // Loss repair without a keyframe: long-term reference frames of the low-latency encoder.
 // The viewer loses three delta frames; the repair is either a forced keyframe (production) or a
 // refresh that references the last acknowledged long-term frame. Both are decoded and checked.
+/// The long-term-reference acknowledgement token a sample carries, if any.
 func ltrToken(_ sample: CMSampleBuffer) -> NSNumber? {
     guard let all = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[CFString: Any]], let first = all.first else { return nil }
     return first[kVTSampleAttachmentKey_RequireLTRAcknowledgementToken] as? NSNumber

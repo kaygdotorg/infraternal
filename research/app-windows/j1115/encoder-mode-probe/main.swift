@@ -1,23 +1,24 @@
-// J1115 measurement probe (not product code): which VideoToolbox rate-control mode and data-rate
-// cap the App Windows encoder should use, and how the settled sharp refresh should be sent (#146).
-//
-// It builds the same session as crates/plugins/desktop/native/Encoder.swift in both modes:
-// "lowlat" (EnableLowLatencyRateControl, the mode before J1115) and "realtime" (the ordinary
-// real-time mode), the latter with and without DataRateLimits caps. Every encoded sample is kept
-// and decoded after the timed loop, so scoring never disturbs the source cadence. A dropped frame
-// leaves the previous decoded picture on screen, and that is what "shown" PSNR scores.
-//
-// Sections (ONLY=a,b to pick; default all):
-//   mode     steady 120/60 Hz typing and scrolling: encode p50/p95/p99, drops, kbit/s, worst frame
-//   sparse   one typed change after a gap: encode time and bytes
-//   refine   after a pause: forced keyframe at 4x (before J1115) against delta passes at 2x/4x,
-//            after typing, after scrolling, and after a lone motion keyframe ("static")
-// Lines that start with RESULT are measurements; NOTE lines report a property the encoder refused.
+/// J1115 measurement probe (not product code): which VideoToolbox rate-control mode and data-rate
+/// cap the App Windows encoder should use, and how the settled sharp refresh should be sent (#146).
+///
+/// It builds the same session as crates/plugins/desktop/native/Encoder.swift in both modes:
+/// "lowlat" (EnableLowLatencyRateControl, the mode before J1115) and "realtime" (the ordinary
+/// real-time mode), the latter with and without DataRateLimits caps. Every encoded sample is kept
+/// and decoded after the timed loop, so scoring never disturbs the source cadence. A dropped frame
+/// leaves the previous decoded picture on screen, and that is what "shown" PSNR scores.
+///
+/// Sections (ONLY=a,b to pick; default all):
+///   mode     steady 120/60 Hz typing and scrolling: encode p50/p95/p99, drops, kbit/s, worst frame
+///   sparse   one typed change after a gap: encode time and bytes
+///   refine   after a pause: forced keyframe at 4x (before J1115) against delta passes at 2x/4x,
+///            after typing, after scrolling, and after a lone motion keyframe ("static")
+/// Lines that start with RESULT are measurements; NOTE lines report a property the encoder refused.
 import CoreMedia
 import CoreVideo
 import Foundation
 import VideoToolbox
 
+/// The machine's tick-to-nanosecond ratio, read once.
 var timebase = mach_timebase_info_data_t(); mach_timebase_info(&timebase)
 /// Milliseconds for a `mach_absolute_time` span.
 func ms(_ ticks: UInt64) -> Double { Double(ticks) * Double(timebase.numer) / Double(timebase.denom) / 1e6 }
@@ -32,7 +33,9 @@ func pct(_ values: [Double], _ p: Double) -> Double {
 }
 /// Three decimals.
 func f(_ v: Double) -> String { String(format: "%.3f", v) }
+/// The environment, which selects sections (ONLY), arms (ARMS) and a short run (QUICK).
 let env = ProcessInfo.processInfo.environment
+/// True for the short run: one size and fewer frames.
 let quick = env["QUICK"] != nil
 /// True when the section was asked for (or no section was named).
 func want(_ section: String) -> Bool { env["ONLY"].map { $0.split(separator: ",").contains(Substring(section)) } ?? true }
@@ -78,9 +81,13 @@ func fill(_ pixel: CVPixelBuffer, _ w: Int, _ h: Int, rows: (Int) -> UnsafeRawPo
 /// pictures, which is how scoring regenerates what was encoded. A returned buffer stays valid
 /// until two more pictures have been taken.
 final class Source {
+    /// Picture width and height in pixels, and the scenario name.
     let w: Int, h: Int, scenario: String
+    /// The picture being drawn into, the mark generator and the index of the next picture.
     private var base: [UInt8]; private var r = RNG(s: 42); private var k = 0
+    /// The three reusable output buffers.
     private let ring: [CVPixelBuffer]
+    /// A sequence of `w`x`h` pictures for `scenario` (`typing` or `scroll`).
     init(_ w: Int, _ h: Int, _ scenario: String) {
         self.w = w; self.h = h; self.scenario = scenario; base = basePicture(w, h)
         ring = (0..<3).map { _ in buffer(w, h) }
@@ -154,6 +161,7 @@ func encode(_ s: VTCompressionSession, _ pixel: CVPixelBuffer, key: Bool, fps: I
 }
 /// A software-visible VideoToolbox decoder producing BGRA, for scoring.
 final class Decoder {
+    /// The decoding session, made from the first sample's format.
     var session: VTDecompressionSession?
     /// Decodes one sample synchronously; nil when it cannot.
     func decode(_ sample: CMSampleBuffer) -> CVPixelBuffer? {
@@ -182,6 +190,7 @@ func size(_ s: CMSampleBuffer) -> Int { CMSampleBufferGetTotalSampleSize(s) }
 /// Sleeps until the absolute tick `deadline`.
 func sleepUntil(_ deadline: UInt64) { if deadline > now() { mach_wait_until(deadline) } }
 
+/// Every arm the probe knows: the mode before J1115, the ordinary mode, and three caps.
 let arms: [Arm] = [
     Arm(name: "lowlat", lowLatency: true),
     Arm(name: "realtime", lowLatency: false),
@@ -189,10 +198,14 @@ let arms: [Arm] = [
     Arm(name: "realtime_cap1s_1x", lowLatency: false, cap: [(1.0, 1)]),
     Arm(name: "realtime_cap1s_1.5x_100ms_3x", lowLatency: false, cap: [(1.5, 1), (3.0, 0.1)]),
 ]
+/// The arms to run: those named in ARMS, or all.
 let chosen = env["ARMS"].map { names in arms.filter { names.split(separator: ",").contains(Substring($0.name)) } } ?? arms
+/// The hardware model name (hw.model), for the log header.
 var host = [CChar](repeating: 0, count: 256); var hostSize = 256; sysctlbyname("hw.model", &host, &hostSize, nil, 0)
 print("INFO model=\(String(cString: host)) os=\(ProcessInfo.processInfo.operatingSystemVersionString) cores=\(ProcessInfo.processInfo.activeProcessorCount) thermal=\(ProcessInfo.processInfo.thermalState.rawValue) low_power=\(ProcessInfo.processInfo.isLowPowerModeEnabled) arms=\(chosen.map(\.name).joined(separator: ","))")
+/// Picture sizes: 0.28, 1.56 and 4.1 megapixels (only 1.56 in the short run).
 let sizes = quick ? [(1520, 1026)] : [(656, 422), (1520, 1026), (2560, 1600)]
+/// Timed frames per steady run, and warm-up frames before them.
 let FRAMES = 160, WARM = 30
 
 // Steady cadence: one source picture per tick, one frame in flight.
