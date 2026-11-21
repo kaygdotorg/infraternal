@@ -10,7 +10,9 @@
 //! libraries, sourced files and arbitrary root executable-input graphs are not.
 //! A negative result establishes none of those routes' absence. The report
 //! names completed checks and explicitly says access outside them is uncovered.
-use std::{ffi::CString, io::Read, path::Path, process::Stdio, time::Duration};
+#[cfg(not(target_vendor = "apple"))]
+use std::ffi::CString;
+use std::{io::Read, path::Path, process::Stdio, time::Duration};
 
 use nix::unistd::{Group, Uid, User};
 use tokio::io::AsyncReadExt as _;
@@ -328,6 +330,7 @@ fn root_group_or_unknown(account: &User, _jobs: &crate::access_jobs::Observation
 
 /// Resolve the complete account group list once before a credential drop.
 /// Missing NSS membership is unknown, never an empty group list.
+#[cfg(not(target_vendor = "apple"))]
 pub(crate) fn account_groups(account: &User) -> Option<Vec<nix::unistd::Gid>> {
     let mut sources = String::new();
     std::fs::File::open("/etc/nsswitch.conf")
@@ -340,6 +343,14 @@ pub(crate) fn account_groups(account: &User) -> Option<Vec<nix::unistd::Gid>> {
     }
     let name = CString::new(account.name.as_bytes()).ok()?;
     nix::unistd::getgrouplist(&name, account.gid).ok()
+}
+
+/// macOS keeps group membership in Directory Services, and the `nix` crate has no
+/// `getgrouplist` there, so the answer is unknown: callers already treat unknown as
+/// the cautious result (#355, D367).
+#[cfg(target_vendor = "apple")]
+pub(crate) fn account_groups(_account: &User) -> Option<Vec<nix::unistd::Gid>> {
+    None
 }
 
 /// Use the already completed job inventory, rather than scan host units twice.

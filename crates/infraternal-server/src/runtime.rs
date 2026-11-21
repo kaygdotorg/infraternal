@@ -685,7 +685,7 @@ async fn build_router_core(
     let pool = open_database(&config.data_dir).await?;
     // The staging proof's broken-migration release fails here, as a real failed
     // migration would, so its warm undo is proven on a real server (#211 S4).
-    #[cfg(feature = "staging-trust")]
+    #[cfg(all(feature = "release", feature = "staging-trust"))]
     if crate::update_apply::staging_migration_fails() {
         return Err(ServerError::Migration(
             sqlx::migrate::MigrateError::VersionMissing(0),

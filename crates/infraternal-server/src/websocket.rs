@@ -280,6 +280,7 @@ impl WebSocketState {
         let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
         // Update switches record the live sessions, and trials require them (#211 S4).
+        #[cfg(feature = "release")]
         crate::update_apply::set_session_inventory(inventory.clone());
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
@@ -538,6 +539,7 @@ async fn upgrade(
     ws: WebSocketUpgrade,
 ) -> Response {
     // A new release on trial takes no terminal traffic until the trial commits (#211 S4).
+    #[cfg(feature = "release")]
     crate::update_apply::terminals_admitted().await;
     if headers
         .get(header::ORIGIN)
