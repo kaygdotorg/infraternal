@@ -162,6 +162,7 @@ async fn primary_ping_during_terminal_flood() {
         https_root: None,
         https_system_roots: false,
         execution_uid: uid,
+        server_leaf: std::sync::Arc::default(),
     };
     let node_state = state.clone();
     tasks.spawn(async move {

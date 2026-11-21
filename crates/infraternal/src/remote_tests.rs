@@ -1,6 +1,7 @@
 //! Verifies bounded operator input, private identity creation and certificate-only renewal publication [63][132][133], #78.
 
 use super::*;
+use infraternal_agent::server_leaf_floor::ServerLeafFloor;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 
 struct Directory(PathBuf);
@@ -939,4 +940,43 @@ async fn an_unspecified_listener_dials_the_origin_host() {
     let fixed = Some("10.0.0.5:45681".parse().unwrap());
     assert_eq!(direct_endpoint(fixed, "https://ssh.kayg.org").await, fixed);
     assert_eq!(direct_endpoint(None, "https://ssh.kayg.org").await, None);
+}
+
+/// The agent's server-leaf floor survives a restart, belongs to one
+/// enrollment, and reads as "no floor" when missing, foreign or malformed (#559).
+#[test]
+fn server_leaf_file_persists_the_floor_for_its_own_enrollment_only() {
+    use infraternal_agent::server_leaf_floor::ServerLeafStore;
+    let directory = Directory::new();
+    let host = uuid::Uuid::new_v4();
+    let file = ServerLeafFile {
+        data: directory.0.clone(),
+        host,
+    };
+    assert_eq!(file.load(), None);
+    file.remember(1_800_000_000).unwrap();
+    file.remember(1_800_086_400).unwrap();
+    assert_eq!(file.load(), Some(1_800_086_400));
+    let metadata = std::fs::metadata(directory.0.join(ServerLeafFile::NAME)).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::read_dir(&directory.0).unwrap().count(),
+        1,
+        "no pending file may be left behind"
+    );
+    assert_eq!(
+        ServerLeafFloor::newest(&ServerLeafFile::floor(&directory.0, host)),
+        Some(1_800_086_400)
+    );
+    let other = ServerLeafFile {
+        data: directory.0.clone(),
+        host: uuid::Uuid::new_v4(),
+    };
+    assert_eq!(
+        other.load(),
+        None,
+        "another enrollment's floor must not apply"
+    );
+    std::fs::write(directory.0.join(ServerLeafFile::NAME), b"not a floor\n").unwrap();
+    assert_eq!(file.load(), None);
 }

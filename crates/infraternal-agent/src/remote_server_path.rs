@@ -267,6 +267,8 @@ async fn connect_with_predecessor_fallback(
                 https_root: identity.https_root.clone(),
                 https_system_roots: identity.https_system_roots,
                 execution_uid: identity.execution_uid,
+                // The same enrollment: one floor, whichever host key dials.
+                server_leaf: identity.server_leaf.clone(),
             };
             connect(&predecessor_identity, None, address, kind, prove).await
         }
