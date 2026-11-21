@@ -19,6 +19,7 @@ import { el } from "../dom";
 import type { GroupDef, KeyDef, PanelId } from "./catalog";
 import { SETTING_DEFS } from "./definitions.on-demand";
 import type { Spot } from "./model";
+import { updatesSource } from "../updates/source";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
 const live = new Map<string, Map<string, SettingRow>>();
@@ -102,7 +103,15 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
     pane.append(list);
     shown++;
   }
-  const data = source.data?.(comp.id, group.id);
+  // The Machines Updates window: the owner's controls, when a source exists. The example facts the double also holds for this window give way to it.
+  const updates = group.updates ? updatesSource() : undefined;
+  if (updates) {
+    let gone = false, stop: (() => void) | undefined;
+    void onDemand(() => import("../updates/panel.on-demand")).then((mod) => { if (!gone) stop = mod.renderUpdates(cx, pane, updates); });
+    disposers.push(() => { gone = true; stop?.(); });
+    shown++;
+  }
+  const data = updates ? undefined : source.data?.(comp.id, group.id);
   if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); shown++; }
   if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); shown++; }
 

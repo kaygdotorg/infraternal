@@ -420,6 +420,19 @@
 /* A panel that already existed, reused in a window: it brings its own pane, which must not pad and scroll a second time. */
 .cl-settings-nest > .ui-settings-pane { padding: 0; overflow: visible; }
 .cl-settings-later { margin: 0; padding: 0.5rem 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
+/* Settings > Machines > Updates (#211, S5): the sentence under the status, and the buttons. A window is a fifth of the screen wide, so the buttons wrap rather than shrink. */
+.cl-up { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
+.cl-up-detail { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; overflow-wrap: anywhere; }
+.cl-up-detail[hidden] { display: none; }
+.cl-up-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.cl-up-button {
+  --ui-button-min-width: 0;
+  --ui-button-height: var(--ui-control-h, 2rem);
+  --ui-button-padding: 0 1rem;
+  --ui-button-radius: 999px;
+  --ui-button-font: var(--fw-title) var(--ui-size-button)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-letter-spacing: var(--ui-tracking);
+}
 
 /* A Settings window has no input lock, so its title pill does not leave room for one: it may use the header up to its own action group (the
    product's cap is half of it, for the lock, and cut "Published Services" to "Published Serv…"). The room left is the group's: 28 px per button and the gap. */
