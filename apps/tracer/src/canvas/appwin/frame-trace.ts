@@ -13,6 +13,8 @@ export interface FrameTrace {
   width?: number;
   height?: number;
   outcome: "painted" | "superseded" | "unpainted";
+  /** Set to "tile" for a tile update (#146 proposal C); its `decodedAt` is when its pixels were inflated. Video leaves it unset. */
+  lane?: "tile";
 }
 /** The part of a `FrameTrace` known when the frame arrives, before the decode worker has seen it. */
 export type ReceiveTrace = Pick<FrameTrace, "captureNs" | "bytes" | "receivedAt" | "copyFinishedAt">;

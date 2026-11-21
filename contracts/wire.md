@@ -648,7 +648,7 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | type | name | body (little endian) |
 | ---: | --- | --- |
 | 0x40 | AttachDesktop | 16-byte session UUID, u8 delivery (0 reliable, 1 datagram) |
-| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit |
+| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit or tile update (desktop-helper.md) |
 | 0x42 | VideoSize | u16 width, u16 height, u16 density_milli |
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
