@@ -1,8 +1,8 @@
 /**
  * Keeps opt-in local keystroke predictions in a removable overlay above the terminal renderer.
  *
- * A prediction is an ordered queue of operations: a printable glyph, or an erase (the host's `\b \b` echo
- * of DEL). Invariants that keep the predicted cursor on the cell grid and on the host's cursor:
+ * A prediction is an ordered queue of operations: a printable glyph, or an erase (the host's echo of DEL:
+ * `\b \b` from the kernel's line discipline, or `\b` then erase-to-end-of-line `ESC [ K` from line editors). Invariants that keep the predicted cursor on the cell grid and on the host's cursor:
  *
  * - Every operation stores the integer cell (column, row) where it lands and where the cursor is afterwards,
  *   computed once when the key is typed from the previous operation (or, for the first one, from the host
@@ -105,7 +105,7 @@ export interface PredictiveEchoOptions {
 
 /** Where the echo scanner is inside a terminal escape sequence. */
 type VtParserState = "text" | "escape" | "csi" | "string" | "string-escape";
-/** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete `\b \b` erase occurred. */
+/** Visible echo bytes of one output chunk, and the offsets in `bytes` at which a complete erase echo occurred. */
 type VisibleOutput = { bytes: Uint8Array; erases: number[] };
 
 /** A single terminal session's bounded, client-only prediction state. */
@@ -131,8 +131,13 @@ export class PredictiveEcho {
   private mispredictions = 0;
   /** Set after something that makes the cursor position uncertain; no key is predicted until host output has settled it. */
   private waitingForOutput = false;
-  /** Progress through matching the host's `\b \b` erase echo. */
-  private backspaceEchoState: 0 | 1 | 2 = 0;
+  /**
+   * Progress through matching the host's erase echo: 1 after `\b`, 2 after `\b ` (expecting the closing `\b`),
+   * 3 after `\b ESC` (expecting `[K`, `[0K`, which line editors send instead of overwriting with a space).
+   */
+  private backspaceEchoState: 0 | 1 | 2 | 3 = 0;
+  /** The parameter bytes of the CSI sequence that follows a `\b` (state 3); only empty or `0` before `K` is an erase. */
+  private eraseCsiParams = "";
   /** The pending echo or proof timeout. */
   private timeout = 0;
   /** The pending animation frame for a render. */
@@ -761,7 +766,7 @@ export class PredictiveEcho {
     this.render(at, false);
   }
 
-  /** The printable echo bytes of one output chunk, with the offsets at which a `\b \b` erase finished. Escape sequences are skipped. */
+  /** The printable echo bytes of one output chunk, with the offsets at which an erase echo finished. Escape sequences are skipped. */
   private visibleBytes(bytes: Uint8Array): VisibleOutput {
     const visible = new Uint8Array(Math.min(bytes.byteLength, MAX_VISIBLE_ECHO_BYTES));
     let length = 0;
@@ -775,6 +780,21 @@ export class PredictiveEcho {
     for (const byte of bytes) {
       scanned += 1;
       if (scanned > MAX_VISIBLE_ECHO_BYTES) break;
+      if (this.backspaceEchoState === 3) {
+        // `\b` then `ESC [ K` (or `ESC [ 0 K`): the cell left of the cursor is cleared, like `\b \b`. Any other
+        // sequence after a `\b` is a plain cursor move, which is not an erase; it is skipped like other escapes.
+        if (this.parserState !== "escape" || byte === 0x5b) {
+          if (this.parserState === "escape") this.parserState = "csi";
+          else if (byte >= 0x40 && byte <= 0x7e) {
+            if (byte === 0x4b && (this.eraseCsiParams === "" || this.eraseCsiParams === "0")) erases.push(length);
+            this.backspaceEchoState = 0;
+            this.parserState = "text";
+          } else this.eraseCsiParams += String.fromCharCode(byte);
+          continue;
+        }
+        // Not a CSI (for example an OSC string): no erase; the escape is parsed as usual below.
+        this.backspaceEchoState = 0;
+      }
       if (this.parserState === "escape") {
         if (byte === 0x5b) this.parserState = "csi";
         else if (byte === 0x5d || byte === 0x50 || byte === 0x5e || byte === 0x5f || byte === 0x58) this.parserState = "string";
@@ -788,6 +808,13 @@ export class PredictiveEcho {
         this.parserState = byte === 0x5c ? "text" : "string";
       } else if (byte === 0x1b) {
         this.parserState = "escape";
+        if (this.backspaceEchoState === 1) {
+          this.backspaceEchoState = 3;
+          this.eraseCsiParams = "";
+        } else if (this.backspaceEchoState === 2) {
+          this.backspaceEchoState = 0;
+          emit(0x20);
+        }
       } else if (this.backspaceEchoState === 0 && byte === 0x08) {
         this.backspaceEchoState = 1;
       } else if (this.backspaceEchoState === 1) {
