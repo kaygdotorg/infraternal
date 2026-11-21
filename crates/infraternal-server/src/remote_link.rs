@@ -4,7 +4,8 @@
 use crate::embedded::AgentError;
 #[cfg(any(test, feature = "native-streams"))]
 use crate::remote_guard::AuthorityGuard;
-use axum::extract::ws::{Message as WebSocketMessage, WebSocket};
+// The host-link socket starts under the `/remote/agent` proof budget (#572).
+use crate::remote_agent_http::AgentSocket as WebSocket;
 use bytes::{Bytes, BytesMut};
 use futures_util::{
     SinkExt, StreamExt,
@@ -40,6 +41,7 @@ use tokio::{
     sync::{Mutex, mpsc, watch},
     task::JoinSet,
 };
+use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 // Tests observe existing ownership without extending a transport's lifetime.
 #[cfg(test)]
