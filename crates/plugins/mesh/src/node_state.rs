@@ -1353,7 +1353,7 @@ fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
 /// descriptor is used for decoding so a path replacement cannot change which bytes are read.
 /// # Errors
 /// Refuses unsafe metadata, malformed JSON, or filesystem errors.
-fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
+pub(crate) fn read_public<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Option<T>> {
     match OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW)
@@ -1423,7 +1423,7 @@ pub(crate) fn existing_matches(path: &Path, body: &[u8]) -> bool {
 // Write the journal before kernel mutation and the accepted snapshot afterwards.
 // A crash between writes can recover ownership from the journal, the accepted
 // peer list and the retained kernel peer list; no cross-file atomicity is assumed.
-fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
+pub(crate) fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
     let temporary = path.with_extension(format!("{}.new", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)

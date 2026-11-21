@@ -853,16 +853,16 @@ mod test_trust_anchor {
     }
 }
 
-/// Recognize authored Linux Mesh restore messages without exposing raw local errors.
+/// Recognize authored Linux and macOS Mesh restore messages without exposing raw local errors.
 pub(crate) fn mesh_restore_failure(error: &io::Error) -> Option<(&'static str, &'static str)> {
-    #[cfg(all(target_os = "linux", feature = "plugin-mesh"))]
+    #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "plugin-mesh"))]
     {
         let refusal = error
             .get_ref()?
             .downcast_ref::<infraternal_plugin_mesh::node::MachineBindingError>()?;
         Some((refusal.summary(), refusal.recovery()))
     }
-    #[cfg(not(all(target_os = "linux", feature = "plugin-mesh")))]
+    #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "plugin-mesh")))]
     {
         let _ = error;
         None

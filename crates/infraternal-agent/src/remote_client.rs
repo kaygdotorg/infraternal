@@ -285,7 +285,7 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    #[cfg(all(feature = "mesh", any(target_os = "linux", target_os = "macos")))]
     if let Ok(path) = crate::sessions::state_path(state.clone()) {
         // Check the machine binding before transport, including recovery, so the link
         // supervisor cannot turn a persistent configuration error into reconnects.
