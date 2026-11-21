@@ -653,6 +653,19 @@ fn open_sessions(runtime: &File) -> Result<u16, u8> {
 fn enrolled(root: &File) -> String {
     enrolled_record(root).unwrap_or_else(|| "- -".to_owned())
 }
+/// The two fields of `identity.json` the stuck-install check reads; every other
+/// field is skipped without being copied. The key lands directly in a buffer
+/// wiped on drop: parsing into a generic JSON value would leave ordinary heap
+/// copies of it, and of a pending rotation's candidate key, in freed memory
+/// (#559 L1).
+#[derive(serde::Deserialize)]
+struct EnrolledFields {
+    /// The server the identity was issued for.
+    server_name: String,
+    /// The active private key, PKCS#8 in unpadded URL-safe base64.
+    key_der: zeroize::Zeroizing<String>,
+}
+
 fn enrolled_record(root: &File) -> Option<String> {
     let state = directory(&at(root, "state")).ok()?;
     let mut file = OpenOptions::new()
@@ -673,8 +686,8 @@ fn enrolled_record(root: &File) -> Option<String> {
     if bytes.len() > 8192 {
         return None;
     }
-    let stored: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let server = stored.get("server_name")?.as_str()?;
+    let stored: EnrolledFields = serde_json::from_slice(&bytes).ok()?;
+    let server = stored.server_name.as_str();
     if server.is_empty()
         || server.len() > 253
         || server.starts_with(['-', '.'])
@@ -686,13 +699,14 @@ fn enrolled_record(root: &File) -> Option<String> {
     }
     // Identities store DER as unpadded URL-safe base64; OpenSSL decodes the
     // standard alphabet with padding.
-    let mut key = zeroize::Zeroizing::new(
-        stored
-            .get("key_der")?
-            .as_str()?
-            .replace('-', "+")
-            .replace('_', "/"),
-    );
+    // Translate in place into a buffer already sized for the padding, so no
+    // reallocation leaves a partial key copy in freed memory (#559 L1).
+    let mut key = zeroize::Zeroizing::new(String::with_capacity(stored.key_der.len() + 3));
+    key.extend(stored.key_der.chars().map(|character| match character {
+        '-' => '+',
+        '_' => '/',
+        other => other,
+    }));
     while key.len() % 4 != 0 {
         key.push('=');
     }
