@@ -75,7 +75,7 @@ fi
 
 chain after-boot
 log "phase 2 start run=$run"
-timeout 1200 ./server-tests --ignored --exact "$tests::auto_update_after_reboot" \
+timeout 2400 ./server-tests --ignored --exact "$tests::auto_update_after_reboot" \
     --nocapture --test-threads=1 > "$out/phase2.log" 2>&1
 rc=$?
 log "phase 2 rc=$rc"

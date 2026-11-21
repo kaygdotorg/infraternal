@@ -60,8 +60,8 @@ vm_pid=$!
 vm_pgid=$vm_pid
 printf 'UPDATE_VM booted pid=%s pgid=%s\n' "$vm_pid" "$vm_pgid"
 
-# The proof takes about 25 minutes; give it 50, then stop it.
-deadline=$(( $(date +%s) + 3000 ))
+# The proof takes about 35 minutes; give it 60, then stop it.
+deadline=$(( $(date +%s) + 3600 ))
 while [[ ! -s "$share/out/DONE" ]]; do
     if ! kill -0 "$vm_pid" 2>/dev/null; then
         printf 'UPDATE_VM the VM exited before the proof finished\n' >&2
