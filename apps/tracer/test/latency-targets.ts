@@ -13,6 +13,8 @@
 
 /** One display frame at 120 Hz, in milliseconds. */
 export const FRAME_MS = 1000 / 120;
+/** D375 row 1 (owner, 2026-11-21): our own work for a predicted letter, p99, in milliseconds. */
+export const PREDICTED_GLYPH_WORK_MS = 4;
 /** The fixed allowance D259/D267 add after a reconnect's round trips. */
 export const RECONNECT_ALLOWANCE_MS = 50;
 /** D41/D375: first paint on a mid-range phone stays under one second. */
@@ -50,7 +52,12 @@ export interface D375Measurement {
     | "first_paint_phone"
     | "real_paint_after_ws"
     | "real_echo_shell"
-    | "real_typed_letter";
+    | "real_typed_letter"
+    | "real_flood_effect"
+    | "first_paint_4g_signin"
+    | "first_paint_4g_connected"
+    | "first_paint_3g_signin"
+    | "first_paint_3g_connected";
   source: string;
   n: number;
   value: number;
@@ -60,6 +67,8 @@ export interface D375Measurement {
   higherIsBetter?: boolean;
   /** Print `result=REPORT` instead of PASS/FAIL: a row that is measured and shown but does not gate yet. */
   reportOnly?: boolean;
+  /** A second condition the row must also meet (row 1's "letter in the first frame"); the row fails when `ok` is false. */
+  condition?: { ok: boolean; note: string };
   extra?: string;
 }
 
@@ -67,7 +76,7 @@ export interface D375Measurement {
 export function d375Row(row: D375Measurement): { line: string; passed: boolean } {
   const gate = row.gate ?? row.target;
   const within = (limit: number): boolean => (row.higherIsBetter ? row.value >= limit : row.value <= limit);
-  const passed = Number.isFinite(row.value) && row.n > 0 && within(gate);
+  const passed = Number.isFinite(row.value) && row.n > 0 && within(gate) && (row.condition?.ok ?? true);
   const line =
     `METRIC name=d375_${row.key} source=${row.source} display=${latencyDisplay()} n=${row.n} ` +
     `value=${row.value.toFixed(2)} unit=${row.unit} ` +

@@ -125,9 +125,9 @@ def gated_rows(latency_targets, log_text):
     """
     measured = latency_targets.parse("\n".join([log_text, *latency_targets.compose_own_overhead(log_text)]))
     rows = {}
-    for row in latency_targets.ROWS:
+    for row in (*latency_targets.ROWS, *latency_targets.EXTRA_ROWS):
         entries = measured.get(row.key, {})
-        display = next((name for name in latency_targets.GATED_DISPLAYS if name in entries), None)
+        display = latency_targets.gated_display(row, entries)
         if display is None:
             continue
         fields = entries[display]
@@ -164,9 +164,11 @@ def regressions(previous, current):
 
 def failing(latency_targets, current):
     """The rows that failed their gate, plus every D375 row that is missing from the run."""
+    # A reported row (result REPORT) shows in the table and the regression check but never fails the night.
     bad = [(key, row["measure"], f"{row['value']:.2f} {row['unit']} against a gate of {row['gate']}")
-           for key, row in current.items() if row["result"] != "PASS"]
-    bad += [(row.key, row.measure, "not measured") for row in latency_targets.ROWS if row.key not in current]
+           for key, row in current.items() if row["result"] not in ("PASS", "REPORT")]
+    bad += [(row.key, row.measure, "not measured") for row in (*latency_targets.ROWS, *latency_targets.EXTRA_ROWS)
+            if row.key not in current]
     return bad
 
 
