@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
+/** The shared stylesheet's text, read once for every test below. */
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 describe("pinch guard", () => {
