@@ -331,7 +331,7 @@ export class Wizard {
   private rowOf(entry: Entry, added: boolean): string {
     const host = entry.discovered!;
     const status = statusOf(host);
-    const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
+    const sources = host.sources.map((source) => `<span class="ah-src" role="img" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
     const checked = this.selected.some((item) => item.id === entry.id);
     const facts = [host.operatingSystem, host.architecture].filter(Boolean).map((item, index) => `<span>${index ? "· " : ""}${escapeHtml(item!)}</span>`).join("") || `<span>${escapeHtml(entry.address)}</span>`;
     return `<label class="ah-row${added ? " is-added" : ""}" data-host="${escapeHtml(entry.id)}">

@@ -326,7 +326,7 @@ export async function mountAddHostPrototype(core: CoreScreen, canvas: CanvasCont
     private hostRow(host: AddHostFixture): string {
       const typed = this.typed.includes(host);
       const status = typed ? { label: "We'll check it when you continue", tone: "none" as const, icon: ICON.pending } : statusOf(host);
-      const sources = host.sources.map((source) => `<span class="ah-src" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
+      const sources = host.sources.map((source) => `<span class="ah-src" role="img" title="${SOURCE_LABELS[source]}" aria-label="${SOURCE_LABELS[source]}">${hostSourceIconMarkup(source)}</span>`).join("");
       const checked = this.selected.some((item) => item.id === host.id);
       const mark = typed ? svg(ICON.typed, "ah-os-mark is-line") : hostIconMarkup(platformOf(host), "ah-os-mark");
       return `<label class="ah-row${host.alreadyAdded ? " is-added" : ""}" data-host="${escapeHtml(host.id)}">
