@@ -2064,7 +2064,8 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
 }
 
-// Each browser frame is validated here and routed without allocating a second terminal payload.
+/// Validates one browser frame and routes it without allocating a second terminal payload. A plugin call goes
+/// to `pending_plugin_calls`, which runs it now or queues it behind the busy ones (#556); only a full queue refuses.
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
