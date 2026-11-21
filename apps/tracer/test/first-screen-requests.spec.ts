@@ -65,7 +65,8 @@ test("the sign-in screen does not wait for the canvas sheets", async ({ page }) 
     released = true;
     await route.continue();
   });
-  await page.goto("/");
+  // "commit", not the default "load": the load event waits for every stylesheet, even one that does not block rendering.
+  await page.goto("/", { waitUntil: "commit" });
   await expect(page.locator("#login-passkey")).toBeVisible();
   expect(released).toBe(false);
 });
