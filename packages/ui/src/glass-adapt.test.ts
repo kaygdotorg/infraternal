@@ -9,7 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { luminanceOf, type Rgb } from "./glass-contrast";
-import { blurCells, rangeOfGrid } from "./glass-adapt.on-demand";
+import { blurCells, mergeRanges, rangeOfGrid, rangeOfSample } from "./glass-adapt.on-demand";
 import type { GlassGridRead } from "./glass-under.on-demand";
 import { glassFor } from "./glass-rules.on-demand";
 import { THEMES } from "./themes";
@@ -67,5 +67,32 @@ describe("the backdrop range of a terminal screen", () => {
     expect(plain.alpha).toBeCloseTo(0.2, 2);
     expect(bars.alpha).toBeGreaterThan(plain.alpha);
     expect(bars.ok).toBe(true);
+  });
+});
+
+describe("a card that straddles a picture and the page", () => {
+  test("the merged range reaches the darkest and lightest of both parts", () => {
+    // A white picture under one half of the card and a dark page under the other.
+    const picture = rangeOfSample([255, 255, 255, 255]);
+    const page = rangeOfSample([...INK_BG, 255]);
+    const merged = mergeRanges(picture, page);
+    expect(merged.light).toEqual(picture.light);
+    expect(merged.dark).toEqual(page.dark);
+    expect(luminanceOf(merged.dark)).toBeLessThan(luminanceOf(merged.light));
+  });
+
+  test("merging is symmetric and leaves a range that already covers the other alone", () => {
+    const wide = rangeOfSample([0, 0, 0, 255, 255, 255, 255, 255]);
+    const narrow = rangeOfSample([128, 128, 128, 255]);
+    expect(mergeRanges(wide, narrow)).toEqual(wide);
+    expect(mergeRanges(narrow, wide)).toEqual(wide);
+  });
+
+  test("a hard mix is solid where either half alone would be glass", () => {
+    const ink = THEMES.find((t) => t.name === "ink")!;
+    const white = rangeOfSample([255, 255, 255, 255]);
+    const dark = rangeOfSample([...INK_BG, 255]);
+    expect(glassFor(ink, 3, dark).solid).toBe(false);
+    expect(glassFor(ink, 3, mergeRanges(dark, white)).solid).toBe(true);
   });
 });
