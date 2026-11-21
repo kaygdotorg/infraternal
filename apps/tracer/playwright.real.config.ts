@@ -48,6 +48,8 @@ export default defineConfig({
     launchOptions: {
       args: browserName === "chromium" ? [
         "--disable-renderer-backgrounding",
+        // The latency profile runs its real-server rows unthrottled (vsync and the frame-rate limit off) and at normal pacing.
+        ...(process.env.TRACER_CHROMIUM_FLAGS ?? "").split(/\s+/).filter(Boolean),
         // The private fixture certificate also covers service-worker fetches.
         "--ignore-certificate-errors",
         ...(demoHost && demoAddress ? [`--host-resolver-rules=MAP ${demoHost} ${demoAddress}`] : []),

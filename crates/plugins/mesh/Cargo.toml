@@ -71,7 +71,7 @@ url = { workspace = true, optional = true }
 # sendmsg_x and, from 15.6, arrive through recvmsg_x, on every socket where that
 # measured faster; both are looked up at run time and fall back to one datagram
 # per call. GOTATUN_MAC_BATCH=off turns them off (#554, J1036).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "0f8f93401dcb8e6737b61d41a26ef000f08aa17a", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "ac1d1d74291ec0fdeaed4a5bd1015f96ffc05044", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

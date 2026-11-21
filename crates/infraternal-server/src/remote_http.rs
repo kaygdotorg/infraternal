@@ -575,7 +575,8 @@ async fn issue_approved_machine_join(
         .begin()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    // A device approval can create only its requested owner-bound host row.
+    // A device approval can create only its requested owner-bound host row;
+    // the SELECT below refuses a row that existed before this approval.
     sqlx::query(
         "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved) \
          SELECT ?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
@@ -593,12 +594,20 @@ async fn issue_approved_machine_join(
     .execute(&mut *transaction)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // The host id is chosen by the requester, so `ON CONFLICT DO NOTHING` can
+    // land on a host that already exists. Accept only the row this approval
+    // made (device-approved, created at the approval's own issue time), which
+    // a poll retry still matches. An existing host whose join-token row is
+    // gone (a finished root handover) would otherwise get a fresh receipt
+    // bound to the requester's key, and a second active certificate (#559 F1).
     let stored_uid: Option<i64> = sqlx::query_scalar(
-        "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL",
+        "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? \
+         AND revoked_at IS NULL AND device_approved=1 AND created_at=?",
     )
     .bind(request.host_id.as_bytes().as_slice())
     .bind(&approval.user_id)
     .bind(mode.as_str())
+    .bind(approval.issued_at)
     .fetch_optional(&mut *transaction)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
@@ -647,7 +656,12 @@ async fn issue_approved_machine_join(
             .map(|leaf| leaf.to_der().map(|der| B64.encode(der)))
             .transpose()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
-        endpoint: None,
+        // The same direct QUIC listener an Add-host invitation names. It
+        // travels only to the poll-token holder over this pinned HTTPS reply,
+        // inside the invitation already bound to the approved host and key,
+        // so it needs no separate proof. App Windows lanes exist only on QUIC
+        // (#146, D349); the public origin stays the fallback (D196, D291).
+        endpoint: Some(api.endpoint.endpoint),
         server_name: api.endpoint.server_name,
     };
     transaction

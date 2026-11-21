@@ -26,6 +26,9 @@
 //!   state; it starts empty after a restart and is rebuilt within one poll.
 //! - Pushed only on a transition: a change notifies each Mesh viewer, who is sent a resync only when a node it can
 //!   see changed (socket.rs), so an unchanged mesh costs viewers nothing and a hidden node leaves no trace.
+//! - **Only while the server's node has a mesh configuration (#562).** With the mesh off, nothing runs: no timer
+//!   and no call, which D81 asks of an idle server. The node worker tells [`run`] when a configuration is
+//!   delivered and when it goes away.
 //! - A poll every [`POLL`], not an event, and not on every Mesh revision: the kernel has no handshake
 //!   notification, and a revision does not change who passes traffic. A poll is one `mesh.status` call and one
 //!   `mesh.peers` listing in its compact presence form, which reads the kernel once however many pages it has
@@ -310,11 +313,13 @@ impl Tracker {
     }
 }
 
-/// Clears presence when the server's worker ends, so a stopped worker never leaves nodes shown online.
+/// Clears presence when the server's worker ends, so a stopped worker never leaves nodes shown online. It also
+/// forgets that the server's node was configured: the next channel starts from "nothing delivered yet" (#562).
 struct Clear(MeshService);
 impl Drop for Clear {
     fn drop(&mut self) {
         self.0.set_presence(Live::new());
+        self.0.set_server_configured(false);
     }
 }
 
@@ -337,21 +342,55 @@ pub async fn publish_reflexive(service: &MeshService, tracker: &Tracker) -> bool
     }
 }
 
-/// Keeps presence current for as long as the server's own node channel is attached. The caller runs it only for
-/// the server's channel (socket.rs), so a remote host's worker never polls.
+/// Keeps presence current for as long as the server's own node channel is attached **and** its node holds a mesh
+/// configuration. The caller runs it only for the server's channel (socket.rs), so a remote host's worker never polls.
+///
+/// While the mesh is off, nothing is polled: the task sleeps on the "configured" signal the node worker publishes
+/// (`node_coordination.rs`), so an idle server wakes no thread for it (D81, #562). When the signal drops (the mesh
+/// is turned off or the membership removed) polling stops and every node reads offline at once.
 pub async fn run(service: MeshService, channel: Arc<dyn NodeChannel>) {
+    run_every(service, channel, POLL).await;
+}
+
+/// [`run`] with the time between polls given, so a test need not wait [`POLL`].
+#[doc(hidden)]
+pub async fn run_every(service: MeshService, channel: Arc<dyn NodeChannel>, period: Duration) {
     let _clear = Clear(service.clone());
+    let mut configured = service.subscribe_server_configured();
+    loop {
+        if configured.wait_for(|on| *on).await.is_err() {
+            return;
+        }
+        poll_while_configured(&service, channel.as_ref(), &mut configured, period).await;
+        service.set_presence(Live::new());
+    }
+}
+
+/// One stretch of polling: from a configuration being delivered until it goes away. Returns early, with no
+/// further poll, as soon as the "configured" signal drops or its sender is gone.
+async fn poll_while_configured(
+    service: &MeshService,
+    channel: &dyn NodeChannel,
+    configured: &mut tokio::sync::watch::Receiver<bool>,
+    period: Duration,
+) {
     let mut tracker = Tracker::default();
     let mut server = None;
     loop {
         if server.is_none() {
             server = service.dataplane().node_for_host("server").await;
         }
-        tracker.record(observe(channel.as_ref()).await, unix_now());
+        tracker.record(observe(channel).await, unix_now());
         service.set_presence(tracker.live(server, unix_now()));
-        publish_reflexive(&service, &tracker).await;
+        publish_reflexive(service, &tracker).await;
         // The first poll runs at once, so presence is rebuilt within one poll of a restart.
-        tokio::time::sleep(POLL).await;
+        tokio::select! {
+            () = tokio::time::sleep(period) => {}
+            gone = configured.wait_for(|on| !*on) => {
+                let _ = gone;
+                return;
+            }
+        }
     }
 }
 

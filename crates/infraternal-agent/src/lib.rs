@@ -111,6 +111,9 @@ pub fn run_embedded_with_mesh_state(
     state: Option<std::path::PathBuf>,
     mesh_state: Option<std::path::PathBuf>,
 ) -> std::io::Result<()> {
+    // This thread is the agent's whole runtime and relays every terminal byte, so it asks for a
+    // fast core. Timer coalescing is fixed by launchd's `ProcessType`, not here (#554).
+    let _ = infraternal_shim::qos::set_current_thread(infraternal_shim::qos::Qos::UserInteractive);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

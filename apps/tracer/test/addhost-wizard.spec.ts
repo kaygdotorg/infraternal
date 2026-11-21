@@ -335,12 +335,12 @@ test("a changed key after a restart is shown as changed, not as a new key (#510)
   await open(page);
   await openWizard(page);
   await addTyped(page, "kayg@changedkey.lab");
-  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Warning: this host's trusted key changed.")).toBeVisible({ timeout: 15_000 });
   const opened = countBootstrapSockets(page);
   await config(page, { drop: true });
   // The card asks again by itself (a new socket), and the new observation is still the warning with its own button.
   await expect.poll(opened, { timeout: 15_000 }).toBeGreaterThanOrEqual(1);
-  await expect(page.getByText("Warning: this host’s trusted key changed.")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText("Warning: this host's trusted key changed.")).toBeVisible({ timeout: 15_000 });
   await expect(inWizard(page, "Replace trusted key")).toBeVisible({ timeout: 15_000 });
   await expect(inWizard(page, "Trust and continue")).toHaveCount(0);
   await inWizard(page, "Replace trusted key").click();
@@ -423,7 +423,7 @@ test("a changed host key stays a real warning with the strong wording (#397)", a
   await addTyped(page, "kayg@changedkey.lab");
   await expect(page.getByRole("heading", { name: /Check changedkey.lab's key/ })).toBeVisible({ timeout: 15_000 });
   await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-hero")).toHaveAttribute("data-tone", "danger");
-  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).toContainText("Warning: this host’s trusted key changed");
+  await expect(wizard(page).locator(".ah-page[data-page='hostkey'] .ah-lede")).toContainText("Warning: this host's trusted key changed");
   await expect(inWizard(page, "Replace trusted key")).toBeVisible();
 });
 
@@ -909,9 +909,9 @@ test("a failure with nothing beyond the summary shows no Details at all", async 
 
 // J314 P2-1: the other staging refusals each say what was found, and offer no retry that would meet the same files.
 for (const [host, title] of [
-  ["unproven-cache.lab", "unproven-cache.lab's download cache isn't setup's own"],
-  ["unproven-prepared.lab", "An earlier copy of the agent is in the way on unproven-prepared.lab"],
-  ["unproven-foreign.lab", "unproven-foreign.lab's setup folder has files setup didn't make"],
+  ["unproven-cache.lab", "unproven-cache.lab has a download cache that setup didn't create"],
+  ["unproven-prepared.lab", "An earlier copy of the infraternal agent is in the way on unproven-prepared.lab"],
+  ["unproven-foreign.lab", "unproven-foreign.lab's setup folder has files setup didn't create"],
 ] as const) {
   test(`a staging refusal is named by its cause, with no retry: ${host}`, async ({ page }) => {
     await open(page);

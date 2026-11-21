@@ -91,10 +91,10 @@ async fn local_identity_load_refuses_symlink_and_shared_file() {
     std::fs::remove_file(&path).unwrap();
     std::fs::write(&path, b"public fixture").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(
-        run(&data, None).await.unwrap_err().to_string(),
-        "remote infraternal agent operation refused"
-    );
+    // A 0644 identity names its fix instead of the generic failure (#554).
+    let error = run(&data, None).await.unwrap_err();
+    assert_eq!(Failure::of(&error), Some(Failure::SharedFile));
+    assert!(public_error(&error).contains("chmod 600"));
 }
 
 /// Restart refuses an enrolled certificate whose saved private key no longer matches.
@@ -115,7 +115,7 @@ async fn restart_refuses_a_mismatched_enrolled_key_before_connecting() {
         https_system_roots: false,
         ca_der: B64.encode(enrolled.to_der().unwrap()),
         certificate_der: B64.encode(enrolled.to_der().unwrap()),
-        key_der: B64.encode(replacement.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(replacement.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -189,7 +189,7 @@ fn renewal_publication_replaces_only_certificate_and_preserves_private_metadata(
     let stored = StoredIdentity {
         host_id: uuid::Uuid::new_v4(),
         certificate_der: "old public certificate".into(),
-        key_der: "private fixture sentinel".into(),
+        key_der: Zeroizing::new("private fixture sentinel".to_owned()),
         ca_der: "public issuer fixture".into(),
         endpoint: Some("127.0.0.1:7443".parse().unwrap()),
         server_name: "localhost".into(),
@@ -268,7 +268,7 @@ fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -344,7 +344,7 @@ fn public_origin_reenrollment_keeps_the_legacy_d168_server_name() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -617,7 +617,7 @@ async fn join_re_enrolls_the_same_hosts_identity_and_refuses_another_host() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -694,7 +694,7 @@ fn candidate_identity_buffers_are_zeroizing_without_an_intermediate_json_vec() {
         https_system_roots: false,
         ca_der: "public issuer".into(),
         certificate_der: "public certificate".into(),
-        key_der: "active identity".into(),
+        key_der: Zeroizing::new("active identity".to_owned()),
         identity_rotation: Some(StoredRotation {
             challenge: infraternal_plugin_remote::identity_rotation::Challenge {
                 host_id: uuid::Uuid::new_v4(),
@@ -710,6 +710,8 @@ fn candidate_identity_buffers_are_zeroizing_without_an_intermediate_json_vec() {
         }),
         completed_identity_rotation: None,
     };
+    // The active key is held the same way as the candidate (#559 L1).
+    assert_zeroizing_string(&stored.key_der);
     let document = serialize_identity_document(&stored).unwrap();
     assert_zeroizing_bytes(&document);
     let directory = Directory::new();
@@ -756,7 +758,7 @@ async fn join_refuses_the_same_host_id_from_another_server() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -815,7 +817,7 @@ async fn join_re_enrolls_for_a_moved_server_but_not_a_renamed_one() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -876,7 +878,7 @@ fn replace_aborts_when_the_identity_changed_since_it_was_read() {
         https_system_roots: false,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -915,7 +917,7 @@ fn origin_identities_keep_their_direct_endpoint() {
         https_system_roots: true,
         ca_der: B64.encode(ca.to_der().unwrap()),
         certificate_der: B64.encode(ca.to_der().unwrap()),
-        key_der: B64.encode(key.private_key_to_pkcs8().unwrap()),
+        key_der: Zeroizing::new(B64.encode(key.private_key_to_pkcs8().unwrap())),
         identity_rotation: None,
         completed_identity_rotation: None,
     };

@@ -59,12 +59,13 @@
   position: absolute; z-index: var(--z-overlay); display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   border-radius: var(--r-md); color: var(--fg);
 }
-.canvas-popover-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0.75rem; }
+.canvas-popover-head { display: flex; align-items: center; gap: 0.75rem; padding: 0.875rem 1rem 0; }
 .canvas-popover-logo { display: grid; flex: none; place-items: center; width: 1.5rem; height: 1.5rem; color: var(--fg); }
 .canvas-popover-names { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
 .canvas-popover-title { font: var(--ui-type-name); letter-spacing: var(--ui-tracking); }
 .canvas-popover-sub { color: var(--ui-text-secondary); font: var(--ui-type-label); letter-spacing: var(--ui-tracking); }
-.canvas-popover-tabs { display: flex; padding: 0 1rem 0.625rem; }
+/* The tab bar sits between the header above and the list's top edge below with the same space on both sides (TASTE: a bar between two edges is equidistant). The header ends at its text, so this padding is the whole gap above; the list's own 1px edge starts right under the bottom padding. */
+.canvas-popover-tabs { display: flex; padding: var(--ui-bar-gap) 1rem; --ui-bar-gap: 0.75rem; }
 .canvas-popover-scroll {
   min-height: 0; overflow: auto; padding: 2px 1rem 0.625rem; overscroll-behavior: contain;
   border-top: 1px solid var(--line);
@@ -90,7 +91,7 @@
 .canvas-popover-ask-actions .canvas-popover-ask-yes { --ui-button-background: var(--danger); --ui-button-color: #fff; }
 @media (pointer: coarse) {
   .canvas-popover { border-radius: var(--r-lg); }
-  .canvas-popover-head { padding: 1rem 1rem 0.75rem; }
+  .canvas-popover-head { padding: 1rem 1rem 0; }
   .canvas-popover-logo { width: 1.75rem; height: 1.75rem; }
 }
 

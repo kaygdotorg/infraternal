@@ -85,6 +85,16 @@ pub(crate) const AGENT_CONNECTION_REFUSED: CloseReason = CloseReason::new(
     "terminal_attach_unavailable",
     "the host could not accept the terminal attachment",
 );
+/// The host already shows as many terminals as one link carries (#562).
+///
+/// Owner wording rule (TASTE.md, "Plain, spelled-out wording"): the sentence
+/// says what happened and what to do, with no protocol terms. It reaches the
+/// browser as the reason of a `Close 1013` on the stream that was refused.
+pub(crate) const HOST_STREAM_LIMIT: CloseReason = CloseReason::new(
+    "stream_limit",
+    "host_stream_limit",
+    "this host already shows as many terminals as it can; close one to open another",
+);
 /// The terminal's input queue overflowed its flow-control limit.
 pub(crate) const INPUT_QUEUE_FULL: CloseReason = CloseReason::new(
     "flow_control_refusal",
@@ -717,6 +727,7 @@ pub(crate) fn safe_agent_close_reason(reason: &str) -> &'static str {
         }
         "shim lacks restart-safe input capability" => "shim lacks restart-safe input capability",
         "shim refused terminal request" => "shim refused terminal request",
+        "terminal stream limit" => "terminal stream limit",
         _ => "other",
     }
 }
@@ -730,6 +741,7 @@ pub(crate) fn classify_terminal_close(reason: &'static str) -> CloseReason {
         "reader fell behind; reattach" => READER_FELL_BEHIND,
         "terminal route unresponsive" | "connection unresponsive" => TERMINAL_ROUTE_IDLE,
         "standby writer unavailable" => AGENT_CONNECTION_REFUSED,
+        "terminal stream limit" => HOST_STREAM_LIMIT,
         _ => AGENT_STREAM_ENDED,
     }
 }
@@ -1106,6 +1118,18 @@ mod tests {
         let route = classify_terminal_close("terminal route unresponsive");
         assert_eq!(route.category, "idle");
         assert_eq!(route.kind, "terminal_route_unresponsive");
+    }
+
+    /// A host that is full says so in its own plain sentence (#562): the agent's refusal is a known reason
+    /// that classifies as the stream limit, and the browser's text names what to do.
+    #[test]
+    fn a_full_host_is_reported_as_the_stream_limit() {
+        let reason = safe_agent_close_reason("terminal stream limit");
+        assert_eq!(reason, "terminal stream limit");
+        let close = classify_terminal_close(reason);
+        assert_eq!(close, HOST_STREAM_LIMIT);
+        assert_eq!(close.category, "stream_limit");
+        assert!(close.client_text.contains("close one"));
     }
 
     /// Hand-run in release (`--ignored --nocapture`) on a multi-threaded runtime, with

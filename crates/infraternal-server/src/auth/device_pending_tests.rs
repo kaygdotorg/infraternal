@@ -632,3 +632,45 @@ async fn a_cli_sign_in_needs_a_passkey_tap_for_that_approval() {
         "a ceremony is single use"
     );
 }
+
+/// #559 F3: the device label is what the owner reads before approving, so labels that
+/// could render as another device (bidi override, zero-width, control characters) are
+/// refused for both sign-in and machine-join requests, while plain labels still start.
+#[tokio::test]
+async fn device_labels_that_could_mislead_the_approver_are_refused() {
+    let _guard = SERIAL.lock().await;
+    let f = fixture().await;
+    let app = super::http::router(f.auth.clone());
+    f.auth.set_test_http_time(NOW);
+    // Each start comes from its own network so no per-network budget interferes.
+    let mut network = 0;
+    let mut source = || {
+        network += 1;
+        v4_network(network)
+    };
+    for label in [
+        "cli\u{202e}gnirts",
+        "lap\u{200b}top",
+        "line\nbreak",
+        "caf\u{e9}",
+        "",
+    ] {
+        let mut request = sign_in();
+        request["device"] = json!(label);
+        assert_eq!(
+            start(&app, source(), &request).await,
+            StatusCode::BAD_REQUEST,
+            "sign-in label {label:?} must be refused"
+        );
+        let mut request = join();
+        request["device"] = json!(label);
+        assert_eq!(
+            start(&app, source(), &request).await,
+            StatusCode::BAD_REQUEST,
+            "join label {label:?} must be refused"
+        );
+    }
+    let mut request = sign_in();
+    request["device"] = json!("CLI device");
+    assert_eq!(start(&app, source(), &request).await, StatusCode::OK);
+}

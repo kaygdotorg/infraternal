@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Uploads an immutable bundle, requests Worker signing, then verifies public bytes [184,224].
+# Uploads an immutable bundle through the bucket-scoped R2 S3 API (SigV4), requests Worker signing, then verifies public bytes [184,224] (#211).
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common"
 [[ $# == 1 ]] || { printf 'usage: scripts/release/publish VERSION\n' >&2; exit 2; }
 publication_version "$1"
-: "${CLOUDFLARE_API_TOKEN:?set CLOUDFLARE_API_TOKEN in the environment}"
+: "${R2_ACCESS_KEY_ID:?set R2_ACCESS_KEY_ID in the environment}"
+: "${R2_SECRET_ACCESS_KEY:?set R2_SECRET_ACCESS_KEY in the environment}"
 : "${RELEASE_CALLER_TOKEN:?set RELEASE_CALLER_TOKEN in the environment}"
 : "${CLOUDFLARE_ACCOUNT_ID:?set CLOUDFLARE_ACCOUNT_ID in the environment}"
 [[ "$CLOUDFLARE_ACCOUNT_ID" =~ ^[a-zA-Z0-9]+$ ]] || { printf 'invalid account identifier\n' >&2; exit 2; }
@@ -16,7 +17,8 @@ files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl infr
 component_archives=(components/$1/proxy/darwin/amd64/traefik_v3.7.17_darwin_amd64.tar.gz components/$1/proxy/darwin/arm64/traefik_v3.7.17_darwin_arm64.tar.gz components/$1/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz components/$1/proxy/linux/arm64/traefik_v3.7.17_linux_arm64.tar.gz)
 for name in "${files[@]}" "${component_archives[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
 printf '%s\n' "$1" | cmp - "$bundle/VERSION" || { printf 'the built bundle belongs to another version\n' >&2; exit 1; }
-api="$release_api/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/infraternal-builds/objects/releases/$1"
+# The bucket-scoped S3 endpoint (path style); only a loopback stand-in replaces it.
+s3="${release_s3_origin:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com}/infraternal-builds"
 # All build directories for this user share one inode. Never unlink the lock:
 # replacing it could admit a new writer while an older process still holds it.
 umask 077
@@ -31,18 +33,23 @@ flock -n 9 || { printf 'a publisher for this version is already running\n' >&2; 
 staging=""
 trap '[[ -z "$staging" ]] || rm -rf -- "$staging"' EXIT
 staging="$(mktemp -d "$release_scratch/publish.XXXXXX")"
-# Query the authoritative API prefix, including unrelated or partial objects.
-# A provider error or ambiguous response never becomes permission to overwrite.
-request "$CLOUDFLARE_API_TOKEN" --get --data-urlencode "prefix=releases/$1/" --data-urlencode 'per_page=1' \
-    "${api%/releases/$1}" | python3 "$release_root/scripts/release/response.py" empty-prefix
-for name in "${files[@]}"; do
-    request "$CLOUDFLARE_API_TOKEN" --request PUT --header 'If-None-Match: *' \
-        --header 'Content-Type: application/octet-stream' --data-binary "@$bundle/$name" "$api/$name" | \
-        python3 "$release_root/scripts/release/response.py" uploaded
+# List the authoritative object prefix (ListObjectsV2), including unrelated or
+# partial objects. The page must be empty; a truncated-but-empty page is followed
+# for at most 5 pages. A provider error or ambiguous page never becomes
+# permission to overwrite.
+token=""
+for page in 1 2 3 4 5 6; do
+    [[ "$page" != 6 ]] || { printf 'release exists or the release response cannot be verified\n' >&2; exit 1; }
+    query=(--data-urlencode 'list-type=2' --data-urlencode "prefix=releases/$1/" --data-urlencode 'max-keys=10')
+    [[ -z "$token" ]] || query+=(--data-urlencode "continuation-token=$token")
+    token="$(s3_request --get "${query[@]}" "$s3" | python3 "$release_root/scripts/release/response.py" s3-empty-prefix infraternal-builds "releases/$1/")"
+    [[ -n "$token" ]] || break
 done
-for name in "${component_archives[@]}"; do
-    request "$CLOUDFLARE_API_TOKEN" --request PUT --header 'If-None-Match: *' \
-        --header 'Content-Type: application/octet-stream' --data-binary "@$bundle/$name" "$api/$name" | \
+# R2 honours If-None-Match: * on PutObject atomically (a second writer gets 412):
+# https://developers.cloudflare.com/r2/api/s3/conditional-operations/
+for name in "${files[@]}" "${component_archives[@]}"; do
+    s3_request --request PUT --header 'If-None-Match: *' \
+        --header 'Content-Type: application/octet-stream' --data-binary "@$bundle/$name" "$s3/releases/$1/$name" | \
         python3 "$release_root/scripts/release/response.py" uploaded
 done
 request "$RELEASE_CALLER_TOKEN" --request POST --header 'Content-Type: application/json' \

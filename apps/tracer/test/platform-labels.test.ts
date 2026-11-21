@@ -4,7 +4,7 @@
  * platform on every call, so each test swaps `navigator` and restores it afterwards.
  */
 import { afterEach, expect, test } from "bun:test";
-import { isMacPlatform, keysLabel, shortcutLabel } from "../../../packages/ui/src/platform";
+import { isMacPlatform, keyboardLikely, keysLabel, shortcutLabel } from "../../../packages/ui/src/platform";
 import { comboLabel, keyCaps, PALETTE_KEYS, type Combo } from "../../../packages/ui/src/shortcuts";
 
 const realNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
@@ -66,4 +66,31 @@ test("a platform read from userAgentData counts the same as navigator.platform",
   expect(isMacPlatform()).toBe(false);
   Object.defineProperty(globalThis, "navigator", { configurable: true, value: { platform: "", userAgent: MAC.userAgent, userAgentData: { platform: "macOS" } } });
   expect(isMacPlatform()).toBe(true);
+});
+
+test("the plus key keeps its own cap on every platform, including through the Mac glyph pass (#560 F5)", () => {
+  emulate(MAC.platform, MAC.userAgent);
+  expect(keysLabel("⌘+")).toBe("⌘+");
+  expect(keysLabel("Ctrl++")).toBe("⌃+");
+  expect(keysLabel("Ctrl+Shift+L")).toBe("⌃⇧L");
+  expect(keyCaps("⌘+")).toEqual(["⌘", "+"]);
+  expect(keyCaps(comboLabel({ code: "Equal", key: "+", mod: true }))).toEqual(["⌘", "+"]);
+  emulate(LINUX.platform, LINUX.userAgent);
+  expect(keyCaps("Ctrl++")).toEqual(["Ctrl", "+"]);
+  expect(keyCaps(comboLabel({ code: "Equal", key: "+", mod: true }))).toEqual(["Ctrl", "+"]);
+});
+
+test("no key caps where no hardware keyboard is likely (a phone), caps kept elsewhere (#560 F4)", () => {
+  const real = Object.getOwnPropertyDescriptor(globalThis, "matchMedia");
+  try {
+    emulate(IPAD.platform, IPAD.userAgent);
+    Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: (q: string) => ({ matches: q === "(hover: none) and (pointer: coarse)" }) });
+    expect(keyboardLikely()).toBe(false);
+    expect(keyCaps("⌘K")).toEqual([]);
+    Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: () => ({ matches: false }) });
+    expect(keyboardLikely()).toBe(true);
+    expect(keyCaps("⌘K")).toEqual(["⌘", "K"]);
+  } finally {
+    if (real) Object.defineProperty(globalThis, "matchMedia", real); else delete (globalThis as { matchMedia?: unknown }).matchMedia;
+  }
 });

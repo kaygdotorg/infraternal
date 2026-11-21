@@ -25,7 +25,7 @@ use crate::{
 use infraternal_plugin_api::{PluginError, streams::WireLane};
 use infraternal_protocol::{
     Frame, decode_frame,
-    desktop::{Delivery, Input as WireInput, Message},
+    desktop::{Delivery, EndReason, Input as WireInput, Message},
     encode_frame_into,
 };
 use serde_json::Value;
@@ -109,10 +109,29 @@ pub(super) async fn run(config: Config, mut leg: Leg) -> Outcome {
             cleanup: Ok(()),
         };
     }
+    // A root agent's helper runs as the person at the screen. With nobody
+    // logged in, wait (idle, nothing started) instead of failing at once,
+    // which would only make the server attach again in a tight loop.
+    if config.cross_user.is_some() {
+        tokio::select! { biased;
+            _ = leg.cancelled.changed() => {
+                return Outcome {
+                    output: Ok(Value::Null),
+                    cleanup: Ok(()),
+                };
+            }
+            () = crate::cross_user::someone_at_screen() => {}
+        }
+    }
     let mut helper = match Helper::start(&config, &mut leg.cancelled).await {
         Ok(helper) => helper,
         Err(error) => return Outcome::failed(error.cleanup()),
     };
+    // A session first shown for one person never shows another's screen: a
+    // leg whose helper runs for someone else ends the session before `Start`.
+    if !leg.metadata.bind_console(helper.console_uid()) {
+        return Outcome::failed(helper.stop().await.map_err(|_| PluginError::Rejected));
+    }
     let result = async {
         let start = leg
             .metadata
@@ -170,11 +189,18 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
     let mode = leg.delivery;
     let mut sender = tokio::spawn(async move { send_video(lane, mode, id, receive, repair).await });
     let mut pending = VecDeque::<Pending>::new();
+    // A root agent's helper runs as the person at the screen. When that person
+    // changes, the session ends for good (`gone`), whole-screen ones included.
+    let mut console = helper.console_watch();
     let result = async {
         loop {
             if *leg.cancelled.borrow() { return Ok(()); }
             tokio::select! { biased;
                 _ = leg.cancelled.changed() => return Ok(()),
+                () = console.changed() => {
+                    leg.metadata.console_changed();
+                    return Err(PluginError::Rejected);
+                }
                 // No deadline exists while video is idle and no control reply is owed.
                 () = async { match pending.front() { Some(response) => tokio::time::sleep_until(response.deadline).await, None => std::future::pending().await } } => return Err(PluginError::Rejected),
                 result = &mut sender => return result.map_err(|_| PluginError::Rejected).and_then(|result| result),
@@ -227,8 +253,10 @@ async fn pump(helper: &mut Helper, leg: &mut Leg) -> Result<(), PluginError> {
 /// Keeps the companion's permanent closure result across replacement capture lanes.
 /// Generic helper errors and transport failures leave the target eligible to reconnect.
 fn remember_closed_window(metadata: &Metadata, body: &[u8]) {
-    if serde_json::from_slice::<Value>(body).is_ok_and(|reply| reply["state"] == "gone") {
-        metadata.gone.store(true, Ordering::Release);
+    if let Ok(reply) = serde_json::from_slice::<Value>(body)
+        && reply["state"] == "gone"
+    {
+        metadata.latch_gone(EndReason::from_helper_word(reply["reason"].as_str()));
     }
 }
 /// Turns the helper's video payload (8-byte capture time, 1-byte keyframe flag,
@@ -633,8 +661,8 @@ mod mapping_tests {
     /// to the new output even though the Size reply has not arrived yet.
     #[test]
     fn a_click_right_after_a_size_maps_to_that_size() {
-        let metadata = Metadata {
-            start: std::sync::Mutex::new(protocol::Start {
+        let metadata = Metadata::new(
+            protocol::Start {
                 passive_geometry: false,
                 target: protocol::Target::Window {
                     window_id: 7,
@@ -647,10 +675,9 @@ mod mapping_tests {
                     canvas_height: 500.0,
                     backing_scale: 1.0,
                 },
-            }),
-            sequence: std::sync::atomic::AtomicU64::new(0),
-            gone: std::sync::atomic::AtomicBool::new(false),
-        };
+            },
+            0,
+        );
         let (kind, _) = command(
             &packet(Message::Size {
                 width: 2000,

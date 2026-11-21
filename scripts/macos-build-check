@@ -6,6 +6,9 @@
 # For a merge-time compile guard without release linking or portable tests:
 #   nix develop -c scripts/macos-build-check --check
 # It is not part of `scripts/verify fast`, which runs on the Linux build VMs.
+# That gate's "macOS compile" row type-checks the macOS code from Linux on
+# every run (#260); this script adds what only a Mac can do: the Swift
+# bridges, the native link and the portable tests.
 #
 # Checks, in order:
 # 1. the pinned Zig (D213, D328) resolves on this host: same version and
