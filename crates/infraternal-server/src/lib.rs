@@ -55,6 +55,12 @@ pub use terminal_queries::verify_terminal_query_sample;
 #[cfg(feature = "parser-checks")]
 #[doc(hidden)]
 pub use websocket::receive_checks::verify_receive_wire_sample;
+/// Fuzz entry point for the machine join and approval parsers (`parser-checks` only).
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+mod remote_join_checks;
+#[cfg(all(feature = "remote", feature = "parser-checks"))]
+#[doc(hidden)]
+pub use remote_join_checks::verify_remote_join_sample;
 mod liveness;
 pub mod login_access;
 #[cfg(all(feature = "ssh", feature = "mesh", feature = "remote"))]

@@ -16,6 +16,8 @@ mod crypto;
 mod devices;
 #[cfg(feature = "remote")]
 pub(crate) use devices::ApprovedMachineJoin;
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+pub(crate) use devices::check_join_machine_sample;
 mod http;
 pub(crate) use http::refresh_api_cookie;
 mod recovery;
