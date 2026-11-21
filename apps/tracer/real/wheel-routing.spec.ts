@@ -166,6 +166,7 @@ test("the wheel over a window's header strip pans the canvas", async () => {
 test("Option/Alt plus the wheel over the focused terminal moves the canvas and its scrollback stays (D377)", async () => {
   // The terminal goes back into its scrollback first, so the test has scrollback that a stray wheel could move.
   await focus(1);
+  // sleep: the focused terminal settles after the click; no event marks that it has taken the keyboard
   await page.waitForTimeout(800);
   const mid = await centre(1);
   await page.mouse.move(mid.x, mid.y);
