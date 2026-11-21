@@ -614,8 +614,11 @@ input; ordinary retirement still closes only that terminal stream. A stalled
 browser route becomes disconnected before the
 client requests WebSocket closure: an intermediary need not deliver a close
 event. Replacement sockets ignore all late events from the retired route. A
-shared daemon link is replaced independently of graceful child reaping; session
-shims remain alive. Before automatic rebinding, each retained stream receives
+shared daemon link is retired at once, independently of graceful child reaping;
+session shims remain alive. A replacement embedded infraternal agent starts
+only after the retired one has been reaped (at most its 2 s SIGTERM grace), so
+two embedded agents never share the per-user sockets and stop hooks (#562).
+Before automatic rebinding, each retained stream receives
 `{"type":"terminal.reconnecting","session_id":"UUID"}` on its Event channel.
 The window stops advertising readiness and holds input in its existing bounded
 queue; the replacement's painted `terminal.replay_complete` fence confirms
@@ -648,7 +651,7 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | type | name | body (little endian) |
 | ---: | --- | --- |
 | 0x40 | AttachDesktop | 16-byte session UUID, u8 delivery (0 reliable, 1 datagram) |
-| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit |
+| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit or tile update (desktop-helper.md) |
 | 0x42 | VideoSize | u16 width, u16 height, u16 density_milli |
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
@@ -895,6 +898,25 @@ agent sends `terminal.query_replies_unavailable` with its `session_id`; the
 server validates and forwards it only in response to marked input, so an old
 browser never receives this new notice. The browser says to open a new shell.
 Ordinary legacy Input remains available. No session is automatically ended.
+
+### Echo state notice (#569, D130)
+
+The infraternal agent turns the shim's `EchoState` (shim.md, capability bit 8)
+into an `Event` on the terminal stream, `sub_id: 0`:
+`{"type":"terminal.echo","session_id":"<UUID>","seq":u64,"hidden":bool}`.
+`hidden: true` means the host terminal reads a line with echo off (a password
+prompt, in any language); `false` means it echoes again. `seq` is the shim's
+output head when the mode was read. The notice is not a cursor fence and may
+pass output held for credit. The server admits it in its closed notice list
+and forwards it unchanged; across a hedged secondary link (D215) it forwards a
+copy only when its `seq` is newer, or equal with a different state, than the
+last echo state it forwarded on that stream. The viewer draws no predicted key
+while `hidden` is true and drops predictions already drawn; a new attachment
+starts at "echo on" until told otherwise. Viewers ignore notice types they do
+not know (since 2026-10-17), so no leg-A capability is needed. Leg B has no
+free core capability bit: an agent sends it only to a server of the same
+release (lockstep updates, D135), because an older server refuses unknown
+notices and retires the agent link.
 
 ### Layout session incarnation (#250, D312)
 

@@ -9,6 +9,9 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 # Exported so unit tests that place private fixtures under the target folder
 # (release staging tests) find it whether or not the caller set it.
 export CARGO_TARGET_DIR="$target_dir"
+# A gate builds each crate once, so incremental caches never get reused but cost about a fifth of
+# the target (12 of 56 GB, #574). Callers that iterate on one checkout may still set it to 1.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Cargo does not make a target directory safe to share between source roots.
 # Remember the last checkout and revision so a comparison with reused artifacts
@@ -130,7 +133,7 @@ verify_latency_steps() {
     # They run twice: unthrottled (vsync and the frame-rate limit off, so frame-bound rows
     # measure our own work; this run gates) and at headless Chromium's normal 60 Hz pacing
     # (reported beside it). The report checks the unthrottled run really ran above 60 Hz.
-    local row_specs=(test/terminal.spec.ts test/latency-profile.spec.ts)
+    local row_specs=(test/terminal.spec.ts test/latency-profile.spec.ts test/second-burst.spec.ts)
     local unthrottled_flags="--disable-renderer-backgrounding --disable-gpu-vsync --disable-frame-rate-limit"
     (
         cd -- "$repo_dir/apps/tracer" &&

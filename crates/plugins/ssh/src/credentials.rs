@@ -511,9 +511,12 @@ pub fn askpass_reply() -> std::io::Result<()> {
     }
     let stream = std::os::unix::net::UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    let mut bytes = Vec::new();
+    // Read into one wiped buffer sized for the largest accepted reply, so no
+    // reallocation leaves part of the secret in freed memory, and an error
+    // part-way through still wipes what arrived (#559 L2).
+    let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(16 * 1024 + 1));
     stream.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
-    let secret = Secret::new(bytes);
+    let secret = Secret::new(std::mem::take(&mut *bytes));
     if secret.expose().is_empty() || secret.expose().len() > 16 * 1024 {
         return Err(std::io::Error::other("SSH prompt unavailable"));
     }

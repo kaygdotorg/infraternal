@@ -239,3 +239,45 @@ fn committed_text_refuses_surrogates_controls_and_extra_bytes() {
         assert_eq!(decode_frame(&bytes).unwrap().frame, Frame::Desktop(message));
     }
 }
+
+/// An end-of-session reason rides in the final `Close` frame's code: it roundtrips through the codec,
+/// every known code maps back to itself, and anything else (an unknown code, an unknown helper word)
+/// is not a reason or falls to the safe default instead of inventing a message [#146].
+#[test]
+fn an_end_reason_roundtrips_as_a_close_code_and_unknown_values_are_safe() {
+    use crate::desktop::{CONSOLE_USER_CHANGED, EndReason, WINDOW_CLOSED};
+    for reason in [EndReason::WindowClosed, EndReason::ConsoleUserChanged] {
+        let mut wire = Vec::new();
+        encode_frame_into(
+            &Frame::Close {
+                code: reason.close_code(),
+                reason: reason.close_text(),
+            },
+            &mut wire,
+        )
+        .unwrap();
+        let Frame::Close { code, reason: text } = decode_frame(&wire).unwrap().frame else {
+            panic!("not a close");
+        };
+        assert_eq!(EndReason::from_close_code(code), Some(reason));
+        assert_eq!(text, reason.close_text());
+        assert_eq!(
+            EndReason::from_helper_word(Some(reason.helper_word())),
+            reason
+        );
+    }
+    assert_eq!(WINDOW_CLOSED, 4410);
+    assert_eq!(CONSOLE_USER_CHANGED, 4411);
+    for code in [0, 4403, 4404, 4409, 4412, u16::MAX] {
+        assert_eq!(EndReason::from_close_code(code), None);
+    }
+    for word in [
+        None,
+        Some(""),
+        Some("window_closed"),
+        Some("CONSOLE_USER_CHANGED"),
+        Some("<script>"),
+    ] {
+        assert_eq!(EndReason::from_helper_word(word), EndReason::WindowClosed);
+    }
+}

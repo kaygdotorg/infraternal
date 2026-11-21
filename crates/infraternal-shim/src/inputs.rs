@@ -107,6 +107,11 @@ pub(super) struct Inputs {
     /// bytes written at it are not "another viewer's width", so an opener
     /// reporting a different size keeps the raw replay (#521).
     pub(super) viewer_sized: bool,
+    /// Set whenever bytes reach the PTY ([`Inputs::advance`]). The session pump
+    /// takes it to know that the program may have answered with a new echo mode,
+    /// so it samples termios only after real PTY traffic (#569); nothing else
+    /// reads it.
+    pub(super) wrote_to_pty: bool,
     /// Most runs `segments` may hold. Bounds bookkeeping when writers alternate
     /// byte by byte.
     #[cfg(feature = "process-per-user")]
@@ -133,6 +138,7 @@ impl Inputs {
             )]),
             segments: VecDeque::new(),
             viewer_sized: false,
+            wrote_to_pty: false,
             #[cfg(feature = "process-per-user")]
             segment_limit: MAX_FRAME,
         }
@@ -322,6 +328,7 @@ impl Inputs {
     /// PTY, advancing each owner's written offset by what was theirs. Fails if more
     /// bytes are claimed than are queued.
     pub(super) fn advance(&mut self, mut bytes: usize) -> io::Result<()> {
+        self.wrote_to_pty |= bytes > 0;
         while bytes > 0 {
             let (writer, count) = self.segments.front_mut().ok_or_else(super::invalid_input)?;
             let used = bytes.min(*count);

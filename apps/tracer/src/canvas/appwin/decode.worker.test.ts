@@ -273,6 +273,56 @@ test("decoder output presents the newest admitted picture immediately and releas
     ]);
     finish(current!, 514);
     expect(messages.at(-1)).toMatchObject({ t: "trace", frame: { sequence: 515, captureNs: "515", outcome: "painted" } });
+    // Tile lane [#146 C]: a tile update takes the next order number but never enters the decoder. A delta accepted before
+    // it is still drawn when it decodes (a tile is not a newer video picture), and the tile waits for it, then follows in
+    // the same callback.
+    send({ t: "reset" }); messages.length = 0;
+    globalThis.ImageData ??= class { constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {} } as unknown as typeof ImageData;
+    const layers: string[] = [];
+    const tileCanvas = { width: 0, height: 0, getContext: () => ({
+      drawImage: () => layers.push("video"), putImageData: (image: ImageData) => layers.push(`tile${image.data[0]}`),
+    }) } as unknown as OffscreenCanvas;
+    send({ t: "init", canvas: tileCanvas, hardware: "no-preference" });
+    const tileUnit = (value: number): ArrayBuffer => {
+      const unit = new Uint8Array(21 + 4).fill(value);
+      unit.set([0xf7, 0x54, 1, 0, 0, 64, 0, 48, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 4]);
+      return unit.buffer;
+    };
+    send({ t: "chunk", sequence: 1, keyframe: true, bytes: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]).buffer });
+    const tiled = current!;
+    output!({ timestamp: tiled.chunks[0]!.timestamp, displayWidth: 64, displayHeight: 48, close: () => {} } as unknown as VideoFrame);
+    send({ t: "chunk", sequence: 2, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    send({ t: "chunk", sequence: 3, keyframe: false, bytes: tileUnit(77) });
+    // sleep: one task turn lets the tile chain's microtasks draw the raw tile.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(tiled.chunks).toHaveLength(2);
+    expect(layers).toEqual(["video"]);
+    output!({ timestamp: tiled.chunks[1]!.timestamp, displayWidth: 64, displayHeight: 48, close: () => {} } as unknown as VideoFrame);
+    expect(layers).toEqual(["video", "video", "tile77"]);
+    send({ t: "chunk", sequence: 4, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    output!({ timestamp: tiled.chunks[2]!.timestamp, displayWidth: 64, displayHeight: 48, close: () => {} } as unknown as VideoFrame);
+    expect(layers).toEqual(["video", "video", "tile77", "video"]);
+    send({ t: "stats" });
+    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { tiles: { received: 1, painted: 1, waited: 1 } } });
+
+    // A stale decoder and the tile lane (#146): a tile that arrives while the oldest waiting video unit has waited past
+    // 100 ms overflows like video. The waiting video is dropped, no tile is drawn over the older picture, and later
+    // tiles wait for the repair keyframe.
+    send({ t: "reset" }); layers.length = 0;
+    send({ t: "chunk", sequence: 20, keyframe: true, bytes: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]).buffer });
+    const behind = current!;
+    send({ t: "chunk", sequence: 21, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    send({ t: "chunk", sequence: 22, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    const staleStart = performance.now();
+    const staleClock = spyOn(performance, "now").mockReturnValue(staleStart + 150);
+    send({ t: "chunk", sequence: 23, keyframe: false, bytes: tileUnit(88) });
+    send({ t: "chunk", sequence: 24, keyframe: false, bytes: tileUnit(99) });
+    staleClock.mockRestore();
+    // sleep: one task turn lets any tile chain's microtasks run, so a wrongly accepted tile would have drawn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finish(behind, 0); finish(behind, 1);
+    expect(behind.chunks, "the stale unit 22 was discarded").toHaveLength(2);
+    expect(layers.filter((layer) => layer.startsWith("tile"))).toEqual([]);
 
 
   } finally {

@@ -33,6 +33,64 @@ pub const MAX_VIDEO_BYTES: usize = MAX_FRAME_LEN - 42;
 
 /// Viewer Close code for an authoritative native window retirement.
 pub const WINDOW_CLOSED: u16 = 4410;
+/// Viewer Close code for a session the machine ended because the person at its screen changed.
+pub const CONSOLE_USER_CHANGED: u16 = 4411;
+
+/// Why the machine ended a desktop session for good. It is a closed set: the host never sends free
+/// text, so a viewer can say why in its own words and an unknown value can only be the safe default.
+/// On the wire it is the code of the viewer's final `Close` frame (no extra bytes), see
+/// [`EndReason::close_code`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    /// The window is gone: it was closed, or its app quit. This is the default for anything unknown.
+    WindowClosed,
+    /// Someone else (or nobody) is now at the Mac's screen, so every session ended for privacy.
+    ConsoleUserChanged,
+}
+impl EndReason {
+    /// The `Close` code that carries this reason to the viewer.
+    #[must_use]
+    pub const fn close_code(self) -> u16 {
+        match self {
+            Self::WindowClosed => WINDOW_CLOSED,
+            Self::ConsoleUserChanged => CONSOLE_USER_CHANGED,
+        }
+    }
+    /// Reads a `Close` code, or `None` when it is not an end-of-session reason.
+    #[must_use]
+    pub const fn from_close_code(code: u16) -> Option<Self> {
+        match code {
+            WINDOW_CLOSED => Some(Self::WindowClosed),
+            CONSOLE_USER_CHANGED => Some(Self::ConsoleUserChanged),
+            _ => None,
+        }
+    }
+    /// The short fixed text that goes in the `Close` frame's reason field (never shown as is).
+    #[must_use]
+    pub const fn close_text(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window closed",
+            Self::ConsoleUserChanged => "console user changed",
+        }
+    }
+    /// Reads the helper's `reason` word from its `gone` reply. Any other word, or none, is
+    /// [`EndReason::WindowClosed`]: a host that says something new can never invent a message.
+    #[must_use]
+    pub fn from_helper_word(word: Option<&str>) -> Self {
+        match word {
+            Some("console_user_changed") => Self::ConsoleUserChanged,
+            _ => Self::WindowClosed,
+        }
+    }
+    /// The word the helper puts in its `gone` reply for this reason.
+    #[must_use]
+    pub const fn helper_word(self) -> &'static str {
+        match self {
+            Self::WindowClosed => "window_closed",
+            Self::ConsoleUserChanged => "console_user_changed",
+        }
+    }
+}
 
 /// How video reaches the viewer. The viewer picks one in [`Message::Attach`]. Both candidates
 /// stay available until the owner selects one from measurements.

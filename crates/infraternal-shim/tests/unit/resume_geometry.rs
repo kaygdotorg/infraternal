@@ -200,6 +200,7 @@ fn peer() -> Peer {
         stopping: false,
         request: None,
         replay_awaits_size: false,
+        echo_hidden_told: false,
     }
 }
 
