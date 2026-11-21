@@ -214,6 +214,8 @@ class Binary:
         self.retired = set()
         self.cpu_weight = fixture_cpu_weight()
         self.events = []
+        # `terminal.echo` states (#569): the host's echo mode, not recovery notices.
+        self.echo_states = []
         self.inventory = None
         self.snapshots = []
         self.link = None
@@ -455,6 +457,10 @@ class Binary:
                 cursor = replay_complete_cursor(event, self.id)
                 # The writer orders this marker after all replay bytes on the stream.
                 assert cursor == self.out, (cursor, self.out)
+            elif event.get('type') == 'terminal.echo':
+                # Probes that run `stty -echo` see these; they never count as notices.
+                assert isinstance(event.get('hidden'), bool), event
+                self.echo_states.append(event['hidden'])
             else:
                 self.events.append(event)
         else:

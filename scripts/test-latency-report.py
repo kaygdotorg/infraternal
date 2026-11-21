@@ -20,17 +20,57 @@ def full_log(**overrides):
     """A log with a passing line for every D375 row; `overrides` replaces chosen rows' lines."""
     lines = []
     for row in targets.ROWS:
-        lines.append(overrides.get(row.key) or targets.row_line(row.key, source="test", n=100, value=1.0, unit="ms", target=8.3))
+        lines.append(overrides.get(row.key) or targets.row_line(row.key, source="test", n=100, value=1.0, unit="ms", target=8.3,
+                                                              display=row.display))
+    # The rows a person typing and a phone network see: gating ones pass, reported ones print REPORT.
+    for row in targets.EXTRA_ROWS:
+        lines.append(overrides.get(row.key) or targets.row_line(row.key, source="test", n=100, value=1.0, unit="ms", target=8.3,
+                                                              report_only=not row.gating))
     return "\n".join(lines)
 
 
 class ReportTests(unittest.TestCase):
-    """The report must list all ten rows, gate them, and never let a row disappear."""
+    """The report must list all eleven rows, gate them, and never let a row disappear."""
 
     def test_all_rows_pass(self):
         table, passed = targets.report(full_log())
         self.assertTrue(passed)
-        self.assertEqual(table.count("| PASS |"), len(targets.ROWS))
+        self.assertEqual(table.count("| PASS |"), len(targets.ROWS) + sum(row.gating for row in targets.EXTRA_ROWS))
+        self.assertEqual(table.count("| REPORT |"), sum(not row.gating for row in targets.EXTRA_ROWS))
+
+    def test_row_one_gates_at_60hz_on_own_work_and_shows_unthrottled_beside_it(self):
+        """Row 1 is about frames, so it gates where a frame is a real wait (owner, 2026-11-21)."""
+        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=100, value=0.4, unit="ms",
+                                 target=targets.PREDICTED_GLYPH_WORK_MS)
+        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=100, value=0.3, unit="ms",
+                                target=targets.PREDICTED_GLYPH_WORK_MS)
+        table, passed = targets.report("\n".join([log, paced, fast]))
+        self.assertTrue(passed, table)
+        self.assertIn("| 0.40 ms (n=100) | 0.30 ms | yes | PASS |", table)
+        slow = targets.row_line("predicted_glyph", source="t", display="60hz", n=100, value=4.5, unit="ms",
+                                target=targets.PREDICTED_GLYPH_WORK_MS)
+        _, passed = targets.report("\n".join([log, slow, fast]))
+        self.assertFalse(passed)
+        _, passed = targets.report("\n".join([log, fast]))
+        self.assertFalse(passed, "an unthrottled run alone cannot gate row 1")
+
+    def test_reported_rows_never_fail_and_gating_extra_rows_do(self):
+        log = full_log()
+        _, passed = targets.report(log)
+        self.assertTrue(passed)
+        reported = targets.row_line("first_paint_3g_connected", source="t", n=5, value=99999.0, unit="ms", target=1000.0,
+                                    report_only=True)
+        table, passed = targets.report("\n".join([log, reported]))
+        self.assertTrue(passed, table)
+        self.assertIn("99999.00 ms (n=5)", table)
+        slow = targets.row_line("real_paint_after_ws", source="t", n=100, value=9.0, unit="ms", target=targets.FRAME_MS)
+        _, passed = targets.report("\n".join([log, slow]))
+        self.assertFalse(passed)
+        missing = "\n".join(line for line in log.splitlines() if "d375_real_echo_shell" not in line)
+        table, passed = targets.report(missing)
+        self.assertFalse(passed)
+        self.assertIn("MISSING", table)
 
     def test_missing_row_fails(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_idle_agent_rss" not in line)
@@ -65,10 +105,10 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(passed, "one share alone must leave the row MISSING")
 
     def test_unthrottled_gates_and_60hz_is_shown_beside_it(self):
-        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
-        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=100, value=4.0, unit="ms",
+        log = "\n".join(line for line in full_log().splitlines() if "d375_real_echo " not in line)
+        fast = targets.row_line("real_echo", source="t", display="unthrottled", n=100, value=4.0, unit="ms",
                                 target=targets.FRAME_MS)
-        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=100, value=15.0, unit="ms",
+        paced = targets.row_line("real_echo", source="t", display="60hz", n=100, value=15.0, unit="ms",
                                  target=targets.FRAME_MS)
         pacing = ("METRIC name=frame_pacing display=unthrottled phase=rows n=7000 fps=240.0\n"
                   "METRIC name=frame_pacing display=60hz phase=rows n=1800 fps=60.0\n"
@@ -79,8 +119,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn("unthrottled 240.0", table)
 
     def test_60hz_alone_cannot_gate(self):
-        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
-        paced = targets.row_line("predicted_glyph", source="t", display="60hz", n=20, value=4.0, unit="ms",
+        log = "\n".join(line for line in full_log().splitlines() if "d375_real_echo " not in line)
+        paced = targets.row_line("real_echo", source="t", display="60hz", n=20, value=4.0, unit="ms",
                                  target=targets.FRAME_MS)
         table, passed = targets.report(log + "\n" + paced)
         self.assertFalse(passed)
@@ -88,8 +128,8 @@ class ReportTests(unittest.TestCase):
 
     def test_unthrottled_run_under_120_fps_while_rows_ran_fails(self):
         """A fast idle page does not count: the floor is the rate measured while the rows ran (J459 review)."""
-        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
-        fast = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=4.0, unit="ms",
+        log = "\n".join(line for line in full_log().splitlines() if "d375_real_echo " not in line)
+        fast = targets.row_line("real_echo", source="t", display="unthrottled", n=20, value=4.0, unit="ms",
                                 target=targets.FRAME_MS)
         pacing = ("METRIC name=frame_pacing display=unthrottled n=240 idle_fps=350.0\n"
                   "METRIC name=frame_pacing display=unthrottled phase=rows n=3300 fps=110.0")
@@ -111,10 +151,10 @@ class ReportTests(unittest.TestCase):
 
     def test_too_few_samples_fail_the_row(self):
         """A p99 of a handful of samples is just their maximum, so the report refuses it (J468 review)."""
-        few = targets.row_line("predicted_glyph", source="t", display="unthrottled", n=20, value=1.0, unit="ms",
+        few = targets.row_line("real_echo", source="t", display="unthrottled", n=20, value=1.0, unit="ms",
                                target=targets.FRAME_MS)
         self.assertIn("result=PASS", few)
-        log = "\n".join(line for line in full_log().splitlines() if "d375_predicted_glyph" not in line)
+        log = "\n".join(line for line in full_log().splitlines() if "d375_real_echo " not in line)
         pacing = "METRIC name=frame_pacing display=unthrottled phase=rows n=9000 fps=300"
         table, passed = targets.report("\n".join([log, few, pacing]))
         self.assertFalse(passed)
@@ -178,6 +218,9 @@ class TypeScriptCopyTests(unittest.TestCase):
             match = re.search(rf"export const {name} = ([0-9.]+);", source)
             self.assertIsNotNone(match, name)
             self.assertEqual(float(match.group(1)), value, name)
+        match = re.search(r"export const PREDICTED_GLYPH_WORK_MS = ([0-9.]+);", source)
+        self.assertIsNotNone(match)
+        self.assertEqual(float(match.group(1)), targets.PREDICTED_GLYPH_WORK_MS)
         match = re.search(r"export const PHONE_CPU_SLOWDOWN = ([0-9.]+);", source)
         self.assertIsNotNone(match)
         self.assertEqual(float(match.group(1)), targets.PHONE_CPU_SLOWDOWN)
@@ -210,21 +253,23 @@ class TypeScriptCopyTests(unittest.TestCase):
         bun = shutil.which("bun")
         self.assertIsNotNone(bun, "bun is required to compare d375Row() with row_line()")
         cases = [
-            dict(key="predicted_glyph", n=100, value=1.1, unit="ms", target=targets.FRAME_MS),
-            dict(key="predicted_glyph", n=100, value=9.2, unit="ms", target=targets.FRAME_MS),
+            dict(key="predicted_glyph", n=100, value=1.1, unit="ms", target=targets.PREDICTED_GLYPH_WORK_MS),
+            dict(key="predicted_glyph", n=100, value=4.2, unit="ms", target=targets.PREDICTED_GLYPH_WORK_MS),
+            dict(key="real_typed_letter", n=100, value=300.0, unit="ms", target=targets.FRAME_MS, report=True),
             dict(key="real_echo", n=0, value=1.0, unit="ms", target=346.67),
             dict(key="render_10mbps", n=50, value=119.0, unit="fps", target=120.0, higher=True),
             dict(key="render_10mbps", n=50, value=714.3, unit="fps", target=120.0, higher=True),
             dict(key="first_paint_phone", n=20, value=1000.0, unit="ms", target=1000.0, gate=1200.0),
+            dict(key="second_burst_extra_frames", n=40, value=1.0, unit="frames", target=0.0),
         ]
         script = ("import { d375Row } from './apps/tracer/test/latency-targets.ts';"
                   "for (const c of JSON.parse(process.argv[1])) console.log(d375Row({ key: c.key, source: 't', n: c.n,"
-                  " value: c.value, unit: c.unit, target: c.target, gate: c.gate, higherIsBetter: c.higher }).line);")
+                  " value: c.value, unit: c.unit, target: c.target, gate: c.gate, higherIsBetter: c.higher, reportOnly: c.report }).line);")
         result = subprocess.run([bun, "-e", script, json.dumps(cases)], cwd=ROOT, capture_output=True, text=True,
                                 env={**os.environ, "INFRATERNAL_LATENCY_DISPLAY": "unthrottled"}, check=True)
         expected = [targets.row_line(c["key"], source="t", display="unthrottled", n=c["n"], value=c["value"],
                                      unit=c["unit"], target=c["target"], gate=c.get("gate"),
-                                     higher_is_better=c.get("higher", False)) for c in cases]
+                                     higher_is_better=c.get("higher", False), report_only=c.get("report", False)) for c in cases]
         self.assertEqual(result.stdout.splitlines(), expected)
 
     def test_browser_row_keys_are_known(self):
@@ -233,7 +278,7 @@ class TypeScriptCopyTests(unittest.TestCase):
         self.assertIsNotNone(union)
         keys = set(re.findall(r'"(\w+)"', union.group(1)))
         self.assertTrue(keys)
-        self.assertLessEqual(keys, {row.key for row in targets.ROWS})
+        self.assertLessEqual(keys, targets.ROW_KEYS)
 
 
 if __name__ == "__main__":

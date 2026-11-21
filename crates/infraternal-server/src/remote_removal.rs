@@ -493,7 +493,7 @@ impl Removal {
                 )
                 .await?
                 {
-                    return Err(crate::auth::Error::Denied);
+                    return Err(crate::auth::Error::FreshRequired);
                 }
             }
             RemovalAuthority::ApiKey { key_hash, .. } => {
@@ -575,18 +575,20 @@ impl Removal {
                 // window closing after the dry run refuses the removal.
                 let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id JOIN remote_hosts h ON h.owner_id=u.id WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1 AND h.id=? AND h.revoked_at IS NULL)")
                     .bind(&entry.hash).bind(&entry.user).bind(live).bind(entry.host.as_bytes().as_slice()).fetch_one(&mut *tx).await?;
-                if !allowed
-                    || entry.expires <= live
-                    || !infraternal_plugin_api::fresh_session_tx(
-                        &mut tx,
-                        &entry.hash,
-                        &entry.user,
-                        now,
-                        infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
-                    )
-                    .await?
-                {
+                if !allowed || entry.expires <= live {
                     return Err(crate::auth::Error::Denied);
+                }
+                // Same answer as every other closed window (#563): the page renews and retries.
+                if !infraternal_plugin_api::fresh_session_tx(
+                    &mut tx,
+                    &entry.hash,
+                    &entry.user,
+                    now,
+                    infraternal_plugin_api::ADMIN_WINDOW_SECONDS,
+                )
+                .await?
+                {
+                    return Err(crate::auth::Error::FreshRequired);
                 }
                 None
             }

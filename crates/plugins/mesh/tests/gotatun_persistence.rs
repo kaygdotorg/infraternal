@@ -1300,6 +1300,12 @@ fn j534_nat_rule(ns: &str, marker: &str) -> (String, u64) {
 }
 
 /// Denied and unknown peer keys get no cookie while an allowed peer keeps normal rate limiting.
+///
+/// `GotaTun` sends cookies only while its handshake backlog is at least 128 messages (#260,
+/// J1112), so the allowed peer's flood must outrun the receive task: a thousand replayed
+/// initiations sent at once leave hundreds waiting (the guard admits about 400 from one known
+/// endpoint per second, and each costs two key agreements). The 101 the old per-source count
+/// needed would now be served without a cookie, which is the point of that change.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
 fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_behavior() {
@@ -1473,7 +1479,7 @@ fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_
     );
 
     let registered_cookie = in_ns(NS_B, || {
-        for _ in 0..101 {
+        for _ in 0..J534_REGISTERED_FLOOD {
             registered_socket
                 .send_to(&registered_packet, listener)
                 .unwrap();
@@ -1504,7 +1510,7 @@ fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_
         "a configured peer with network access keeps the standard cookie response under load"
     );
     assert!(
-        j534_rule(NS_A, "j534-cookie-probe").1 >= 303,
+        j534_rule(NS_A, "j534-cookie-probe").1 >= 202 + J534_REGISTERED_FLOOD,
         "all three packet floods must reach the listener before its response is checked"
     );
 
@@ -1513,6 +1519,10 @@ fn peers_without_network_access_get_no_reply_while_registered_peers_keep_cookie_
     cleanup(&[&state_a]);
     fs::remove_file(firewall).unwrap();
 }
+
+/// How many replayed initiations the allowed peer sends at once in the j534 cookie case: enough
+/// to build `GotaTun`'s handshake backlog past its under-load mark of 128.
+const J534_REGISTERED_FLOOD: u64 = 1_000;
 
 /// Delete a marked nft rule after a controlled adversarial packet phase.
 fn j534_delete_rule(ns: &str, marker: &str) {

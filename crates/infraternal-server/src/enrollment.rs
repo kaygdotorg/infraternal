@@ -61,6 +61,30 @@ impl JoinToken {
     }
 }
 
+/// The 32 bytes of an invitation secret, or `None` unless `secret` is their
+/// one canonical spelling: exactly 43 characters of unpadded base64url.
+/// Only that spelling is hashed and looked up, so no alias of a secret (a
+/// different final character, padding, another alphabet) is ever accepted.
+fn canonical_secret(secret: &str) -> Option<[u8; 32]> {
+    if secret.len() != 43 {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(secret).ok()?;
+    if URL_SAFE_NO_PAD.encode(&decoded) != secret {
+        return None;
+    }
+    decoded.try_into().ok()
+}
+
+/// Fuzz hook: an accepted invitation secret is exactly 32 bytes in its canonical spelling.
+#[cfg(any(test, feature = "parser-checks"))]
+pub(crate) fn check_secret_sample(data: &[u8]) {
+    let secret = String::from_utf8_lossy(data);
+    if let Some(bytes) = canonical_secret(&secret) {
+        assert_eq!(URL_SAFE_NO_PAD.encode(bytes), secret);
+    }
+}
+
 /// Content-free errors safe for operator diagnostics.
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollmentError {
@@ -388,15 +412,10 @@ impl EnrollmentStore {
     ) -> Result<(), EnrollmentError> {
         // Canonical spelling matters: hash only the one URL-safe encoding of
         // exactly 32 bytes, rejecting aliases and oversized inputs before decode.
-        if secret.len() != 43 || now < 0 {
+        if now < 0 || canonical_secret(secret).is_none() {
             return Err(EnrollmentError::Denied);
         }
-        let decoded = URL_SAFE_NO_PAD
-            .decode(secret)
-            .map_err(|_| EnrollmentError::Denied)?;
-        if decoded.len() != 32
-            || URL_SAFE_NO_PAD.encode(&decoded) != secret
-            || certificate.not_before < 0
+        if certificate.not_before < 0
             || certificate.not_before > now
             || certificate.not_after <= now
             || certificate.not_before.checked_add(604_800) != Some(certificate.not_after)

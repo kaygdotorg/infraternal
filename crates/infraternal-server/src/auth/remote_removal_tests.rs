@@ -947,11 +947,13 @@ async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
             }
             _ => {}
         }
-        assert_eq!(
-            forget_request(&f, host).await,
-            axum::http::StatusCode::FORBIDDEN,
-            "{rule}"
-        );
+        // A closed admin window is the one refusal the page can fix with a passkey tap (#563).
+        let expected = if rule == "expired" {
+            axum::http::StatusCode::PRECONDITION_REQUIRED
+        } else {
+            axum::http::StatusCode::FORBIDDEN
+        };
+        assert_eq!(forget_request(&f, host).await, expected, "{rule}");
         assert!(live(&f, host).await, "{rule}");
     }
 }

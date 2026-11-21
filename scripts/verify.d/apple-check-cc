@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# C toolchain for type-checking the arm64 macOS build from Linux (#260, #221).
+#
+# scripts/verify's "macOS compile" row runs `cargo check --target
+# aarch64-apple-darwin` on the Linux build machines. Cargo still runs the
+# build scripts of C dependencies (OpenSSL, ring, SQLite) for a check, so they
+# need a C compiler for macOS. The pinned Zig (D213, D328) already
+# cross-compiles the terminal engine for macOS in scripts/build-vt, and it
+# carries the macOS libc headers, so this wrapper drives it as that compiler.
+#
+# The row links this file under the names cc, c++, ar and ranlib and points the
+# target-qualified CC/CXX/AR/RANLIB variables at those links; the name picks
+# the tool. INFRATERNAL_APPLE_CHECK_ZIG names the Zig binary.
+#
+# The objects are only ever thrown away: the row never links, and the shipped
+# Mach-O images are built on a Mac with the OS toolchain (.cargo/apple-cc.sh).
+# So the flags that tie a compile to Apple's own driver and SDK are dropped:
+# `-arch`, `-isysroot`, `-target`/`--target=` and the minimum-version flags.
+# The single `-target aarch64-macos` given to Zig replaces them.
+set -euo pipefail
+
+zig="${INFRATERNAL_APPLE_CHECK_ZIG:?the macOS compile row sets INFRATERNAL_APPLE_CHECK_ZIG}"
+case "$(basename -- "$0")" in
+    ar) exec "$zig" ar "$@" ;;
+    ranlib) exec "$zig" ranlib "$@" ;;
+    cc) driver=cc ;;
+    c++) driver=c++ ;;
+    *)
+        printf 'apple-check-cc: run it as cc, c++, ar or ranlib\n' >&2
+        exit 2
+        ;;
+esac
+
+args=()
+while (($#)); do
+    case "$1" in
+        -arch | -isysroot | -target)
+            (($# >= 2)) || { printf 'apple-check-cc: %s needs a value\n' "$1" >&2; exit 2; }
+            shift 2
+            ;;
+        --target=* | -mmacosx-version-min=* | -mmacos-version-min=*)
+            shift
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+exec "$zig" "$driver" -target aarch64-macos "${args[@]}"

@@ -27,6 +27,16 @@ pub const SHARED_WRITER: u64 = 16;
 pub const QUERY_REPLIES: u64 = 32;
 /// Capability bit 6 permits an explicit saved-shell shutdown request [314].
 pub const CLOSE_SESSION: u64 = 64;
+/// Capability bit 8 asks the shim to report when the terminal stops echoing
+/// typed keys (a password prompt) and when it echoes again, as [`Frame::EchoState`]
+/// (#569, D130). The shim sends the report only on a streaming link (after its
+/// first `ReadFrom` or `SnapshotRequest`), so handshake replies never interleave
+/// with it, and only on a change.
+pub const ECHO_STATE: u64 = 256;
+/// The one defined [`Frame::EchoState`] flag: the terminal is in line mode with
+/// echo off (termios `ICANON` set and `ECHO` clear), which is how password
+/// prompts read a secret in every language. Every other bit is refused.
+pub const ECHO_HIDDEN: u8 = 1;
 
 /// Frozen v1 messages. Byte vectors are owned only after length validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +84,12 @@ pub enum Frame {
     StopShell,
     /// Sent only after the shim has reaped its owned shell.
     ShellStopped,
+    /// Additive 0x24, legal only after selecting [`ECHO_STATE`]: the terminal's
+    /// echo mode changed. The payload is the output head when the mode was read
+    /// (u64, so relays can drop a stale duplicate) and one flag byte; only
+    /// [`ECHO_HIDDEN`] is defined. It is not replayed: a new link starts as
+    /// "echo on" and hears the current state once it streams.
+    EchoState(u64, u8),
     Error(u16, String),
 }
 /// Borrowed payload decoding for frame-scoped consumers; scalar layouts reuse
@@ -203,6 +219,9 @@ impl Frame {
         wire.extend_from_slice(second);
         Ok(())
     }
+    /// Encode one frame, appending to `wire` when `APPEND` and replacing it
+    /// otherwise. The whole size is checked first, so a refused frame leaves
+    /// `wire` unchanged.
     fn encode_mode<const APPEND: bool>(&self, wire: &mut Vec<u8>) -> io::Result<()> {
         #[cfg(feature = "process-per-user")]
         if let Self::Output(seq, bytes) = self {
@@ -226,6 +245,12 @@ impl Frame {
                 10 + bytes.len()
             }
             Self::Error(_, message) => 3 + message.len(),
+            Self::EchoState(_, flags) => {
+                if flags & !ECHO_HIDDEN != 0 {
+                    return Err(invalid());
+                }
+                10
+            }
             _ => 59,
         };
         if size > MAX_FRAME {
@@ -345,6 +370,11 @@ impl Frame {
             Self::ExitAck => body.push(0x21),
             Self::StopShell => body.push(0x22),
             Self::ShellStopped => body.push(0x23),
+            Self::EchoState(seq, flags) => {
+                body.push(0x24);
+                put!(seq);
+                body.push(*flags);
+            }
             Self::Error(code, message) => {
                 body.push(0x7f);
                 put!(code);
@@ -409,6 +439,14 @@ impl Frame {
             0x21 => Self::ExitAck,
             0x22 => Self::StopShell,
             0x23 => Self::ShellStopped,
+            0x24 => {
+                let seq = p.u64()?;
+                let flags = p.take::<1>()?[0];
+                if flags & !ECHO_HIDDEN != 0 {
+                    return Err(invalid());
+                }
+                Self::EchoState(seq, flags)
+            }
             0x7f => Self::Error(
                 p.u16()?,
                 String::from_utf8(p.bytes()).map_err(|_| invalid())?,

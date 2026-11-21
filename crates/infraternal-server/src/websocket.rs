@@ -23,9 +23,10 @@ use crate::{
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
-        CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
-        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER, TERMINAL_ROUTE_IDLE,
-        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
+        CloseOwner, CloseReason, CloseRecord, CloseWho, HOST_STREAM_LIMIT, INPUT_QUEUE_FULL,
+        NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER,
+        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
+        safe_websocket_reason,
     },
 };
 use axum::{
@@ -102,6 +103,11 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 const REFUSAL_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
+/// Disconnected, still-resumable rows one account keeps. A new connection evicts that account's oldest beyond
+/// this, so one account's connect-and-drop loop can no longer fill [`MAX_RESUME_ROWS`] and refuse every other
+/// account's new sockets (#572 finding 4). 64 is four times the live limit: a person whose 16 tabs all drop and
+/// reconnect several times inside the 120 s window still resumes each of them. The global cap stays the backstop.
+const MAX_USER_RESUME_ROWS: i64 = 64;
 // Reject further AttachTerm requests on a socket at this bound.
 pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
@@ -1666,30 +1672,25 @@ where
             attachment.last_in_acked = in_seq_acked;
             // Each device acknowledges only its durable writer range. The old
             // session column is retained for diagnostics, never new input authority.
-            let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
-                .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
-                .bind(crate::auth::hash(session_token)).bind(user_id).execute(&state.pool).await;
-            if !matches!(changed, Ok(result) if result.rows_affected() == 1) {
-                return Err(());
-            }
-            let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
-            let acked_u64 = in_seq_acked.to_be_bytes();
+            // Both rows change in one transaction on the D379 writer (#562).
             let Ok(now) = unix_seconds() else {
                 return Err(());
             };
-            let result = sqlx::query("UPDATE terminal_sessions SET input_acked_u64=CASE WHEN input_acked_u64<? THEN ? ELSE input_acked_u64 END, input_acked=CASE WHEN ?>=0 THEN MAX(input_acked,?) ELSE input_acked END, last_seen=? WHERE id=? AND user_id=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(acked_u64.as_slice())
-                .bind(acked_u64.as_slice())
-                .bind(legacy_acked)
-                .bind(legacy_acked)
-                .bind(now)
-                .bind(attachment.session_id.as_slice())
-                .bind(user_id)
-                .bind(crate::auth::hash(session_token)).bind(user_id)
-                .execute(&state.pool)
-                .await;
-            if !matches!(result, Ok(result) if result.rows_affected() == 1) {
+            let recorded = crate::terminal_input_ack::record(
+                &state.auth,
+                &state.pool,
+                crate::terminal_input_ack::InputAck {
+                    connection_id,
+                    client_stream: stream_id,
+                    session_id: attachment.session_id,
+                    in_seq_acked,
+                    user_id,
+                    session_token,
+                    now,
+                },
+            )
+            .await;
+            if !recorded {
                 return Err(());
             }
             if !session_is_live(state, user_id, session_token).await {
@@ -1904,6 +1905,14 @@ async fn new_connection(
     if active >= MAX_USER_CONNECTION_ROWS {
         return Err(sqlx::Error::Protocol(CONNECTION_LIMIT_ERROR.into()));
     }
+    // Keep only this account's newest resumable rows (by disconnect time), so its own churn evicts its own
+    // oldest resume first and never spends another account's share of the global cap.
+    sqlx::query("DELETE FROM websocket_connections WHERE user_id=? AND active=0 AND connection_id NOT IN (SELECT connection_id FROM websocket_connections WHERE user_id=? AND active=0 ORDER BY expires_at DESC LIMIT ?)")
+        .bind(user_id)
+        .bind(user_id)
+        .bind(MAX_USER_RESUME_ROWS - 1)
+        .execute(&mut *transaction)
+        .await?;
     let retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE active=1 OR expires_at>=?",
     )
@@ -2418,16 +2427,23 @@ where
             };
             #[cfg(test)]
             addhost_timeline("attach_agent_resolved");
-            let Ok(Ok(attachment)) = tokio::time::timeout(
+            let attached = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
-            .await
-            else {
+            .await;
+            let Ok(Ok(attachment)) = attached else {
+                // A full link refuses at once with its own plain sentence (#562);
+                // every other failure keeps the generic one.
+                let refusal = if matches!(attached, Ok(Err(AgentError::StreamLimit))) {
+                    HOST_STREAM_LIMIT
+                } else {
+                    AGENT_CONNECTION_REFUSED
+                };
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::InfraternalAgent,
-                    AGENT_CONNECTION_REFUSED,
+                    refusal,
                     host_id,
                     session,
                     stream_id,
@@ -3503,6 +3519,11 @@ where
 #[cfg(test)]
 #[path = "websocket_receive_tests.rs"]
 mod receive_tests;
+
+/// Fuzz entry point for [`receive_wire`] and the terminal-open bodies (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[path = "websocket_receive_checks.rs"]
+pub(crate) mod receive_checks;
 
 pub(super) async fn receive_wire<S>(
     source: &mut S,

@@ -45,6 +45,11 @@ impl Fixture {
             .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
+            // Opening the first connection creates the file and switches it to
+            // WAL. On a starved host that has taken longer than sqlx's default 30 s
+            // acquire bound (PoolTimedOut, #443); the wait still ends at the
+            // first connection, so this only bounds a hang.
+            .acquire_timeout(Duration::from_secs(300))
             .connect_with(options)
             .await
             .unwrap();

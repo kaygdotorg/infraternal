@@ -9,6 +9,15 @@ export function isMacPlatform(): boolean {
   return /mac|iphone|ipad/i.test(hint);
 }
 
+/**
+ * Whether a hardware keyboard is likely, so shortcut hints (key caps and "· ⌘1" tails) are worth showing. One rule for every
+ * surface: a phone reports a coarse pointer with no hover and has no keys to hint at, while a desktop, and an iPad with a
+ * keyboard and trackpad that reports a fine pointer or hover, keep them. Read on each call, so it follows a changed device.
+ */
+export function keyboardLikely(): boolean {
+  return typeof matchMedia !== "function" || !matchMedia("(hover: none) and (pointer: coarse)").matches;
+}
+
 /** A shortcut written once for each platform; `shortcutLabel` picks the one that works here. */
 export interface PlatformKeys { mac: string; other: string }
 
@@ -22,8 +31,13 @@ const MAC_GLYPHS: Record<string, string> = { Ctrl: "⌃", Control: "⌃", Alt: "
 /** A written key label as this platform shows it: "Ctrl+Shift+L" → "⌃⇧L" on a Mac, unchanged elsewhere. */
 export function keysLabel(keys: string): string {
   if (keys.length < 2 || !keys.includes("+") || !isMacPlatform()) return keys;
-  const parts = keys.split("+");
-  const key = parts.pop() ?? "";
+  // A label can end in the plus key itself ("Ctrl++", "⌘+"). Splitting on "+" would drop it (it left a lone "⌘"), so the
+  // trailing plus is taken as the key first and the rest is split into modifiers.
+  const plusKey = keys.endsWith("+");
+  let head = plusKey ? keys.slice(0, -1) : keys;
+  if (plusKey && head.endsWith("+")) head = head.slice(0, -1);
+  const parts = head ? head.split("+") : [];
+  const key = plusKey ? "+" : parts.pop() ?? "";
   return parts.map((part) => MAC_GLYPHS[part] ?? part).join("") + key;
 }
 

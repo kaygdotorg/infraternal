@@ -20,7 +20,7 @@
  * closing, an action refusing, the socket dropping.
  */
 import type { MuxConnection, StreamHandler } from "../../connection";
-import { MAX_VIDEO_BYTES, WINDOW_CLOSED, type VideoInput } from "../../../../../packages/protocol/src/desktop";
+import { MAX_VIDEO_BYTES, endReason, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
 import { parseInventory, type AppTarget } from "./inventory";
 import { chooseSize, densityMilli, sizeChanged, type StreamSize } from "./size";
@@ -30,8 +30,14 @@ import type { FromWorker, ToWorker, WorkerStats } from "./worker-protocol";
 
 /** `no-preference` lets the browser pick hardware decoding where it has it (the choice is the browser's, not ours). */
 const HARDWARE: HardwareAcceleration = "no-preference";
-/** Maximum transferred units awaiting acknowledgement from this stream's worker. */
-const MAX_HANDOFF_UNITS = 4;
+/**
+ * Maximum transferred units awaiting acknowledgement from this stream's worker (#146). After a main-thread stall the socket's
+ * queued messages run before the worker's acknowledgements do: a 40 ms stall at 120 fps hands over 5 units at once, 160 ms
+ * about 20. A credit of 4 refused the fifth and forced a keyframe (41–251 KB) where 0.5 KB deltas were waiting. 32 units cover
+ * a 250 ms stall at 120 fps; the byte bound below still caps memory. There is deliberately no
+ * age bound here: the page's own stall would count against it. The worker bounds the age of what waits for its decoder.
+ */
+export const MAX_HANDOFF_UNITS = 32;
 /** How many times a start waits for a lost connection and goes again. */
 const MAX_START_TRIES = 6;
 /** A desktop window releases its worker and surface after this long off screen. A phone does it at once (memory). */
@@ -353,10 +359,11 @@ export class AppStream {
       if (retired) (this.pendingStops ??= new Set()).add(retired);
       this.session = undefined;
       this.setControl({ kind: "none" });
-      if (frame.code === WINDOW_CLOSED) {
+      const ended = endReason(frame.code);
+      if (ended) {
         this.keepControl = false;
         this.releaseSurface();
-        this.setState({ kind: "closed" });
+        this.setState(ended === "console-user-changed" ? { kind: "closed", why: "console-user-changed" } : { kind: "closed" });
       } else {
         void this.diagnose(this.generation, new Error("closed"));
       }

@@ -97,9 +97,7 @@ async fn body(
         return Err(StatusCode::FORBIDDEN);
     }
     if fresh {
-        session
-            .require_admin_window(now)
-            .map_err(|_| StatusCode::PRECONDITION_REQUIRED)?;
+        session.require_admin_window(now).map_err(|e| failure(&e))?;
     }
     let permit = api
         .admission
@@ -142,6 +140,8 @@ async fn finish(
 fn failure(error: &crate::auth::Error) -> StatusCode {
     match error {
         crate::auth::Error::Denied | crate::auth::Error::Webauthn => StatusCode::FORBIDDEN,
+        // The one answer for a closed admin window (#563): the page renews with a passkey tap.
+        crate::auth::Error::FreshRequired => StatusCode::PRECONDITION_REQUIRED,
         crate::auth::Error::Throttled => StatusCode::TOO_MANY_REQUESTS,
         crate::auth::Error::Invalid | crate::auth::Error::Json => StatusCode::BAD_REQUEST,
         _ => StatusCode::SERVICE_UNAVAILABLE,
@@ -220,17 +220,21 @@ struct Forget {
 }
 
 /// Forget only within the same-origin owner's admin window, with the existing bounded decoder.
+/// A closed window answers 428 like removal, so the page can renew and retry (#563).
 async fn forget(
     State(api): State<Api>,
     incoming: axum::extract::Request,
 ) -> Result<Json<Value>, StatusCode> {
-    let (token, now, bytes, _permit) = body(&api, incoming, false).await?;
+    let (token, now, bytes, _permit) = body(&api, incoming, true).await?;
     let input: Forget = decode(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
     api.removal
         .forget_browser(&token, input.host_id, now)
         .await
         .map(Json)
-        .map_err(|_| StatusCode::FORBIDDEN)
+        .map_err(|error| match error {
+            crate::auth::Error::FreshRequired => StatusCode::PRECONDITION_REQUIRED,
+            _ => StatusCode::FORBIDDEN,
+        })
 }
 
 async fn actions(State(api): State<Api>, headers: HeaderMap) -> Result<Json<Value>, StatusCode> {

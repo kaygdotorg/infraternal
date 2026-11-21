@@ -129,3 +129,34 @@ The #149 instrumented run completed 1,781,320 inputs in 61 seconds without a
 crash. Native/proxy TLS evidence and parser cost at 50 sessions are recorded in
 `docs/verification/tls-session.md`. Corpus seeds must be synthetic test values;
 never capture real browser cookies.
+
+## Campaign targets of 2026-11-21 (#561)
+
+Six parsers of untrusted bytes had no target until #561. Each one now calls
+the production code through a `parser-checks` (or, for the vendored SSH
+engine, `fuzz-hooks`) entry point that only this crate enables. Their
+synthetic seeds come from `python3 fuzz/seed_campaign.py` and are committed
+under `fuzz/corpus/<target>/`. Each hook's unit test replays them, so
+`cargo test` runs every entry point on the stable toolchain (ENGINEERING P5).
+
+| Target | What it checks |
+|---|---|
+| `terminal_stream_receive` | Browser WebSocket messages → mux frames (`receive_wire`): whole frames in order, buffer cap, Text/Close handling, at most one unfinished frame at the end; terminal-open bodies |
+| `agent_control_messages` | Local control-socket framing (`read_one`) in any read sizes, `sessions.*` argument checks, saved session names, CLI reply round trip, the Hello `os=` token |
+| `desktop_reassembly` | Video fragment reassembly under loss, repeats, reordering, foreign sessions and deadlines |
+| `remote_join_approval` | `/remote/join` body and canonical CSR, owner-approved `JoinMachineRequest`, receipt token, canonical invitation secret, invitation and link-challenge JSON |
+| `vt_stream_snapshot` | PTY output in any pieces gives the same snapshot; snapshots fit a frame; a snapshot continues the stream |
+| `ssh_packet_read` | The SSH packet reader with its 256-byte read-ahead (#538): sealed packets survive a key change; hostile bytes end in an error without consuming a sequence number |
+
+Build hosts without a nightly toolchain can run them with the pinned stable
+compiler from the dev shell and cargo-fuzz from nixpkgs. `RUSTC_BOOTSTRAP=1`
+lets stable accept the coverage flags, and no sanitizer is needed for these
+memory-safe harnesses. `-a` turns on debug assertions, so arithmetic
+overflow panics:
+
+```sh
+fuzz_bin="$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#cargo-fuzz)/bin"
+nix develop -c env PATH="$fuzz_bin:$PATH" RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEASE_LTO=false \
+  cargo fuzz run -s none -a --features mesh-node vt_stream_snapshot fuzz/corpus/vt_stream_snapshot -- \
+  -max_total_time=600 -max_len=65536 -rss_limit_mb=2048
+```
