@@ -1014,6 +1014,11 @@ impl MeshService {
             .await
     }
 
+    /// `mesh.node.enroll`: an owner (with `MANAGE_NODES`) adds a remote machine's node with the public key it
+    /// was given, optionally bound to a host record. The node gets a fresh id from the allocation high-water
+    /// mark, never a reused one. A key that any other node already holds, as its current key or as a key it is
+    /// rotating to or away from, is refused with `Conflict` (#572, D166). Returns the new node id and the
+    /// state revision.
     async fn enroll_node(
         &self,
         actor: &str,
@@ -1047,6 +1052,13 @@ impl MeshService {
         .await
         .map_err(|error| map_sql_error(error))?
         .ok_or(MeshApiError::Conflict)?;
+        // Refuse a key another node holds, also as a rotation's previous key (#572, D166).
+        if crate::store::key_held_by_another_node(&mut tx, request.public_key.as_slice(), None)
+            .await
+            .map_err(|error| map_sql_error(error))?
+        {
+            return Err(MeshApiError::Conflict);
+        }
         sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us,dataplane_host) VALUES (?,?,?,NULL,NULL,?)")
             .bind(id)
             .bind(&request.name)
