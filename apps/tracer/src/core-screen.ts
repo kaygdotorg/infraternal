@@ -503,6 +503,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     applyTheme(active, ROOT, cardLevel, windowLevel);
     window.dispatchEvent(new CustomEvent("tracer:appearance"));
     THEME_COLOR?.setAttribute("content", active.bg);
+    // The next launch of a home-screen app reads this before first paint (index.html) to pick its status-bar style.
+    try { localStorage.setItem("tracer.chrome", JSON.stringify({ bg: active.bg, dark: active.dark })); } catch { /* storage may be blocked */ }
     // The terminal's own recolour (every retained row is redrawn) is the heaviest part of a theme
     // switch. It runs in its own task, right after the tokens above, so the interface answers at once
     // and no single task is long (work stays under the 50 ms long-task line at 4x CPU).
