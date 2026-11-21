@@ -1,7 +1,7 @@
 //! Serves build-time encodings without request CPU and caches only content-hashed files [5][41].
 //!
 //! Two kinds of file leave here. A file whose name carries a hash of its bytes never changes under that name, so it
-//! is cached for a year: Bun's `chunk-<hash>.js`, and the build's own fingerprinted names
+//! is cached for a year: Bun's `chunk-<hash>.js`, the terminal engine `ghostty-vt-<hash>.wasm`, and the build's own fingerprinted names
 //! `<stem>.<10 hex digits>.js|css|woff2` (the entry script, the page's style sheets and fonts; `apps/tracer/fingerprint.ts`
 //! writes them, #573). Everything else (the page, the workers, the sheets and fonts that code loads by a fixed name)
 //! keeps its name across releases, so it is `no-cache`: the browser asks again on every load and must be told reliably whether its copy is still the
