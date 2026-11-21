@@ -630,10 +630,16 @@ export class TerminalClient {
     }
   }
 
+  /** The loaded engine; a renderer built before `prepareResources` finished is a bug, so it throws. */
+  private static requireEngine(): Ghostty {
+    if (!TerminalClient.engine) throw new Error("The terminal engine is not loaded yet");
+    return TerminalClient.engine;
+  }
+
   /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
-      ghostty: TerminalClient.engine,
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -811,7 +817,7 @@ export class TerminalClient {
     });
     document.body.append(holder);
     const baseline = new Terminal({
-      ghostty: TerminalClient.engine,
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
       cursorBlink: false,

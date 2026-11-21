@@ -41,10 +41,19 @@ nix shell nixpkgs#zig_0_15 -c apps/tracer/vendor/ghostty-web/build.sh --check
 apps/tracer/vendor/ghostty-web/build.sh --update
 ```
 
-The checked-in browser ESM embeds the WASM as a data URL. The separate WASM
-file and generated declarations are kept as build outputs for checksum and
-rebuild verification; the tracer only imports the ESM. `SHA256SUMS` covers the
-ESM, separate WASM and declaration file, and `scripts/verify fast` checks it.
+The checked-in browser ESM embeds the WASM as a data URL, and the separate WASM
+file is kept next to it. The tracer's production build (#573) does not ship that
+copy: `apps/tracer/browser-build.ts` cuts the base64 out of the ESM while
+bundling, and `apps/tracer/src/engine-wasm.ts` imports `dist/ghostty-vt.wasm`
+itself, so the bundler emits it as `ghostty-vt-<hash>.wasm`. The browser fetches
+that file (served as `application/wasm`, cached as immutable, preloaded for a
+signed-in device) and compiles it with `WebAssembly.instantiateStreaming`. The
+engine is then passed to every `Terminal` as its `ghostty` option, so the
+artifact's own `init()` is not used by the app. The pinned files are unchanged
+by this: `SHA256SUMS` still covers the ESM, the WASM and the declaration file
+exactly as `build.sh` produced them, and `scripts/verify fast` checks it. A
+re-pinned ESM must still contain the data URL, or the production build stops
+with a message saying so.
 
 Both this project and the embedded Ghostty VT source use MIT. Their original
 license texts are included as `LICENSE` and `GHOSTTY-LICENSE`. Once an official
