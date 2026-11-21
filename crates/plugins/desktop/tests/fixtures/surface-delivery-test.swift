@@ -6,10 +6,13 @@ import Foundation
 
 enum HelperFailure: Error { case invalid, permission, unavailable }
 
+/// Drives the production capture mailbox and hardware encoder with real buffers and counts the
+/// pictures it sends: startup, the sharp refresh in the configured rate mode, changes and repair.
 @main struct SurfaceDeliveryTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
     }
+    /// Runs the delivery sequence; `expect` exits with `FAIL` on the first broken count.
     static func main() {
         let lock = NSLock()
         var keys: [Bool] = []

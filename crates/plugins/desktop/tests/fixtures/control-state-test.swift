@@ -4,7 +4,10 @@ import Foundation
 import CoreGraphics
 #endif
 
+/// Deterministic checks of the framework-free capture policy: coordinates, local-input priority,
+/// the encode scheduler (repair, drops, sharp refresh plans), the encoder rate mode and bit rate.
 @main struct PolicyTests {
+    /// Runs every check; an `assert` or `fatalError` fails the process, `PASS` means all held.
     static func main() {
         let source = CGRect(x: -1512, y: 90, width: 1512, height: 982)
         let output = CGSize(width: 1920, height: 1080)

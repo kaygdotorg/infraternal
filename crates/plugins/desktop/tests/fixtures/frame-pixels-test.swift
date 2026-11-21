@@ -2,6 +2,8 @@
 import CoreVideo
 import Foundation
 
+/// Checks the exact-pixel history with real CoreVideo buffers: padding, caret cadence, drops,
+/// formats, reset and the rows touched since the last sharp picture.
 @main struct FramePixelsTest {
     static func expect(_ value: Bool, _ label: String) {
         if !value { fputs("FAIL \(label)\n", stderr); exit(1) }
@@ -44,6 +46,7 @@ import Foundation
             }
         }
     }
+    /// Runs every check; `expect` exits with `FAIL` on the first broken one, `PASS` means all held.
     static func main() {
         let damageHistory = FramePixels(), surface = pixel(96, 48)
         fill(surface, 47)
