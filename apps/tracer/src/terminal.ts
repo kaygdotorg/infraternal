@@ -121,6 +121,12 @@ export interface TerminalHooks {
   onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
+  /**
+   * Same facts as {@link onTrace}, for a whole byte range at once: bytes `start` .. `start + length - 1` reached `hop`
+   * at `at`. When set it replaces the per-byte `onTrace` calls for ranges, so a probe costs one call per frame instead
+   * of five BigInt string conversions per output byte (J1065, #569).
+   */
+  onTraceRange?: (start: bigint, length: number, hop: TerminalTraceHop, at: number) => void;
   /** Called after bytes paint; the kind lets paint probes reset when a full screen replaces raw output. */
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint, kind?: "output" | "snapshot") => void;
 }
@@ -2844,9 +2850,15 @@ export class TerminalClient {
     this.conn.send(streamId, frame, (at) => this.traceRange(traceStart, traceLength, "encode", at), () => this.traceRange(traceStart, traceLength, "wsSend", performance.now()));
   }
 
-  /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
+  /**
+   * Maps byte-stream sequence numbers to probe key IDs without changing wire frames. A probe that offers
+   * `onTraceRange` gets the range in one call; otherwise every byte is reported through `onTrace`, which at a 10 MB/s
+   * flood costs more than the terminal itself and made the probe measure its own overhead (J1065, #569).
+   */
   private traceRange(start: bigint, length: number, hop: TerminalTraceHop, at: number): void {
-    const onTrace = this.config.hooks?.onTrace;
+    const hooks = this.config.hooks;
+    if (hooks?.onTraceRange) { hooks.onTraceRange(start, length, hop, at); return; }
+    const onTrace = hooks?.onTrace;
     if (!onTrace) return;
     for (let offset = 0; offset < length; offset += 1) {
       onTrace((start + BigInt(offset)).toString(), hop, at);
