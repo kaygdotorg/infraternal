@@ -31,6 +31,8 @@ declare global {
     __tracerPerformanceProbe?: {
       /** Returns content-free probe stage times for the current synthetic key run. */
       trace: () => ProbeTraceSample[];
+      /** How much history the terminal holds, as counts (#569). */
+      scrollbackSummary: (prefix: string) => { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } | undefined;
     };
     __tracerTestDouble?: {
       isConnected: () => boolean;
@@ -625,7 +627,10 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     const { PerformanceProbe } = await onDemand(() => import("./perf-probe.on-demand"));
     if (generation !== sessionGeneration) return;
     performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
-    window.__tracerPerformanceProbe = { trace: () => performanceProbe?.traceSamples() ?? [] };
+    window.__tracerPerformanceProbe = {
+      trace: () => performanceProbe?.traceSamples() ?? [],
+      scrollbackSummary: (prefix) => currentTerminal?.scrollbackSummary(prefix),
+    };
   }
   const probeHooks = performanceProbe?.hooks();
   // Session continuity across reloads (integration, #34): the tab remembers its
