@@ -108,8 +108,10 @@ impl Metadata {
     /// while one of its legs was running (see [`Metadata::bind_console`]).
     /// The server then sees `gone` at its next prepare and closes the
     /// session instead of attaching again.
+    /// It latches `gone` with the reason [`EndReason::ConsoleUserChanged`], so the
+    /// viewer is told the person changed and not that the window closed (#146).
     pub fn console_changed(&self) {
-        self.gone.store(true, Ordering::Release);
+        self.latch_gone(EndReason::ConsoleUserChanged);
     }
     /// Remembers that the session ended for good, and why, across replacement lanes. The first reason stays.
     pub(super) fn latch_gone(&self, reason: EndReason) {
