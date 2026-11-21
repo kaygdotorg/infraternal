@@ -2,11 +2,10 @@
  * Whether the infraternal agent tells the tracer when a host terminal stops echoing (`terminal.echo`, J1094, #569).
  *
  * Predictive echo is on by default (owner, 2026-11-21, D130), and a default-on prediction must never draw the keys
- * of a password: it can only be safe when the host says when echo is off. Until that signal ships, the default stays
- * off and `?predict=1` is still the explicit opt-in. DEPENDENCY: set this to `true` in the change that merges J1094
- * (branch `j1094-shim-noecho-signal`); nothing else needs to change.
+ * of a password: it is safe because the shim now reports when echo is off (J1094's `terminal.echo` notice, which
+ * `PredictiveEcho.hostEcho()` obeys). `?predict=0` still turns prediction off for a page.
  */
-export const HOST_ECHO_SIGNAL_SHIPPED = false;
+export const HOST_ECHO_SIGNAL_SHIPPED = true;
 
 /**
  * Whether predictive echo runs, from the page's `?predict=` value: `1` always (explicit opt-in), `0` never, and
