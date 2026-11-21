@@ -51,6 +51,8 @@ impl NodeChannel for Channel {
         })
     }
 }
+/// One line of the proof's stdin protocol: set up the mesh, answer a
+/// `mesh.configure` call, retire the host, or make an access change.
 #[derive(Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 enum Request {
@@ -79,6 +81,8 @@ enum Change {
     RuleRemoval,
     DefaultTightening,
 }
+/// The fixture's server side after `Init`: the authority writer, the plugin
+/// runtime driving live peers, the mesh service and its database.
 struct State {
     authority: EnrollmentStore,
     /// The retired host's owner: `owner` (a legacy identity, retired at once)
@@ -210,6 +214,8 @@ async fn initialize(
         pool,
     })
 }
+/// Serve the proof: requests arrive as JSON lines on stdin; `apply` frames
+/// for each peer and the `revoked` result leave as JSON lines on stdout.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Error> {
     let (frames, mut deliveries) = tokio::sync::mpsc::channel::<Apply>(32);

@@ -133,6 +133,9 @@ async fn mesh_revision(pool: &sqlx::SqlitePool) -> i64 {
         .unwrap()
 }
 
+/// A legacy-owner host retires at once on revocation: the peer gets the
+/// `removed` chunk without polling, and the tombstone refuses re-attachment
+/// and admission even for a freshly built authority writer (#173).
 #[tokio::test]
 async fn committed_host_revocation_pushes_peer_withdrawal_without_polling() {
     let (authority, pool, host) = crate::enrollment::authority::tests::enrolled().await;
