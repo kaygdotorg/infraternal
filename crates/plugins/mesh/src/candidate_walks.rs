@@ -33,7 +33,7 @@ use std::{
 };
 
 use crate::{
-    candidates::{Rotation, SILENT, Seen},
+    candidates::{Rotation, Seen},
     dataplane::{Config, Peer, PeerPolicy},
     policy::model::PublicKey,
 };
@@ -83,7 +83,7 @@ pub(crate) fn engine_endpoint(
 /// same evidence cannot tell a roamed peer from one that moved on and fell quiet, so the
 /// retention is as short as the old recovery bound (about 25 s, the walk's whole list at its
 /// steps): a peer that moved and stays silent is followed to the coordinator's list after this
-/// time, not after [`SILENT`]. A peer in traffic re-handshakes at least every two minutes and its
+/// time, not after [`crate::candidates::SILENT`]. A peer in traffic re-handshakes at least every two minutes and its
 /// roam re-handshakes at once, so a stale snapshot that lands soon after the roam is outvoted.
 pub(crate) const OFF_LIST_RETENTION: std::time::Duration = std::time::Duration::from_secs(25);
 
@@ -363,6 +363,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
     use crate::{
+        candidates::SILENT,
         dataplane::PeerPolicy,
         policy::{model::Addresses, rules::TrafficPolicy},
     };
