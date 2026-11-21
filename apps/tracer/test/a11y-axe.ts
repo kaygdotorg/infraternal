@@ -26,3 +26,16 @@ export async function runAxe(page: Page, options: AxeOptions = {}): Promise<Viol
     }));
   }, { tags, rules: options.rules ?? [], exclude: options.exclude ?? [] });
 }
+
+/** How many elements axe could not judge for colour contrast, and why (for example text over an image or a backdrop blur): these need a pixel measurement instead. */
+export async function contrastIncomplete(page: Page): Promise<Record<string, number>> {
+  if (!(await page.evaluate(() => "axe" in window))) await page.addScriptTag({ path: AXE_PATH });
+  return page.evaluate(async () => {
+    type Raw = { incomplete: Array<{ nodes: Array<{ any: Array<{ data?: { messageKey?: string } }> }> }> };
+    const axe = (window as unknown as { axe: { run(ctx: unknown, opts: unknown): Promise<Raw> } }).axe;
+    const results = await axe.run(document, { runOnly: { type: "rule", values: ["color-contrast"] } });
+    const out: Record<string, number> = {};
+    for (const rule of results.incomplete) for (const node of rule.nodes) { const why = node.any[0]?.data?.messageKey ?? "unknown"; out[why] = (out[why] ?? 0) + 1; }
+    return out;
+  });
+}

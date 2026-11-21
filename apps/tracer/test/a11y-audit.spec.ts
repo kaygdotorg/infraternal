@@ -14,7 +14,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "playwright/test";
-import { runAxe } from "./a11y-axe";
+import { contrastIncomplete, runAxe } from "./a11y-axe";
 import { tracerEvidencePath } from "./evidence-path";
 import { startRemovalFromPalette } from "./removal-fixture";
 
@@ -125,6 +125,7 @@ for (const size of SIZES) {
             // sleep: let the screen settle before it is measured
             await page.waitForTimeout(600);
             record.axe = await axe(page);
+            record.contrastIncomplete = await contrastIncomplete(page);
             record.probe = await probe(page, size.touch);
             mkdirSync(OUT, { recursive: true });
             await page.screenshot({ path: resolve(OUT, `${name}-${size.name}-${theme}.png`) });
