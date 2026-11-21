@@ -76,12 +76,14 @@ access (#341 B19).
       `~/.local/share/infraternal` for rootless agents.
     - The upgrade handshake is frozen forever.
     - A downgrade needs a signature and an explicit request from the server.
+    - *Later (owner, 2026-11-21, #557):* D395 amends this entry's install paths (system data in /var/lib/infraternal, server data in /var/lib/infraternal/server/).
 18. **Rootful and rootless agents.** The SSH bootstrap auto-detects sudo, the
     engine sockets, `systemd --user` and linger, and then proposes a mode. A
     host has one agent. When root becomes available, the agent upgrades to a
     root agent, moves the contexts (root docker, kayg podman, …) to it and
     removes the user agent. The agent supports systemd, openrc, runit, s6 and a
     fallback.
+    - *Later (owner, 2026-11-21, #557):* on macOS, D203 C2 (amended 2026-11-20) makes user mode the default; root mode is the opt-in.
 19. **Deployment.** One node, SQLite, and first-class backups (scheduled
     snapshot plus a restore command). No HA: HA comes from Kubernetes or
     Proxmox. The server ships as a static binary with a systemd unit, and also
@@ -134,6 +136,7 @@ access (#341 B19).
     separate repository `kayg/infraternal-enterprise`, so this repository has no
     `ee/` directory. D334 confirms that invites and multi-user management live
     there.
+    - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 32. **Tiers.** Community: free, one user, all features, unlimited hosts.
     Homelab: one-time payment, about 10 users. Team: per user per month.
     Enterprise: contact sales. Apps: a subscription for iOS and macOS, with
@@ -142,6 +145,7 @@ access (#341 B19).
     `ee/` directory, the license check and the role model.
 
 ## Plugins and order
+    - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 
 34. **Slices.**
     - S0: website, repo skeleton, gates.
@@ -204,6 +208,7 @@ access (#341 B19).
     - Idle agent below 15 MB RSS.
 
     Only the owner can loosen a budget.
+    - *Later (owner, 2026-11-21, #557):* rewritten by D375 (2026-11-09): D375's 120 Hz table replaces these budgets. The 5 ms keystroke and 300 ms reconnect bounds above no longer gate anything; D375 governs (reconnect rows: D267, D375, D382).
 42. **CI.** A Forgejo runner on infraternal-dev runs builds and tests. A
     separate, pinned perf VM runs the benchmarks.
 43. **Repo.** Forgejo `kayg/infraternal` is the source of truth, with a mirror
@@ -216,6 +221,7 @@ access (#341 B19).
     `apps/website`. Docs use Astro Starlight in `apps/docs`, served at `/docs`.
     Deploy to Cloudflare Pages through Forgejo Actions and
     `wrangler pages deploy` (direct upload).
+    - *Later (owner, 2026-11-21, #557):* the tree has no apps/website, apps/docs or apps/web: the product app is apps/tracer and the docs live in docs/user (D317).
 45. **Positioning.** The hook is SSH: "a self-hosted terminal that feels local,
     on every device". The all-in-one control plane is the vision and the
     roadmap. Claim only what works.
@@ -724,6 +730,7 @@ access (#341 B19).
      sessions alive and fail closed when it is gone (D128). High
      availability is planned later as a commercial (`ee/`) feature, not in
      the open product.
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 137. **Transport proof before UI (T7):** the orchestrator enrolls o1, o2 and
      minipc01 with the operator join command and runs chaos tests
      (NetBird/Tailscale restarts, agent restarts, network loss, a 300 ms+
@@ -1030,6 +1037,7 @@ access (#341 B19).
      triggers. Standalone docs pages keep the browser's zoom, which readers
      need for accessibility. Zoomed out to thumbnails on an unlocked canvas,
      a pinch zooms the canvas so you can get back in.
+     - *Later (owner, 2026-11-21, #557):* D374 A17 and D377 replace D275's vertical column step and Shift+wheel behaviour.
 160. **One reusable, per-instance-extensible component per UI concept:**
      every UI concept (overlay/popover/sheet material, pill, capsule tabs,
      rows, tooltip, tick and copy swap, toast, buttons, spring) exists
@@ -1282,6 +1290,7 @@ access (#341 B19).
        opens the same editor in place (wiggle, drag, hide, add). A
        horizontal swipe on the top pill steps between views with motion,
        and the canvas lock re-engages on landing.
+     - *Later (owner, 2026-11-21, #557):* D374 A17 and D377 replace D275's vertical column step and Shift+wheel behaviour.
 178. **Sessions, the per-account canvas and the sidebar (owner, 2026-10-08, #89):**
      - **The canvas belongs to the account:** open windows and their
        arrangement are the same on every device; each device keeps only
@@ -2131,6 +2140,7 @@ access (#341 B19).
      - **The server's own host** is reached through the embedded
        infraternal agent, the same way as every other host, with no SSH to
        itself.
+     - *Later (owner, 2026-11-21, #557):* on macOS, D203 C2 (amended 2026-11-20) makes user mode the default; root mode is the opt-in.
 230. **Account names (owner, 2026-10-11, Q12):** setup asks for a username
      (required; no spaces; it names the passkey and the account) and a
      display name (optional, a real name). Sign-in asks only for the
@@ -2256,6 +2266,7 @@ access (#341 B19).
        ignores the policy. The community connection log keeps 30 days.
        A link always needs the person's own passkey; an administrator cannot
        approve one on their behalf (a visible machine grant is the stopgap).
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 236. **Session rows say what is in them (owner, 2026-10-11):** a session's
      label is, in order, the name a person gave it, the foreground program
      (`htop`, `cargo test`), or the current folder's last component (`~` for
@@ -2934,6 +2945,7 @@ access (#341 B19).
          unclear), and refusing while root-only things are in use (prompt
          1 already lists them).
        Removing the host removes everything (D273).
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
      #215):** today a snapped canvas sends every wheel to window navigation,
      so a window's own list (Access) cannot scroll without the input lock.
@@ -2962,6 +2974,7 @@ access (#341 B19).
        width (no neighbours showing)" is removed; phones keep "Edge to edge"
        and "Comfortable". The owner: "simplify and make UI/UX extremely
        easy".
+     - *Later (owner, 2026-11-21, #557):* D374 A17 replaces the vertical column step, and D377 replaces the Shift+wheel behaviour.
 276. **Inbox items can be dismissed (owner, 2026-10-15, #215):** every Inbox
      item can be dismissed, except the few that block something from
      working until they are acted on (for example "Allow host connections").
@@ -3900,6 +3913,7 @@ access (#341 B19).
        as a new host with a new key and retires the old infraternal agent
        (#305). The owner treats the failing re-add of `code` as a bug ("bug
        is not fixed?"), so this path is built.
+     - *Later (owner, 2026-11-21, #557):* D203 C2 (amended 2026-11-20) makes user mode the macOS default, so a plain shell started by the root daemon is the root-mode case only.
 336. **Morning answers (owner, 2026-11-04):**
      - Traefik containment (#281, docs/design/proxy-containment.md): a
        cgroup per Traefik child now, measured first: "let's do it".
@@ -4410,6 +4424,7 @@ access (#341 B19).
      and paper, and the contrast gate enforces it; schemes are adjusted to
      pass. The rejected options were 3:1 for secondary text and keeping D80
      as written.
+     - *Later (owner, 2026-11-21, #557):* this rule covers glass too, as D380 and the code cite it: text on a glass surface (frosted cards, popovers, menus) reaches 4.5:1 against whatever is behind it, and glass that cannot reach it at up to 80% opacity turns into the theme's solid card (#448).
 366. **The interface font follows the account (owner, 2026-11-08, #400):**
      theme, terminal font and transparency follow the account across
      devices (D352). The owner chose "Follow the account" for the interface
