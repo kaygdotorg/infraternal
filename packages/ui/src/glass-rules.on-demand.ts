@@ -12,7 +12,7 @@
  * point, and the opacity is raised above it only where 4.5:1 cannot otherwise be reached (D365 wins only where it is needed). The
  * text colours are solved against that same fill, so the rules and the look can never disagree about what a card is painted with.
  */
-import { CARD_LEVELS, activeGlass, GLASS_ADAPT_VARS, TINT_USERS, glassTint, levelName, levelOpacity, mix, type Theme } from "./themes";
+import { CARD_LEVELS, activeGlass, GLASS_ADAPT_VARS, TINT_USERS, THEMES, glassTint, levelName, levelOpacity, mix, type Theme } from "./themes";
 import { ADAPT_LIMIT, ANY_BACKDROP, MAX_DRIFT, MAX_SHIFT, hexToRgb, luminanceOf, solveGlass, type BackdropRange, type GlassFills, type GlassRole, type GlassSolution } from "./glass-contrast";
 
 /**
@@ -107,6 +107,41 @@ export function glassFloor(active: Theme, level: number, nominal = nominalOpacit
   return solveGlass(hexToRgb(glassTint(active)), nominal, active.dark, glassRoles(active), { range: ANY_BACKDROP, fills: glassFills(active), maxShift: MAX_SHIFT, maxAlpha: ADAPT_LIMIT, maxDrift: MAX_DRIFT });
 }
 
+/** Solved answers for the rules, by kind, theme, level and starting opacity. A theme's answer never changes, so a switch back is a lookup. */
+const solutions = new Map<string, GlassSolution>();
+function memo(kind: string, active: Theme, level: number, solve: () => GlassSolution): GlassSolution {
+  // The starting opacity is in the key because a look's tint moves it (see `nominalOpacity`).
+  const key = `${kind}|${active.name}|${level}|${nominalOpacity(active, level)}`;
+  let hit = solutions.get(key);
+  if (!hit) {
+    if (solutions.size > 512) solutions.clear();
+    hit = solve();
+    solutions.set(key, hit);
+  }
+  return hit;
+}
+
+/**
+ * Solves the answers for the other themes at the level in force, one theme per idle slice, so a later theme switch finds them
+ * in the memo and its click does no contrast arithmetic (#567). Nothing waits on this: a theme that is not ready yet is solved
+ * in the switch itself, as before. Started once; the rest of the page's work always goes first.
+ */
+let warming = false;
+function warmThemes(level: number): void {
+  if (warming || typeof requestIdleCallback === "undefined") return;
+  warming = true;
+  const queue = Object.values(THEMES);
+  const step = (deadline: IdleDeadline): void => {
+    while (queue.length && deadline.timeRemaining() > 1.5) {
+      const next = queue.shift()!;
+      memo("themed", next, level, () => glassFor(next, level));
+      memo("floor", next, level, () => glassFloor(next, level));
+    }
+    if (queue.length) requestIdleCallback(step);
+  };
+  requestIdleCallback(step);
+}
+
 /** The one adopted sheet that holds the glass contrast rules; created on first use and rewritten when its inputs change. */
 let glassSheet: CSSStyleSheet | undefined;
 /** What the sheet was last written for (theme, level and the look's tint, as text), so asking again for the same costs nothing. */
@@ -147,16 +182,18 @@ export function installGlassRules(): void {
     return own + blurRule + Object.entries(GLASS_ROLE_VARS).map(([role, name]) => `${name}: ${fallback ? `var(${GLASS_ADAPT_VARS.role(role)}, ${sol.colours[role]})` : sol.colours[role]};`).join("");
   };
   const css: string[] = [];
-  // Without a look every level is written (a level can be chosen by `data-card` alone). With a look the product pins the card level, so
-  // only that one is solved: a tint slider moves this on every frame, and eight solves cost about 3 ms where two cost under 1 ms.
-  for (const level of look ? [String(cardLevel)] : Object.keys(CARD_LEVELS)) {
+  // Only the level in force is solved and written. `applyTheme` is the one writer of `data-card` and always asks for these rules in
+  // the same task, so no other level can be on the root, and a theme switch solves one level, not eight (the eight cost about 2 ms
+  // of the click, #567). Each answer is memoised, so returning to a theme costs nothing. The rules are on the root before the
+  // browser paints, so there is no frame in which a card shows the previous theme's text colours: the cut is not deferred.
+  for (const level of [String(cardLevel)]) {
     const name = levelName(Number(level)).toLowerCase();
-    const themed = glassFor(active, Number(level));
+    const themed = memo("themed", active, Number(level), () => glassFor(active, Number(level)));
     css.push(`:where(:root[data-card="${name}"]) :where(${TINT_USERS}) { ${write(themed, Number(level))} }`);
     // A themed card that cannot hold the line is the solid card; it has to beat a look's fill rule, so it is written at the floor's specificity.
     if (themed.solid) css.push(`:root[data-card="${name}"] :is(${TINT_USERS}) { ${write(themed, Number(level))} }`);
     // On the surface itself: `glass-under.on-demand.ts` marks the surface it finds over a picture or a terminal.
-    const floor = glassFloor(active, Number(level));
+    const floor = memo("floor", active, Number(level), () => glassFloor(active, Number(level)));
     css.push(`:root[data-card="${name}"] :is(${TINT_USERS})[data-glass-under] { ${write(floor, Number(level), floor)} }`);
     // Solid means no blur: on the floor until a tracker answers with glass, and whenever a tracker answers solid.
     css.push(`:root[data-card="${name}"] :is(${TINT_USERS})${floor.solid ? '[data-glass-under]:not([data-glass-answer="glass"])' : '[data-glass-answer="solid"]'} { --ui-overlay-blur: 0px; }`);
@@ -167,6 +204,7 @@ export function installGlassRules(): void {
     followLook();
   }
   glassSheet.replaceSync(css.join("\n"));
+  warmThemes(cardLevel);
   document.documentElement.setAttribute("data-glass-rules", "");
 }
 
