@@ -277,7 +277,17 @@ const CONSOLE_POWER_ACTIONS: &[&str] = &[
 /// Stock `reboot` and `power-off` imply setting the message logind sends to
 /// logged-in terminals before it shuts down: text shown to people, never a
 /// file or a command. Its own defaults are still read like any action's.
+/// The owner (2026-11-21) chose to ignore it only "when it comes with the
+/// stock reboot defaults": only the [`WALL_MESSAGE_FROM`] actions may imply
+/// it, and a grant of its own still counts.
 const IMPLIED_ONLY: &[&str] = &["org.freedesktop.login1.set-wall-message"];
+
+/// The stock actions whose defaults imply [`IMPLIED_ONLY`]'s wall message.
+/// An implication of it from any other action counts as a grant.
+const WALL_MESSAGE_FROM: &[&str] = &[
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.power-off",
+];
 
 /// Whether a `yes` (or `auth_self`) default for `scope` of action `id` is
 /// approved: the harmless login1 ids in every scope, the D382 console power
@@ -305,16 +315,19 @@ enum Reach {
     Beyond,
 }
 
-/// Classify one `annotation:` line of an approved action (see [`Reach`]).
-/// Only an implication of known ids stays inside the approved set (#355).
-fn annotation_reach(annotation: &str) -> Reach {
+/// Classify one `annotation:` line of approved action `action` (see
+/// [`Reach`]). Only an implication of known ids stays inside the approved
+/// set (#355), and the wall message only from [`WALL_MESSAGE_FROM`].
+fn annotation_reach(action: &str, annotation: &str) -> Reach {
     let Some(ids) = annotation.strip_prefix("org.freedesktop.policykit.imply ->") else {
         return Reach::Beyond;
     };
     // An empty list is not a known implication.
     let mut reach = Reach::Beyond;
     for id in ids.split_ascii_whitespace() {
-        if CONSOLE_POWER_ACTIONS.contains(&id) || IMPLIED_ONLY.contains(&id) {
+        if IMPLIED_ONLY.contains(&id) && !WALL_MESSAGE_FROM.contains(&action) {
+            return Reach::Beyond;
+        } else if CONSOLE_POWER_ACTIONS.contains(&id) || IMPLIED_ONLY.contains(&id) {
             reach = Reach::Console;
         } else if !HARMLESS_ACTIONS.contains(&id) {
             return Reach::Beyond;
@@ -395,10 +408,10 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             }
             scopes |= bit;
         } else if let Some(rest) = line.trim_start().strip_prefix("annotation:") {
-            if action.is_none() {
+            let Some(id) = action else {
                 return true;
-            }
-            match annotation_reach(rest.trim()) {
+            };
+            match annotation_reach(id, rest.trim()) {
                 Reach::Harmless => {}
                 Reach::Console => console = true,
                 Reach::Beyond => extends = true,
@@ -670,6 +683,51 @@ mod tests {
         };
         assert!(action_defaults_allow_or_unknown(&reaching(reboot)));
         assert!(!action_defaults_allow_or_unknown(&reaching(halt)));
+    }
+
+    /// Owner, 2026-11-21: `login1.set-wall-message` is ignored only when it
+    /// comes with the stock reboot and power-off defaults, which imply it. A
+    /// grant of its own, or an implication from any other action, counts.
+    #[test]
+    fn the_wall_message_counts_unless_stock_reboot_or_power_off_implies_it() {
+        const WALL: &str = "org.freedesktop.login1.set-wall-message";
+        assert!(!action_defaults_allow_or_unknown(STOCK_DEBIAN13));
+        let defaults = |any: &str, inactive: &str, active: &str| {
+            format!(
+                "{WALL}:\n  implicit any:      {any}\n  implicit inactive: {inactive}\n  implicit active:   {active}\n"
+            )
+        };
+        for (any, inactive, active) in [
+            ("auth_admin_keep", "auth_admin_keep", "yes"),
+            ("auth_admin_keep", "yes", "auth_admin_keep"),
+            ("yes", "auth_admin_keep", "auth_admin_keep"),
+            ("auth_admin_keep", "auth_admin_keep", "auth_self"),
+        ] {
+            assert!(
+                action_defaults_allow_or_unknown(&defaults(any, inactive, active)),
+                "{any} {inactive} {active}"
+            );
+        }
+        let imply = |from: &str| {
+            let header = format!("\n{from}:\n");
+            let at = STOCK_DEBIAN13.find(&header).unwrap() + header.len();
+            format!(
+                "{}  annotation:        org.freedesktop.policykit.imply -> {WALL}\n{}",
+                &STOCK_DEBIAN13[..at],
+                &STOCK_DEBIAN13[at..]
+            )
+        };
+        for stock in ["org.freedesktop.login1.reboot", "org.freedesktop.login1.power-off"] {
+            assert!(!action_defaults_allow_or_unknown(&imply(stock)), "{stock}");
+        }
+        for other in [
+            "org.freedesktop.login1.suspend",
+            "org.freedesktop.login1.reboot-multiple-sessions",
+            "org.freedesktop.login1.set-reboot-to-firmware-setup",
+            "org.freedesktop.login1.inhibit-delay-shutdown",
+        ] {
+            assert!(action_defaults_allow_or_unknown(&imply(other)), "{other}");
+        }
     }
 
     /// D382 ignores the console power ids for an active session only. polkit
