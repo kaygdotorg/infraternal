@@ -194,61 +194,64 @@ impl Removal {
         );
         Ok(start)
     }
-    /// D356: what the owner can read about access files that changed on
-    /// `host`'s accounts since their logins were granted, as the host reported
-    /// them when it revoked those logins. Read-only. Only the server owner's
-    /// session reads it, inside the admin window (D339) like the removal: line
-    /// text from shell startup files can hold a pasted token. `None` is a host
-    /// they do not own, answered like an unknown one. The report holds file
-    /// paths and line text only.
-    pub(crate) async fn access_report(
+    /// D398: the access reports waiting in the owner's Inbox: what the host
+    /// found in the access files of a person whose login was revoked while the
+    /// host stayed, as it reported when it revoked them. Read-only. Only the
+    /// server owner's session reads it; others are refused. A host removal
+    /// never makes one. The text can include a pasted token from a shell
+    /// startup file, so it goes to the owner's session and nowhere else, and
+    /// is never logged. The admin window is not needed: revoked hosts cannot
+    /// start the passkey renewal that window needs (#498), and this reads
+    /// nothing a signed-in owner cannot already see in a terminal.
+    pub(crate) async fn access_reports(
+        &self,
+        token: &str,
+        now: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let session = self.auth.session(token, now).await?;
+        if !session.owner {
+            return Err(crate::auth::Error::Denied);
+        }
+        let waiting = crate::access_report::inbox(&self.pool, &session.user_id).await?;
+        let mut shown = Vec::with_capacity(waiting.reports.len());
+        for item in waiting.reports {
+            // The words are built here, once, from the cleaned report (D360,
+            // D364, D367): the browser only draws them. The raw report object
+            // is not sent, so nothing in the page can reword it.
+            let single = json!({"state": "reported", "outcome": item.report.state, "more": 0, "reports": [item.report]});
+            let lines: Vec<String> = crate::access_report_text::report_body(&single)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            shown.push(json!({
+                "host_id": item.host,
+                "host": display_name(&item.host_name),
+                "person_id": item.person,
+                "person_name": crate::access_report::person_name(&self.pool, item.person).await?,
+                "recorded_at": item.recorded_at,
+                "outcome": item.report.state,
+                "headline": crate::access_report_text::headline(&single),
+                "lines": lines,
+            }));
+        }
+        Ok(json!({"reports": shown, "more": waiting.more}))
+    }
+
+    /// The owner dismisses one Inbox report. `false` when it is not theirs or
+    /// is already dismissed.
+    pub(crate) async fn dismiss_access_report(
         &self,
         token: &str,
         host: Uuid,
+        person: Uuid,
         now: i64,
-    ) -> Result<Option<Value>, crate::auth::Error> {
-        let session = self.auth.fresh_session(token, now).await?;
-        let owner: bool = sqlx::query_scalar("SELECT owner=1 FROM users WHERE id=?")
-            .bind(&session.user_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .unwrap_or(false);
-        if !owner {
+    ) -> Result<bool, crate::auth::Error> {
+        let session = self.auth.session(token, now).await?;
+        if !session.owner {
             return Err(crate::auth::Error::Denied);
         }
-        let Some(reading) = crate::access_report::read(&self.pool, &session.user_id, host).await?
-        else {
-            return Ok(None);
-        };
-        Ok(Some(match reading {
-            crate::access_report::Reading::Pending => {
-                json!({"host_id": host, "state": "pending", "reports": []})
-            }
-            crate::access_report::Reading::NotRevoked => {
-                json!({"host_id": host, "state": "not_revoked", "reports": []})
-            }
-            crate::access_report::Reading::Reported {
-                reports,
-                more,
-                overall,
-            } => {
-                let mut shown = Vec::with_capacity(reports.len());
-                for (person, report) in reports {
-                    let mut entry = serde_json::to_value(report).unwrap_or_default();
-                    entry["person_id"] = json!(person);
-                    entry["person_name"] =
-                        json!(crate::access_report::person_name(&self.pool, person).await?);
-                    shown.push(entry);
-                }
-                json!({
-                    "host_id": host,
-                    "state": "reported",
-                    "outcome": overall,
-                    "more": more,
-                    "reports": shown,
-                })
-            }
-        }))
+        Ok(crate::access_report::dismiss(&self.pool, &session.user_id, host, person, now).await?)
     }
 
     /// Remove the host a review from this session's dry run named. A review for another host

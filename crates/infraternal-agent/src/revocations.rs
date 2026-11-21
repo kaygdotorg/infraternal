@@ -167,15 +167,14 @@ async fn run(registry: Arc<Registry>) {
         let Some((person, intent)) = work else {
             return;
         };
-        let result =
-            super::revoke_once(
-                &registry.root,
-                intent.manager,
-                person,
-                intent.rootless,
-                intent.report,
-            )
-            .await;
+        let result = super::revoke_once(
+            &registry.root,
+            intent.manager,
+            person,
+            intent.rootless,
+            intent.report,
+        )
+        .await;
         let failed = result.is_err();
         // Remove a completed intent before waking callers: an immediate explicit
         // restoration must observe completed cleanup. Disk is already durable.

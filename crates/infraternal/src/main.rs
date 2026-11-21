@@ -3265,10 +3265,7 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     .or_else(|| matches.get_one::<String>("server"))
                     .map_or("", String::as_str),
                 host,
-                host_remove::Step::from_flags(
-                    matches.get_flag("finish"),
-                    matches.get_flag("access_report"),
-                ),
+                host_remove::Step::from_flags(matches.get_flag("finish")),
                 matches.get_flag("retain"),
                 json,
             );

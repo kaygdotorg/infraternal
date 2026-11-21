@@ -1,16 +1,17 @@
 //! D356's access report on the server: what the infraternal agent found in a
 //! person's access files when it revoked their logins, per host account.
 //!
-//! Every confirmed revocation keeps one report per host and person, with one
-//! of three outcomes, so the owner is never told "nothing changed" for
-//! something that was not checked:
+//! Revoking a person while the host stays keeps one report per host and
+//! person (D398); it reaches the owner as an Inbox item. A host removal keeps
+//! none: it deletes infraternal and its state and nothing else, so nothing
+//! scans for it. Each report has one of three outcomes, so the owner is never
+//! told "nothing changed" for something that was not checked:
 //! - `changed`: these files changed since the grant;
 //! - `unchanged`: checked, nothing changed;
 //! - `not_checked`, with a reason: the agent had no record from the grant,
 //!   the host runs rootless so the person could have changed the record
-//!   (D18), the agent is older than D356 and sent nothing, the agent was
-//!   removed before it could answer, or the revocation predates these
-//!   reports.
+//!   (D18), the agent is older than D356 and sent nothing, or the
+//!   revocation predates these reports.
 //!
 //! A host is less trusted than the server, so the server bounds and cleans
 //! the report again on arrival: counts of accounts, files and lines, the
@@ -22,7 +23,7 @@
 //!
 //! A report holds account names, file paths, line text and notes only. It is
 //! stored in the transaction that confirms the revocation, read only by the
-//! owner inside the admin window, and never logged.
+//! owner, and never logged.
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use uuid::Uuid;
@@ -80,8 +81,6 @@ pub(crate) enum Reason {
     RootlessUnverified,
     /// The agent predates D356 and sent no report.
     OlderAgent,
-    /// The agent was removed before it could answer.
-    AgentRemoved,
     /// The revocation was confirmed before these reports were kept.
     NotRecorded,
     /// The account is root or may become root (J334 P1-4).
@@ -202,24 +201,29 @@ pub(crate) struct AccessReport {
     pub(crate) warning: Option<String>,
 }
 
-/// What the owner can read about one host's revoked logins.
+/// One report waiting in the owner's Inbox (D398).
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Reading {
-    /// A revocation is waiting for the host to confirm it.
-    Pending,
-    /// Confirmed revocations: the newest reports, how many more there are,
-    /// and the outcome over all of them (never only the ones shown).
-    Reported {
-        /// The newest reports, at most [`SHOWN`].
-        reports: Vec<(Uuid, AccessReport)>,
-        /// Reports not shown.
-        more: u64,
-        /// Changed if any report changed, else not checked if any was not
-        /// checked, else unchanged.
-        overall: State,
-    },
-    /// No revocation has run on this host.
-    NotRevoked,
+pub(crate) struct Waiting {
+    /// The host the person was revoked on.
+    pub(crate) host: Uuid,
+    /// The host's name for the owner: its address, or its id when it has none.
+    pub(crate) host_name: String,
+    /// The revoked person.
+    pub(crate) person: Uuid,
+    /// When the revocation was confirmed (Unix seconds).
+    pub(crate) recorded_at: i64,
+    /// What the host reported.
+    pub(crate) report: AccessReport,
+}
+
+/// What the owner's Inbox holds: the newest waiting reports and how many more
+/// there are.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Inbox {
+    /// The newest reports, at most [`SHOWN`].
+    pub(crate) reports: Vec<Waiting>,
+    /// Waiting reports not listed.
+    pub(crate) more: u64,
 }
 
 /// Whether `c` could drive a terminal or hide or reorder text: controls,
@@ -616,7 +620,7 @@ pub(crate) async fn store(
     report: &AccessReport,
     now: i64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO remote_access_reports(host_id,person_id,report,recorded_at) VALUES(?,?,?,?) ON CONFLICT(host_id,person_id) DO UPDATE SET report=excluded.report, recorded_at=excluded.recorded_at")
+    sqlx::query("INSERT INTO remote_access_reports(host_id,person_id,report,recorded_at) VALUES(?,?,?,?) ON CONFLICT(host_id,person_id) DO UPDATE SET report=excluded.report, recorded_at=excluded.recorded_at, seen_at=NULL")
         .bind(host.as_bytes().as_slice())
         .bind(person.to_string())
         .bind(report.json())
@@ -626,74 +630,64 @@ pub(crate) async fn store(
     Ok(())
 }
 
-/// The reports of `host` for its owner `owner`, or `None` when the host is not
-/// theirs (the caller answers that as not found).
-pub(crate) async fn read(
-    pool: &SqlitePool,
-    owner: &str,
-    host: Uuid,
-) -> Result<Option<Reading>, sqlx::Error> {
-    let state: Option<(bool, Option<String>)> = sqlx::query_as(
-        "SELECT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0), (SELECT q.person_id FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=1 ORDER BY q.person_id LIMIT 1) FROM remote_hosts h WHERE h.id=? AND h.owner_id=?",
+/// The reports waiting for `owner` (D398): those of revocations on hosts
+/// they own that they have not dismissed, newest first. A stored report that
+/// no longer decodes reads as not checked rather than half-read.
+pub(crate) async fn inbox(pool: &SqlitePool, owner: &str) -> Result<Inbox, sqlx::Error> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM remote_access_reports r JOIN remote_hosts h ON h.id=r.host_id WHERE h.owner_id=? AND r.seen_at IS NULL",
     )
-    .bind(host.as_bytes().as_slice())
     .bind(owner)
-    .fetch_optional(pool)
-    .await?;
-    let Some((pending, confirmed)) = state else {
-        return Ok(None);
-    };
-    if pending {
-        return Ok(Some(Reading::Pending));
-    }
-    // Newest first; the outcome comes from every row, so a hidden report
-    // can never leave the headline reading "unchanged" (J334 P2-5).
-    let (total, changed, unchecked): (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*), coalesce(sum(json_extract(report,'$.state')='changed'),0), coalesce(sum(json_extract(report,'$.state')<>'unchanged' AND json_extract(report,'$.state')<>'changed'),0) FROM remote_access_reports WHERE host_id=?",
-    )
-    .bind(host.as_bytes().as_slice())
     .fetch_one(pool)
     .await?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT person_id,report FROM remote_access_reports WHERE host_id=? ORDER BY recorded_at DESC,person_id LIMIT ?",
+    let rows: Vec<(Vec<u8>, String, i64, String, String)> = sqlx::query_as(
+        "SELECT r.host_id, r.person_id, r.recorded_at, r.report, COALESCE(b.address, lower(hex(r.host_id))) FROM remote_access_reports r JOIN remote_hosts h ON h.id=r.host_id LEFT JOIN remote_host_bootstrap b ON b.host_id=r.host_id WHERE h.owner_id=? AND r.seen_at IS NULL ORDER BY r.recorded_at DESC, r.person_id LIMIT ?",
     )
-    .bind(host.as_bytes().as_slice())
+    .bind(owner)
     .bind(SHOWN)
     .fetch_all(pool)
     .await?;
-    let mut reports: Vec<(Uuid, AccessReport)> = rows
+    let reports: Vec<Waiting> = rows
         .into_iter()
-        .filter_map(|(person, report)| {
-            let person = Uuid::parse_str(&person).ok()?;
-            // Stored reports were bounded on the way in; one that no longer
-            // decodes reads as not checked rather than half-read.
-            let report = serde_json::from_str(&report)
-                .unwrap_or_else(|_| AccessReport::not_checked(Reason::NotRecorded));
-            Some((person, report))
+        .filter_map(|(host, person, recorded_at, report, name)| {
+            let mut ignored = false;
+            Some(Waiting {
+                host: Uuid::from_slice(&host).ok()?,
+                host_name: printable(&name, ACCOUNT_CHARS, &mut ignored),
+                person: Uuid::parse_str(&person).ok()?,
+                recorded_at,
+                report: serde_json::from_str(&report)
+                    .unwrap_or_else(|_| AccessReport::not_checked(Reason::NotRecorded)),
+            })
         })
         .collect();
-    let mut overall = if changed > 0 {
-        State::Changed
-    } else if unchecked > 0 {
-        State::NotChecked
-    } else {
-        State::Unchanged
-    };
-    if reports.is_empty()
-        && let Some(person) = confirmed.and_then(|person| Uuid::parse_str(&person).ok())
-    {
-        reports.push((person, AccessReport::not_checked(Reason::NotRecorded)));
-        overall = State::NotChecked;
-    }
-    Ok(Some(if reports.is_empty() {
-        Reading::NotRevoked
-    } else {
-        Reading::Reported {
-            more: u64::try_from(total - i64::try_from(reports.len()).unwrap_or(0)).unwrap_or(0),
-            reports,
-            overall,
-        }
-    }))
+    Ok(Inbox {
+        more: u64::try_from(total - i64::try_from(reports.len()).unwrap_or(0)).unwrap_or(0),
+        reports,
+    })
+}
+
+/// The owner dismisses the Inbox item of `person` on `host`. `false` when
+/// there is no such waiting report on a host they own, so a foreign or
+/// repeated dismissal changes nothing.
+pub(crate) async fn dismiss(
+    pool: &SqlitePool,
+    owner: &str,
+    host: Uuid,
+    person: Uuid,
+    now: i64,
+) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query(
+        "UPDATE remote_access_reports SET seen_at=? WHERE host_id=? AND person_id=? AND seen_at IS NULL AND EXISTS(SELECT 1 FROM remote_hosts h WHERE h.id=remote_access_reports.host_id AND h.owner_id=?)",
+    )
+    .bind(now)
+    .bind(host.as_bytes().as_slice())
+    .bind(person.to_string())
+    .bind(owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 #[cfg(test)]

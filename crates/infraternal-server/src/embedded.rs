@@ -321,6 +321,9 @@ pub(crate) struct WeakEmbeddedAgent {
 #[cfg(feature = "remote")]
 struct Retirement {
     person: uuid::Uuid,
+    /// Whether the person's access report (D356) is wanted; a host removal
+    /// does not want it (D398).
+    report: bool,
     reply: oneshot::Sender<Result<Revoked, AgentError>>,
 }
 
@@ -336,16 +339,27 @@ pub(crate) struct Revoked {
 #[cfg(feature = "remote")]
 impl WeakEmbeddedAgent {
     /// Revoke `person`'s login on this host through the cleanup lane, and
-    /// return the host's confirmation with its D356 report.
-    pub(crate) async fn revoke_login(&self, person: uuid::Uuid) -> Result<Revoked, AgentError> {
+    /// return the host's confirmation with its D356 report when `report` asks
+    /// for one. A host removal passes `false` (D398): the agent then scans
+    /// nothing, and whatever it sends is ignored, so no report exists.
+    pub(crate) async fn revoke_login(
+        &self,
+        person: uuid::Uuid,
+        report: bool,
+    ) -> Result<Revoked, AgentError> {
         // Retain actor lifetime, but never acquire ordinary queue capacity.
         let _lifetime = self.commands.upgrade().ok_or(AgentError::Unavailable)?;
         let sender = self.cleanup.upgrade().ok_or(AgentError::Unavailable)?;
         let (reply, result) = oneshot::channel();
         sender
-            .send(Retirement { person, reply })
+            .send(Retirement {
+                person,
+                report,
+                reply,
+            })
             .map_err(|_| AgentError::Unavailable)?;
-        result.await.map_err(|_| AgentError::Unavailable)?
+        let revoked = result.await.map_err(|_| AgentError::Unavailable)??;
+        Ok(if report { revoked } else { Revoked::default() })
     }
 }
 
@@ -902,6 +916,7 @@ enum Command {
     #[cfg(feature = "remote")]
     RevokeLogin {
         person: uuid::Uuid,
+        report: bool,
         reply: oneshot::Sender<Result<Revoked, AgentError>>,
     },
     Call {
@@ -1842,8 +1857,9 @@ async fn read_frame_from_socket(
     }
 }
 
-// A lifecycle request is produced only by the authorized internal finalizer;
-// neither the ordinary queue nor another person's outstanding work admits it.
+/// The next command for the actor loop. A lifecycle request is produced only by the
+/// authorized internal finalizer; neither the ordinary queue nor another person's
+/// outstanding work admits it.
 async fn next_command(
     commands: &mut mpsc::Receiver<Command>,
     control_ready: bool,
@@ -1853,7 +1869,7 @@ async fn next_command(
     {
         tokio::select! {
             biased;
-            Some(retirement) = cleanup.recv() => Some(Command::RevokeLogin { person: retirement.person, reply: retirement.reply }),
+            Some(retirement) = cleanup.recv() => Some(Command::RevokeLogin { person: retirement.person, report: retirement.report, reply: retirement.reply }),
             command = commands.recv(), if control_ready => command,
         }
     }
@@ -2336,7 +2352,11 @@ async fn process_command(
             true
         }
         #[cfg(feature = "remote")]
-        Command::RevokeLogin { person, reply } => {
+        Command::RevokeLogin {
+            person,
+            report,
+            reply,
+        } => {
             // Once queued, cleanup remains owned even if its caller times out.
             prune_cancelled_preparations(pending);
             // Pending ordinary calls and other people cannot fence lifecycle
@@ -2348,7 +2368,9 @@ async fn process_command(
             // Only the authorized host tombstone finalizer can submit this
             // fixed action. Its writer transaction already owns authority;
             // rereading the same pool here could wait behind that transaction.
-            let Ok(json) = serde_json::to_vec(&serde_json::json!({"person":person})) else {
+            let Ok(json) =
+                serde_json::to_vec(&serde_json::json!({"person":person,"report":report}))
+            else {
                 let _ = reply.send(Err(AgentError::Protocol));
                 return true;
             };

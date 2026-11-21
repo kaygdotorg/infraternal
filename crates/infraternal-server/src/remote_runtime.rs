@@ -117,6 +117,12 @@ async fn deliver_login_cleanup(
         .pending_uninstall(host)
         .await
         .map_err(io::Error::other)?;
+    // D398: a removal asks for no access report; revoking a person while
+    // the host stays does.
+    let report = !store
+        .removal_requested(host)
+        .await
+        .map_err(io::Error::other)?;
     let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
     let mut inventory = actor.session_inventory();
     accepts
@@ -128,7 +134,7 @@ async fn deliver_login_cleanup(
             tokio::select! {
                 biased;
                 delivered = async {
-                    let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person).await?;
+                    let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person, report).await?;
                     if !uninstall {
                         return Some((revoked, None));
                     }

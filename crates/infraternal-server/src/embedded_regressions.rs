@@ -24,6 +24,7 @@ fn connection() -> (AgentConnection, UnixStream) {
     )
 }
 
+/// A retirement whose caller has gone away is still sent to the host, so the cleanup survives.
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn canceled_retirement_recipient_does_not_cancel_host_cleanup() {
@@ -35,6 +36,7 @@ async fn canceled_retirement_recipient_does_not_cancel_host_cleanup() {
         process_command(
             Command::RevokeLogin {
                 person: uuid::Uuid::new_v4(),
+                report: true,
                 reply
             },
             &mut connection,
@@ -98,6 +100,7 @@ async fn canceled_retirement_recipient_does_not_cancel_host_cleanup() {
     );
 }
 
+/// Retirements have their own mailbox: a full ordinary command queue never blocks them.
 #[cfg(feature = "remote")]
 #[tokio::test]
 async fn retirement_mailbox_bypasses_a_full_ordinary_command_queue() {
@@ -119,6 +122,7 @@ async fn retirement_mailbox_bypasses_a_full_ordinary_command_queue() {
             cleanup
                 .send(Retirement {
                     person: uuid::Uuid::new_v4(),
+                    report: true,
                     reply
                 })
                 .is_ok()

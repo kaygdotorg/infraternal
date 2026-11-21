@@ -1665,7 +1665,7 @@ pub(crate) fn account_tool(name: &str) -> Option<PathBuf> {
             && metadata.mode() & 0o111 != 0
             && protected
             && links.iter().all(|link| link_fixed(link)))
-            .then_some(canonical);
+        .then_some(canonical);
     }
     None
 }
