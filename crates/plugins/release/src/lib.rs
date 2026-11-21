@@ -12,3 +12,9 @@ mod socket;
 pub mod update;
 #[cfg(feature = "server")]
 pub use socket::ReleasePlugin;
+/// The applier S4 plugs in for apply and rollback; until then a stub that says so (#211 S5).
+#[cfg(feature = "server")]
+pub mod apply;
+/// The bounded update history shown in the Updates row (#211 S5).
+#[cfg(feature = "server")]
+pub mod history;
