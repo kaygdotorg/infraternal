@@ -1,6 +1,8 @@
 //! Actor isolation, restart-credit and stream-retirement regressions using real Unix sockets.
 use super::*;
 
+/// A greeted local connection over a fresh socketpair, with no child process, and the peer end
+/// that plays the infraternal agent.
 fn connection() -> (AgentConnection, UnixStream) {
     let (socket, peer) = UnixStream::pair().unwrap();
     let (reader, writer) = socket.into_split();
@@ -11,6 +13,7 @@ fn connection() -> (AgentConnection, UnixStream) {
             peer: Peer::Local { reader, writer },
             execution_uid: nix::unistd::Uid::effective().as_raw(),
             pid: None,
+            _child_slot: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],
             encode: Vec::new(),
@@ -2096,6 +2099,92 @@ async fn embedded_actor_notifies_when_the_infraternal_agent_reconnects() {
         .expect("restart observer remains connected");
     actor.abort();
     let _ = actor.await;
+}
+
+/// A replacement embedded infraternal agent starts only after the retired one is reaped (#562).
+///
+/// J1034 (compute01, load ~60) saw every respawn fail with `address in use`: the retired child
+/// still answered on its per-user `plugins.sock` while its replacement started 200–800 ms later.
+/// The fixture child stands in for that socket with a pid file: a child that finds its
+/// predecessor alive records a collision and exits, as the real one does. The first child greets,
+/// drops its link with a Close, and then ignores SIGTERM, the way a starved child holds its
+/// sockets through the whole 2 s grace. The replacement must greet without any collision.
+#[tokio::test]
+async fn replacement_child_waits_for_the_retired_child_to_be_reaped() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().join(format!(
+        "j562-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let mut hello = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "fixture",
+        },
+        &mut hello,
+    )
+    .unwrap();
+    std::fs::write(directory.join("hello"), hello).unwrap();
+    let mut close = Vec::new();
+    encode_muxed_frame_into(
+        CONTROL_STREAM,
+        &Frame::Close {
+            code: 1006,
+            reason: "fixture link ended",
+        },
+        &mut close,
+    )
+    .unwrap();
+    std::fs::write(directory.join("close"), close).unwrap();
+    let script = directory.join("agent");
+    // `kill -0` also succeeds for an unreaped zombie, so a predecessor counts as gone only once
+    // the server has reaped it. Every child exits on its own after 6 s.
+    let body = format!(
+        "#!/bin/sh\n\
+         cd '{}' || exit 2\n\
+         trap '' TERM\n\
+         if [ -s live ] && kill -0 \"$(cat live)\" 2>/dev/null; then echo \"$$ $(cat live)\" >> collisions; exit 1; fi\n\
+         echo $$ > live\n\
+         echo $$ >> started\n\
+         cat hello >&3\n\
+         if [ ! -e dropped ]; then : > dropped; cat close >&3; fi\n\
+         exec sleep 6\n",
+        directory.display()
+    );
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let started = std::time::Instant::now();
+    let agent = EmbeddedAgent::spawn(script);
+    let mut restarts = agent.restarts();
+    let replaced = tokio::time::timeout(Duration::from_secs(15), restarts.changed()).await;
+    let elapsed = started.elapsed();
+    let collisions = std::fs::read_to_string(directory.join("collisions")).unwrap_or_default();
+    let children = std::fs::read_to_string(directory.join("started")).unwrap_or_default();
+    drop(agent);
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(
+        replaced.is_ok_and(|changed| changed.is_ok()),
+        "the replacement infraternal agent never greeted (children: {children:?})"
+    );
+    assert_eq!(
+        collisions, "",
+        "a replacement started while its predecessor was alive (`new old` pids)"
+    );
+    assert_eq!(
+        children.lines().count(),
+        2,
+        "one retired child and one replacement"
+    );
+    // The replacement waits for the 2 s grace and the reap, not for extra backoff.
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "replacement took {elapsed:?}"
+    );
 }
 
 #[path = "embedded_path_tests.rs"]

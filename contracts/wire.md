@@ -614,8 +614,11 @@ input; ordinary retirement still closes only that terminal stream. A stalled
 browser route becomes disconnected before the
 client requests WebSocket closure: an intermediary need not deliver a close
 event. Replacement sockets ignore all late events from the retired route. A
-shared daemon link is replaced independently of graceful child reaping; session
-shims remain alive. Before automatic rebinding, each retained stream receives
+shared daemon link is retired at once, independently of graceful child reaping;
+session shims remain alive. A replacement embedded infraternal agent starts
+only after the retired one has been reaped (at most its 2 s SIGTERM grace), so
+two embedded agents never share the per-user sockets and stop hooks (#562).
+Before automatic rebinding, each retained stream receives
 `{"type":"terminal.reconnecting","session_id":"UUID"}` on its Event channel.
 The window stops advertising readiness and holds input in its existing bounded
 queue; the replacement's painted `terminal.replay_complete` fence confirms
