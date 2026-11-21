@@ -933,10 +933,11 @@ async fn device_code_machine_join_cannot_name_an_existing_host() {
         StatusCode::UNAUTHORIZED,
         "an approval must not publish a receipt for a host it did not create"
     );
-    let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens WHERE host_id=?")
-        .bind(existing.as_bytes().as_slice())
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens WHERE host_id=?")
+            .bind(existing.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(receipts, 0, "no receipt exists for the existing host");
 }

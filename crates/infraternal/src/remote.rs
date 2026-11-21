@@ -373,7 +373,7 @@ fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
         Ok(_) => {
             let (stored, _) = load_snapshot(data)?;
             return PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
-            .map_err(|_| refused());
+                .map_err(|_| refused());
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused()),
@@ -561,8 +561,8 @@ fn enrolled_key(
             return Err(refused());
         }
     }
-    let key =
-        PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?).map_err(|_| refused())?;
+    let key = PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
+        .map_err(|_| refused())?;
     Ok(Some((key, snapshot)))
 }
 

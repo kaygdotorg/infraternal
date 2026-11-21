@@ -648,7 +648,13 @@ async fn device_labels_that_could_mislead_the_approver_are_refused() {
         network += 1;
         v4_network(network)
     };
-    for label in ["cli\u{202e}gnirts", "lap\u{200b}top", "line\nbreak", "caf\u{e9}", ""] {
+    for label in [
+        "cli\u{202e}gnirts",
+        "lap\u{200b}top",
+        "line\nbreak",
+        "caf\u{e9}",
+        "",
+    ] {
         let mut request = sign_in();
         request["device"] = json!(label);
         assert_eq!(
