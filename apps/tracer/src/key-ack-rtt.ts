@@ -10,24 +10,35 @@
  *
  * Use: call {@link KeyAckRtt.sent} for each input frame sent on a confirmed attachment, {@link KeyAckRtt.acked}
  * when an `Ack` arrives, and {@link KeyAckRtt.reset} when the attachment is lost (replayed input would be timed
- * from its first send and read as a huge round trip). Read {@link KeyAckRtt.smoothed}.
+ * from its first send and read as a huge round trip). Read {@link KeyAckRtt.p90}.
  */
 
-/** Weight of a new sample in the smoothed value; the same 1/8 the connection uses for its ping. */
-const SMOOTHING = 0.125;
+/** Recent samples the 90th percentile is taken over: about the last half minute of typing. */
+const WINDOW_SAMPLES = 32;
+/** Which share of recent samples the reported figure covers; the mean hides a Wi-Fi tail, the 90th percentile does not. */
+const PERCENTILE = 0.9;
 /** Keys remembered while waiting for their `Ack`; a typing burst longer than this is not worth timing. */
 const MAX_TIMED_KEYS = 64;
 /** A sample longer than this is a stalled link or a held-then-replayed key, not a round trip. */
 const MAX_SAMPLE_MS = 5000;
 
-/** Smoothed key -> `Ack` time of one terminal. */
+/** 90th-percentile key -> `Ack` time of one terminal over its recent keys. */
 export class KeyAckRtt {
   /** Sent inputs in order: the sequence just past their last byte, and when they were sent. */
   private readonly timed: { end: bigint; at: number }[] = [];
-  private value: number | undefined;
+  /** The last {@link WINDOW_SAMPLES} samples, oldest first. */
+  private readonly samples: number[] = [];
 
-  /** The smoothed round trip in milliseconds, or undefined until one key has been acknowledged. */
-  get smoothed(): number | undefined { return this.value; }
+  /**
+   * The 90th percentile (nearest rank) of recent round trips, in milliseconds, or undefined until one key has been
+   * acknowledged. Prediction decides on this, not the mean: a link whose usual key takes 20 ms but one in ten takes
+   * 200 ms (Wi-Fi) must still get prediction, because those slow keys are the ones that feel broken (owner, 2026-11-21).
+   */
+  get p90(): number | undefined {
+    if (this.samples.length === 0) return undefined;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    return sorted[Math.ceil(PERCENTILE * sorted.length) - 1];
+  }
 
   /** Notes an input of `length` bytes starting at `sequence`, sent at `at` (milliseconds). */
   sent(sequence: bigint, length: number, at: number): void {
@@ -36,7 +47,7 @@ export class KeyAckRtt {
   }
 
   /**
-   * Handles an `Ack` covering input up to `acked`, received at `at`. Returns the new smoothed value when the Ack
+   * Handles an `Ack` covering input up to `acked`, received at `at`. Returns the new {@link KeyAckRtt.p90} when the Ack
    * completed a timed key. When one Ack covers several keys, only the newest is timed: the older ones waited for
    * the batch, which is not the path's round trip.
    */
@@ -51,13 +62,14 @@ export class KeyAckRtt {
     this.timed.splice(0, covered);
     const sample = at - newest!.at;
     if (!(sample >= 0) || sample > MAX_SAMPLE_MS) return undefined;
-    this.value = this.value === undefined ? sample : this.value * (1 - SMOOTHING) + sample * SMOOTHING;
-    return this.value;
+    if (this.samples.length >= WINDOW_SAMPLES) this.samples.shift();
+    this.samples.push(sample);
+    return this.p90;
   }
 
-  /** Forgets keys in flight and the smoothed value (the attachment ended, the path may have changed). */
+  /** Forgets keys in flight and the samples (the attachment ended, the path may have changed). */
   reset(): void {
     this.timed.length = 0;
-    this.value = undefined;
+    this.samples.length = 0;
   }
 }

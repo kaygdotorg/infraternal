@@ -214,7 +214,7 @@ export interface TerminalConfig {
   getEndedSession?: () => { status?: number } | undefined;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
-  /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
+  /** Turns predictive echo on (`?predict=1`, or the default once the host echo signal ships: see `host-echo-signal.ts`). */
   predictiveEcho?: boolean;
 }
 
@@ -575,7 +575,7 @@ export class TerminalClient {
     this.offRoundTrip = this.conn.onRoundTrip((ms) => {
       this.roundTripMs = ms;
       // A terminal that has timed its own keys keeps that figure: the ping stops at the server, the host may be far behind it.
-      this.prediction?.setRoundTrip(ms === undefined ? undefined : this.keyAck.smoothed ?? ms);
+      this.prediction?.setRoundTrip(ms === undefined ? undefined : this.keyAck.p90 ?? ms);
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
