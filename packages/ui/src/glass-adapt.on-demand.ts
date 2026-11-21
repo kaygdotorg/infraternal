@@ -17,7 +17,7 @@
  * `data-glass-stats` on the root makes this module count its updates in `globalThis.__glassStats`.
  */
 import { activeGlass, glassTint, GLASS_ADAPT_VARS, type Theme } from "./themes";
-import { glassSeen, nominalOpacity } from "./glass-rules.on-demand";
+import { clearSolution, glassSeen, nominalOpacity } from "./glass-rules.on-demand";
 // The rules are written by the same chunk: `themes.ts` requests this module at the start of boot and calls `installGlassRules`.
 export { installGlassRules } from "./glass-rules.on-demand";
 import { hexToRgb, luminanceOf, type BackdropRange, type Rgb } from "./glass-contrast";
@@ -186,13 +186,6 @@ function writeSolution(surface: HTMLElement, sol: ReturnType<typeof glassSeen>, 
     surface.dataset.glassAnswer = sol.solid ? "solid" : "glass";
     for (const [role, colour] of Object.entries(sol.colours)) surface.style.setProperty(GLASS_ADAPT_VARS.role(role), colour);
   });
-}
-
-/** Removes what {@link writeSolution} wrote, which puts the surface back on the static floor. */
-function clearSolution(surface: HTMLElement): void {
-  surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
-  delete surface.dataset.glassAnswer;
-  for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
 }
 
 /** What a tracker hands back to `glass-under.on-demand.ts`: nudge it to look again, or stop it and restore the floor. */

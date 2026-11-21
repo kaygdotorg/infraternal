@@ -107,6 +107,13 @@ export function glassFloor(active: Theme, level: number, nominal = nominalOpacit
   return solveGlass(hexToRgb(glassTint(active)), nominal, active.dark, glassRoles(active), { range: ANY_BACKDROP, fills: glassFills(active), maxShift: MAX_SHIFT, maxAlpha: ADAPT_LIMIT, maxDrift: MAX_DRIFT });
 }
 
+/** Removes what `writeSolution` in `glass-adapt.on-demand.ts` wrote, which puts the surface back on the static floor. */
+export function clearSolution(surface: HTMLElement): void {
+  surface.style.removeProperty(GLASS_ADAPT_VARS.overlay);
+  delete surface.dataset.glassAnswer;
+  for (const role of ["fg", "fg2", "fg3", "secondary", "accent", "ok", "danger", "warn"]) surface.style.removeProperty(GLASS_ADAPT_VARS.role(role));
+}
+
 /** Solved answers for the rules, by kind, theme, level and starting opacity. A theme's answer never changes, so a switch back is a lookup. */
 const solutions = new Map<string, GlassSolution>();
 function memo(kind: string, active: Theme, level: number, solve: () => GlassSolution): GlassSolution {
@@ -172,6 +179,10 @@ export function installGlassRules(): void {
   if (key === glassSheetKey) return;
   glassSheetKey = key;
   glassSheetLook = look;
+  // What the trackers wrote on surfaces was solved for the theme that is going away: until a tracker answers again (up to a sample
+  // interval later) the surface would show the old theme's text colours on the new tint (2.1:1 measured, #567). Back on the floor,
+  // which holds over anything, it is safe in the first frame; the tracker's next answer is for the new theme.
+  for (const surface of document.querySelectorAll<HTMLElement>("[data-glass-answer]")) clearSolution(surface);
   const tint = hexToRgb(glassTint(active)).join(" ");
   // A solid answer is the opaque tint with no blur. The blur is switched by the surface's `data-glass-answer` (written by the
   // trackers in `glass-adapt.on-demand.ts`), not by a custom property: a glass answer must leave the card's own blur alone
