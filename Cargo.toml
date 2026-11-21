@@ -101,6 +101,13 @@ too_many_arguments = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 
+# Debug and test builds keep file/line tables (so panics and backtraces still name source lines)
+# but not variable and type debug info (#574). A `scripts/verify fast` target held 226 test
+# executables of ~143 MB each, 32 of its 56 GB, almost all of it that debug info. The `test`
+# profile inherits this one. Release builds are unaffected: they carry no debug info.
+[profile.dev]
+debug = "line-tables-only"
+
 # Keep SSH prompt image hashing inside its fixed reply deadline in test and
 # development builds; optimized release builds already use this code path.
 [profile.dev.package.sha2]
