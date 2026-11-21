@@ -2758,7 +2758,7 @@ mod inherited_login_process_tests {
         // below). An owned copy overwritten there leaves two owners of one
         // descriptor, and the second close aborts with an IO-safety violation.
         let dup_from_ten = |socket: &std::os::unix::net::UnixStream| {
-            let raw = fcntl(socket.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(10)).unwrap();
+            let raw = fcntl(socket.as_fd(), FcntlArg::F_DUPFD_CLOEXEC(10)).unwrap();
             // SAFETY: fcntl returned a fresh descriptor that nothing else owns.
             unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) }
         };
