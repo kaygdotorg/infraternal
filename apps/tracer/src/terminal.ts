@@ -427,6 +427,8 @@ export class TerminalClient {
   /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
   private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  /** A tap is as good as a key for cutting a reconnect backoff short. */
+  private readonly onTapRetry = (): void => this.conn.retryForInput();
   private readonly onBlinkInput = (): void => this.restartCursorBlink();
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
@@ -497,6 +499,7 @@ export class TerminalClient {
     this.staleWatch = new StaleScreenWatch((stale) => config.hooks?.onStaleScreen?.(stale), { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
+    config.host.addEventListener("pointerdown", this.onTapRetry, { passive: true });
     document.addEventListener("visibilitychange", this.onBlinkEnvironment);
     window.addEventListener("blur", this.onBlinkEnvironment);
     window.addEventListener("focus", this.onBlinkEnvironment);
@@ -1040,6 +1043,7 @@ export class TerminalClient {
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
+    this.config.host.removeEventListener("pointerdown", this.onTapRetry);
     document.removeEventListener("visibilitychange", this.onBlinkEnvironment);
     window.removeEventListener("blur", this.onBlinkEnvironment);
     window.removeEventListener("focus", this.onBlinkEnvironment);
@@ -1526,6 +1530,8 @@ export class TerminalClient {
     if (this.inputModifiers.alt === "armed") this.inputModifiers.alt = "off";
     this.config.onInputActivity?.();
     this.sampleRoundTrip();
+    // A key typed while the connection waits out a reconnect backoff retries at once (#569).
+    this.conn.retryForInput();
     data = applyInputModifiers(data, ctrl, alt);
     const at = performance.now();
     const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
