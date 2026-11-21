@@ -79,7 +79,7 @@ test("the canvas is not drawn until its sheets have arrived, and then it is styl
     released = true;
     await route.continue();
   });
-  await page.goto("/?proto=product&fresh=1&bg=none");
+  await page.goto("/?proto=product&fresh=1&bg=none", { waitUntil: "commit" });
   await expect(page.locator(".ui-window").first()).toBeVisible();
   expect(released).toBe(true);
   // Every deferred sheet is now live: none is left on the print medium.
