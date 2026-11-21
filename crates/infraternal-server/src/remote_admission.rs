@@ -43,6 +43,16 @@ impl SourceSlots {
         };
         semaphore.try_acquire_owned().ok()
     }
+    /// True when more than half of the slots of `address`'s source are held right
+    /// now. A source with no live slots is not under pressure.
+    pub(crate) fn more_than_half_held(&self, address: IpAddr) -> bool {
+        let address = crate::runtime::device_source(address);
+        self.buckets
+            .lock()
+            .ok()
+            .and_then(|buckets| buckets.get(&address).and_then(Weak::upgrade))
+            .is_some_and(|semaphore| semaphore.available_permits() * 2 < self.limit)
+    }
 }
 /// Source keys: ports, IPv4-mapped addresses and IPv6 /64 networks.
 #[cfg(test)]

@@ -18,6 +18,14 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     task::JoinSet,
 };
+/// Concurrent handshakes from sources not yet known to be hosts.
+const ANONYMOUS_LANES: usize = 48;
+/// Concurrent handshakes reserved for sources that admitted a host before.
+const KNOWN_LANES: usize = 16;
+/// Concurrent handshakes one source network may hold in either lane.
+const SOURCE_LANES: usize = 4;
+
+/// Handshake capacity for the host-link listeners, shared by QUIC and TCP/TLS.
 pub(crate) struct Limits {
     admission: Arc<Semaphore>,
     reserved: Arc<Semaphore>,
@@ -27,26 +35,52 @@ pub(crate) struct Limits {
     standby: Arc<crate::remote_standby::Slots>,
 }
 impl Limits {
+    /// Fresh limits for one listener set: empty lanes and no known sources.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            admission: Arc::new(Semaphore::new(48)),
-            reserved: Arc::new(Semaphore::new(16)),
-            sources: Arc::new(SourceSlots::new(4)),
-            reserved_sources: Arc::new(SourceSlots::new(4)),
+            admission: Arc::new(Semaphore::new(ANONYMOUS_LANES)),
+            reserved: Arc::new(Semaphore::new(KNOWN_LANES)),
+            sources: Arc::new(SourceSlots::new(SOURCE_LANES)),
+            reserved_sources: Arc::new(SourceSlots::new(SOURCE_LANES)),
             known: Arc::default(),
             standby: Arc::default(),
         })
     }
-    fn handshake(&self, address: IpAddr) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    /// The lane `address` draws from: its slots, their total, and its per-source slots.
+    fn lane(&self, address: IpAddr) -> (&Arc<Semaphore>, usize, &Arc<SourceSlots>) {
         if self
             .known
             .lock()
             .is_ok_and(|known| known.contains(&address))
         {
-            reserve(&self.reserved, &self.reserved_sources, address)
+            (&self.reserved, KNOWN_LANES, &self.reserved_sources)
         } else {
-            reserve(&self.admission, &self.sources, address)
+            (&self.admission, ANONYMOUS_LANES, &self.sources)
         }
+    }
+    /// Take a handshake slot from `address`'s lane and source, or `None` when either is full.
+    fn handshake(&self, address: IpAddr) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+        let (slots, _, sources) = self.lane(address);
+        reserve(slots, sources, address)
+    }
+    /// True when a QUIC Initial from an address that has not proved it receives
+    /// packets there should get a Retry instead of a handshake slot (#572
+    /// finding 2): its lane, or its source's slots, are more than half held.
+    ///
+    /// Source addresses of UDP Initials can be forged, and every Initial holds
+    /// its slots for the 5 s handshake deadline. Without this, about 10 forged
+    /// packets a second kept all 48 anonymous lanes full. A Retry costs the
+    /// server no state, and only a peer that receives it can come back with a
+    /// validated address. Below half, nothing changes: a reconnecting host keeps
+    /// its round-trip count, and pays one extra round trip only under pressure.
+    pub(crate) fn wants_retry(&self, address: IpAddr) -> bool {
+        let (slots, total, sources) = self.lane(address);
+        slots.available_permits() * 2 < total || sources.more_than_half_held(address)
+    }
+    /// Handshake slots currently held in the anonymous lane, for tests.
+    #[cfg(test)]
+    pub(crate) fn anonymous_in_use(&self) -> usize {
+        ANONYMOUS_LANES - self.admission.available_permits()
     }
 }
 fn reserve(
@@ -77,6 +111,16 @@ pub(crate) async fn quic(
     while let Some(incoming) = quic.accept().await {
         while handshakes.try_join_next().is_some() {}
         let address = incoming.remote_address().ip().to_canonical();
+        if !incoming.remote_address_validated()
+            && incoming.may_retry()
+            && limits.wants_retry(address)
+        {
+            // Stateless: the peer's next Initial carries the token and a validated address.
+            if let Err(unsent) = incoming.retry() {
+                unsent.into_incoming().refuse();
+            }
+            continue;
+        }
         let Some((source_permit, permit)) = limits.handshake(address) else {
             incoming.refuse();
             continue;
@@ -323,6 +367,7 @@ async fn handle_tcp_connection(
     }
 }
 
+/// Lane separation and the Retry pressure rule.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +390,30 @@ mod tests {
         assert_eq!(limits.reserved.available_permits(), 16);
         drop(held);
         assert!(limits.handshake(IpAddr::V4(13u32.into())).is_some());
+    }
+
+    /// #572 finding 2: Retry starts only once a lane or one source's slots are
+    /// more than half held, so an idle server keeps the plain handshake.
+    #[test]
+    fn retry_only_when_a_lane_or_source_is_more_than_half_held() {
+        let limits = Limits::new();
+        let host = IpAddr::V4(200u32.into());
+        assert!(!limits.wants_retry(host));
+        let mut held = Vec::new();
+        for address in 1..=12u32 {
+            for _ in 0..2 {
+                held.push(limits.handshake(IpAddr::V4(address.into())).unwrap());
+            }
+        }
+        assert_eq!(limits.anonymous_in_use(), 24);
+        assert!(!limits.wants_retry(host), "exactly half is not pressure");
+        held.push(limits.handshake(IpAddr::V4(13u32.into())).unwrap());
+        assert!(limits.wants_retry(host));
+        drop(held);
+        let one = IpAddr::V4(1u32.into());
+        let source: Vec<_> = (0..3).map(|_| limits.handshake(one).unwrap()).collect();
+        assert!(limits.wants_retry(one), "a source more than half held");
+        assert!(!limits.wants_retry(host));
+        drop(source);
     }
 }
