@@ -1597,7 +1597,8 @@ where
             .is_ok()
         }
         TerminalOutput::Event { event_json } => {
-            let ended = crate::terminal_exit::record(
+            let ended = crate::terminal_exit::record_on_writer(
+                &state.auth,
                 &state.pool,
                 user_id,
                 session_token,
@@ -2312,8 +2313,8 @@ where
                 NO_SESSION
             };
             let host_id = owned_host.flatten();
-            let Ok((input_acked, writer_stream)) = owned_writer(
-                &state.pool,
+            let Ok((input_acked, writer_stream)) = claim_writer(
+                state,
                 user_id,
                 connection_id,
                 stream_id,
@@ -3282,18 +3283,20 @@ async fn open_terminal(
     }
     let session_id = opened.session_id;
     let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
-    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
-        .bind(session_id.as_slice())
-        .bind(user_id)
-        .bind(now)
-        .bind(now)
-        .bind(host.map(|id| id.as_bytes().to_vec()))
-        .bind(crate::auth::hash(session_token)).bind(user_id)
-        .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
-    if changed.rows_affected() != 1 {
+    // The row is written on the D379 writer thread (#562).
+    let recorded = crate::terminal_session_record::record(
+        &state.auth,
+        &state.pool,
+        crate::terminal_session_record::NewSession {
+            session_id,
+            user_id,
+            host: host.map(|id| id.as_bytes().to_vec()),
+            session_token,
+            now,
+        },
+    )
+    .await;
+    if !recorded {
         #[cfg(test)]
         eprintln!("remote terminal open stage=session-persist result=unavailable");
         return Err(crate::embedded::AgentError::Unavailable);
@@ -3423,6 +3426,37 @@ impl EndedStreams {
             _ => Err(()),
         }
     }
+}
+
+/// Claim the device's durable writer for an attachment: on the D379 writer
+/// thread when the server has one, otherwise (in-memory test databases) on
+/// sqlx with the same rules (#562). Returns the acknowledged input offset and
+/// the wire writer id.
+async fn claim_writer(
+    state: &WebSocketState,
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+    authority: Option<&str>,
+) -> Result<(u64, u32), ()> {
+    let limit = i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())?;
+    if let Some(result) = crate::terminal_writer_claim::claim(
+        &state.auth,
+        crate::terminal_writer_claim::Claim {
+            user,
+            connection,
+            stream,
+            session,
+            authority,
+            limit,
+        },
+    )
+    .await
+    {
+        return result;
+    }
+    owned_writer(&state.pool, user, connection, stream, session, authority).await
 }
 
 async fn owned_writer(

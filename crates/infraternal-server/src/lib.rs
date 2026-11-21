@@ -158,6 +158,10 @@ mod stream_close;
 mod terminal_exit;
 /// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
 mod terminal_input_ack;
+/// Persists a newly opened terminal's session row on the D379 writer (#562).
+mod terminal_session_record;
+/// Claims a device's durable input writer row for an attachment on the D379 writer (#562).
+mod terminal_writer_claim;
 mod web_assets;
 mod websocket;
 mod websocket_input;
