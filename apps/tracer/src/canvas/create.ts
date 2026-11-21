@@ -147,7 +147,8 @@ export function createCanvas(core: CoreScreen, options: CanvasOptions): CanvasCo
       }).catch(() => {
         appWindowsLoading = undefined;
         if (!cx.signal.aborted && appWindowsAdapter.available()) {
-          cx.toast.show({ message: "Could not load app windows. Try again.", tone: "error", duration: 5000 });
+          // The action runs the same load again (the failed promise was cleared above), so a retry that works needs no reload.
+          cx.toast.show({ message: "Could not load app windows.", tone: "error", duration: 5000, action: { label: "Try again", onSelect: () => { void loadAppWindows(); } } });
         }
         return undefined;
       });
