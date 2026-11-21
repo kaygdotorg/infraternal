@@ -31,6 +31,14 @@ const limits = {
   // reported, not limited.
   onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
+/**
+ * The terminal engine's wasm is a file of its own, outside the JavaScript budget (#573). It is gated here: the file must
+ * carry the content-hashed name the server caches for good, and its Brotli size is reported. The base64 copy this
+ * replaced cost 133 KB of the terminal chunk's Brotli against 99 KB for the raw wasm.
+ */
+const engineFiles = (await readdir(dist)).filter((name) => /^ghostty-vt-[0-9a-z]{8}\.wasm$/.test(name));
+if (engineFiles.length !== 1) throw new Error(`expected one content-hashed engine wasm (ghostty-vt-<hash>.wasm) in ${dist}, found ${engineFiles.length}`);
+console.log(`terminal engine ${engineFiles[0]}: identity=${(await stat(`${dist}/${engineFiles[0]}`)).size} brotli=${await stat(`${dist}/${engineFiles[0]}.br`).then((file) => file.size).catch(() => "none")} bytes`);
 /** The chunk lists the build wrote to `chunks.json`. */
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
 /** The compressed size of each on-demand chunk, checked one by one. */
