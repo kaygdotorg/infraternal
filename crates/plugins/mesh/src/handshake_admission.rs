@@ -944,22 +944,19 @@ impl PeerAdmissionUdpReceiver {
                 .await
                 .check(packet, source, Instant::now())
                 .is_ok();
-        if admitted {
-            if let Some(cursor) = self.sources.as_mut() {
-                cursor.note(source);
-            }
+        if let (true, Some(cursor)) = (admitted, self.sources.as_mut()) {
+            cursor.note(source);
         }
         admitted
     }
 
     /// Start or refresh this receiver's copy of the confirmed list before a batch.
     async fn sync_sources(&mut self) {
-        match self.sources.as_mut() {
-            Some(cursor) => cursor.sync(),
-            None => {
-                let watch = self.admission.read().await.sources();
-                self.sources = Some(SourceCursor::new(watch));
-            }
+        if let Some(cursor) = self.sources.as_mut() {
+            cursor.sync();
+        } else {
+            let watch = self.admission.read().await.sources();
+            self.sources = Some(SourceCursor::new(watch));
         }
     }
 }

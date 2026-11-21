@@ -2468,6 +2468,7 @@ mod tests {
         for index in 0..count {
             let mut policy = template.clone();
             let [a, b, c, d] = index.to_be_bytes();
+            let [_, _, high, low] = index.to_be_bytes();
             policy.peer.key = PublicKey([
                 a ^ 0x5a,
                 b,
@@ -2503,12 +2504,7 @@ mod tests {
                 9,
             ]);
             policy.peer.addresses = Addresses {
-                ipv4: std::net::Ipv4Addr::new(
-                    10,
-                    100 + (index >> 16) as u8,
-                    (index >> 8) as u8,
-                    index as u8,
-                ),
+                ipv4: std::net::Ipv4Addr::new(10, 100, high, low),
                 ipv6: std::net::Ipv6Addr::new(
                     0xfd01,
                     0,
@@ -2516,13 +2512,13 @@ mod tests {
                     0,
                     1,
                     0,
-                    (index >> 16) as u16,
-                    index as u16,
+                    u16::from(high),
+                    u16::from(low),
                 ),
             };
             policy.peer.endpoint = Some(SocketAddr::from((
                 [192, 0, 2, 1],
-                20_000 + (index % 30_000) as u16,
+                20_000 + u16::try_from(index % 30_000).expect("below 30000"),
             )));
             config.peers.insert(NodeId(10 + u64::from(index)), policy);
         }
@@ -2537,6 +2533,10 @@ mod tests {
     /// machine and run it there. No root is needed: a socket pair stands in for the TUN.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "measurement only: run by hand with INFRATERNAL_IDLE_PEERS and INFRATERNAL_IDLE_SECS"]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "counts of a 30 s window convert to a rate"
+    )]
     async fn idle_cost_with_many_peers() {
         use super::{
             EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
@@ -2546,14 +2546,6 @@ mod tests {
         use gotatun::x25519::StaticSecret;
         use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
         use std::sync::{Arc, mpsc as sync};
-        let env = |name: &str, default: u32| {
-            std::env::var(name)
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(default)
-        };
-        let count = env("INFRATERNAL_IDLE_PEERS", 1);
-        let seconds = env("INFRATERNAL_IDLE_SECS", 30);
         /// Voluntary context switches and CPU ticks of every thread of this process.
         fn sample() -> (u64, u64) {
             let (mut switches, mut ticks) = (0, 0);
@@ -2582,6 +2574,14 @@ mod tests {
             }
             (switches, ticks)
         }
+        let env = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let count = env("INFRATERNAL_IDLE_PEERS", 1);
+        let seconds = env("INFRATERNAL_IDLE_SECS", 30);
         let private_key = StaticSecret::from([7; 32]);
         let (kernel, device) = socketpair(
             AddressFamily::Unix,
