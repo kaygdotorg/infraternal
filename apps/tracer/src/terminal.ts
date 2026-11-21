@@ -338,6 +338,11 @@ export class TerminalClient {
   private readonly weightMemo = new Map<string, string>();
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
+  /**
+   * True while a paint callback (which the renderer runs inside an animation frame, after its own render pass) drains
+   * the next queued bytes. Those bytes are then drawn in the same frame instead of waiting for the next one (#569).
+   */
+  private drainingInFrame = false;
   /** Parser writes are compared with the latest successful renderer pass on a synchronized release. */
   private parsedOutputVersion = 0;
   private renderedOutputVersion = 0;
@@ -1998,7 +2003,8 @@ export class TerminalClient {
         this.outputWriteLength = 0;
         this.outputWriteInFlight = false;
         this.returnCredit(consumed);
-        this.drainOutput();
+        this.drainingInFrame = true;
+        try { this.drainOutput(); } finally { this.drainingInFrame = false; }
         this.tryAttach();
       };
       this.pendingWriteCompletion = onWritten;
@@ -2049,6 +2055,9 @@ export class TerminalClient {
         // The terminal state includes these bytes now; only their paint is a frame away. Reconcile prediction.
         if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
         else this.prediction?.hostWritten(region!);
+        // Output that was waiting for the previous write's paint is parsed inside a frame, after that frame's render
+        // pass already ran. Left alone, its first draw would be the next frame; draw the dirty rows now so this frame shows it.
+        if (this.drainingInFrame) this.renderDirtyNow();
       }
       return;
     }
@@ -2421,6 +2430,17 @@ export class TerminalClient {
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer || this.closed) return;
     renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /**
+   * Draws the rows the parser changed since the last render pass, now, in this task. Unlike {@link repaintAll} it does
+   * not force a full redraw, so it costs only the changed rows; the render wrapper still honours held synchronized output.
+   */
+  private renderDirtyNow(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer || this.closed || this.suspended || this.surfaceReleased || this.frozen) return;
+    renderer.render(buffer, false, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
 
   /** Draws released VT state in its first available frame, then completes callbacks for what that frame painted. */
