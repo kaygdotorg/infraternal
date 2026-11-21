@@ -1,14 +1,16 @@
 //! Server-held sessions fan out immutable access units without letting a viewer stall capture [D104,D200,D208].
 //!
 //! A [`Session`] is the server's record of one capture. The producer side calls
-//! [`Session::publish`] with each encoded frame; the session keeps the frames
-//! of the last ~100 ms ([`crate::backlog`]'s bounds) and the latest keyframe,
-//! and shares them (without copying) with up to five [`Viewer`]s. Each viewer
-//! reads them in order from its own position, so a viewer that is a moment
-//! behind (a slow socket write, a busy browser) catches up with small delta
-//! frames. A viewer further behind than the bound finds its next frame gone:
-//! it skips to the newest frames, waits for a keyframe, and the session asks
-//! the host for one, once (D254's drop-to-newest, beyond the bound).
+//! [`Session::publish`] with each encoded frame; the session keeps the recent
+//! frames (up to 1 s, within [`crate::backlog`]'s unit and byte bounds) and the
+//! latest keyframe, and shares them (without copying) with up to five
+//! [`Viewer`]s. Each viewer reads them in order from its own position, so a
+//! viewer that is a moment behind (a slow socket write, a busy browser)
+//! catches up with small delta frames. A viewer whose next frame waited longer
+//! than the 100 ms bound for it, or is gone, skips to the newest frames, waits
+//! for a keyframe, and the session asks the host for one, once (D254's
+//! drop-to-newest, beyond the bound). As in [`crate::backlog`], the time a
+//! viewer spends writing a keyframe does not age the deltas behind it.
 //!
 //! A viewer also measures how far behind it is ([`Viewer::take_lag`]: the
 //! longest any frame it took or skipped had waited); the socket adapter turns
@@ -113,11 +115,15 @@ struct Published {
 /// lowers its rate at most every 500 ms; reporting twice as often keeps it
 /// informed without filling the bounded command queue.
 const PRESSURE_INTERVAL: Duration = Duration::from_millis(250);
+/// The oldest a recent frame may be and still be kept: the 1 s a viewer's
+/// write may take. Which frames a viewer may still use is decided per viewer
+/// with the shorter [`crate::backlog::MAX_AGE`].
+const RECENT_AGE: Duration = Duration::from_secs(1);
 /// Mutable session state, behind one mutex that is never held across an `await`.
 struct State {
     /// The latest keyframe, given to viewers that attach later.
     keyframe: Option<Arc<Video>>,
-    /// The frames published in the last ~100 ms, oldest first, within
+    /// The frames published in the last second, oldest first, within
     /// [`crate::backlog`]'s unit and byte bounds. Always holds the newest frame
     /// while the session is open. A keyframe replaces everything before it.
     recent: VecDeque<Published>,
@@ -143,15 +149,15 @@ struct State {
     window_closed: bool,
 }
 impl State {
-    /// Lets go of the oldest recent frames while they are older than the
-    /// backlog's age bound, or while there are too many or too many bytes. The
+    /// Lets go of the oldest recent frames while they are older than
+    /// [`RECENT_AGE`], or while there are too many or too many bytes. The
     /// newest frame always stays, whatever its age or size, so a viewer that
     /// keeps up never misses one.
     fn trim(&mut self, now: Instant) {
-        use crate::backlog::{MAX_AGE, MAX_BYTES, MAX_UNITS};
+        use crate::backlog::{MAX_BYTES, MAX_UNITS};
         while self.recent.len() > 1 {
             let oldest = &self.recent[0];
-            let expired = now.saturating_duration_since(oldest.at) > MAX_AGE;
+            let expired = now.saturating_duration_since(oldest.at) > RECENT_AGE;
             if !(expired || self.recent.len() > MAX_UNITS || self.recent_bytes > MAX_BYTES) {
                 break;
             }
@@ -303,6 +309,8 @@ impl Session {
             last_sequence: 0,
             waiting_keyframe: true,
             lag: Duration::ZERO,
+            keyframe_taken: false,
+            aged_from: None,
         })
     }
     /// The command that re-announces the current controller to a reconnected
@@ -609,6 +617,12 @@ pub struct Viewer {
     /// waited for this viewer since it was published, since the last
     /// [`Viewer::take_lag`].
     lag: Duration,
+    /// The last frame returned was a keyframe, so the caller is (or was)
+    /// writing it: the frames behind it do not age meanwhile.
+    keyframe_taken: bool,
+    /// Frames count their age for the bound from this moment, if it is later
+    /// than their publication: when the caller came back from a keyframe.
+    aged_from: Option<Instant>,
 }
 impl Viewer {
     /// Retain identity, never the Viewer itself, across a bounded transport queue.
@@ -649,12 +663,17 @@ impl Viewer {
     }
     /// Receive the next decodable access unit, in order from this viewer's
     /// position among the recent frames. The cached IDR is returned first. A
-    /// viewer whose next frame was already let go (it fell further behind than
-    /// the backlog bound) skips the deltas after the gap, and the session asks
-    /// the host for a keyframe once; the next keyframe resumes it.
+    /// viewer whose next frame was let go, or waited longer than
+    /// [`crate::backlog::MAX_AGE`] for it (not counting the time it spent
+    /// writing the keyframe before), skips the deltas after the gap, and the
+    /// session asks the host for a keyframe once; the next keyframe resumes it.
+    /// Calling it means the previous frame has been written.
     /// # Errors
     /// Refuses ended sessions or withdrawn access before exposing any bytes.
     pub async fn next(&mut self) -> Result<Arc<Video>, Error> {
+        if std::mem::take(&mut self.keyframe_taken) {
+            self.aged_from = Some(tokio::time::Instant::now().into_std());
+        }
         loop {
             self.allowed(false)?;
             // Mark the newest frame seen before reading the recent frames: a
@@ -667,6 +686,7 @@ impl Viewer {
                 }
                 if let Some(cached) = self.cached.take() {
                     self.last_sequence = cached.sequence;
+                    self.keyframe_taken = true;
                     return Ok(cached);
                 }
                 state
@@ -693,13 +713,16 @@ impl Viewer {
             // frame counts towards the lag too: a viewer that fell beyond the
             // bound is the one most behind.
             self.last_sequence = frame.sequence;
-            let waited = tokio::time::Instant::now()
-                .into_std()
-                .saturating_duration_since(published);
+            let now = tokio::time::Instant::now().into_std();
+            let waited = now.saturating_duration_since(published);
             self.lag = self.lag.max(waited);
+            let late = now.saturating_duration_since(
+                self.aged_from.map_or(published, |from| from.max(published)),
+            ) > crate::backlog::MAX_AGE;
             if frame.keyframe {
                 self.waiting_keyframe = false;
-            } else if self.waiting_keyframe || !continuous {
+                self.keyframe_taken = true;
+            } else if self.waiting_keyframe || !continuous || late {
                 self.waiting_keyframe = true;
                 let mut state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
                 self.session.repair(&mut state)?;

@@ -33,8 +33,8 @@ const HARDWARE: HardwareAcceleration = "no-preference";
 /**
  * Maximum transferred units awaiting acknowledgement from this stream's worker (#146). After a main-thread stall the socket's
  * queued messages run before the worker's acknowledgements do: a 40 ms stall at 120 fps hands over 5 units at once, 160 ms
- * about 20. A credit of 4 refused the fifth and forced a keyframe (41–251 KB) where 0.5 KB deltas were waiting. 32 units match
- * the server's backlog bound (`crate::backlog::MAX_UNITS`); the byte bound below still caps memory. There is deliberately no
+ * about 20. A credit of 4 refused the fifth and forced a keyframe (41–251 KB) where 0.5 KB deltas were waiting. 32 units cover
+ * a 250 ms stall at 120 fps; the byte bound below still caps memory. There is deliberately no
  * age bound here: the page's own stall would count against it. The worker bounds the age of what waits for its decoder.
  */
 export const MAX_HANDOFF_UNITS = 32;

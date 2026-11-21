@@ -683,18 +683,20 @@ viewer controls a session; taking control is an explicit handover.
 
 The server holds the session independently of viewers and checks live grants
 for view and control. At most five viewers attach. It retains the latest IDR
-and the access units of the last 100 ms (at most 32 units and 1 MiB, always
+and the access units of the last second (at most 128 units and 1 MiB, always
 including the newest; an IDR replaces those before it), sharing immutable
 bytes between viewers. Each viewer reads them in order from its own position,
-so a viewer briefly behind catches up with deltas; one whose next unit is no
-longer retained discards deltas until IDR and coalesces one repair (#146). A new
+so a viewer briefly behind catches up with deltas. A viewer whose next unit is
+no longer retained, or waited more than 100 ms for it, discards deltas until
+IDR and coalesces one repair (#146). The time a viewer spends writing an IDR
+does not count towards the 100 ms of the units behind it. A new
 viewer receives the cached IDR immediately, requests a fresh IDR and waits for
 it before consuming current deltas. Replaying a stale IDR followed by a current
 P-frame is forbidden. A viewer that misses a sequence discards deltas until IDR.
 
 Reliable mode queues frames at the sender within the same bound (oldest
-waiting frame at most 100 ms old, 32 units, 1 MiB) and has a bounded in-flight
-write. Past the bound every waiting frame is dropped, deltas are discarded
+waiting frame at most 100 ms old, not counting an IDR write in flight; 128
+units; 1 MiB) and has a bounded in-flight write. Past the bound every waiting frame is dropped, deltas are discarded
 until IDR, and the sender asks for one. Once any bytes of a reliable frame are written it must be completed
 or its dedicated video stream reset: partial-frame cancellation cannot splice
 the next frame into it. Control and input use an independently driven reliable

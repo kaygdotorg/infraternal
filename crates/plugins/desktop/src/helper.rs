@@ -304,7 +304,7 @@ impl Frames {
         let Ok(mut state) = self.state.lock() else {
             return Taken::Ended(io::Error::other("Desktop capture unavailable."));
         };
-        if let Some(body) = state.backlog.pop() {
+        if let Some(body) = state.backlog.pop(Instant::now()) {
             return Taken::Frame(body);
         }
         match state.ended.take() {

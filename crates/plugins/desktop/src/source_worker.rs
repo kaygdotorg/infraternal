@@ -352,7 +352,7 @@ async fn send_video(
             .backlog
             .lock()
             .map_err(|_| PluginError::Rejected)?
-            .pop();
+            .pop(tokio::time::Instant::now().into_std());
         let Some(video) = next else {
             if frames.closed.load(Ordering::Acquire) {
                 break;
@@ -700,6 +700,8 @@ mod pacing_tests {
 
     /// A lane blocked past the backlog bound drops what waited and takes no
     /// delta until a fresh keyframe (D254 drop-to-newest beyond the bound).
+    /// The blocked write here is a keyframe, whose write time is forgiven, so
+    /// the unit bound is the one reached.
     #[tokio::test(start_paused = true)]
     async fn delta_past_the_bound_waits_for_fresh_keyframe() {
         let (entered, mut packets) = mpsc::unbounded_channel();
@@ -723,14 +725,20 @@ mod pacing_tests {
             delta.keyframe = false;
             delta
         };
-        assert_eq!(publisher.publish(delta(2)), Admission::Queued);
-        tokio::time::advance(std::time::Duration::from_millis(150)).await;
-        assert_eq!(publisher.publish(delta(3)), Admission::Overflowed);
-        assert_eq!(publisher.publish(delta(4)), Admission::Sealed);
-        assert_eq!(publisher.publish(frame(5)), Admission::Queued);
+        let mut sequence = 2;
+        while publisher.publish(delta(sequence)) == Admission::Queued {
+            sequence += 1;
+        }
+        assert_eq!(
+            sequence,
+            2 + crate::backlog::MAX_UNITS as u64,
+            "the unit bound overflowed"
+        );
+        assert_eq!(publisher.publish(delta(sequence + 1)), Admission::Sealed);
+        assert_eq!(publisher.publish(frame(sequence + 2)), Admission::Queued);
         drop(publisher);
         lane.release.notify_one();
-        assert_eq!(packets.recv().await, Some(5));
+        assert_eq!(packets.recv().await, Some(sequence + 2));
         lane.release.notify_one();
         assert!(writing.await.unwrap().is_ok());
         drop(lane);

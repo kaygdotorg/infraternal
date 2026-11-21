@@ -93,10 +93,13 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
     let mut slow = session.attach("watcher".into()).unwrap();
     assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
     session.publish(video(1, true, 100)).unwrap();
-    assert_eq!(fast.next().await.unwrap().sequence, 1);
-    assert_eq!(slow.next().await.unwrap().sequence, 1);
-    for sequence in 2..=10 {
-        // 9 × 20 ms: frame 2 is older than the 100 ms bound when frame 10 arrives.
+    session.publish(video(2, false, 100)).unwrap();
+    for viewer in [&mut fast, &mut slow] {
+        assert_eq!(viewer.next().await.unwrap().sequence, 1);
+        assert_eq!(viewer.next().await.unwrap().sequence, 2);
+    }
+    for sequence in 3..=11 {
+        // 9 × 20 ms: when the slow viewer asks at 180 ms, frame 3 has waited 160 ms.
         tokio::time::advance(Duration::from_millis(20)).await;
         session.publish(video(sequence, false, 100)).unwrap();
         assert_eq!(fast.next().await.unwrap().sequence, sequence);
@@ -107,12 +110,11 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
             .is_err()
     );
     assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
-    // The skipped frame 5 had waited 100 ms: the viewer that fell behind shows it.
-    assert_eq!(slow.take_lag(), Duration::from_millis(100));
-    // The keyframe (still cached) and frames 5..=10, the last 100 ms.
-    assert_eq!(session.retained_bytes(), 700);
-    session.publish(video(11, true, 100)).unwrap();
-    assert_eq!(slow.next().await.unwrap().sequence, 11);
+    assert_eq!(slow.take_lag(), Duration::from_millis(160));
+    // Frames stay retained for up to 1 s; the 100 ms bound is per viewer.
+    assert_eq!(session.retained_bytes(), 1100);
+    session.publish(video(12, true, 100)).unwrap();
+    assert_eq!(slow.next().await.unwrap().sequence, 12);
     assert_eq!(
         session.retained_bytes(),
         100,
@@ -121,7 +123,32 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
     drop(fast);
     drop(slow);
     let mut reconnect = session.attach("owner".into()).unwrap();
-    assert_eq!(reconnect.next().await.unwrap().sequence, 11);
+    assert_eq!(reconnect.next().await.unwrap().sequence, 12);
+}
+/// The time a viewer spends writing a keyframe does not age the deltas that
+/// queue behind it: on a slow link, repairing them would only send another
+/// keyframe (#146).
+#[tokio::test(start_paused = true)]
+async fn deltas_behind_a_slow_keyframe_write_are_not_late() {
+    let (session, mut commands, _) = session();
+    let mut viewer = session.attach("owner".into()).unwrap();
+    assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
+    session.publish(video(1, true, 100)).unwrap();
+    assert_eq!(viewer.next().await.unwrap().sequence, 1);
+    // The keyframe takes 400 ms to write; 50 deltas are published meanwhile.
+    for sequence in 2..=51 {
+        tokio::time::advance(Duration::from_millis(8)).await;
+        session.publish(video(sequence, false, 100)).unwrap();
+    }
+    for sequence in 2..=51 {
+        assert_eq!(viewer.next().await.unwrap().sequence, sequence);
+    }
+    assert!(commands.try_recv().is_err(), "no repair was needed");
+    assert_eq!(
+        viewer.take_lag(),
+        Duration::from_millis(392),
+        "frame 2 waited"
+    );
 }
 /// A viewer whose frames wait reports pressure for the host, at most once per
 /// 250 ms, as the `Pressure` host command (#146).
