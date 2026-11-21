@@ -1487,6 +1487,7 @@ access (#341 B19).
      #259 rename work alone reached 307,714 B; the owner chose a moderate
      raise that keeps the gate (growth stays visible) over removing it or
      loading rename on demand. Big features still load on demand.
+     - *Later (owner, 2026-11-21, #557):* the deferred budget is 60 KiB gzip / 54 KiB brotli for the whole class and the on-demand budget 20 KiB gzip / 18 KiB brotli per chunk, as `apps/tracer/transfer-budget.ts` enforces. The owner: "they're really small numbers for modern browsers, it's fine."
 189. **Card and window transparency (owner, 2026-10-08; superseded by D322):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
