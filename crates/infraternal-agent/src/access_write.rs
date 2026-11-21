@@ -89,10 +89,14 @@ pub(crate) fn writable(account: &User, paths: &[PathBuf]) -> Option<BTreeSet<usi
 /// `user:alice:rwx` would read as not writable (J1013). Such a host's
 /// answer is unknown, never "not writable". `shell` is the canonical path
 /// [`crate::logins::account_tool`] returns.
+///
+/// Only the shells known to ask the kernel answer. A list of shells that
+/// don't would miss busybox installed as a hard link (its canonical name is
+/// then `sh` or `ash`) or under another file name (J1051).
 fn kernel_test(shell: &std::path::Path) -> bool {
     shell
         .file_name()
-        .is_some_and(|name| name != "busybox" && name != "toybox")
+        .is_some_and(|name| name == "dash" || name == "bash")
 }
 
 #[cfg(test)]
@@ -112,6 +116,8 @@ mod tests {
     use std::os::unix::{fs::PermissionsExt as _, net::UnixListener};
 
     /// A multi-call shell computes `-w` from mode bits, so it never answers.
+    /// Nor does any shell not known to ask the kernel, such as busybox
+    /// installed as a hard link named `sh` (J1051).
     #[test]
     fn only_a_shell_that_asks_the_kernel_answers() {
         for shell in [
@@ -121,7 +127,14 @@ mod tests {
         ] {
             assert!(kernel_test(std::path::Path::new(shell)), "{shell}");
         }
-        for shell in ["/bin/busybox", "/usr/bin/toybox"] {
+        for shell in [
+            "/bin/busybox",
+            "/usr/bin/toybox",
+            "/bin/sh",
+            "/bin/ash",
+            "/bin/busybox.static",
+            "/usr/bin/mksh",
+        ] {
             assert!(!kernel_test(std::path::Path::new(shell)), "{shell}");
         }
     }
