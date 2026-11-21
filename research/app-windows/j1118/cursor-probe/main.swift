@@ -39,6 +39,8 @@ if mode == "window" {
         let top = NSScreen.screens[0].frame.height - window.frame.maxY
         let x = window.frame.minX + (CGFloat(index % strips.count) + 0.5) * 840 / CGFloat(strips.count), y = top + 70
         CGWarpMouseCursorPosition(CGPoint(x: x, y: y)); CGAssociateMouseAndMouseCursorPosition(1)
+        // A warp raises no mouse-moved event, so the window's cursor rects would not apply; set the shape directly.
+        strips[index % strips.count].1.set()
         print("MOVE strip=\(strips[index % strips.count].0)"); fflush(stdout)
         index += 1
     }

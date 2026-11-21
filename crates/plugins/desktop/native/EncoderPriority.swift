@@ -25,8 +25,12 @@ final class EncoderPriority {
     /// How long a claim stays valid after the last accepted remote input, in milliseconds.
     static let claimMilliseconds = 1500.0
     /// How long the controlled window keeps its lease after an encode finishes, in milliseconds.
-    /// It covers the gap to the window's next frame, so others do not slip in between two frames.
-    static let holdMilliseconds = 8.0
+    /// It covers part of the gap to the window's next frame, so others do not slip in between two
+    /// frames. Measured on an M1 with three scrolling 1520x1026 windows (J1118): 4 and 5 ms give the
+    /// controlled window 66 frames a second and a 16 ms 95th-percentile encode (against 59.5 fps and
+    /// 20.6 ms with no priority) while the others keep about 34 fps. 6 ms is on the edge, and 8 ms or
+    /// more takes the controlled window to 76 fps and 11 ms but starves the others to under 4 fps.
+    static let holdMilliseconds = 5.0
     /// The longest another window waits for the lease, in milliseconds. About two frames at 120 Hz:
     /// a window that is not controlled is delayed by this much at most, so it still keeps moving.
     static let waitMilliseconds = 16.0
