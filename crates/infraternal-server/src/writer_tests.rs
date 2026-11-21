@@ -283,3 +283,434 @@ async fn resume_refusals_distinguish_connection_state_and_lost_token_rotation() 
         .unwrap();
     assert!(matches!(refused, sqlx::Error::Protocol(ref check) if check == "token_mismatch"));
 }
+
+/// A WAL database file under a fresh private directory, shaped like the server's
+/// own, so `Auth` puts its D379 writer in front of it (#562).
+async fn disk_database() -> (SqlitePool, String, [u8; 16], Auth, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("infraternal-claim-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.join("infraternal.sqlite"))
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap();
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    assert!(
+        auth.database().is_some(),
+        "an on-disk Auth owns a D379 pool"
+    );
+    let user = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES (?,'writer','writer','Writer',1,'unused-test-hash')")
+        .bind(&user).execute(&pool).await.unwrap();
+    let session = [7; 16];
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,input_acked_u64) VALUES (?,?,0,0,?)")
+        .bind(session.as_slice()).bind(&user).bind(77_u64.to_be_bytes().as_slice()).execute(&pool).await.unwrap();
+    (pool, user, session, auth, dir)
+}
+
+/// Claim through the D379 writer with the sqlx test's inputs.
+async fn claim_on_writer(
+    auth: &Auth,
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+    authority: Option<&str>,
+    limit: i64,
+) -> Result<(u64, u32), ()> {
+    crate::terminal_writer_claim::claim(
+        auth,
+        crate::terminal_writer_claim::Claim {
+            user,
+            connection,
+            stream,
+            session,
+            authority,
+            limit,
+        },
+    )
+    .await
+    .expect("an on-disk Auth has a writer")
+}
+
+/// The D379 claim keeps every rule of the sqlx `owned_writer`: a device gets
+/// its own identity and offset, a repeat claim returns the same row, another
+/// account or an unknown session is refused, the per-socket limit holds, ids
+/// never repeat after a socket is deleted, and a logged-out session is refused.
+#[tokio::test]
+async fn writer_claim_on_the_d379_writer_keeps_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let a = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let b = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (offset, first) = claim_on_writer(&auth, &user, &a.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        (offset, first % 2),
+        (0, 0),
+        "a fresh writer starts at zero, even id"
+    );
+    let (_, other_device) = claim_on_writer(&auth, &user, &b.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert_ne!(first, other_device);
+    let high = u64::MAX - 1;
+    sqlx::query(
+        "UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=1",
+    )
+    .bind(high.to_be_bytes().as_slice())
+    .bind(a.connection_id.as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        claim_on_writer(&auth, &user, &a.connection_id, 1, &session, None, 32).await,
+        Ok((high, first)),
+        "a repeat claim returns the stored offset and identity"
+    );
+    assert!(
+        claim_on_writer(
+            &auth,
+            "someone-else",
+            &a.connection_id,
+            1,
+            &session,
+            None,
+            32
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        claim_on_writer(&auth, &user, &a.connection_id, 1, &[8; 16], None, 32)
+            .await
+            .is_err()
+    );
+    claim_on_writer(&auth, &user, &a.connection_id, 3, &session, None, 2)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(&auth, &user, &a.connection_id, 5, &session, None, 2)
+            .await
+            .is_err(),
+        "the per-socket limit holds"
+    );
+    sqlx::query("DELETE FROM websocket_connections WHERE connection_id=?")
+        .bind(a.connection_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let c = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (_, later) = claim_on_writer(&auth, &user, &c.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert!(
+        later > first,
+        "a new writer reused a retired input identity"
+    );
+
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("claim-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'claim',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    claim_on_writer(&auth, &user, &c.connection_id, 3, &session, Some(&hash), 32)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(
+            &auth,
+            &user,
+            &c.connection_id,
+            5,
+            &session,
+            Some("not-a-session"),
+            32
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(&auth, &user, &c.connection_id, 3, &session, Some(&hash), 32)
+            .await
+            .is_err(),
+        "a logged-out session cannot claim"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Opening a terminal records its session row on the D379 writer under the
+/// sqlx statement's rules: only for a live login session, never twice for one
+/// id, never for a host the account does not own.
+#[tokio::test]
+async fn opened_session_row_is_recorded_on_the_d379_writer_under_the_sqlx_rules() {
+    let (pool, user, _session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("open-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'open',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let new = |id: u8, token: &'static str, host: Option<Vec<u8>>| {
+        crate::terminal_session_record::NewSession {
+            session_id: [id; 16],
+            user_id: &user,
+            host,
+            session_token: token,
+            now,
+        }
+    };
+    assert!(crate::terminal_session_record::record(&auth, &pool, new(1, "open-token", None)).await);
+    let row: (i64, i64) =
+        sqlx::query_as("SELECT created_at,last_seen FROM terminal_sessions WHERE id=?")
+            .bind([1_u8; 16].as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, (now, now));
+    assert!(
+        !crate::terminal_session_record::record(&auth, &pool, new(1, "open-token", None)).await,
+        "a duplicate id is refused"
+    );
+    assert!(
+        !crate::terminal_session_record::record(&auth, &pool, new(2, "other-token", None)).await,
+        "no live login session"
+    );
+    assert!(
+        !crate::terminal_session_record::record(
+            &auth,
+            &pool,
+            new(3, "open-token", Some(vec![9; 16]))
+        )
+        .await,
+        "unknown remote host"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions WHERE id IN (?,?)")
+        .bind([2_u8; 16].as_slice())
+        .bind([3_u8; 16].as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "refused opens leave no row");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// An exit notice recorded on the D379 writer follows the sqlx rules: it sets
+/// the status once, keeps the first closure time, refuses a conflicting status
+/// and a stale login session, and a non-exit event records nothing.
+#[tokio::test]
+async fn terminal_exit_on_the_d379_writer_keeps_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("exit-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'exit',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let exited = |status: i32, final_seq: u64| {
+        serde_json::to_vec(&serde_json::json!({"type":"terminal.exited","session_id":uuid::Uuid::from_bytes(session),"status":status,"final_seq":final_seq})).unwrap()
+    };
+    let record = |token: &'static str, cursor: u64, event: Vec<u8>| {
+        let (auth, pool, user) = (auth.clone(), pool.clone(), user.clone());
+        async move {
+            crate::terminal_exit::record_on_writer(
+                &auth, &pool, &user, token, &session, cursor, &event,
+            )
+            .await
+        }
+    };
+    assert_eq!(
+        record("exit-token", 9, br#"{"type":"terminal.output"}"#.to_vec()).await,
+        Ok(false)
+    );
+    assert_eq!(
+        record("exit-token", 9, exited(7, 8)).await,
+        Err(()),
+        "final_seq must equal the cursor"
+    );
+    assert_eq!(
+        record("other-token", 9, exited(7, 9)).await,
+        Err(()),
+        "no live login session"
+    );
+    assert_eq!(record("exit-token", 9, exited(7, 9)).await, Ok(true));
+    let first: (Option<i64>, Option<i32>) =
+        sqlx::query_as("SELECT closed_at,exit_status FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(first.0.is_some() && first.1 == Some(7));
+    assert_eq!(
+        record("exit-token", 9, exited(7, 9)).await,
+        Ok(true),
+        "a duplicate is accepted"
+    );
+    assert_eq!(
+        record("exit-token", 9, exited(8, 9)).await,
+        Err(()),
+        "a conflicting status cannot overwrite"
+    );
+    let again: (Option<i64>, Option<i32>) =
+        sqlx::query_as("SELECT closed_at,exit_status FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(again, first, "the first closure time and status stay");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The D379 branch of `terminal_input_ack::record` (#562): one transaction that
+/// advances the writer row and the session row together. It succeeds for the
+/// right stream and session; refuses a wrong stream, a wrong session, a
+/// backwards offset and a logged-out session; rolls the writer row back when
+/// the session row refuses; and leaves the signed legacy column alone for an
+/// offset above `i64::MAX`.
+#[tokio::test]
+async fn input_ack_on_the_d379_writer_is_one_transaction_with_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let token = "ack-token";
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'ack',?,?,1)")
+        .bind(crate::auth::hash(token)).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let connection = new_connection(&pool, &user, 0, None, None)
+        .await
+        .unwrap()
+        .connection_id;
+    claim_on_writer(&auth, &user, &connection, 1, &session, None, 32)
+        .await
+        .unwrap();
+    let ack = |stream: u32, session: [u8; 16], offset: u64, token: &'static str| {
+        let (auth, pool, user) = (auth.clone(), pool.clone(), user.clone());
+        async move {
+            crate::terminal_input_ack::record(
+                &auth,
+                &pool,
+                crate::terminal_input_ack::InputAck {
+                    connection_id: &connection,
+                    client_stream: stream,
+                    session_id: session,
+                    in_seq_acked: offset,
+                    user_id: &user,
+                    session_token: token,
+                    now: 4242,
+                },
+            )
+            .await
+        }
+    };
+    // (writer.input_acked, session.input_acked_u64, session.input_acked, session.last_seen)
+    let rows = || async {
+        let writer: Vec<u8> = sqlx::query_scalar(
+            "SELECT input_acked FROM terminal_writers WHERE connection_id=? AND client_stream=1",
+        )
+        .bind(connection.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let (unsigned, signed, seen): (Vec<u8>, i64, i64) = sqlx::query_as(
+            "SELECT input_acked_u64,input_acked,last_seen FROM terminal_sessions WHERE id=?",
+        )
+        .bind(session.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        (
+            u64::from_be_bytes(writer.try_into().unwrap()),
+            u64::from_be_bytes(unsigned.try_into().unwrap()),
+            signed,
+            seen,
+        )
+    };
+    let before = rows().await;
+    assert_eq!(before.0, 0);
+
+    assert!(
+        ack(1, session, 100, token).await,
+        "the right stream and session succeed"
+    );
+    assert_eq!(
+        rows().await,
+        (100, 100, 100, 4242),
+        "both rows moved together"
+    );
+
+    assert!(
+        !ack(3, session, 110, token).await,
+        "no writer on that stream"
+    );
+    assert!(
+        !ack(1, [8; 16], 110, token).await,
+        "not this writer's session"
+    );
+    assert!(
+        !ack(1, session, 90, token).await,
+        "an offset cannot move backwards"
+    );
+    assert_eq!(
+        rows().await,
+        (100, 100, 100, 4242),
+        "refusals change nothing"
+    );
+
+    // The session row refuses (another account owns it) after the writer row
+    // matched: the transaction rolls back, so the writer row stays at 100.
+    sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES ('other','o','o','O',0,'x')")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE terminal_sessions SET user_id='other' WHERE id=?")
+        .bind(session.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!ack(1, session, 120, token).await);
+    assert_eq!(
+        rows().await.0,
+        100,
+        "the writer row was rolled back with the session row"
+    );
+    sqlx::query("UPDATE terminal_sessions SET user_id=? WHERE id=?")
+        .bind(&user)
+        .bind(session.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Above i64::MAX the legacy signed column is left alone (the statement gets -1).
+    let high = u64::MAX - 1;
+    assert!(ack(1, session, high, token).await);
+    assert_eq!(
+        rows().await,
+        (high, high, 100, 4242),
+        "unsigned column moved, signed column kept"
+    );
+
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        !ack(1, session, u64::MAX, token).await,
+        "a logged-out session is refused"
+    );
+    assert_eq!(rows().await.0, high, "and rolled back");
+    let _ = std::fs::remove_dir_all(dir);
+}

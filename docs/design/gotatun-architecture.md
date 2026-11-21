@@ -186,11 +186,11 @@ Effects below separate measured source results from estimates for GotaTun. When 
 
 **What it is.** Put many delayed actions into shared timer buckets rather than creating one timer and wakeup per packet or flow.
 
-**Target and expected size.** It would target timer allocations and wakeups, not the measured crypto queue. In the examined fork, one device timer task loops over peers while timer state remains per peer; J88h did not identify timer work in the loaded tail. Expected p99 and throughput gain: zero until a profile says timers are hot.
+**Evidence and what was built (#260, J1077, J1111).** The timer evidence arrived: the device's timer task visited every configured peer every 250 ms, so idle cost grew with the peer count (J1077 table A: 134 wakeups/s and 6.7 ms CPU/s at 4,096 inert peers, against wireguard-go's 6.3 and 0.0). J1111 replaced the scan with a per-peer next-deadline min-heap (fork `device/timer_queue.rs`, `device/timer_task.rs`, `noise/timers/deadline.rs`), not a hashed wheel: at mesh peer counts one heap entry per peer is all that is needed. Each tunnel computes when `update_timers` can next act and reports that deadline only on the transitions that can make it earlier. The task sleeps until the earliest deadline, rounded up to the old 250 ms grid (so every WireGuard timer still fires within one tick after it is due), never longer than 1 s, and visits every peer in a 10 s safety sweep that counts misses. Packet timestamps use an event clock read once per packet run and rounded down to 250 ms. A property test runs random lossy scripts through the old poll and the new driver and requires identical packet logs. Measured on backup01: 6.3 wakeups/s and no measurable CPU at 4,096 inert peers; 54 → 20 wakeups/s and 2.3 → 0.4 ms CPU/s with 1,000 live peers at the 25 s keepalive. Loaded throughput and p99 are in the J1111 comments on #260.
 
-**Memory and ordering.** Per timed peer or flow, one timer node and bucket link; endpoint memory is proportional to active timers, not queued packet bytes. Timers do not reorder packets, but expiration must not cancel packets already handed to crypto.
+**Memory and ordering.** One heap item and map entry per peer, plus stale heap items that are discarded when they surface: about 0.45 KiB per inert peer measured. Timers do not reorder packets: a timer packet still takes a slot in the peer's ordered output lane.
 
-**Complexity, platform and foundation.** Low/medium if reusing the existing runtime timer; no new library is needed. A shared wheel can work on macOS. Do not build one as part of this performance roadmap without timer evidence.
+**What remains.** The keepalive traffic itself (D81) is now nearly all of the idle cost at scale. Batching keepalives onto one phase, and the product's own 250 ms endpoint scan (J1077 finding 3), are separate items.
 
 ## Ranked roadmap beyond J88h
 
@@ -216,7 +216,7 @@ Each cut declares one primary target before its hold. Keep a latency cut only if
 | 10 | **AF_XDP feasibility spike**, only if the NIC path dominates after crypto and queue costs fall. Targets CPU/Gbit and throughput. | Unknown on our hardware; zero-copy requires driver support. A 4,096 × 2 KiB UMEM is 8 MiB per endpoint before metadata. | No product cut until hardware zero-copy is verified and the prototype beats the socket path outside spread, meets p99/order requirements and stays inside the idle-memory guard. The owner chooses the BPF/XDP stack first. |
 | 11 | **Multi-buffer SIMD crypto**, only if parallel `ring` workers miss the throughput target. Targets throughput and CPU/Gbit, with p99 risk from batch wait. | No defensible speed estimate for WireGuard packet sizes. Intel IPsec MB has a ChaCha20-Poly1305 job API; `ring` exposes per-message calls, not a multi-message API. | First measure parallel `ring`. A second library needs owner approval. Compare 64/512/1,380-byte messages and full R4b p99/order/RSS; keep only if throughput improves outside spread, p99 does not regress, order is preserved and idle RSS stays within budget. |
 
-Do not add a timer wheel unless timers appear in a new profile. Do not spend an R4b hold repeating TUN/UDP offload work already present. NUMA is a later host-scale study, not a four-vCPU VM cut. Busy polling, SPSC rings and ECN/L4S stay conditional on the stage or path evidence stated above.
+Do not spend an R4b hold repeating TUN/UDP offload work already present. NUMA is a later host-scale study, not a four-vCPU VM cut. Busy polling, SPSC rings and ECN/L4S stay conditional on the stage or path evidence stated above.
 
 ### Optional quick probes
 

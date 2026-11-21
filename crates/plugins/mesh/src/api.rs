@@ -507,6 +507,8 @@ pub struct MeshService {
     updates: broadcast::Sender<MeshChange>,
     // Runtime liveness from the server's own device; never persisted (presence.rs, #236).
     presence: std::sync::Arc<crate::presence::Presence>,
+    // Whether the server's own node holds a delivered mesh configuration; presence polls only then (#562).
+    server_configured: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
     // Rotation drivers sleep until a deadline and wake only when a peer applies a view.
     rotation_updates: tokio::sync::watch::Sender<u64>,
     /// One admitted receipt finalizer per service; waiting workers remain cancelable.
@@ -556,6 +558,7 @@ impl MeshService {
             pool,
             updates,
             presence: std::sync::Arc::default(),
+            server_configured: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
             rotation_updates: tokio::sync::watch::Sender::new(0),
             receipt_finalizer: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             fresh_authority: None,
@@ -614,6 +617,23 @@ impl MeshService {
     /// Install the server's current reading of who is online; watchers wake only when it changed (#236).
     pub fn set_presence(&self, live: crate::presence::Live) {
         self.presence.replace(live);
+    }
+
+    /// Say whether the server's own node holds a delivered mesh configuration. The server's node worker
+    /// calls this whenever that changes, so presence polls only while the mesh has something to report (#562).
+    /// Watchers wake only on a change.
+    pub fn set_server_configured(&self, configured: bool) {
+        self.server_configured.send_if_modified(|current| {
+            let changed = *current != configured;
+            *current = configured;
+            changed
+        });
+    }
+
+    /// Watch whether the server's own node holds a mesh configuration (#562).
+    #[must_use]
+    pub fn subscribe_server_configured(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.server_configured.subscribe()
     }
 
     /// Watch presence transitions. They advance no revision; socket.rs resyncs only viewers who see a change.
@@ -994,6 +1014,11 @@ impl MeshService {
             .await
     }
 
+    /// `mesh.node.enroll`: an owner (with `MANAGE_NODES`) adds a remote machine's node with the public key it
+    /// was given, optionally bound to a host record. The node gets a fresh id from the allocation high-water
+    /// mark, never a reused one. A key that any other node already holds, as its current key or as a key it is
+    /// rotating to or away from, is refused with `Conflict` (#572, D166). Returns the new node id and the
+    /// state revision.
     async fn enroll_node(
         &self,
         actor: &str,
@@ -1027,6 +1052,13 @@ impl MeshService {
         .await
         .map_err(|error| map_sql_error(error))?
         .ok_or(MeshApiError::Conflict)?;
+        // Refuse a key another node holds, also as a rotation's previous key (#572, D166).
+        if crate::store::key_held_by_another_node(&mut tx, request.public_key.as_slice(), None)
+            .await
+            .map_err(|error| map_sql_error(error))?
+        {
+            return Err(MeshApiError::Conflict);
+        }
         sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us,dataplane_host) VALUES (?,?,?,NULL,NULL,?)")
             .bind(id)
             .bind(&request.name)

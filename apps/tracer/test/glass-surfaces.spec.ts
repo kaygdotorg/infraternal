@@ -51,10 +51,10 @@ for (const size of SIZES) {
               // line (the floor is solid over any picture; a sampled one only over a hard backdrop), glass otherwise.
               const paint = await paintOf(page, surface.selector);
               expect.soft(paint.shadowed, `${picture}: elements with a text shadow`).toEqual([]);
-              // Sampled pictures: solid over a hard backdrop, glass over a matching or middling one. The ⋯ menu mounts in the window, not wholly
-              // inside the picture, so it stays on the static floor (solid) and says nothing about the sampled glass; a split picture likewise.
+              // Sampled pictures: solid over a hard backdrop, glass over a matching or middling one. The ⋯ menu hangs over the window's edge, so
+              // it is solved for the picture and the page beside it together (#448, J1058); a split picture's answer depends on which half the card sees.
               if (pass === "floor" || mustBeSolid(scheme, picture)) { expect.soft(paint.alpha, `${picture}: solid fill`).toBe(1); expect.soft(paint.blur, `${picture}: solid has no blur`).toBe(0); }
-              else if (surface.id !== "menu" && picture !== "split") expect.soft(paint.alpha, `${picture}: stays glass`).toBeLessThan(1);
+              else if (picture !== "split") expect.soft(paint.alpha, `${picture}: stays glass`).toBeLessThan(1);
               const results = await measure(page, surface.selector);
               expect(results.length, "text runs found").toBeGreaterThan(0);
               if (results[0]!.ratio < LINE) writeFileSync(`${OUT}/low-${size.id}-${scheme}-${surface.id}-${picture}-${pass}-card${card}.png`, results.hidden);

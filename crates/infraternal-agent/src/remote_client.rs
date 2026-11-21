@@ -33,6 +33,9 @@ pub struct RemoteIdentity {
     pub https_system_roots: bool,
     /// Bound uid, checked against the running rootless infraternal agent.
     pub execution_uid: u32,
+    /// Newest server leaf this enrollment has accepted. Every direct dial
+    /// (QUIC, TCP/TLS, mesh and recovery) refuses an older one (#559).
+    pub server_leaf: std::sync::Arc<crate::server_leaf_floor::ServerLeafFloor>,
 }
 
 fn trace_attempt<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T> {
@@ -115,7 +118,8 @@ fn run_with_publishers<'a>(
             &identity.identity,
             &identity.roots,
             publisher,
-        );
+        )
+        .with_server_leaf(identity.server_leaf.clone());
         if let Some(rotation) = rotation {
             renewal.enable_identity_rotation(rotation)?;
         }
@@ -281,7 +285,7 @@ async fn run_inner(
     if identity.execution_uid != nix::unistd::Uid::effective().as_raw() {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    #[cfg(all(feature = "mesh", target_os = "linux"))]
+    #[cfg(all(feature = "mesh", any(target_os = "linux", target_os = "macos")))]
     if let Ok(path) = crate::sessions::state_path(state.clone()) {
         // Check the machine binding before transport, including recovery, so the link
         // supervisor cannot turn a persistent configuration error into reconnects.
@@ -405,7 +409,15 @@ async fn dial_preferred(
         // Start QUIC first, then race TCP after a short grace period. A
         // silent UDP path cannot add its full handshake timeout to TCP.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        remote_tls::dial(address, &identity.server_name, tls).await
+        let connection = remote_tls::dial(address, &identity.server_name, tls).await?;
+        // Dropping a refused connection closes it before any frame is sent.
+        identity.server_leaf.admit(
+            connection
+                .peer_leaf
+                .as_ref()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
+        )?;
+        Ok(connection)
     };
     tokio::pin!(quic, fallback);
     tokio::select! {
@@ -523,7 +535,9 @@ impl Channel for PrefixedControl {
     }
 }
 
-/// Dial the server over QUIC with this host's identity.
+/// Dial the server over QUIC with this host's identity, and refuse a server
+/// leaf older than the newest one this enrollment has accepted (#559) before
+/// any stream is opened.
 async fn quic_connect(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
@@ -531,7 +545,7 @@ async fn quic_connect(
     let address = identity
         .endpoint
         .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
-    tokio::time::timeout(
+    let connection = tokio::time::timeout(
         Duration::from_secs(5),
         endpoint
             .connect(address, &identity.server_name)
@@ -544,7 +558,12 @@ async fn quic_connect(
             io::Error::from(io::ErrorKind::PermissionDenied)
         }
         error => io::Error::other(error),
-    })
+    })?;
+    if let Err(error) = identity.server_leaf.admit_quic(&connection) {
+        connection.close(0u32.into(), b"");
+        return Err(error);
+    }
+    Ok(connection)
 }
 
 /// The Hello this agent sends, offering renewal and identity rotation when available.

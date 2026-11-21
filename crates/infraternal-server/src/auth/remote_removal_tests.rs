@@ -581,6 +581,241 @@ async fn pending_removal_describes_one_host_without_claiming_completion() {
     }
 }
 
+/// A changed report with one planted key, as the host would send it.
+fn changed_report(line: &str) -> crate::access_report::AccessReport {
+    use crate::access_report::{AccessFile, AccessReport, AccountReport, ChangeKind, State};
+    AccessReport {
+        state: State::Changed,
+        reason: None,
+        omitted_accounts: 0,
+        accounts: vec![AccountReport {
+            account: "deploy".to_owned(),
+            recorded_at: 1,
+            root_checks: infraternal_agent::access_files::root_check_names(),
+            state: State::Changed,
+            reason: None,
+            files: vec![AccessFile {
+                path: "~/.ssh/authorized_keys".to_owned(),
+                change: ChangeKind::Changed,
+                lines: vec![line.to_owned()],
+                note: None,
+            }],
+            ..AccountReport::default()
+        }],
+        warning: None,
+    }
+}
+
+/// Start a revocation of `host`'s person that leaves the host in place: its
+/// login cleanup waits for the host's receipt, and no removal exists (D398).
+async fn revoke_pending(f: &Fixture, host: Uuid) -> Uuid {
+    let person = Uuid::parse_str(&f.user).unwrap();
+    sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,?)")
+        .bind(host.as_bytes().as_slice())
+        .bind(person.to_string())
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    person
+}
+
+/// D398: revoking a person while the host stays puts the host's report in the
+/// owner's Inbox once the host confirms. A foreign receipt stores nothing, a
+/// repeated receipt replaces nothing, the owner dismisses it once, and a
+/// signed-out request is refused.
+#[tokio::test]
+async fn a_revoked_persons_report_waits_in_the_owners_inbox() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let waiting = |value: serde_json::Value| value["reports"].as_array().unwrap().len();
+    assert_eq!(
+        waiting(service.access_reports(&f.session, NOW).await.unwrap()),
+        0
+    );
+    let person = revoke_pending(&f, host).await;
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+    store
+        .confirm_login_cleanup_with_report(host, Uuid::new_v4(), Some(&changed_report("foreign")))
+        .await
+        .unwrap();
+    assert_eq!(
+        waiting(service.access_reports(&f.session, NOW).await.unwrap()),
+        0,
+        "a foreign receipt stored a report"
+    );
+    store
+        .confirm_login_cleanup_with_report(
+            host,
+            person,
+            Some(&changed_report("ssh-ed25519 AAAAleft left")),
+        )
+        .await
+        .unwrap();
+    let value = service.access_reports(&f.session, NOW).await.unwrap();
+    assert_eq!(value["more"], 0);
+    let shown = &value["reports"][0];
+    assert_eq!(shown["host_id"], json!(host));
+    assert_eq!(shown["person_id"], json!(person));
+    // J323 (84303): the owner sees who, not only an id.
+    let expected: String = sqlx::query_scalar(
+        "SELECT COALESCE(NULLIF(display_name,''), NULLIF(name,''), username) FROM users WHERE id=?",
+    )
+    .bind(person.to_string())
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert_eq!(shown["person_name"], json!(expected));
+    assert_eq!(shown["outcome"], "changed");
+    assert!(
+        shown["headline"].as_str().unwrap().contains("changed"),
+        "{shown}"
+    );
+    let lines: Vec<&str> = shown["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| line.as_str().unwrap())
+        .collect();
+    assert!(lines.contains(&"  ~/.ssh/authorized_keys"), "{lines:?}");
+    assert!(
+        lines.contains(&"    + ssh-ed25519 AAAAleft left"),
+        "{lines:?}"
+    );
+    assert!(shown.get("report").is_none(), "the raw report was sent");
+    store
+        .confirm_login_cleanup_with_report(host, person, Some(&changed_report("replayed")))
+        .await
+        .unwrap();
+    assert_eq!(
+        service.access_reports(&f.session, NOW).await.unwrap(),
+        value,
+        "a duplicate receipt replaced the report"
+    );
+    // Dismissing: not another host's, then once, then never again.
+    assert!(
+        !service
+            .dismiss_access_report(&f.session, Uuid::new_v4(), person, NOW)
+            .await
+            .unwrap()
+    );
+    assert!(
+        service
+            .dismiss_access_report(&f.session, host, person, NOW)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !service
+            .dismiss_access_report(&f.session, host, person, NOW)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        waiting(service.access_reports(&f.session, NOW).await.unwrap()),
+        0
+    );
+    assert!(service.access_reports("signed-out", NOW).await.is_err());
+}
+
+/// D398 (owner, 2026-11-21): removing a host deletes infraternal and its state
+/// and nothing else, so it keeps no report: not for a removal that uninstalls,
+/// and not for one that retains the install. The host's reply is ignored.
+#[tokio::test]
+async fn a_host_removal_keeps_no_access_report() {
+    for uninstall in [true, false] {
+        let f = fixture().await;
+        let host = owned_host(&f).await;
+        let service = removal(&f);
+        let start = service
+            .start(&f.session, host, uninstall, NOW)
+            .await
+            .unwrap();
+        let review = str_field(&start, "review").to_owned();
+        service
+            .finish_host(&f.session, host, &review, NOW)
+            .await
+            .unwrap();
+        let person = Uuid::parse_str(&f.user).unwrap();
+        let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+        assert!(
+            store.removal_requested(host).await.unwrap(),
+            "the removal left no record"
+        );
+        store
+            .confirm_login_cleanup_with_report(
+                host,
+                person,
+                Some(&changed_report("ssh-ed25519 AAAAleft left")),
+            )
+            .await
+            .unwrap();
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_access_reports")
+            .fetch_one(&f.auth.pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 0, "a removal kept a report (uninstall={uninstall})");
+        assert_eq!(
+            service.access_reports(&f.session, NOW).await.unwrap()["reports"],
+            json!([])
+        );
+    }
+}
+
+/// D398: only the server owner reads the Inbox reports, and the admin window
+/// is not needed: a revoked host cannot start the passkey renewal it would
+/// ask for (#498), and a signed-in owner already reads these files by
+/// opening a terminal. A stale window still reads; a non-owner does not.
+#[tokio::test]
+async fn the_inbox_is_for_the_owner_and_needs_no_admin_window() {
+    let f = fixture().await;
+    let service = removal(&f);
+    assert!(service.access_reports(&f.session, NOW + 899).await.is_ok());
+    assert!(
+        service.access_reports(&f.session, NOW + 900).await.is_ok(),
+        "an expired admin window refused the Inbox"
+    );
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert!(matches!(
+        service.access_reports(&f.session, NOW).await,
+        Err(crate::auth::Error::Denied)
+    ));
+}
+
+/// With more reports than the Inbox shows, the newest come first and the rest
+/// are counted.
+#[tokio::test]
+async fn waiting_reports_beyond_the_shown_ones_are_counted() {
+    use crate::access_report::{AccessReport, AccountReport, State};
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let service = removal(&f);
+    let mut transaction = f.auth.pool.acquire().await.unwrap();
+    let clean = AccessReport {
+        state: State::Unchanged,
+        accounts: vec![AccountReport {
+            account: "new".to_owned(),
+            state: State::Unchanged,
+            ..AccountReport::default()
+        }],
+        ..AccessReport::default()
+    };
+    for index in 0..21 {
+        crate::access_report::store(&mut transaction, host, Uuid::new_v4(), &clean, 100 + index)
+            .await
+            .unwrap();
+    }
+    drop(transaction);
+    let value = service.access_reports(&f.session, NOW).await.unwrap();
+    assert_eq!(value["reports"].as_array().unwrap().len(), 16);
+    assert_eq!(value["more"], 5);
+    assert_eq!(value["reports"][0]["recorded_at"], 120, "newest first");
+}
+
 /// A removed host with its original removal record and a 14-minute-old admin approval.
 async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
     let host = owned_host(f).await;
@@ -737,11 +972,13 @@ async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
             }
             _ => {}
         }
-        assert_eq!(
-            forget_request(&f, host).await,
-            axum::http::StatusCode::FORBIDDEN,
-            "{rule}"
-        );
+        // A closed admin window is the one refusal the page can fix with a passkey tap (#563).
+        let expected = if rule == "expired" {
+            axum::http::StatusCode::PRECONDITION_REQUIRED
+        } else {
+            axum::http::StatusCode::FORBIDDEN
+        };
+        assert_eq!(forget_request(&f, host).await, expected, "{rule}");
         assert!(live(&f, host).await, "{rule}");
     }
 }
@@ -772,6 +1009,30 @@ async fn removal_start_status(f: &Fixture, host: Uuid) -> axum::http::StatusCode
                 .header("content-type", "application/json")
                 .header("cookie", format!("__Host-infraternal={}", f.session))
                 .body(axum::body::Body::from(json!({"host_id":host}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+/// POST `payload` to the browser removal router at `path` as the fixture's
+/// same-origin session, returning only the status code.
+async fn owner_post_status(
+    f: &Fixture,
+    path: &str,
+    payload: serde_json::Value,
+) -> axum::http::StatusCode {
+    use tower::ServiceExt;
+    crate::remote_removal_http::router(f.auth.clone(), removal(f))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .header("cookie", format!("__Host-infraternal={}", f.session))
+                .body(axum::body::Body::from(payload.to_string()))
                 .unwrap(),
         )
         .await
@@ -1111,4 +1372,40 @@ async fn concurrent_second_removal_returns_existing_pending_response() {
         removals, 1,
         "the second request cannot publish another removal"
     );
+}
+
+/// The Inbox route (D398) answers an expired admin window with the report list
+/// (no passkey tap is needed), a non-owner 403 and an ended session 401; the
+/// earlier per-host report route is gone.
+#[tokio::test]
+async fn the_inbox_route_answers_by_who_asks() {
+    let f = fixture().await;
+    let host = owned_host(&f).await;
+    let inbox = || owner_post_status(&f, "/remote/hosts/access-reports", json!({}));
+    sqlx::query("UPDATE sessions SET fresh=1")
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(inbox().await, axum::http::StatusCode::OK);
+    assert_eq!(
+        owner_post_status(&f, "/remote/hosts/access-report", json!({"host_id":host})).await,
+        axum::http::StatusCode::NOT_FOUND,
+        "the per-host report route is still mounted"
+    );
+    sqlx::query("UPDATE users SET owner=0 WHERE id=?")
+        .bind(&f.user)
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        inbox().await,
+        axum::http::StatusCode::FORBIDDEN,
+        "a non-owner must not read the Inbox"
+    );
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(crate::auth::hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(inbox().await, axum::http::StatusCode::UNAUTHORIZED);
 }

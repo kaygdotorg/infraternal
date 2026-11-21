@@ -26,8 +26,12 @@ export type StreamState =
   | { kind: "paused" }
   /** The connection to infraternal dropped; the stream attaches again by itself. */
   | { kind: "reconnecting" }
-  /** The app's window is gone from the machine (the app quit or the window closed). */
-  | { kind: "closed" }
+  /**
+   * The app's window is gone from the machine (the app quit or the window closed). `why` is set when the machine said
+   * something more specific: `console-user-changed` means the person at the Mac's screen changed, so the machine ended
+   * the stream although the app is still open.
+   */
+  | { kind: "closed"; why?: "console-user-changed" }
   /** macOS has not allowed what streaming needs. `what` is the permission's name in System Settings. */
   | { kind: "permission"; what: "Screen Recording" | "Accessibility" }
   /** This browser cannot decode the stream. */
@@ -85,6 +89,8 @@ export function describe(state: StreamState, ctx: { machine: string; app: string
       // The dot turns (a connecting arc) and the picture dims; the pill's own tooltip says the link is resuming.
       return { dot: "connecting", keepPicture: true, dim: true };
     case "closed":
+      // One line, no blame (TASTE: messages say what happens). The app is still open there; only the stream ended.
+      if (state.why === "console-user-changed") return { dot: "offline", keepPicture: false, card: { mark: "window", title: `The person at ${ctx.machine} changed`, hint: ctx.screen ? "Open the screen again to see it." : `${ctx.app} is still open on ${ctx.machine}. Open it again to see it.`, action: { label: "Close window", id: "close" } } };
       return { dot: "offline", keepPicture: false, card: { mark: "window", title: ctx.screen ? "The screen is not available" : `${ctx.app} was closed`, hint: ctx.screen ? `${ctx.machine} stopped sharing it.` : `The window is gone from ${ctx.machine}.`, action: { label: "Close window", id: "close" } } };
     case "permission":
       return { dot: "offline", keepPicture: false, card: { mark: "lock", title: `${ctx.machine} needs permission`, hint: permissionHint(state.what, ctx.machine), action: { label: "Try again", id: "retry" } } };

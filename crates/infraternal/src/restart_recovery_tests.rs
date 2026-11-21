@@ -206,7 +206,7 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
         });
         let signed = crate::restart_binary::fixture::Signed::image(directory.join("candidate"));
         let admitted = signed.open().unwrap();
-        let mut replacement = Replacement::new(admitted, Some(source.as_ref())).unwrap();
+        let mut replacement = Replacement::new(admitted, Some(source.clone())).unwrap();
         // Mutation after admission must not change the successful execution image.
         std::fs::write(&signed.path, b"changed after verification").unwrap();
         if std::env::var("INFRATERNAL_RECOVERY_CASE").unwrap() == "late" {
@@ -298,4 +298,81 @@ fn verified_exec_and_late_refusal_preserve_listener_and_ca() {
             String::from_utf8_lossy(&output.stdout)
         );
     }
+}
+
+/// Open a signed copy of this test executable, in its own fixture directory, flagged `warm`.
+///
+/// Warmth normally needs a root-owned release image; the export logic reads only the flag. The
+/// directory must outlive the image, so both are returned.
+#[cfg(target_os = "linux")]
+fn fixture_image(
+    name: &str,
+    warm: bool,
+) -> (
+    crate::restart_binary::fixture::Directory,
+    crate::restart_binary::Opened,
+) {
+    let directory = crate::restart_binary::fixture::Directory::new();
+    let mut image = crate::restart_binary::fixture::Signed::image(directory.0.join(name))
+        .open()
+        .unwrap();
+    image.warm = warm;
+    (directory, image)
+}
+
+/// An unlock that finishes while a warm restart waits for quiescence reaches the successor.
+///
+/// J1083's audit on #559 found that the CA was exported when the restart request arrived, so an
+/// administrator's unlock landing in the shutdown window (up to 4 s, plus the Mesh mirror) answered
+/// "unlocked" while the successor started cold. Here the request arrives while the CA is locked,
+/// the unlock lands afterwards, and both exec frames must carry the unlocked key (D217).
+#[cfg(target_os = "linux")]
+#[test]
+fn unlock_during_quiescence_reaches_the_warm_successor() {
+    use std::io::Read as _;
+
+    let (material, issuer) = material();
+    let source = Arc::new(MemoryCaSource::cold_start_with_system_https(issuer.clone()));
+    let (_successor_directory, binary) = fixture_image("successor", true);
+    let (_recovery_directory, recovery) = fixture_image("recovery", true);
+    let replacement = Replacement::with_recovery(binary, recovery, Some(source.clone()));
+    assert!(
+        !replacement.warm_at_request,
+        "the reply reflects the lock at request time"
+    );
+    assert!(
+        replacement.input.is_none() && replacement.recovery_input.is_none(),
+        "nothing is exported before quiescence"
+    );
+
+    // The administrator's unlock completes while the runtime is shutting down.
+    infraternal_server::ca_bootstrap::install(&source, material).unwrap();
+
+    for image in [&replacement.binary, &replacement.recovery] {
+        let frame = Replacement::export_ca(replacement.source.as_ref(), image)
+            .expect("an unlock before exec must produce a warm frame");
+        let mut bytes = Vec::new();
+        (&frame).read_to_end(&mut bytes).unwrap();
+        let received = infraternal_server::ca_handoff::parse(&bytes).unwrap();
+        // The frame's key must install against the same retained issuer, as the successor does.
+        let successor = Arc::new(MemoryCaSource::cold_start_with_system_https(issuer.clone()));
+        infraternal_server::ca_bootstrap::install(&successor, received).unwrap();
+        assert!(successor.load().is_ok());
+    }
+}
+
+/// A cold-only image never receives CA material, even from an unlocked source (D217).
+#[cfg(target_os = "linux")]
+#[test]
+fn cold_image_never_receives_a_ca_frame() {
+    let (material, issuer) = material();
+    let source = Arc::new(MemoryCaSource::cold_start_with_system_https(issuer));
+    infraternal_server::ca_bootstrap::install(&source, material).unwrap();
+    let (_successor_directory, binary) = fixture_image("successor", false);
+    let (_recovery_directory, recovery) = fixture_image("recovery", true);
+    let replacement = Replacement::with_recovery(binary, recovery, Some(source));
+    assert!(!replacement.warm_at_request);
+    assert!(Replacement::export_ca(replacement.source.as_ref(), &replacement.binary).is_none());
+    // The recovery image is still warm-capable, so it alone gets a frame.
+    assert!(Replacement::export_ca(replacement.source.as_ref(), &replacement.recovery).is_some());
 }

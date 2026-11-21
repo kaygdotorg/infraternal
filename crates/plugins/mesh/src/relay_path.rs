@@ -15,15 +15,32 @@
 //! shim's address from that authenticated initiation. Moving the endpoint
 //! before a link exists would send initiations into a shim that drops them.
 //!
-//! Relay choice in this slice: every node gets the same ordered relay list.
-//! A pair without a link asks every live relay; when links exist on several,
-//! both ends keep the lowest-indexed one and withdraw the others. Both ends
-//! see the same links (the relay announces a link to both at once), so they
-//! settle on the same relay without talking to each other. A linked pair
-//! stays where it is until that relay is lost, then asks every live relay
-//! again; nothing moves back, so a recovering relay causes no switch.
-//! Ranking by measured end-to-end RTT (D185) and the #201 selector replace
-//! the static order in later slices.
+//! Relay choice (#201, D185, D313 Q5): every node gets the same relay list and keeps
+//! one connection to each. A relayed pair asks every live relay for a link and keeps
+//! every link it gets, so a second relay is always ready for a make-before-break
+//! move. The first link that comes up carries the pair at once; nothing waits for a
+//! measurement. While a pair has two or more links, it measures each one end to end
+//! with a 12-byte probe DATAGRAM on the link itself (see [`probe_frame`]): the peer's
+//! shim answers it on the same link, so the round trip covers both legs and the
+//! relay's own queueing, exactly what the pair's packets see. Both ends measure the
+//! same quantity, so they settle on the same relay without a new relay message; for
+//! the moment they disagree, either relay delivers, because a node accepts its peer's
+//! packets on every link. The pair moves only on the shared rule in
+//! [`infraternal_mesh::path_choice`]: a sustained win of at least max(5 ms, 15 %),
+//! at most once per 10 s. The one exception is the first measured choice: when every
+//! link has its first sample, a link that beats the unmeasured default (the lowest
+//! index) by the margin takes over at once. A lost relay is left at once for the best
+//! remaining link.
+//!
+//! Probing never runs on a timer. A probe round goes out only from the send path,
+//! after a packet of the pair's own traffic, at most once per [`PROBE_INTERVAL`], and
+//! only when there is a choice (two links or more). An idle pair, or one with a
+//! single relay, sends nothing extra and is never woken by this module (D81).
+//!
+//! A relay sees the probe's token and could answer for the peer to look faster than
+//! it is. It cannot look faster than its own leg, which this node's QUIC connection
+//! to it measures independently; relays already hold the deployment's server-purpose
+//! certificate. Authenticating probes per pair is a later hardening step.
 
 use crate::{
     dataplane,
@@ -31,6 +48,7 @@ use crate::{
     wireguard,
 };
 use bytes::{BufMut, BytesMut};
+use infraternal_mesh::path_choice::{Path, Samples, Selector, first_choice};
 use infraternal_plugin_relay::{
     client::{Client, Notices},
     probe::{self, ProbeKey},
@@ -64,6 +82,19 @@ const CONNECT_RECENT: Duration = Duration::from_millis(750);
 const RELAY_MTU_POLL: Duration = Duration::from_secs(1);
 /// How long a new link may still change before the session start (`settle`).
 const SETTLE: Duration = Duration::from_millis(25);
+/// Least time between two probe rounds of one pair. Rounds ride on the pair's traffic, so
+/// this caps probe cost at one small DATAGRAM per link per second while the pair is busy.
+const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// A link probe unanswered for this long counts as a sample of this round trip, so a link
+/// that silently stopped forwarding loses the comparison instead of keeping its old samples.
+const PROBE_LOST: Duration = Duration::from_secs(2);
+/// First payload byte of a link probe. `WireGuard` message types are 1–4 (little-endian, so
+/// the first byte), so a probe can never be mistaken for ciphertext.
+const PING: u8 = 0xF0;
+/// First payload byte of the answer to a link probe; like [`PING`], never a `WireGuard` type.
+const PONG: u8 = 0xF1;
+/// A link probe after the link id: kind, three zero bytes, a big-endian 64-bit token.
+const PROBE_LEN: usize = 12;
 /// Probe retransmissions after the first send (#220 design §2: 250/750 ms).
 const PROBE_WAITS: [Duration; 3] = [
     Duration::from_millis(250),
@@ -155,6 +186,14 @@ pub struct Stats {
     pub unlinked: u64,
     /// Packets larger than the relay connection's current DATAGRAM size.
     pub too_large: u64,
+    /// Link probes this node sent to measure its relayed pairs' paths.
+    pub probes_sent: u64,
+    /// Peers' link probes this node answered.
+    pub probes_answered: u64,
+    /// Answers to this node's own probes that matched an outstanding probe.
+    pub probe_answers: u64,
+    /// Pairs moved to a measurably faster relay (failovers are not counted).
+    pub switches: u64,
     /// Incoming relay datagrams inspected by the namespace fixture.
     #[cfg(feature = "test-support")]
     pub inbound_datagrams: u64,
@@ -175,12 +214,17 @@ pub struct Stats {
     pub receive_errors: u64,
 }
 
+/// The live counters behind [`Stats`], updated lock-free from the data path.
 #[derive(Default)]
 struct Counters {
     sent: AtomicU64,
     received: AtomicU64,
     unlinked: AtomicU64,
     too_large: AtomicU64,
+    probes_sent: AtomicU64,
+    probes_answered: AtomicU64,
+    probe_answers: AtomicU64,
+    switches: AtomicU64,
     #[cfg(feature = "test-support")]
     inbound_datagrams: AtomicU64,
     #[cfg(feature = "test-support")]
@@ -221,8 +265,16 @@ struct Peer {
     active: RwLock<Option<(Arc<Live>, LinkId)>>,
     /// Limits concurrent route refreshes after an oversized relay packet.
     refreshing_route_mtu: std::sync::atomic::AtomicBool,
+    /// Milliseconds since [`Shared::epoch`] before which no probe round starts. Read on every
+    /// sent packet without taking `state`, so the send path stays lock-free between rounds.
+    next_round_ms: AtomicU64,
+    /// Serializes publication of `state.active` to `active` and the route (see [`publish`]).
+    publishing: tokio::sync::Mutex<()>,
 }
 
+/// One relayed pair's links, requests, measurements and choice, behind `Peer::state`.
+///
+/// Lock order: this state before `Peer::route_mtu_generation`, everywhere.
 #[derive(Default)]
 struct PeerState {
     /// Per relay index: the link there, and whether a request is outstanding.
@@ -230,8 +282,126 @@ struct PeerState {
     requested: Vec<bool>,
     /// The relay index and link id the data path uses.
     active: Option<(usize, LinkId)>,
+    /// Per relay index: this pair's end-to-end round trips through the link there. Cleared
+    /// whenever that link changes, so samples always describe the current link.
+    rtt: Vec<Samples>,
+    /// Per relay index: the outstanding probe's token and send time.
+    probing: Vec<Option<(u64, Duration)>>,
+    /// The measured rule's view of `active` and its dwell clock.
+    selector: Selector,
+    /// Whether the first measured choice was made since the pair last had nothing measured
+    /// (see [`PeerState::first_measured`]).
+    decided: bool,
 }
 
+impl PeerState {
+    /// Fresh state for a pair over `relays` relays: no link, no request, no samples.
+    fn new(relays: usize) -> Self {
+        Self {
+            links: vec![None; relays],
+            requested: vec![false; relays],
+            active: None,
+            rtt: vec![Samples::default(); relays],
+            probing: vec![None; relays],
+            selector: Selector::default(),
+            decided: false,
+        }
+    }
+
+    /// Whether any link of the pair has a round-trip sample.
+    fn measured(&self) -> bool {
+        self.rtt.iter().any(|samples| !samples.is_empty())
+    }
+
+    /// Once every link has its first sample, make the first measured choice: leave the
+    /// unmeasured default (the lowest index) at once for a link that beats it by the margin
+    /// ([`first_choice`]). Returns `true` when `active` moved; the caller publishes.
+    ///
+    /// Without this a pair whose default relay is far waits for a full sustained window, and
+    /// J1105's first perf run showed why that hurts: the near relay linked first, the default
+    /// moved the pair to the far one, and keys paid 300 ms for 10 s. With equal links the
+    /// default stays, so both ends of a pair keep agreeing on it.
+    fn first_measured(&mut self, now: Duration) -> bool {
+        if self.decided {
+            return false;
+        }
+        let linked: Vec<(usize, LinkId, Duration)> = self
+            .links
+            .iter()
+            .enumerate()
+            .filter_map(|(index, link)| link.map(|id| (index, id)))
+            .map(|(index, id)| (index, id, self.rtt[index].median()))
+            .map_while(|(index, id, rtt)| rtt.map(|rtt| (index, id, rtt)))
+            .collect();
+        if linked.len() != self.links.iter().flatten().count() {
+            return false;
+        }
+        self.decided = true;
+        let Some((current, _)) = self.active else {
+            return false;
+        };
+        let Some(&(_, _, current_rtt)) = linked.iter().find(|&&(index, _, _)| index == current)
+        else {
+            return false;
+        };
+        let Some(&(best, id, best_rtt)) =
+            linked.iter().min_by_key(|&&(index, _, rtt)| (rtt, index))
+        else {
+            return false;
+        };
+        if best == current || !first_choice(Path::Relay(best), best_rtt, current_rtt) {
+            return false;
+        }
+        self.active = Some((best, id));
+        self.selector.install(Some(Path::Relay(best)), now);
+        true
+    }
+
+    /// Record that relay `index`'s link changed: its samples and probe described the old one.
+    fn link_changed(&mut self, index: usize) {
+        self.rtt[index].clear();
+        self.probing[index] = None;
+    }
+
+    /// The link a pair without a usable active link should take: the lowest measured median,
+    /// unmeasured links after measured ones, then the lowest index (the old fixed order).
+    fn best_link(&self) -> Option<(usize, LinkId)> {
+        self.links
+            .iter()
+            .enumerate()
+            .filter_map(|(index, link)| link.map(|id| (index, id)))
+            .min_by_key(|&(index, _)| (self.rtt[index].median().unwrap_or(Duration::MAX), index))
+    }
+
+    /// Ask the measured rule whether a faster link should carry the pair, and move `active`
+    /// there if so. The caller holds the state lock and publishes when this returns `true`.
+    fn choose(&mut self, now: Duration) -> bool {
+        let Self {
+            links,
+            rtt,
+            selector,
+            active,
+            ..
+        } = self;
+        let linked = links
+            .iter()
+            .zip(rtt.iter())
+            .enumerate()
+            .filter(|(_, (link, _))| link.is_some())
+            .map(|(index, (_, samples))| (Path::Relay(index), samples));
+        let Some(Path::Relay(index)) = selector.choose(now, linked) else {
+            return false;
+        };
+        let Some(id) = links[index] else {
+            return false;
+        };
+        *active = Some((index, id));
+        true
+    }
+}
+
+/// What every task of one node's relay paths shares: identity, relay connections, peers,
+/// counters and the clock the path rule reads.
 struct Shared {
     /// This node's host id; it decides which end of a pair starts a session.
     local: HostId,
@@ -243,6 +413,17 @@ struct Shared {
     peers: RwLock<HashMap<HostId, Arc<Peer>>>,
     events: mpsc::Sender<Event>,
     counters: Counters,
+    /// The zero of the monotonic clock the path rule reads ([`path_choice`](infraternal_mesh::path_choice)).
+    epoch: Instant,
+    /// Source of probe tokens. Tokens only match answers to probes; they are not secret.
+    tokens: AtomicU64,
+}
+
+impl Shared {
+    /// Monotonic time since this node's relay paths started.
+    fn now(&self) -> Duration {
+        self.epoch.elapsed()
+    }
 }
 
 fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -328,6 +509,8 @@ impl RelayPaths {
             peers: RwLock::new(HashMap::new()),
             events,
             counters: Counters::default(),
+            epoch: Instant::now(),
+            tokens: AtomicU64::new(token_seed()),
         });
         let drivers = (0..shared.relays.len())
             .map(|index| tokio::spawn(drive(shared.clone(), index)))
@@ -376,13 +559,11 @@ impl RelayPaths {
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
-            state: Mutex::new(PeerState {
-                links: vec![None; relays],
-                requested: vec![false; relays],
-                active: None,
-            }),
+            state: Mutex::new(PeerState::new(relays)),
             active: RwLock::new(None),
             refreshing_route_mtu: std::sync::atomic::AtomicBool::new(false),
+            next_round_ms: AtomicU64::new(0),
+            publishing: tokio::sync::Mutex::new(()),
         });
         write(&self.shared.peers).insert(peer, shim.clone());
         let task = tokio::spawn(outbound(self.shared.clone(), shim.clone()));
@@ -421,6 +602,24 @@ impl RelayPaths {
             .and_then(|shim| lock(&shim.state).active.map(|(index, _)| index))
     }
 
+    /// The median end-to-end round trip of `peer`'s link on each relay, by relay index:
+    /// `None` where it has no link or no answered probe yet. For diagnostics and fixtures.
+    #[must_use]
+    pub fn rtt(&self, peer: HostId) -> Vec<Option<Duration>> {
+        read(&self.shared.peers)
+            .get(&peer)
+            .map(|shim| {
+                let state = lock(&shim.state);
+                state
+                    .links
+                    .iter()
+                    .zip(&state.rtt)
+                    .map(|(link, samples)| link.and(samples.median()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Ask relay `index` which public address it sees for this node's
     /// `WireGuard` port, through `observer`.
     /// # Errors
@@ -447,6 +646,10 @@ impl RelayPaths {
             received: counters.received.load(Ordering::Relaxed),
             unlinked: counters.unlinked.load(Ordering::Relaxed),
             too_large: counters.too_large.load(Ordering::Relaxed),
+            probes_sent: counters.probes_sent.load(Ordering::Relaxed),
+            probes_answered: counters.probes_answered.load(Ordering::Relaxed),
+            probe_answers: counters.probe_answers.load(Ordering::Relaxed),
+            switches: counters.switches.load(Ordering::Relaxed),
             #[cfg(feature = "test-support")]
             inbound_datagrams: counters.inbound_datagrams.load(Ordering::Relaxed),
             #[cfg(feature = "test-support")]
@@ -545,6 +748,7 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
         match live.client.connection().send_datagram(buffer.freeze()) {
             Ok(()) => {
                 shared.counters.sent.fetch_add(1, Ordering::Relaxed);
+                probe_round(&shared, &peer);
             }
             Err(quinn::SendDatagramError::TooLarge) => {
                 shared.counters.too_large.fetch_add(1, Ordering::Relaxed);
@@ -571,7 +775,7 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
             Err(_) => {
                 shared.counters.unlinked.fetch_add(1, Ordering::Relaxed);
             }
-        };
+        }
     }
 }
 
@@ -615,6 +819,25 @@ async fn inbound(shared: Arc<Shared>, live: Arc<Live>) {
                 .fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        if let Some((kind, token)) = parse_probe(payload) {
+            if kind == PING {
+                // Answer on the same link, so the round trip is this relay's both ways.
+                if live
+                    .client
+                    .connection()
+                    .send_datagram(probe_frame(id, PONG, token))
+                    .is_ok()
+                {
+                    shared
+                        .counters
+                        .probes_answered
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            } else {
+                answered(&shared, &peer, live.index, id, token);
+            }
+            continue;
+        }
         // A full loopback buffer drops the packet, as a congested path would.
         if peer.socket.try_send(payload).is_ok() {
             shared.counters.received.fetch_add(1, Ordering::Relaxed);
@@ -628,7 +851,149 @@ async fn inbound(shared: Arc<Shared>, live: Arc<Live>) {
     }
 }
 
-/// Ask every live relay where this peer has no request yet, if it has no link.
+/// A start value for probe tokens that differs between runs; tokens need not be secret.
+fn token_seed() -> u64 {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    since.as_secs().rotate_left(32)
+        ^ u64::from(since.subsec_nanos())
+        ^ u64::from(std::process::id())
+}
+
+/// One link probe DATAGRAM: the link id, then `kind` ([`PING`] or [`PONG`]), three zero
+/// bytes and the token, all big-endian. The relay forwards it like any other frame.
+fn probe_frame(id: LinkId, kind: u8, token: u64) -> bytes::Bytes {
+    let mut frame = BytesMut::with_capacity(wire::HEADER + PROBE_LEN);
+    frame.put_u32(id.0);
+    frame.put_u8(kind);
+    frame.put_bytes(0, 3);
+    frame.put_u64(token);
+    frame.freeze()
+}
+
+/// The kind and token of a link probe payload (after the link id), or `None` for anything
+/// else, which is `WireGuard` ciphertext for the engine to authenticate.
+fn parse_probe(payload: &[u8]) -> Option<(u8, u64)> {
+    let probe: &[u8; PROBE_LEN] = payload.try_into().ok()?;
+    let kind = probe[0];
+    ((kind == PING || kind == PONG) && probe[1..4] == [0; 3]).then(|| {
+        (
+            kind,
+            u64::from_be_bytes(probe[4..].try_into().unwrap_or_default()),
+        )
+    })
+}
+
+/// Whole milliseconds of a monotonic time, for the lock-free round gate.
+fn millis(time: Duration) -> u64 {
+    u64::try_from(time.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// After one of `peer`'s packets went out: start a probe round if one is due and the pair has
+/// a choice of links. This is the only place probes start, so an idle pair sends none.
+///
+/// Each linked relay gets one probe unless its previous one is still in flight and younger
+/// than [`PROBE_LOST`]; an older one is recorded as a [`PROBE_LOST`] sample first, which may
+/// move the pair off a link that stopped answering.
+fn probe_round(shared: &Arc<Shared>, peer: &Arc<Peer>) {
+    let now = shared.now();
+    let now_ms = millis(now);
+    if now_ms < peer.next_round_ms.load(Ordering::Relaxed) {
+        return;
+    }
+    peer.next_round_ms.store(
+        now_ms.saturating_add(millis(PROBE_INTERVAL)),
+        Ordering::Relaxed,
+    );
+    let (probes, moved) = {
+        let mut state = lock(&peer.state);
+        if state.links.iter().flatten().count() < 2 {
+            return;
+        }
+        let mut probes = Vec::new();
+        for index in 0..state.links.len() {
+            let Some(id) = state.links[index] else {
+                continue;
+            };
+            if let Some((_, sent)) = state.probing[index] {
+                if now.saturating_sub(sent) < PROBE_LOST {
+                    continue;
+                }
+                state.rtt[index].record(sent + PROBE_LOST, PROBE_LOST);
+            }
+            let token = shared.tokens.fetch_add(1, Ordering::Relaxed);
+            state.probing[index] = Some((token, now));
+            probes.push((index, id, token));
+        }
+        let moved = state.first_measured(now) || state.choose(now);
+        if moved {
+            advance_generation(peer);
+        }
+        (probes, moved)
+    };
+    for (index, id, token) in probes {
+        if let Some(live) = live(shared, index)
+            && live
+                .client
+                .connection()
+                .send_datagram(probe_frame(id, PING, token))
+                .is_ok()
+        {
+            shared.counters.probes_sent.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    if moved {
+        switched(shared, peer);
+    }
+}
+
+/// An answer to one of this node's probes arrived on relay `index`'s link `id`: record the
+/// round trip if it matches the outstanding probe there, then apply the path rule.
+fn answered(shared: &Arc<Shared>, peer: &Arc<Peer>, index: usize, id: LinkId, token: u64) {
+    let now = shared.now();
+    let moved = {
+        let mut state = lock(&peer.state);
+        let Some((expected, sent)) = state.probing[index] else {
+            return;
+        };
+        if expected != token || state.links[index] != Some(id) {
+            return;
+        }
+        state.probing[index] = None;
+        state.rtt[index].record(now, now.saturating_sub(sent));
+        shared
+            .counters
+            .probe_answers
+            .fetch_add(1, Ordering::Relaxed);
+        let moved = state.first_measured(now) || state.choose(now);
+        if moved {
+            advance_generation(peer);
+        }
+        moved
+    };
+    if moved {
+        switched(shared, peer);
+    }
+}
+
+/// Invalidate route writes for the previously selected path. The caller holds `peer.state`,
+/// which keeps the lock order of [`settle`]: state, then generation.
+fn advance_generation(peer: &Peer) {
+    let mut generation = lock(&peer.route_mtu_generation);
+    *generation = generation.wrapping_add(1);
+}
+
+/// The path rule moved `peer` to a faster link: count it and publish the move. Both links
+/// are live and the session is up, so the endpoint and handshake stay as they are.
+fn switched(shared: &Arc<Shared>, peer: &Arc<Peer>) {
+    shared.counters.switches.fetch_add(1, Ordering::Relaxed);
+    let shared = shared.clone();
+    let peer = peer.clone();
+    tokio::spawn(async move { publish(&shared, &peer, false).await });
+}
+
+/// Ask every live relay where this peer has no link and no request yet.
 async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     for index in 0..shared.relays.len() {
         let Some(live) = live(shared, index) else {
@@ -636,7 +1001,9 @@ async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
         };
         let send = {
             let mut state = lock(&peer.state);
-            let send = state.active.is_none() && !state.requested[index];
+            // Every relay, not only while unlinked: a second link is the pair's ready
+            // alternative, both for a failover and for a measured move.
+            let send = state.links[index].is_none() && !state.requested[index];
             if send {
                 state.requested[index] = true;
             }
@@ -648,47 +1015,72 @@ async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     }
 }
 
-/// Keep the lowest-indexed link, withdraw the others, publish the choice.
+/// Apply a link change: keep the active link while it lasts, otherwise take the best
+/// remaining one ([`PeerState::best_link`]), publish any change, and ask the live relays
+/// for the links still missing. Nothing is withdrawn: every link is a ready alternative.
+///
+/// Until any link of the pair is measured, the lowest-indexed link wins, as in the fixed
+/// order before #201: links that come up together during setup then land both ends on the
+/// same relay whatever order their notices arrive in. Once samples exist, only a lost link
+/// or the measured rule moves the pair.
 async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
-    let (changed, withdraw, route_mtu_generation) = {
+    let changed = {
         let mut state = lock(&peer.state);
-        let active = state
-            .links
-            .iter()
-            .enumerate()
-            .find_map(|(index, link)| link.map(|id| (index, id)));
-        let mut withdraw = Vec::new();
-        for index in active.map_or(0, |(found, _)| found + 1)..state.links.len() {
-            // Taking the link first marks the coming Unlinked notice as our own echo.
-            if state.links[index].take().is_some() {
-                state.requested[index] = false;
-                withdraw.push(index);
-            }
-        }
+        let kept = state
+            .active
+            .filter(|&(index, id)| state.links[index] == Some(id))
+            .filter(|_| state.measured());
+        let active = kept.or_else(|| state.best_link());
         let changed = state.active != active;
         if changed {
             // Route writers hold this lock through the install, so a path change either waits
             // for an older write or advances first and makes that queued result stale.
-            let mut generation = lock(&peer.route_mtu_generation);
-            *generation = generation.wrapping_add(1);
+            advance_generation(peer);
+            let path = active.map(|(index, _)| Path::Relay(index));
+            if state.measured() {
+                state.selector.install(path, shared.now());
+            } else {
+                // Setup on unmeasured links: no dwell, and the first measured choice is due.
+                state.selector.start(path);
+                state.decided = false;
+            }
         }
         state.active = active;
-        (
-            changed.then_some(active),
-            withdraw,
-            *lock(&peer.route_mtu_generation),
-        )
+        changed
     };
-    for index in withdraw {
-        if let Some(live) = live(shared, index) {
-            let _ = live.client.unlink(peer.host).await;
-        }
+    if changed {
+        publish(shared, peer, true).await;
     }
-    let Some(active) = changed else {
-        return;
+    request_everywhere(shared, peer).await;
+}
+
+/// Make the data path follow `state.active`: route budget, `active`, the session start on a
+/// first link, and an [`Event::Active`]. Publications of one peer run one at a time and each
+/// reads the latest state, so a failover and a measured move racing each other still leave
+/// the data path on whatever `state.active` says last.
+///
+/// `prepare` asks for the endpoint and session preparation of [`EndpointUpdater`] on any
+/// change to a linked path (link changes, as before); a measured move passes `false` and
+/// prepares only if the pair had no published link.
+async fn publish(shared: &Arc<Shared>, peer: &Arc<Peer>, prepare: bool) {
+    let _turn = peer.publishing.lock().await;
+    let (active, route_mtu_generation) = {
+        let state = lock(&peer.state);
+        (state.active, *lock(&peer.route_mtu_generation))
     };
     let installed = active.and_then(|(index, id)| live(shared, index).map(|live| (live, id)));
     let linked = installed.is_some();
+    let unchanged = match (read(&peer.active).as_ref(), installed.as_ref()) {
+        (Some((current, current_id)), Some((next, next_id))) => {
+            Arc::ptr_eq(current, next) && current_id == next_id
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if unchanged {
+        return;
+    }
+    let was_linked = read(&peer.active).is_some();
     let previous_mtu = read(&peer.active).as_ref().map(|(live, _)| {
         crate::mesh_mtu::for_relay_datagram(live.client.connection().max_datagram_size())
     });
@@ -705,7 +1097,7 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
                     "Could not install relay transition route MTU"
                 );
             }
-            *write(&peer.active) = installed.clone();
+            write(&peer.active).clone_from(&installed);
             if next != transition
                 && !update_peer_route_mtu(peer, route_mtu_generation, Some(next)).await
             {
@@ -722,7 +1114,7 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
                     "Could not refresh peer route for relay path change"
                 );
             }
-            *write(&peer.active) = installed.clone();
+            write(&peer.active).clone_from(&installed);
         }
         (_, None) => {
             // Stop sending through a lost relay before restoring the direct-path budget.
@@ -735,7 +1127,7 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
     // Prepare the endpoint only after the relay is active. Existing sessions are
     // retained with an endpoint-only update; incomplete handshakes are reset on
     // both ends and the lower host id starts the replacement session after settling.
-    if linked && !peer.starting.swap(true, Ordering::AcqRel) {
+    if linked && (prepare || !was_linked) && !peer.starting.swap(true, Ordering::AcqRel) {
         let peer = peer.clone();
         let prepare_handshake = peer.prepare_handshake.clone();
         let handshake_starter = peer.handshake_starter.clone();
@@ -762,9 +1154,6 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
             relay: active.map(|(index, _)| index),
         },
     );
-    if active.is_none() {
-        request_everywhere(shared, peer).await;
-    }
 }
 
 /// Install one peer's newly derived direct or relayed route budget on a blocking netlink worker.
@@ -931,6 +1320,9 @@ async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: 
                 // dropped is the echo of our own withdrawal: nothing pending.
                 state.requested[index] = state.links[index].is_some();
             }
+            if state.links[index] != link {
+                state.link_changed(index);
+            }
             state.links[index] = link;
         }
         settle(shared, &peer).await;
@@ -945,9 +1337,10 @@ async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: 
             let mut state = lock(&peer.state);
             state.links[index] = None;
             state.requested[index] = false;
+            state.link_changed(index);
         }
+        // Settling also asks the remaining live relays for any link still missing.
         settle(shared, peer).await;
-        request_everywhere(shared, peer).await;
     }
 }
 
@@ -1035,10 +1428,120 @@ impl Drop for Observer {
 
 #[cfg(test)]
 mod tests {
-    //! The slice-1 relay trigger; the data path itself runs in the namespace proof.
-    use super::{RelayMtuTracker, direct_failed};
+    //! The relay trigger, link probes and the link choice; the data path itself runs in the
+    //! namespace proof and `examples/relay_echo.rs`.
+    use super::{
+        LinkId, PING, PONG, PROBE_LEN, PeerState, RelayMtuTracker, direct_failed, parse_probe,
+        probe_frame, wire,
+    };
     use crate::wireguard::Counters;
+    use infraternal_mesh::path_choice::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// A probe survives the relay's framing and is never confused with `WireGuard` ciphertext.
+    #[test]
+    fn link_probes_round_trip_and_never_match_wireguard_packets() {
+        let frame = probe_frame(LinkId(7), PING, 0x0102_0304_0506_0708);
+        assert_eq!(frame.len(), wire::HEADER + PROBE_LEN);
+        let Some((id, payload)) = wire::split(&frame) else {
+            panic!("a probe frame has a link id and a payload");
+        };
+        assert_eq!(id, LinkId(7));
+        assert_eq!(parse_probe(payload), Some((PING, 0x0102_0304_0506_0708)));
+        let answer = probe_frame(LinkId(7), PONG, 9);
+        assert_eq!(
+            wire::split(&answer).and_then(|(_, payload)| parse_probe(payload)),
+            Some((PONG, 9))
+        );
+        // WireGuard's four message types, a keepalive-sized data packet and a probe-length
+        // data packet stay ciphertext.
+        for kind in 1..=4_u8 {
+            let mut packet = [0_u8; PROBE_LEN];
+            packet[0] = kind;
+            assert_eq!(parse_probe(&packet), None, "type {kind}");
+        }
+        assert_eq!(parse_probe(&[4, 0, 0, 0]), None);
+        let mut nonzero = [0_u8; PROBE_LEN];
+        nonzero[0] = PING;
+        nonzero[2] = 1;
+        assert_eq!(parse_probe(&nonzero), None, "reserved bytes must be zero");
+        let mut long = [0_u8; PROBE_LEN + 1];
+        long[0] = PING;
+        assert_eq!(parse_probe(&long), None, "exact length only");
+    }
+
+    /// Without a usable active link, the fastest measured link wins, then the lowest index.
+    #[test]
+    fn the_fallback_link_is_the_fastest_measured_then_the_lowest_index() {
+        let mut state = PeerState::new(3);
+        assert_eq!(state.best_link(), None);
+        state.links = vec![None, Some(LinkId(5)), Some(LinkId(6))];
+        assert_eq!(
+            state.best_link(),
+            Some((1, LinkId(5))),
+            "unmeasured: list order"
+        );
+        state.rtt[2].record(Duration::from_secs(1), Duration::from_millis(30));
+        assert_eq!(
+            state.best_link(),
+            Some((2, LinkId(6))),
+            "measured beats unmeasured"
+        );
+        state.rtt[1].record(Duration::from_secs(1), Duration::from_millis(10));
+        assert_eq!(state.best_link(), Some((1, LinkId(5))));
+        state.link_changed(1);
+        assert_eq!(
+            state.best_link(),
+            Some((2, LinkId(6))),
+            "a changed link forgets its samples"
+        );
+    }
+
+    /// The first complete probe round leaves a far default at once, and keeps an equal one.
+    #[test]
+    fn the_first_probe_round_leaves_a_far_default_at_once() {
+        let at = Duration::from_millis(1_300);
+        let mut state = PeerState::new(2);
+        state.links = vec![Some(LinkId(1)), Some(LinkId(2))];
+        state.active = Some((0, LinkId(1)));
+        state.rtt[1].record(at, Duration::from_millis(30));
+        assert!(!state.first_measured(at), "relay 0 has no sample yet");
+        state.rtt[0].record(at, Duration::from_millis(300));
+        assert!(state.first_measured(at));
+        assert_eq!(state.active, Some((1, LinkId(2))));
+        assert!(!state.first_measured(at), "only once");
+
+        let mut equal = PeerState::new(2);
+        equal.links = vec![Some(LinkId(1)), Some(LinkId(2))];
+        equal.active = Some((0, LinkId(1)));
+        equal.rtt[0].record(at, Duration::from_millis(41));
+        equal.rtt[1].record(at, Duration::from_millis(39));
+        assert!(!equal.first_measured(at));
+        assert_eq!(
+            equal.active,
+            Some((0, LinkId(1))),
+            "equal links keep the shared default"
+        );
+    }
+
+    /// A sustained faster link takes over the active one; the rule itself is tested in
+    /// `infraternal_mesh::path_choice`.
+    #[test]
+    fn a_sustained_faster_link_becomes_active() {
+        let mut state = PeerState::new(2);
+        state.links = vec![Some(LinkId(1)), Some(LinkId(2))];
+        state.active = Some((0, LinkId(1)));
+        state.selector.install(Some(Path::Relay(0)), Duration::ZERO);
+        for second in 1..=5 {
+            let at = Duration::from_secs(second);
+            state.rtt[0].record(at, Duration::from_millis(300));
+            state.rtt[1].record(at, Duration::from_millis(30));
+            let moved = state.choose(at);
+            assert_eq!(moved, second == 5, "second {second}");
+        }
+        assert_eq!(state.active, Some((1, LinkId(2))));
+        assert_eq!(state.selector.current(), Some(Path::Relay(1)));
+    }
 
     fn timestamp(seconds: u64, nanoseconds: u32) -> SystemTime {
         UNIX_EPOCH + Duration::new(seconds, nanoseconds)
@@ -1192,12 +1695,13 @@ mod review_j375_tests {
             starting: AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
             state: Mutex::new(PeerState {
-                links: vec![None],
-                requested: vec![false],
                 active: Some((0, LinkId(1))),
+                ..PeerState::new(1)
             }),
             active: RwLock::new(Some((live.clone(), LinkId(1)))),
             refreshing_route_mtu: AtomicBool::new(false),
+            next_round_ms: AtomicU64::new(0),
+            publishing: tokio::sync::Mutex::new(()),
         });
         let (events, _rx) = mpsc::channel(16);
         let shared = Arc::new(Shared {
@@ -1210,6 +1714,8 @@ mod review_j375_tests {
             peers: RwLock::new(HashMap::from([(host, peer.clone())])),
             events,
             counters: Default::default(),
+            epoch: Instant::now(),
+            tokens: AtomicU64::new(1),
         });
         let stale_generation = *lock(&peer.route_mtu_generation);
         let delayed_peer = peer.clone();

@@ -138,14 +138,17 @@ pub fn csr_digest(csr_der: &[u8]) -> [u8; 32] {
 
 /// Run the versioned recovery exchange over the certificate-free recovery ALPN.
 /// The returned leaf remains untrusted until its caller verifies and durably publishes it.
+/// The server's leaf must pass `floor` (#559) before any request is written, so
+/// a server posing with an older leaf never sees the signed challenge.
 /// # Errors
 /// Refuses malformed identity metadata, unknown roots, denied recovery, oversized frames,
-/// and transport or TLS failures.
+/// a server leaf older than `floor`, and transport or TLS failures.
 pub async fn exchange(
     address: std::net::SocketAddr,
     server_name: &str,
     identity: &remote_tls::Identity,
     roots: &[openssl::x509::X509],
+    floor: &crate::server_leaf_floor::ServerLeafFloor,
 ) -> io::Result<openssl::x509::X509> {
     if roots.is_empty() || roots.len() > 16 {
         return Err(denied());
@@ -153,6 +156,7 @@ pub async fn exchange(
     let proof = prepare_proof(identity)?;
     let config = remote_tls::recovery_client_config(roots)?;
     let connection = remote_tls::dial_recovery(address, server_name, &config).await?;
+    floor.admit(connection.server_leaf.as_ref().ok_or_else(denied)?)?;
 
     let mut signer =
         openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;

@@ -2,7 +2,7 @@
 import { writeFile } from "node:fs/promises";
 import { expect as baseExpect, test, type Page, type TestInfo } from "playwright/test";
 import { KEY_SET } from "../src/perf-probe.on-demand";
-import { d375Row, FRAME_MS, latencyDisplay, RECONNECT_ALLOWANCE_MS, roundTripBoundMs } from "./latency-targets";
+import { d375Row, FRAME_MS, latencyDisplay, PREDICTED_GLYPH_WORK_MS, RECONNECT_ALLOWANCE_MS, roundTripBoundMs } from "./latency-targets";
 
 // A fresh proxied document loads assets before access is ready; its readiness wait is independent of speed budgets.
 const expect = baseExpect.configure({ timeout: 30_000 });
@@ -353,6 +353,13 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
   // The clock calibration above takes about two seconds, long enough for the attachment to be confirmed again after a
   // route refresh; the probe refuses to start on an unconfirmed terminal, so wait for the state it checks, then click.
   await expect.poll(() => page.evaluate(() => window.__tracerTestDouble?.isConnected() === true), { timeout: 30_000 }).toBe(true);
+  // Every animation frame of the prediction run, so each key's letter can be placed in a frame (D375 row 1).
+  await page.evaluate(() => {
+    const frames: number[] = [];
+    (window as typeof window & { __predictionFrames?: number[] }).__predictionFrames = frames;
+    const tick = (at: number): void => { frames.push(at); requestAnimationFrame(tick); };
+    requestAnimationFrame(tick);
+  });
   await page.locator("#probe-run").click();
   // The panel re-renders after every painted key, so "p99:" shows after the first one; wait for the whole run. With
   // 20 keys the early read happened to win the race, with 100 it read 49 echoed keys (#447 round 3).
@@ -454,11 +461,31 @@ export async function terminalScenario(page: Page, testInfo: TestInfo, { perform
       `result=${predictionCost.length > 0 && percentile(predictionCost, 0.99) <= 2 ? "PASS" : "FAIL"}`,
   );
   console.log(`METRIC name=keystroke_prediction_fallback_reasons source=tracer-production-build reasons=${JSON.stringify(fallbackReasons)} result=REPORT`);
-  // D375 row: every key counts, so a key prediction declined shows up as its (slow) real echo.
+  // D375 row 1 (owner, 2026-11-21): our own work at most 4 ms p99, and the letter in the first frame after the key.
+  // A key whose prediction was declined counts as late: its letter comes with the real echo. "The first frame after
+  // the key" is the first animation frame that starts after the keydown; the letter is in it when the prediction was
+  // reported visible by that frame's callback (the callback stamps the time, so it is the same frame when no later
+  // frame started before the stamp). This gates at normal 60 Hz pacing, where a frame is a real wait.
+  const frameStamps = await page.evaluate(() => (window as typeof window & { __predictionFrames?: number[] }).__predictionFrames ?? []);
+  const framesLate = keySamples.map((sample, index) => {
+    const traced = browserTrace[index];
+    const keydown = traced?.stages.keydown;
+    const visibleAt = traced?.stages.prediction;
+    if (keydown === undefined || visibleAt === undefined || !sample.overlayVisible) return Number.POSITIVE_INFINITY;
+    const first = frameStamps.findIndex((stamp) => stamp >= keydown);
+    // The stamp is taken inside a frame callback a hair after that frame's own first callback ran.
+    let shown = -1;
+    for (let at = 0; at < frameStamps.length && frameStamps[at]! <= visibleAt + 0.5; at += 1) shown = at;
+    return first < 0 || shown < 0 ? Number.POSITIVE_INFINITY : Math.max(0, shown - first);
+  });
+  const lateKeys = framesLate.filter((late) => late > 0).length;
+  const ownWorkP99 = percentile(predictionCost, 0.99);
   console.log(d375Row({
-    key: "predicted_glyph", source: "tracer-production-build", n: predictedMs.length, value: predictedP99, unit: "ms",
-    target: FRAME_MS,
-    extra: `p50_ms=${predictedP50.toFixed(2)} overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount}`,
+    key: "predicted_glyph", source: "tracer-production-build", n: predictedMs.length, value: ownWorkP99, unit: "ms",
+    target: PREDICTED_GLYPH_WORK_MS,
+    condition: { ok: lateKeys === 0 || lateKeys / framesLate.length <= 0.01, note: `late_keys=${lateKeys}` },
+    extra: `late_keys=${lateKeys} key_to_letter_p50_ms=${predictedP50.toFixed(2)} key_to_letter_p99_ms=${predictedP99.toFixed(2)} ` +
+      `overlay_n=${predictedOverlayCount} fallback_n=${predictionFallbackCount}`,
   }).line);
   console.log(
     `METRIC name=keystroke_predicted_glyph_visible_prediction_on source=tracer-production-build n=${predictedSamples.length} ` +

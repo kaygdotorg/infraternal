@@ -12,7 +12,7 @@ limitations."
 
 This page lists the practices we adopted, ranked by value for cost,
 and the ones we turned down. It builds on what already holds: D5 (measure,
-speed wins), D40 (strictness), D41 and D188 (budgets), D243 (size reporting),
+speed wins), D40 (strictness), D41 as rewritten by D375, and D188 (budgets), D243 (size reporting),
 D318 (one event route), D345 (doc comments) and `docs/PROCESS.md`.
 
 ## How a practice earns a place here

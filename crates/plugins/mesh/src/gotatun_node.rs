@@ -59,9 +59,7 @@ use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmis
 use crate::listen_port::Request as ListenPortRequest;
 /// The node's route listener and the worker share this; see [`crate::underlay_announce`].
 pub(crate) use crate::underlay_announce::UnderlayAnnounce;
-use crate::underlay_announce::{
-    AnnouncementWaiter, COALESCE_MIN_INTERVAL, CoalescedSchedule, CoalescedWake,
-};
+use crate::underlay_announce::{AnnouncementWaiter, CoalescedSchedule, CoalescedWake};
 use crate::{
     candidate_walks::{
         EngineEndpoint, HANDSHAKE_WAIT, Observed, Walks, active_peer_key, engine_endpoint,
@@ -123,8 +121,16 @@ impl EndpointRefreshSignal {
     }
 }
 
-/// The endpoint scan's period; it shares the coalesced work's floor.
-const ENDPOINT_REFRESH_MIN_INTERVAL: Duration = COALESCE_MIN_INTERVAL;
+/// How long the endpoint scan waits when no datagram from an unconfirmed source woke it (#260
+/// J1077 finding 3). The receive path wakes the scan for every change it can see, so this only
+/// covers a change it cannot: a peer that moves to an address another peer already confirmed
+/// (both behind one relay, say). A node with nothing to do wakes once per this period.
+const ENDPOINT_SCAN_FALLBACK: Duration = Duration::from_secs(15);
+
+/// One extra scan this long after a scan that a wake caused. The wake comes when the datagram
+/// arrives, and `GotaTun` confirms the endpoint a moment later in its crypto workers; the
+/// scan's own debounce is usually enough, and this makes the rare race harmless.
+const ENDPOINT_SCAN_SETTLE: Duration = Duration::from_secs(1);
 
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
 /// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching
@@ -839,8 +845,16 @@ async fn run_worker(
 ) {
     let mut announcements = AnnouncementWaiter::new(underlay_announce);
     let mut endpoint_refresh_schedule = CoalescedSchedule::default();
-    let mut endpoint_scan = tokio::time::interval(ENDPOINT_REFRESH_MIN_INTERVAL);
-    endpoint_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The endpoint scan runs when the receive path saw a source `GotaTun` has not confirmed
+    // (and after anything that rebuilds the engine's peers), then once more to settle, and
+    // otherwise on a slow fallback. It no longer ticks: an idle node costs no wakeup for it.
+    let sources = match state.pending.as_ref() {
+        Some(pending) => pending.factory.admission.read().await.sources(),
+        None => Arc::default(),
+    };
+    let mut scan_schedule = CoalescedSchedule::default();
+    let mut scan_due = Instant::now() + ENDPOINT_SCAN_FALLBACK;
+    sources.wake.request();
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
     // A restored configuration may already carry candidates; no session predates it.
     state.refresh_walks(&BTreeMap::new()).await;
@@ -858,6 +872,7 @@ async fn run_worker(
                         observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
                     }
                     let _ = reply.send(result);
+                    sources.wake.request();
                     // After the reply: a walk reads the counters once, off the apply path.
                     if applied {
                         state.refresh_walks(&before).await;
@@ -900,24 +915,32 @@ async fn run_worker(
                 endpoint_refresh_schedule.start();
                 endpoint_refresh.begin_refresh();
                 match state.refresh_live_peer_endpoints(&route_endpoint_updater).await {
-                    Ok(endpoints) => observed_endpoints = Some(endpoints),
+                    Ok(endpoints) => {
+                        // Traffic-driven refreshes read every peer anyway; the guard's list
+                        // follows for free instead of waiting for the next scan.
+                        state
+                            .admit_confirmed_endpoints(&mut confirmed_feed, &endpoints)
+                            .await;
+                        observed_endpoints = Some(endpoints);
+                    }
                     Err(error) => tracing::warn!(error = %error, "could not refresh mesh routes from live peer endpoints"),
                 }
                 endpoint_refresh_schedule.finish(Instant::now());
             }
-            _ = endpoint_scan.tick() => {
-                let endpoints = state.live_peer_endpoint_snapshot().await;
-                state
-                    .admit_confirmed_endpoints(&mut confirmed_feed, &endpoints)
-                    .await;
-                let changed = observed_endpoints
-                    .as_ref()
-                    .is_some_and(|previous| previous != &endpoints);
-                if changed {
-                    endpoint_refresh.endpoint_changed();
-                } else if observed_endpoints.is_none() {
-                    observed_endpoints = Some(endpoints);
-                }
+            () = sources.wake.notified(), if !scan_schedule.is_armed() => {
+                scan_schedule.arm(Instant::now());
+            }
+            () = scan_schedule.wait() => {
+                scan_schedule.start();
+                sources.wake.begin();
+                scan_endpoints(&state, &mut confirmed_feed, &mut observed_endpoints, &endpoint_refresh).await;
+                let now = Instant::now();
+                scan_schedule.finish(now);
+                scan_due = now + ENDPOINT_SCAN_SETTLE;
+            }
+            () = tokio::time::sleep_until(scan_due) => {
+                scan_endpoints(&state, &mut confirmed_feed, &mut observed_endpoints, &endpoint_refresh).await;
+                scan_due = Instant::now() + ENDPOINT_SCAN_FALLBACK;
             }
             () = announcements.next() => {
                 if let Some(device) = &state.device {
@@ -931,14 +954,39 @@ async fn run_worker(
             // the node still looks up (#260 J143 P2-1). Stop the device and rebuild it.
             () = fatal_error(state.device.as_mut()), if state.handshakes.is_empty() => {
                 state.engine_stopped().await;
+                sources.wake.request();
             }
             () = restart_due(state.restart_at), if state.restart_at.is_some() => {
                 state.restart().await;
+                sources.wake.request();
             }
             () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
                 state.step_walks().await;
+                // A walk moves where we send; the answer may come from an address that is
+                // already confirmed for another peer, which the receive path cannot tell apart.
+                sources.wake.request();
             }
         }
+    }
+}
+
+/// One endpoint scan: read the peers' confirmed endpoints, hand them to the admission guard, and
+/// ask for a route refresh when they differ from the last snapshot the routes were derived from.
+async fn scan_endpoints(
+    state: &RuntimeState,
+    feed: &mut ConfirmedEndpointFeed,
+    observed_endpoints: &mut Option<BTreeMap<PublicKey, Option<SocketAddr>>>,
+    endpoint_refresh: &EndpointRefreshSignal,
+) {
+    let endpoints = state.live_peer_endpoint_snapshot().await;
+    state.admit_confirmed_endpoints(feed, &endpoints).await;
+    let changed = observed_endpoints
+        .as_ref()
+        .is_some_and(|previous| previous != &endpoints);
+    if changed {
+        endpoint_refresh.endpoint_changed();
+    } else if observed_endpoints.is_none() {
+        *observed_endpoints = Some(endpoints);
     }
 }
 
@@ -946,7 +994,7 @@ impl RuntimeState {
     /// Give the admission guard the peers' confirmed endpoints through `feed`, so those exact
     /// sources keep the guard's reserved budget under a flood.
     ///
-    /// Runs on the 250 ms endpoint scan. The shared feed takes the guard's write lock only on a
+    /// Runs on every endpoint scan. The shared feed takes the guard's write lock only on a
     /// change, because the receive task takes its read lock for every initiation.
     async fn admit_confirmed_endpoints(
         &self,
@@ -1126,8 +1174,8 @@ impl RuntimeState {
     /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
     ///
     /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
-    /// [`Self::engine_addresses`] adds one before the apply only when the snapshot changes a
-    /// walking or relayed peer. No timer runs for a finished walk, so an idle node stays idle
+    /// [`Self::engine_addresses`] adds one before the apply when the snapshot changes any
+    /// installed peer (#483, J1025). No timer runs for a finished walk, so an idle node stays idle
     /// (D81). Known follow-up (J699 P3-2, D393): once any walk has found its peer, `watching` is
     /// true, so every applied snapshot reads every peer's counters, an O(peers) read not yet
     /// measured at 1,000 and 4,096 peers. #515 holds the measurement plan; a per-walk "earliest
@@ -1185,14 +1233,11 @@ impl RuntimeState {
     /// Each peer's send and recent confirmed endpoints before `next` is applied, by device key,
     /// for [`Self::refresh_walks`] (J602 F1).
     ///
-    /// Read only when `next` changes a peer that walks or is relayed, because only then can
-    /// `apply` keep a re-installed peer's address ([`kept_address`]). Every other snapshot reads
+    /// Read whenever `next` changes any installed peer: `apply` rewrites a changed peer whole and
+    /// can keep its address only from this read ([`kept_address`]). Every other snapshot reads
     /// nothing here.
     async fn engine_addresses(&self, next: &Config) -> BTreeMap<PublicKey, EngineEndpoint> {
-        let watched = |peer: &crate::dataplane::Peer| {
-            !peer.candidates.is_empty() || self.relayed.contains_key(&active_peer_key(peer))
-        };
-        if !crate::candidate_walks::reinstalls_a_peer(self.config.as_ref(), next, watched) {
+        if !crate::candidate_walks::engine_read_needed(self.config.as_ref(), next) {
             return BTreeMap::new();
         }
         let Some(device) = self.device.as_ref() else {
@@ -1644,6 +1689,7 @@ async fn bind_udp(
     let mut factory = UdpSocketFactory {
         recv_buffer_size: Some(UDP_BUFFER_BYTES),
         send_buffer_size: Some(UDP_BUFFER_BYTES),
+        ..UdpSocketFactory::default()
     };
     if request.port != 0 {
         let params = UdpTransportFactoryParams {
@@ -2279,6 +2325,370 @@ mod tests {
         stopped.recv().expect("stop reply");
     }
 
+    /// #483 (J1025) receipt: what one pre-apply engine read costs at mesh scale.
+    ///
+    /// `engine_addresses` now runs for every snapshot that changes an installed peer, so this
+    /// times it on a real device holding `J1025_PEERS` peers (4,096 by default) when one peer's
+    /// endpoint changes, plus the no-change case, which must read nothing. It prints a METRIC
+    /// line and asserts only that the read saw every peer; speed is never asserted (ENGINEERING
+    /// P3). Run: `cargo test -p infraternal-plugin-mesh --features agent,server,relay,test-support
+    /// --release --lib engine_address_read_cost -- --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "A measurement, run on demand with --ignored --nocapture."]
+    async fn engine_address_read_cost_at_scale() {
+        use super::{
+            Health, LinuxPacketIo, PacketFilter, PendingDevice, RuntimeInfo, RuntimeState,
+            bind_udp, build_device,
+        };
+        use gotatun::x25519::StaticSecret;
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::sync::Arc;
+        let count: u32 = std::env::var("J1025_PEERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4096);
+        let mut config =
+            one_peer_config(Some("198.51.100.1:10254".parse().expect("fixture value")));
+        let template = config.peers.remove(&NodeId(1)).expect("template peer");
+        for n in 1..=u64::from(count) {
+            let mut peer = template.clone();
+            let [_, _, high, low] = u32::try_from(n).expect("fixture value").to_be_bytes();
+            peer.peer.key = PublicKey({
+                let mut key = [3; 32];
+                key[..8].copy_from_slice(&n.to_le_bytes());
+                key
+            });
+            peer.peer.addresses = Addresses {
+                ipv4: std::net::Ipv4Addr::new(10, 100 + high, high, low),
+                ipv6: std::net::Ipv6Addr::new(
+                    0xfd01,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x100 + u16::from(high),
+                    u16::from(low),
+                ),
+            };
+            peer.peer.endpoint = Some(SocketAddr::from((
+                [198, 51, 100, 1],
+                10_000 + u16::try_from(n % 50_000).expect("fixture value"),
+            )));
+            config.peers.insert(NodeId(n), peer);
+        }
+        let private_key = StaticSecret::from([7; 32]);
+        let (_kernel, tun_fd) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let health = Arc::new(Health::default());
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        let tun = LinuxPacketIo::new(
+            crate::gotatun_tun::LinuxTun::from_fd(tun_fd, true, Arc::clone(&health.refused))
+                .expect("TUN stand-in registers"),
+            filter,
+        );
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("engine socket");
+        let device = build_device(
+            factory.clone(),
+            private_key.clone(),
+            port,
+            peers_for_config(&config).expect("peers"),
+            admitted_peer_keys(&config),
+            tun.clone(),
+        )
+        .await
+        .expect("device");
+        let state = RuntimeState {
+            tun: Some(tun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            pending: Some(PendingDevice {
+                factory,
+                private_key,
+            }),
+            config: Some(config.clone()),
+            info: RuntimeInfo {
+                interface: "test-tun".to_owned(),
+                port,
+                thp_disabled: true,
+                offloads_enabled: true,
+            },
+            health,
+            restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
+        };
+        let mut next = config.clone();
+        next.peers
+            .get_mut(&NodeId(1))
+            .expect("fixture value")
+            .peer
+            .endpoint = Some("203.0.113.9:10254".parse().expect("fixture value"));
+        let unchanged = state.engine_addresses(&config).await;
+        assert!(unchanged.is_empty(), "an unchanged snapshot reads nothing");
+        let mut samples = Vec::new();
+        for _ in 0..21 {
+            let started = std::time::Instant::now();
+            let read = state.engine_addresses(&next).await;
+            samples.push(started.elapsed());
+            assert_eq!(read.len(), usize::try_from(count).expect("fixture value"));
+        }
+        samples.sort();
+        eprintln!(
+            "METRIC j1025_engine_read peers={count} median_ms={:.2} max_ms={:.2} min_ms={:.2}",
+            samples[10].as_secs_f64() * 1e3,
+            samples[20].as_secs_f64() * 1e3,
+            samples[0].as_secs_f64() * 1e3,
+        );
+    }
+
+    /// A configuration with `count` installed peers that have an endpoint and never handshake.
+    fn many_peer_config(count: u32) -> Config {
+        let mut config = one_peer_config(None);
+        let template = config.peers[&NodeId(1)].clone();
+        config.peers.clear();
+        for index in 0..count {
+            let mut policy = template.clone();
+            let [a, b, c, d] = index.to_be_bytes();
+            let [_, _, high, low] = index.to_be_bytes();
+            policy.peer.key = PublicKey([
+                a ^ 0x5a,
+                b,
+                c,
+                d.wrapping_add(1),
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+                9,
+            ]);
+            policy.peer.addresses = Addresses {
+                ipv4: std::net::Ipv4Addr::new(10, 100, high, low),
+                ipv6: std::net::Ipv6Addr::new(
+                    0xfd01,
+                    0,
+                    0,
+                    0,
+                    1,
+                    0,
+                    u16::from(high),
+                    u16::from(low),
+                ),
+            };
+            policy.peer.endpoint = Some(SocketAddr::from((
+                [192, 0, 2, 1],
+                20_000 + u16::try_from(index % 30_000).expect("below 30000"),
+            )));
+            config.peers.insert(NodeId(10 + u64::from(index)), policy);
+        }
+        config
+    }
+
+    /// Hand-run measurement (#260 J1077 finding 3, J1113): what the node's worker costs an
+    /// idle node that has `INFRATERNAL_IDLE_PEERS` installed peers. Prints one row of process
+    /// wakeups (voluntary context switches over every thread) and CPU per second over
+    /// `INFRATERNAL_IDLE_SECS`. Run it as `cargo test -p infraternal-plugin-mesh --features agent
+    /// -- --ignored --nocapture idle_cost_with_many_peers`, or copy the test binary to a quiet
+    /// machine and run it there. No root is needed: a socket pair stands in for the TUN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "measurement only: run by hand with INFRATERNAL_IDLE_PEERS and INFRATERNAL_IDLE_SECS"]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "counts of a 30 s window convert to a rate"
+    )]
+    async fn idle_cost_with_many_peers() {
+        use super::{
+            EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
+            RouteEndpointUpdater, RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device,
+            run_worker,
+        };
+        use gotatun::x25519::StaticSecret;
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::sync::{Arc, mpsc as sync};
+        /// Voluntary context switches and CPU ticks of every thread of this process.
+        fn sample() -> (u64, u64) {
+            let (mut switches, mut ticks) = (0, 0);
+            for task in std::fs::read_dir("/proc/self/task")
+                .expect("tasks")
+                .flatten()
+            {
+                let status =
+                    std::fs::read_to_string(task.path().join("status")).unwrap_or_default();
+                let stat = std::fs::read_to_string(task.path().join("stat")).unwrap_or_default();
+                for line in status.lines() {
+                    if let Some(rest) = line.strip_prefix("voluntary_ctxt_switches:") {
+                        switches += rest.trim().parse::<u64>().unwrap_or(0);
+                    }
+                }
+                if let Some(end) = stat.rfind(')') {
+                    let fields: Vec<_> = stat[end + 2..].split_whitespace().collect();
+                    let at = |index: usize| {
+                        fields
+                            .get(index)
+                            .and_then(|f| f.parse::<u64>().ok())
+                            .unwrap_or(0)
+                    };
+                    ticks += at(11) + at(12);
+                }
+            }
+            (switches, ticks)
+        }
+        let env = |name: &str, default: u32| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(default)
+        };
+        let count = env("INFRATERNAL_IDLE_PEERS", 1);
+        let seconds = env("INFRATERNAL_IDLE_SECS", 30);
+        let private_key = StaticSecret::from([7; 32]);
+        let (kernel, device) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let health = Arc::new(Health::default());
+        let config = many_peer_config(count);
+        let filter = Arc::new(
+            PacketFilter::new(
+                &config,
+                infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+            )
+            .expect("compile filter"),
+        );
+        let tun = LinuxPacketIo::new(
+            crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
+                .expect("TUN stand-in registers"),
+            filter,
+        );
+        let (factory, port) = bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            private_key.clone(),
+        )
+        .await
+        .expect("engine socket");
+        let peers = peers_for_config(&config).expect("peers");
+        let device = build_device(
+            factory.clone(),
+            private_key.clone(),
+            port,
+            peers,
+            admitted_peer_keys(&config),
+            tun.clone(),
+        )
+        .await
+        .expect("device");
+        let state = RuntimeState {
+            tun: Some(tun),
+            device: Some(Arc::new(device)),
+            handshakes: tokio::task::JoinSet::new(),
+            pending: Some(PendingDevice {
+                factory,
+                private_key,
+            }),
+            config: Some(config),
+            info: RuntimeInfo {
+                interface: "test-tun".to_owned(),
+                port,
+                thp_disabled: true,
+                offloads_enabled: true,
+            },
+            health: Arc::clone(&health),
+            restart_at: None,
+            walks: crate::candidate_walks::Walks::default(),
+            relayed: BTreeMap::new(),
+        };
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let updater: RouteEndpointUpdater = Arc::new(|_| Ok(()));
+        let worker = tokio::spawn(run_worker(
+            receiver,
+            state,
+            Arc::new(EndpointRefreshSignal::default()),
+            updater,
+            Arc::default(),
+        ));
+        // Let the start-up work (first scan, first walk step) finish before the window opens.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let (before, started) = (sample(), std::time::Instant::now());
+        tokio::time::sleep(std::time::Duration::from_secs(u64::from(seconds))).await;
+        let (after, elapsed) = (sample(), started.elapsed().as_secs_f64());
+        let hz = 100.0; // sysconf(_SC_CLK_TCK) is 100 on every Linux we run
+        eprintln!(
+            "idle-cost peers={count} secs={elapsed:.1} wakeups_per_s={:.2} cpu_ms_per_s={:.2}",
+            (after.0 - before.0) as f64 / elapsed,
+            (after.1 - before.1) as f64 * 1000.0 / hz / elapsed,
+        );
+        // The status path is a separate command: it must still answer, for every peer, while
+        // the scan runs only on wakes (the worker serves it from its select loop).
+        let (reply, counters) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Counters(reply))
+            .map_err(|_| "worker ended")
+            .expect("counters");
+        let counters = tokio::task::spawn_blocking(move || counters.recv())
+            .await
+            .expect("join")
+            .expect("counters reply")
+            .expect("counters");
+        eprintln!("status-counters peers_reported={}", counters.len());
+        assert_eq!(counters.len(), count as usize);
+        drop(kernel);
+        let (reply, stopped) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Stop(reply))
+            .map_err(|_| "worker ended")
+            .expect("stop");
+        worker.await.expect("worker");
+        stopped.recv().expect("stop reply");
+    }
+
     /// A configuration with one peer at `endpoint`.
     fn one_peer_config(endpoint: Option<SocketAddr>) -> Config {
         Config {
@@ -2320,6 +2730,24 @@ mod tests {
             #[cfg(feature = "mesh-dns")]
             peer_names: BTreeMap::new(),
         }
+    }
+
+    /// #483 (J1025): a peer with no candidate list is still re-installed with its snapshot
+    /// endpoint, so the engine's live address must be read before any peer change, or a stale
+    /// snapshot overwrites a roamed single-address peer.
+    #[test]
+    fn a_changed_single_address_peer_needs_the_engine_read() {
+        let applied = one_peer_config(Some("198.51.100.1:10254".parse().expect("fixture address")));
+        let next = one_peer_config(Some("198.51.100.9:10254".parse().expect("fixture address")));
+        assert!(crate::candidate_walks::engine_read_needed(
+            Some(&applied),
+            &next
+        ));
+        assert!(!crate::candidate_walks::engine_read_needed(
+            Some(&applied),
+            &applied
+        ));
+        assert!(!crate::candidate_walks::engine_read_needed(None, &next));
     }
 
     /// The Linux typed-packet adapter applies grants before returning packets to `GotaTun`.

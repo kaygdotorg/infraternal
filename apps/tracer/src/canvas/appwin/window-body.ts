@@ -33,6 +33,7 @@ import { containedRect, framePoint, modifierBits, movedEnough, scrollDelta, wire
 import { controlLine, describe, type ControlState, type StateView, type StreamState } from "./status";
 import { AppStream } from "./stream";
 import { shapeStreamWindow } from "./shape";
+import { applyPointer } from "./pointer";
 import type { AppTarget } from "./inventory";
 import type { StreamConnection } from "./adapter";
 
@@ -103,6 +104,7 @@ export class AppBinding implements SessionBinding {
   /** The press on the mark was a touch: its tap peeks the tooltip instead of opening the pill's popover. */
   private markTouch = false;
 
+  /** Builds the window's stream; nothing is shown or started until `mount`. */
   constructor(private readonly cx: Ctx, private readonly rec: WinRec, private readonly o: AppBodyOptions) {
     this.stream = new AppStream({
       connection: o.connection, hostId: o.hostId, target: o.target, coarse: coarse.matches,
@@ -112,6 +114,7 @@ export class AppBinding implements SessionBinding {
         picture: (size) => { this.picture = size; },
         shape: (aspect) => { this.remoteShape = aspect; this.applyShape(aspect); },
         surface: (canvas) => this.setSurface(canvas),
+        cursor: (shape) => applyPointer(this.stage.style, shape),
       },
     });
   }

@@ -431,3 +431,80 @@ async fn ca_status_distinguishes_initial_setup_from_locked_retained_trust() {
 
 #[path = "ca_http_audit_tests.rs"]
 mod audit_tests;
+
+/// Rows changed on the fixture's one SQLite connection so far, rolled-back changes included.
+async fn total_changes(pool: &sqlx::SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT total_changes()")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A request without a live administrator session is refused before any CA route writes (#559).
+///
+/// J1083's audit found that every CA route ran `require_live` first, whose opening `UPDATE`
+/// takes SQLite's writer lock, and that the start routes slid the session (also a write) before
+/// any check. Here an administrator's own cookie, made pending, still matches their
+/// `ca_administrators` row, so the old order changed a row (counted by `total_changes`) on every
+/// request. An unknown cookie matches nothing but would still have taken the writer lock.
+#[tokio::test]
+async fn ca_requests_without_a_live_administrator_session_write_nothing() {
+    let (f, app) = http_fixture().await;
+    let pool = f.auth.auth.pool.clone();
+    sqlx::query("UPDATE sessions SET unlocked=0 WHERE token_hash=?")
+        .bind(hash(&f.auth.session))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let unknown = random();
+    for path in [
+        "/remote/ca/status",
+        "/remote/ca/unlock/start",
+        "/remote/ca/unlock/finish",
+        "/remote/ca/bootstrap/start",
+        "/remote/ca/bootstrap/finish",
+        "/remote/ca/administrators/start",
+        "/remote/ca/administrators/finish",
+    ] {
+        for cookie in [f.auth.session.as_str(), unknown.as_str()] {
+            let before = total_changes(&pool).await;
+            let response = app
+                .clone()
+                .oneshot(ca_request(path, Some(ORIGIN), Some(cookie), "{}".into()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(total_changes(&pool).await, before, "{path} wrote");
+        }
+    }
+    assert!(f.source.load().is_err());
+}
+
+/// Each client network gets its own CA request budget, and spending it refuses only that network.
+#[tokio::test]
+async fn ca_requests_count_against_their_client_network_budget() {
+    let (_f, app) = http_fixture().await;
+    let unknown = random();
+    let from = |address: &str| {
+        let mut request = ca_request(
+            "/remote/ca/status",
+            Some(ORIGIN),
+            Some(&unknown),
+            "{}".into(),
+        );
+        request
+            .extensions_mut()
+            .insert(crate::runtime::ClientAddress(address.parse().unwrap()));
+        request
+    };
+    for _ in 0..crate::ca_http::SOURCE_BUDGET {
+        let response = app.clone().oneshot(from("192.0.2.7")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let spent = app.clone().oneshot(from("192.0.2.7")).await.unwrap();
+    assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(spent.headers().get(header::RETRY_AFTER).unwrap(), "60");
+    // A different client network still has its whole budget.
+    let other = app.clone().oneshot(from("198.51.100.7")).await.unwrap();
+    assert_eq!(other.status(), StatusCode::FORBIDDEN);
+}
