@@ -1787,12 +1787,19 @@ impl Link {
         })
         .await
     }
+    /// Read the next shim frame, refusing frames of a capability this link did
+    /// not select (approximate Snapshots, echo state) as a protocol error.
     async fn read(&mut self) -> io::Result<Shim> {
         let frame = self.reader.read(&mut self.session.peer).await?;
         if matches!(frame, Shim::SnapshotWithFlags(..))
             && self.session.caps & APPROXIMATE_SNAPSHOT == 0
         {
             return Err(sessions::invalid("unnegotiated approximate Snapshot"));
+        }
+        if matches!(frame, Shim::EchoState(..))
+            && self.session.caps & infraternal_shim::frame::ECHO_STATE == 0
+        {
+            return Err(sessions::invalid("unnegotiated echo state"));
         }
         Ok(frame)
     }
@@ -2752,6 +2759,16 @@ async fn terminal_run(
                             let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
                             capture_io!(emit(&tx, Message::Pong(stream, nonce, sent_us)))?;
                         }
+                    }
+                    Shim::EchoState(seq, flags) => {
+                        // A state, not a cursor fence: it may pass output held
+                        // for credit, so a prompt's report is never late (#569).
+                        let json = terminal_events::Notice::Echo {
+                            session_id: uuid::Uuid::from_bytes(id),
+                            seq,
+                            hidden: flags & infraternal_shim::frame::ECHO_HIDDEN != 0,
+                        }.json()?;
+                        emit(&tx, Message::Event(stream, json)).await?;
                     }
                     Shim::Exited(status, final_seq) => {
                         release_key_cover(&priority, stream, attachment, key_repaint_target).await?;

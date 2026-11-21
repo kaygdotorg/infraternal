@@ -880,6 +880,25 @@ server validates and forwards it only in response to marked input, so an old
 browser never receives this new notice. The browser says to open a new shell.
 Ordinary legacy Input remains available. No session is automatically ended.
 
+### Echo state notice (#569, D130)
+
+The infraternal agent turns the shim's `EchoState` (shim.md, capability bit 8)
+into an `Event` on the terminal stream, `sub_id: 0`:
+`{"type":"terminal.echo","session_id":"<UUID>","seq":u64,"hidden":bool}`.
+`hidden: true` means the host terminal reads a line with echo off (a password
+prompt, in any language); `false` means it echoes again. `seq` is the shim's
+output head when the mode was read. The notice is not a cursor fence and may
+pass output held for credit. The server admits it in its closed notice list
+and forwards it unchanged; across a hedged secondary link (D215) it forwards a
+copy only when its `seq` is newer, or equal with a different state, than the
+last echo state it forwarded on that stream. The viewer draws no predicted key
+while `hidden` is true and drops predictions already drawn; a new attachment
+starts at "echo on" until told otherwise. Viewers ignore notice types they do
+not know (since 2026-10-17), so no leg-A capability is needed. Leg B has no
+free core capability bit: an agent sends it only to a server of the same
+release (lockstep updates, D135), because an older server refuses unknown
+notices and retires the agent link.
+
 ### Layout session incarnation (#250, D312)
 
 Hello capability bit 5 (`32`) requests an additive Welcome suffix: a length-prefixed

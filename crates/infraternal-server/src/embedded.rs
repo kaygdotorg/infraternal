@@ -2779,9 +2779,19 @@ enum TerminalNotice {
         #[serde(default)]
         retired: bool,
     },
+    /// The host terminal stopped or resumed echoing typed keys (#569). It
+    /// only stops the viewer's predictive echo, so it is forwarded as is.
+    #[serde(rename = "terminal.echo")]
+    Echo {
+        session_id: String,
+        seq: u64,
+        hidden: bool,
+    },
 }
 
 impl TerminalNotice {
+    /// The session the notice names, checked against the attachment before
+    /// it is forwarded; the other fields are only shape-checked here.
     fn session_id(&self) -> &str {
         // Cursor/status fields validate JSON shape; wire Snapshot/Ack remain authoritative.
         match self {
@@ -2807,6 +2817,14 @@ impl TerminalNotice {
                 session_id
             }
             Self::QueryRepliesUnavailable { session_id } => session_id,
+            Self::Echo {
+                session_id,
+                seq,
+                hidden,
+            } => {
+                let _ = (seq, hidden);
+                session_id
+            }
             Self::Exited {
                 session_id,
                 status,

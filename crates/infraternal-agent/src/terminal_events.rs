@@ -49,6 +49,16 @@ pub(super) enum Notice<'a> {
     /// No snapshot could be provided for `session_id` at sequence `seq`.
     #[serde(rename = "terminal.snapshot_unavailable")]
     SnapshotUnavailable { session_id: Uuid, seq: u64 },
+    /// The terminal stopped (`hidden: true`) or resumed (`false`) echoing typed
+    /// keys: a password prompt in any language (#569, D130). `seq` is the shim's
+    /// output head when the mode was read, so a relay can drop a stale copy. The
+    /// viewer uses it only to stop predictive echo; it is not a cursor fence.
+    #[serde(rename = "terminal.echo")]
+    Echo {
+        session_id: Uuid,
+        seq: u64,
+        hidden: bool,
+    },
 }
 impl Notice<'_> {
     /// Serializes the notice straight to JSON bytes (the `type` field names the
@@ -121,6 +131,28 @@ mod tests {
         );
     }
 
+    /// The echo notice carries exactly identity, the output head and the state,
+    /// which is all the server's closed notice list admits (#569).
+    #[test]
+    fn echo_notice_is_identity_head_and_state_only() {
+        let id = Uuid::from_bytes([2; 16]);
+        for hidden in [true, false] {
+            let event = Notice::Echo {
+                session_id: id,
+                seq: 42,
+                hidden,
+            }
+            .json()
+            .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&event).unwrap(),
+                serde_json::json!({"type":"terminal.echo", "session_id":id.to_string(), "seq":42, "hidden":hidden})
+            );
+        }
+    }
+
+    /// An exit without retirement has no `retired` field, and every notice's u64
+    /// sequence stays a JSON number, including `u64::MAX`.
     #[test]
     fn ordinary_exit_omits_retired_and_snapshot_sequences_stay_numeric() {
         let id = Uuid::nil();
@@ -151,6 +183,11 @@ mod tests {
             Notice::SnapshotUnavailable {
                 session_id: id,
                 seq: u64::MAX,
+            },
+            Notice::Echo {
+                session_id: id,
+                seq: u64::MAX,
+                hidden: true,
             },
         ] {
             let event = notice.json().unwrap();
