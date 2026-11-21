@@ -253,6 +253,63 @@ rust_check_release_feature_sets() {
     return "$failed"
 }
 
+# The "macOS compile" row (#260, #221). The "release feature sets" row checks the
+# macOS feature sets for Linux, so code under cfg(target_os = "macos") was never
+# compiled by any gate, and dev's macOS Mesh node stopped building unnoticed
+# (an unqualified `PublicKey` in macos_node.rs, J1028). This row type-checks it
+# for aarch64-apple-darwin, the only Mac target we ship (scripts/macos-release),
+# from the Linux build machines, so it needs no Mac:
+# - the two shipping macOS feature sets from scripts/release/feature-sets;
+# - the library and test targets of the Mesh, desktop and infraternal agent
+#   crates, with the features that switch their macOS modules on, so macOS-only
+#   tests compile too.
+# `cargo check` still runs build scripts. The C ones get the pinned Zig as their
+# macOS compiler (scripts/verify.d/apple-check-cc), and the terminal engine is
+# already built by Zig. DOCS_RS makes the Swift bridges of the capture crates and
+# of our desktop companion skip their build, as they do on docs.rs: there is no
+# Swift on Linux, and Rust code compiles without them. Linking, signing and the
+# Swift sources stay with scripts/macos-build-check and scripts/macos-release on
+# the Mac. On a Mac the row reports SKIP, because macos-build-check is the
+# native check there. It runs every check after a failure, so one log shows all.
+rust_check_macos_compile() {
+    local failed=0 tools zig tool
+    local release_macos_host_cargo_args release_macos_helper_cargo_args
+    if [[ "$(uname -s)" != Linux ]]; then
+        printf 'SKIP macOS compile: Linux cross-check only; use scripts/macos-build-check on a Mac\n'
+        return 77
+    fi
+    source scripts/release/feature-sets || return 1
+    scripts/auth-toolchain >/dev/null || return 1
+    zig="$CARGO_TARGET_DIR/auth-tools/zig/zig"
+    tools="$CARGO_TARGET_DIR/apple-check-tools"
+    mkdir -p "$tools" || return 1
+    for tool in cc c++ ar ranlib; do
+        ln -sfn "$(pwd -P)/scripts/verify.d/apple-check-cc" "$tools/$tool" || return 1
+    done
+    # The process environment outranks the [env] table in .cargo/config.toml,
+    # which points these at the Mac-only .cargo/apple-cc.sh. SDKROOT stops cc-rs
+    # asking xcrun for an SDK; the wrapper drops the -isysroot it then adds.
+    # Zig's caches live in the target, so deleting the target cleans them up.
+    local -a env=(
+        INFRATERNAL_APPLE_CHECK_ZIG="$zig"
+        ZIG_GLOBAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
+        ZIG_LOCAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
+        CC_aarch64_apple_darwin="$tools/cc"
+        CXX_aarch64_apple_darwin="$tools/c++"
+        AR_aarch64_apple_darwin="$tools/ar"
+        RANLIB_aarch64_apple_darwin="$tools/ranlib"
+        SDKROOT="$tools"
+        DOCS_RS=1
+    )
+    local -a check=(env "${env[@]}" cargo check --locked --target aarch64-apple-darwin)
+    "${check[@]}" "${release_macos_host_cargo_args[@]}" || failed=1
+    "${check[@]}" "${release_macos_helper_cargo_args[@]}" || failed=1
+    "${check[@]}" --package infraternal-plugin-mesh --features agent --lib --tests || failed=1
+    "${check[@]}" --package infraternal-agent --features mesh,desktop --lib --tests || failed=1
+    "${check[@]}" --package infraternal-plugin-desktop --features desktop --lib --bins --tests || failed=1
+    return "$failed"
+}
+
 # The shim's library tests under each shim feature set the product ships (#555).
 # Feature-only tests are compiled out of other builds, so a feature set that no
 # row runs can ship broken tests, and its `cfg(not(...))` tests never run at all.
@@ -385,6 +442,8 @@ rust_verify_fast() {
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
     rust_run_gate "release feature sets" rust_check_release_feature_sets
+    # cfg(target_os = "macos") code, type-checked from Linux; SKIP on a Mac (#260).
+    rust_run_gate_skippable "macOS compile" rust_check_macos_compile
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     rust_run_gate "latency report (D375)" python3 scripts/test-latency-report.py
