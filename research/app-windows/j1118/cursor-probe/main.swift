@@ -51,10 +51,11 @@ if mode == "window" {
     try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
     let cursor = MachineCursor(); var last = ""; let end = Date().addingTimeInterval(seconds)
     while Date() < end {
-        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        let began = Date()
         guard let shape = cursor.current(), let id = shape["id"] as? String, id != last else { continue }
         last = id
-        print("SHAPE id=\(id) px=\(shape["width"]!)x\(shape["height"]!) scale=\(shape["scale"]!) hot=\(shape["hot_x"]!),\(shape["hot_y"]!) png_base64=\((shape["png"] as! String).count)"); fflush(stdout)
+        print("SHAPE read_ms=\(String(format: "%.2f", Date().timeIntervalSince(began) * 1000)) id=\(id) px=\(shape["width"]!)x\(shape["height"]!) scale=\(shape["scale"]!) hot=\(shape["hot_x"]!),\(shape["hot_y"]!) png_base64=\((shape["png"] as! String).count)"); fflush(stdout)
         try? Data(base64Encoded: shape["png"] as! String)?.write(to: URL(fileURLWithPath: "\(out)/shape-\(id).png"))
     }
 }
