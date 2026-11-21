@@ -202,7 +202,7 @@ numbered history, both timestamp arrival orders and altered checksums.
 
   | Measure | Target, p99 | Measured by |
   |---|---|---|
-  | Key to letter on screen, with prediction | 8.3 ms | tracer scenario, every one of 100 probe keys (a declined prediction counts as its real echo) |
+  | Own work with prediction, and the letter in the first frame after the key | own work at most 4 ms; first frame | tracer scenario at 60 Hz pacing (vsync on): prediction cost p99 over 100 probe keys, and every key's letter placed in an animation frame (a declined prediction counts as late). Reworded by the owner, 2026-11-21 (D375 amendment) |
   | Real echo | round trip + 16.7 ms | tracer scenario, prediction off, key to painted echo |
   | Flood effect on typing | at most +8.3 ms | `verify-latency.py`, echo p99 growth with another and the same PTY flooding (the worse one) |
   | Own overhead, no network | 8.3 ms (stretch 5 ms); gate 12 ms until reached | the report: real agent echo p99 with the relay delay at 0 (`verify-latency.py`) plus the browser's own spans p99, keydown to send and echo arrival to paint (tracer scenario) |
@@ -218,6 +218,27 @@ numbered history, both timestamp arrival orders and altered checksums.
   table: measured value, target, the gate used and PASS/FAIL. A missing row
   fails the run like a missed one. The full log is kept under
   `$HOME/.cache/codex-scratch/latency/evidence/`.
+- **Rows a person sees (#569 finding 2, #573; reported beside the ten).**
+  The ten rows above type one synthetic key at a time into a test double that
+  repeats every byte, so they cannot see overlapping keys, a shell that
+  redraws instead of echoing, or a predicted letter drawn one cell short.
+  `apps/tracer/real/realistic-typing.spec.ts` types J1079's key lists with a
+  person's irregular rhythm (trusted key events, keys overlapping at 300 ms)
+  into a real bash and zsh, through the production server, behind the fixture
+  bridge's round trip (it delays in user space: no namespace, route or `tc`
+  rule is touched). Its rows: `real_paint_after_ws` (socket message to paint,
+  our own work, gates unthrottled), `real_echo_shell` (round trip + 16.7 ms,
+  gates), `real_typed_letter` (reported: the letter in its own cell, with the
+  count of wrong cells). `verify-latency.py` adds `real_flood_effect`, the
+  flood comparison at jitter 0 (the old flood row's own jitter is as big as
+  its 8.3 ms budget; reported). `first-paint-network.spec.ts` adds four
+  reported first-paint rows: 4G (9 Mbps, 170 ms) and fast 3G, "sign-in
+  visible" and "terminal connected", cold cache, 4x CPU slowdown; they gate
+  once the first-paint fixes of J1069 and J1100 land (#573). The report prints
+  them as a second table; the old rows keep gating until the new ones are
+  stable. `scripts/verify latency` and the nightly run (#447) produce them.
+  The first-paint row of the phone profile reads the frame that shows the
+  sign-in button: Chromium reports no `first-contentful-paint` for that page.
 - **How the rows gate [D375].** Each row gates on its target, except own
   overhead: its 8.3 ms target becomes the gate only once it is reached. Until
   then the gate is **12 ms** (`OWN_OVERHEAD_GATE_MS` in
