@@ -60,7 +60,7 @@ pub(super) struct Metadata {
     /// Latches when the native companion confirms the target window closed,
     /// or when the person at a root agent's screen changed (D203 C2).
     pub gone: AtomicBool,
-    /// Why `gone` latched: 0 the window is gone (the default), 1 the person at the Mac changed.
+    /// Why `gone` latched: 0 not yet, 1 the window is gone (the default), 2 the person at the Mac changed.
     /// Only read once `gone` is set; set it with [`Metadata::latch_gone`].
     pub(super) gone_reason: std::sync::atomic::AtomicU8,
     /// The console uid whose screen this session first showed, for a root
@@ -115,7 +115,7 @@ impl Metadata {
     }
     /// Remembers that the session ended for good, and why, across replacement lanes. The first reason stays.
     pub(super) fn latch_gone(&self, reason: EndReason) {
-        let code = u8::from(reason == EndReason::ConsoleUserChanged);
+        let code = if reason == EndReason::ConsoleUserChanged { 2 } else { 1 };
         let _ = self
             .gone_reason
             .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
@@ -123,7 +123,7 @@ impl Metadata {
     }
     /// Why the session ended, as the viewer will be told.
     pub(super) fn gone_reason(&self) -> EndReason {
-        if self.gone_reason.load(Ordering::Acquire) == 1 {
+        if self.gone_reason.load(Ordering::Acquire) == 2 {
             EndReason::ConsoleUserChanged
         } else {
             EndReason::WindowClosed
