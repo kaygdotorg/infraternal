@@ -941,3 +941,187 @@ async fn device_code_machine_join_cannot_name_an_existing_host() {
             .unwrap();
     assert_eq!(receipts, 0, "no receipt exists for the existing host");
 }
+
+/// Start, inspect, approve and redeem one device-code machine join for `host`,
+/// the way `infraternal up` and the owner's approval page do, at the auth
+/// clock's current time. Returns the redeem response.
+async fn approve_and_redeem_machine_join(
+    app: &Router,
+    auth: &Auth,
+    session: &str,
+    host: Uuid,
+    (mode, execution_uid): (&str, u32),
+    key: &PKey<Private>,
+    now: i64,
+) -> Response {
+    let key_digest = openssl::sha::sha256(&key.raw_public_key().unwrap());
+    let start = request(
+        app,
+        "/auth/device-start",
+        json!({
+            "kind": "join_machine",
+            "device": "laptop",
+            "request": {
+                "host_id": host,
+                "hostname": "laptop",
+                "mode": mode,
+                "execution_uid": execution_uid,
+                "key_fingerprint": format!("SHA256:{}", FINGERPRINT_B64.encode(key_digest)),
+            },
+        }),
+        None,
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&start.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let inspected = request(
+        app,
+        "/auth/device-inspect",
+        json!({"code":approval["user_code"]}),
+        Some(session),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    auth.approve_without_passkey_for_tests(session, approval["user_code"].as_str().unwrap(), now)
+        .await
+        .unwrap();
+    request(
+        app,
+        "/auth/device-redeem",
+        json!({"token":approval["poll_token"]}),
+        None,
+        "",
+    )
+    .await
+}
+
+/// #559 F1, for a host that a device-code approval itself created: after the
+/// host joins and is promoted to root (which deletes its join-token row), a
+/// later approval naming the same id must not get a receipt. Only the
+/// `created_at` match refuses it here, since the row is device-approved. The
+/// owner's own re-enrolment of that promoted host (an invitation, as SSH
+/// setup's Retry uses, #230) must still work.
+#[tokio::test]
+async fn a_promoted_device_approved_host_refuses_a_later_approval_but_rejoins_by_invitation() {
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let issuer = InvitationIssuer::new(
+        auth.clone(),
+        pool.clone(),
+        store.clone(),
+        EnrollmentService {
+            source: source.clone(),
+            endpoint: endpoint.clone(),
+        },
+    );
+    let app = crate::auth::router_with_invitation_issuer(auth.clone(), Some(issuer)).merge(
+        router_with_store(auth.clone(), pool.clone(), store, source.clone(), endpoint),
+    );
+    source.unlock_from(&Administrator(material)).unwrap();
+    // /remote/join reads wall time, so the first approval starts a minute
+    // before it: its receipt is still live when the host joins.
+    let now = super::now().unwrap();
+    let host = Uuid::new_v4();
+    let host_key = PKey::generate_ed25519().unwrap();
+    auth.set_test_http_time(now - 60);
+    let first = approve_and_redeem_machine_join(
+        &app,
+        &auth,
+        &token,
+        host,
+        ("user", 1002),
+        &host_key,
+        now - 60,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: JoinInvitation =
+        serde_json::from_slice(&first.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let joined = request(
+        &app,
+        "/remote/join",
+        json!({
+            "host_id": host, "mode": "rootless", "token": first.token,
+            "csr_der": B64.encode(csr(&host_key)),
+        }),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(joined.status(), StatusCode::OK, "the approved host joins");
+    // The two writes of a finished root handover that matter here
+    // (`remote_promotion::handover`): the row becomes root, and its join-token
+    // row, the only other guard against a second receipt, is deleted.
+    sqlx::query("UPDATE remote_hosts SET mode='rootful',execution_uid=0 WHERE id=?")
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM remote_join_tokens WHERE host_id=?")
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    auth.set_test_http_time(now);
+    let attacker_key = PKey::generate_ed25519().unwrap();
+    let later = approve_and_redeem_machine_join(
+        &app,
+        &auth,
+        &token,
+        host,
+        ("system", 0),
+        &attacker_key,
+        now,
+    )
+    .await;
+    assert_eq!(
+        later.status(),
+        StatusCode::UNAUTHORIZED,
+        "a later approval must not publish a receipt for a host an earlier approval created"
+    );
+    let receipts: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(receipts, 0, "no receipt exists for the promoted host");
+
+    let invitation = issue_bound_machine_invitation(&app, &token, host, &host_key).await;
+    let rejoined = request(
+        &app,
+        "/remote/join",
+        json!({
+            "host_id": host, "mode": "rootful", "token": invitation.token,
+            "csr_der": B64.encode(csr(&host_key)),
+        }),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(
+        rejoined.status(),
+        StatusCode::OK,
+        "the owner can still re-enrol the promoted host with its own key"
+    );
+}
