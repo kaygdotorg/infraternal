@@ -10,8 +10,8 @@
 import { expect, test, type Page } from "playwright/test";
 import { runAxe } from "./a11y-axe";
 
-/** The rules that are held at zero. The keybar's `aside` with `role=group` is a known minor finding on the issue. */
-const HELD = { rules: ["aria-allowed-attr", "aria-prohibited-attr", "aria-allowed-role", "scrollable-region-focusable"], exclude: ["#keybar"] };
+/** The rules that are held at zero. */
+const HELD = { rules: ["aria-allowed-attr", "aria-prohibited-attr", "aria-allowed-role", "scrollable-region-focusable"] };
 
 /** Asserts that axe reports nothing for the held rules on the current page. */
 async function expectClean(page: Page, what: string): Promise<void> {
@@ -41,6 +41,17 @@ test("the add-hosts wizard names its source marks with a role", async ({ page })
   await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 45_000 });
   await expect(page.locator(".ah-src").first()).toHaveAttribute("role", "img");
   await expectClean(page, "add hosts");
+});
+
+test("the phone key bar is a group, not a landmark with a group role", async ({ browser }) => {
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  await page.context().request.post("/__mock/reset");
+  await page.context().request.post("/__mock/open-terminal");
+  await page.goto("/?mock=1&bg=none");
+  await expect(page.locator("#terminal-screen")).toHaveAttribute("data-connected", "true", { timeout: 30_000 });
+  await expectClean(page, "terminal on a phone");
+  await context.close();
 });
 
 test("sign-in is clean", async ({ page }) => {

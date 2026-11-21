@@ -220,7 +220,7 @@ const SCREEN = `
     </section>
     ` : ""}
     <div class="keyblur" aria-hidden="true"></div>
-    <aside class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
+    <div class="keybar" id="keybar" role="group" aria-label="Extra terminal keys">
       <div id="keytray" class="keytray ui-pill" role="toolbar" aria-label="Extra terminal keys. Press F6 to navigate." aria-keyshortcuts="F6 Shift+F6" aria-orientation="horizontal" tabindex="0" aria-activedescendant="key-escape">
         <div class="keyrows" id="keyrows">
           <div class="keyrow" id="keyrow-canvas" data-row="canvas" role="group" aria-label="Canvas" hidden></div>
@@ -243,7 +243,7 @@ const SCREEN = `
         </div>
         <span class="keydots" aria-hidden="true"><i></i><i></i></span>
       </div>
-    </aside>
+    </div>
     <p id="connection-status" class="connection-status" role="status">Starting terminal…</p>
     <span id="test-double-badge" class="test-double-badge" hidden>TEST DOUBLE</span>
     <aside id="probe-panel" class="probe-panel ui-overlay-surface" data-overlay-size="large" aria-label="Terminal latency probe" hidden>
