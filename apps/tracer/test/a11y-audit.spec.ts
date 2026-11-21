@@ -57,7 +57,7 @@ const DESCRIBE = `(el) => { const t = el.tagName.toLowerCase(); const id = el.id
 
 /** Measures the page for the probe above. */
 async function probe(page: Page, touch: boolean): Promise<Probe> {
-  return page.evaluate(({ describeSrc, touchTarget }) => {
+  return page.evaluate(({ describeSrc, touchTarget, touch }) => {
     const describe = eval(describeSrc) as (el: Element) => string;
     const interactive = Array.from(document.querySelectorAll<HTMLElement>("a[href], button, input:not([type=hidden]), select, textarea, summary, [role=button], [role=link], [role=menuitem], [role=tab], [role=switch], [role=checkbox], [role=option], [role=radio], [tabindex]:not([tabindex='-1'])"));
     const visible = (el: HTMLElement): boolean => {
@@ -88,7 +88,7 @@ async function probe(page: Page, touch: boolean): Promise<Probe> {
       doc: { lang: document.documentElement.lang, title: document.title, hasMain: !!document.querySelector("main, [role=main]"), viewport: document.querySelector("meta[name=viewport]")?.getAttribute("content") ?? "" },
       animations: document.getAnimations().map((a) => (a as CSSAnimation).animationName ?? (a as CSSTransition).transitionProperty ?? a.constructor.name),
     };
-  }, { describeSrc: DESCRIBE, touchTarget: 44 });
+  }, { describeSrc: DESCRIBE, touchTarget: 44, touch });
 }
 
 /** One axe violation, trimmed. */
@@ -172,7 +172,7 @@ for (const size of SIZES) {
         await openPalette(page);
         await page.keyboard.type("Settings: Appearance");
         await page.keyboard.press("Enter");
-        await expect(page.locator(".ui-sp").first()).toBeVisible({ timeout: 8000 });
+        await expect(page.locator(".ui-sp, .ui-settings").first()).toBeVisible({ timeout: 8000 });
       });
       screen("popover", async (page) => {
         await openCanvas(page, theme);
@@ -185,7 +185,8 @@ for (const size of SIZES) {
         await expect(page.locator(".ah-page[data-page='discovery']")).toBeVisible({ timeout: 45_000 });
       });
       screen("remove-host", async (page) => {
-        await openCanvas(page, theme, 1);
+        await page.goto(`/?mock=1&proto=clusters&scene=1&bg=none&removal=1&theme=${theme}`);
+        await expect(page.locator(".ui-window").nth(1)).toBeVisible({ timeout: 30_000 });
         await startRemovalFromPalette(page);
         await expect(page.locator(".ui-confirm-tip")).toBeVisible();
       });
