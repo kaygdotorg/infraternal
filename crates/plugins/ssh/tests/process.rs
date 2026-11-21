@@ -80,7 +80,10 @@ async fn cancellation_retires_the_helper_descendant_too() {
         execute(&mut command, Input::Empty, Duration::from_secs(70)).await
     });
     assert!(
-        until(|| !std::fs::read_to_string(&path).unwrap_or_default().is_empty()).await,
+        until(|| !std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .is_empty())
+        .await,
         "the helper never reported its descendant"
     );
     let child: u32 = std::fs::read_to_string(&path).unwrap().parse().unwrap();
@@ -139,7 +142,10 @@ async fn group_identity_is_retained_until_inherited_pipes_finish() {
             .filter_map(|id| id.parse().ok())
             .collect()
     };
-    assert!(until(|| read_ids().len() == 2).await, "the fixture never wrote both ids");
+    assert!(
+        until(|| read_ids().len() == 2).await,
+        "the fixture never wrote both ids"
+    );
     let ids = read_ids();
     let escape_cleanup = Descendant {
         pid: ids[1],
