@@ -25,6 +25,8 @@ infraternal-shim = { workspace = true, features = ["host-login"] }
 infraternal-protocol.workspace = true
 infraternal-plugin-host-facts = { version = "0.1.0", path = "../crates/plugins/host-facts" }
 infraternal-plugin-mesh = { version = "0.1.0", path = "../crates/plugins/mesh", default-features = false, features = ["server"] }
+# The vendored SSH engine (D289) with its packet-reader fuzz hook (#538).
+russh = { version = "=0.65.2", default-features = false, features = ["ring", "fuzz-hooks"] }
 
 [[bin]]
 name = "shim_frame_decode"
@@ -71,6 +73,13 @@ bench = false
 [[bin]]
 name = "auth_cookie"
 path = "fuzz_targets/auth_cookie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssh_packet_read"
+path = "fuzz_targets/ssh_packet_read.rs"
 test = false
 doc = false
 bench = false
