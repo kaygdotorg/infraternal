@@ -22,6 +22,7 @@
 //! Only built for tests and the `parser-checks` feature (the fuzz harness).
 
 use crate::{frame::MAX_FRAME, terminal::Terminal};
+use std::fmt::Write as _;
 
 /// One run of output, then the size both terminals change to after it (none for the last run).
 type Segment<'a> = (&'a [u8], Option<(u16, u16)>);
@@ -101,7 +102,8 @@ pub fn verify_vt_stream_sample(data: &[u8]) {
     if let (Ok(original), Ok(rebuilt)) = (whole.snapshot(), viewer.snapshot()) {
         assert!(
             original == rebuilt,
-            "a snapshot did not continue the stream"
+            "a snapshot did not continue the stream: {}",
+            first_difference(&original, &rebuilt)
         );
     }
 }
@@ -126,13 +128,52 @@ fn feed(terminal: &mut Terminal, mut bytes: &[u8], schedule: &[u8], step: &mut u
     }
 }
 
+/// Where two snapshots first differ, with up to 48 escaped bytes of each
+/// from just before that point (and both whole when they are small), so a
+/// failure can be read without a debugger.
+fn first_difference(left: &[u8], right: &[u8]) -> String {
+    let at = left
+        .iter()
+        .zip(right)
+        .position(|(a, b)| a != b)
+        .unwrap_or(left.len().min(right.len()));
+    let from = at.saturating_sub(16);
+    let window = |bytes: &[u8]| {
+        bytes[from.min(bytes.len())..(from + 48).min(bytes.len())]
+            .escape_ascii()
+            .to_string()
+    };
+    let mut text = format!(
+        "lengths {} and {}, first difference at byte {at}: {:?} vs {:?}",
+        left.len(),
+        right.len(),
+        window(left),
+        window(right)
+    );
+    // Small snapshots are shown whole: the difference can depend on bytes
+    // far from where it shows.
+    if left.len().max(right.len()) <= 4096 {
+        let _ = write!(
+            text,
+            "\nleft:  {}\nright: {}",
+            left.escape_ascii(),
+            right.escape_ascii()
+        );
+    }
+    text
+}
+
 /// Both terminals' snapshots agree and are bounded; returns the snapshot.
 fn compare(pieces: &Terminal, whole: &Terminal) -> Option<Vec<u8>> {
     assert!(pieces.approximate_snapshot().len() <= MAX_FRAME);
     match (pieces.snapshot(), whole.snapshot()) {
         (Ok(a), Ok(b)) => {
             assert!(a.len() <= MAX_FRAME);
-            assert!(a == b, "chunk boundaries changed the snapshot");
+            assert!(
+                a == b,
+                "chunk boundaries changed the snapshot: {}",
+                first_difference(&a, &b)
+            );
             Some(a)
         }
         (Err(_), Err(_)) => None,
