@@ -5169,7 +5169,7 @@ access (#341 B19).
        its final run (on top of the 512-slot build) holds those numbers. The
        owner, verbatim: "agreed".
 
-398. **The left-behind report belongs to revoking a person, not to removing a host (owner, 2026-11-21, #355; refines D356 and D367; DRAFT, owner-approved 2026-11-21, the orchestrator confirms the number and wording with the owner before merge):**
+398. **The left-behind report belongs to revoking a person, not to removing a host (owner, 2026-11-21, #355; refines D356 and D367; confirmed by the owner 2026-11-22):**
      - **Context:** D356 shows what a person left behind (an SSH key, a
        cron entry, a user service, a shell startup line) when their access
        is revoked, and D360/D364/D367 fixed how it is worded. Reviews of it
