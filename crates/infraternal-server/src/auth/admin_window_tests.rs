@@ -2,6 +2,7 @@
 //! counts from the tap that started the session; per-action changes still spend a tap.
 use super::*;
 
+/// One tap opens the window for fifteen minutes, and the first second after it asks for a tap again.
 #[tokio::test]
 async fn one_tap_opens_a_fifteen_minute_admin_window() {
     let _guard = SERIAL.lock().await;
@@ -92,6 +93,7 @@ const FRESH_ROUTES: &[(&str, &str)] = &[
     ("remote", "/remote/hosts/forget"),
 ];
 
+/// Table-driven proof that no fresh-session route says 401 or 403 for a closed window (#563).
 #[tokio::test]
 async fn every_fresh_session_route_answers_428_when_the_window_has_closed() {
     use axum::http::StatusCode;
@@ -176,7 +178,12 @@ fn admin_window_callers_are_all_known() {
             }
             let text = std::fs::read_to_string(&path).unwrap();
             if text.contains(".require_admin_window(") || text.contains(".fresh_session(") {
-                found.push(path.strip_prefix(&src).unwrap().to_string_lossy().into_owned());
+                found.push(
+                    path.strip_prefix(&src)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
             }
         }
     }
