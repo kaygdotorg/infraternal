@@ -327,9 +327,15 @@ impl Removed {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         loop {
             let mut socket = self.reconnect().await;
-            if let Some((call_id, action, _)) =
+            if let Some((call_id, action, input)) =
                 try_next_call(&mut socket, Duration::from_secs(2)).await
             {
+                // D398: a removal asks the host for no access report.
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(&input).unwrap()["report"],
+                    false,
+                    "the removal asked the host for an access report"
+                );
                 answer_receipt_reporting(&mut socket, call_id, &action, report).await;
                 return socket;
             }
@@ -581,16 +587,19 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
     let result = publishing.await.unwrap().unwrap();
     assert_eq!(result["state"], "removed");
     assert_eq!(result["host_cleanup"], "requested");
-    let Some(crate::access_report::Reading::Reported { reports, .. }) =
-        crate::access_report::read(&removed.pool, &person, removed.host)
+    // D398: a removal keeps no access report, even when the host sent one.
+    assert!(
+        crate::access_report::inbox(&removed.pool, &person)
             .await
             .unwrap()
-    else {
-        panic!("uninstall confirmation lost its access report");
-    };
-    assert_eq!(
-        reports[0].1.accounts[0].files[0].lines,
-        ["fixture access retained"]
+            .reports
+            .is_empty(),
+        "a removal kept the access report"
     );
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_access_reports")
+        .fetch_one(&removed.pool)
+        .await
+        .unwrap();
+    assert_eq!(kept, 0);
     removed.server.abort();
 }

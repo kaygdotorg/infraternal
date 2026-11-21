@@ -29,6 +29,7 @@ export interface InboxAction {
   primary?: boolean;
 }
 
+/** One thing waiting on the person: a collapsed line and, when opened, its context and actions. */
 export interface InboxItem {
   id: string;
   /** Glyph for the collapsed line: the inner markup of a 24x24 stroke icon (see `ICONS`). */
@@ -37,6 +38,11 @@ export interface InboxItem {
   title: string;
   /** The full context, shown when the line is expanded: why it waits and what the actions do. */
   body: string;
+  /**
+   * Optional lines the person reads or copies from (a list of files and lines, say), shown under the body in a
+   * wrapped monospace block that scrolls when it is long. Plain text only; a line's leading spaces are kept.
+   */
+  details?: readonly string[];
   actions: readonly InboxAction[];
   /**
    * False when the person cannot act on it: the item is not drawn (a control that cannot act is not shown). The
@@ -62,6 +68,7 @@ export interface InboxOptions {
   onCount?(count: number): void;
 }
 
+/** The elements of one drawn line, kept so a republish updates them in place. */
 interface Row {
   root: HTMLElement;
   toggle: HTMLButtonElement;
@@ -69,6 +76,7 @@ interface Row {
   title: HTMLElement;
   panel: HTMLElement;
   body: HTMLElement;
+  details: HTMLElement;
   actions: HTMLElement;
 }
 
@@ -83,6 +91,7 @@ const svg = (inner: string, className: string): SVGSVGElement => {
 
 let serial = 0;
 
+/** Make the Inbox card inside `options.parent`; sources publish to it and it draws every item the same way. */
 export function createInbox(options: InboxOptions): InboxController {
   const shell = createSidebarCard({
     parent: options.parent, before: options.before ?? null, label: "Inbox", className: "ui-inbox",
@@ -134,21 +143,30 @@ export function createInbox(options: InboxOptions): InboxController {
     inner.className = "ui-inbox-panel-inner";
     const body = document.createElement("p");
     body.className = "ui-inbox-body";
+    // Present only when an item has lines (`fill` toggles it); a tabindex keeps a long list scrollable from the keyboard.
+    const details = document.createElement("pre");
+    details.className = "ui-inbox-details";
+    details.tabIndex = 0;
+    details.hidden = true;
     const actions = document.createElement("div");
     actions.className = "ui-inbox-actions";
-    inner.append(body, actions);
+    inner.append(body, details, actions);
     panel.append(inner);
     root.append(toggle, panel);
     const glyph = svg("", "ui-inbox-glyph");
     toggle.prepend(glyph);
     toggle.append(svg(ICONS.next, "ui-inbox-chevron"));
-    return { root, toggle, glyph, title, panel, body, actions };
+    return { root, toggle, glyph, title, panel, body, details, actions };
   };
 
   const fill = (row: Row, item: InboxItem, id: string): void => {
     row.glyph.innerHTML = item.icon;
     row.title.textContent = item.title;
     row.body.textContent = item.body;
+    row.details.textContent = item.details?.join("\n") ?? "";
+    row.details.hidden = !item.details?.length;
+    // The lines name what they are for, so a screen reader hears more than "group" when focus lands on them.
+    if (item.details?.length) row.details.setAttribute("aria-label", `${item.title}: details`);
     row.toggle.onclick = () => setExpanded(expanded === id ? undefined : id);
     row.actions.replaceChildren(...item.actions.map((action) => {
       const button = document.createElement("button");

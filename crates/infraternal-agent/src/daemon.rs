@@ -271,8 +271,19 @@ struct Open {
 pub(crate) use crate::daemon_writer::hello_capabilities;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+/// The trusted server's request to revoke one person's host logins (`terminal.login.revoke`).
 struct RevokeLogin {
     person: uuid::Uuid,
+    /// Whether the D356 access report is wanted. The server leaves it out
+    /// for a host removal (D398), so the default is to scan: a caller that
+    /// says nothing is a person's revoke.
+    #[serde(default = "wants_report")]
+    report: bool,
+}
+
+/// The default of [`RevokeLogin::report`].
+fn wants_report() -> bool {
+    true
 }
 
 struct Opened {
@@ -589,7 +600,7 @@ const REVOKE_REPLY_BUDGET: usize = 30 * 1024;
 /// background programs may remain, and D356's `access` report, which
 /// only the person revoking sees (never a log). If the report would not fit a
 /// control frame, its last lines are dropped and it says it is truncated.
-fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
+fn revoke_reply(revoked: &crate::logins::Revoked, report: bool) -> Vec<u8> {
     let mut access = revoked.access.clone();
     loop {
         let mut reply = serde_json::json!({ "revoked": true });
@@ -599,7 +610,11 @@ fn revoke_reply(revoked: &crate::logins::Revoked) -> Vec<u8> {
         }
         // D356: always sent, so "nothing changed" is never confused with
         // "not checked" (an older agent sends none).
-        reply["access"] = serde_json::to_value(&access).unwrap_or_default();
+        // A revoke that was not asked for a report (a host removal, D398)
+        // sends none; the server never reads one then.
+        if report {
+            reply["access"] = serde_json::to_value(&access).unwrap_or_default();
+        }
         let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{\"revoked\":true}".to_vec());
         if bytes.len() <= REVOKE_REPLY_BUDGET {
             return bytes;
@@ -759,7 +774,7 @@ mod revoke_reply_tests {
                 }],
             },
         };
-        let bytes = super::revoke_reply(&revoked);
+        let bytes = super::revoke_reply(&revoked, true);
         assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
         let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(reply["access"]["omitted_accounts"], 3);
@@ -775,9 +790,26 @@ mod revoke_reply_tests {
             "the planted key was trimmed before less valuable files"
         );
         assert!(reply["warning"].is_string(), "D353's warning was dropped");
-        let clean = super::revoke_reply(&crate::logins::Revoked::default());
+        let clean = super::revoke_reply(&crate::logins::Revoked::default(), true);
         let clean: serde_json::Value = serde_json::from_slice(&clean).unwrap();
         assert_eq!(clean["access"]["state"], "unchanged");
+    }
+    /// D398: a revoke that was not asked for a report (a host removal) sends
+    /// none, and still carries the receipt and D353's warning.
+    #[test]
+    fn a_revoke_without_a_report_sends_only_the_receipt() {
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            ..crate::logins::Revoked::default()
+        };
+        let reply: serde_json::Value =
+            serde_json::from_slice(&super::revoke_reply(&revoked, false)).unwrap();
+        assert_eq!(reply["revoked"], true);
+        assert!(reply.get("access").is_none(), "a report was sent: {reply}");
+        assert!(reply["warning"].is_string());
+        let asked: serde_json::Value =
+            serde_json::from_slice(&super::revoke_reply(&revoked, true)).unwrap();
+        assert!(asked.get("access").is_some());
     }
     /// D362 process evidence cannot overflow a reply or lose its warning during trimming.
     #[test]
@@ -799,7 +831,7 @@ mod revoke_reply_tests {
                 accounts: vec![account; 64],
             },
         };
-        let bytes = super::revoke_reply(&revoked);
+        let bytes = super::revoke_reply(&revoked, true);
         assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
         let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert!(
@@ -821,6 +853,7 @@ fn spawn_revocation(
     manager: LoginManager,
     person: uuid::Uuid,
     restore: bool,
+    report: bool,
     finished: oneshot::Sender<OpenResult>,
 ) -> tokio::task::JoinHandle<()> {
     use infraternal_plugin_api::admission::OpenRefusal;
@@ -831,9 +864,9 @@ fn spawn_revocation(
                 .await
                 .map(|()| b"{\"restored\":true}".to_vec())
         } else {
-            crate::logins::revoke(&state, manager, person)
+            crate::logins::revoke_reporting(&state, manager, person, report)
                 .await
-                .map(|revoked| revoke_reply(&revoked))
+                .map(|revoked| revoke_reply(&revoked, report))
         }
         .map(|json| Opened {
             session: None,
@@ -1649,7 +1682,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 // remaining resource quota, and keeps terminal dispatch live.
                                 revocations.retain(|task| !task.is_finished());
                                 let (finished, result) = tokio::sync::oneshot::channel();
-                                revocations.push(spawn_revocation(state.clone(), login_manager(&mut login_manager_slot), input.person, action == "terminal.login.restore", finished));
+                                revocations.push(spawn_revocation(state.clone(), login_manager(&mut login_manager_slot), input.person, action == "terminal.login.restore", input.report, finished));
                                 opens.spawn(async move {
                                     (stream, call_id, result.await.unwrap_or(Err(OpenRefusal::ResourceUnavailable)))
                                 });
