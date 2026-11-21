@@ -208,6 +208,34 @@ final class FramePixels {
     /// Tracking state from before the latest `prepare`, restored if that picture is dropped.
     private var recognitionBeforePrepare: CaretRecognition?
 
+    /// Rows changed since the last sharp picture (`markSharp`), one flag per row of `height`.
+    private var touched: [Bool] = []
+    /// How many flags in `touched` are set.
+    private var touchedCount = 0
+    /// True when every row counts as touched: no sharp picture yet, a size change, or a
+    /// comparison that was not against the delivered picture (after a drop or reset).
+    private var touchedAll = true
+
+    /// Fraction (0...1) of picture rows that changed since the last sharp picture. Pictures are
+    /// counted when prepared, so an undelivered picture can only over-count, which errs towards
+    /// a full keyframe refresh, never towards a stale picture.
+    var touchedFraction: Double { touchedAll || height == 0 ? 1 : Double(touchedCount) / Double(height) }
+    /// Records that the delivered picture is now sharp everywhere (a sharp refresh or the last
+    /// refinement pass reached the stream), so touched rows count from zero again.
+    func markSharp() {
+        guard valid, height > 0 else { touchedAll = true; return }
+        if touched.count != height { touched = [Bool](repeating: false, count: height) }
+        else { for row in touched.indices { touched[row] = false } }
+        touchedCount = 0; touchedAll = false
+    }
+    /// Records that every row is at motion quality again (a keyframe at the motion budget).
+    func markAllTouched() { touchedAll = true }
+    /// Counts `row` as changed since the last sharp picture.
+    private func touch(_ row: Int) {
+        guard !touchedAll, row < touched.count, !touched[row] else { return }
+        touched[row] = true; touchedCount += 1
+    }
+
     /// True only after a picture has been successfully delivered to the stream.
     var hasDeliveredHistory: Bool { valid }
 
@@ -253,6 +281,10 @@ final class FramePixels {
                     let previousRow = previous.advanced(by: row * rowBytes)
                     if memcmp(currentRow, previousRow, rowBytes) == 0 { continue }
                     same = false
+                    touch(row)
+                    // Once the change is too large to be a cursor, only whole-row
+                    // comparison continues, to count the rows it touched.
+                    guard damageBoundsComplete else { continue }
                     for column in 0..<w {
                         let currentPixel = currentRow.advanced(by: column * 4)
                         let previousPixel = previousRow.advanced(by: column * 4)
@@ -267,7 +299,6 @@ final class FramePixels {
                             break
                         }
                     }
-                    if !damageBoundsComplete { break }
                 }
                 if changedPixels > 0, damageBoundsComplete {
                     let bounds = PixelDamageBounds(
@@ -286,6 +317,7 @@ final class FramePixels {
                 }
             }
         }
+        if !comparable { touchedAll = true }
         prepared = true; alreadyDelivered = same
         if same { damageKind = .unchanged; return false }
         if comparable, changedPixels > 0 {
@@ -340,6 +372,7 @@ final class FramePixels {
         valid = false; prepared = false; alreadyDelivered = false
         damageKind = .content; damageBounds = nil; changedPixels = 0; damageBoundsComplete = true
         caretRecognition = .empty; recognitionBeforePrepare = nil
+        touchedAll = true
     }
 
     /// Copies the before and after pixels of `bounds` out of the two buffers, each with its own row

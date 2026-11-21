@@ -149,20 +149,57 @@ enum EncodeDecision: Equatable {
     case caret
     /// Encode a sharp full keyframe of the settled, unchanged picture.
     case refresh
+    /// Encode the settled, unchanged picture once more as a delta, at the sharp budget. A few of
+    /// these sharpen a picture where only small areas changed, at a fraction of a keyframe's bytes.
+    case refine
     /// Whether this decision must produce a keyframe.
     var keyframe: Bool {
         switch self {
         case .motion(let force): return force
-        case .caret: return false
+        case .caret, .refine: return false
         case .refresh: return true
         }
+    }
+    /// Whether this decision re-encodes the settled picture at the larger sharp budget.
+    var sharp: Bool { self == .refresh || self == .refine }
+}
+
+/// How the settled sharp refresh is sent, from how much of the picture changed since the last
+/// sharp one and from the encoder's rate control [D200 V2, #146].
+///
+/// After small changes (typing) most of the picture is still the sharp one the viewer has, so a
+/// few delta frames at the sharp budget beat a forced keyframe at a fraction of its bytes. On the
+/// M1 at 1.56 MP (J1115): three passes reached 46.0 dB in 224 KB against the keyframe's 40.3 dB
+/// in 610 KB (real-time mode), and 40.8 dB in 128 KB against 36.9 dB in 414 KB (low-latency
+/// mode). After heavy motion (a scroll, a new page) the modes differ. In the low-latency mode
+/// deltas plateau (31.2 dB after 8 passes against the keyframe's 36.1 dB, J1078 and J1115), so
+/// the keyframe stays. In the ordinary real-time mode the keyframe itself is poor (31.2 dB in
+/// 385 KB) while 8 delta passes reach 37.8 dB in 336 KB, so heavy motion is refined too.
+struct SharpRefreshPlan: Equatable {
+    /// Above this fraction of picture rows touched since the last sharp picture, the motion was heavy.
+    static let heavyMotionFraction = 0.25
+    /// Delta passes after small changes.
+    static let smallChangePasses = 3
+    /// Delta passes after heavy motion; 0 sends one forced keyframe instead.
+    let heavyMotionPasses: Int
+    /// The plan for an encoder's rate control: refine heavy motion in 8 passes in the ordinary
+    /// real-time mode, keep the keyframe in the low-latency mode.
+    init(mode: EncoderRateMode) { heavyMotionPasses = mode == .realtime ? 8 : 0 }
+    /// How many refinement passes a refresh that is due now gets, where `touched` is the fraction
+    /// (0...1) of rows changed since the last sharp picture; 0 means one forced keyframe. A
+    /// non-finite `touched` counts as heavy motion.
+    func passes(touched: Double) -> Int {
+        touched.isFinite && touched <= Self.heavyMotionFraction ? Self.smallChangePasses : heavyMotionPasses
     }
 }
 
 /// Event-driven scheduler for the encoder. It turns capture events (`changed`) and encoder
 /// results (`completed`, `encoderDropped`) into the next `EncodeDecision`, with no timer: an idle
-/// desktop encodes nothing. After motion stops for 0.25 s it owes one sharp `refresh`.
+/// desktop encodes nothing. After motion stops for 0.25 s it owes one sharp refresh: a few
+/// `refine` deltas, or one keyframe `refresh`, as `plan` says.
 struct DamageEncodingState {
+    /// How the settled sharp refresh is sent. The default keeps a keyframe after heavy motion.
+    var plan = SharpRefreshPlan(mode: .lowLatency)
     /// A picture has been captured at least once.
     private var hasFrame = false
     /// A change arrived that has not been encoded yet.
@@ -175,6 +212,8 @@ struct DamageEncodingState {
     private var settle: Double?
     /// A refresh was dropped by the encoder and must be tried again.
     private var retryRefresh = false
+    /// Delta refinement passes still owed for the settled picture; 0 when none.
+    private var refinementsLeft = 0
     /// Records that the captured picture changed.
     /// - Parameters:
     ///   - now: Monotonic seconds.
@@ -188,13 +227,20 @@ struct DamageEncodingState {
         if !caret {
             settle = now + 0.25
             retryRefresh = false
+            // Refinement sharpens a picture that is no longer the newest one;
+            // the new settle deadline owes a fresh plan for the new picture.
+            refinementsLeft = 0
         }
     }
     /// Forces the next encoded picture to be a keyframe, after the viewer lost one.
     mutating func repair() { keyframe = true }
     /// Returns what to encode now, or `nil` if nothing is due. Call it after a capture event or when
     /// `refreshDeadline` is reached.
-    mutating func next(at now: Double) -> EncodeDecision? {
+    /// - Parameters:
+    ///   - now: Monotonic seconds.
+    ///   - touched: Fraction of picture rows changed since the last sharp picture, read only when
+    ///     a refresh starts. The default (everything) keeps the keyframe refresh.
+    mutating func next(at now: Double, touched: Double = 1) -> EncodeDecision? {
         guard hasFrame else { return nil }
         if damaged {
             damaged = false
@@ -203,8 +249,20 @@ struct DamageEncodingState {
             return caret ? .caret : .motion(keyframe: keyframe)
         }
         if retryRefresh { retryRefresh = false; return .refresh }
-        if keyframe { return .motion(keyframe: true) }
-        if let settle, now >= settle { self.settle = nil; return .refresh }
+        if keyframe {
+            // A keyframe at the motion budget replaces the picture being refined;
+            // deltas cannot make it sharp everywhere, so the rest becomes a refresh.
+            if refinementsLeft > 0 { refinementsLeft = 0; retryRefresh = true }
+            return .motion(keyframe: true)
+        }
+        if refinementsLeft > 0 { refinementsLeft -= 1; return .refine }
+        if let settle, now >= settle {
+            self.settle = nil
+            let passes = plan.passes(touched: touched)
+            guard passes > 0 else { return .refresh }
+            refinementsLeft = passes - 1
+            return .refine
+        }
         return nil
     }
     // A dropped encoder input never became a decoder reference, so no drop needs
@@ -214,12 +272,13 @@ struct DamageEncodingState {
     // tick (the caller's timer), and a newer capture replaces the retry.
     /// Reports that the encoder dropped a picture that `next` returned. Returns `true` when that
     /// picture is still owed, so the caller retries at the next source tick: always, because a
-    /// dropped motion or caret delta leaves the viewer on an older picture and a dropped keyframe or
-    /// refresh still owes its keyframe. No drop
+    /// dropped motion or caret delta leaves the viewer on an older picture, a dropped keyframe or
+    /// refresh still owes its keyframe, and a dropped refinement pass still owes its pass. No drop
     /// forces a keyframe: the next delta still builds on the last picture the decoder received.
     mutating func encoderDropped(_ decision: EncodeDecision) -> Bool {
         switch decision {
         case .refresh: retryRefresh = true
+        case .refine: refinementsLeft += 1
         case .motion, .caret: damaged = true; damagedCaret = decision == .caret
         }
         return true
@@ -227,6 +286,9 @@ struct DamageEncodingState {
     /// Reports that an encoded picture was handled. When it was not `delivered`, the next picture
     /// becomes a keyframe because the viewer's decoder never saw it.
     mutating func completed(delivered: Bool) { keyframe = !delivered }
+    /// True while refinement passes for the settled picture are still owed. When a delivered
+    /// `refine` leaves this false, the picture is sharp.
+    var refining: Bool { refinementsLeft > 0 }
     /// When the sharp refresh is due, in monotonic seconds, or `nil`. A caller sleeps until then.
     var refreshDeadline: Double? { settle }
 }

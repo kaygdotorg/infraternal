@@ -77,6 +77,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     init(target: [String: Any], rect: CGRect, size: CGSize, hevc: Bool, fps: Int, output: @escaping (UInt8, Data) throws -> Void) {
         self.target = target; self.rect = rect; self.size = size; self.hevc = hevc; self.fps = fps; self.output = output
         bitrate = AdaptiveBitrate(maximum: max(500_000, Int(size.width * size.height) * 3))
+        super.init()
+        damageState.plan = SharpRefreshPlan(mode: encoder.mode)
     }
 
     /// In measurement mode, logs a lifecycle stage with a timestamp.
@@ -217,12 +219,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Encodes pictures until nothing is due, on the encoding queue.
     ///
-    /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, or a
-    /// sharp refresh), encodes it and sends the packet. A dropped picture is retried one frame
-    /// interval later unless a newer one arrives first; a settled picture schedules its sharp
-    /// refresh with a timer rather than polling. A terminal encoder or output error stops the
-    /// capture and sends one error packet. When it ends it reschedules itself if a newer frame
-    /// arrived in the meantime.
+    /// Each pass takes the newest frame, asks `damageState` what to encode (motion, caret delta, a
+    /// sharp keyframe refresh, or a refinement delta), encodes it and sends the packet. A dropped
+    /// picture is retried one frame interval later unless a newer one arrives first; a settled
+    /// picture schedules its sharp refresh with a timer rather than polling. Refinement passes
+    /// run back to back, each checking the mailbox first, so new motion always wins. A terminal
+    /// encoder or output error stops the capture and sends one error packet. When it ends it
+    /// reschedules itself if a newer frame arrived in the meantime.
     private func drain() {
         var retryDroppedFrame = false
         do {
@@ -254,10 +257,10 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     damageState.changed(at: ProcessInfo.processInfo.systemUptime, caret: pixels.damageKind == .caret)
                 }
                 if repair { damageState.repair() }
-                guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime) else { break }
+                guard let current, let decision = damageState.next(at: ProcessInfo.processInfo.systemUptime, touched: pixels.touchedFraction) else { break }
                 if frame == nil, !deferHistoryUntilAfterPaint { _ = pixels.prepare(current.0) }
                 let prepared = measure ? nanos(mach_absolute_time()) : 0
-                let budget = decision == .refresh ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
+                let budget = decision.sharp ? min(bitrate.maximum * 4, bitrate.current * 4) : bitrate.current
                 guard let body = try encoder.encodeSurface(current.0, ticks: current.1, force: decision.keyframe, bitrate: budget) else {
                     pixels.dropped()
                     retryDroppedFrame = damageState.encoderDropped(decision)
@@ -279,6 +282,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                     pixels.delivered()
                 }
                 damageState.completed(delivered: true)
+                // Touched rows count from the last sharp picture: a delivered refresh or last
+                // refinement pass is sharp everywhere; a motion keyframe is not sharp anywhere.
+                if decision == .refresh || (decision == .refine && !damageState.refining) { pixels.markSharp() }
+                else if decision.keyframe { pixels.markAllTouched() }
+                if measure && decision.sharp {
+                    FileHandle.standardError.write(Data("METRIC sharp_refresh decision=\(decision) bytes=\(body.count - 9) capture_ns=\(nanos(current.1))\n".utf8))
+                }
                 _ = bitrate.feedback(at: ProcessInfo.processInfo.systemUptime, congested: ProcessInfo.processInfo.systemUptime - began > 0.1)
             }
             // No drop needs reference repair, but every dropped picture is retried
