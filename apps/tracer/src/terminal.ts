@@ -8,6 +8,7 @@ import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
 import { Osc52Scanner } from "./osc52";
 import { readProgramCopy } from "./program-copy";
+import { KeyAckRtt } from "./key-ack-rtt";
 import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
@@ -402,6 +403,8 @@ export class TerminalClient {
   /** D309: after a reattach, silence from the program means its screen may be out of date; see stale-screen.ts. */
   private staleWatch: StaleScreenWatch | undefined;
   private roundTripMs: number | undefined;
+  /** This terminal's own key -> Ack time; what prediction decides on once it has a sample (#569). */
+  private readonly keyAck = new KeyAckRtt();
   private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
@@ -568,7 +571,8 @@ export class TerminalClient {
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
     this.offRoundTrip = this.conn.onRoundTrip((ms) => {
       this.roundTripMs = ms;
-      this.prediction?.setRoundTrip(ms);
+      // A terminal that has timed its own keys keeps that figure: the ping stops at the server, the host may be far behind it.
+      this.prediction?.setRoundTrip(ms === undefined ? undefined : this.keyAck.smoothed ?? ms);
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
@@ -1548,6 +1552,7 @@ export class TerminalClient {
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
     if (this.attachmentConfirmed) {
+      this.keyAck.sent(firstSequence, encoded.byteLength, performance.now());
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1707,6 +1712,8 @@ export class TerminalClient {
     }
     this.inputQueue.consume(acknowledged);
     this.ackedInSeq = sequence;
+    const keyRoundTrip = this.keyAck.acked(sequence, performance.now());
+    if (keyRoundTrip !== undefined) this.prediction?.setRoundTrip(keyRoundTrip);
     this.resumeInputIfRoom();
   }
 
@@ -2864,6 +2871,7 @@ export class TerminalClient {
 
   /** Attachment and typing refresh the latency sample; connection liveness continues at idle [D265]. */
   private startPings(): void {
+    this.keyAck.reset();
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
     // The readout was just blanked above, so this probe's answer must be allowed to refill it (#430).
