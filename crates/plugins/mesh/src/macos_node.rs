@@ -491,7 +491,7 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-pub use crate::enrolment::Enrolment;
+pub use crate::enrolment::{Enrolment, MachineBindingError};
 
 /// Apply the binding rule to saved state; `true` means the key must rotate.
 ///
@@ -2144,12 +2144,23 @@ fn valid_rotation_request(operation_id: &str, sequence: u64) -> bool {
 }
 
 impl Node {
+    /// Refuse a folder bound to another Mac before the supervisor starts (see `macos_machine`).
+    /// # Errors
+    /// `PermissionDenied` carrying a [`MachineBindingError`].
+    pub fn check_enrolled_machine(state_directory: &Path) -> io::Result<()> {
+        crate::macos_machine::check_existing(state_directory)
+    }
+
     /// Restore accepted public intent, clean only old utun routes, and resume before coordinator dialing.
     ///
     /// State that another enrolment issued is discarded first (see [`reconcile`]).
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        // An enrolled node belongs to one Mac: refuse a copied folder first (#221).
+        if enrolment.is_some() {
+            crate::macos_machine::bind(state_directory, crate::macos_machine::fingerprint())?;
+        }
         #[cfg(feature = "mesh-dns")]
         crate::dns_integration::DnsIntegration::default().remove()?;
         let path = state_directory.join(PUBLIC_STATE);
@@ -3152,6 +3163,9 @@ mod tests {
     mod authority_mtu;
     /// The Mac UDP listener: socket reuse and the handshake admission guard.
     mod listener;
+    /// An enrolled restore binds the folder to this Mac and refuses another Mac's (#221).
+    mod machine_binding;
+    use machine_binding::bind_this_mac;
     /// A failed retirement save leaves a peer-free deny snapshot, written before the worker fence.
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
@@ -4622,9 +4636,12 @@ mod tests {
             .collect()
     }
 
+    /// State from an unbound (slice-1) node loses its key and peers once, then keeps everything.
     #[test]
     fn restoring_unbound_state_removes_the_key_and_logs_why() {
         let directory = test_directory();
+        // Bind while empty: state with no record is refused.
+        bind_this_mac(&directory);
         let current = enrolment(b"coordinator B");
         write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None))
             .expect("write slice-1 state");
@@ -4646,9 +4663,12 @@ mod tests {
         assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
     }
 
+    /// Restoring under a new enrolment retires the old key and records the new binding.
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();
+        // Bind while empty: state with no record is refused.
+        bind_this_mac(&directory);
         let old = enrolment(b"coordinator A");
         let new = enrolment(b"coordinator B");
         write_public_state(

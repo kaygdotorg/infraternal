@@ -81,6 +81,13 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+/// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.
+#[cfg(any(
+    all(feature = "agent", target_os = "macos"),
+    all(test, feature = "agent", target_os = "linux")
+))]
+mod macos_machine;
+
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub use macos_node as node;
 
