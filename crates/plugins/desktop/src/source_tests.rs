@@ -166,6 +166,36 @@ fn a_console_change_during_a_leg_latches_gone() {
     assert!(metadata.bind_console(Some(501)));
     metadata.console_changed();
     assert!(metadata.gone.load(Ordering::Acquire));
+    assert_eq!(metadata.gone_reason(), EndReason::ConsoleUserChanged);
+}
+
+/// A console change tells the server why through the `gone` reply, so the viewer
+/// hears "the person changed" (Close 4411), while a closed window keeps its
+/// default reason, and the first reason a session latched stays (#146).
+#[tokio::test]
+async fn the_gone_reply_names_a_console_change_and_the_first_reason_stays() {
+    let bridge = SourceBridge::new("missing-runtime".into(), "missing-helper".into(), 2);
+    bridge.set_enabled(true).await.unwrap();
+    let (changed, closed) = (Uuid::from_u128(8), Uuid::from_u128(9));
+    for id in [changed, closed] {
+        bridge.prepare(id, start()).unwrap();
+    }
+    let metadata = |id| {
+        bridge.0.state.lock().unwrap().prepared[&id]
+            .metadata
+            .clone()
+    };
+    metadata(changed).console_changed();
+    metadata(closed).latch_gone(EndReason::WindowClosed);
+    metadata(closed).console_changed();
+    assert_eq!(
+        bridge.prepare(changed, start()).unwrap()["reason"],
+        "console_user_changed"
+    );
+    assert_eq!(
+        bridge.prepare(closed, start()).unwrap()["reason"],
+        "window_closed"
+    );
 }
 
 /// Every window list after the first carries the icons the agent holds, and
