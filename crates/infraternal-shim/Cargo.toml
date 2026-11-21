@@ -51,6 +51,8 @@ ca-handoff = ["dep:openssl"]
 desktop-user = ["dep:security-framework", "dep:core-foundation"]
 # Enables input encoding only for the native mouse ABI probe, not shipping builds.
 vt-test-input = []
+# Exposes `vt_checks` for the workspace fuzz harness crate only; never in shipping builds.
+parser-checks = []
 bench-vt = ["dep:alacritty_terminal", "dep:vt100"]
 bench-ghostty = ["bench-vt", "dep:libghostty-vt"]
 

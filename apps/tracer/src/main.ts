@@ -22,8 +22,10 @@ import { releaseAuthScheme, useAuthScheme } from "./auth-scheme";
 import { recoveryUiEnabled } from "./recovery-ui";
 import type { HumanTrace, PerformanceProbe, ProbeTraceSample } from "./perf-probe.on-demand";
 import { onDemand } from "./on-demand";
+import { deferredStylesReady } from "./deferred-styles";
 // Ghostty and its WASM are fetched only once an authenticated user reaches the terminal.
 import type { TerminalClient } from "./terminal";
+import { predictiveEchoEnabled } from "./host-echo-signal";
 
 declare global {
   interface Window {
@@ -31,6 +33,8 @@ declare global {
     __tracerPerformanceProbe?: {
       /** Returns content-free probe stage times for the current synthetic key run. */
       trace: () => ProbeTraceSample[];
+      /** How much history the terminal holds, as counts (#569). */
+      scrollbackSummary: (prefix: string) => { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } | undefined;
       /** The typing recorder for a driver that types like a person (see `PerformanceProbe.startHumanRecording`). */
       human: {
         start: () => void;
@@ -515,7 +519,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // Concept mockup for views on one canvas (#89): it brings its own windows and no live terminal.
   const clustersMode = __CLUSTERS_PREVIEW__ && mockMode && proto === "clusters";
   const probeMode = query.get("probe") === "1";
-  const predictiveEcho = query.get("predict") === "1";
+  const predictiveEcho = predictiveEchoEnabled(query.get("predict"));
   const reviewLayout = productTestMode && query.get("reviewLayout") === "1";
   // The canvas is the product screen. The test double's plain page and the latency probe keep the single
   // terminal screen: the terminal specs and the probe drive that one terminal.
@@ -530,6 +534,8 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     await loadFont(font);
     applyFontVars(font, document.documentElement);
     if (uiFont === "sans") await document.fonts.load('450 14px "Geist Sans"');
+    // The canvas sheets load behind the first paint (index.html); the screen must not draw before they are in.
+    await deferredStylesReady();
     if (generation !== sessionGeneration) return;
     // The controller stores the account face in the canvas look; `?ui=` overrides this page only and never enters that look.
     document.documentElement.dataset.uiFont = uiFont;
@@ -657,6 +663,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
     window.__tracerPerformanceProbe = {
       trace: () => performanceProbe?.traceSamples() ?? [],
+      scrollbackSummary: (prefix) => currentTerminal?.scrollbackSummary(prefix),
       human: {
         start: () => performanceProbe?.startHumanRecording(),
         stop: () => performanceProbe?.stopHumanRecording(),

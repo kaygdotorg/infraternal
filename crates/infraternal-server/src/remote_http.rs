@@ -575,7 +575,8 @@ async fn issue_approved_machine_join(
         .begin()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    // A device approval can create only its requested owner-bound host row.
+    // A device approval can create only its requested owner-bound host row;
+    // the SELECT below refuses a row that existed before this approval.
     sqlx::query(
         "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved) \
          SELECT ?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
@@ -593,12 +594,20 @@ async fn issue_approved_machine_join(
     .execute(&mut *transaction)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // The host id is chosen by the requester, so `ON CONFLICT DO NOTHING` can
+    // land on a host that already exists. Accept only the row this approval
+    // made (device-approved, created at the approval's own issue time), which
+    // a poll retry still matches. An existing host whose join-token row is
+    // gone (a finished root handover) would otherwise get a fresh receipt
+    // bound to the requester's key, and a second active certificate (#559 F1).
     let stored_uid: Option<i64> = sqlx::query_scalar(
-        "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? AND revoked_at IS NULL",
+        "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? \
+         AND revoked_at IS NULL AND device_approved=1 AND created_at=?",
     )
     .bind(request.host_id.as_bytes().as_slice())
     .bind(&approval.user_id)
     .bind(mode.as_str())
+    .bind(approval.issued_at)
     .fetch_optional(&mut *transaction)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
@@ -662,6 +671,49 @@ async fn issue_approved_machine_join(
     Ok(invitation)
 }
 
+/// The CSR bytes of a join body, or `None` unless `csr_der` is the one
+/// canonical unpadded base64url spelling of at most 4096 bytes (5462
+/// characters), so no alias of the same DER reaches certificate issuance.
+fn canonical_csr(csr_der: &str) -> Option<Vec<u8>> {
+    if csr_der.len() > 5462 {
+        return None;
+    }
+    let der = B64.decode(csr_der).ok()?;
+    (B64.encode(&der) == csr_der).then_some(der)
+}
+
+/// Fuzz hook: a join body decodes strictly, and an accepted CSR spelling is canonical.
+#[cfg(any(test, feature = "parser-checks"))]
+pub(crate) fn check_join_request_sample(data: &[u8]) {
+    let Ok(request) = serde_json::from_slice::<JoinRequest>(data) else {
+        return;
+    };
+    if let Some(der) = canonical_csr(&request.csr_der) {
+        assert!(der.len() <= 4096);
+        assert_eq!(B64.encode(&der), request.csr_der);
+    }
+    let Ok(encoded) = serde_json::to_vec(&request) else {
+        panic!("a decoded join request does not serialise");
+    };
+    let Ok(again) = serde_json::from_slice::<JoinRequest>(&encoded) else {
+        panic!("a re-encoded join request is refused");
+    };
+    assert_eq!(
+        (
+            again.host_id,
+            again.mode.as_str(),
+            &again.token,
+            &again.csr_der
+        ),
+        (
+            request.host_id,
+            request.mode.as_str(),
+            &request.token,
+            &request.csr_der
+        )
+    );
+}
+
 /// `POST /remote/join`: a host redeems its invitation (or a root upgrade's
 /// successor its promotion token) with a CSR, and gets its signed
 /// certificate and the uid it is bound to.
@@ -669,15 +721,7 @@ async fn join(
     State(api): State<Api>,
     Json(request): Json<JoinRequest>,
 ) -> Result<Json<JoinResponse>, StatusCode> {
-    if request.csr_der.len() > 5462 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let der = B64
-        .decode(&request.csr_der)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if B64.encode(&der) != request.csr_der {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let der = canonical_csr(&request.csr_der).ok_or(StatusCode::BAD_REQUEST)?;
     let store = api.store;
     let certificate = RemoteEnrollment::new(api.source, store.clone())
         .join(request.host_id, request.mode, &request.token, &der, now()?)

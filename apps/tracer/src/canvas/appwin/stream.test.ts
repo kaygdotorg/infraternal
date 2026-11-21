@@ -3,7 +3,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { StreamHandler } from "../../connection";
 import { MAX_VIDEO_BYTES, type VideoInput } from "../../../../../packages/protocol/src/desktop";
 import type { WireFrame } from "../../../../../packages/protocol/src/codec";
-import { AppStream, parseStatus, type StreamOptions } from "./stream";
+import { AppStream, MAX_HANDOFF_UNITS, parseStatus, type StreamOptions } from "./stream";
 import type { FromWorker, ToWorker } from "./worker-protocol";
 import type { ControlState } from "./status";
 
@@ -129,6 +129,21 @@ test("authoritative window retirement after reconnect clears the viewer and work
   } finally { f.stream.dispose(); }
 });
 
+/** The machine's end reason rides in the Close code: 4411 names the console user, any other code keeps today's meaning (#146). */
+test("a Close with the console-user code says why; an unknown code is only a failure to diagnose", async () => {
+  const f = await fixture();
+  try {
+    f.handlers.get(1)!.onFrame({ type: "Close", code: 4411, reason: "console user changed" }, new Uint8Array(), 0);
+    expect(f.stream.current).toEqual({ kind: "closed", why: "console-user-changed" });
+    expect(f.handlers.size).toBe(0);
+  } finally { f.stream.dispose(); }
+  const g = await fixture();
+  try {
+    g.handlers.get(1)!.onFrame({ type: "Close", code: 4412, reason: "something new" }, new Uint8Array(), 0);
+    expect(g.stream.current.kind).not.toBe("closed");
+  } finally { g.stream.dispose(); }
+});
+
 /** A worker that never runs cannot accumulate access units, even across a socket reconnect. */
 test("stalled worker handoff stays within one maximum access unit and resumes on a keyframe", async () => {
   const f = await fixture();
@@ -152,7 +167,8 @@ test("stalled worker handoff stays within one maximum access unit and resumes on
     f.worker.onmessage?.({ data: { t: "admitted", bytes: MAX_VIDEO_BYTES } });
     const tiny = bytes.subarray(0, 1);
     for (let sequence = 24; sequence <= 1000; sequence++) deliver(sequence, sequence === 24, tiny);
-    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, 24, 25, 26, 27]);
+    // The credit admits one stall's burst of small deltas (MAX_HANDOFF_UNITS), then nothing more until the worker answers.
+    expect(f.chunks.map(chunk => chunk.sequence)).toEqual([1, 23, ...Array.from({ length: MAX_HANDOFF_UNITS }, (_, i) => 24 + i)]);
   } finally { f.stream.dispose(); }
 });
 

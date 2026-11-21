@@ -129,9 +129,11 @@ pub struct RecoveryPending {
 }
 impl Session {
     /// The session is inside the browser's 15-minute admin window that its tap started (D333).
+    /// The one check every fresh-session route uses; a closed window is `Error::FreshRequired`
+    /// (HTTP 428), never a plain denial, so the page can offer renewal (#563).
     pub(crate) fn require_admin_window(&self, now: i64) -> Result<()> {
         if self.fresh > now || now - self.fresh >= infraternal_plugin_api::ADMIN_WINDOW_SECONDS {
-            return Err(Error::Denied);
+            return Err(Error::FreshRequired);
         }
         Ok(())
     }

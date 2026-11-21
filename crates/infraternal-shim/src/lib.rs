@@ -47,6 +47,9 @@ pub mod code_identity;
 pub mod desktop_user;
 #[cfg(any(feature = "host-login", target_os = "macos"))]
 pub mod login_ready;
+/// The open-file limit of the server and the infraternal agent, and the shells that must not inherit a raised one (#562).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod open_files;
 /// A terminal no other process of the account can open, for the password
 /// of a root upgrade (#399, D274).
 #[cfg(target_os = "linux")]
@@ -377,6 +380,13 @@ mod terminal_limits;
 mod terminal_memory;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal_native;
+/// Fuzz entry point for the VT stream and its snapshots (tests and `parser-checks` only).
+#[cfg(all(
+    any(test, feature = "parser-checks"),
+    any(target_os = "linux", target_os = "macos")
+))]
+#[doc(hidden)]
+pub mod vt_checks;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use session::{Config, run, run_with_retention};
 #[cfg(all(feature = "host-login", target_os = "linux"))]

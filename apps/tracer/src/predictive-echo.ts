@@ -128,6 +128,12 @@ export class PredictiveEcho {
   private roundTripMs: number | undefined;
   /** Set when the host stopped echoing (a password prompt, a late echo) or mispredicted three times; cleared again when host output matches a saved echo proof (see `offerEchoProof`). */
   private muted = false;
+  /**
+   * Set while the host says its terminal reads a line with echo off (`terminal.echo`, read by the shim from the
+   * PTY's mode): a password prompt in any language. Nothing is drawn then. Prompts inside a nested login do not
+   * reach this flag (the outer terminal still echoes), so the other safety rules stay in force (#569, D130).
+   */
+  private hostEchoHidden = false;
   /** Echoes that would prove the host is echoing again: a timed-out run's late echo and the newest muted key. */
   private proofs: Uint8Array[] = [];
   /** Wrong predictions so far; three mute prediction. */
@@ -279,11 +285,32 @@ export class PredictiveEcho {
     }
   }
 
+  /**
+   * The host's terminal stopped (`true`) or resumed (`false`) echoing typed keys. While echo is off every queued
+   * prediction is dropped at once and no key is drawn, so not one character of a secret shows. Turning echo back
+   * on only lifts this rule; the other waits (round trip, mutes, unconfirmed output) still apply.
+   */
+  hostEcho(hidden: boolean): void {
+    if (hidden === this.hostEchoHidden) return;
+    this.hostEchoHidden = hidden;
+    if (hidden) {
+      // A secret's keys never echo, so no echo can prove anything while it is read.
+      this.proofs = [];
+      this.clearPending("host-echo-off");
+    } else if (this.lastReason === "host-echo-off") {
+      this.lastReason = this.isAboveThreshold() ? "ready" : "rtt-low";
+    }
+  }
+
   /** Places and queues a prediction for `data` when it is safe, otherwise clears the queue or records why not. */
   private predictInput(data: string, sequence: bigint, bytes: Uint8Array, terminalSafe: boolean): void {
     if (!terminalSafe) {
       this.clearPending("unsafe-screen");
       this.waitingForOutput = true;
+      return;
+    }
+    if (this.hostEchoHidden) {
+      this.clearPending("host-echo-off");
       return;
     }
 
@@ -539,9 +566,10 @@ export class PredictiveEcho {
     return this.roundTripMs !== undefined && this.roundTripMs > RTT_THRESHOLD_MS;
   }
 
-  /** Whether keys are predicted right now: opted in, a slow link, not muted, fewer than three mispredictions, and no wait pending. */
+  /** Whether keys are predicted right now: opted in, a slow link, not muted, fewer than three mispredictions, no wait pending, and the host echoing. */
   private isEnabled(): boolean {
-    return this.options.optedIn && this.isAboveThreshold() && !this.muted && this.mispredictions < 3 && !this.waitingForOutput;
+    return this.options.optedIn && this.isAboveThreshold() && !this.muted && this.mispredictions < 3 && !this.waitingForOutput
+      && !this.hostEchoHidden;
   }
 
   /** How many cells wide `text` is (0 when it cannot be measured, otherwise 1 or 2). */

@@ -16,6 +16,8 @@ mod crypto;
 mod devices;
 #[cfg(feature = "remote")]
 pub(crate) use devices::ApprovedMachineJoin;
+#[cfg(all(feature = "remote", any(test, feature = "parser-checks")))]
+pub(crate) use devices::check_join_machine_sample;
 mod http;
 pub(crate) use http::refresh_api_cookie;
 mod recovery;
@@ -102,6 +104,11 @@ impl VerifiedPasskey {
 pub enum Error {
     #[error("authorization failed")]
     Denied,
+    /// The caller is a signed-in account, but its 15-minute admin window (D333) has closed.
+    /// Every route that needs the window answers this the same way: HTTP 428, so the page can
+    /// offer the quick passkey renewal (#498, #563). It is not an authorization failure.
+    #[error("confirm with your passkey again")]
+    FreshRequired,
     #[error("invalid request")]
     Invalid,
     #[error("username already exists")]

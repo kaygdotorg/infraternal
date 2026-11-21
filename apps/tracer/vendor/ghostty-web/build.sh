@@ -3,8 +3,12 @@
 set -euo pipefail
 
 readonly upstream_url="https://github.com/coder/ghostty-web.git"
-readonly upstream_commit="5f0c6b7720e5ac241208afe7a2335981ded1b486"
-readonly ghostty_commit="5714ed07a1012573261b7b7e3ed2add9c1504496"
+readonly upstream_commit="835eb2749f640a139693bb64fd67de3c1b50a598"
+# The Ghostty core is NOT the submodule upstream records (5714ed07, 2025-12-01). It
+# is the newest core that upstream's WASM API still fits (wasm-api.patch): the
+# commit before Ghostty added its own, incompatible terminal C API (2026-03-13).
+readonly ghostty_url="https://github.com/ghostty-org/ghostty.git"
+readonly ghostty_commit="e75f8956c576ea8acf6ee4e70d45f918738e7512"
 readonly required_bun="1.4.2"
 readonly required_zig="0.15.2"
 readonly vendor_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,7 +63,10 @@ if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$upstream_commit" ]]; then
     exit 1
 fi
 
-# This local bridge patch sets theme colors directly in the existing terminal state.
+# Upstream's WASM API patch (with our theme API folded in), rebased onto the newer
+# Ghostty core, replaces the file that upstream's build-wasm.sh applies to the core.
+cp -- "$vendor_dir/wasm-api.patch" "$source_dir/patches/ghostty-wasm-api.patch"
+# This local bridge patch (TypeScript side) sets theme colors directly in the terminal.
 git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 # Apply font geometry after the theme renderer changes so both fixes build together.
 git -C "$source_dir" apply "$vendor_dir/cell-metrics.patch"
@@ -70,16 +77,21 @@ git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
 # Control boundaries share one scoped input copy and one set of write effects.
 git -C "$source_dir" apply "$vendor_dir/buffered-writes.patch"
 
-git -C "$source_dir" submodule update --quiet --init --recursive --depth=1
+# Fetch the Ghostty core by its immutable commit instead of the recorded submodule.
+# build-wasm.sh sees ghostty/.git and skips its own submodule initialisation.
+git init --quiet "$source_dir/ghostty"
+git -C "$source_dir/ghostty" remote add origin "$ghostty_url"
+git -C "$source_dir/ghostty" fetch --quiet --depth=1 origin "$ghostty_commit"
+git -C "$source_dir/ghostty" checkout --quiet --detach FETCH_HEAD
 if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then
-    printf 'Ghostty submodule does not match its pinned commit\n' >&2
+    printf 'Ghostty core does not match its pinned commit\n' >&2
     exit 1
 fi
 
 # Ghostty zeroes page memory only in safe builds and trusts the OS otherwise. The
 # browser build is freestanding and pools pages inside one shared WebAssembly
 # instance, so a new terminal would inherit an earlier terminal's screen. This
-# patch is inside the submodule, so it applies after the submodule update.
+# patch is inside the Ghostty core, so it applies after the core is checked out.
 git -C "$source_dir/ghostty" apply "$vendor_dir/zero-pages.patch"
 
 zig_path="$(command -v "$zig_bin")"

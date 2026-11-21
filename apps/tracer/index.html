@@ -36,11 +36,27 @@
     <link rel="stylesheet" href="./style.css" />
     <link rel="stylesheet" href="./ui.css" />
     <link rel="stylesheet" href="./auth.css" />
-    <link rel="stylesheet" href="./canvas.css" />
-    <link rel="stylesheet" href="./clusters.css" />
-    <link rel="stylesheet" href="./mesh.css" />
-    <link rel="stylesheet" href="./sessions.css" />
-    <link rel="stylesheet" href="./addhost.css" />
+    <link rel="stylesheet" href="./canvas.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./clusters.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./mesh.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./sessions.css" media="print" data-deferred />
+    <link rel="stylesheet" href="./addhost.css" media="print" data-deferred />
+    <!-- The five sheets above are for the signed-in canvas only, so they must not hold back the first paint (#573). `media="print"` makes
+         the browser fetch them at low priority without blocking rendering; each one is switched to `all` when it arrives, and
+         `window.__deferredStyles` settles once all have (or failed: an unstyled canvas beats none). `mountCoreScreen`'s caller waits
+         for it (src/deferred-styles.ts), so the canvas never shows unstyled. -->
+    <script>
+      (function () {
+        var pending = [].map.call(document.querySelectorAll("link[data-deferred]"), function (link) {
+          return new Promise(function (done) {
+            function ready() { link.media = "all"; done(); }
+            if (link.sheet) ready();
+            else { link.addEventListener("load", ready); link.addEventListener("error", done); }
+          });
+        });
+        window.__deferredStyles = Promise.all(pending);
+      })();
+    </script>
   </head>
   <body>
     <!-- No interim "loading" text: the page stays a calm empty surface for the few

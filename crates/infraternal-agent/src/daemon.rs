@@ -1503,8 +1503,15 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Ended(stream))?;
                                 continue;
                             }
-                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
-                                return Err(sessions::invalid("terminal stream already attached or limit reached"));
+                            if streams.contains_key(&stream) {
+                                return Err(sessions::invalid("terminal stream already attached"));
+                            }
+                            // A full link refuses this one stream at once and keeps
+                            // its siblings: the server turns the Close into a plain
+                            // sentence for the person (#562).
+                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
+                                reply(&control, Message::Close(stream, "terminal stream limit"))?;
+                                continue;
                             }
                             // The registry only caches shims this process has seen. A miss is not
                             // proof of death, and never a reason to drop every sibling stream: the
@@ -1787,12 +1794,19 @@ impl Link {
         })
         .await
     }
+    /// Read the next shim frame, refusing frames of a capability this link did
+    /// not select (approximate Snapshots, echo state) as a protocol error.
     async fn read(&mut self) -> io::Result<Shim> {
         let frame = self.reader.read(&mut self.session.peer).await?;
         if matches!(frame, Shim::SnapshotWithFlags(..))
             && self.session.caps & APPROXIMATE_SNAPSHOT == 0
         {
             return Err(sessions::invalid("unnegotiated approximate Snapshot"));
+        }
+        if matches!(frame, Shim::EchoState(..))
+            && self.session.caps & infraternal_shim::frame::ECHO_STATE == 0
+        {
+            return Err(sessions::invalid("unnegotiated echo state"));
         }
         Ok(frame)
     }
@@ -2752,6 +2766,16 @@ async fn terminal_run(
                             let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
                             capture_io!(emit(&tx, Message::Pong(stream, nonce, sent_us)))?;
                         }
+                    }
+                    Shim::EchoState(seq, flags) => {
+                        // A state, not a cursor fence: it may pass output held
+                        // for credit, so a prompt's report is never late (#569).
+                        let json = terminal_events::Notice::Echo {
+                            session_id: uuid::Uuid::from_bytes(id),
+                            seq,
+                            hidden: flags & infraternal_shim::frame::ECHO_HIDDEN != 0,
+                        }.json()?;
+                        emit(&tx, Message::Event(stream, json)).await?;
                     }
                     Shim::Exited(status, final_seq) => {
                         release_key_cover(&priority, stream, attachment, key_repaint_target).await?;

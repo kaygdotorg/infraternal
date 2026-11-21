@@ -13,6 +13,7 @@
  */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { brotliCompressSync, gzipSync } from "node:zlib";
+import { FINGERPRINTED_NAME } from "./fingerprint";
 
 /** The build output folder to measure; `TRACER_DIST`, default `dist`. */
 const dist = process.env.TRACER_DIST ?? "dist";
@@ -32,6 +33,14 @@ const limits = {
   // reported, not limited.
   onDemand: { gzip: 20 * KIB, brotli: 18 * KIB },
 };
+/**
+ * The terminal engine's wasm is a file of its own, outside the JavaScript budget (#573). It is gated here: the file must
+ * carry the content-hashed name the server caches for good, and its Brotli size is reported. The base64 copy this
+ * replaced cost 133 KB of the terminal chunk's Brotli against 99 KB for the raw wasm.
+ */
+const engineFiles = (await readdir(dist)).filter((name) => /^ghostty-vt-[0-9a-z]{8}\.wasm$/.test(name));
+if (engineFiles.length !== 1) throw new Error(`expected one content-hashed engine wasm (ghostty-vt-<hash>.wasm) in ${dist}, found ${engineFiles.length}`);
+console.log(`terminal engine ${engineFiles[0]}: identity=${(await stat(`${dist}/${engineFiles[0]}`)).size} brotli=${await stat(`${dist}/${engineFiles[0]}.br`).then((file) => file.size).catch(() => "none")} bytes`);
 /** The chunk lists the build wrote to `chunks.json`. */
 const classes = JSON.parse(await readFile(`${dist}/chunks.json`, "utf8")) as { critical: string[]; deferred: string[]; onDemand: string[] };
 /** The compressed size of each on-demand chunk, checked one by one. */
@@ -44,10 +53,11 @@ for (const name of await readdir(dist, { recursive: true })) {
   if (!name.endsWith(".js") || name.startsWith("docs/")) continue;
   const klass = classes.critical.includes(name) ? "critical" : classes.deferred.includes(name) ? "deferred" : classes.onDemand.includes(name) ? "onDemand" : undefined;
   if (!klass) throw new Error(`${name} is in no chunk class: chunks.json is stale, rebuild`);
-  // The server gives a year-long immutable cache only to `chunk-<8 alphanumerics>.js` (web_assets.rs). Every split
-  // chunk must have such a content-hashed name, or a returning visit would revalidate (or miss) it. The entries
-  // (the app and the two workers) are named for their role and revalidate with a conditional request.
-  const entry = name === "main.js" || name.endsWith(".worker.js") || name.endsWith(".worker.on-demand.js");
+  // The server gives a year-long immutable cache only to `chunk-<8 alphanumerics>.js` and to names with a fingerprint
+  // (web_assets.rs). Every split chunk must have a content-hashed name, or a returning visit would revalidate (or miss) it. The
+  // app's entry carries a fingerprint too (fingerprint.ts); the workers are named for their role (code loads them by that name)
+  // and revalidate with a conditional request.
+  const entry = /^main\.[0-9a-f]{10}\.js$/.test(name) || name.endsWith(".worker.js") || name.endsWith(".worker.on-demand.js");
   if (!entry && !/^chunk-[0-9a-z]{8}\.js$/.test(name)) throw new Error(`${name} has no content-hashed chunk name`);
   const identity = (await stat(`${dist}/${name}`)).size;
   const gzip = await stat(`${dist}/${name}.gz`).then((file) => file.size).catch(() => identity);
@@ -136,6 +146,8 @@ const sized = async (path: string): Promise<number> => {
   return bytes.length;
 };
 for (const entry of fontEntries) {
+  // A fingerprinted font is a copy of a plain-named one (fingerprint.ts); counting both would double the family.
+  if (FINGERPRINTED_NAME.test(entry.name)) continue;
   if (!entry.isDirectory()) {
     if (entry.name === "nerd-symbols.woff2") {
       const size = await sized(`${fontRoot}/${entry.name}`);
@@ -148,7 +160,7 @@ for (const entry of fontEntries) {
   if (!budget) { fontFailure ||= `font family ${entry.name} has no transfer budget`; continue; }
   let total = 0;
   let critical = 0;
-  for (const name of (await readdir(`${fontRoot}/${entry.name}`)).filter((file) => file.endsWith(".woff2")).sort()) {
+  for (const name of (await readdir(`${fontRoot}/${entry.name}`)).filter((file) => file.endsWith(".woff2") && !FINGERPRINTED_NAME.test(file)).sort()) {
     const size = await sized(`${fontRoot}/${entry.name}/${name}`);
     total += size;
     if (name === "roman.latin.woff2") critical = size;
