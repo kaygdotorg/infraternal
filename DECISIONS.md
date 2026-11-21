@@ -4639,6 +4639,18 @@ access (#341 B19).
        are removed after their offline time (D370). D166 amended.
      - **Solid material (A16):** overlays are never opaque, except when the
        person chooses Solid. D160 amended.
+     - **Second burst: an eleventh gated row (owner, 2026-11-21, #569;
+       amends the table above).** Output that arrives right behind a
+       previous burst (a key's echo followed by its prompt redraw) is drawn
+       by the same frame, never the next one: **0 extra frames, p99**,
+       measured by `test/second-burst.spec.ts`. The owner, as relayed by the
+       orchestrator: "make 'second-burst extra frames = 0' a gated D375
+       row". Why: the terminal parsed one write at a time and started the
+       next only after the previous one was painted, which put the second
+       burst one frame (8.3 ms at 120 Hz) late; measured on the perf VM that
+       was 52% of such second bursts, and 0% after the fix. The row counts
+       frames, not milliseconds, so it is valid on the unthrottled run that
+       gates and on the 60 Hz run beside it. It gates from its first run.
 
 376. **Upgrading a host to root, design round (owner, 2026-11-09, #399;
      completes D274's round):**

@@ -25,7 +25,7 @@ def full_log(**overrides):
 
 
 class ReportTests(unittest.TestCase):
-    """The report must list all ten rows, gate them, and never let a row disappear."""
+    """The report must list all eleven rows, gate them, and never let a row disappear."""
 
     def test_all_rows_pass(self):
         table, passed = targets.report(full_log())
@@ -216,6 +216,7 @@ class TypeScriptCopyTests(unittest.TestCase):
             dict(key="render_10mbps", n=50, value=119.0, unit="fps", target=120.0, higher=True),
             dict(key="render_10mbps", n=50, value=714.3, unit="fps", target=120.0, higher=True),
             dict(key="first_paint_phone", n=20, value=1000.0, unit="ms", target=1000.0, gate=1200.0),
+            dict(key="second_burst_extra_frames", n=40, value=1.0, unit="frames", target=0.0),
         ]
         script = ("import { d375Row } from './apps/tracer/test/latency-targets.ts';"
                   "for (const c of JSON.parse(process.argv[1])) console.log(d375Row({ key: c.key, source: 't', n: c.n,"

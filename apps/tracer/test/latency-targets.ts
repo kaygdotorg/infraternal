@@ -47,11 +47,12 @@ export interface D375Measurement {
     | "reconnect_last_screen"
     | "reconnect_network_change"
     | "render_10mbps"
-    | "first_paint_phone";
+    | "first_paint_phone"
+    | "second_burst_extra_frames";
   source: string;
   n: number;
   value: number;
-  unit: "ms" | "fps";
+  unit: "ms" | "fps" | "frames";
   target: number;
   gate?: number;
   higherIsBetter?: boolean;

@@ -211,6 +211,7 @@ numbered history, both timestamp arrival orders and altered checksums.
   | Reconnect, typable, after a network change | 4 round trips + 50 ms | tracer scenario, socket drop to the first resumed echo painted (D267) |
   | Rendering | 120 fps at 10 MB/s output | `latency-profile.spec.ts`, 1000 / p99 frame interval while the terminal takes 10 MB/s |
   | First paint | under 1 s on a mid-range phone | `latency-profile.spec.ts`, phone viewport, CPU slowed 4×, no injected delay |
+  | Second burst, extra frames | 0 extra frames | `second-burst.spec.ts`, two output messages back to back, p99 of the frame that draws the second minus the first frame that could (D375 amendment, #569) |
   | Idle infraternal agent | under 15 MB RSS | `verify-latency.py`, agent RSS idle, with no session and with one quiet session (the larger) |
 
   Every row is printed on every run as `METRIC name=d375_<row>`, and
