@@ -215,6 +215,8 @@ final class FramePixels {
     /// of them with a total area within `tileAreaLimit`, top to bottom. `nil` when the picture is
     /// unchanged, has no comparable history, or changed too much to be sent as tiles.
     private(set) var tileRects: [PixelDamageBounds]?
+    /// Rows found changed by the latest comparison, reused between calls to avoid allocation.
+    private var changedRows: [Int] = []
     /// Cursor-tracking state.
     private var caretRecognition = CaretRecognition.empty
     /// Tracking state from before the latest `prepare`, restored if that picture is dropped.
@@ -259,6 +261,7 @@ final class FramePixels {
         var minX = w, minY = h, maxX = -1, maxY = -1
         var transition: PixelTransition?
         var bands = TileBands(limit: tileAreaLimit)
+        changedRows.removeAll(keepingCapacity: true)
         if comparable {
             bytes.withUnsafeBytes { old in
                 let previous = old.baseAddress!
@@ -267,9 +270,11 @@ final class FramePixels {
                     let previousRow = previous.advanced(by: row * rowBytes)
                     if memcmp(currentRow, previousRow, rowBytes) == 0 { continue }
                     same = false
-                    // The caret scan stops at its small limits; the band pass may continue
-                    // for tiles. Once neither needs more rows, the comparison stops early.
-                    if !damageBoundsComplete && !bands.tracking { break }
+                    changedRows.append(row)
+                    // Every changed row is recorded so only those rows are copied into the history
+                    // below; once neither the caret scan nor the tile bands need detail, the rest of
+                    // the frame is still compared, never copied.
+                    if !damageBoundsComplete && !bands.tracking { continue }
                     // Pixels outside [first, last] are equal, so skipping them keeps the caret
                     // scan's raster-order counts and limits exactly as a full-row walk.
                     let first = Self.firstDifferentPixel(currentRow, previousRow, width: w)
@@ -326,10 +331,14 @@ final class FramePixels {
         }
         // Overwriting history invalidates it until this exact prepared input is
         // delivered. A raw drop must never suppress an unconfirmed new picture.
-        valid = false; width = w; height = h
+        valid = false
+        // Comparable history already holds every unchanged row, so only changed rows are copied;
+        // a small change then costs one read of the frame instead of a read plus a full copy.
+        let rows: [Int] = comparable ? changedRows : Array(0..<h)
+        width = w; height = h
         if bytes.count != rowBytes * h { bytes = Data(count: rowBytes * h) }
         bytes.withUnsafeMutableBytes { destination in
-            for row in 0..<h {
+            for row in rows {
                 destination.baseAddress!.advanced(by: row * rowBytes).copyMemory(from: base.advanced(by: row * stride), byteCount: rowBytes)
             }
         }
