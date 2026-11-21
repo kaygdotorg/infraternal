@@ -75,7 +75,7 @@ for (const sentBeforeDrop of [false, true]) test(`review: refusal fallback prese
       outputQueue: { length: 0, clear() {} },
       config: { hooks: {}, status: { textContent: "" } }, conn,
       terminal: { reset() {} }, lastSize: { cols: 80, rows: 24, pxW: 0, pxH: 0 },
-      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {}, conn, keyAck: new KeyAckRtt(),
+      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {}, keyAck: new KeyAckRtt(),
       sendFrame: (stream: number, frame: WireFrame) => conn.send(stream, frame),
     }) as TerminalProbe;
     conn.openStream(terminal.streamHandler());

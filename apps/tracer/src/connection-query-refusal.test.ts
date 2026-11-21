@@ -97,7 +97,7 @@ for (const sentBeforeDrop of [false, true]) test(`pending query stays reply-mark
           renderer.writeSlices(bytes, (write) => slices((end) => { write(end); drainReplies(); })); callback();
         },
       }, lastSize: { cols: 80, rows: 24, pxW: 0, pxH: 0 },
-      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {}, conn, keyAck: new KeyAckRtt(),
+      showInputResendNotice() { notices += 1; }, cancelStreamRetry() {}, wakeTerminal() {}, setStatus() {}, sampleRoundTrip() {}, startPings() {}, keyAck: new KeyAckRtt(),
       sendFrame: (stream: number, frame: WireFrame) => conn.send(stream, frame),
     }) as TerminalProbe;
     // Adapt only renderer event delivery; production methods own scanning, marking and suppression.
