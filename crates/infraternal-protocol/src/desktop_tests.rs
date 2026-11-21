@@ -52,6 +52,7 @@ fn desktop_messages_roundtrip_at_every_split_and_reject_trailing_fixed_fields() 
         Message::Repair {
             last_sequence: u64::MAX,
         },
+        Message::Pressure { waited_ms: 65_535 },
         Message::Fragment {
             session_id: &id,
             sequence: 1,

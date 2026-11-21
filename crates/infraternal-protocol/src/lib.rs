@@ -699,7 +699,7 @@ fn decode_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, DecodeError> {
         0x10..=0x17 => decode_terminal_body(frame_type, body),
         0x30..=0x33 => decode_control_body(frame_type, body),
         #[cfg(any(test, feature = "desktop"))]
-        0x40..=0x45 => desktop::decode(frame_type, body).map(Frame::Desktop),
+        0x40..=0x46 => desktop::decode(frame_type, body).map(Frame::Desktop),
         _ => Err(DecodeError::UnknownType(frame_type)),
     }
 }
