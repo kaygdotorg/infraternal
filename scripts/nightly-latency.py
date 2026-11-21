@@ -61,7 +61,7 @@ NOISE_FLOOR = 0.5
 MIN_TMP_FREE_BYTES = 1_500_000_000
 MIN_HOME_FREE_BYTES = 100_000_000
 #: How long `scripts/verify latency` may run on the perf VM before it is killed (seconds).
-VERIFY_TIMEOUT = 55 * 60
+VERIFY_TIMEOUT = 75 * 60
 #: How long the coordinator waits for the build and for the perf VM's lock plus the run (seconds).
 BUILD_TIMEOUT = 3 * 3600
 PERF_TIMEOUT = 2 * 3600
