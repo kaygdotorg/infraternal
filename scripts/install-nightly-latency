@@ -106,14 +106,29 @@ def install(home, source, path, *, enable=True, systemctl=None):
     return changed
 
 
+# The perf VM's root-owned `perf-run` (installed at /usr/local/bin) has no status subcommand:
+# its interface is `perf-run [--cold] [--root] [--out DIR] -- <cmd> [args...]`. Running `-- true`
+# takes the shared perf lock for a few milliseconds and proves the tool, the lock and the
+# account work. It can wait behind a benchmark, so a busy perf VM may time out the preflight.
+PERF_PREFLIGHT = "perf-run -- true"
+
+
 def preflight():
-    """Check the tools and both hosts are reachable now; return the list of problems."""
+    """Check the tools and both hosts are reachable now; return the list of problems.
+
+    The perf VM check runs `PERF_PREFLIGHT`, a real `perf-run` invocation. It takes the perf lock
+    briefly, so it can fail (after its timeout) while a benchmark holds the lock; rerun it then.
+    """
     problems = [f"`{tool}` is not on PATH" for tool in ("netbird", "git", "fj") if shutil.which(tool) is None]
     if problems:
         return problems
-    checks = ((BUILD_HOST, "$HOME/infraternal-ops/build-slot --status"), (PERF_HOST, "perf-run status"))
+    checks = ((BUILD_HOST, "$HOME/infraternal-ops/build-slot --status"), (PERF_HOST, PERF_PREFLIGHT))
     for host, command in checks:
-        result = subprocess.run(["netbird", "ssh", host, command], capture_output=True, text=True, timeout=120)
+        try:
+            result = subprocess.run(["netbird", "ssh", host, command], capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            problems.append(f"`{command}` on {host} did not finish within 120 s (busy host or unreachable)")
+            continue
         if result.returncode != 0:
             problems.append(f"`{command}` on {host} failed: {result.stderr.strip()[:200]}")
     return problems
