@@ -456,3 +456,58 @@ async fn writer_claim_on_the_d379_writer_keeps_the_sqlx_rules() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Opening a terminal records its session row on the D379 writer under the
+/// sqlx statement's rules: only for a live login session, never twice for one
+/// id, never for a host the account does not own.
+#[tokio::test]
+async fn opened_session_row_is_recorded_on_the_d379_writer_under_the_sqlx_rules() {
+    let (pool, user, _session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("open-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'open',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let new = |id: u8, token: &'static str, host: Option<Vec<u8>>| {
+        crate::terminal_session_record::NewSession {
+            session_id: [id; 16],
+            user_id: &user,
+            host,
+            session_token: token,
+            now,
+        }
+    };
+    assert!(crate::terminal_session_record::record(&auth, &pool, new(1, "open-token", None)).await);
+    let row: (i64, i64) =
+        sqlx::query_as("SELECT created_at,last_seen FROM terminal_sessions WHERE id=?")
+            .bind([1_u8; 16].as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, (now, now));
+    assert!(
+        !crate::terminal_session_record::record(&auth, &pool, new(1, "open-token", None)).await,
+        "a duplicate id is refused"
+    );
+    assert!(
+        !crate::terminal_session_record::record(&auth, &pool, new(2, "other-token", None)).await,
+        "no live login session"
+    );
+    assert!(
+        !crate::terminal_session_record::record(
+            &auth,
+            &pool,
+            new(3, "open-token", Some(vec![9; 16]))
+        )
+        .await,
+        "unknown remote host"
+    );
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM terminal_sessions WHERE id IN (?,?)")
+        .bind([2_u8; 16].as_slice())
+        .bind([3_u8; 16].as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "refused opens leave no row");
+    let _ = std::fs::remove_dir_all(dir);
+}

@@ -3235,18 +3235,20 @@ async fn open_terminal(
     }
     let session_id = opened.session_id;
     let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
-    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
-        .bind(session_id.as_slice())
-        .bind(user_id)
-        .bind(now)
-        .bind(now)
-        .bind(host.map(|id| id.as_bytes().to_vec()))
-        .bind(crate::auth::hash(session_token)).bind(user_id)
-        .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
-    if changed.rows_affected() != 1 {
+    // The row is written on the D379 writer thread (#562).
+    let recorded = crate::terminal_session_record::record(
+        &state.auth,
+        &state.pool,
+        crate::terminal_session_record::NewSession {
+            session_id,
+            user_id,
+            host: host.map(|id| id.as_bytes().to_vec()),
+            session_token,
+            now,
+        },
+    )
+    .await;
+    if !recorded {
         #[cfg(test)]
         eprintln!("remote terminal open stage=session-persist result=unavailable");
         return Err(crate::embedded::AgentError::Unavailable);
