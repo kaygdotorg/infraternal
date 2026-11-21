@@ -499,7 +499,7 @@ fn a_new_release_that_gave_up_its_undo_settles_the_marker_when_it_serves() {
 
 /// J1085 finding 3 (its experiment 3): a new release that cannot record its trial
 /// (here `pending.json.tmp` is blocked by a folder, as a full or failing disk would)
-/// gets TRIAL_NOT_RECORDED, so its startup stays off the database.
+/// gets `TRIAL_NOT_RECORDED`, so its startup stays off the database.
 #[test]
 fn a_new_release_that_cannot_record_its_trial_is_told_so() {
     let data = Data::new();
