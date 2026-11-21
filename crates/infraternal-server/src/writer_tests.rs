@@ -511,3 +511,68 @@ async fn opened_session_row_is_recorded_on_the_d379_writer_under_the_sqlx_rules(
     assert_eq!(count, 0, "refused opens leave no row");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// An exit notice recorded on the D379 writer follows the sqlx rules: it sets
+/// the status once, keeps the first closure time, refuses a conflicting status
+/// and a stale login session, and a non-exit event records nothing.
+#[tokio::test]
+async fn terminal_exit_on_the_d379_writer_keeps_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("exit-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'exit',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let exited = |status: i32, final_seq: u64| {
+        serde_json::to_vec(&serde_json::json!({"type":"terminal.exited","session_id":uuid::Uuid::from_bytes(session),"status":status,"final_seq":final_seq})).unwrap()
+    };
+    let record = |token: &'static str, cursor: u64, event: Vec<u8>| {
+        let (auth, pool, user) = (auth.clone(), pool.clone(), user.clone());
+        async move {
+            crate::terminal_exit::record_on_writer(
+                &auth, &pool, &user, token, &session, cursor, &event,
+            )
+            .await
+        }
+    };
+    assert_eq!(
+        record("exit-token", 9, br#"{"type":"terminal.output"}"#.to_vec()).await,
+        Ok(false)
+    );
+    assert_eq!(
+        record("exit-token", 9, exited(7, 8)).await,
+        Err(()),
+        "final_seq must equal the cursor"
+    );
+    assert_eq!(
+        record("other-token", 9, exited(7, 9)).await,
+        Err(()),
+        "no live login session"
+    );
+    assert_eq!(record("exit-token", 9, exited(7, 9)).await, Ok(true));
+    let first: (Option<i64>, Option<i32>) =
+        sqlx::query_as("SELECT closed_at,exit_status FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(first.0.is_some() && first.1 == Some(7));
+    assert_eq!(
+        record("exit-token", 9, exited(7, 9)).await,
+        Ok(true),
+        "a duplicate is accepted"
+    );
+    assert_eq!(
+        record("exit-token", 9, exited(8, 9)).await,
+        Err(()),
+        "a conflicting status cannot overwrite"
+    );
+    let again: (Option<i64>, Option<i32>) =
+        sqlx::query_as("SELECT closed_at,exit_status FROM terminal_sessions WHERE id=?")
+            .bind(session.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(again, first, "the first closure time and status stay");
+    let _ = std::fs::remove_dir_all(dir);
+}

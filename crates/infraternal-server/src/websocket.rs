@@ -1584,7 +1584,8 @@ where
             .is_ok()
         }
         TerminalOutput::Event { event_json } => {
-            let ended = crate::terminal_exit::record(
+            let ended = crate::terminal_exit::record_on_writer(
+                &state.auth,
                 &state.pool,
                 user_id,
                 session_token,
