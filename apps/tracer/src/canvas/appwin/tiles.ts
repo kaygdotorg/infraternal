@@ -29,6 +29,8 @@ export const TILE_VERSION = 1;
 export const MAX_TILE_RECTS = 8;
 /** The most tiles waiting at once. Past it the layer drops them and asks for a keyframe, which supersedes them all. */
 export const MAX_WAITING_TILES = 64;
+/** The most inflated pixel bytes waiting at once (4 MiB); past it, the same as `MAX_WAITING_TILES`. */
+export const MAX_WAITING_TILE_BYTES = 4 * 1024 * 1024;
 /** The most raw pixel bytes one update may expand to: 65,536 pixels of RGBA, the Mac's area cap. */
 export const MAX_TILE_PIXEL_BYTES = 65_536 * 4;
 
@@ -191,7 +193,8 @@ export class TileLayer {
     this.stats.received++;
     const update = parseTileUpdate(bytes);
     if (!update) { this.stats.dropped++; this.surface.repair(); return; }
-    if (this.waiting.length >= MAX_WAITING_TILES) {
+    const waitingBytes = this.waiting.reduce((sum, tile) => sum + tile.update.pixelBytes, 0);
+    if (this.waiting.length >= MAX_WAITING_TILES || waitingBytes + update.pixelBytes > MAX_WAITING_TILE_BYTES) {
       // A keyframe supersedes every waiting tile; until it arrives the canvas keeps a correct older picture.
       this.stats.dropped += this.waiting.length + 1;
       this.waiting = [];

@@ -151,6 +151,14 @@ test("too many waiting tiles and unreadable updates ask for a keyframe instead o
   await layer.settled();
   layer.accept(101, new Uint8Array([0xf7, 0x54, 9]));
   expect(s.repairs()).toBe(3);
+  // The byte cap: sixteen of the largest legal tiles (65,536 px, 256 KiB of pixels each) fill 4 MiB; the seventeenth
+  // asks for a keyframe, long before the count cap.
+  const before = s.repairs();
+  const huge = new TileLayer({ ...s.surface, size: () => ({ width: 1024, height: 64 }) });
+  huge.videoAccepted(1);
+  for (let order = 2; order <= 18; order++) huge.accept(order, tile({ x: 0, y: 0, w: 1024, h: 64 }, 2, true, { width: 1024, height: 64 }));
+  await huge.settled();
+  expect(s.repairs() - before).toBe(1);
 });
 
 test("reset discards tiles that are still inflating", async () => {

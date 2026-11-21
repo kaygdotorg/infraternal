@@ -186,7 +186,7 @@ function retireDecoder(keepPending = false): void {
 function decodeUnit(keyframe: boolean, bytes: Uint8Array, stamp: number, trace?: FrameTrace): void {
   if (keyframe) {
     const wanted = avcCodecString(bytes) ?? codec;
-    if (!wanted) { discardPending(); repair(); return; }
+    if (!wanted) { discardPending(); tiles.videoDropped(stamp); repair(); return; }
     if (!decoder || codec !== wanted) {
       // Units buffered after this IDR belong to its new codec, not the retired
       // decoder. Closing the old decoder must preserve that new reference chain.
