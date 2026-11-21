@@ -57,9 +57,11 @@ pub(super) async fn tick(
     let local = matches!(connection.peer, Peer::Local { .. });
     let mut valid = true;
     remote_probes.retain(|id| {
-        attachments
-            .get(id)
-            .is_some_and(|a| !a.awaiting_ack && !a.proof_rebind_pending && a.route.is_some())
+        attachments.get(id).is_some_and(|a| {
+            !a.awaiting_ack
+                && !a.proof_rebind_pending
+                && a.route.as_ref().is_some_and(|r| !r.is_suspended())
+        })
     });
     let fill_remote_queue = remote_probes.is_empty();
     for (&id, attachment) in attachments.iter_mut() {
@@ -69,6 +71,10 @@ pub(super) async fn tick(
         let Some(route) = &mut attachment.route else {
             continue;
         };
+        // A hidden viewer's route is parked: no probe, so its shim stays asleep [#562].
+        if route.is_suspended() {
+            continue;
+        }
         if !local {
             if fill_remote_queue {
                 remote_probes.push_back(id);
@@ -116,6 +122,9 @@ pub(super) async fn probe(
     let Some(route) = &mut attachment.route else {
         return true;
     };
+    if route.is_suspended() {
+        return true;
+    }
     let (nonce, sent_us) = route.ping();
     write_frame(
         connection,

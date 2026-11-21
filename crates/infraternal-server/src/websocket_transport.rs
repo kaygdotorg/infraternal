@@ -477,6 +477,18 @@ fn visibility_notice(json: &[u8]) -> Option<bool> {
         .then(|| notice.get("hidden")?.as_bool())?
 }
 
+/// The per-terminal sibling of [`visibility_notice`]: a terminal's viewer is hidden (page hidden or its window
+/// off the canvas) or shown again. Sent on the terminal's own stream; the socket loop parks or resumes that
+/// terminal's route probes [#562]. Same size bound and strict shape; anything else is `None`.
+pub(crate) fn terminal_visibility_notice(json: &[u8]) -> Option<bool> {
+    if json.len() > 128 {
+        return None;
+    }
+    let notice: serde_json::Value = serde_json::from_slice(json).ok()?;
+    (notice.get("topic")?.as_str()? == "terminal.visibility")
+        .then(|| notice.get("hidden")?.as_bool())?
+}
+
 /// Reads the socket: answers transport probes and visibility notices in the reader turn itself, ahead of bounded
 /// application admission, and queues everything else for the socket loop.
 async fn read(
@@ -853,6 +865,27 @@ mod tests {
             &[b' '; 129],
         ] {
             assert_eq!(visibility_notice(bytes), None);
+        }
+    }
+
+    /// A terminal's visibility notice is accepted only with its exact topic, a boolean and the size bound.
+    #[test]
+    fn terminal_visibility_notices_are_small_and_typed() {
+        assert_eq!(
+            terminal_visibility_notice(br#"{"topic":"terminal.visibility","hidden":true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            terminal_visibility_notice(br#"{"topic":"terminal.visibility","hidden":false}"#),
+            Some(false)
+        );
+        for bytes in [
+            br#"{"topic":"connection.visibility","hidden":true}"#.as_slice(),
+            br#"{"topic":"terminal.visibility","hidden":"yes"}"#,
+            b"[]",
+            &[b' '; 129],
+        ] {
+            assert_eq!(terminal_visibility_notice(bytes), None);
         }
     }
 

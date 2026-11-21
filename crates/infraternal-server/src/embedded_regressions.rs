@@ -243,6 +243,7 @@ async fn idle_route_proofs_do_not_queue_payload_notifications_at_capacity() {
     );
 }
 
+/// One host tick probes every ready route in a single batch, and the replies never reach payload consumers.
 #[tokio::test]
 async fn actor_batch_probes_every_ready_route_without_payload_notifications() {
     let (mut link, mut peer) = connection();
@@ -313,6 +314,100 @@ async fn actor_batch_probes_every_ready_route_without_payload_notifications() {
             .values()
             .all(|a| !a.route.as_ref().unwrap().expired())
     );
+}
+
+/// One host tick of route proofs on a local peer, asserting the connection stays usable.
+async fn tick(
+    link: &mut AgentConnection,
+    attachments: &mut HashMap<u64, AttachmentState>,
+    routes: &mut HashMap<u32, u64>,
+    queued: &mut std::collections::VecDeque<u64>,
+) {
+    assert!(route_proofs::tick(link, attachments, routes, &mut HashMap::new(), true, queued).await);
+}
+
+/// A hidden viewer's route is sent no probes, so its shim sleeps; the first show resumes probing with a
+/// fresh lease, and a route parked past the old deadline never expires by silence [#562, D265, D300].
+#[tokio::test]
+async fn parked_routes_get_no_probes_and_resume_with_a_fresh_lease() {
+    let (mut link, mut peer) = connection();
+    let mut attachments = HashMap::new();
+    let mut routes = HashMap::new();
+    let mut readers = Vec::new();
+    for id in 1..=6_u32 {
+        let (output, reader) = mpsc::channel(4);
+        attachments.insert(
+            u64::from(id),
+            AttachmentState {
+                stream_id: id * 2,
+                route: Some(Liveness::new()),
+                ..attachment(output)
+            },
+        );
+        routes.insert(id * 2, u64::from(id));
+        readers.push(reader);
+    }
+    let mut pending = HashMap::new();
+    for id in 1..=4_u64 {
+        assert!(
+            process_command(
+                Command::Park {
+                    attachment_id: id,
+                    parked: true,
+                },
+                &mut link,
+                &mut attachments,
+                &mut routes,
+                &mut pending,
+            )
+            .await
+        );
+    }
+    let mut queued = std::collections::VecDeque::new();
+    tick(&mut link, &mut attachments, &mut routes, &mut queued).await;
+    let mut wire = vec![0; 4096];
+    let count = peer.read(&mut wire).await.unwrap();
+    let mut offset = 0;
+    let mut probed = std::collections::BTreeSet::new();
+    while offset < count {
+        let decoded = decode_muxed_frame(&wire[offset..count]).unwrap();
+        assert!(matches!(decoded.frame, Frame::Ping { .. }));
+        probed.insert(decoded.stream_id);
+        offset += decoded.wire_len;
+    }
+    assert_eq!(
+        probed,
+        std::collections::BTreeSet::from([10, 12]),
+        "only the two shown routes probe"
+    );
+    // Parked routes carry no deadline, so silence can never expire them.
+    assert!(attachments[&1].route.as_ref().unwrap().is_suspended());
+    assert!(!attachments[&1].route.as_ref().unwrap().expired());
+    // Showing one resumes it: it probes on the next tick again.
+    assert!(
+        process_command(
+            Command::Park {
+                attachment_id: 1,
+                parked: false,
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending,
+        )
+        .await
+    );
+    tick(&mut link, &mut attachments, &mut routes, &mut queued).await;
+    let count = peer.read(&mut wire).await.unwrap();
+    let mut offset = 0;
+    let mut probed = std::collections::BTreeSet::new();
+    while offset < count {
+        let decoded = decode_muxed_frame(&wire[offset..count]).unwrap();
+        probed.insert(decoded.stream_id);
+        offset += decoded.wire_len;
+    }
+    assert!(probed.contains(&2), "the shown route probes again");
+    assert!(!probed.contains(&4), "a still-hidden route stays parked");
 }
 
 /// Route probes cross the shim fence even when native input has its own bounded writer.

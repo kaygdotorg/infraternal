@@ -256,6 +256,21 @@ impl AttachmentHandle {
         }
         self.reply(query_seq, bytes, expires)
     }
+    /// Tells the host actor whether this attachment's viewer is hidden (page hidden or the window
+    /// off the canvas). A parked attachment is sent no 25 ms route probes, so its shim sleeps; the
+    /// first show starts a fresh lease at once [#562, D265, D300]. Queued like any command, never
+    /// dropped: a lost "shown" notice would leave a visible terminal unprobed.
+    pub async fn set_parked(&self, parked: bool) -> Result<(), AgentError> {
+        self.0
+            .commands
+            .send(Command::Park {
+                attachment_id: self.0.id,
+                parked,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)
+    }
+
     /// Rebind only after the browser consumer admits the transition under its authority gate.
     pub async fn reconnect(&self) -> Result<(), AgentError> {
         self.0
@@ -922,6 +937,11 @@ enum Command {
     },
     Reconnect {
         attachment_id: u64,
+    },
+    /// The viewer of this attachment went hidden (`parked`) or came back (#562).
+    Park {
+        attachment_id: u64,
+        parked: bool,
     },
 }
 
@@ -2477,6 +2497,20 @@ async fn process_command(
             let _ = reply.send(Ok((attachment_id, stream_id)));
             true
         }
+        Command::Park {
+            attachment_id,
+            parked,
+        } => {
+            if let Some(attachment) = attachments.get_mut(&attachment_id) {
+                // Suspending drops the old lease's correlations; resuming starts a fresh lease,
+                // so the next tick probes at once and a route that died while parked expires
+                // within the startup allowance instead of at a stale deadline.
+                if let Some(route) = &mut attachment.route {
+                    route.set_suspended(parked);
+                }
+            }
+            true
+        }
         Command::Reconnect { attachment_id } => {
             let Some(attachment) = attachments.get_mut(&attachment_id) else {
                 return true;
@@ -3086,7 +3120,14 @@ async fn process_incoming(
             // Its first reattach Ack is authoritative for this same durable writer.
             let replay = attachment.replaying;
             if attachment.awaiting_ack && attachment.route.is_some() {
-                attachment.route = Some(Liveness::new());
+                // A reattach builds a new lease; a hidden viewer's must start suspended too [#562].
+                let hidden = attachment
+                    .route
+                    .as_ref()
+                    .is_some_and(Liveness::is_suspended);
+                let mut route = Liveness::new();
+                route.set_suspended(hidden);
+                attachment.route = Some(route);
                 attachment.proof_rebind_pending = false;
             }
             attachment.replaying = false;
