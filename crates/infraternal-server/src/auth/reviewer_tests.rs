@@ -28,7 +28,9 @@ async fn disk_fixture() -> (Fixture, PathBuf) {
         .unwrap();
     let start = auth.setup_start(&token, "owner", NOW).await.unwrap();
     let user = str_field(&start, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let session = auth
@@ -71,9 +73,12 @@ async fn v2_start(f: &Fixture, now: i64) -> (String, i64, i64) {
         .await
         .unwrap()
 }
+/// Build a fresh 24-word phrase and its matching replacement recovery wrap.
 async fn replacement(f: &Fixture, start: &Value, now: i64) -> Result<String> {
     let software = Software::new();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     f.auth
         .registration_finish_with_verifier(
             str_field(start, "ceremony"),
@@ -185,6 +190,7 @@ async fn reviewer_http_expired_ceremony_cannot_complete_after_writer_wait() {
     expired_finish_after_writer_wait(true).await;
 }
 
+/// Check that waiting for the database writer cannot extend a recovery completion deadline.
 async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
     let _guard = SERIAL.lock().await;
     let (f, path) = disk_fixture().await;
@@ -234,7 +240,9 @@ async fn expired_finish_after_writer_wait(ceremony_expires: bool) {
         .unwrap()
         .to_owned();
     let software = Software::new();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let body = json!({"ceremony":start["ceremony"],"proof":software.registration(&start,ORIGIN,true),"passkey_wrap":browser_wrap(&software.prf(&start),&f.dek,&f.user,"passkey"),"recovery_wrap":browser_wrap(&recovery_material(&words,"wrap"),&f.dek,&f.user,"recovery"),"recovery_verifier":recovery_verifier(&words)});
     let original: (String, String) = sqlx::query_as(
         "SELECT recovery_hash,(SELECT blob FROM wraps WHERE kind='recovery') FROM users",

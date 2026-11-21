@@ -251,7 +251,7 @@ export function mountCanvas(core: CoreScreen, hostName: string): CanvasControlle
     { id: "lock", label: "Lock or unlock", keys: "Ctrl+Shift+L" },
     { id: "previous", label: "Previous window", keys: "Ctrl+Shift+←" },
     { id: "next", label: "Next window", keys: "Ctrl+Shift+→" },
-    { id: "pan", label: "Pan sideways", keys: "Shift+Scroll" },
+    // The mockup keeps its own pan rule (Shift+wheel, above); it is not the product canvas, so the product help does not name it.
   ] });
   const removeProvider = core.addPaletteProvider(() => {
     if (!active || active.flow) return [];

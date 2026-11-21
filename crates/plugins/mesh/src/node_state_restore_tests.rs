@@ -38,6 +38,7 @@ fn prior_reader<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Optio
 fn public_state(peers: u16) -> State {
     let mut config = Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
@@ -72,6 +73,7 @@ fn public_state(peers: u16) -> State {
                         ipv6: std::net::Ipv6Addr::new(0xfd01, 0, 0, 0, 0, 0, 0, index),
                     },
                     endpoint: Some(([10, 220, a, b], 7443).into()),
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::None,
@@ -201,4 +203,189 @@ fn public_state_restore_at_1000_peers() {
             .trim(),
         fs::read_to_string("/proc/loadavg").unwrap().trim(),
     );
+}
+
+/// A symlink to a runtime ID must be refused even though the link lives on disk.
+#[test]
+fn runtime_machine_id_symlink_is_not_persistent() {
+    let directory = super::tests::Directory::new();
+    let runtime = super::tests::Directory::new_in(Path::new("/dev/shm"));
+    let primary = directory.0.join("machine-id");
+    let fallback = directory.0.join("dbus-machine-id");
+    let id = "0123456789abcdef0123456789abcdef";
+    fs::write(&fallback, id).unwrap();
+    let persistent = machine_fingerprint_at(&primary, &fallback).unwrap();
+    std::os::unix::fs::symlink(&fallback, &primary).unwrap();
+    assert_eq!(
+        machine_fingerprint_at(&primary, &fallback),
+        Some(persistent)
+    );
+
+    let transient = runtime.0.join("machine-id");
+    fs::write(&transient, id).unwrap();
+    fs::remove_file(&primary).unwrap();
+    std::os::unix::fs::symlink(&transient, &primary).unwrap();
+    assert_eq!(machine_fingerprint_at(&primary, &fallback), None);
+    assert_eq!(machine_fingerprint_at(&transient, &fallback), None);
+}
+
+/// Missing machine identity leaves a fresh enrollment directory without a binding record.
+#[test]
+fn missing_machine_id_refuses_enrollment_without_writing_state() {
+    let directory = super::tests::Directory::new();
+    let enrolment = crate::enrolment::Enrolment::new(b"coordinator", "host", b"agent key");
+    let missing = machine_fingerprint_at(&directory.0.join("etc"), &directory.0.join("dbus"));
+    let result =
+        crate::node::Node::prepare_enrolled_restore_with_machine(&directory.0, enrolment, missing);
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("/etc/machine-id"));
+    assert!(!directory.0.join(ENROLMENT_FILE).exists());
+}
+
+/// A fresh OS installation must leave the original record intact and explain how to re-enroll.
+#[test]
+fn fresh_os_machine_id_requires_add_host() {
+    let directory = super::tests::Directory::new();
+    let enrolment = crate::enrolment::Enrolment::new(b"coordinator", "host", b"agent key");
+    let primary = directory.0.join("machine-id");
+    let fallback = directory.0.join("dbus-machine-id");
+    fs::write(&primary, "0123456789abcdef0123456789abcdef").unwrap();
+    let original = machine_fingerprint_at(&primary, &fallback);
+    assert!(original.is_some());
+    crate::node::Node::prepare_enrolled_restore_with_machine(
+        &directory.0,
+        enrolment.clone(),
+        original,
+    )
+    .unwrap();
+    let record = fs::read(directory.0.join(ENROLMENT_FILE)).unwrap();
+    fs::write(&primary, "fedcba9876543210fedcba9876543210").unwrap();
+    let replacement = machine_fingerprint_at(&primary, &fallback);
+    assert!(replacement.is_some());
+    assert_ne!(replacement, original);
+    let error = crate::node::Node::prepare_enrolled_restore_with_machine(
+        &directory.0,
+        enrolment,
+        replacement,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("Add host"));
+    assert_eq!(fs::read(directory.0.join(ENROLMENT_FILE)).unwrap(), record);
+}
+
+/// A pre-fix record without a fingerprint cannot establish this installation as its owner.
+#[test]
+fn unbound_enrolment_record_requires_add_host() {
+    let directory = super::tests::Directory::new();
+    let binding = directory.0.join(ENROLMENT_FILE);
+    let original =
+        br#"{"machine":null,"enrolment":{"coordinator":"ca","host":"host","agent_key":"key"}}"#;
+    fs::write(&binding, original).unwrap();
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
+    let Err(error) = read_enrolment_with(&directory.0, || Some([1; 32])) else {
+        panic!("a record without a binding must be refused");
+    };
+    assert!(error.to_string().contains("Add host"));
+    assert_eq!(fs::read(binding).unwrap(), original);
+}
+
+/// A restored remote Mesh directory cannot start on a machine with a different ID.
+#[test]
+fn foreign_machine_mesh_restore_is_refused_before_network_setup() {
+    let directory = super::tests::Directory::new();
+    let binding = directory.0.join("mesh-enrolment.json");
+    fs::write(
+        &binding,
+        br#"{"machine":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"enrolment":{"coordinator":"ca","host":"host","agent_key":"key"}}"#,
+    )
+    .unwrap();
+    fs::set_permissions(&binding, fs::Permissions::from_mode(0o600)).unwrap();
+    let Err(error) = Store::open(&directory.0) else {
+        panic!("a copied Mesh directory must be refused");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    assert!(error.to_string().contains("different machine"));
+}
+
+/// Restart reuses a matching enrollment, while re-enrollment retires the prior key and routes.
+#[test]
+fn enrollment_restore_preserves_matching_state_and_retires_a_changed_key() {
+    use crate::node::{Enrolment, Node};
+
+    let directory = super::tests::Directory::new();
+    let enrolled = || Enrolment::new(b"coordinator", "host", b"original agent key");
+    Node::prepare_enrolled_restore(&directory.0, enrolled()).unwrap();
+    let (store, _) = Store::open(&directory.0).unwrap();
+    let mut state = public_state(1);
+    // No kernel objects are needed to test the retained intent and private key.
+    state.config.as_mut().unwrap().local_key = None;
+    state.backend = None;
+    store.save(&state).unwrap();
+    store
+        .record_routes(&["10.254.0.3".parse().unwrap()].into_iter().collect())
+        .unwrap();
+    store.write_private_key(&[17; 32]).unwrap();
+    store
+        .record_engine(crate::node::EngineKind::GotaTun)
+        .unwrap();
+    store
+        .save_rotation_secret(&RotationSecret {
+            operation_id: "00000000-0000-4000-8000-000000000221".into(),
+            sequence: 1,
+            previous: [17; 32],
+            candidate: [19; 32],
+            commit_requested: false,
+            completed: false,
+        })
+        .unwrap();
+    let rotation_path = directory.0.join("mesh-key-rotation.bin");
+    let key_path = directory.0.join("mesh-private-key");
+    for path in [&rotation_path, &key_path] {
+        assert_eq!(fs::symlink_metadata(path).unwrap().mode() & 0o777, 0o600);
+    }
+    drop(store);
+
+    Node::prepare_enrolled_restore(&directory.0, enrolled()).unwrap();
+    let (store, same) = Store::open(&directory.0).unwrap();
+    assert_eq!(same.config, state.config);
+    assert!(store.read_private_key().unwrap().is_some());
+    assert!(store.rotation_secret().unwrap().is_some());
+    assert_eq!(
+        store.recorded_engine().unwrap(),
+        Some(crate::node::EngineKind::GotaTun)
+    );
+    assert_eq!(store.route_inventory().unwrap().len(), 1);
+    drop(store);
+
+    let replacement = Enrolment::new(b"coordinator", "host", b"replacement agent key");
+    Node::prepare_enrolled_restore(&directory.0, replacement).unwrap();
+    let (store, fresh) = Store::open(&directory.0).unwrap();
+    assert!(!fresh.enabled);
+    assert!(fresh.config.is_none());
+    assert!(store.read_private_key().unwrap().is_none());
+    assert!(store.rotation_secret().unwrap().is_none());
+    assert!(store.recorded_engine().unwrap().is_none());
+    assert!(store.route_inventory().unwrap().is_empty());
+    for path in [&rotation_path, &key_path] {
+        assert_eq!(
+            fs::symlink_metadata(path).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+    }
+}
+
+/// An unbound directory with a key alone must retire it before claiming the enrollment.
+#[test]
+fn enrollment_restore_retires_a_legacy_key_without_a_snapshot() {
+    let directory = super::tests::Directory::new();
+    let (store, _) = Store::open(&directory.0).unwrap();
+    store.write_private_key(&[23; 32]).unwrap();
+    drop(store);
+
+    let enrolment = crate::node::Enrolment::new(b"coordinator", "host", b"agent key");
+    crate::node::Node::prepare_enrolled_restore(&directory.0, enrolment).unwrap();
+    let (restored, _) = Store::open(&directory.0).unwrap();
+    assert!(restored.read_private_key().unwrap().is_none());
 }

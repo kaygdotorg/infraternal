@@ -4,6 +4,8 @@
 //! unit with a drop-in and a plain description), a rootful host, a rootless
 //! host, and a machine with nothing installed.
 
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::{fs, path::Path};
 
 use super::{
@@ -156,6 +158,78 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(Path::new(&self.root));
     }
+}
+
+/// Owner and write-mode checks reject source entries that an unprivileged user can replace.
+#[test]
+#[cfg(unix)]
+fn system_unit_source_metadata_requires_the_expected_owner_and_safe_write_mode() {
+    assert!(super::source_metadata_is_trusted(0, 0o644, false, false, 0));
+    assert!(!super::source_metadata_is_trusted(
+        1000, 0o644, false, false, 0
+    ));
+    assert!(!super::source_metadata_is_trusted(
+        0, 0o664, false, false, 0
+    ));
+    assert!(!super::source_metadata_is_trusted(
+        0, 0o646, false, false, 0
+    ));
+    assert!(super::source_metadata_is_trusted(0, 0o777, true, false, 0));
+}
+
+/// The installed unit file cannot be group- or world-writable.
+#[test]
+#[cfg(unix)]
+fn system_unit_source_rejects_group_and_world_writable_unit_files() {
+    let fixture = Fixture::new();
+    let boundary = fixture.root.join("etc");
+    let unit = boundary.join("infraternal-agent.service");
+    fixture.write("etc/infraternal-agent.service", "[Service]\n");
+    let owner = fs::metadata(&boundary).unwrap().uid();
+
+    for mode in [0o664, 0o646] {
+        fs::set_permissions(&unit, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            !super::source_path_is_trusted_for(&unit, &boundary, owner, false),
+            "writable unit mode {mode:o} must be refused"
+        );
+    }
+}
+
+/// A systemd drop-in cannot be writable by group or other users.
+#[test]
+#[cfg(unix)]
+fn system_unit_source_rejects_a_world_writable_dropin() {
+    let fixture = Fixture::new();
+    let boundary = fixture.root.join("etc");
+    let dropin = boundary.join("infraternal-agent.service.d/10-state.conf");
+    fixture.write(
+        "etc/infraternal-agent.service.d/10-state.conf",
+        "[Service]\nExecStart=/infraternal agent --state=/tmp/attacker run\n",
+    );
+    let owner = fs::metadata(&boundary).unwrap().uid();
+    fs::set_permissions(&dropin, fs::Permissions::from_mode(0o666)).unwrap();
+
+    assert!(!super::source_path_is_trusted_for(
+        &dropin, &boundary, owner, false
+    ));
+}
+
+/// Every directory between a source and its unit root must stay protected.
+#[test]
+#[cfg(unix)]
+fn system_unit_source_rejects_a_writable_parent_directory() {
+    let fixture = Fixture::new();
+    let boundary = fixture.root.join("etc");
+    let parent = boundary.join("systemd");
+    let unit = parent.join("infraternal-agent.service");
+    fixture.write("etc/systemd/infraternal-agent.service", "[Service]\n");
+    let owner = fs::metadata(&boundary).unwrap().uid();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+
+    assert!(!super::source_path_is_trusted_for(
+        &unit, &boundary, owner, false
+    ));
 }
 
 fn state<'a>(status: &'a NodeStatus, name: &str) -> (&'a str, &'a str) {

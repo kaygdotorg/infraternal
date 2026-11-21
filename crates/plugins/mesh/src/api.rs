@@ -509,6 +509,8 @@ pub struct MeshService {
     presence: std::sync::Arc<crate::presence::Presence>,
     // Rotation drivers sleep until a deadline and wake only when a peer applies a view.
     rotation_updates: tokio::sync::watch::Sender<u64>,
+    /// One admitted receipt finalizer per service; waiting workers remain cancelable.
+    receipt_finalizer: std::sync::Arc<tokio::sync::Semaphore>,
     // Request-local authority is never installed in the shared service.
     fresh_authority: Option<String>,
     store: crate::store::Store,
@@ -555,6 +557,7 @@ impl MeshService {
             updates,
             presence: std::sync::Arc::default(),
             rotation_updates: tokio::sync::watch::Sender::new(0),
+            receipt_finalizer: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
             list_diagnostics: StorageDiagnostics::new("mesh.list"),
@@ -621,10 +624,49 @@ impl MeshService {
         self.presence.subscribe()
     }
 
-    /// Wake rotation drivers after an applied-view receipt is committed.
-    pub(crate) fn rotation_applied(&self) {
+    /// Commit and publish a receipt independently of the replaceable node worker.
+    /// Admission waits fairly and is cancelable. After admission, the owned task
+    /// retains the service and its sole permit through commit and publication,
+    /// even if the caller drops its join handle. No queued tasks are spawned.
+    /// SQLite already serializes receipt writes; one task also bounds abandoned
+    /// finalizers across channel replacements. Waiters stay in the node workers.
+    pub(crate) async fn finalize_applied(
+        &self,
+        node: NodeId,
+        revision: u64,
+    ) -> Result<(), MeshApiError> {
+        let permit = self
+            .receipt_finalizer
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| MeshApiError::Storage)?;
+        let service = self.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if service.store.acknowledge_applied(node, revision).await? {
+                service.publish_rotation_progress();
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| MeshApiError::Storage)?
+    }
+
+    /// Publish only a durable advancement; unchanged receipts must never wake drivers.
+    fn publish_rotation_progress(&self) {
         self.rotation_updates
             .send_modify(|version| *version = version.wrapping_add(1));
+    }
+
+    /// Model a completed publication and the publishing worker's following read.
+    /// Mark the publishing worker caught up before its next driver pass, so it never
+    /// wakes itself. Concurrent progress consumed here is safe: that pass reads the
+    /// current durable receipts; progress arriving during the pass remains unseen.
+    #[cfg(test)]
+    pub(crate) fn rotation_applied(&self, own_progress: &mut tokio::sync::watch::Receiver<u64>) {
+        self.publish_rotation_progress();
+        own_progress.borrow_and_update();
     }
 
     /// Subscribe to coalesced applied-view progress without a polling timer.
@@ -1373,6 +1415,7 @@ impl MeshService {
         ))
     }
 
+    /// Update one endpoint using only the two permitted column pairs.
     async fn move_grant(
         &self,
         actor: &str,
@@ -1401,12 +1444,17 @@ impl MeshService {
         )
         .await?;
         let (kind, value) = endpoint_fields(&request.endpoint)?;
-        let column = match request.side {
-            EndpointSide::From => "from",
-            EndpointSide::To => "to",
+        let (column, sql) = match request.side {
+            EndpointSide::From => (
+                "from",
+                "UPDATE mesh_grants SET from_kind=?,from_value=? WHERE name=?",
+            ),
+            EndpointSide::To => (
+                "to",
+                "UPDATE mesh_grants SET to_kind=?,to_value=? WHERE name=?",
+            ),
         };
-        let sql = format!("UPDATE mesh_grants SET {column}_kind=?,{column}_value=? WHERE name=?");
-        let changed = sqlx::query(&sql)
+        let changed = sqlx::query(sql)
             .bind(kind)
             .bind(value)
             .bind(&request.name)

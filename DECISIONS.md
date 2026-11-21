@@ -340,6 +340,13 @@ access (#341 B19).
     session, the size of the device that typed last wins (tmux's default
     `window-size latest`). The other devices show the same screen, scaled to
     fit.
+    - **Amended (owner, 2026-11-16, #521):** a device that typed last keeps
+      the size only while it is attached. Once it has disconnected, the next
+      device that reports a size takes it. Why: a reopened tab could not
+      take the size until it typed, so a narrower or shorter reopen (for
+      example a phone turned to landscape) kept a garbled replay (J792,
+      J795). Asked "D74: session size after a reopen", the owner chose,
+      verbatim: "Disconnected last typist gives up the size".
 75. **Nothing depends on the browser.** Each session, each SSH connection
     and each job starts and runs on the server side: in an agent, which can
     be the server's embedded agent. Hosts without an agent (routers,
@@ -1708,9 +1715,14 @@ access (#341 B19).
        without a trusted decoder is decided in I2a.
      - **Decoder (I4):** the most performant and reliable PNG decoder by
        measurement (speed plus fuzzing), reported to the owner.
-     - **Capture (C2):** on macOS the infraternal agent stays a daemon; a
-       small per-user helper in the logged-in session does capture and input,
-       as part of the desktop plugin (D198).
+     - **Capture (C2), amended (owner, 2026-11-20, #146):** macOS has two
+       modes, like Linux. **User mode (default):** the infraternal agent runs
+       as the logged-in user; a one-shot privileged helper creates the mesh
+       interface, route and resolver entry, then exits. **Root mode:** a
+       LaunchDaemon for Macs with no logged-in user, with a per-user helper
+       for capture and input, as part of the desktop plugin (D198).
+       (Was: "on macOS the infraternal agent stays a daemon; a small per-user
+       helper in the logged-in session does capture and input".)
      - **Engines (C4):** capture bindings and encoders are measured
        (latency, CPU and memory per session at ×10 and ×50); nothing chosen
        without numbers. The owner has an Apple Developer account for signing
@@ -5044,7 +5056,10 @@ access (#341 B19).
        per Gbit and +3.68% loaded p99 against dev, consistent in all 8
        dev-vs-head holds. That is over the 3% performance gate. The filter is
        what lets a Nix-only host like prod enforce grants without depending
-       on the kernel firewall path. Memory is about 55 MB per 1,000 peers.
+       on the kernel firewall path. Memory is about 52 MB per 1,000 peers
+       with flows (the 52 KiB flow table each) and 68.7 MB when every
+       peer's fragment table is in use too (68,672 bytes per peer; J797,
+       #265; corrected by the owner on 2026-11-16, was "about 55 MB").
      - **Decision:** the owner chose, by quoting it, "Ship D384 now, then make
        the filter's hot path faster as a measured follow-up. Grants are
        enforced everywhere, and these security fixes land."
@@ -5080,6 +5095,11 @@ access (#341 B19).
        removes the link only if it still points at our binary.
      - **Existing installs** keep working: the old locations are read and moved
        on the next update, never broken in place.
+     - **Amendment (owner, 2026-11-15, #516):** told that `server init` used
+       the standard folders only for fresh installs and left existing ones
+       untouched, the owner said, verbatim: "change for existing installs
+       too". `server init` now moves an existing server's data folder to its
+       standard location (J740; the steps are in docs/CLI.md).
 396. **Deploys lock the CA until auto-update ships; no interim signed-deploy path (owner, 2026-11-14, #211, #514; amends D217's deploy rule for now, keeps D251):**
      - **Context:** `deploy.sh` replaces production by a plain stop/start, a cold start that locks the CA (D168) until an admin unlocks it with a passkey. The warm restart that keeps the CA unlocked already exists (`infraternal server … restart --binary`), but it only accepts a signed release (D184). The orchestrator asked for either (a) about 2 days to sign deploy builds through the edge release channel, which needs Cloudflare and release credentials, or (b) building the server's own auto-update first, 1.5–2.5 weeks.
      - **The owner chose (b), verbatim:** "lock on restart, build auto-update directly".

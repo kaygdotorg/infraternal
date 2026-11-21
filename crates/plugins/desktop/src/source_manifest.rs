@@ -22,6 +22,8 @@ const fn action(id: &'static str, summary: &'static str, effect: Effect) -> Acti
         fresh_passkey: false,
     }
 }
+/// The node-side desktop source: its lifecycle actions, the source actions the
+/// server calls (start, stop, windows, status, clock, icon) and its wire lane.
 pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     actions: &[
         UP,
@@ -50,6 +52,11 @@ pub static DESCRIPTOR: PluginDescriptor = PluginDescriptor {
         action(
             "desktop.source.clock",
             "Sample the desktop capture clock",
+            Effect::Read,
+        ),
+        action(
+            "desktop.source.icon",
+            "Read one piece of an app icon by its content hash",
             Effect::Read,
         ),
     ],

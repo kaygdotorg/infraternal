@@ -45,9 +45,11 @@ const PREPARATION_CALL_BIT: u32 = 1 << 31;
 const RETIREMENT_CALL_BIT: u32 = 1 << 30;
 const BACKGROUND_CALL_BITS: u32 = PREPARATION_CALL_BIT | RETIREMENT_CALL_BIT;
 // A full output queue retires only that attachment; reconnect replays from its last offset.
-// A default 1MiB grant can arrive in 256 bulk PTY frames while forwarding awaits I/O.
-// Credits bound payload bytes; frame slots separately bound small outputs and notices.
-const OUTPUT_CAPACITY: usize = 256;
+/// Each browser stream's output queue, bounded in bytes tied to the credit window [D381, #477].
+#[path = "embedded_output_queue.rs"]
+mod output_queue;
+use output_queue::{OUTPUT_QUEUE_SLOTS, OutputQueue};
+/// The most unspent output credit one browser stream may hold; it also sizes the queue cap.
 const MAX_OUTPUT_CREDIT: u64 = 8 * 1024 * 1024;
 // Bounded actor input queues backpressure each attachment forwarding worker.
 const INPUT_CAPACITY: usize = 4;
@@ -299,8 +301,12 @@ pub(crate) struct EmbeddedAgent {
     #[cfg(feature = "remote")]
     cleanup: mpsc::UnboundedSender<Retirement>,
     changes: tokio::sync::watch::Receiver<()>,
+    restarts: tokio::sync::watch::Receiver<()>,
     next_attachment_id: Arc<AtomicU64>,
     session_inventory: watch::Sender<SessionInventoryState>,
+    /// The OS the host's infraternal agent named in its latest Hello ("macOS" or
+    /// "Linux"), or `None` before a Hello, for the server itself and for older agents.
+    reported_os: watch::Sender<Option<&'static str>>,
 }
 
 /// Weak retirement routing never keeps a remote infraternal agent actor alive.
@@ -345,6 +351,13 @@ impl EmbeddedAgent {
         changes
     }
 
+    /// Subscribe to future embedded infraternal agent process replacements.
+    pub(crate) fn restarts(&self) -> tokio::sync::watch::Receiver<()> {
+        let mut restarts = self.restarts.clone();
+        restarts.borrow_and_update();
+        restarts
+    }
+
     /// Start the on-demand agent supervisor for the server's own executable.
     #[cfg(any(not(target_os = "linux"), test))]
     pub fn spawn(executable: PathBuf) -> Self {
@@ -363,6 +376,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
@@ -374,6 +388,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -381,8 +396,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -393,6 +410,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (_changes, notice) = tokio::sync::watch::channel(());
+        let (_restarts, restart_notice) = tokio::sync::watch::channel(());
         drop(receiver);
         #[cfg(feature = "remote")]
         drop(cleanup_rx);
@@ -402,8 +420,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 
@@ -414,18 +434,22 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (accepts, incoming) = mpsc::channel(1);
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
+        let (reported_os, _) = watch::channel(None);
         tokio::spawn(run_actor(
             Source::Remote {
                 incoming,
                 uid,
                 pending: None,
+                reported_os: reported_os.clone(),
             },
             receiver,
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         (
@@ -434,8 +458,10 @@ impl EmbeddedAgent {
                 #[cfg(feature = "remote")]
                 cleanup,
                 changes: notice,
+                restarts: restart_notice,
                 next_attachment_id: Arc::new(AtomicU64::new(1)),
                 session_inventory,
+                reported_os,
             },
             accepts,
         )
@@ -702,6 +728,11 @@ impl EmbeddedAgent {
         self.session_inventory.subscribe()
     }
 
+    /// The OS the host's infraternal agent named in its latest Hello, if it named one.
+    pub(crate) fn reported_os(&self) -> Option<&'static str> {
+        *self.reported_os.borrow()
+    }
+
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
     // Native attachments belong to remote bootstrap; browser-only builds use monitored routes.
     #[cfg(any(test, feature = "remote"))]
@@ -736,7 +767,7 @@ impl EmbeddedAgent {
         stream_id: u32,
         monitored: bool,
     ) -> Result<TerminalAttachment, AgentError> {
-        let (output_tx, output) = mpsc::channel(OUTPUT_CAPACITY);
+        let (output_tx, output) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
         let (input_credit, input_acked) = watch::channel(last_in_seq);
         let id = self
@@ -782,6 +813,7 @@ impl EmbeddedAgent {
         #[cfg(feature = "remote")]
         let (cleanup, cleanup_rx) = mpsc::unbounded_channel();
         let (changes, notice) = tokio::sync::watch::channel(());
+        let (restarts, restart_notice) = tokio::sync::watch::channel(());
         let (session_inventory, _) = watch::channel(SessionInventoryState::Pending);
         tokio::spawn(run_actor(
             Source::Embedded {
@@ -793,6 +825,7 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup_rx,
             changes,
+            restarts,
             session_inventory.clone(),
         ));
         Self {
@@ -800,8 +833,10 @@ impl EmbeddedAgent {
             #[cfg(feature = "remote")]
             cleanup,
             changes: notice,
+            restarts: restart_notice,
             next_attachment_id: Arc::new(AtomicU64::new(1)),
             session_inventory,
+            reported_os: watch::channel(None).0,
         }
     }
 }
@@ -890,6 +925,8 @@ enum Command {
     },
 }
 
+/// The host-link actor's state for one browser attachment: its cursors, retained unacknowledged
+/// input, granted output credit, route liveness, and the byte-bounded queue its output goes to.
 struct AttachmentState {
     session_id: [u8; 16],
     stream_id: u32,
@@ -908,7 +945,8 @@ struct AttachmentState {
     // The same actor tick owns the lease; a Pong never needs a payload forwarder.
     route: Option<Liveness>,
     proof_rebind_pending: bool,
-    output: mpsc::Sender<TerminalOutput>,
+    // Every send goes through the byte-bounded queue so its ledger sees each item.
+    output: OutputQueue,
 }
 
 enum Peer {
@@ -938,6 +976,8 @@ enum Source {
         incoming: mpsc::Receiver<RemoteLink>,
         uid: u32,
         pending: Option<Box<RemoteLink>>,
+        /// Where each greeted link publishes the OS its agent named (#146).
+        reported_os: watch::Sender<Option<&'static str>>,
     },
 }
 
@@ -967,13 +1007,14 @@ impl Source {
                 incoming,
                 uid,
                 pending,
+                reported_os,
             } => {
                 let link = if let Some(link) = pending.take() {
                     *link
                 } else {
                     incoming.recv().await.ok_or(AgentError::Unavailable)?
                 };
-                connect_remote(link, *uid).await
+                connect_remote(link, *uid, reported_os).await
             }
         }
     }
@@ -1006,8 +1047,15 @@ impl Source {
     }
 }
 
+/// Greets one admitted host link: sends the server Hello, reads the agent's,
+/// records the capabilities and the OS the agent named (#146), and wraps the
+/// link as the actor's connection. The whole greeting has a 5 s deadline.
 #[cfg(feature = "remote")]
-async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, AgentError> {
+async fn connect_remote(
+    link: RemoteLink,
+    uid: u32,
+    reported_os: &watch::Sender<Option<&'static str>>,
+) -> Result<AgentConnection, AgentError> {
     let mut receive = BytesMut::with_capacity(4096);
     let mut scratch = vec![0; READ_CHUNK];
     let hello = Frame::Hello {
@@ -1040,6 +1088,11 @@ async fn connect_remote(link: RemoteLink, uid: u32) -> Result<AgentConnection, A
                     }
                     link.hello(&decoded.frame)
                         .map_err(|_| AgentError::Protocol)?;
+                    if let Frame::Hello { client_info, .. } = decoded.frame {
+                        // Only the exact forms the agent sends are kept (#146).
+                        reported_os
+                            .send_replace(infraternal_agent::host_os::reported_os(client_info));
+                    }
                     receive.advance(decoded.wire_len);
                     return Ok(());
                 }
@@ -1269,11 +1322,13 @@ async fn forward_inputs(
     let _ = commands.send(Command::Detach { attachment_id }).await;
 }
 
+/// Run the embedded host actor and notify observers whenever its infraternal agent reconnects.
 async fn run_actor(
     mut source: Source,
     mut commands: mpsc::Receiver<Command>,
     #[cfg(feature = "remote")] mut cleanup: mpsc::UnboundedReceiver<Retirement>,
     changes: tokio::sync::watch::Sender<()>,
+    restarts: tokio::sync::watch::Sender<()>,
     session_inventory: watch::Sender<SessionInventoryState>,
 ) {
     let mut attachments = HashMap::<u64, AttachmentState>::new();
@@ -1286,6 +1341,7 @@ async fn run_actor(
     let mut backoff = RECONNECT_FLOOR;
     let mut connected_at = std::time::Instant::now();
     let mut first_attempt = true;
+    let mut connected_once = false;
     #[cfg(feature = "remote")]
     let mut hot = priming::State::default();
     #[cfg(feature = "remote")]
@@ -1363,6 +1419,14 @@ async fn run_actor(
                 connection = Some(fresh);
                 connected_at = std::time::Instant::now();
                 changes.send_replace(());
+                // Remote admission replaces plugin workers itself, including
+                // after path promotion. The embedded worker survives replacement.
+                if !source.remote() {
+                    if connected_once {
+                        restarts.send_replace(());
+                    }
+                    connected_once = true;
+                }
                 fresh_host_lease(&mut liveness, &mut doubted);
             } else {
                 tracing::warn!("infraternal agent connection failed; awaiting reconnect");
@@ -2407,7 +2471,7 @@ async fn process_command(
                     replaying: false,
                     route: monitored.then(Liveness::new),
                     proof_rebind_pending: false,
-                    output,
+                    output: output.into(),
                 },
             );
             let _ = reply.send(Ok((attachment_id, stream_id)));

@@ -377,9 +377,11 @@ struct ArchiveStreamWriter<'a> {
 }
 
 impl ArchiveStreamWriter<'_> {
+    /// Verify the length and digest of all archive bytes written.
     fn finish(self) -> io::Result<()> {
         if self.received != self.expected_size
-            || format!("{:x}", self.digest.finalize()) != self.expected_digest
+            || format!("{:x}", base16ct::HexDisplay(&self.digest.finalize()))
+                != self.expected_digest
         {
             return Err(invalid_data(
                 "component archive does not match its signed length and digest",
@@ -500,6 +502,7 @@ fn extract_archive_entry<R: Read>(
     Ok(())
 }
 
+/// Extract the selected executable and verify its size and digest against the manifest.
 fn extract_allowlisted_executable<R: Read>(
     mut entry: tar::Entry<'_, R>,
     bin: &Path,
@@ -538,7 +541,7 @@ fn extract_allowlisted_executable<R: Read>(
         digest.update(&buffer[..count]);
     }
     if written != manifest.executable_size
-        || format!("{:x}", digest.finalize()) != manifest.executable_sha256
+        || format!("{:x}", base16ct::HexDisplay(&digest.finalize())) != manifest.executable_sha256
     {
         return Err(invalid_data(
             "Traefik executable does not match its signed digest",
@@ -671,6 +674,7 @@ fn validate_executable_metadata(metadata: &fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
+/// Return the lowercase SHA-256 digest of a file, refusing a symlink at the final path component.
 fn hash_file(path: &Path) -> io::Result<String> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -685,7 +689,7 @@ fn hash_file(path: &Path) -> io::Result<String> {
         }
         digest.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(format!("{:x}", base16ct::HexDisplay(&digest.finalize())))
 }
 
 fn lock_store(root: &Path) -> io::Result<Flock<File>> {

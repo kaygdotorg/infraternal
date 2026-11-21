@@ -27,7 +27,9 @@ use zeroize::{Zeroize, Zeroizing};
 struct StoredIdentity {
     host_id: uuid::Uuid,
     execution_uid: u32,
-    /// Legacy direct endpoint; migrated identities use only `public_origin`.
+    /// The server's direct QUIC listener from the invitation, dialled before
+    /// the HTTPS origin (#146). Dropped from legacy 7443 identities, which had
+    /// no public origin to fall back to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     endpoint: Option<std::net::SocketAddr>,
     server_name: String,
@@ -106,6 +108,10 @@ fn decode_candidate_key(encoded: &str) -> io::Result<Zeroizing<Vec<u8>>> {
     Ok(decoded)
 }
 
+/// Public startup refusal for a key that cannot prove its enrolled identity.
+const IDENTITY_MISMATCH: &str =
+    "This machine's saved private key does not match its enrollment certificate.";
+
 const PENDING_JOIN_KEY: &str = "join-key.pk8";
 
 /// Why a join step failed, in the classes a caller acts on.
@@ -127,6 +133,8 @@ pub(crate) enum Failure {
     Upgrade,
     /// The upgraded route did not send a valid app-level challenge.
     Challenge,
+    /// The saved private key differs from the key certified at enrollment.
+    IdentityMismatch,
 }
 
 impl std::fmt::Display for Failure {
@@ -137,6 +145,7 @@ impl std::fmt::Display for Failure {
             Self::Connect => "The infraternal agent on this host cannot reach the server over HTTPS. Allow outbound TCP 443 to the server's public origin, then try again.",
             Self::Tls => "The infraternal agent on this host could not verify the server's HTTPS certificate. Check the public certificate chain and server name, then try again.",
             Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
+            Self::IdentityMismatch => IDENTITY_MISMATCH,
             Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
         })
     }
@@ -277,7 +286,7 @@ async fn join_with_key_inner(
     let stored = StoredIdentity {
         host_id: invitation.host_id,
         execution_uid: uid,
-        endpoint: None,
+        endpoint: invitation.endpoint,
         server_name,
         public_origin: Some(public_origin),
         https_der: invitation.https_der,
@@ -642,6 +651,7 @@ pub(crate) async fn post_json(
     root: Option<&X509>,
     max_response_bytes: usize,
     request_started: &mut bool,
+    preference: Option<&'static str>,
 ) -> Result<ClientResponse, ClientFailure> {
     use http_body_util::BodyExt;
 
@@ -680,14 +690,18 @@ pub(crate) async fn post_json(
         let _ = connection.await;
     }));
     let request_body = SecretBytes(body);
-    let request = hyper::Request::builder()
+    let mut request = hyper::Request::builder()
         .method("POST")
         .uri(path)
         .header(
             header::HOST,
             url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
         )
-        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(preference) = preference {
+        request = request.header("prefer", preference);
+    }
+    let request = request
         .body(http_body_util::Full::new(request_body.clone_for_request()))
         .map_err(|_| ClientFailure::HttpHandshake)?;
     // Hyper may poll the request body as soon as this send future is polled.
@@ -754,27 +768,36 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
             .map_err(|_| ClientFailure::TlsConfiguration)?;
         tls.set_cert_store(trust.build());
     } else {
-        tls.set_default_verify_paths()
-            .map_err(|_| ClientFailure::TlsConfiguration)?;
-        // Vendored OpenSSL may have a build-time prefix absent on this host.
-        // Use the system's public bundle, never an enrollment TOFU pin.
-        for bundle in [
-            "/etc/ssl/certs/ca-certificates.crt",
-            "/etc/pki/tls/certs/ca-bundle.crt",
-            "/etc/ssl/ca-bundle.pem",
-        ] {
-            if Path::new(bundle).is_file() {
-                tls.set_ca_file(bundle)
-                    .map_err(|_| ClientFailure::TlsConfiguration)?;
-                break;
-            }
-        }
+        // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        tls.set_cert_store(
+            infraternal_plugin_api::tls_roots::public_root_store()
+                .map_err(|_| ClientFailure::TlsConfiguration)?,
+        );
     }
     Ok(tls.build())
 }
 
+/// Recognize authored Linux Mesh restore messages without exposing raw local errors.
+pub(crate) fn mesh_restore_failure(error: &io::Error) -> Option<(&'static str, &'static str)> {
+    #[cfg(all(target_os = "linux", feature = "plugin-mesh"))]
+    {
+        let refusal = error
+            .get_ref()?
+            .downcast_ref::<infraternal_plugin_mesh::node::MachineBindingError>()?;
+        Some((refusal.summary(), refusal.recovery()))
+    }
+    #[cfg(not(all(target_os = "linux", feature = "plugin-mesh")))]
+    {
+        let _ = error;
+        None
+    }
+}
+
 /// CLI output can carry only these authored public sentences, never arbitrary errors.
 pub(crate) fn public_error(error: &io::Error) -> &'static str {
+    if let Some((summary, _)) = mesh_restore_failure(error) {
+        return summary;
+    }
     match Failure::of(error) {
         Some(Failure::Dns(sentence)) => sentence,
         Some(Failure::Connect) => {
@@ -789,10 +812,12 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
         Some(Failure::Challenge) => {
             "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
         }
+        Some(Failure::IdentityMismatch) => IDENTITY_MISMATCH,
         Some(Failure::Refused) | None => "Remote infraternal agent operation failed",
     }
 }
 
+/// Redeem a machine invitation over HTTPS using its pinned trust when provided.
 async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Result<JoinResponse> {
     let url = url::Url::parse(url).map_err(|_| refused())?;
     if url.scheme() != "https"
@@ -813,6 +838,7 @@ async fn redeem(url: &str, root: Option<&X509>, request: &JoinRequest) -> io::Re
         root,
         8192,
         &mut request_started,
+        None,
     )
     .await
     .map_err(client_failure_to_io)?;
@@ -940,9 +966,9 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
         stored.public_origin = Some(canonical);
         stored.https_der = None;
         stored.https_system_roots = true;
-        changed = true;
-    }
-    if stored.endpoint.take().is_some() {
+        // The legacy 7443 address is filtered in the networks that motivated
+        // #291; an identity enrolled with a public origin keeps its endpoint.
+        stored.endpoint = None;
         changed = true;
     }
     if changed {
@@ -950,6 +976,35 @@ fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
         replace(data, &bytes, Some(&snapshot))?;
     }
     Ok(stored)
+}
+
+/// The address to dial for the direct QUIC link, or `None` to use only HTTPS.
+///
+/// The server hands out its listener address, which is `0.0.0.0:<port>` (or
+/// `[::]`) when it listens on every address; that means "the public origin's
+/// host, this port". The name is looked up once per agent start. A failed
+/// lookup only skips the direct dial: the HTTPS origin still links (#146).
+async fn direct_endpoint(
+    endpoint: Option<std::net::SocketAddr>,
+    public_origin: &str,
+) -> Option<std::net::SocketAddr> {
+    let endpoint = endpoint?;
+    if !endpoint.ip().is_unspecified() {
+        return Some(endpoint);
+    }
+    let host = url::Url::parse(public_origin).ok()?.host_str()?.to_owned();
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_owned();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), endpoint.port())),
+    )
+    .await
+    .ok()?
+    .ok()?
+    .next()
 }
 
 /// Run the remote client from the stored identity in `data`.
@@ -966,21 +1021,27 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
                 .map_err(|_| refused())?,
         )
     };
+    let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
+        .map_err(|_| refused())?;
+    let key_der = Zeroizing::new(B64.decode(&stored.key_der).map_err(|_| refused())?);
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    // A mismatched pair can never reconnect. Check it before starting the
+    // supervisor, so the service reports the local problem immediately.
+    if !certificate
+        .public_key()
+        .map_err(|_| refused())?
+        .public_eq(&key)
+    {
+        return Err(Failure::IdentityMismatch.error(io::ErrorKind::PermissionDenied));
+    }
     let identity = RemoteIdentity {
         host_id: stored.host_id,
-        identity: Identity {
-            certificate: X509::from_der(
-                &B64.decode(&stored.certificate_der).map_err(|_| refused())?,
-            )
-            .map_err(|_| refused())?,
-            key: PKey::private_key_from_pkcs8(&B64.decode(&stored.key_der).map_err(|_| refused())?)
-                .map_err(|_| refused())?,
-        },
+        identity: Identity { certificate, key },
         roots: vec![
             X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
                 .map_err(|_| refused())?,
         ],
-        endpoint: stored.endpoint,
+        endpoint: direct_endpoint(stored.endpoint, &public_origin).await,
         server_name: stored.server_name.clone(),
         public_origin: Some(public_origin),
         https_root,

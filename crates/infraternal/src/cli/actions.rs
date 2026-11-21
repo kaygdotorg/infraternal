@@ -1,7 +1,9 @@
 //! Builds the validated action registry from built-in and enabled component plugins.
 
+#[cfg(all(feature = "remote", feature = "plugin-server"))]
+use infraternal_plugin_api::ActionPermission;
 use infraternal_plugin_api::{
-    ActionContract, ActionDefinition, ActionEffect, ActionPermission, ActionRegistry, ActionTarget,
+    ActionContract, ActionDefinition, ActionEffect, ActionRegistry, ActionTarget,
     CliDryRun as DryRun, CliHandler, JsonSchema, PluginDefinition, RegistryError,
 };
 
@@ -131,6 +133,7 @@ fn release_plugin() -> PluginDefinition {
     }
 }
 
+/// Register the commands available in the current platform and feature set.
 fn cli_plugin() -> PluginDefinition {
     let plugin = PluginDefinition::new(
         "cli",
@@ -145,12 +148,12 @@ fn cli_plugin() -> PluginDefinition {
     let mut plugin = plugin;
     #[cfg(all(feature = "remote", feature = "plugin-server"))]
     plugin.actions.extend(hosted_server_actions());
-    #[cfg(all(feature = "remote", target_os = "linux"))]
+    #[cfg(machine_up)]
     {
         plugin.actions.push(up_action());
         plugin.actions.push(up_system_action());
     }
-    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    #[cfg(not(machine_up))]
     plugin
         .actions
         .extend(infraternal_plugin_api::placeholders(|| [up_action()]));
@@ -291,7 +294,7 @@ fn status_action() -> ActionDefinition {
     action
 }
 
-/// Register hosted command adapters against the descriptors used by the browser dispatcher.
+/// Register hosted command adapters for the browser actions this build can invoke.
 #[cfg(all(feature = "remote", feature = "plugin-server"))]
 fn hosted_server_actions() -> Vec<ActionDefinition> {
     vec![
@@ -306,6 +309,7 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
                 [],
             ),
         ),
+        #[cfg(feature = "ssh")]
         hosted_action(
             infraternal_plugin_ssh::manifest::START,
             &["hosts", "add"],
@@ -438,6 +442,7 @@ fn hosted_action(
     action
 }
 
+/// Describe the approved host-enrollment action and the result fields it returns.
 fn up_action() -> ActionDefinition {
     let data = JsonSchema::object(
         [
@@ -484,22 +489,37 @@ fn up_action() -> ActionDefinition {
         ],
         [],
     );
+    // Only builds with the host firewall code add its input below.
+    #[cfg_attr(
+        not(all(
+            target_os = "linux",
+            any(feature = "plugin-mesh", feature = "plugin-server")
+        )),
+        allow(unused_mut)
+    )]
+    let mut inputs = vec![(
+        "server".to_owned(),
+        JsonSchema::string("HTTPS origin of the server."),
+    )];
+    #[cfg(all(target_os = "linux", any(feature = "plugin-mesh", feature = "plugin-server")))]
+    inputs.push((
+        "host_firewall_allow".to_owned(),
+        JsonSchema::array(
+            JsonSchema::string("INTERFACE,SOURCE,tcp|udp,PORT; use * for any."),
+            "Administrator input rules saved for a host policy that drops by default. A joined machine only opens mesh input, so these take effect only if a server policy is added; `up` records the current SSH port automatically.",
+        ),
+    ));
     let action = ActionDefinition::new(
         ["up"],
-        "Add this Linux machine to a server.",
-        "Use this command on a Linux machine that should join an existing server.",
+        "Add this machine to a server.",
+        "Use this command on a Linux machine or a Mac that should join an existing server.",
         [
             "Approve this machine with a fresh passkey in the browser before the request expires.",
-            "This command installs the Linux system service with one sudo prompt.",
+            "This command installs the system service with one sudo prompt.",
             "After approval, it enrolls this machine over HTTPS and reports service status.",
+            "On Linux, the system service opens mesh input before networking and blocks nothing else.",
         ],
-        JsonSchema::object(
-            [(
-                "server".to_owned(),
-                JsonSchema::string("HTTPS origin of the server."),
-            )],
-            ["server".to_owned()],
-        ),
+        JsonSchema::object(inputs, ["server".to_owned()]),
         JsonSchema::command_result_with(data),
         ActionContract::new(
             ActionTarget::Global,
@@ -514,12 +534,20 @@ fn up_action() -> ActionDefinition {
         "up https://infra.example.org",
         "Add this machine to the server.",
     );
-    #[cfg(not(all(feature = "remote", target_os = "linux")))]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
+    let action = action.with_example(
+        "up https://infra.example.org --host-firewall-allow wt0,10.69.69.0/24,tcp,22",
+        "Keep another SSH path after the host firewall is installed.",
+    );
+    #[cfg(not(machine_up))]
     let action = action.not_available_yet();
     action
 }
 
-#[cfg(all(feature = "remote", target_os = "linux"))]
+#[cfg(machine_up)]
 fn up_system_action() -> ActionDefinition {
     ActionDefinition::new(
         ["__up-system"],
@@ -1238,14 +1266,18 @@ mod default_build_tests {
     //! A default build carries no declaration of a component that is not built yet (D243).
     use super::registry;
 
+    /// Check that the default registry exposes only built commands, including native machine enrollment.
     #[test]
     fn default_build_registers_no_unbuilt_command() {
         let registry = registry().expect("registry");
         assert!(registry.actions().all(|a| a.action.availability
             != infraternal_plugin_api::ActionAvailability::NotAvailableYet),);
-        #[cfg(all(feature = "remote", target_os = "linux"))]
-        assert!(registry.find(&["up"]).is_some(), "Linux remote up is built");
-        #[cfg(not(all(feature = "remote", target_os = "linux")))]
+        #[cfg(machine_up)]
+        assert!(
+            registry.find(&["up"]).is_some(),
+            "machine enrollment is built"
+        );
+        #[cfg(not(machine_up))]
         assert!(
             registry.find(&["up"]).is_none(),
             "up is not built on this target"

@@ -15,6 +15,12 @@ use uuid::Uuid;
 #[error("remote enrollment refused")]
 pub struct RemoteEnrollmentError;
 
+/// Report the refused phase without including the invitation, CSR, key or storage error.
+fn join_refused(host: Uuid, reason: &'static str) -> RemoteEnrollmentError {
+    tracing::debug!(event = "remote_join_refused", host_id = %host, reason, "Machine join refused");
+    RemoteEnrollmentError
+}
+
 /// One live unlock source and SQLite authority; constructing the adapter never unlocks the CA.
 pub struct RemoteEnrollment<S: CaKeySource + ?Sized> {
     source: Arc<S>,
@@ -56,17 +62,17 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
                         self.store
                             .preflight_successor(token, host, now)
                             .await
-                            .map_err(|_| RemoteEnrollmentError)?,
+                            .map_err(|_| join_refused(host, "invitation_or_promotion"))?,
                     ),
                     true,
                 ),
-                Err(_) => return Err(RemoteEnrollmentError),
+                Err(_) => return Err(join_refused(host, "invitation")),
             };
-        let csr = ValidatedCsr::parse(csr_der).map_err(|_| RemoteEnrollmentError)?;
+        let csr = ValidatedCsr::parse(csr_der).map_err(|_| join_refused(host, "csr"))?;
         let public_key = csr
             .key()
             .raw_public_key()
-            .map_err(|_| RemoteEnrollmentError)?;
+            .map_err(|_| join_refused(host, "public_key"))?;
         let actual_key_digest = Sha256::digest(public_key);
         let matches = expected_key_digest
             .as_ref()
@@ -77,7 +83,7 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             if !successor {
                 let _ = self.store.consume_refused(token, host, mode, now).await;
             }
-            return Err(RemoteEnrollmentError);
+            return Err(join_refused(host, "key_binding"));
         }
         #[cfg(test)]
         let certificate_started = std::time::Instant::now();
@@ -86,9 +92,10 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
         let certificate = self
-            .signer()?
+            .signer()
+            .map_err(|_| join_refused(host, "signer_locked_or_unavailable"))?
             .sign_host(host, &csr, now)
-            .map_err(|_| RemoteEnrollmentError)?;
+            .map_err(|_| join_refused(host, "signing"))?;
         #[cfg(test)]
         if std::env::var_os("ADDHOST_RETRY_PHASE_TIMING").is_some() {
             let epoch = std::time::SystemTime::now()
@@ -111,12 +118,12 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
             self.store
                 .redeem_successor(token, host, now, &certificate.record)
                 .await
-                .map_err(|_| RemoteEnrollmentError)?;
+                .map_err(|_| join_refused(host, "redeem_successor"))?;
         } else {
             self.store
                 .redeem(token, host, mode, now, &certificate.record)
                 .await
-                .map_err(|_| RemoteEnrollmentError)?;
+                .map_err(|_| join_refused(host, "redeem_invitation"))?;
         }
         Ok(certificate)
     }

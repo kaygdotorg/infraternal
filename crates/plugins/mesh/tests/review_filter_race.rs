@@ -68,6 +68,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
         local_key: Some(local_key),
         server: Some(NodeId(1)),
         authority_epoch: None,
+        rotation_operation: None,
         node: NodeId(2),
         #[cfg(feature = "mesh-dns")]
         name: None,
@@ -89,6 +90,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
                     previous_active: false,
                     addresses: addresses(1),
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
@@ -106,7 +108,10 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
     assert!(node.chunk(chunk).unwrap(), "the policy chunk is applied");
 }
 
+/// Keep the shared mesh policy table while one node replaces another.
 fn racing_up_keeps_the_live_nodes_table(engine: EngineKind) {
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let old_state = fresh_state(&format!("filter-race-old-{engine:?}"));
     let new_state = fresh_state(&format!("filter-race-new-{engine:?}"));
     let mut old = Node::restore_with_engine(&old_state, engine).unwrap();

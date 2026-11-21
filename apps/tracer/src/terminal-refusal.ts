@@ -14,8 +14,8 @@ const ROOTLESS = "This server runs without root, so it can only open shells as i
  */
 export type RefusalAction = "retry" | "add-host" | "sessions" | "none";
 
-/** What a refusal says (`message`), whether the sessions list helps (`sessionList`), and its one helpful `action`. */
-export interface TerminalRefusal { message: string; sessionList: boolean; action: RefusalAction }
+/** What a refusal says (`message`), whether the sessions list helps (`sessionList`), and its one helpful `action`, and `calm` when the state clears by itself and so is not an error (it gets the info icon, never the red cross; D393). */
+export interface TerminalRefusal { message: string; sessionList: boolean; action: RefusalAction; calm?: true }
 
 /** Turns a refused `ssh.session.open` into the words and the action its window shows. */
 export function terminalRefusal(error: unknown, hostName?: string): TerminalRefusal {
@@ -46,6 +46,8 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "denied": return { message: `You do not have access to ${hostName?.trim() || "this host"}. Ask an admin for access.`, sessionList: false, action: "none" };
       case "host_memory_unavailable": return { message: `${host} could not check its available memory. Try again.`, sessionList: false, action: "retry" };
       case "resource_unavailable": return { message: `${host} could not start a shell. Try again.`, sessionList: false, action: "retry" };
+      // A root upgrade (D376) holds the host's shells for a short while; it ends by itself, so name that and the way back (D393).
+      case "host_upgrading": return { message: `${host} is being upgraded and will be back shortly.`, sessionList: false, action: "retry", calm: true };
       // Offline, never enrolled, or cut off from the server all arrive as this one reason, so the sentence names the two
       // things a person can check; the network detail for an expert belongs in the docs, not here.
       case "unavailable": return { message: `${host} is offline or cannot reach this server. Check its network, then try again.`, sessionList: false, action: "retry" };

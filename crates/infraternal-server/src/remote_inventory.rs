@@ -61,6 +61,16 @@ impl Source {
             changed.any |= changed.hostname;
         }
         if let Some(os) = os
+            && let Ok(result) = sqlx::query("UPDATE remote_hosts SET device_os=? WHERE id=? AND device_approved=1 AND revoked_at IS NULL AND device_os IS NOT ?")
+                .bind(os)
+                .bind(id.as_bytes().as_slice())
+                .bind(os)
+                .execute(&mut *tx)
+                .await
+        {
+            changed.any |= result.rows_affected() > 0;
+        }
+        if let Some(os) = os
             && let Ok(result) = sqlx::query("UPDATE remote_host_bootstrap SET os=? WHERE host_id=? AND os IS NOT ? AND EXISTS(SELECT 1 FROM remote_hosts WHERE id=host_id AND revoked_at IS NULL)")
                 .bind(os)
                 .bind(id.as_bytes().as_slice())
@@ -74,6 +84,24 @@ impl Source {
             return FactChanges::default();
         }
         changed
+    }
+
+    /// Records the OS the host's infraternal agent named in its Hello (#146, D349).
+    ///
+    /// A host that joined by invitation has no SSH bootstrap row, so this is the
+    /// only place its OS is known; the host list prefers the bootstrap's richer
+    /// name when both exist. `os` is one of the fixed names from
+    /// `infraternal_agent::host_os::reported_os`, never free text from the host.
+    /// A storage failure only leaves the old value; the next link tries again.
+    async fn save_reported_os(&self, id: Uuid, os: &'static str) {
+        let _ = sqlx::query(
+            "UPDATE remote_hosts SET reported_os=? WHERE id=? AND revoked_at IS NULL AND reported_os IS NOT ?",
+        )
+        .bind(os)
+        .bind(id.as_bytes().as_slice())
+        .bind(os)
+        .execute(&self.pool)
+        .await;
     }
 
     /// Publish retained facts and reconcile only when a hostname changes; old hosts may omit the field.
@@ -126,6 +154,9 @@ impl Inventory for Source {
                 );
                 if current != available {
                     available = current;
+                    if current && let Some(os) = actor.reported_os() {
+                        self.save_reported_os(id, os).await;
+                    }
                     self.hosts.5.publish();
                     if current {
                         let facts = channel
@@ -201,7 +232,7 @@ impl Inventory for Source {
                 .transpose()?;
             // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
             let rows: Vec<AdmittedHostRow> = sqlx::query_as(
-                "SELECT h.id,COALESCE(b.address,''),b.os,h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
+                "SELECT h.id,COALESCE(b.address,''),COALESCE(b.os,h.reported_os),h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
             let mut next = if rows.len() > 128 {
                 Some(Uuid::from_slice(&rows[127].0).map_err(|_| ())?.to_string())
@@ -280,6 +311,55 @@ mod tests {
             json!([])
         );
     }
+    /// An invitation host has no SSH bootstrap row; the OS its agent named in
+    /// the Hello is what the canvas sees, and a bootstrap name still wins (#146).
+    #[tokio::test]
+    async fn invitation_hosts_list_the_os_their_agent_reported() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool: pool.clone(),
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            Value::Null
+        );
+        source.save_reported_os(host, "macOS").await;
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            "macOS"
+        );
+        sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,os) VALUES(?,'operator@worker','Debian GNU/Linux')").bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["os"],
+            "Debian GNU/Linux"
+        );
+    }
+    /// #337 (D339): an agent that reports no hostname still gets a name from the OS it reported, `<os>-<6 id
+    /// characters>`, and `host-<id>` only when no OS was reported at all (an old agent).
+    #[tokio::test]
+    async fn an_agent_without_a_hostname_is_named_by_the_os_it_reported() {
+        let (_, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let six: String = host.simple().to_string().chars().take(6).collect();
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["name"],
+            format!("host-{six}")
+        );
+        source.save_reported_os(host, "Linux").await;
+        assert_eq!(
+            source.list("owner", None).await.unwrap()["hosts"][0]["name"],
+            format!("linux-{six}")
+        );
+    }
+
     /// A window's details name its own host (#410): an unknown or other account's host is `host unavailable`,
     /// and an admitted host whose agent is not connected is `host offline`. Neither answers with the server's facts.
     #[tokio::test]

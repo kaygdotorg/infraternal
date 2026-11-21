@@ -54,7 +54,10 @@ static PUBLICATION: Mutex<()> = Mutex::new(());
 /// Refuses unsafe ownership, malformed records and filesystem failures.
 pub fn forget_pin(root: &std::path::Path, lookup: &str) -> Result<(), Failure> {
     let _publication = lock(&PUBLICATION);
-    let path = root.join(format!("{:x}.pub", Sha256::digest(lookup.as_bytes())));
+    let path = root.join(format!(
+        "{:x}.pub",
+        base16ct::HexDisplay(&Sha256::digest(lookup.as_bytes()))
+    ));
     if !root.try_exists().map_err(|_| unavailable())? {
         return Ok(());
     }
@@ -198,7 +201,7 @@ impl TrustedOpenSsh {
     fn pin(&self, policy: &TrustPolicy) -> PathBuf {
         self.root.join(format!(
             "{:x}.pub",
-            Sha256::digest(policy.lookup.as_bytes())
+            base16ct::HexDisplay(&Sha256::digest(policy.lookup.as_bytes()))
         ))
     }
 

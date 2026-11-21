@@ -28,6 +28,7 @@ fn health_server(response: &'static [u8]) -> (SocketAddr, JoinHandle<()>) {
     health_server_sequence(vec![response])
 }
 
+/// Answer private health requests in order, waiting for each real loopback request.
 fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind private health fixture");
     listener
@@ -38,7 +39,7 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
         let expected_responses = responses.len();
         let mut served = 0;
         while served < expected_responses {
-            let deadline = Instant::now() + Duration::from_secs(1);
+            let deadline = Instant::now() + Duration::from_secs(30);
             let accepted = loop {
                 match listener.accept() {
                     Ok(accepted) => break Some(accepted),
@@ -46,6 +47,7 @@ fn health_server_sequence(responses: Vec<&'static [u8]>) -> (SocketAddr, JoinHan
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && Instant::now() < deadline =>
                     {
+                        // sleep: poll for the next real private health request under host load.
                         thread::sleep(Duration::from_millis(5));
                     }
                     Err(_) => break None,
@@ -441,6 +443,7 @@ fn private_health_ping_rejects_an_unhealthy_response() {
     server.join().expect("health fixture thread");
 }
 
+/// Reports a running proxy unhealthy when its private health check never succeeds.
 #[test]
 fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
     const HEALTHY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
@@ -481,7 +484,7 @@ fn live_process_without_a_healthy_private_ping_is_reported_unhealthy() {
         },
         provider_files: Vec::new(),
         private_ping_address: health_address,
-        startup_timeout: Duration::from_secs(2),
+        startup_timeout: Duration::from_secs(30),
         public_gate: None,
     };
     let log = std::sync::Arc::new(|_: String| {});

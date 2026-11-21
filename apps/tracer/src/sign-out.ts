@@ -82,7 +82,6 @@ export function signOut(): Promise<void> {
  */
 export function askSignOut(anchor: HTMLElement, toast: SignOutToast): ConfirmTipController {
   return mountConfirmTip(anchor, {
-    label: "Sign out of this device",
     title: "Sign out of this device?",
     effect: "You will need your passkey to sign in again.",
     confirmLabel: "Sign out",

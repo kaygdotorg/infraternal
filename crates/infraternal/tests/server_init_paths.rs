@@ -90,13 +90,22 @@ fn planned_unit(output: &Output) -> String {
         .to_owned()
 }
 
-/// A unit written before #516 (no `--web-root`, custom data) is planned
-/// byte-for-byte unchanged when init is re-run without `--data`, so the real
-/// install is a no-op instead of `ExistingUnit` or a moved data folder.
+/// The whole `--json --dry-run` result, after checking it succeeded.
+fn planned(output: &Output) -> serde_json::Value {
+    assert!(output.status.success(), "{}", text(output));
+    serde_json::from_slice(&output.stdout).expect("plan JSON")
+}
+
+/// A unit written before #516 (custom data, no `--web-root`): a re-run without
+/// `--data` now plans the move to the D395 folder (owner, 2026-11-15: "change
+/// for existing installs too") and keeps the unit's shape; an explicit `--data`
+/// still plans the old unit byte for byte, with or without `--force`.
 #[test]
-fn rerunning_init_on_an_existing_user_install_plans_the_same_unit() {
+fn rerunning_init_on_an_existing_user_install_plans_the_move() {
     let machine = Machine::new("rerun-user");
     let custom = machine.root.join("custom data");
+    fs::create_dir_all(&custom).expect("the old data folder");
+    fs::write(custom.join("infraternal.sqlite"), "db").expect("old database");
     let custom = custom.to_str().expect("utf-8 path");
     let first = planned_unit(&machine.run(
         &["--json", "server", "init", "--dry-run", "--data", custom],
@@ -104,29 +113,101 @@ fn rerunning_init_on_an_existing_user_install_plans_the_same_unit() {
     ));
     assert!(!first.contains("--web-root"), "{first}");
     fs::write(machine.user_unit(), &first).expect("install the old unit");
+    let standard = machine.home().join(".local/state/infraternal");
+    let standard = standard.to_str().expect("utf-8 path");
 
     for args in [
         &["--json", "server", "init", "--dry-run"][..],
         &["--json", "server", "init", "--dry-run", "--force"][..],
     ] {
-        let again = planned_unit(&machine.run(args, &[]));
-        assert_eq!(again, first, "{args:?}");
+        let output = machine.run(args, &[]);
+        let plan = planned(&output);
+        assert_eq!(plan["data"]["data_move"]["from"], custom, "{args:?}");
+        assert_eq!(plan["data"]["data_move"]["to"], standard, "{args:?}");
+        assert_eq!(plan["data"]["data_move"]["moved"], false, "{args:?}");
+        let unit = planned_unit(&output);
+        assert_eq!(unit, first.replace(custom, standard), "{args:?}");
     }
+    for args in [
+        &["--json", "server", "init", "--dry-run", "--data", custom][..],
+        &[
+            "--json",
+            "server",
+            "init",
+            "--dry-run",
+            "--force",
+            "--data",
+            custom,
+        ][..],
+    ] {
+        let output = machine.run(args, &[]);
+        assert!(
+            planned(&output)["data"].get("data_move").is_none(),
+            "{args:?}"
+        );
+        assert_eq!(planned_unit(&output), first, "{args:?}");
+    }
+    // A dry run changed nothing on disk.
+    assert_eq!(
+        fs::read_to_string(machine.user_unit()).expect("unit"),
+        first
+    );
+    assert!(Path::new(custom).join("infraternal.sqlite").is_file());
+    assert!(!Path::new(standard).exists());
 }
 
-/// `--system --force` without `--data` keeps the custom folder of the system
-/// unit it replaces instead of pointing it at `/var/lib/infraternal`.
+/// A system unit with a custom folder: without `--data` init plans the move to
+/// `/var/lib/infraternal` (or refuses because that folder is in use on this
+/// machine); `--data <custom> --force` keeps the custom folder.
+///
+/// Both plans use `--host-firewall-off`, so they hold only the server unit: a
+/// default-drop plan needs every port sshd uses (J671, #483), which an
+/// unprivileged runner cannot read, so it would be refused before the folder
+/// choice this test is about. The firewall plan's folder line is covered by
+/// `install::tests::system_units_mark_the_scope_used_by_first_run_status`.
 #[test]
-fn forcing_a_system_reinstall_keeps_its_custom_data_folder() {
+fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
     let machine = Machine::new("rerun-system");
     let binary = env!("CARGO_BIN_EXE_infraternal");
+    let custom = machine.root.join("custom state");
+    fs::create_dir_all(&custom).expect("the old data folder");
+    let custom = custom.to_str().expect("utf-8 path");
     fs::write(
         machine.system_unit(),
         format!(
-            "[Service]\nExecStart=\"{binary}\" \"server\" \"--listen\" \"127.0.0.1:7443\" \"--data\" \"/srv/custom state\"\n"
+            "[Service]\nExecStart=\"{binary}\" \"server\" \"--listen\" \"127.0.0.1:7443\" \"--data\" \"{custom}\"\n"
         ),
     )
     .expect("install a custom system unit");
+    let output = machine.run(
+        &[
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--force",
+            "--host-firewall-off",
+        ],
+        &[],
+    );
+    let message = text(&output);
+    assert!(message.contains("/var/lib/infraternal"), "{message}");
+    if output.status.success() {
+        let plan = planned(&output);
+        assert_eq!(plan["data"]["data_move"]["from"], custom);
+        assert_eq!(plan["data"]["data_move"]["to"], "/var/lib/infraternal");
+        assert!(planned_unit(&output).contains("\"--data\" \"/var/lib/infraternal\""));
+    } else {
+        assert!(
+            message.contains("already holds")
+                || message.contains("shared")
+                || message.contains("Permission denied")
+                || message.contains("Not a directory")
+                || message.contains("untrusted"),
+            "{message}"
+        );
+    }
     let unit = planned_unit(&machine.run(
         &[
             "--json",
@@ -135,11 +216,39 @@ fn forcing_a_system_reinstall_keeps_its_custom_data_folder() {
             "--system",
             "--dry-run",
             "--force",
+            "--host-firewall-off",
+            "--data",
+            custom,
         ],
         &[],
     ));
-    assert!(unit.contains("\"--data\" \"/srv/custom state\""), "{unit}");
+    assert!(unit.contains(&format!("\"--data\" \"{custom}\"")), "{unit}");
     assert!(!unit.contains("/var/lib/infraternal"), "{unit}");
+}
+
+/// A system `server init` unit waits for the network-online target.
+#[test]
+fn a_generated_system_unit_waits_for_network_online() {
+    let machine = Machine::new("network-online");
+    let system = planned_unit(&machine.run(
+        &[
+            "--json",
+            "server",
+            "init",
+            "--system",
+            "--dry-run",
+            "--host-firewall-off",
+        ],
+        &[],
+    ));
+    assert!(
+        system.contains("After=network-online.target\nWants=network-online.target\n"),
+        "{system}"
+    );
+
+    let user = planned_unit(&machine.run(&["--json", "server", "init", "--dry-run"], &[]));
+    assert!(user.contains("After=network.target\n"), "{user}");
+    assert!(!user.contains("Wants=network-online.target"), "{user}");
 }
 
 /// A fresh per-user install with an empty `XDG_STATE_HOME` uses D395's

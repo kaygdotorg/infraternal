@@ -7,6 +7,7 @@ mod relocations;
 /// binary and, on Linux builds that include the stdin import adapter, the handoff note.
 fn main() {
     handoff_note();
+    machine_up_cfg();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=relocations.rs");
     relocations::emit("infraternal");
@@ -29,5 +30,22 @@ fn handoff_note() {
             "-Wl,-T,"
         };
         println!("cargo:rustc-link-arg={flag}{directory}/handoff-note.ld");
+    }
+}
+
+/// Declares `cfg(machine_up)`: builds where `infraternal up` can install this
+/// machine's system service (#263, #483).
+///
+/// That is a `remote` build on Linux (systemd), or on macOS with the mesh
+/// plugin, because there the service is the mesh `LaunchDaemon`. One name keeps
+/// the command's registration, dispatch and module in step; a long `cfg`
+/// repeated in each place drifted once already.
+fn machine_up_cfg() {
+    println!("cargo::rustc-check-cfg=cfg(machine_up)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let remote = std::env::var_os("CARGO_FEATURE_REMOTE").is_some();
+    let mesh = std::env::var_os("CARGO_FEATURE_PLUGIN_MESH").is_some();
+    if remote && (os == "linux" || (os == "macos" && mesh)) {
+        println!("cargo::rustc-cfg=machine_up");
     }
 }

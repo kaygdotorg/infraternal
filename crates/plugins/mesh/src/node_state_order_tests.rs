@@ -12,6 +12,7 @@ fn revision(version: u64) -> State {
         enabled: true,
         config: Some(Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -145,6 +146,7 @@ fn accepted_snapshot_persistence_at_1000_peers() {
                             ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
                         },
                         endpoint: Some("192.0.2.1:44000".parse().expect("endpoint")),
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

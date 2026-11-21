@@ -2,7 +2,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
-import { hostname } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { CLOSE_SESSION_GONE, encodeMuxedFrame, WebSocketFrameDecoder, type WireFrame } from "../../../packages/protocol/src/codec";
@@ -11,6 +10,7 @@ import { QueryReplies } from "./query-replies-double";
 import { terminalFixtures } from "./terminal-fixtures";
 import { handleBootstrapHttp, serveProvisioning } from "./provisioning-double";
 import { serveSetup } from "./setup-double";
+import { DOUBLE_HOSTNAME } from "./double-hostname";
 import { addHostFixtures, prototypeHosts } from "./prototype-fixtures";
 import { sessionDevices, sessionHosts } from "./session-fixtures";
 import { renameDataset } from "../docs-dataset";
@@ -39,6 +39,13 @@ const MAX_HTTP_BODY = 32 * 1024;
 const MAX_MOCK_OUTPUT = 2 * 1024 * 1024;
 const MOCK_OUTPUT_RING_CAPACITY = 8 * 1024 * 1024;
 const MAX_MESSAGE = 16 * 1024;
+/**
+ * The most flow-control credit a page may hold on one attached terminal: the 1 MiB bulk window plus the 64 KiB repaint
+ * reserve the page grants at attach (`INITIAL_CREDIT` in src/terminal.ts, D381/#477). A grant that would push the total
+ * past this is a protocol error. When the page's window changes, change this with it: a stale cap makes the double close
+ * every connection at its first Credit (1002), and every window then reconnects in a loop (#529).
+ */
+const MAX_PAGE_CREDIT = 1024 * 1024 + 64 * 1024;
 const MAX_TRACE_EVENTS = 120_000;
 const MAX_ATTACH_HISTORY = 64;
 const DIST_ROOT = resolve(process.env.TRACER_DIST ?? resolve(import.meta.dirname, "../dist"));
@@ -169,6 +176,8 @@ let nextClientId = 0;
 const attachHistory: Array<{ last_out_seq: string; output_sequence: string }> = [];
 const traceEvents: TraceEvent[] = [];
 
+/** A name a spec asked the double to give as "this host" (`POST /__mock/hostname`), instead of the short default; cleared by a reset. */
+let hostnameOverride: string | undefined;
 const perfSink = createPerfSink(FRONT_PORT);
 const server = createServer((request, response) => { void routeHttp(request, response); });
 // Never close an idle kept-alive connection. Specs reach the double through the test link's added delay with
@@ -790,6 +799,11 @@ async function routeHttp(request: IncomingMessage, response: ServerResponse): Pr
     closeAfterAttachMs = delay;
     return sendJson(response, 200, { delay_ms: delay });
   }
+  if (request.method === "POST" && url.pathname === "/__mock/hostname") {
+    const name = (await readJson(request))?.name;
+    hostnameOverride = typeof name === "string" && name.length > 0 ? name : undefined;
+    return sendJson(response, 200, { hostname: hostnameOverride ?? DOUBLE_HOSTNAME });
+  }
   if (request.method === "POST" && url.pathname === "/__mock/reset") {
     resetMockState();
     return sendJson(response, 200, { setup_token: setupToken });
@@ -850,7 +864,7 @@ async function authAction(
       if (unlockPending) return sendJson(response, 401, { error: "authorization failed" });
     case "unlock-session":
       if (!isAuthenticated(request) || !owner) return sendJson(response, 401, { error: "authorization failed" });
-      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : hostname() });
+      return sendJson(response, 200, { user_id: owner.userId, username: owner.username, display_name: owner.displayName, device: "test-double", fresh: 1, hostname: DOCS_DATASET ? "home-server" : hostnameOverride ?? DOUBLE_HOSTNAME });
     case "setup-start": {
       const username = body.username;
       const suppliedDisplayName = body.display_name;
@@ -1111,6 +1125,11 @@ function handleControlFrame(connection: Connection, frame: WireFrame): void {
   }
 }
 
+/**
+ * Answers one frame on a terminal stream: attaching to a session, the page's flow-control credit, its input and resizes.
+ * A frame the real server would refuse closes the socket with 1002 and a reason naming the rule, so a page that breaks the
+ * wire contract fails loudly instead of hanging.
+ */
 function handleTerminalFrame(connection: Connection, streamId: number, frame: WireFrame): void {
   switch (frame.type) {
     case "AttachTerm":
@@ -1157,7 +1176,7 @@ function handleTerminalFrame(connection: Connection, streamId: number, frame: Wi
       }
       return;
     case "Credit":
-      if (!connection.attached || connection.credit > 1024 * 1024 - frame.bytes) {
+      if (!connection.attached || connection.credit > MAX_PAGE_CREDIT - frame.bytes) {
         connection.socket.close(1002, "invalid test-double credit");
         return;
       }
@@ -1473,6 +1492,7 @@ const mockGroups: Record<string, string[]> = { ops: ["kayg", "asha"], sre: ["rav
 let accountToolbar: unknown;
 /** Puts the double back to a fresh state for the next test: no owner, no sessions, no sockets or counters, and the setup token renewed. */
 function resetMockState(): void {
+  hostnameOverride = undefined;
   mockShares.length = 0;
   accountToolbar = undefined;
   owner = undefined;

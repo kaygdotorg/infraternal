@@ -215,7 +215,9 @@ export function mountShortcutsView(options: ShortcutsViewOptions): ShortcutsView
     stage.append(panel);
     const screen = stage.getBoundingClientRect();
     const rect = pill.getBoundingClientRect();
-    const width = Math.min(560, screen.width - 24);
+    // 560 px, but never narrower than the pill it grows out of: a long machine name makes the pill wider than that, and a panel
+    // narrower than its own pill would shrink on opening instead of unfolding.
+    const width = Math.min(Math.max(560, rect.width), screen.width - 24);
     const left = Math.max(12, Math.min(screen.width - width - 12, rect.left - screen.left + rect.width / 2 - width / 2));
     const top = rect.top - screen.top;
     panel.style.left = `${Math.round(left)}px`;

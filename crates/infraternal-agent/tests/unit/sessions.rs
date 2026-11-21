@@ -9,9 +9,12 @@ use std::{
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Directory(PathBuf);
 impl Directory {
+    /// Creates one fixture directory beneath the configured short state root.
     fn new() -> Self {
-        Self(PathBuf::from(format!(
-            "../../target/as{}-{}",
+        let root = std::env::var_os("INFRATERNAL_TEST_STATE_ROOT")
+            .map_or_else(|| PathBuf::from("../../target"), PathBuf::from);
+        Self(root.join(format!(
+            "as{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         )))
@@ -21,6 +24,36 @@ impl Drop for Directory {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+/// A reset removes only a stale socket carrying a private probe marker.
+#[test]
+fn reset_removes_only_a_private_probe_rendezvous() {
+    let directory = Directory::new();
+    let runtime = state(Some(directory.0.clone())).unwrap();
+    let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+
+    let probe = runtime.join("sessions/probe.sock");
+    let listener = UnixListener::bind(&probe).unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o600)).unwrap();
+    let marker = probe.with_extension("readiness");
+    fs::write(&marker, []).unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
+    drop(listener);
+    assert!(super::remove_stale_rendezvous(&probe, &reset).unwrap());
+    assert!(!probe.exists());
+    assert!(!marker.exists());
+
+    let ordinary = runtime.join("sessions/ordinary.sock");
+    let listener = UnixListener::bind(&ordinary).unwrap();
+    fs::set_permissions(&ordinary, fs::Permissions::from_mode(0o600)).unwrap();
+    let marker = ordinary.with_extension("readiness");
+    fs::write(&marker, []).unwrap();
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o644)).unwrap();
+    drop(listener);
+    assert!(!super::remove_stale_rendezvous(&ordinary, &reset).unwrap());
+    assert!(ordinary.exists());
+    assert!(marker.exists());
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -154,6 +154,17 @@ pub(crate) async fn serve(
         if options.remote_listen.is_some() {
             return Err(infraternal_server::ServerError::InvalidConfiguration);
         }
+        #[cfg(target_os = "linux")]
+        if let Ok(socket) = crate::server_control::Socket::bind(&config.data_dir) {
+            let data = config.data_dir.clone();
+            let serving = infraternal_server::serve(config);
+            tokio::pin!(serving);
+            return tokio::select! {
+                result = &mut serving => result,
+                _ = crate::server_control::serve_database(socket, &data) => serving.await,
+            }
+            .map(|()| Outcome::Stopped);
+        }
         infraternal_server::serve(config)
             .await
             .map(|()| Outcome::Stopped)

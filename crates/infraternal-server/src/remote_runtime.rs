@@ -209,6 +209,20 @@ struct TerminalAdmission {
     opens_drained: Notify,
 }
 
+/// Why a host's terminal admission turned an open away.
+///
+/// Only [`AdmissionRefused::Upgrading`] tells the person the host is being upgraded (D393), so it
+/// must come from the promotion guard's own bit and nothing else: a broken admission map would
+/// otherwise make every host look "being upgraded" for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdmissionRefused {
+    /// A root upgrade (D376) holds this host's admission closed. It reopens by itself when the
+    /// promotion guard drops: on commit, rollback, failure or cancel.
+    Upgrading,
+    /// Any other refusal: the admission map's lock was poisoned, or the open counter is full.
+    Unavailable,
+}
+
 /// Keeps a remote terminal open inside its admission window until its row is persisted.
 pub(crate) struct TerminalOpenGuard {
     /// Its count keeps a promotion from passing the final session census.
@@ -228,11 +242,18 @@ const OPEN_COUNT_MASK: usize = !PROMOTION_ACTIVE;
 
 impl TerminalAdmission {
     /// Admit one open if promotion has not closed this host, refusing counter overflow.
-    fn admit(self: &Arc<Self>) -> Result<TerminalOpenGuard, ()> {
+    ///
+    /// The refusal names its cause: the promotion bit is `Upgrading`, a full counter is
+    /// `Unavailable`. Both are read from the same atomic word the open would claim, so the reason
+    /// is exact at the moment of refusal.
+    fn admit(self: &Arc<Self>) -> Result<TerminalOpenGuard, AdmissionRefused> {
         let mut current = self.state.load(AtomicOrdering::Acquire);
         loop {
-            if current & PROMOTION_ACTIVE != 0 || current & OPEN_COUNT_MASK == OPEN_COUNT_MASK {
-                return Err(());
+            if current & PROMOTION_ACTIVE != 0 {
+                return Err(AdmissionRefused::Upgrading);
+            }
+            if current & OPEN_COUNT_MASK == OPEN_COUNT_MASK {
+                return Err(AdmissionRefused::Unavailable);
             }
             match self.state.compare_exchange_weak(
                 current,
@@ -498,8 +519,17 @@ impl RemoteHosts {
     }
 
     /// Refuse terminal opens while a promotion owns its admission window.
-    pub(crate) fn admit_terminal_open(&self, id: Uuid) -> Result<TerminalOpenGuard, ()> {
-        self.terminal_admission(id)?.admit()
+    ///
+    /// The error says why (see [`AdmissionRefused`]); a poisoned admission map is `Unavailable`,
+    /// never `Upgrading`. Callers check that the person owns the host first, so the upgrade state
+    /// is only ever told to the host's owner.
+    pub(crate) fn admit_terminal_open(
+        &self,
+        id: Uuid,
+    ) -> Result<TerminalOpenGuard, AdmissionRefused> {
+        self.terminal_admission(id)
+            .map_err(|()| AdmissionRefused::Unavailable)?
+            .admit()
     }
 
     /// Acquire terminal-open exclusion for the duration of a promotion.

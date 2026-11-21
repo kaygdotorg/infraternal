@@ -10,7 +10,8 @@
 //! (`infraternal.sqlite`), sockets, the identity and trust files: databases and
 //! state, in D395's words. It cannot be split yet, so the whole folder maps to
 //! D395's *state* location, with no extra suffix, matching the Linux system
-//! path that already exists:
+//! path that already exists. On a Linux system with an infraternal agent in
+//! the shared base, the server gets its own 0700 `server/` child.
 //!
 //! | Platform        | Data folder                                          |
 //! |-----------------|------------------------------------------------------|
@@ -24,12 +25,14 @@
 //! (`infraternal-server`'s `remote_startup::default_ca_dir`). macOS has a single
 //! Application Support folder for both, as D395 says.
 //!
-//! # Existing installs are never moved here
+//! # Existing installs
 //!
-//! The new defaults apply only to a fresh install. [`resolve_server_init`] keeps
-//! the folders recorded in the unit it would overwrite, so re-running init
-//! leaves the unit byte-for-byte unchanged and never orphans a custom folder.
-//! Moving old locations is the updater's job (D395, "moved on the next update").
+//! [`resolve_server_init`] reports the folders recorded in the unit it would
+//! overwrite, so a custom web root is kept and a re-run plans the same unit.
+//! When that unit's data folder is not the default above and no `--data` was
+//! given, `server init` then moves it there with `install_move` (owner,
+//! 2026-11-15: "change for existing installs too"), which also rewrites the
+//! unit. An explicit `--data` keeps any folder where it is.
 //!
 //! # Not routed through here (yet)
 //!
@@ -48,6 +51,12 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+
+/// The Linux system base shared by the server and infraternal agent.
+pub(super) const LINUX_SYSTEM_BASE: &str = "/var/lib/infraternal";
+
+/// The standard private server child when the Linux system base is shared.
+pub(super) const LINUX_COMBINED_SERVER: &str = "/var/lib/infraternal/server";
 
 /// Why a folder could not be chosen; the text says what to pass instead.
 #[derive(Debug, thiserror::Error)]
@@ -165,7 +174,7 @@ pub fn check_scope(
 /// The server's default data folder for a fresh install in this scope (see the module table).
 pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBuf, PathError> {
     match (environment.os, scope) {
-        (Os::Linux, Scope::System) => Ok(PathBuf::from("/var/lib/infraternal")),
+        (Os::Linux, Scope::System) => Ok(linux_system_data_dir(Path::new(LINUX_SYSTEM_BASE))),
         (Os::Linux, Scope::User) => Ok(match &environment.xdg_state_home {
             Some(state) => state.join("infraternal"),
             None => environment
@@ -176,6 +185,30 @@ pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBu
         (Os::MacOs, Scope::User) => Ok(environment
             .absolute_home()?
             .join("Library/Application Support/infraternal")),
+    }
+}
+
+/// Select the private child for new installs when the infraternal agent uses the base.
+fn linux_system_data_dir(base: &Path) -> PathBuf {
+    // A binary directory can also be part of a server-only release. Look
+    // for infraternal agent state or ownership markers instead.
+    if [
+        "agent",
+        "state",
+        "sessions",
+        ".bootstrap-owner",
+        ".bootstrap-lock",
+        ".promotion-transaction",
+        "host-firewall-agent.json",
+    ]
+    .iter()
+    .any(|name| {
+        std::fs::symlink_metadata(base.join(name))
+            .is_ok_and(|entry| entry.is_dir() || entry.is_file())
+    }) {
+        base.join("server")
+    } else {
+        base.to_owned()
     }
 }
 
@@ -384,6 +417,34 @@ pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathB
     }
 }
 
+/// Where the symlink `link` really points, as an absolute path with `.` and `..` resolved.
+///
+/// A relative target is taken from the link's own folder, as the kernel does.
+/// `..` is resolved lexically, without touching the disk, so a dangling link
+/// (its release deleted) still has a target to judge. Lexical resolution can
+/// differ from the kernel's only when a component of the target is itself a
+/// symlink to elsewhere; then the link is judged by the path it names, which
+/// errs on the side of calling it foreign. `None` means it is not a readable link.
+fn link_target(link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    let joined = if target.is_absolute() {
+        target
+    } else {
+        link.parent()?.join(target)
+    };
+    let mut normal = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normal.pop();
+            }
+            other => normal.push(other),
+        }
+    }
+    Some(normal)
+}
+
 /// Whether the symlink `link` points at a release of ours.
 ///
 /// Ours means: exactly `binary`, or a file named `infraternal`, `live` or
@@ -391,14 +452,8 @@ pub fn path_link(scope: Scope, environment: &Environment) -> Result<Option<PathB
 /// release, old or new). That is how an update recognises the previous
 /// release's link and re-points it, while a link to `/usr/bin/other` is foreign.
 fn points_at_ours(link: &Path, binary: &Path) -> bool {
-    let Ok(target) = std::fs::read_link(link) else {
+    let Some(target) = link_target(link) else {
         return false;
-    };
-    let target = if target.is_absolute() {
-        target
-    } else {
-        link.parent()
-            .map_or(target.clone(), |dir| dir.join(&target))
     };
     if target == binary {
         return true;
@@ -423,12 +478,19 @@ fn points_at_ours(link: &Path, binary: &Path) -> bool {
 pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
     match std::fs::symlink_metadata(link) {
         Ok(meta) if meta.file_type().is_symlink() => {
-            if std::fs::read_link(link)? == binary {
+            if link_target(link).as_deref() == Some(binary) {
                 return Ok(LinkOutcome::Current(link.to_owned()));
             }
             if !points_at_ours(link, binary) {
                 return Ok(LinkOutcome::Foreign(link.to_owned()));
             }
+            // Known window (J719 P3): between the check above and the rename
+            // below, someone could replace the link with a file of their own,
+            // and the rename would replace that file. Closing it needs an
+            // atomic swap (Linux `renameat2(RENAME_EXCHANGE)`, macOS
+            // `renamex_np(RENAME_SWAP)`) and a swap back, two OS paths for a
+            // race in a folder only its owner (or root) can write. Accepted:
+            // PATH readers still see the old or the new link, never neither.
             let parent = link.parent().ok_or(io::ErrorKind::InvalidInput)?;
             let temporary = parent.join(format!(".infraternal.link-{}", std::process::id()));
             let _ = std::fs::remove_file(&temporary);
@@ -451,9 +513,14 @@ pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
     }
 }
 
-/// Remove `link` only if it is a symlink that still points at our binary; report whether it did.
+/// Remove `link` only if it is a symlink to exactly `binary`; report whether it did.
 ///
-/// Uninstall calls this so a link someone re-pointed to another program stays.
+/// Uninstall calls this so a link someone re-pointed to another program
+/// stays. Unlike publishing, which re-points a link to any older release of
+/// ours, removal is exact (D395: "only if it still points at our binary"):
+/// a link to another release or a developer checkout belongs to that
+/// install. A dangling link to exactly `binary` still counts, because
+/// uninstall may delete the binary first.
 #[cfg_attr(
     not(test),
     expect(
@@ -463,7 +530,7 @@ pub fn publish_link(link: &Path, binary: &Path) -> io::Result<LinkOutcome> {
 )]
 pub fn remove_link(link: &Path, binary: &Path) -> io::Result<bool> {
     if std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
-        && points_at_ours(link, binary)
+        && link_target(link).as_deref() == Some(binary)
     {
         std::fs::remove_file(link)?;
         return Ok(true);
@@ -543,6 +610,32 @@ mod tests {
             fresh(Scope::System, &macos()).data,
             PathBuf::from("/Library/Application Support/infraternal")
         );
+    }
+
+    /// A new install selects the private child only when infraternal agent state exists.
+    #[test]
+    fn combined_system_default_uses_the_server_child() {
+        let base = scratch("combined");
+        std::fs::create_dir_all(base.join("bin")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base);
+        std::fs::create_dir(base.join("agent")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base.join("server"));
+        std::fs::remove_dir(base.join("agent")).unwrap();
+        std::fs::create_dir(base.join("server")).unwrap();
+        assert_eq!(linux_system_data_dir(&base), base);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// A standalone server may already use the name `server` for its web root.
+    #[test]
+    fn standalone_system_default_ignores_an_unrelated_server_child() {
+        let base = scratch("standalone-web");
+        std::fs::create_dir_all(base.join("server")).unwrap();
+        std::fs::write(base.join("server/index.html"), "standalone web").unwrap();
+        std::fs::write(base.join("infraternal.sqlite"), "standalone data").unwrap();
+        let selected = linux_system_data_dir(&base);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(selected, base);
     }
 
     /// An absolute `XDG_STATE_HOME` is honoured; empty or relative ones are ignored (XDG spec).
@@ -871,6 +964,95 @@ mod tests {
         assert!(!remove_link(&file, &new).unwrap());
         assert!(remove_link(&link, &new).unwrap());
         assert!(!link.exists() && std::fs::symlink_metadata(&link).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Uninstall removes only a link to exactly this binary, never one to another release (J719 P2).
+    #[test]
+    fn uninstall_removes_only_a_link_to_this_exact_binary() {
+        let root = scratch("unlink");
+        let ours = root.join("data/infraternal/bin/infraternal");
+        let older = root.join("data/infraternal/old/infraternal");
+        let checkout = root.join("src/infraternal/live");
+        let link = root.join("bin/infraternal");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        for other in [&older, &checkout] {
+            std::os::unix::fs::symlink(other, &link).unwrap();
+            assert!(!remove_link(&link, &ours).unwrap(), "{}", other.display());
+            assert_eq!(&std::fs::read_link(&link).unwrap(), other);
+            std::fs::remove_file(&link).unwrap();
+        }
+        // Dangling but exact still counts as ours: the binary was removed first.
+        std::os::unix::fs::symlink(&ours, &link).unwrap();
+        assert!(remove_link(&link, &ours).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Relative targets are normalised (`..` too), and odd things at the link path are handled (J719 P3).
+    #[test]
+    fn relative_dangling_and_directory_links_are_judged_by_their_real_target() {
+        let root = scratch("relink");
+        let binary = root.join("data/infraternal/bin/infraternal");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, "elf").unwrap();
+        let bin = root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("infraternal");
+
+        // A relative link through `..` to exactly this binary is current, and uninstall removes it.
+        std::os::unix::fs::symlink("../data/infraternal/bin/../bin/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Current(link.clone())
+        );
+        assert!(remove_link(&link, &binary).unwrap());
+
+        // A relative link to an older release of ours is re-pointed.
+        std::os::unix::fs::symlink("../data/infraternal/old/../old/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Repointed(link.clone())
+        );
+        assert_eq!(std::fs::read_link(&link).unwrap(), binary);
+        std::fs::remove_file(&link).unwrap();
+
+        // `..` that leaves the install folder is not ours, even if a name matches.
+        std::os::unix::fs::symlink("../data/infraternal/../elsewhere/infraternal", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        std::fs::remove_file(&link).unwrap();
+
+        // A dangling link of ours (its release was deleted) is re-pointed.
+        std::os::unix::fs::symlink(root.join("data/infraternal/gone/infraternal"), &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Repointed(link.clone())
+        );
+        std::fs::remove_file(&link).unwrap();
+
+        // A dangling foreign link stays exactly as it was.
+        std::os::unix::fs::symlink("/nonexistent/other-tool", &link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("/nonexistent/other-tool")
+        );
+        assert!(!remove_link(&link, &binary).unwrap());
+        std::fs::remove_file(&link).unwrap();
+
+        // A directory at the link path is foreign and survives publish and uninstall.
+        std::fs::create_dir(&link).unwrap();
+        assert_eq!(
+            publish_link(&link, &binary).unwrap(),
+            LinkOutcome::Foreign(link.clone())
+        );
+        assert!(!remove_link(&link, &binary).unwrap());
+        assert!(link.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -174,11 +174,19 @@ test("every floating card uses the one overlay material", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openCanvas(page);
   await page.locator(".ui-window").first().locator(".ui-window-pill").click();
+  // The card is over the terminal, so glass-under marks it and it takes the static floor (0.87 for Tinted; D365, #448,
+  // glass-rules.on-demand.ts) instead of the themed 0.78. The mark arrives a moment after the popover opens (the watcher
+  // looks under a new surface from a mutation callback), so wait for it: reading earlier compares a card that is still on the
+  // themed rules, and which of the two a read catches is a race.
+  await expect(page.locator(".canvas-popover")).toHaveAttribute("data-glass-under", /./);
+  // The probe takes the same mark and sits where the rules apply the same way, so the two compare one material (tint, blur),
+  // not the floor against the themed value.
   const material = await page.evaluate(() => {
     const read = (el: Element) => { const s = getComputedStyle(el); return { background: s.backgroundColor, filter: s.backdropFilter }; };
     const popover = read(document.querySelector(".canvas-popover")!);
     const probe = document.createElement("div");
     probe.className = "ui-overlay-surface";
+    probe.setAttribute("data-glass-under", "");
     document.body.append(probe);
     const shared = read(probe);
     probe.remove();
@@ -734,10 +742,10 @@ test("details popover tabs: the selected capsule glides (does not jump) and the 
   expect(end).toBeGreaterThan(start + 20);
   // At least two frames sit strictly between the start and the end: a glide, not a jump.
   expect(samples.filter((value) => value > start + 1 && value < end - 1).length).toBeGreaterThanOrEqual(2);
-  // Arrow keys move it without animation.
+  // Arrow keys move it without animation. The popover has two tabs since D385 (Machine, Connection), and the arrows wrap, so from Connection the right arrow lands on Machine.
   await page.locator(".canvas-popover .ui-tab[data-tab='connection']").focus();
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator(".canvas-popover .ui-tab[data-tab='session']")).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".canvas-popover .ui-tab[data-tab='machine']")).toHaveAttribute("aria-selected", "true");
   expect(await page.locator(".ui-tabs-capsule").evaluate((node) => node.style.transition)).toBe("none");
 });
 
@@ -806,9 +814,10 @@ test("a normal preview session never writes text bottom left: reload, a failing 
   // The shared toast sits bottom centre and takes the theme's material (light on paper).
   await page.evaluate(() => { document.querySelector("#connection-status")!.textContent = "The server could not open this terminal."; });
   await expect(page.locator(".ui-toast")).toBeVisible();
-  const toast = await page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
-  expect(Math.abs(toast.centre - 720)).toBeLessThan(4);
-  expect(toast.bottom).toBeLessThan(40);
+  const place = () => page.locator(".ui-toast").evaluate((node) => { const r = node.getBoundingClientRect(); return { centre: r.left + r.width / 2, bottom: innerHeight - r.bottom }; });
+  // The toast rises into place, and a busy host reads it a few frames early (40.7 px up on its way to under 40): wait for it to rest.
+  await expect.poll(async () => (await place()).bottom).toBeLessThan(40);
+  expect(Math.abs((await place()).centre - 720)).toBeLessThan(4);
 });
 
 // ---- copying from an insecure origin ---------------------------------------------------------
@@ -883,7 +892,8 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   expect(900 - (b.y + b.height)).toBeGreaterThanOrEqual(224);
   expect(Math.abs(b.y + b.height / 2 - 450)).toBeLessThan(1);
   const sizes: number[] = [b.height];
-  for (const [query, expectRows] of [["ink", 1], ["theme", 10], ["zzzz", 0]] as const) {
+  // "dark" is the hint of every dark colour row: the rows are in the group Colour since D322, so the word "theme" no longer finds them.
+  for (const [query, expectRows] of [["ink", 1], ["dark", 10], ["zzzz", 0]] as const) {
     await page.locator("#palette-input").fill(query);
     await page.waitForTimeout(60);
     b = await box();
@@ -899,9 +909,9 @@ test("palette (desktop): centred, as tall as its results, never closer than a qu
   expect(empty).toBeLessThan(none);
   expect(one).toBeLessThan(200);
   // The selected row keeps its inset highlight.
-  await page.locator("#palette-input").fill("theme");
+  await page.locator("#palette-input").fill("dark");
   const inset = await page.locator(".result[aria-selected='true']").first().evaluate((node) => getComputedStyle(node, "::before").top);
-  expect(parseFloat(inset)).toBeCloseTo(3 * (await uiFactor(page)), 1);
+  expect(parseFloat(inset)).toBeCloseTo(4 * (await uiFactor(page)), 1); // the highlight's inset is 0.25rem (4 px at a 16 px root): 96f06e7d1 (D372) rounded the old 3 px spacing to 4 px
   await page.keyboard.press("Escape");
 });
 
@@ -929,7 +939,7 @@ test("palette: Ctrl+K then typing within 20 ms lands every character; arrow sele
   await page.keyboard.type("thm", { delay: 0 });
   await expect(page.locator("#palette-input")).toHaveValue("thm");
   expect(await page.evaluate(() => getComputedStyle(document.querySelector("#palette")!).pointerEvents)).not.toBe("none");
-  await page.locator("#palette-input").fill("theme");
+  await page.locator("#palette-input").fill("dark");
   const before = await page.locator(".result[aria-selected='true']").getAttribute("data-action");
   await page.keyboard.press("ArrowDown");
   expect(await page.locator(".result[aria-selected='true']").getAttribute("data-action")).not.toBe(before);

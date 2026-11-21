@@ -8,14 +8,14 @@ use std::{
     io::{self, Read, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    net::UnixStream,
     signal::unix::{SignalKind, signal},
 };
 
@@ -36,8 +36,7 @@ const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024;
 
 /// The private control endpoint: its socket, server data root, and reload signal.
 pub(crate) struct Control {
-    listener: UnixListener,
-    path: PathBuf,
+    socket: crate::server_control::Socket,
     /// Trusted data root used to find the durable Mesh directory during rollback.
     data: PathBuf,
     reload: tokio::signal::unix::Signal,
@@ -68,48 +67,8 @@ impl Control {
             Some(&mask),
             None,
         )?;
-        let directory = data.join("restart");
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&directory)?;
-        let parent = std::fs::symlink_metadata(data)?;
-        if !parent.is_dir()
-            || parent.uid() != nix::unistd::Uid::effective().as_raw()
-            || parent.mode() & 0o022 != 0
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        let metadata = std::fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir()
-            || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-            || metadata.mode() & 0o077 != 0
-        {
-            return Err(io::ErrorKind::PermissionDenied.into());
-        }
-        let path = directory.join("control.sock");
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => {
-                if !metadata.file_type().is_socket()
-                    || metadata.uid() != nix::unistd::Uid::effective().as_raw()
-                {
-                    return Err(io::ErrorKind::PermissionDenied.into());
-                }
-                // Never steal a live server's restart endpoint. A pathname left
-                // by a completed exec or abrupt stop has no listener.
-                if std::os::unix::net::UnixStream::connect(&path).is_ok() {
-                    return Err(io::ErrorKind::AddrInUse.into());
-                }
-                std::fs::remove_file(&path)?;
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        let listener = UnixListener::bind(&path)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
-            listener,
-            path,
+            socket: crate::server_control::Socket::bind(data)?,
             data: data.to_owned(),
             reload,
             clock_health,
@@ -146,12 +105,12 @@ impl Control {
                         }
                     }
                 },
-                accepted = self.listener.accept() => accepted?.0,
+                accepted = self.socket.listener.accept() => accepted?.0,
             };
             let peer = socket.peer_cred().ok();
             if peer
                 .as_ref()
-                .is_none_or(|peer| peer.uid() != nix::unistd::Uid::effective().as_raw())
+                .is_none_or(|peer| !crate::server_control::same_account(peer))
             {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
@@ -162,6 +121,11 @@ impl Control {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             };
+            #[cfg(target_os = "linux")]
+            if matches!(request, ControlRequest::Database) {
+                let _ = crate::server_control::send_database(&mut socket, &self.data).await;
+                continue;
+            }
             let ControlRequest::Restart {
                 binary,
                 reload,
@@ -243,12 +207,6 @@ impl Control {
         }
     }
 }
-impl Drop for Control {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
 /// Send the clock-aware trust snapshot through the private owner socket.
 async fn send_status(
     socket: &mut UnixStream,
@@ -267,9 +225,14 @@ async fn send_status(
     socket.write_all(&payload).await
 }
 
-/// What the private control endpoint can be asked: status, restart, or previous-build rollback.
+/// Read-only queries and restart or rollback requests for the private endpoint.
 enum ControlRequest {
+    /// Public CA status.
     Status,
+    /// The live SQLite handle used during install relocation.
+    #[cfg(target_os = "linux")]
+    Database,
+    /// Replace this process with a verified binary.
     Restart {
         binary: PathBuf,
         reload: bool,
@@ -288,6 +251,8 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
         }
         return match socket.read_u8().await? {
             1 => Ok(ControlRequest::Status),
+            #[cfg(target_os = "linux")]
+            2 => Ok(ControlRequest::Database),
             _ => Err(io::ErrorKind::InvalidInput.into()),
         };
     }
@@ -701,8 +666,10 @@ impl Replacement {
     }
 }
 
-/// Exec exactly the checked inode of `binary` with this process's arguments and
-/// environment, `input` (or `/dev/null`) as stdin. Returns the error if the exec fails.
+/// Replace this process with exactly the checked inode of `binary`, passing the
+/// same arguments and environment and `input` (or `/dev/null`) as stdin. Only
+/// returns when the kernel refused the exec, with the reason, so the caller can
+/// recover.
 fn execute_image(
     binary: &crate::restart_binary::Opened,
     input: Option<&std::os::unix::net::UnixStream>,
@@ -744,6 +711,13 @@ fn execute_image(
         // Execute exactly the checked inode; no pathname lookup occurs after
         // exporting the CA. O_CLOEXEC closes this fd in the successor.
         queue_reload()?;
+        // The new image records its launcher's transparent-huge-page policy
+        // at startup and gives it to the shells it starts. Hand it the policy
+        // this server was started with, not the opt-out the mesh engine took
+        // for this process; a refused exec gets the opt-out back (#522).
+        #[cfg(target_os = "linux")]
+        infraternal_shim::with_launcher_thp(|| binary.image.execute(&argv, &environment))?;
+        #[cfg(not(target_os = "linux"))]
         binary.image.execute(&argv, &environment)?;
         Ok(())
     };

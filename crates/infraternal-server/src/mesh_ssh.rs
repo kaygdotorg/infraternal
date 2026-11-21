@@ -518,6 +518,7 @@ impl MeshSshPlugin {
     /// Push to one node until its connection ends.
     async fn serve_node(self, channel: Arc<dyn NodeChannel>) {
         let mut changes = self.changes.subscribe();
+        let mut agent_restarts = channel.agent_restarts();
         let mut issue = true;
         loop {
             changes.borrow_and_update();
@@ -530,6 +531,18 @@ impl MeshSshPlugin {
             };
             tokio::select! {
                 result = changes.changed() => if result.is_err() { return },
+                result = async {
+                    match agent_restarts.as_mut() {
+                        Some(restarts) => restarts.changed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if result.is_err() { return; }
+                    // The embedded infraternal agent can restart behind the same
+                    // NodeChannel. Its Mesh SSH keys are process-owned, so issue
+                    // fresh certificates after the actor reports a new connection.
+                    issue = true;
+                },
                 () = tokio::time::sleep(wait) => {}
             }
         }

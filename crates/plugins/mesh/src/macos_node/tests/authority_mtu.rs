@@ -8,7 +8,7 @@ use super::{
 /// Start a real encrypted loopback peer whose decrypted UDP endpoint echoes each datagram.
 /// Only the node has a utun: the remote endpoint uses bounded packet channels so no second
 /// host address can accidentally deliver traffic outside the encrypted tunnel.
-fn mtu_echo_peer(
+pub(super) fn mtu_echo_peer(
     local_key: PublicKey,
     local_address: Ipv4Addr,
     peer_address: Ipv4Addr,

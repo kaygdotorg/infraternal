@@ -28,7 +28,6 @@
 /* The card tint is read by the element that carries it and by nothing inside it, so it does not inherit: a change then
    restyles the glass surfaces and not their descendants too (themes.ts `installLevelRules` sets it per element). */
 @property --overlay { syntax: "*"; inherits: false; }
-@property --ui-overlay-halo { syntax: "*"; inherits: false; }
 @property --ui-overlay-blur { syntax: "*"; inherits: false; }
 
 /* The one material's blur and saturation: surfaces and pills read these two tokens, so tuning them
@@ -47,16 +46,12 @@
   border: 1px solid var(--ui-overlay-border, var(--overlay-line));
   box-shadow: var(--ui-overlay-shadow, var(--shadow));
   color: var(--ui-overlay-color, var(--fg));
-  /* A soft halo in the tint colour keeps text legible over a dense terminal without adding tint. */
-  text-shadow: 0 0 1px var(--ui-overlay-halo, transparent), 0 0 2px var(--ui-overlay-halo, transparent), 0 0 0.1875rem var(--ui-overlay-halo, transparent), 0 0 0.25rem var(--ui-overlay-halo, transparent), 0 0 0.375rem var(--ui-overlay-halo, transparent), 0 0 0.625rem var(--ui-overlay-halo, transparent);
   -webkit-backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
   backdrop-filter: blur(var(--ui-overlay-blur)) saturate(var(--ui-overlay-saturation));
 }
-/* On the thin material secondary text is a step stronger than on a page (contrast over a busy terminal comes
-   from text colour and the halo, never from more tint). */
-.ui-overlay-surface, .ui-panel { --ui-text-secondary: color-mix(in oklab, var(--fg) 80%, var(--bg)); }
-/* Form controls reset text-shadow in the browser's own styles; they take the halo too. */
-.ui-overlay-surface :is(button, input, textarea, select) { text-shadow: inherit; }
+/* On the thin material secondary text is a step stronger than on a page. Contrast over a busy backdrop comes from the
+   glass solver (text colour, then tint, then a solid surface), never from a glow behind the glyphs (TASTE: no glow behind text). */
+.ui-overlay-surface, .ui-panel { --ui-text-secondary: var(--ui-glass-secondary, color-mix(in oklab, var(--fg) 80%, var(--bg))); }
 .ui-overlay-surface[data-overlay-size="large"] { --ui-overlay-shadow: var(--overlay-shadow-large, var(--shadow)); }
 /* The glass bed under a small floating card (src/glass-bed.ts). A card's own backdrop blur fades at its edges and lets the
    unblurred page show through, so on a small card no blur value hides text. The bed is an oversized blurred layer clipped to the
@@ -912,7 +907,7 @@
 .ui-sidebar-avatar {
   display: grid; flex: none; place-items: center; width: calc(var(--pill-h) - 0.625rem); height: calc(var(--pill-h) - 0.625rem); border-radius: 50%; color: #fff;
   background: linear-gradient(145deg, oklch(from var(--accent) calc(l + 0.06) c calc(h + var(--ui-avatar-hue, 0))), oklch(from var(--accent) calc(l - 0.12) c calc(h + var(--ui-avatar-hue, 0) + 28)));
-  font: 600 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace); text-shadow: 0 1px 1px rgb(0 0 0 / 0.25);
+  font: 600 var(--ui-size-eyebrow)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
 }
 .ui-sidebar-foot[data-variant="b"] .ui-sidebar-avatar { box-shadow: 0 0 0 1.5px color-mix(in oklab, var(--accent) 40%, transparent); }
 @media (pointer: coarse) { .ui-sidebar-avatar { font-size: var(--ui-size-body); } .ui-sidebar-foot .ui-pill { font-size: var(--text-secondary); } }

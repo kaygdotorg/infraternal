@@ -166,10 +166,25 @@ test("a page that opens and closes more than 32 windows keeps working: the conne
   await page.locator(".cl-viewport").waitFor();
   const keep = await windows(page).count();
   const sockets = server.bridges.length;
+  // Every attachment the server has seen, on every socket. A bridge keeps its attachments after the window closes, so
+  // "something is attached" is true from the first window on; the new window's own attach is a count that grows (#556).
+  const attachments = (): number => server.bridges.reduce((sum, bridge) => sum + [...bridge.attached.values()].reduce((n, ids) => n + ids.length, 0), 0);
+  // The server answers at most 4 calls at once on a socket and refuses a window's open past that (`unavailable`). A new
+  // window sends a startup inspection that stays pending a while; a person never opens windows this fast, so the loop
+  // lets the pending ones finish instead of tripping that cap.
+  const pendingCalls = (): number => {
+    const control = live().at(-1)?.control ?? [];
+    const answered = new Set(control.filter((frame) => frame.dir === "down" && frame.type === "Result").map((frame) => frame.callId));
+    return control.filter((frame) => frame.dir === "up" && frame.type === "Call" && !answered.has(frame.callId)).length;
+  };
   for (let i = 0; i < 34; i++) {
+    await expect.poll(pendingCalls, { timeout: 30_000, message: `calls pending before window ${i}` }).toBeLessThan(3);
+    const before = attachments();
     await page.locator(".tab-add").click();
     await expect(windows(page)).toHaveCount(keep + 1);
-    await expect.poll(() => live().at(-1)?.attached.size ?? 0, { timeout: 15_000 }).toBeGreaterThan(0);
+    // The stream opens after the terminal module loads; closing the window before that opens no stream at all, which
+    // is how an earlier version of this loop never filled the connection's writer table.
+    await expect.poll(attachments, { timeout: 15_000, message: `window ${i} attached` }).toBeGreaterThan(before);
     // Clicked from the page: the new window is still flying into view, and a pointer click would aim at where it was.
     await windows(page).last().locator('[data-action="close"]').evaluate((b) => (b as HTMLElement).click());
     await expect(windows(page), `closing window ${i}`).toHaveCount(keep);
@@ -179,7 +194,7 @@ test("a page that opens and closes more than 32 windows keeps working: the conne
   await page.locator(".tab-add").click();
   await expect(windows(page)).toHaveCount(keep + 1);
   // The terminal starts after the window exists (font and renderer load); the keys go to it once it has focus.
-  await expect(windows(page).last().locator(".terminal-host")).toBeFocused({ timeout: 15_000 });
+  await expect(windows(page).last().locator(".terminal-host textarea")).toBeFocused({ timeout: 15_000 });
   await page.keyboard.type("echo after-rotation-$((5*5))\n", { delay: 5 });
   await expect.poll(() => [...(live().at(-1)?.output.values() ?? [])].join(""), { timeout: 20_000 }).toContain("after-rotation-25");
 });

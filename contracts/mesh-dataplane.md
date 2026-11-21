@@ -47,6 +47,30 @@ coordinator channel, never through the public local CLI registry. Authorized
 replacement reconciles the owned local host addresses, including on restart;
 ordinary same-identity address changes still require the D199 overlap barrier.
 
+For rotation continuity across a coordinator process restart (#534, D166), the
+coordinator independently probes `mesh.identity` with
+`{"rotation_continuity":true}`. Only a positive negotiated reply permits
+`rotation_operation: {"operation_id":string,"sequence":u64}` on configuration
+chunks. A probe timeout or malformed reply withholds configuration until the
+existing identity retry succeeds; only explicit refusal or a valid negative
+reply permits an older receiver's shape. Every chunk repeats the same operation
+or omits it. The authenticated
+full snapshot must still bind the active local key and pass the existing
+complete-snapshot authority fence. An exact journal UUID and sequence match
+retains that operation through epoch adoption, including an interrupted commit.
+An absent or mismatched operation settles the active identity and discards the
+abandoned journal. A new database cannot inherit the old sequence space merely
+by enrolling the same public key. Recovery from an interrupted epoch reset
+checks the incoming operation again only after every chunk, header and complete
+snapshot content check succeeds. Incomplete or rejected snapshots leave the
+journal intact; saved metadata alone never proves continuity. Public snapshots retain their rollback-compatible shape; the
+separate authority record caches the metadata for persistence comparisons.
+
+A failed full configuration delivery retries after five seconds without a
+source event (#533). Successful delivery cancels the retry. A refused delta
+still falls back immediately to a full snapshot. No retry timer remains active
+for a settled, successfully installed view.
+
 Host revocation retires its Mesh membership key, direct network access rules and tag
 membership in the same SQLite transaction as the durable authority tombstone.
 A historical tombstone is reconciled during migration. After commit the host
@@ -59,9 +83,44 @@ The Linux component uses typed route/generic netlink for kernel WireGuard.
 Peer updates are chunked to the netlink datagram bound. It owns only its
 interface and firewall table; disabling removes them and leaves no poller,
 socket or timer running. Last installed configuration survives server loss.
-Endpoints are server-observed addresses combined with the node's advertised
-WireGuard UDP port. An endpoint is discovery, never proof of reachability.
-Handshake counters distinguish a direct path from an unproven endpoint.
+A peer's `endpoint` is the first underlay address to try. Its optional
+`candidates` list holds further addresses, in order (#515, D391): the peer's
+LAN address when both nodes sit behind one public address, its
+server-reflexive address (the public address and port the server's own mesh
+device last saw its packets come from), and the server-observed control IP
+combined with the node's advertised UDP port. The coordinator sends
+`candidates` only to a node whose identity reply to `{"candidates":true}` said
+it accepts them, because `Peer` refuses unknown fields. GotaTun on Linux and
+macOS walks the list. Kernel WireGuard installs only the first address and
+reports no LAN addresses. The coordinator gives a peer a list only if the
+Access policy grants network access in at least one direction. A node without
+candidate support gets the
+reflexive address, or the control-IP guess before one is observed, as its one
+`endpoint`, and so does the server's own node, which only answers its nodes
+and reads their reflexive addresses from its device. Two nodes sit behind one
+public address only when their control connections come from one IP (one
+/64 for IPv6) and, when the server has observed both, their reflexive IPs
+match too: the control source cannot be forged, and the reflexive IP keeps
+nodes behind one TCP proxy apart. A GotaTun node moves a
+peer that has sent nothing back (no bytes, a handshake more than one second
+newer, no packet from another address) to its next candidate every 5 s, for
+three rounds, then stays on the first. A walk starts on the engine's current
+address when that is on the list, else on the first candidate. A peer is not
+walked when the engine already sent to its first address, with a live
+session, before the snapshot was applied; a session that a re-install has
+just moved onto the first address proves nothing. A finished walk is kept
+while the peer's list is unchanged, so a later snapshot never moves a
+working peer. A walk that found its peer runs again only once that peer has
+had no handshake for 180 s, checked when the next snapshot is applied, with
+no timer. A GotaTun node sends a new WireGuard handshake initiation when a
+walk starts, at each walk step, and when a snapshot gives a peer without
+candidates a new first address, so the first packet through its own NAT
+leaves at once. It is sent even while the old session is live (GotaTun's
+`rehandshake`), and that session keeps carrying data until the new one
+completes, so no working session is dropped. An unanswered initiation is
+retried by the engine's own rekey timer. An endpoint is discovery, never proof of
+reachability. Handshake counters distinguish a direct path from an unproven
+endpoint.
 
 The server's mesh default setting defaults to allow in the open-source
 edition and deny with the enterprise build feature. Explicit network access rules

@@ -43,6 +43,10 @@ export interface GraphViewModule {
   stats(): ({ level: string } & ReturnType<GraphController["stats"]>) | undefined;
 }
 
+/**
+ * Builds the Mesh graph view: the cards and arrows of the hosts and who can reach whom, with the confirmations that edit an arrow.
+ * `cx` is the shared canvas context and `source` the mesh data and its edits; the returned module is driven by the canvas.
+ */
 export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const { signal, camera, state, views } = cx;
   const cam = camera.cam;
@@ -405,7 +409,6 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       const ids = { a: n.id, b: to };
       const title = say("Let {a} reach {b}?", ids), effect = say("{a} will be able to connect to {b}. You can stop it any time.", ids);
       mountConfirmTip(at.anchor, {
-        label: say("Let {a} reach {b}", ids).plain,
         title: title.plain, titleNode: title.node, effect: effect.plain, effectNode: effect.node,
         confirmLabel: "Allow access", cancelLabel: "Cancel",
         onConfirm: () => {
@@ -502,7 +505,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
           : "{from} will lose its connection to {to}, and {cand} will gain one. You can change it back any time.", ids);
         const endTip = tipAt(toClient({ x: live.end().x + origin.x, y: live.end().y + origin.y }));
         mountConfirmTip(endTip.anchor, {
-          label: moveTitle.plain, title: moveTitle.plain, titleNode: moveTitle.node, effect: moveEffect.plain, effectNode: moveEffect.node,
+          title: moveTitle.plain, titleNode: moveTitle.node, effect: moveEffect.plain, effectNode: moveEffect.node,
           confirmLabel: "Change access", cancelLabel: "Cancel",
           onConfirm: () => {
             source.moveGrant(g, end === "head" ? { to: next.to } : { from: next.from });
@@ -525,7 +528,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       const stopIds = { from: g.from, to: g.to };
       const stopTitle = say("Stop {from} reaching {to}?", stopIds), stopEffect = say("{from} will lose its connection to {to}. You can allow it again any time.", stopIds);
       mountConfirmTip(at.anchor, {
-        label: stopTitle.plain.replace(/\?$/, ""), title: stopTitle.plain, titleNode: stopTitle.node, effect: stopEffect.plain, effectNode: stopEffect.node,
+        title: stopTitle.plain, titleNode: stopTitle.node, effect: stopEffect.plain, effectNode: stopEffect.node,
         confirmLabel: "Stop access", cancelLabel: "Keep it",
         onConfirm: () => {
           source.removeGrant(g);

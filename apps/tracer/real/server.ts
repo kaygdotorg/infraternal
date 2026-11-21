@@ -93,6 +93,30 @@ export interface Bridge {
   outputTimes?: number[];
   /** Output cursor ranges without terminal text, to identify replayed byte ranges. */
   outputRanges?: Array<{ stream: number; outSeq: string; bytes: number; at: number }>;
+  /** Content-free frame stages for a focused latency trace. */
+  flowTimes?: Array<{
+    direction: "up" | "down";
+    stage: "bridge-receive" | "backend-send" | "backend-receive" | "browser-send";
+    stream: number;
+    type: "Input" | "Output" | "Credit" | "Ack" | "Snapshot";
+    bytes: number;
+    sequence?: string;
+    /** Outstanding grant balance when this Input reached the production server. */
+    creditBalance?: number;
+    at: number;
+  }>;
+  /** Optional direction:stage:type keys that keep a busy trace within its fixed event limit. */
+  flowFilter?: ReadonlySet<string>;
+  /** Skip output text decoding and retention after content assertions finish. */
+  skipOutputText?: boolean;
+  /** Total Output and Snapshot bytes seen without retaining their contents. */
+  outputBytesSeen?: number;
+  /** Cumulative raw Output bytes by stream, excluding Snapshot replacements. */
+  rawOutputBytesSeen?: Map<number, number>;
+  /** Credit grants accepted by the server for each stream, for flow-control measurements. */
+  creditGrantedByStream?: Map<number, number>;
+  /** Output and Snapshot bytes charged by the server for each stream. */
+  creditSpentByStream?: Map<number, number>;
   /** Optional terminal recovery events and closes, enabled only by focused redraw traces. */
   terminalEvents?: Array<{ stream: number; type: string; at: number }>;
   terminalCloses?: Array<{ stream: number; code: number; reason: string; at: number }>;
@@ -111,7 +135,7 @@ export interface Bridge {
   /** Close frames the client sent (stream detaches). */
   detached: number[];
   /** Control-stream actions and subscriptions: what the browser asked (`up`) and what the server answered (`down`). */
-  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
+  control: Array<{ dir: "up" | "down"; type: "Call" | "Result" | "Subscribe" | "Event"; /** Action id, subscription topic, or result status. */ detail: string; callId?: number; /** For a refused `Result`: the server's error text (at most 120 characters; never a success body). */ reason?: string; /** Optional VM benchmark timestamp; never includes frame bodies. */ at?: number }>;
   cookie: string;
 }
 
@@ -165,6 +189,58 @@ export function probeStage(phase: ProbeStage["phase"], socket: number, stream: n
 }
 const text = new TextDecoder();
 
+/** A bounded view of a protocol frame that carries no user input or terminal output. */
+type FlowNote = {
+  stream: number;
+  type: "Input" | "Output" | "Credit" | "Ack" | "Snapshot";
+  bytes: number;
+  sequence?: string;
+  /** Outstanding grant balance when an Input reaches the production server. */
+  creditBalance?: number;
+};
+
+/** The largest content-free frame trace retained by one bridge. */
+const FLOW_TRACE_LIMIT = 16_384;
+
+/** Return safe timing metadata for the frame types used by the latency review. */
+function flowNote(stream: number, frame: WireFrame): FlowNote | undefined {
+  switch (frame.type) {
+    case "Input": return { stream, type: "Input", bytes: frame.bytes.byteLength, sequence: frame.inSeq.toString() };
+    case "Output": return { stream, type: "Output", bytes: frame.bytes.byteLength, sequence: frame.outSeq.toString() };
+    case "Credit": return { stream, type: "Credit", bytes: frame.bytes };
+    case "Ack": return { stream, type: "Ack", bytes: 0, sequence: frame.inSeqAcked.toString() };
+    case "Snapshot": return { stream, type: "Snapshot", bytes: frame.bytes.byteLength, sequence: frame.outSeq.toString() };
+    default: return undefined;
+  }
+}
+
+/** Append one stage to the fixed-capacity trace without retaining frame contents. */
+function recordFlow(
+  bridge: Bridge,
+  direction: "up" | "down",
+  stage: NonNullable<Bridge["flowTimes"]>[number]["stage"],
+  note: FlowNote,
+): void {
+  let tracedNote = note;
+  if (direction === "up" && stage === "backend-send" && note.type === "Credit") {
+    const granted = bridge.creditGrantedByStream;
+    if (granted) granted.set(note.stream, (granted.get(note.stream) ?? 0) + note.bytes);
+  }
+  if (direction === "down" && stage === "backend-receive" && (note.type === "Output" || note.type === "Snapshot")) {
+    const spent = bridge.creditSpentByStream;
+    if (spent) spent.set(note.stream, (spent.get(note.stream) ?? 0) + note.bytes);
+  }
+  if (direction === "up" && stage === "backend-send" && note.type === "Input") {
+    const granted = bridge.creditGrantedByStream?.get(note.stream) ?? 0;
+    const spent = bridge.creditSpentByStream?.get(note.stream) ?? 0;
+    tracedNote = { ...note, creditBalance: granted - spent };
+  }
+  if (bridge.flowFilter && !bridge.flowFilter.has(`${direction}:${stage}:${note.type}`)) return;
+  const times = bridge.flowTimes;
+  if (!times || times.length >= FLOW_TRACE_LIMIT) return;
+  times.push({ direction, stage, ...tracedNote, at: performance.timeOrigin + performance.now() });
+}
+
 /**
  * `latencyMs` (or `REAL_ONE_WAY_MS`) delays every browser-socket message by that many milliseconds in each direction
  * (so 150 is the 300 ms round-trip profile of docs/PROCESS.md); order is kept. Page loads are not delayed.
@@ -176,6 +252,8 @@ export async function startRealServer(options: {
   upgradeDelayMs?: number;
   /** Record public control timestamps only for an explicitly enabled VM measurement. */
   timedControls?: boolean;
+  /** Record content-free Input, Credit, Ack and Snapshot stages for a focused latency trace. */
+  recordFlow?: boolean;
   /** Explicit native-window measurement only; bootstrap messages never enter it. */
   onDesktopStage?: (receipt: DesktopStage) => void;
   /** Explicit reconnect diagnosis only; these are same-host handling intervals. */
@@ -345,6 +423,13 @@ export async function startRealServer(options: {
       const bridge: Bridge = { id: bridges.length, closed: false, attached: new Map(), output: new Map(), acked: new Map(), replays: 0, replyAttempts: 0, detached: [], control: [], cookie: request.headers.cookie ?? "" };
       // Harness stage markers contain only fixed labels and timestamps, never terminal text.
       bridge.markers = [];
+      if (options.recordFlow) {
+        bridge.flowTimes = [];
+        bridge.outputBytesSeen = 0;
+        bridge.rawOutputBytesSeen = new Map();
+        bridge.creditGrantedByStream = new Map();
+        bridge.creditSpentByStream = new Map();
+      }
       if (options.recordCloses) bridge.terminalCloses = [];
       if (process.env.REAL_OUTPUT_TIMES === "1") {
         bridge.outputTimes = [];
@@ -362,7 +447,7 @@ export async function startRealServer(options: {
       const inbound = new WebSocketFrameDecoder();
       const outbound = new WebSocketFrameDecoder();
       const desktopDecoder = (options.onDesktopStage || options.onProbeStage) && protocol ? new WebSocketFrameDecoder() : undefined;
-      const queued: Array<{ bytes: Buffer; binary: boolean }> = [];
+      const queued: Array<{ bytes: Buffer; binary: boolean; flow: FlowNote[] }> = [];
       let pendingUpstreamMessages = 0;
       let closeBrowserWhenDrained = false;
       const closeBrowserAfterDrain = (): void => {
@@ -372,7 +457,15 @@ export async function startRealServer(options: {
       };
       browser.on("message", (data, binary) => {
         const bytes = Buffer.from(data as Buffer);
+        const flow: FlowNote[] = [];
         if (protocol && binary) inbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
+          // Keep Input too: timing ends at the browser paint, so the trace must
+          // show when each key left the bridge and when its echo reached it.
+          const note = options.recordFlow ? flowNote(stream, f) : undefined;
+          if (note) {
+            recordFlow(bridge, "up", "bridge-receive", note);
+            flow.push(note);
+          }
           if (options.onProbeStage) {
             const probe = probeStage("browser_ping", bridge.id, stream, f, performance.timeOrigin + performance.now());
             if (probe) options.onProbeStage(probe);
@@ -395,14 +488,27 @@ export async function startRealServer(options: {
           if (f.type === "Call") bridge.control.push({ dir: "up", type: "Call", detail: f.actionId, callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
           if (f.type === "Subscribe") bridge.control.push({ dir: "up", type: "Subscribe", detail: (() => { try { return String((JSON.parse(text.decode(f.filterJson)) as { topic?: unknown }).topic); } catch { return "?"; } })() });
         });
-        later(() => { if (bridge.closed) return; if (upstream.readyState === WebSocket.OPEN) upstream.send(bytes, { binary }); else queued.push({ bytes, binary }); });
+        later(() => {
+          if (bridge.closed) return;
+          if (upstream.readyState === WebSocket.OPEN) {
+            for (const note of flow) recordFlow(bridge, "up", "backend-send", note);
+            upstream.send(bytes, { binary });
+          } else queued.push({ bytes, binary, flow });
+        });
       });
-      upstream.on("open", () => { for (const q of queued.splice(0)) { if (!bridge.closed) upstream.send(q.bytes, { binary: q.binary }); } });
+      upstream.on("open", () => {
+        for (const q of queued.splice(0)) {
+          if (bridge.closed) continue;
+          for (const note of q.flow) recordFlow(bridge, "up", "backend-send", note);
+          upstream.send(q.bytes, { binary: q.binary });
+        }
+      });
       upstream.on("message", (data, binary) => {
         const receivedAt = desktopDecoder ? performance.timeOrigin + performance.now() : 0;
         pendingUpstreamMessages++;
         const bytes = Buffer.from(data as Buffer);
         const desktop: Omit<DesktopStage, "stage" | "at">[] | undefined = desktopDecoder ? [] : undefined;
+        const flow: FlowNote[] = [];
         if (desktopDecoder && binary && desktop) desktopDecoder.feed(new Uint8Array(bytes), (_stream, frame) => {
           if (options.onProbeStage) {
             const probe = probeStage("server_pong", bridge.id, _stream, frame, receivedAt);
@@ -415,7 +521,19 @@ export async function startRealServer(options: {
         });
         if (protocol && binary) outbound.feed(new Uint8Array(bytes), (stream: number, f: WireFrame) => {
           recordAttachment(bridge.attached, stream, f);
-          if (lean) return;
+          if (f.type === "Output" || f.type === "Snapshot") {
+            bridge.outputBytesSeen = (bridge.outputBytesSeen ?? 0) + f.bytes.byteLength;
+          }
+          if (f.type === "Output" && bridge.rawOutputBytesSeen) {
+            bridge.rawOutputBytesSeen.set(stream,
+              (bridge.rawOutputBytesSeen.get(stream) ?? 0) + f.bytes.byteLength);
+          }
+          const note = options.recordFlow ? flowNote(stream, f) : undefined;
+          if (note) {
+            recordFlow(bridge, "down", "backend-receive", note);
+            flow.push(note);
+          }
+          if (lean || bridge.skipOutputText) return;
           if (process.env.REAL_FRAME_LOG === "1" && f.type !== "Output" && f.type !== "Ack") console.error(`FRAME ${Date.now() % 100000} b${bridge.id} down s${stream} ${f.type}`);
           if (f.type === "Output") {
             const chunkText = text.decode(f.bytes, { stream: true });
@@ -454,13 +572,14 @@ export async function startRealServer(options: {
               if (process.env.REAL_EVENT_TIMES === "1") console.error(`SERVER_CLOSE_FRAME b${bridge.id} stream=${stream} code=${close.code} reason=${JSON.stringify(reason)}`);
             }
           }
-          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(options.timedControls ? { at: Date.now() } : {}) });
+          if (f.type === "Result") bridge.control.push({ dir: "down", type: "Result", detail: f.ok ? "ok" : "refused", callId: f.callId, ...(f.ok ? {} : { reason: new TextDecoder().decode(f.json).slice(0, 120) }), ...(options.timedControls ? { at: Date.now() } : {}) });
         });
         // Drain messages already received before closing the browser side of a failed upstream route.
         later(() => {
           pendingUpstreamMessages--;
           try {
             if (browser.readyState !== WebSocket.OPEN) return;
+            for (const note of flow) recordFlow(bridge, "down", "browser-send", note);
             if (!desktop?.length) { browser.send(bytes, { binary }); return; }
             const began = performance.timeOrigin + performance.now();
             for (const identity of desktop) options.onDesktopStage?.({ ...identity, stage: "fixture_send_begin", at: began });

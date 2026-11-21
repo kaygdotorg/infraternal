@@ -20,6 +20,7 @@ use infraternal_protocol::{
 };
 use std::{
     fs,
+    io::Write,
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::PathBuf,
     sync::Arc,
@@ -43,9 +44,11 @@ impl WireLane for Lane {
     fn retire(&self) {}
 }
 
-// The helper answers Start once, then keeps the solicited Status silent.
-const SILENT_HELPER: &str = r#"#!/usr/bin/env python3
-# Role: starts real framed capture, then records a solicited status without sending a reply.
+/// The helper answers Start once, then keeps the solicited Status silent.
+const SILENT_HELPER: &str = concat!(
+    "#!/usr/bin/env python3\n",
+    include_str!("fixtures/atomic_marker.py"),
+    r#"# Role: starts real framed capture, then records a solicited status without sending a reply.
 import json, os, socket, struct, sys
 os.umask(0o077)
 base = sys.argv[sys.argv.index("--companion-runtime") + 1]
@@ -74,11 +77,50 @@ while True:
         send(66, b'{"capture_rect":{"x":0,"y":0,"width":960,"height":600}}')
         send(70, struct.pack(">Q", 1)+b'\x01\x00\x00\x00\x01\x65'+bytes(100))
     elif kind == 6:
-        with open(os.path.join(base, "received"), "w") as marker:
-            json.dump({"kind":kind,"pid":os.getpid()}, marker)
+        body = json.dumps({"kind":kind,"pid":os.getpid()}).encode()
+        publish_marker(os.path.join(base, "received"), body)
 connection.close()
-"#;
+"#,
+);
 
+/// Wait for a fixture marker to contain complete JSON, retrying while its writer is publishing.
+/// `on_incomplete` runs after each missing or partial read so tests can coordinate a paused writer.
+async fn wait_for_marker_json(
+    path: &std::path::Path,
+    timeout: Duration,
+    mut on_incomplete: impl FnMut(),
+) -> Result<serde_json::Value, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_parse_error = None;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(value) => return Ok(value),
+                Err(error) => last_parse_error = Some(error.to_string()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("cannot read marker {}: {error}", path.display()));
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            let detail = last_parse_error
+                .map(|error| format!(": last JSON read was incomplete ({error})"))
+                .unwrap_or_default();
+            return Err(format!(
+                "marker {} was not ready within {} ms{detail}",
+                path.display(),
+                timeout.as_millis()
+            ));
+        }
+        on_incomplete();
+        // sleep: retry marker reads until the writer publishes complete JSON.
+        tokio::time::sleep(Duration::from_millis(10).min(remaining)).await;
+    }
+}
+
+/// The active helper must retire after a silent solicited status reaches its control deadline.
 #[tokio::test]
 async fn active_helper_silent_status_retires_after_control_deadline() {
     // A relative private runtime keeps the owned helper socket within sun_path.
@@ -97,6 +139,7 @@ async fn active_helper_silent_status_retires_after_control_deadline() {
         .prepare(
             id,
             Start {
+                passive_geometry: false,
                 target: Target::Screen { display_id: 1 },
                 size: Size {
                     width: 960,
@@ -124,15 +167,10 @@ async fn active_helper_silent_status_retires_after_control_deadline() {
         .unwrap();
     let input = serde_json::to_vec(&serde_json::json!({"session_id":id})).unwrap();
     let mut status = tokio::spawn(bridge.call_async("desktop.source.clock", &input).unwrap());
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !runtime.join("received").exists() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let marker: serde_json::Value =
-        serde_json::from_slice(&fs::read(runtime.join("received")).unwrap()).unwrap();
+    let marker_path = runtime.join("received");
+    let marker = wait_for_marker_json(&marker_path, Duration::from_secs(3), || {})
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(marker["kind"], 6);
     // This checks the contract's functional deadline, not a performance budget.
     let completed = tokio::time::timeout(Duration::from_secs(4), &mut status).await;
@@ -154,5 +192,82 @@ async fn active_helper_silent_status_retires_after_control_deadline() {
     assert!(
         bounded && active == 0,
         "silent active status remains pending beyond the control deadline (active_work={active})"
+    );
+}
+
+/// A reader must wait while a writer holds an empty or partial JSON marker open.
+#[tokio::test(start_paused = true)]
+async fn marker_reader_retries_while_writer_is_paused_with_empty_and_partial_json() {
+    let directory = std::env::temp_dir().join(format!(
+        "infraternal-marker-race-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("received");
+    let mut writer = fs::File::create(&path).unwrap();
+
+    let reader_path = path.clone();
+    let observations = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::clone(&observations);
+    let reader = tokio::spawn(async move {
+        wait_for_marker_json(&reader_path, Duration::from_secs(2), move || {
+            observed.notify_one();
+        })
+        .await
+    });
+    // The writer stays paused until the reader confirms it observed the empty file.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), observations.notified())
+            .await
+            .is_ok(),
+        "reader did not observe the empty marker before its deadline"
+    );
+
+    writer.write_all(b"{\"kind\":").unwrap();
+    writer.flush().unwrap();
+    // The writer stays paused until the reader confirms it observed partial JSON.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), observations.notified())
+            .await
+            .is_ok(),
+        "reader did not retry the partial marker before its deadline"
+    );
+
+    writer.write_all(b"6,\"pid\":123}").unwrap();
+    writer.sync_all().unwrap();
+    tokio::time::advance(Duration::from_millis(10)).await;
+    let marker = reader.await.unwrap().unwrap();
+    assert_eq!(marker["kind"], 6);
+    assert_eq!(marker["pid"], 123);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// A marker that never becomes valid must stop retrying at its monotonic deadline.
+#[tokio::test(start_paused = true)]
+async fn marker_reader_stops_after_its_bounded_wait() {
+    let directory = std::env::temp_dir().join(format!(
+        "infraternal-marker-deadline-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    fs::create_dir(&directory).unwrap();
+    let path = directory.join("received");
+    let _writer = fs::File::create(&path).unwrap();
+    let reader_path = path.clone();
+    let observations = Arc::new(tokio::sync::Notify::new());
+    let observed = Arc::clone(&observations);
+    let reader = tokio::spawn(async move {
+        wait_for_marker_json(&reader_path, Duration::from_secs(1), move || {
+            observed.notify_one();
+        })
+        .await
+    });
+    observations.notified().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let result = reader.await.unwrap();
+    fs::remove_dir_all(directory).unwrap();
+    assert!(
+        result.unwrap_err().contains("was not ready within 1000 ms"),
+        "an unfinished marker must report its bounded wait deadline"
     );
 }

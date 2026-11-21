@@ -1,7 +1,7 @@
 # Virtual workspace manifest for the Rust pieces of infraternal.
 [workspace]
 resolver = "3"
-exclude = ["vendor/russh", "vendor/russh-sftp", "vendor/sqlx-sqlite"]
+exclude = ["vendor/russh", "vendor/russh-sftp"]
 members = [
     "fuzz",
     "crates/infraternal-mesh",
@@ -34,22 +34,25 @@ license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
-argon2 = "0.5"
+argon2 = "0.6"
 # Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
 # matched-path and original-URI extractors are not used [#198].
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tower-log", "tracing", "ws"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-openssl"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-openssl"] }
 bytes = "1"
-base64 = "0.22"
-bip39 = { version = "2.2", features = ["rand"] }
+base64 = "0.23"
+# SHA-2 output arrays no longer format as hex; preserve existing persisted checksum text.
+base16ct = "1"
+bip39 = { version = "3", features = ["rand"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = { version = "1.9", features = ["serde"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
-# The D379 database driver; `bundled` links the one SQLite 3.54 that sqlx shares during the port.
-rusqlite = { version = "0.41", features = ["bundled"] }
+# Retain SQLite's unlock notification while sharing the bundled C library with rusqlite (D379).
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "sqlite-unlock-notify", "migrate", "macros"] }
+# The D379 database driver shares SQLx's single bundled SQLite library during the port.
+rusqlite = { version = "0.43", features = ["bundled"] }
 thiserror = "2"
 # Each role enables its required scheduler; private session images use only the current-thread runtime.
 tokio = { version = "1", features = ["rt", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
@@ -67,20 +70,20 @@ quinn = { version = "0.11.12", default-features = false, features = ["runtime-to
 rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
 # The native QUIC provider already includes this exact HMAC implementation.
 ring = { version = "0.17.14", default-features = false }
-aes-gcm = "0.10"
-hkdf = "0.12"
+aes-gcm = "0.11"
+hkdf = "0.13"
 serde_cbor_2 = "0.13"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect", "handshake"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
 libghostty-vt = { version = "0.2.2", default-features = false }
 libfuzzer-sys = "0.4"
 vt100 = "0.18"
 vte = "0.15"
 alacritty_terminal = "0.26"
-nix = { version = "0.31", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
+nix = { version = "0.32", features = ["fs", "term", "process", "signal", "user", "socket", "poll", "hostname"] }
 infraternal-shim = { version = "0.1.0", path = "crates/infraternal-shim" }
 infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol" }
 infraternal-server = { version = "0.1.0", path = "crates/infraternal-server" }
@@ -190,5 +193,3 @@ opt-level = "s"
 [patch.crates-io]
 russh = { path = "vendor/russh" }
 russh-sftp = { path = "vendor/russh-sftp" }
-# sqlx 0.8.6 on libsqlite3-sys 0.39 so it can share one SQLite with rusqlite (D379); see its INFRATERNAL.md.
-sqlx-sqlite = { path = "vendor/sqlx-sqlite" }

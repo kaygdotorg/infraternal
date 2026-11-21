@@ -3,7 +3,8 @@
  * The wheel scrolls what is under it (D275, #308), on a production build: a docs window scrolls its page without the input lock
  * and the canvas does not move by a pixel; a horizontal gesture over the same page still moves between windows; with the canvas
  * free, a vertical wheel over the page scrolls the page and one over the bare canvas pans it; when the page is at its end the rest
- * of that gesture is swallowed (momentum never carries over) and the page stays put. On a phone, one finger drags the page and the
+ * of that gesture is swallowed (momentum never carries over) and the page stays put. A sideways gesture over the page is the
+ * page's (D374) and one over the window's pill moves between windows. On a phone, one finger drags the page and the
  * canvas stays. Captures: 1440×900 at DPR 2 and 393×852 at DPR 3, to the external evidence directory.
  *
  * Terminal scrollback is in `real/wheel-routing.spec.ts` (it needs a real terminal). Nothing here asserts wall-clock speed.
@@ -17,7 +18,8 @@ const SIZES = [
   { name: "desktop", width: 1440, height: 900, scale: 2, touch: false },
   { name: "phone", width: 393, height: 852, scale: 3, touch: true },
 ] as const;
-const PAGE = '.ui-window[data-window-id="d-keys"]';
+/** The docs window that shows "Keys and how long they last": a long page that scrolls inside its window. Its address is `reference/keys` since the docs got sections (#311, D317). */
+const PAGE = '.ui-window[data-window-id="d-reference/keys"]';
 
 type Api = Record<string, (...args: unknown[]) => unknown>;
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> =>
@@ -93,9 +95,17 @@ for (const size of SIZES) {
       expect(await stopIndex(page)).toBe(index);
       await page.screenshot({ path: `${OUT}/${size.name}-docs-end.png` });
 
-      // ---- a sideways gesture over the same page is the canvas's: it moves to the neighbouring window ----------------------------
+      // ---- a sideways gesture over the same page is the content's (D374): the canvas stays; over the window's pill it moves ------
       await page.waitForTimeout(400);
+      // Observed on the nightly (#443): the keys page's stop is index 12 of the Docs view's 13 pages, the last one, so a gesture to the
+      // right has no neighbour to go to. The gesture goes the other way when the right one stays put, and either must move the canvas.
       await page.mouse.wheel(300, 0);
+      // sleep: let any wrongly started canvas move show itself; no event marks that something did not happen
+      await page.waitForTimeout(500);
+      expect(await stopIndex(page), "a sideways swipe over content does not move the canvas").toBe(index);
+      const pill = (await page.locator(`${PAGE} .ui-window-pill`).boundingBox())!;
+      await page.mouse.move(pill.x + pill.width / 2, pill.y + pill.height / 2);
+      await page.mouse.wheel(-300, 0); // the page is the view's last window, so the canvas can only move back
       await expect.poll(() => stopIndex(page)).not.toBe(index);
       await page.waitForTimeout(600);
       // The router's cost per wheel event over page content (logged for the record, not asserted: speed is measured in the

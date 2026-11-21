@@ -83,19 +83,11 @@ async fn fetch(
     tls.set_min_proto_version(Some(SslVersion::TLS1_2))
         .map_err(|_| DownloadError::Network)?;
     tls.set_verify(SslVerifyMode::PEER);
-    tls.set_default_verify_paths()
-        .map_err(|_| DownloadError::Network)?;
-    for bundle in [
-        "/etc/ssl/certs/ca-certificates.crt",
-        "/etc/pki/tls/certs/ca-bundle.crt",
-        "/etc/ssl/ca-bundle.pem",
-    ] {
-        if Path::new(bundle).is_file() {
-            tls.set_ca_file(bundle)
-                .map_err(|_| DownloadError::Network)?;
-            break;
-        }
-    }
+    // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+    tls.set_cert_store(
+        infraternal_plugin_api::tls_roots::public_root_store()
+            .map_err(|_| DownloadError::Network)?,
+    );
     let ssl = tls
         .build()
         .configure()

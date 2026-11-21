@@ -200,7 +200,10 @@ pub fn verify_component_manifest(
     }
     verifier.verify(signed_checksums, signature)?;
     let checksums = parse_checksums(signed_checksums)?;
-    let manifest_digest = format!("{:x}", Sha256::digest(manifest_bytes));
+    let manifest_digest = format!(
+        "{:x}",
+        base16ct::HexDisplay(&Sha256::digest(manifest_bytes))
+    );
     if checksums.get(manifest_filename) != Some(&manifest_digest) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

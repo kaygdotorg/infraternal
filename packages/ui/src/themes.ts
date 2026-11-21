@@ -151,17 +151,16 @@ export const THEMES: Record<string, Theme> = {
     "6a89a3 ff6762 c0ef7b ffd8a0 94bdff dba5fe 93efdd d6deeb"),
 };
 
-/** Mixes one curated hex color toward another to derive theme-matched surfaces. */
-function mix(left: string, right: string, amount: number): string {
+/** Mixes one curated hex color toward another (`left` to `right`, in sRGB, as six-digit hex) to derive theme-matched surfaces. */
+export function mix(left: string, right: string, amount: number): string {
   const channels = (hex: string) => [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
   const [from, to] = [channels(left), channels(right)];
   return `#${from.map((value, index) => Math.round(value + ((to[index] ?? value) - value) * amount).toString(16).padStart(2, "0")).join("")}`;
 }
 
+/** The floating-card material of one theme and level: the fill, the line, the shadows and the composite the contrast audit measures. Made by {@link overlayMaterial}; carries no text shadow (TASTE: no glow behind text). */
 export interface OverlayMaterial {
   overlay: string;
-  /** The tint at 0.9: a soft halo behind text on the material, so contrast comes from the halo and not from more tint. */
-  halo: string;
   /** Large floating panels (the sidebar): thinner than pills so content visibly blurs through. */
   overlayPanel: string;
   overlaySolid: string;
@@ -173,7 +172,6 @@ export interface OverlayMaterial {
   surface: string;
 }
 
-/** Keeps dark glass close to its palette and computes the same alpha composite used by the contrast audit. */
 /**
  * How much of what is behind shows through, in four named levels, for the two kinds of surface (the owner's
  * approved values). Cards are the floating material (popovers, palette, sidebar, pills, toasts); windows are the
@@ -201,11 +199,25 @@ export const DEFAULT_CARD = 2;
 export const DEFAULT_WINDOW = 1;
 export const levelName = (level: number): string => LEVEL_NAMES[level - 1] ?? LEVEL_NAMES[0];
 
+/** The colour of the glass tint for a theme: the page colour lifted toward white (a little on dark themes, a lot on light). */
+export const glassTint = (active: Theme): string => mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
+
+/** A level's own opacity for a theme (before any contrast floor, see `glassFor` in `glass-rules.on-demand.ts`). */
+export const levelOpacity = (active: Theme, level: number): number => {
+  const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
+  return active.dark ? glass.dark : glass.light;
+};
+
+/**
+ * The floating-card material of one level for a theme: the tint (kept close to the palette on dark themes),
+ * the shadows, and `surface`, the alpha composite over the page colour that the contrast audit measures cards against.
+ * The text colours that go with the tint's opacity come from {@link glassFor}.
+ */
 export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMaterial {
-  const tinted = mix(active.bg, "#ffffff", active.dark ? 0.06 : 0.6);
+  const tinted = glassTint(active);
   // The one floating-card material (popover, flow card, confirmation, sidebar, toast): the page
   // behind must visibly show through, softly blurred. Secondary text over the busiest terminal
-  // state stays above 4.5:1 (a text shadow carries it at the thin levels, never more tint).
+  // state stays above 4.5:1 through the glass solver (D365), which falls back to the theme's solid surface, never to a glow behind the text.
   const glass = CARD_LEVELS[level] ?? CARD_LEVELS[DEFAULT_CARD]!;
   const opacity = active.dark ? glass.dark : glass.light;
   const channels = (hex: string) => [1, 3, 5].map((index) => Number.parseInt(hex.slice(index, index + 2), 16));
@@ -216,7 +228,6 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
 
   return {
     overlay: `rgb(${rgb(tinted)} / ${opacity})`,
-    halo: `rgb(${rgb(tinted)} / 1)`,
     overlayPanel: `rgb(${rgb(tinted)} / ${opacity})`,
     overlaySolid: mix(active.bg, "#ffffff", active.dark ? 0.07 : 0.7),
     overlayLine: `rgb(${rgb(active.fg)} / 0.09)`,
@@ -242,17 +253,19 @@ export function overlayMaterial(active: Theme, level = DEFAULT_CARD): OverlayMat
  */
 let levelRules = false;
 /** Every element that reads the card tint (see styles.css, tooltip.ts and the key tray's lock mark). */
-const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
+/** The elements the glass rules style, and the ones `glass-under.on-demand.ts` watches. */
+export const TINT_USERS = ".ui-overlay-surface, .ui-panel, .ui-pill, .ui-window-actions, .tip, .tip-arrow, .keybar button";
+/** Writes the glass level rules (tint and blur per theme and level) once, as one adopted sheet; later calls do nothing. */
 function installLevelRules(): void {
   if (levelRules || typeof CSSStyleSheet === "undefined") return;
   levelRules = true;
   const css: string[] = [];
-  // The card tint (`--overlay`, `--ui-overlay-halo`) depends on theme and level. It is set on the elements that read it,
+  // The card tint (`--overlay`) depends on theme and level. It is set on the elements that read it,
   // not on the root, so a theme or level change restyles those few elements and not every element of the page.
   for (const [id, active] of Object.entries(THEMES)) {
     for (const level of Object.keys(CARD_LEVELS)) {
       const m = overlayMaterial(active, Number(level));
-      css.push(`:where(:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"]) :where(${TINT_USERS}) { --overlay: ${m.overlay}; --ui-overlay-halo: ${m.halo}; }`);
+      css.push(`:where(:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"]) :where(${TINT_USERS}) { --overlay: ${m.overlay}; }`);
       css.push(`:root[data-theme="${id}"][data-card="${levelName(Number(level)).toLowerCase()}"] .keybar button::after { --overlay: ${m.overlay}; }`);
     }
   }
@@ -273,6 +286,57 @@ function installLevelRules(): void {
   document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
 }
 
+/** Names of the glass variables a backdrop sampler may write on a `data-glass-under` element (see `glass-adapt.on-demand.ts`): the fill and each text role (the blur follows the surface's `data-glass-answer`). */
+export const GLASS_ADAPT_VARS = { overlay: "--ui-glass-adapt-overlay", role: (role: string): string => `--ui-glass-adapt-${role}` } as const;
+
+/** The adaptive chunk once it has loaded (it carries the rules writer); `undefined` until then. */
+let rulesModule: typeof import("./glass-adapt.on-demand") | undefined;
+/**
+ * Set once the rules chunk has been requested, whether it is still loading, loaded or failed. Each `applyTheme` calls
+ * {@link glassRules}, so without this flag a pending or dead chunk would be requested again on every theme change, and a
+ * failure would be logged once per call. Only the contrast layer depends on the chunk: the theme's own colours are written by
+ * `applyTheme` itself and stay on screen, so a failure is logged once and never retried.
+ */
+let rulesRequested = false;
+/**
+ * Puts the glass contrast rules (D365) in place for the theme and card level last applied. The solver that works them out is in
+ * an on-demand chunk (`glass-rules.on-demand.ts`, loaded together with the adaptive code of `glass-adapt.on-demand.ts`, which uses
+ * the same solver and re-exports it), so the critical path carries no contrast arithmetic: the chunk is
+ * requested by the first `applyTheme`, at the start of boot, in parallel with the first paint, and writes the rules as soon as it
+ * arrives (and `data-glass-rules` on the root says so). After that every call is a synchronous write, only when the theme changed.
+ */
+function glassRules(): void {
+  if (rulesModule) rulesModule.installGlassRules();
+  else if (!rulesRequested) {
+    // `catch` covers both a failed chunk load and an error thrown by the first `installGlassRules`; either way the theme's own
+    // colours are already on the root, so the page stays usable and the rejection is reported here rather than left unhandled.
+    rulesRequested = true;
+    void import("./glass-adapt.on-demand")
+      .then((m) => { rulesModule = m; m.installGlassRules(); })
+      .catch((error: unknown) => console.warn("infraternal: glass contrast rules did not load; theme colours stay in place", error));
+  }
+}
+
+/** Whether the watcher that finds what is under glass surfaces (`glass-under.on-demand.ts`) has been requested. */
+let watcherRequested = false;
+/**
+ * Requests the glass watcher once; it is an on-demand chunk like the rules, and scans the surfaces already on the page when it starts.
+ * A failed load is logged once and not retried: without the watcher a glass surface keeps the static floor (`data-glass-under` is
+ * never set), which is correct over anything, just less adaptive.
+ */
+function glassWatcher(): void {
+  if (watcherRequested || typeof document === "undefined") return;
+  watcherRequested = true;
+  void import("./glass-under.on-demand")
+    .then((m) => m.watchGlassSurfaces())
+    .catch((error: unknown) => console.warn("infraternal: glass surface watcher did not load; glass uses its static floor", error));
+}
+
+/** The theme and card level `applyTheme` last applied; the sampler reads them to solve for what it sees. */
+let applied: { theme: Theme; level: number } | undefined;
+/** The active theme and card level (Ink and Tinted until `applyTheme` has run). */
+export const activeGlass = (): { theme: Theme; level: number } => applied ?? { theme: THEMES.ink!, level: DEFAULT_CARD };
+
 /** Applies UI tokens and mesh source hues; derived surfaces stay coherent with the theme. */
 export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT_CARD, windowLevel = DEFAULT_WINDOW): void {
   const style = root.style;
@@ -281,6 +345,9 @@ export function applyTheme(active: Theme, root: HTMLElement, cardLevel = DEFAULT
   // Windows: a translucent fill (no blur except at Frosted). The data attributes let CSS skip the filter and the
   // alpha entirely at Solid, so the default paints exactly what an opaque card paints.
   installLevelRules();
+  applied = { theme: active, level: cardLevel };
+  glassRules();
+  glassWatcher();
   root.dataset.scheme = active.dark ? "dark" : "light";
   root.dataset.card = levelName(cardLevel).toLowerCase();
   root.dataset.windowLevel = levelName(windowLevel).toLowerCase();

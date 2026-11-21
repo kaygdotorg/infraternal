@@ -177,6 +177,7 @@ fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
 fn aad(user: &str, kind: &str) -> Vec<u8> {
     format!("infraternal/keywrap/v1|{user}|{kind}").into_bytes()
 }
+/// Build the browser key-wrap fixture with the production envelope and HKDF context.
 fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let salt = rand::random::<[u8; 32]>();
     let nonce = rand::random::<[u8; 12]>();
@@ -188,7 +189,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
     let ciphertext = Aes256Gcm::new_from_slice(&key)
         .unwrap()
         .encrypt(
-            Nonce::from_slice(&nonce),
+            &Nonce::from(nonce),
             Payload {
                 msg: dek,
                 aad: &aad,
@@ -201,6 +202,7 @@ fn browser_wrap(ikm: &[u8], dek: &[u8], user: &str, kind: &str) -> Wrap {
         ciphertext: B64.encode(ciphertext),
     }
 }
+/// Decrypt a browser key-wrap fixture while authenticating its original account context.
 fn unwrap_browser(
     ikm: &[u8],
     wrap: &Wrap,
@@ -216,7 +218,7 @@ fn unwrap_browser(
         .expand(&aad, &mut key)
         .unwrap();
     Aes256Gcm::new_from_slice(&key).unwrap().decrypt(
-        Nonce::from_slice(&nonce),
+        &Nonce::from(<[u8; 12]>::try_from(nonce.as_slice()).unwrap()),
         Payload {
             msg: &ciphertext,
             aad: &aad,
@@ -541,6 +543,7 @@ async fn setup_restart_rotation_expiry_and_parallel_redemption() {
 }
 
 #[tokio::test]
+/// Verify recovery delay, cancellation and replacement revoke all obsolete capabilities.
 async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
     let _guard = SERIAL.lock().await;
     let f = fixture().await;
@@ -552,7 +555,9 @@ async fn recovery_delay_cancel_and_replacement_revokes_every_capability() {
         f.auth
             .recovery_start(
                 &f.user,
-                bip39::Mnemonic::generate(24).unwrap().to_string(),
+                bip39::Mnemonic::generate(bip39::WordCount::Words24)
+                    .unwrap()
+                    .to_string(),
                 NOW
             )
             .await
@@ -1922,6 +1927,7 @@ async fn server_setup_terminal_echo_and_resume_preserve_offsets_once() {
     std::fs::remove_dir_all(data_dir).expect("remove temporary server data");
 }
 
+/// Complete the HTTP registration fixture with a full-strength 24-word recovery phrase.
 pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) -> (String, String) {
     let (status, start_headers, start) = http_post_json(
         app,
@@ -1931,7 +1937,9 @@ pub(crate) async fn register_over_http(app: &axum::Router, setup_token: &str) ->
     .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let user_id = str_field(&start, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&start), &dek, &user_id, "passkey");
@@ -2174,8 +2182,12 @@ where
     let next = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match socket.next().await {
-                // RFC Pong is transport housekeeping, never authority-bearing output.
-                Some(Ok(Message::Pong(_))) => {}
+                // RFC Ping and Pong are transport housekeeping, never
+                // authority-bearing output. The server's liveness probe is an
+                // RFC Ping due every 25 ms once the last one is answered, so
+                // when logout takes longer than that (a loaded host), a probe
+                // can arrive before the close (J785, #525).
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                 // A protocol heartbeat already in flight cannot prove closure.
                 // Continue to actual WebSocket closure; every data/reply frame
                 // remains a failure, including an undrained input acknowledgment.
@@ -2217,6 +2229,19 @@ where
         matches!(next, None | Some(Ok(Message::Close(_)) | Err(_))),
         "unexpected frame while awaiting WebSocket closure (stream,type,ack,close): {diagnostic:?}"
     );
+}
+
+/// J785 (#525): a transport probe (an RFC Ping) that arrives while logout is
+/// still closing the socket is not output after logout. Before the fix, the
+/// closure check failed on it with "unexpected frame … None" whenever logout
+/// took longer than one 25 ms probe tick, which a loaded gate host does.
+#[tokio::test]
+async fn socket_closure_check_skips_a_transport_probe_before_the_close() {
+    let mut socket = futures_util::stream::iter(vec![
+        Ok::<_, tokio_tungstenite::tungstenite::Error>(Message::Ping(Bytes::from_static(b"probe"))),
+        Ok(Message::Close(None)),
+    ]);
+    assert_socket_closed(&mut socket).await;
 }
 
 async fn read_partial_terminal<S>(socket: &mut S) -> (Vec<u8>, bool)
@@ -2722,7 +2747,9 @@ async fn setup_start_accepts_username_and_display_name() {
     );
 
     let user_id = str_field(&body, "user_id").to_owned();
-    let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+    let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+        .unwrap()
+        .to_string();
     let software = Software::new();
     let dek = rand::random::<[u8; 32]>();
     let passkey_wrap = browser_wrap(&software.prf(&body), &dek, &user_id, "passkey");
@@ -3588,8 +3615,11 @@ async fn recovery_audit_commits_once_with_start_cancel_and_complete() {
 // Explicit legacy-enrollment fixtures keep old PHC/envelope migration coverage.
 // Production ceremonies never generate mnemonic entropy or retain a phrase hash.
 impl Auth {
+    /// Create the legacy enrollment fixture with a complete 24-word recovery phrase.
     async fn legacy_enrollment(&self, mut start: Value) -> Value {
-        let words = bip39::Mnemonic::generate(24).unwrap().to_string();
+        let words = bip39::Mnemonic::generate(bip39::WordCount::Words24)
+            .unwrap()
+            .to_string();
         let stored = crypto::recovery_hash_fixture(words.clone()).await.unwrap();
         self.pending
             .lock()
@@ -3612,6 +3642,7 @@ impl Auth {
             .await)
     }
 }
+/// Derive the purpose-separated recovery fixture bytes from the phrase entropy.
 fn recovery_material(words: &str, kind: &str) -> [u8; 32] {
     let entropy = recovery_ikm(words);
     let mut output = [0; 32];
@@ -3797,6 +3828,10 @@ mod remote_removal_tests;
 mod terminal_refusal_tests;
 #[path = "tls_tests.rs"]
 mod tls_tests;
+/// D393: while a host is being upgraded, only its owner hears so; anyone else gets `unavailable`.
+#[cfg(feature = "remote")]
+#[path = "upgrade_refusal_tests.rs"]
+mod upgrade_refusal_tests;
 /// Keep the canonical public-status result documentation aligned with the HTTP boundary.
 #[tokio::test]
 async fn public_status_result_fields_are_listed_in_the_auth_contract() {
@@ -4018,12 +4053,82 @@ async fn session_slides_keep_the_wal_bounded() {
     if let Some(dir) = path.parent() {
         let _ = std::fs::remove_dir_all(dir);
     }
-    // The limit plus a little: the inline backstop's pass can lose a race to
-    // a background pass and run on a later commit.
+    // The limit plus a little: the backstop runs after the commit that
+    // crossed the limit, and the log rewinds on the write after it. It waits
+    // for a running background pass instead of losing the race to it (#525),
+    // so a starved checkpointer thread no longer lets the log grow.
     assert!(
         frames <= 8_200,
         "the WAL reached {frames} frames after 5,000 session slides"
     );
+}
+
+/// Compare retained-WAL settings with J785's 5,000 session slides, alone and with a second indexed writer.
+/// Run explicitly on the performance VM; reported times include dispatch and the durable commit acknowledgment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "Measurement only: run on the pinned performance VM"]
+async fn review_sqlx_retention_session_commit_latency() {
+    let _guard = SERIAL.lock().await;
+    for mixed in [false, true] {
+        for limit in [-1_i64, 8_388_608, 8_388_608, -1] {
+            let (pool, path) = disk_pool("review-retention").await;
+            let mut connections = Vec::new();
+            for _ in 0..8 {
+                connections.push(pool.acquire().await.unwrap());
+            }
+            for connection in &mut connections {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "PRAGMA journal_size_limit={limit}"
+                )))
+                .execute(&mut **connection)
+                .await
+                .unwrap();
+            }
+            drop(connections);
+            let (auth, token) = empty_with_pool(pool.clone()).await;
+            let f = fixture_with_bootstrap(auth, token).await;
+            sqlx::raw_sql("CREATE TABLE review_receipt(id INTEGER PRIMARY KEY, revision INTEGER); CREATE INDEX review_receipt_revision ON review_receipt(revision); INSERT INTO review_receipt VALUES(1,0);")
+                .execute(&pool).await.unwrap();
+            let writer_pool = pool.clone();
+            let writer = tokio::spawn(async move {
+                let mut times = Vec::new();
+                if mixed {
+                    for revision in 1..=5_000 {
+                        let started = Instant::now();
+                        sqlx::query("UPDATE review_receipt SET revision=? WHERE id=1")
+                            .bind(revision)
+                            .execute(&writer_pool)
+                            .await
+                            .unwrap();
+                        times.push(started.elapsed().as_nanos());
+                    }
+                }
+                times
+            });
+            let mut times = Vec::new();
+            for n in 0..5_000 {
+                let started = Instant::now();
+                f.auth.session(&f.session, NOW + n).await.unwrap();
+                times.push(started.elapsed().as_nanos());
+            }
+            let mut sqlx_times = writer.await.unwrap();
+            times.sort_unstable();
+            sqlx_times.sort_unstable();
+            let wal = std::fs::metadata(format!("{}-wal", path.display()))
+                .unwrap()
+                .len();
+            println!(
+                "RETENTION_LATENCY mixed={mixed} limit={limit} slides=5000 slide_p50_ns={} slide_p99_ns={} sqlx_p50_ns={} sqlx_p99_ns={} wal_bytes={wal}",
+                times[2500],
+                times[4950],
+                sqlx_times.get(2500).copied().unwrap_or(0),
+                sqlx_times.get(4950).copied().unwrap_or(0)
+            );
+            f.auth.close_database().await;
+            pool.close().await;
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+    }
 }
 
 /// `path` written relative to the current directory: one `..` per component

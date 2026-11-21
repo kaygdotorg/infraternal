@@ -46,6 +46,7 @@ pub const ACTIONS: &[ActionDef] = &[
         Effect::Read,
         &[
             "Read whether the mesh is on, its addresses, and which access rules apply.",
+            "Read the UDP port this machine is actually listening on.",
             "Read how this machine reaches its server: over the mesh, or over the enrolled port.",
             "With --json, data.public_key is the active public key only; the field is absent without a Mesh identity.",
         ],
@@ -169,6 +170,8 @@ pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
 struct Owner {
     node: Option<Node>,
     path: Option<std::path::PathBuf>,
+    /// Suppress repeated restore failures until the next successful restore.
+    restore_failed: bool,
 }
 impl Owner {
     /// Return the process-owned node, restoring it lazily when this action first needs it.
@@ -181,14 +184,41 @@ impl Owner {
             // only Linux reaches this lazy path, through `new`.
             #[cfg(target_os = "macos")]
             let node = Node::restore(path, None);
-            self.node = Some(node.map_err(|error| node_action_error(&error))?);
+            self.node = Some(startup_result(node, &mut self.restore_failed, "restore")?);
         }
         self.node.as_mut().ok_or(PluginError::Rejected)
     }
 }
+/// Report a startup error once per streak, even before a tracing subscriber exists.
+fn startup_result<T>(
+    result: std::io::Result<T>,
+    failed: &mut bool,
+    phase: &str,
+) -> Result<T, PluginError> {
+    match result {
+        Ok(value) => {
+            *failed = false;
+            Ok(value)
+        }
+        Err(error) => {
+            if !*failed {
+                eprintln!(
+                    "Mesh node failed phase={phase} kind={:?}; check local mesh permissions and tunnel availability.",
+                    error.kind()
+                );
+            }
+            *failed = true;
+            Err(node_action_error(&error))
+        }
+    }
+}
+
+/// Owns the process's mesh actions and their startup diagnostics.
 pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
+    /// Reports activation failures once per streak.
+    ensure_failed: bool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
@@ -239,12 +269,23 @@ fn peer_page(
         for (id, peer) in config.peers.range((from, Unbounded)) {
             let stats = counters.get(&peer.peer.key).cloned().unwrap_or_default();
             let value = if presence {
-                json!([
-                    id,
-                    stats.handshake_secs,
-                    stats.received_bytes,
-                    stats.persistent_keepalive_secs
-                ])
+                // The engine's current address for the peer comes last, so the server can read
+                // its nodes' server-reflexive addresses from the same poll (#515, presence.rs).
+                match stats.endpoint {
+                    Some(endpoint) => json!([
+                        id,
+                        stats.handshake_secs,
+                        stats.received_bytes,
+                        stats.persistent_keepalive_secs,
+                        endpoint.to_string()
+                    ]),
+                    None => json!([
+                        id,
+                        stats.handshake_secs,
+                        stats.received_bytes,
+                        stats.persistent_keepalive_secs
+                    ]),
+                }
             } else {
                 json!({"node":id,"peer":peer.peer,"inbound":policy_summary(&peer.inbound),"outbound":policy_summary(&peer.outbound),"counters":stats,"path":if stats.handshake_secs > 0 {"Direct"} else {"Unproven"}})
             };
@@ -309,8 +350,10 @@ impl MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: None,
                 path: Some(path.to_owned()),
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -325,8 +368,10 @@ impl MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: Some(node),
                 path: None,
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -373,8 +418,10 @@ impl Default for MeshNodePlugin {
             owner: Arc::new(Mutex::new(Owner {
                 node: Some(Node::default()),
                 path: None,
+                restore_failed: false,
             })),
             changed: AtomicBool::new(false),
+            ensure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -400,6 +447,13 @@ struct IdentityProbe {
     key_rotation: bool,
     #[serde(default)]
     authority_epoch: bool,
+    /// Opt in to operation-bound rotation continuity metadata.
+    #[serde(default)]
+    rotation_continuity: bool,
+    /// The coordinator can send ordered direct-path candidates and wants this node's LAN
+    /// addresses (#515). Asked on its own, so a strict older node refuses only this probe.
+    #[serde(default)]
+    candidates: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -414,7 +468,7 @@ pub struct RotationOperation {
 pub struct Page {
     #[serde(default)]
     cursor: Option<Cursor>,
-    /// Rows of counters only, `[node, handshake_secs, received_bytes, persistent_keepalive_secs]`, for the
+    /// Rows of counters only, `[node, handshake_secs, received_bytes, persistent_keepalive_secs, endpoint?]`, for the
     /// server's presence poll (presence.rs). The server asks only its own node, which is always the same build,
     /// so an older node never sees the field. A quarter of the bytes of a full row: fewer pages per poll.
     #[serde(default)]
@@ -450,6 +504,10 @@ pub enum Request {
         dns_names: bool,
         key_rotation: bool,
         authority_epoch: bool,
+        /// Whether the caller accepts rotation continuity metadata.
+        rotation_continuity: bool,
+        /// Whether the caller accepts direct-path candidates and requests LAN addresses.
+        candidates: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -473,6 +531,8 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 dns_names: probe.dns_names,
                 key_rotation: probe.key_rotation,
                 authority_epoch: probe.authority_epoch,
+                rotation_continuity: probe.rotation_continuity,
+                candidates: probe.candidates,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -522,9 +582,13 @@ fn rotation_response(
     Ok((value, node.interface_key() != before))
 }
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
+///
+/// `lan` is this node's LAN candidates ([`crate::candidates::lan_addresses`]); it is sent only to a
+/// coordinator that asked for candidates.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested: IdentityProbe,
+    lan: Vec<std::net::SocketAddr>,
 ) -> Option<IdentityResponse> {
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
@@ -532,8 +596,15 @@ fn identity_response(
         compact_access: identity.compact_access && requested.compact_access,
         key_rotation: identity.key_rotation && requested.key_rotation,
         authority_epoch: identity.authority_epoch && requested.authority_epoch,
+        rotation_continuity: identity.rotation_continuity && requested.rotation_continuity,
         #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
+        candidates: requested.candidates,
+        lan: if requested.candidates {
+            lan
+        } else {
+            Vec::new()
+        },
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
@@ -549,9 +620,18 @@ struct IdentityResponse {
     key_rotation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     authority_epoch: bool,
+    /// True only when both sides negotiated operation continuity.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    rotation_continuity: bool,
     #[cfg(feature = "mesh-dns")]
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     dns_names: bool,
+    /// This node accepts `Peer::candidates` and walks them in order (#515).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    candidates: bool,
+    /// This node's LAN candidates, for peers behind the same public address (#515).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    lan: Vec<std::net::SocketAddr>,
 }
 
 impl AgentPlugin for MeshNodePlugin {
@@ -616,6 +696,8 @@ impl AgentPlugin for MeshNodePlugin {
                     dns_names,
                     key_rotation,
                     authority_epoch,
+                    rotation_continuity,
+                    candidates,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -623,16 +705,33 @@ impl AgentPlugin for MeshNodePlugin {
                         dns_names,
                         key_rotation,
                         authority_epoch,
+                        rotation_continuity,
+                        // Offered only by an engine that walks the list it would receive.
+                        candidates: candidates && walks_candidates(node),
                     };
-                    json!(identity_response(
-                        node.ensure().map_err(|error| node_action_error(&error))?,
-                        requested,
-                    ))
+                    let candidates = requested.candidates;
+                    let identity =
+                        startup_result(node.ensure(), &mut self.ensure_failed, "activate")?;
+                    let lan = match (&identity, candidates) {
+                        (Some(identity), true) => {
+                            // The node's own mesh addresses are never LAN candidates.
+                            let own: Vec<std::net::IpAddr> = node
+                                .config()
+                                .map(|config| {
+                                    vec![config.addresses.ipv4.into(), config.addresses.ipv6.into()]
+                                })
+                                .unwrap_or_default();
+                            crate::candidates::lan_addresses(identity.port, &own)
+                        }
+                        _ => Vec::new(),
+                    };
+                    json!(identity_response(identity, requested, lan))
                 }
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|error| node_action_error(&error))?),
                         IdentityProbe::default(),
+                        Vec::new(),
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -660,7 +759,19 @@ impl AgentPlugin for MeshNodePlugin {
                     } else {
                         "Waiting"
                     };
-                    let mut status = json!({"state":state,"version":node.config().map(|c|c.version),"addresses":node.config().map(|c|c.addresses),"peer_count":node.config().map_or(0,|c|c.peers.len()),"default_policy":node.config().map(|c|c.default_policy),"server_link":self.server_link,"engine":engine_health(node),"engine_selection":engine_selection(node),"enforcement":access_enforcement(node),"kernel_guard":kernel_guard_status(node)});
+                    let mut status = json!({
+                        "state": state,
+                        "version": node.config().map(|config| config.version),
+                        "addresses": node.config().map(|config| config.addresses),
+                        "peer_count": node.config().map_or(0, |config| config.peers.len()),
+                        "default_policy": node.config().map(|config| config.default_policy),
+                        "udp_port": node.listen_port(),
+                        "server_link": self.server_link,
+                        "engine": engine_health(node),
+                        "engine_selection": engine_selection(node),
+                        "enforcement": access_enforcement(node),
+                        "kernel_guard": kernel_guard_status(node),
+                    });
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -752,6 +863,22 @@ fn engine_selection(node: &Node) -> serde_json::Value {
 #[cfg(target_os = "macos")]
 fn engine_selection(_node: &Node) -> serde_json::Value {
     json!({"engine":"gotatun","reason":"default"})
+}
+
+/// Whether this node's engine walks an ordered candidate list (#515), and so may tell the
+/// coordinator it accepts one: only `GotaTun`. Kernel `WireGuard` installs just the first
+/// candidate, so it answers like an older node and keeps getting one public address. That node
+/// also reports no LAN addresses; its peers still reach it through the reflexive address.
+#[cfg(target_os = "linux")]
+fn walks_candidates(node: &Node) -> bool {
+    node.engine_selection().engine == crate::node::EngineKind::GotaTun
+}
+
+/// The Mac node runs `GotaTun` and walks its candidate lists with the same bookkeeping as Linux
+/// (#515, J704), so it always accepts a list and reports its LAN addresses.
+#[cfg(target_os = "macos")]
+const fn walks_candidates(_node: &Node) -> bool {
+    true
 }
 
 /// Name the packet path that actually enforces this node's access rules.
@@ -850,6 +977,43 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
+    /// Embedded infraternal agents have no tracing subscriber; repeated restore failures still reach stderr once.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn restore_failure_reaches_stderr_without_a_tracing_subscriber() {
+        const CHILD: &str = "INFRATERNAL_MESH_RESTORE_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let directory =
+                std::env::temp_dir().join(format!("missing-mesh-{}", std::process::id()));
+            let mut plugin = MeshNodePlugin::new(&directory);
+            for _ in 0..3 {
+                assert!(plugin.call("mesh.identity", b"{}").is_err());
+            }
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "node_actions::tests::restore_failure_reaches_stderr_without_a_tracing_subscriber",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run diagnostic child");
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+        assert_eq!(
+            stderr
+                .matches("Mesh node failed phase=restore kind=NotFound")
+                .count(),
+            1,
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("missing-mesh-"),
+            "paths do not enter diagnostics"
+        );
+    }
     use super::*;
 
     /// `mesh.status` exposes only the live public identity needed to verify persistence.
@@ -865,6 +1029,7 @@ mod tests {
             dns_names: false,
             key_rotation: false,
             authority_epoch: false,
+            rotation_continuity: false,
         }));
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("mesh status"))
@@ -955,6 +1120,7 @@ mod tests {
         let accepted = Chunk {
             access_updates: Vec::new(),
             authority_epoch: Some("00000000-0000-4000-8000-000000000001".to_owned()),
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: Some(identity.public_key),
             node: NodeId(1),
@@ -1037,6 +1203,7 @@ mod tests {
         let mut chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             server: Some(NodeId(2)),
             local_key: None,
             node: NodeId(1),
@@ -1066,6 +1233,7 @@ mod tests {
                             ipv6: "fd01::2".parse().expect("IPv6"),
                         },
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1116,6 +1284,10 @@ mod tests {
             status["server_link"],
             serde_json::to_value(&observed).expect("observed link")
         );
+        assert_eq!(
+            status["udp_port"], 10_254,
+            "mesh status reports the actual listener port"
+        );
         plugin.call("mesh.down", b"{}").expect("down");
         assert!(plugin.preferred_server().is_none());
         plugin.call("mesh.up", b"{}").expect("up");
@@ -1165,6 +1337,7 @@ mod tests {
         let (_, peer_key) = Key::generate().expect("peer key");
         let chunk = Chunk {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(2),
@@ -1194,6 +1367,7 @@ mod tests {
                             ipv6: "fd01::1".parse().expect("peer IPv6"),
                         },
                         endpoint: None,
+                        candidates: Vec::new(),
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1242,6 +1416,18 @@ mod tests {
         assert_eq!(
             engine_selection(&Node::default().with_engine(crate::node::EngineKind::Kernel)),
             serde_json::json!({"engine":"kernel","reason":"chosen"})
+        );
+    }
+
+    /// J585 F5 (#515): only an engine that walks candidates may say it accepts them. A node that
+    /// installs just the first candidate would aim at a LAN address on another network when two
+    /// sites share a public address, and never try the reflexive address an older node gets.
+    #[test]
+    fn only_the_walking_engine_offers_candidates() {
+        assert!(walks_candidates(&Node::default()), "GotaTun walks");
+        assert!(
+            !walks_candidates(&Node::default().with_engine(crate::node::EngineKind::Kernel)),
+            "kernel WireGuard installs only the first candidate"
         );
     }
 
@@ -1299,10 +1485,13 @@ mod tests {
             ])
         );
     }
-    /// Preserves explicit-off intent after failed kernel-firewall cleanup and reconnect.
+    /// D386 lets mesh cleanup remove a recreated table in the product-owned namespace.
+    ///
+    /// It runs on the kernel `WireGuard` engine, where nft holds the full peer policy (D346), so
+    /// the recreated table is the one the grants live in.
     #[test]
     #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
-    fn kernel_firewall_cleanup_failure_reports_stopping_and_reconnect_keeps_explicit_off() {
+    fn mesh_down_removes_a_recreated_product_table_and_keeps_explicit_off() {
         use crate::{
             dataplane::DefaultPolicy,
             policy::model::{Addresses, NodeId},
@@ -1311,6 +1500,8 @@ mod tests {
             io::Write as _,
             process::{Command, Stdio},
         };
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = crate::host_firewall::discover_nft(None).expect("fixed-path nft fixture");
         let mut plugin = MeshNodePlugin::from_node(
             Node::default().with_engine(crate::gotatun_node::EngineKind::Kernel),
         );
@@ -1318,6 +1509,7 @@ mod tests {
         let chunk = Chunk {
             access_updates: Vec::new(),
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: None,
             node: NodeId(1),
@@ -1349,7 +1541,7 @@ mod tests {
                 &serde_json::to_vec(&chunk).expect("chunk"),
             )
             .expect("configure");
-        let mut child = Command::new("/usr/sbin/nft")
+        let mut child = Command::new(&nft)
             .args(["-f", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -1363,19 +1555,24 @@ mod tests {
             .write_all(b"delete table inet infraternal_mesh\nadd table inet infraternal_mesh\n")
             .expect("fixture batch");
         assert!(child.wait().expect("fixture status").success());
-        assert!(plugin.call("mesh.down", b"{}").is_err());
+        let down: serde_json::Value =
+            serde_json::from_slice(&plugin.call("mesh.down", b"{}").expect("mesh down"))
+                .expect("JSON");
+        assert_eq!(down["state"], "Off");
         let status: serde_json::Value =
             serde_json::from_slice(&plugin.call("mesh.status", b"{}").expect("status"))
                 .expect("JSON");
-        assert_eq!(status["state"], "Stopping");
+        assert_eq!(status["state"], "Off");
         assert!(
-            Command::new("/usr/sbin/nft")
-                .args(["delete", "table", "inet", "infraternal_mesh"])
+            !Command::new(&nft)
+                .args(["-j", "list", "table", "inet", "infraternal_mesh"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
-                .expect("fixture cleanup")
-                .success()
+                .expect("inspect product table")
+                .success(),
+            "D386 cleanup removes the product-owned table even without its old marker"
         );
-        plugin.call("mesh.down", b"{}").expect("finish cleanup");
         assert_eq!(
             plugin.call("mesh.identity", b"{}").expect("reconnect"),
             b"null"
@@ -1390,6 +1587,7 @@ mod tests {
 /// The identity reply keeps its legacy shape unless a capability is requested.
 #[cfg(all(test, target_os = "linux"))]
 mod identity_upgrade_tests {
+    #![allow(clippy::expect_used)]
     /// An ordinary identity request gets the reply older coordinators read.
     #[test]
     fn ordinary_identity_reply_retains_the_legacy_shape() {
@@ -1401,10 +1599,12 @@ mod identity_upgrade_tests {
             dns_names: true,
             key_rotation: true,
             authority_epoch: true,
+            rotation_continuity: true,
         };
         let legacy = serde_json::json!(super::identity_response(
             Some(identity.clone()),
             super::IdentityProbe::default(),
+            vec!["10.1.0.2:44000".parse().expect("LAN fixture")],
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
@@ -1417,11 +1617,15 @@ mod identity_upgrade_tests {
                 dns_names: true,
                 key_rotation: true,
                 authority_epoch: true,
+                rotation_continuity: true,
+                candidates: false,
             },
+            Vec::new(),
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
         assert_eq!(negotiated["authority_epoch"], true);
+        assert_eq!(negotiated["rotation_continuity"], true);
         #[cfg(feature = "mesh-dns")]
         assert_eq!(negotiated["dns_names"], true);
         let compact_only = serde_json::json!(super::identity_response(
@@ -1430,12 +1634,51 @@ mod identity_upgrade_tests {
                 compact_access: true,
                 ..super::IdentityProbe::default()
             },
+            Vec::new(),
         ));
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
         assert!(compact_only.get("authority_epoch").is_none());
+        assert!(compact_only.get("rotation_continuity").is_none());
         #[cfg(feature = "mesh-dns")]
         assert!(compact_only.get("dns_names").is_none());
+    }
+
+    /// A coordinator that asks for candidates learns that this node takes them, and its LAN
+    /// addresses; nobody else sees either field (#515).
+    #[test]
+    fn candidates_and_lan_addresses_are_sent_only_when_asked() {
+        let identity = crate::dataplane::Identity {
+            public_key: crate::policy::model::PublicKey([1; 32]),
+            port: 10254,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+            rotation_continuity: false,
+        };
+        let lan: Vec<std::net::SocketAddr> = vec!["10.9.0.3:10254".parse().expect("LAN fixture")];
+        let asked = serde_json::json!(super::identity_response(
+            Some(identity.clone()),
+            super::IdentityProbe {
+                candidates: true,
+                ..super::IdentityProbe::default()
+            },
+            lan.clone(),
+        ));
+        assert_eq!(asked["candidates"], true);
+        assert_eq!(asked["lan"], serde_json::json!(["10.9.0.3:10254"]));
+        let parsed: super::IdentityProbe =
+            super::parse(br#"{"candidates":true}"#).expect("candidate probe");
+        assert!(parsed.candidates);
+        let plain = serde_json::json!(super::identity_response(
+            Some(identity),
+            super::IdentityProbe::default(),
+            lan,
+        ));
+        assert!(plain.get("candidates").is_none());
+        assert!(plain.get("lan").is_none());
     }
 }
 
@@ -1462,6 +1705,7 @@ mod peer_page_tests {
         };
         Config {
             authority_epoch: None,
+            rotation_operation: None,
             local_key: None,
             server: Some(NodeId(1)),
             node: NodeId(1),
@@ -1488,6 +1732,7 @@ mod peer_page_tests {
                                     [203, 0, 113, 7],
                                     40_000,
                                 ))),
+                                candidates: Vec::new(),
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
@@ -1612,5 +1857,18 @@ mod peer_page_tests {
                 per_poll.as_secs_f64() / 5.0 * 100.0
             );
         }
+    }
+}
+
+/// The Mac node's answer to the coordinator's candidate offer.
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::{Node, walks_candidates};
+
+    /// J699 P2-3 (#515): the Mac node walks candidate lists like Linux, so it accepts them and
+    /// reports its LAN addresses. Before J704 it answered like an older node and got one address.
+    #[test]
+    fn the_mac_node_offers_candidates() {
+        assert!(walks_candidates(&Node::default()));
     }
 }

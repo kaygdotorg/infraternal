@@ -162,7 +162,7 @@ async fn cleanup(state: &Path, person: uuid::Uuid) -> io::Result<Option<io::Erro
             if id.is_none()
                 || (!owned.contains(&id)
                     && infraternal_shim::ended::read(&path)?.is_none()
-                    && !private_readiness(&path)?)
+                    && !sessions::private_readiness(&path)?)
             {
                 failure = Some(io::Error::new(
                     io::ErrorKind::Unsupported,
@@ -211,21 +211,6 @@ async fn cleanup(state: &Path, person: uuid::Uuid) -> io::Result<Option<io::Erro
         }
     }
     Ok(failure)
-}
-
-#[cold]
-fn private_readiness(path: &Path) -> io::Result<bool> {
-    // Only a fixed probe publishes this marker. Never infer a person-terminal
-    // exemption from a missing ownership record or an unsafe runtime file.
-    let metadata = match fs::symlink_metadata(path.with_extension("readiness")) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    Ok(metadata.is_file()
-        && metadata.uid() == nix::unistd::Uid::effective().as_raw()
-        && metadata.mode() & 0o7777 == 0o600
-        && metadata.len() == 0)
 }
 
 /// Hang guard for each step of stopping one person's shell (D352 principle,
@@ -332,9 +317,9 @@ async fn stop(path: PathBuf, id: [u8; 16]) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
-    //! Cleanup refuses unsupported or unconfirmed peers without inventing exit proof.
+    //! Linux-only cleanup coverage refuses unsupported peers without inventing exit proof.
     use super::*;
 
     /// A private state root with one recorded terminal of `person` and a fake
@@ -356,7 +341,7 @@ mod tests {
                 .unwrap();
         }
         let id = uuid::Uuid::new_v4();
-        OpenOptions::new()
+        fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
@@ -621,6 +606,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A stale fixed probe loses both its socket and its private marker.
     #[tokio::test]
     async fn stale_probe_discovery_removes_its_readiness_marker() {
         let root = PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -635,6 +621,7 @@ mod tests {
         fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         let marker = path.with_extension("readiness");
         fs::write(&marker, []).unwrap();
+        fs::set_permissions(&marker, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
         drop(listener);
         assert!(sessions::discover(&root).await.unwrap().is_empty());
         assert!(!path.exists());

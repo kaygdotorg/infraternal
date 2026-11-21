@@ -1,10 +1,11 @@
 /** Exercises the authenticated core screen and saves the requested production-build views. */
 import { tracerEvidencePath } from "./evidence-path";
 import { mkdir } from "node:fs/promises";
-import { hostname } from "node:os";
+import { DOUBLE_HOSTNAME } from "./double-hostname";
 import { resolve } from "node:path";
 import { expect, test, type Page, type TestInfo } from "playwright/test";
 import { contrastRatio } from "../../../packages/ui/src/color";
+import { settled } from "./glass-settled";
 import { THEMES, overlayMaterial } from "../../../packages/ui/src/themes";
 import { FONTS } from "../../../packages/ui/src/fonts";
 
@@ -86,7 +87,6 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
       return {
         // The card tint lives on the elements that read it, not on the root (a root token restyles the whole page).
         root: resolveColor(".capsule", "--overlay"),
-        rootPanel: resolveColor("#sidebar", "--overlay"),
         rootLine: resolveColor(":root", "--overlay-line"),
         rootShadow: root.getPropertyValue("--shadow").trim(),
         rootLargeShadow: root.getPropertyValue("--overlay-shadow-large").trim(),
@@ -118,12 +118,20 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-closed`));
     await page.locator("#sidebar-toggle").click();
     await expect(page.locator("#sidebar")).toBeVisible();
-    const sidebarMaterial = await page.locator("#sidebar").evaluate((element) => {
+    // The panel material is the sidebar's own card tint (the glass rules, D365, give a surface over the terminal its own solved
+    // tint: the static floor until the glass has read the cells), so the fill and the expected colour are read together.
+    await settled(page, "#sidebar");
+    const { sidebarMaterial, sidebarFill } = await page.locator("#sidebar").evaluate((element) => {
       const style = getComputedStyle(element);
-      return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
+      const probe = document.createElement("div");
+      probe.style.background = style.getPropertyValue("--overlay");
+      element.append(probe);
+      const fill = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return { sidebarMaterial: { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow }, sidebarFill: fill };
     });
-    // The sidebar is a large floating surface: the thinner shared panel material, not the pill one.
-    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(material.rootPanel));
+    // The sidebar is a large floating surface: its fill is exactly its own panel tint, never the pill's.
+    expect(cssChannels(sidebarMaterial.background)).toEqual(cssChannels(sidebarFill));
     expect(cssChannels(sidebarMaterial.line)).toEqual(cssChannels(material.rootLine));
     expect(material.rootLargeShadow).not.toBe("");
     paths.push(await saveScreenshot(page, testInfo, `${prefix}-sidebar-open`));
@@ -131,21 +139,24 @@ async function screenshotMatrix(page: Page, testInfo: TestInfo, width: number, h
     await expect(page.locator("#sidebar")).toBeHidden();
     await page.keyboard.press("Control+Shift+K");
     await expect(page.getByRole("dialog", { name: "Go to anything" })).toBeVisible();
-    const paletteMaterial = await page.locator("#palette").evaluate((element) => {
+    // The glass answers some tens of milliseconds after the palette opens (the floor first, then what it read under the card)
+    // and cross-fades to it for 160 ms, during which the painted fill is not the tint. Wait for it to settle, then read the fill
+    // and the expected colour in one go.
+    await settled(page, "#palette");
+    const { paletteMaterial, paletteFill } = await page.locator("#palette").evaluate((element) => {
       const style = getComputedStyle(element);
-      return { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow };
-    });
-    // D219: the palette's fill is the card tint mixed 58% over the page colour, so it is never thinner than the shared
-    // material and no text reads through it. The browser works out the expected colour from the same two inputs, inside
-    // the palette so that the page colour resolves where the palette reads it.
-    const paletteFill = await page.locator("#palette").evaluate((element, tint) => {
       const probe = document.createElement("div");
-      probe.style.background = `color-mix(in oklab, ${tint} 58%, var(--bg))`;
+      // D219: the palette's fill is ITS card tint mixed 58% over the page colour, so it is never thinner than the shared
+      // material and no text reads through it. The tint is the palette's own, not a capsule's: since the glass rules (D365) a
+      // surface over the terminal carries its own solved tint, and until the glass has read the cells it is the static floor
+      // (the theme's solid card on Paper), thicker than the capsule's. The browser works out the expected colour from the same
+      // two inputs, inside the palette so that the page colour resolves where the palette reads it.
+      probe.style.background = `color-mix(in oklab, ${style.getPropertyValue("--overlay")} 58%, var(--bg))`;
       element.append(probe);
       const fill = getComputedStyle(probe).backgroundColor;
       probe.remove();
-      return fill;
-    }, material.root);
+      return { paletteMaterial: { background: style.backgroundColor, line: style.borderTopColor, shadow: style.boxShadow }, paletteFill: fill };
+    });
     expect(cssChannels(paletteMaterial.background)).toEqual(cssChannels(paletteFill));
     expect(cssChannels(paletteMaterial.background)[3]).toBeGreaterThanOrEqual(cssChannels(material.root)[3]);
     expect(cssChannels(paletteMaterial.line)).toEqual(cssChannels(material.rootLine));
@@ -171,7 +182,7 @@ test("core screen themes, tree, RTT, mobile tray, and screenshots", async ({ bro
   await page.goto("/?mock=1&theme=paper&bg=mesh");
   await waitForAttached(page);
   await expect(page.locator("#terminal-host").locator("xpath=..")).toHaveClass(/pane-card/);
-  await expect(page.locator("#tree .bm-sec[data-id='current-host']")).toHaveAttribute("aria-label", hostname());
+  await expect(page.locator("#tree .bm-sec[data-id='current-host']")).toHaveAttribute("aria-label", DOUBLE_HOSTNAME);
   await expect(page.locator("#tree .bm-sec")).toHaveCount(1);
   await expect(page.locator("#tree .bm-leaf:not(:disabled)")).toHaveCount(1);
   await expect(page.locator("#tree .bm-leaf:disabled")).toHaveCount(0);

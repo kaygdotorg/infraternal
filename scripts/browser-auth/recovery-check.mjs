@@ -1,5 +1,6 @@
 /** Exercises production recovery crypto in native Chromium against the Rust verifier and SQLite [D113,40]. */
 import { chromium } from 'playwright';
+import { responseHeaders } from './response-headers.mjs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { readFile } from 'node:fs/promises';
@@ -32,7 +33,7 @@ try {
         }
         child.stdin.write(JSON.stringify({ path: new URL(request.url()).pathname, headers: request.headers(), body: request.postDataJSON() }) + '\n');
         const response = JSON.parse((await lines.next()).value);
-        await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: JSON.stringify(response.body) });
+        await route.fulfill({ status: response.status, headers: responseHeaders(response.headers), body: JSON.stringify(response.body) });
       });
       await page.goto('https://auth.example.test/');
       await page.addScriptTag({ content: await readFile(resolve(target, 'auth-rework/recovery.js'), 'utf8') });

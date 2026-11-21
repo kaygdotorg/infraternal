@@ -20,6 +20,9 @@ fn installed() -> serde_json::Value {
 }
 /// Keeps refusal, replacement, and restart boundaries in one real-kernel scenario.
 fn check(backend: Backend) {
+    #[cfg(feature = "test-support")]
+    let _nft_override =
+        infraternal_plugin_mesh::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
     let root = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap())
         .join(format!("binding-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
@@ -43,6 +46,7 @@ fn check(backend: Backend) {
     let identity = node.up().unwrap();
     let mut old = Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: None,
         server: None,
         node: NodeId(1),

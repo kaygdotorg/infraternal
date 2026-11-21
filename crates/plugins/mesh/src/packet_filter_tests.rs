@@ -54,6 +54,7 @@ fn config(inbound: TrafficPolicy, outbound: TrafficPolicy) -> Config {
         local_key: None,
         server: None,
         authority_epoch: None,
+        rotation_operation: None,
         node: NodeId(1),
         #[cfg(feature = "mesh-dns")]
         name: None,
@@ -78,6 +79,7 @@ fn config(inbound: TrafficPolicy, outbound: TrafficPolicy) -> Config {
                         ipv6: PEER6,
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound,
                 outbound,
@@ -338,6 +340,7 @@ fn flow_state_is_bounded_per_peer() {
                     ipv6: "fd01::3".parse().expect("other IPv6 peer"),
                 },
                 endpoint: None,
+                candidates: Vec::new(),
             },
             inbound: TrafficPolicy::All,
             outbound: TrafficPolicy::All,
@@ -400,6 +403,7 @@ fn colliding_peers_keep_independent_flow_quotas() {
                         ipv6: Ipv6Addr::from(0xfd01_u128 << 112 | u128::from(last)),
                     },
                     endpoint: None,
+                    candidates: Vec::new(),
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
@@ -2099,7 +2103,9 @@ fn a_packet_binds_its_peer_while_the_sweep_is_paused() {
 
 /// Revocation ends flows at publish even when the sweep could not visit the peer's table
 /// (J721, #265): no revoked flow admits another packet, and their slots go back to the
-/// quota the moment the full direction needs them.
+/// quota the moment the full direction needs them. The first check comes before any
+/// reclaim, so it guards the busy-skip case on its own; the checks after the replacement SYN
+/// show the slots really were freed.
 #[test]
 fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
     let mut policy = config(TrafficPolicy::All, TrafficPolicy::All);
@@ -2141,11 +2147,23 @@ fn revoked_flows_skipped_by_the_sweep_free_their_quota_on_demand() {
         Some([usize::from(quota), 0]),
         "the sweep waited for a busy table"
     );
+    // The sweep skipped this table, so every revoked flow is still in it. A packet of one of
+    // them must be refused before anything has reclaimed the slot: only the per-packet grant
+    // check stands between the stale entry and the peer (J772 P3 3, #265).
+    let mut stale_before = tcp4(LOCAL4, PEER4, 20_000 + quota / 2, 443, ACK);
+    assert!(
+        !filter.check_at(&mut stale_before, Direction::HostToMesh, now),
+        "a revoked flow in a table the sweep skipped admitted a packet"
+    );
+    // Refusing that packet dropped its flow, which freed one slot. Fill it with a flow the
+    // new policy allows, so the direction is full again and the next SYN must reclaim.
+    let mut topping_up = tcp4(LOCAL4, PEER4, 39_999, 8443, SYN);
+    assert!(filter.check_at(&mut topping_up, Direction::HostToMesh, now));
     let mut replacement = tcp4(LOCAL4, PEER4, 40_000, 8443, SYN);
     assert!(filter.check_at(&mut replacement, Direction::HostToMesh, now));
     assert_eq!(
         filter.with_table(NodeId(2), |table| table.map(|shard| shard.initiated)),
-        Some([1, 0]),
+        Some([2, 0]),
         "the full direction did not reclaim its revoked flows"
     );
     for port in [0, quota / 2, quota - 1] {
@@ -2171,7 +2189,7 @@ fn status_kib(field: &str) -> u64 {
         .expect("status field")
 }
 
-/// Build a filter for `peers` peers, open 8 connections on each of 10 of them, then
+/// Build a filter for `peers` peers, open 8 connections on each of up to 10 of them, then
 /// prepare and publish the same policy 21 times, the way config applies do. Print the RSS
 /// added since before the filter existed, the peak (`VmHWM`, reset first) and the median and
 /// worst publish time. The config is built before the baseline, so only the filter is
@@ -2184,7 +2202,7 @@ fn measure_filter_rss(peers: u32) -> (u64, u64) {
     let baseline = status_kib("VmRSS:");
     let filter = PacketFilter::new(&config, MeshProxyIngress::default()).expect("compile");
     let now = Instant::now();
-    for n in 2..12 {
+    for n in 2..peers.min(10) + 2 {
         for port in 0..8 {
             assert!(establish4(&filter, scale_peer4(n), 40_000 + port, now));
         }
@@ -2202,8 +2220,9 @@ fn measure_filter_rss(peers: u32) -> (u64, u64) {
     let peak = status_kib("VmHWM:").saturating_sub(baseline);
     publish_us.sort_unstable();
     println!(
-        "FILTER_RSS peers={peers} active=10x8 rss_added_kib={rss} peak_added_kib={peak} \
+        "FILTER_RSS peers={peers} active={}x8 rss_added_kib={rss} peak_added_kib={peak} \
          publish_us_median={} publish_us_max={} tables={}",
+        peers.min(10),
         publish_us[publish_us.len() / 2],
         publish_us[publish_us.len() - 1],
         filter.allocated_tables()
@@ -2216,12 +2235,17 @@ fn measure_filter_rss(peers: u32) -> (u64, u64) {
 /// D393's 1,000 peers with 10 active, the filter adds under 5 MiB, and a prepare plus
 /// publish raises the peak by under 5 MiB too, so memory never doubles. It re-runs itself
 /// in a child process, so the numbers are this filter's alone; it also prints the 4,096-peer
-/// figures and the publish time for the issue.
+/// figures and the publish time for the issue. A one-peer run first pays the fixed cost of
+/// faulting in the filter's executable and library pages and starting the allocator. That
+/// startup cost is printed separately: it depends on the linked image's layout, not peer
+/// state (J841, #531: 4,288 KiB of the failing 5,360 KiB was file-backed). Warming one peer
+/// keeps growth at the 1,000-peer design scale, including refresh peaks, under the same bound.
 #[cfg(target_os = "linux")]
 #[test]
 fn idle_peers_add_under_five_mib_of_rss() {
     const LIMIT_KIB: u64 = 5 * 1024;
     if std::env::var_os(RSS_CHILD_ENV).is_some() {
+        measure_filter_rss(1);
         let (rss, peak) = measure_filter_rss(1000);
         assert!(
             rss < LIMIT_KIB,

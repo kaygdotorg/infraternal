@@ -17,14 +17,15 @@ fn addhost_timeline(step: &'static str) {
     }
 }
 use crate::{
+    account_sockets::{AccountSlot, AccountSockets, TAKEOVER_WAIT, Viewer},
     auth::Auth,
     plugins::{Dispatch, PluginRuntime, SocketPlugins},
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
-        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CREDIT_REFUSED, CloseOwner,
-        CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION, PROTOCOL_ERROR,
-        RESUME_REFUSED, StreamCloseLog, TERMINAL_ROUTE_IDLE, classify_terminal_close,
-        safe_agent_close_reason, safe_websocket_reason,
+        ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
+        CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
+        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER, TERMINAL_ROUTE_IDLE,
+        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
     },
 };
 use axum::{
@@ -69,7 +70,14 @@ const TERMINAL_QUERY_REPLIES: u64 = 1 << 3;
 const RESUME_WINDOW_SECONDS: u32 = 120;
 // Reject upgrades immediately when the process is at this fixed socket limit.
 const MAX_CONNECTIONS: usize = 256;
+/// Live sockets one account may hold at once: one per open tab or app, so a person with many tabs or devices
+/// open reaches it. The account's slots (`account_sockets`, via `user_slot`) and the database row count (`new_connection`)
+/// both enforce it.
 const MAX_USER_CONNECTIONS: usize = 16;
+/// [`MAX_USER_CONNECTIONS`] as the row count `new_connection` and `resume_connection` compare against. Kept as its
+/// own literal because a `usize` to `i64` cast is refused by the lints; `connection_limit_constants_agree` holds the
+/// two equal.
+const MAX_USER_CONNECTION_ROWS: i64 = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const PARTIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -85,8 +93,8 @@ const AUTHORITY_READ_TIMEOUT: Duration = Duration::from_millis(25);
 // A read that misses its deadline is a busy store, not a refusal (#240): it is
 // retried while the socket's work stays held, and fails closed after this wait.
 const AUTHORITY_WAIT: Duration = Duration::from_secs(1);
-// Pause between attempts: 5 ms, doubling to 100 ms. A socket stalled for the
-// whole wait makes about 11 attempts, each a read-only SELECT.
+// Pause between attempts: 5 ms, doubling to 100 ms. A read still in flight
+// also has to finish before its checker can attempt another SELECT.
 const AUTHORITY_RETRY_PAUSE: Duration = Duration::from_millis(5);
 const AUTHORITY_RETRY_PAUSE_MAX: Duration = Duration::from_millis(100);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
@@ -98,8 +106,6 @@ const MAX_RESUME_ROWS: i64 = 4096;
 pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
-// Bound unfinished host-facts and terminal-open calls on each socket.
-const MAX_PENDING_PLUGIN_CALLS: usize = 4;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
 const OUTPUT_CHANNEL_CAPACITY: usize = 4;
 // Cap a fragmented input frame before the decoder retains more bytes.
@@ -111,6 +117,8 @@ const SOCKET_READ_CHUNK: usize = 32 * 1024;
 const MAX_CREDIT: u64 = 8 * 1024 * 1024;
 
 type PendingPluginCall = (u32, Result<Vec<u8>, AgentError>);
+/// Running and waiting plugin calls of one socket (#556).
+type PluginCalls = crate::plugin_calls::PluginCalls<PendingPluginCall>;
 
 // Pool connections that authority work may hold at once: half of the
 // production pool's eight (runtime.rs), so retries and renewals under a stalled
@@ -172,11 +180,16 @@ pub(crate) struct WebSocketState {
     handshake_timeout: Duration,
     #[cfg(test)]
     authority_read_timeout: Duration,
+    /// Let the paused-clock test advance time after the retry guard.
+    #[cfg(test)]
+    yield_before_authority_backoff: bool,
     #[cfg(test)]
     terminal_connect_timeout: Duration,
     connections: Arc<Semaphore>,
     authority: Arc<AuthorityLimits>,
-    users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<Semaphore>>>>,
+    /// Each account's socket slots and viewers (`account_sockets`), weakly: an entry lives only while its account
+    /// has a socket.
+    users: Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<AccountSockets>>>>,
     session_changes: watch::Sender<u64>,
     close_logs: StreamCloseLog,
     queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>>,
@@ -236,6 +249,8 @@ impl WebSocketState {
         )
         .await
     }
+
+    /// Build the shared socket state and its plugin runtime for this server.
     async fn new_inner(
         auth: Auth,
         pool: SqlitePool,
@@ -306,6 +321,8 @@ impl WebSocketState {
             handshake_timeout: HANDSHAKE_TIMEOUT,
             #[cfg(test)]
             authority_read_timeout: AUTHORITY_READ_TIMEOUT,
+            #[cfg(test)]
+            yield_before_authority_backoff: false,
             #[cfg(test)]
             terminal_connect_timeout: TERMINAL_CONNECT_TIMEOUT,
             connections: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
@@ -425,23 +442,42 @@ impl WebSocketState {
     }
 
     /// Observe retained reads while socket tests control time around real storage.
-    #[cfg(all(test, feature = "remote"))]
+    #[cfg(test)]
     pub(crate) fn authority_read_monitor(&self) -> impl Fn() -> usize + 'static {
         let authority = Arc::clone(&self.authority);
         move || AUTHORITY_READS - authority.reads.available_permits()
     }
 
-    /// Reserve per-user capacity before Hello. Weak entries disappear when the last socket drops.
-    fn user_permit(&self, user: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    /// The account's socket slots and viewers, made on first use. Weak entries disappear when the last socket drops.
+    fn account_sockets(&self, user: &str) -> Option<Arc<AccountSockets>> {
         let mut users = self.users.lock().ok()?;
-        users.retain(|_, semaphore| semaphore.strong_count() != 0);
-        let semaphore = users
+        users.retain(|_, account| account.strong_count() != 0);
+        let account = users
             .get(user)
             .and_then(std::sync::Weak::upgrade)
-            .unwrap_or_else(|| Arc::new(Semaphore::new(MAX_USER_CONNECTIONS)));
-        let permit = semaphore.clone().try_acquire_owned().ok()?;
-        users.insert(user.to_owned(), Arc::downgrade(&semaphore));
-        Some(permit)
+            .unwrap_or_else(|| Arc::new(AccountSockets::new(MAX_USER_CONNECTIONS)));
+        users.insert(user.to_owned(), Arc::downgrade(&account));
+        Some(account)
+    }
+
+    /// Reserve per-user capacity before Hello. When the account is full, the new page takes over the socket of the
+    /// account's longest-hidden tab (owner decision B, #523); `None` only when no tab of the account is hidden or the
+    /// taken-over socket did not free its slot in time.
+    async fn user_slot(&self, user: &str) -> Option<AccountSlot> {
+        let account = self.account_sockets(user)?;
+        if let Some(slot) = account.try_slot() {
+            return Some(slot);
+        }
+        let slot = account.take_over_hidden(TAKEOVER_WAIT).await?;
+        self.close_logs.record(&CloseRecord::new(
+            CloseOwner::of(user),
+            CloseWho::Server,
+            TAKEN_OVER,
+            None,
+            NO_SESSION,
+            0,
+        ));
+        Some(slot)
     }
 }
 
@@ -485,6 +521,9 @@ pub(crate) fn router(state: WebSocketState) -> Router {
         .with_state(Arc::new(state))
 }
 
+/// Admits a browser's WebSocket upgrade: same origin, a live session cookie, and room under the process-wide and
+/// per-account limits. A full account makes room by taking over its longest-hidden tab (`user_slot`); with none to
+/// take, the page is upgraded only to be told so (`refuse_over_limit`, #523).
 async fn upgrade(
     State(state): State<Arc<WebSocketState>>,
     headers: HeaderMap,
@@ -511,17 +550,70 @@ async fn upgrade(
     let Ok(permit) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Some(user_permit) = state.user_permit(&session.user_id) else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    let Some(user_slot) = state.user_slot(&session.user_id).await else {
+        // Over the account's limit with no hidden tab to take over. A bare 503 reaches the page only as a failed
+        // socket, so the page cannot say why and sat blank (#523). The upgrade goes through only to close at once with the limit's reason; the
+        // process-wide permit above still bounds these refusals, and the socket never reads a frame.
+        let user_id = session.user_id;
+        return ws
+            .max_message_size(MAX_SOCKET_BUFFER)
+            .max_frame_size(MAX_SOCKET_BUFFER)
+            .on_upgrade(move |socket| async move {
+                let _permit = permit;
+                refuse_over_limit(socket, &state, &user_id).await;
+            });
     };
     ws.read_buffer_size(SOCKET_READ_CHUNK)
         .max_message_size(MAX_SOCKET_BUFFER)
         .max_frame_size(MAX_SOCKET_BUFFER)
         .on_upgrade(move |socket| async move {
             let _permit = permit;
-            let _user_permit = user_permit;
-            run_socket(socket, state, session.user_id, session_token, owner).await;
+            // Held until `run_socket` has marked the connection row inactive, so the freed slot and row go together.
+            let viewer = user_slot.viewer();
+            run_socket(socket, state, session.user_id, session_token, owner, viewer).await;
+            drop(user_slot);
         })
+}
+
+/// Closes a socket the account has no room for with [`CONNECTION_LIMIT`] (code 1008), so the page can tell the
+/// person to close a tab they no longer need. The line is rate-limited per account like every other close.
+///
+/// The reason goes out twice: first as the protocol's own Close frame on the control stream, the way every other
+/// handshake refusal is sent, then as the WebSocket close. A browser reports a WebSocket close whose handshake the
+/// server did not wait out as 1006 with no reason (seen in Chromium on the #523 spec), so the page reads the protocol
+/// frame. The WebSocket close keeps the reason for other clients.
+async fn refuse_over_limit(mut socket: WebSocket, state: &WebSocketState, user_id: &str) {
+    state.close_logs.record(&CloseRecord::new(
+        CloseOwner::of(user_id),
+        CloseWho::Server,
+        CONNECTION_LIMIT,
+        None,
+        NO_SESSION,
+        0,
+    ));
+    let mut encode = Vec::new();
+    let _ = tokio::time::timeout(
+        CLOSE_TIMEOUT,
+        send_frame(
+            &mut socket,
+            CONTROL_STREAM,
+            &Frame::Close {
+                code: 1008,
+                reason: CONNECTION_LIMIT.client_text,
+            },
+            &mut encode,
+        ),
+    )
+    .await;
+    let close = axum::extract::ws::CloseFrame {
+        code: 1008,
+        reason: CONNECTION_LIMIT.client_text.into(),
+    };
+    let _ = tokio::time::timeout(
+        CLOSE_TIMEOUT,
+        send_message(&mut socket, Message::Close(Some(close))),
+    )
+    .await;
 }
 
 /// Socket upgrades use exactly the same cookie shape and request-wide uniqueness as HTTP auth.
@@ -529,6 +621,9 @@ pub(crate) fn session_cookie(headers: &HeaderMap) -> Option<&str> {
     crate::auth::cookies::session(headers).map(|cookie| cookie.token)
 }
 
+/// Runs one admitted socket: the handshake (Hello, then Welcome or Resume), then the loop that carries control and
+/// terminal frames until the browser goes, the session ends or the server closes it. A refused handshake closes with
+/// its reason (the account's limit, a refused resume or a refused attach).
 // Plugin work has independent bounded admission; this loop dispatches shared control and terminal frames.
 async fn run_socket(
     socket: WebSocket,
@@ -536,6 +631,7 @@ async fn run_socket(
     user_id: String,
     session_token: String,
     owner: bool,
+    viewer: Arc<Viewer>,
 ) {
     // One absolute budget covers server Hello, authority reads, client Hello and Resume.
     // Starting a fresh five seconds after a slow initial write would retain admission too long.
@@ -583,6 +679,7 @@ async fn run_socket(
 
     let mut pending_welcome = None;
     let mut resume_attempt = None;
+    let mut over_limit = false;
     let handshake = tokio::time::timeout_at(
         handshake_deadline,
         while_authorized_value(
@@ -600,6 +697,7 @@ async fn run_socket(
                 &session_token,
                 &mut pending_welcome,
                 &mut resume_attempt,
+                &mut over_limit,
             ),
         ),
     )
@@ -612,7 +710,9 @@ async fn run_socket(
         viewer_visibility,
     ))) = handshake
     else {
-        let reason = if resume_attempt.is_some() {
+        let reason = if over_limit {
+            CONNECTION_LIMIT
+        } else if resume_attempt.is_some() {
             RESUME_REFUSED
         } else {
             ATTACH_REFUSED
@@ -692,9 +792,10 @@ async fn run_socket(
     // Poll plugin calls beside inbound frames; dropping this socket drops any unfinished waits.
     // Calls keep polling while this loop authorizes another frame. An in-loop
     // future can hold the only SQLite connection while the loop awaits that same
-    // pool; independent tasks avoid that cycle without raising the four-call bound.
+    // pool; independent tasks avoid that cycle. At most four run at once; more wait in a
+    // bounded queue instead of being refused (plugin_calls.rs, #556).
     // Shutdown below aborts and joins every call before releasing socket state.
-    let mut pending_plugin_calls = tokio::task::JoinSet::<PendingPluginCall>::new();
+    let mut pending_plugin_calls = PluginCalls::new();
     let mut plugins = state.plugin_socket(&user_id, &session_token);
     plugins.set_peer_capabilities(peer_capabilities);
     let mut output_open = true;
@@ -710,6 +811,7 @@ async fn run_socket(
         session_token.clone(),
         proof_authority,
         viewer_visibility,
+        viewer.clone(),
     );
     let mut attachments = HashMap::<u32, ClientAttachment>::new();
     let mut ended = EndedStreams::default();
@@ -728,6 +830,13 @@ async fn run_socket(
         loop {
             transport.active(!attachments.is_empty());
             tokio::select! {
+                // A newer tab of this account took this hidden tab's place (#523, option B): end with that reason, so
+                // the page pauses instead of reconnecting while it stays hidden.
+                () = viewer.taken_over() => {
+                    teardown_reason = TAKEN_OVER;
+                    loop_result = Err(());
+                    break;
+                }
                 Some(_) = login_preparation.join_next(), if !login_preparation.is_empty() => {}
                 Some(reply) = plugins.recv() => {
                     let Some(wire) = plugins.accept(reply, &mut encode) else {continue;};
@@ -1072,6 +1181,9 @@ async fn run_socket(
                     &Frame::Close {
                         code: if authority_unavailable_known {
                             1013
+                        } else if teardown_reason == TAKEN_OVER {
+                            // Not a failure: the server ended the socket on purpose, for another tab of the account.
+                            1000
                         } else {
                             1011
                         },
@@ -1651,6 +1763,7 @@ async fn handshake<S, K>(
     session_token: &str,
     pending_welcome: &mut Option<Welcome>,
     resume_attempt: &mut Option<[u8; 16]>,
+    over_limit: &mut bool,
 ) -> Result<([u8; 16], probe_authority::Lease, bool, u64, bool), ()>
 where
     S: Stream<Item = Result<Message, axum::Error>> + Unpin,
@@ -1704,7 +1817,7 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|_| ())?
+        .map_err(|error| *over_limit = is_connection_limit(&error))?
     } else {
         new_connection(
             &state.pool,
@@ -1714,7 +1827,7 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|_| ())?
+        .map_err(|error| *over_limit = is_connection_limit(&error))?
     };
     // Retain rollback metadata outside the cancelled future, including the previous Resume token.
     *pending_welcome = Some(welcome);
@@ -1756,6 +1869,19 @@ struct Welcome {
     previous_expiry: Option<i64>,
 }
 
+/// The error `new_connection` returns when the account already holds its live connections.
+const CONNECTION_LIMIT_ERROR: &str = "connection limit reached";
+/// The resume refusal category for the same limit (`resume_connection`).
+const RESUME_CAPACITY_CHECK: &str = "connection_capacity";
+
+/// True when an admission error is the account's connection limit rather than an authority or storage failure, so
+/// the handshake closes with [`CONNECTION_LIMIT`], which the page can explain, instead of a bare refusal (#523).
+fn is_connection_limit(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Protocol(message) if message == CONNECTION_LIMIT_ERROR || message == RESUME_CAPACITY_CHECK)
+}
+
+/// Records a fresh connection for the account, inside the limit on live connections (then [`CONNECTION_LIMIT_ERROR`])
+/// and on retained resume rows, and returns its Welcome credentials.
 async fn new_connection(
     pool: &SqlitePool,
     user_id: &str,
@@ -1775,8 +1901,8 @@ async fn new_connection(
     .bind(user_id)
     .fetch_one(&mut *transaction)
     .await?;
-    if active >= 16 {
-        return Err(sqlx::Error::Protocol("connection limit reached".into()));
+    if active >= MAX_USER_CONNECTION_ROWS {
+        return Err(sqlx::Error::Protocol(CONNECTION_LIMIT_ERROR.into()));
     }
     let retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE active=1 OR expires_at>=?",
@@ -1865,8 +1991,8 @@ async fn resume_connection(
     .bind(user_id)
     .fetch_one(&mut *transaction)
     .await?;
-    if active >= 16 {
-        return Err(resume_refused("connection_capacity"));
+    if active >= MAX_USER_CONNECTION_ROWS {
+        return Err(resume_refused(RESUME_CAPACITY_CHECK));
     }
     let welcome = Welcome {
         connection_id,
@@ -1938,14 +2064,15 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
     Sha256::digest(token).into()
 }
 
-// Each browser frame is validated here and routed without allocating a second terminal payload.
+/// Validates one browser frame and routes it without allocating a second terminal payload. A plugin call goes
+/// to `pending_plugin_calls`, which runs it now or queues it behind the busy ones (#556); only a full queue refuses.
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
     user_id: &str,
     session_token: &str,
     owner: bool,
-    pending_plugin_calls: &mut tokio::task::JoinSet<PendingPluginCall>,
+    pending_plugin_calls: &mut PluginCalls,
     connection_id: &[u8; 16],
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
@@ -2001,7 +2128,7 @@ where
             };
             let valid = request.as_ref().is_some_and(|(size, _)| size.valid());
             if let Some((size, host)) = request.filter(|(size, _)| size.valid())
-                && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS
+                && pending_plugin_calls.has_room()
             {
                 let state = state.clone();
                 let user = user_id.to_owned();
@@ -2010,7 +2137,7 @@ where
                 // Opening a PTY may wait for a remote login. Poll it alongside route
                 // proofs, input and revocation; never suspend the multiplexed receive loop.
                 // The existing bounded call queue owns cancellation on socket teardown.
-                pending_plugin_calls.spawn(async move {
+                pending_plugin_calls.submit(true, async move {
                     let result = while_authorized_value(&state, &user, &token, false, async {
                         Ok(open_terminal(&state, &user, &token, size, host).await)
                     })
@@ -2060,13 +2187,13 @@ where
             input_json,
         } if stream_id == CONTROL_STREAM
             && input_json.len() <= 8192
-            && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS =>
+            && pending_plugin_calls.has_room() =>
         {
             let state = state.clone();
             let user = user_id.to_owned();
             let token = session_token.to_owned();
             let input = input_json.to_vec();
-            pending_plugin_calls.spawn(async move {
+            pending_plugin_calls.submit(false, async move {
                 let result = while_authorized_value(&state, &user, &token, false, async {
                     Ok(startup_call(&state, &user, &input).await)
                 })
@@ -2094,11 +2221,11 @@ where
                             Permission::Any(permissions) => !permissions.is_empty(),
                         }
                 });
-            if authorized && pending_plugin_calls.len() < MAX_PENDING_PLUGIN_CALLS {
+            if authorized && pending_plugin_calls.has_room() {
                 let agent = state.agent.clone();
                 let action_id = action_id.to_owned();
                 let input_json = input_json.to_vec();
-                pending_plugin_calls.spawn(async move {
+                pending_plugin_calls.submit(false, async move {
                     let result =
                         tokio::time::timeout(BACKEND_TIMEOUT, agent.call(action_id, input_json))
                             .await
@@ -2617,11 +2744,11 @@ async fn authority_deadline(
 
 /// Read the session's expiry, and start its renewal when `renew` is set and it
 /// is due. Each attempt has the fixed per-read deadline. An attempt that misses
-/// it is a busy store, not a refusal (#240): it is dropped and tried again after
-/// a pause (5 ms doubling to 100 ms) until `wait` has passed (`AUTHORITY_WAIT`
-/// everywhere but teardown, which passes zero for a single attempt), then the
-/// read fails closed. A store that answers (no live session, or a storage
-/// error) fails at once and is never retried. The caller does no work
+/// it is a busy store, not a refusal (#240). The checker discards the late
+/// answer and retries after a pause (5 ms doubling to 100 ms). All attempts fit
+/// inside `wait` (`AUTHORITY_WAIT` everywhere but teardown, which passes zero
+/// for one attempt with the full read deadline). A store that answers with no
+/// live session or a storage error fails at once. The caller does no work
 /// meanwhile: every call site awaits this before it polls the operation it
 /// guards, so input stays queued in order behind the read instead of being
 /// dropped with the socket. One non-generic function serves every call site so
@@ -2631,11 +2758,28 @@ async fn authority_deadline(
 /// another connection holds the write lock. The renewal is a write that may
 /// wait seconds for that lock; it never runs here (`renew_soon`). Each attempt
 /// obtains one of the `AUTHORITY_READS` places within its deadline. Fast SELECTs
-/// run inline. If one misses its deadline, `DetachOnDrop` moves its pinned
-/// future into a task with its place until the SELECT future completes. Pool
-/// return and health checks may finish afterward, so the place bounds active
-/// queries rather than an instantaneous pool-idle count. A retry cannot start
-/// another SELECT while its previous query future remains in flight.
+/// run inline. Pool return and health checks may finish after a SELECT, so the
+/// place bounds active queries rather than an instantaneous pool-idle count.
+///
+/// One call has at most one SELECT in flight, so it holds at most one place
+/// (#525). A SELECT that misses its attempt deadline stays this call's: the
+/// retry first waits, up to the end of `wait`, for that SELECT to finish and
+/// throws its answer away, then starts a fresh SELECT with a fresh clock under
+/// a fresh attempt deadline. A missed answer is never used, however soon it
+/// arrives after its deadline, and every retry reads the authority as it is
+/// when the retry starts, so a revocation during a stall is seen. The retry
+/// pause also ends by the original deadline, even if scheduling delayed
+/// setting its wake time. Before #525
+/// each retry queued a new SELECT behind its own abandoned ones: one stalled
+/// caller could take all four places and keep every other socket's reads out
+/// of them, and after the stall each fresh SELECT waited behind its
+/// predecessors, so on a slow store no retry could answer within its deadline.
+/// Rejected: using the missed SELECT's late answer (it may predate a
+/// revocation and was observed after its deadline), and cancelling it (sqlx
+/// cannot cancel a running statement, and the pool may already have handed it
+/// a connection). If the call ends while its SELECT is still running (the
+/// wait is over, or teardown's single attempt missed), `DetachOnDrop` moves
+/// that future into a task with its place until it completes.
 ///
 /// Expiry is monotonic: once a session's end has passed it is never found live
 /// again. Every attempt reads the wall clock when it starts, so a retry after a
@@ -2654,10 +2798,15 @@ async fn read_expiry(
     let read_timeout = state.authority_read_timeout;
     #[cfg(not(test))]
     let read_timeout = AUTHORITY_READ_TIMEOUT;
-    let give_up = tokio::time::Instant::now() + wait;
+    let mut started = tokio::time::Instant::now();
+    let give_up = started + if wait.is_zero() { read_timeout } else { wait };
     let mut pause = AUTHORITY_RETRY_PAUSE;
+    // This call's SELECT, from the moment it holds a place until it finishes.
+    // It lives outside the attempt so a missed attempt leaves it here for the
+    // retry to wait out; dropping it with the call detaches it (see above).
+    let mut in_flight = None;
     let expiry = loop {
-        let attempt_deadline = tokio::time::Instant::now() + read_timeout;
+        let attempt_deadline = (started + read_timeout).min(give_up);
         let read = async {
             let reads = &state.authority.reads;
             let place = match reads.try_acquire() {
@@ -2669,20 +2818,41 @@ async fn read_expiry(
                 return Some(Err(AuthorityMiss::Unavailable));
             };
             let hold = AuthorityReadHold::take(Arc::clone(&state.authority), place);
-            let query = crate::completion::DetachOnDrop::new(Box::pin(
+            let query = in_flight.insert(crate::completion::DetachOnDrop::new(Box::pin(
                 state.auth.live_expiry(token, user_id, now, hold),
-            ));
-            Some(query.await.map_err(|error| match error {
+            )));
+            let result = query.await;
+            in_flight = None;
+            Some(result.map_err(|error| match error {
                 crate::auth::Error::Denied => AuthorityMiss::Refused,
                 _ => AuthorityMiss::Unavailable,
             }))
         };
-        match tokio::time::timeout_at(attempt_deadline, read).await {
+        let outcome = tokio::time::timeout_at(attempt_deadline, read).await;
+        match outcome {
             // A future that does not yield can finish after the timer. Keep the
             // explicit post-result check so such a completion still retries.
             Ok(Some(result)) if tokio::time::Instant::now() <= attempt_deadline => break result?,
-            _ if tokio::time::Instant::now() + pause < give_up => {
-                tokio::time::sleep(pause).await;
+            _ if !wait.is_zero() && tokio::time::Instant::now() + pause < give_up => {
+                #[cfg(test)]
+                if state.yield_before_authority_backoff {
+                    tokio::task::yield_now().await;
+                }
+                let resume = (tokio::time::Instant::now() + pause).min(give_up);
+                // Let the missed SELECT finish before the next one starts; its
+                // answer is stale by now and is discarded. The pause still
+                // separates attempts when it finished sooner.
+                if let Some(missed) = in_flight.as_mut() {
+                    if tokio::time::timeout_at(give_up, missed).await.is_err() {
+                        return Err(AuthorityMiss::Unavailable);
+                    }
+                    in_flight = None;
+                }
+                tokio::time::sleep_until(resume).await;
+                started = tokio::time::Instant::now();
+                if started >= give_up {
+                    return Err(AuthorityMiss::Unavailable);
+                }
                 pause = (pause * 2).min(AUTHORITY_RETRY_PAUSE_MAX);
             }
             _ => return Err(AuthorityMiss::Unavailable),
@@ -2979,20 +3149,48 @@ async fn open_terminal(
     let connect_timeout = state.terminal_connect_timeout;
     #[cfg(not(test))]
     let connect_timeout = TERMINAL_CONNECT_TIMEOUT;
-    let agent = terminal_agent(state, user_id, host)
-        .await
-        .map_err(|()| crate::embedded::AgentError::Unavailable)?;
+    // A remote host is checked in this order: ownership, then the upgrade state, then the live link.
+    // - Ownership first: `host` comes from the browser, so the upgrade state (D393) is told only to
+    //   the host's owner. Anyone else gets the same `unavailable` as for a host that does not exist.
+    // - The upgrade state before the live link: a root upgrade (D376) can drop the rootless link it
+    //   replaces, and the owner should hear "being upgraded", not "offline".
+    // - Admission is the upgrade check itself (one atomic word, no separate pre-check that could
+    //   race), and its guard then holds the open inside the window until the row is persisted.
     #[cfg(feature = "remote")]
-    let _terminal_admission = host
-        .map(|host| state.remote_hosts.admit_terminal_open(host))
-        .transpose()
-        .map_err(|()| {
-            crate::embedded::AgentError::OpenRefused(
-                infraternal_plugin_api::admission::OpenRefusal::Unavailable,
-            )
-        })?;
+    let (agent, _terminal_admission) = match host {
+        None => (state.agent.clone(), None),
+        Some(host) => {
+            owns_remote_host(state, user_id, host)
+                .await
+                .map_err(|()| crate::embedded::AgentError::Unavailable)?;
+            let admission = state
+                .remote_hosts
+                .admit_terminal_open(host)
+                .map_err(|refused| {
+                    crate::embedded::AgentError::OpenRefused(match refused {
+                        crate::remote_runtime::AdmissionRefused::Upgrading => {
+                            infraternal_plugin_api::admission::OpenRefusal::HostUpgrading
+                        }
+                        crate::remote_runtime::AdmissionRefused::Unavailable => {
+                            infraternal_plugin_api::admission::OpenRefusal::Unavailable
+                        }
+                    })
+                })?;
+            let agent = state
+                .remote_hosts
+                .actor(host)
+                .await
+                .ok_or(crate::embedded::AgentError::Unavailable)?;
+            (agent, Some(admission))
+        }
+    };
     #[cfg(not(feature = "remote"))]
-    let _terminal_admission = ();
+    let (agent, _terminal_admission) = (
+        terminal_agent(state, user_id, host)
+            .await
+            .map_err(|()| crate::embedded::AgentError::Unavailable)?,
+        (),
+    );
     let person =
         uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
     #[cfg(feature = "ssh")]
@@ -3092,12 +3290,19 @@ async fn terminal_agent(
     let Some(host) = host else {
         return Ok(state.agent.clone());
     };
+    owns_remote_host(state, user, host).await?;
+    state.remote_hosts.actor(host).await.ok_or(())
+}
+
+/// `Ok` only when `user` owns remote host `host` and it is not revoked.
+///
+/// Run this before telling a person anything about a host the browser named: a host ID from the
+/// browser is untrusted, and a non-owner must learn nothing about it, not even that it exists.
+#[cfg(feature = "remote")]
+async fn owns_remote_host(state: &WebSocketState, user: &str, host: uuid::Uuid) -> Result<(), ()> {
     let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
         .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
-    if !allowed {
-        return Err(());
-    }
-    state.remote_hosts.actor(host).await.ok_or(())
+    allowed.then_some(()).ok_or(())
 }
 
 /// The session's host for this account: `None` when the account has no such session,
@@ -3454,6 +3659,11 @@ fn unix_seconds() -> Result<i64, ()> {
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 mod writer_tests;
+
+/// Tests for the per-account connection limit (#523).
+#[cfg(test)]
+#[path = "websocket_limit_tests.rs"]
+mod connection_limit_tests;
 
 #[cfg(test)]
 #[path = "session_inventory_tests.rs"]

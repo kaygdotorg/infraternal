@@ -18,6 +18,7 @@ use std::{
 fn config() -> Config {
     Config {
         authority_epoch: None,
+        rotation_operation: None,
         local_key: Some(PublicKey([1; 32])),
         server: Some(NodeId(1)),
         node: NodeId(2),
@@ -46,6 +47,7 @@ fn config() -> Config {
                                 ipv6: Ipv6Addr::from((0xfd02_u128 << 112) + u128::from(id)),
                             },
                             endpoint: None,
+                            candidates: Vec::new(),
                         },
                         inbound: TrafficPolicy::All,
                         outbound: TrafficPolicy::All,

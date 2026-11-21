@@ -234,6 +234,25 @@ rust_check_cli_plugin_compile_out() {
     return "$failed"
 }
 
+# The "release feature sets" row (#530) checks each shipping feature graph.
+# The workspace Clippy row unifies features and missed a Linux host compile
+# failure on dev 6fe482d1e. Keep warnings fatal for the Linux release sets.
+# The macOS checks catch missing optional dependencies on the build host.
+# The native recipe builds and checks both Mach-O images before signing.
+# Run every set even after a failure so one log shows them all.
+rust_check_release_feature_sets() {
+    local failed=0
+    local release_server_cargo_args release_host_cargo_args release_session_cargo_args
+    local release_macos_host_cargo_args release_macos_helper_cargo_args
+    source scripts/release/feature-sets || return 1
+    cargo clippy --locked "${release_server_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_host_cargo_args[@]}" -- -D warnings || failed=1
+    cargo clippy --locked "${release_session_cargo_args[@]}" -- -D warnings || failed=1
+    cargo check --locked "${release_macos_host_cargo_args[@]}" || failed=1
+    cargo check --locked "${release_macos_helper_cargo_args[@]}" || failed=1
+    return "$failed"
+}
+
 # D244/#154 checks the shipping provider, never a GNU test executable or C probe.
 rust_check_static_key_memory() {
     local target="$1"
@@ -344,8 +363,11 @@ rust_verify_fast() {
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
+    rust_run_gate "release feature sets" rust_check_release_feature_sets
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
+    rust_run_gate "latency report (D375)" python3 scripts/test-latency-report.py
+    rust_run_gate "nightly latency run" python3 scripts/test-nightly-latency.py
     # The head-to-head kit is versioned here, so its own tests gate every change (#260); ~5 s.
     rust_run_gate "head-to-head kit tests" python3 -m unittest discover -s research/head-to-head/kit -p "test_*.py"
     rust_run_gate "Traefik component manifest" python3 -m unittest discover -s scripts/release -p traefik_component_test.py

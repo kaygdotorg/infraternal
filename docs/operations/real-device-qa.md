@@ -38,6 +38,27 @@ fixed `/run/infraternal` and the second one's agent fails with "address in use".
 Steps 4 and 5 are recorded UI flows. They were driven by hand once on 2026-11-11 and then encoded; if a step stops
 matching (a label changed), the run names it and you re-drive that one step with `run.sh run <name> '<actions>'`.
 
+## Signing the simulator in (the QA1 route)
+
+The simulator never signs in to test.ssh.kayg.org or production: their shared account's key is wrapped by a passkey that
+lives in another browser (#500). The route that works, and the only one `check` assumes, is QA1 (mesh-staging :8443):
+
+1. `scripts/real-device-qa stage <bundle>` (or `stage/qa1-upgrade.sh`) so QA1 runs the build under test. Confirm with
+   `cat /opt/qa/current/SOURCE` on mesh-staging.
+2. If `check`'s `signin` phase says "This passkey could not sign in" (a data dir whose owner the simulator no longer has a
+   passkey for), run `scripts/real-device-qa qa1-reset [label]`. It gives QA1 an empty data dir (the old one is kept beside
+   it), makes the throwaway `qa-device` login on dev-02, creates a first-run owner in the simulator with a simulated Face ID
+   passkey, and adds the host through the phone UI. The setup token and host password travel only as 0600 files on the
+   Studio; nothing secret is in argv or a log. It takes about 5 minutes; the old data dir is never deleted.
+3. `scripts/real-device-qa check`.
+
+A recorded step names every wording it accepts, separated by `/` (`tapsbif~Use Passkey/Use Selected Passkey~6`): the system
+passkey sheet's button changed between releases, and the page's own labels (`Continue with passkey`, `Add host`,
+`Confirm with passkey`, `Trust and continue`, `Sign in with a password`, `Sign in`) come from `apps/tracer/src/onboarding.ts`,
+`canvas/addhost/wizard.ts` and `canvas/views/world.ts`. When the UI changes, read those files and update the recorded step;
+do not guess from a screenshot. Safari exposes the page's accessible names (aria-label, text) but not `data-*` ids, so the
+accessible name is the stable selector the tool can use.
+
 ## Every deploy
 
 ```
@@ -159,7 +180,7 @@ trusts the QA CA in the Mac's System keychain for mesh-staging.vpn.kayg.org.
   REVIEW, and `check --phases shell` reruns it.
 - Production cannot be signed in to from a simulator without the owner's own passkey, so prod gets no real-device run
   yet.
-- Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
+- (Superseded: see "Dark mode on the Mac VM" below.) Mac Safari is not covered. On 2026-11-11 `claude@infraternal-macos-01-std` could not `sudo -n` (a password is
   required), so neither `launchctl asuser 501 ... -u lume` (a GUI session to click in) nor `safaridriver --enable`
   was possible, and the Mac VM has no Touch ID for a platform passkey anyway. The same approach (its own owner on
   its own QA instance) would work if the Mac VM can make a passkey; that is unproven.
@@ -177,3 +198,24 @@ is never touched). Writing that database directly works only because System Inte
 VM; with SIP on, give the grant once by hand in System Settings → Privacy & Security → Screen Recording. Both commands
 refuse to run unless the target's host name is `infraternal-macos-01-std`, so a `QA_MAC` pointed at std itself is never
 touched. A stale system dialog on the VM's screen (for example a disk-unlock prompt) shows up in the picture.
+
+## Dark mode on the Mac VM (J752, #510)
+
+AppleScript to the console session times out, and it is not needed. `scripts/real-device-qa mac` now sets the VM's appearance
+with `real-device-qa-mac-appearance.sh` (`defaults write -g AppleInterfaceStyle Dark`, as lume, under the Mac lock; `light`
+deletes the key so the VM is left as found) and restores light when it ends. The flow picks the run's colour theme through the
+palette (Mocha or Latte) and fails the run unless the page looks like it (`theme-looks-dark` / `theme-looks-light`, from the
+luminance of the first opaque background under the page centre). Measured 2026-11-15: after the `defaults` write Safari reported
+`prefers-color-scheme: dark` in one safaridriver session; in the next the write had not reached Safari yet (a short sleep was
+added). **Not yet proven end to end:** the palette pick in the Mac flow did not turn the page dark in the one run that could get
+the Mac lock (other jobs held it for hours), so a dark Mac run still reports `theme-looks-dark` FAIL. That is the honest result,
+not a pass; the pick needs one interactive look at the Mac palette.
+
+## Locked CA on a fresh load (J970, #510, re-measured 2026-11-20)
+
+Restarting QA1's server locks its host CA until one passkey tap. A fresh load then shows the stored shell window of the QA host
+with its old prompt and a green dot, a toast "The server restarted. Confirm your passkey once to reconnect your hosts." with an
+Unlock button, and a dot on the sidebar button. The toolbar and palette keep working; the palette offers "Unlock host
+connections" and lists "Open shell on <host>" marked offline. No ghost pane takes focus (the J752 sighting was not
+reproduced). `check --phases locked` records this; `check --phases unlock` clears it. Desktop Chromium could not be checked: the
+QA account's passkey lives only in the simulator.

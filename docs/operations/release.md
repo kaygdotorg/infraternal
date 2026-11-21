@@ -30,11 +30,60 @@ work begins. Every image is uploaded and included in the signer-generated
 checksums. Public verification still accepts older signed releases without
 session images; an advertised session image must be present and match its
 signed digest.
+
+The Linux host images include the Mesh node, so Add host can enroll a node
+with Mesh traffic available after the coordinator assigns its addresses and
+peers. Linux Mesh enrollment state belongs to its original machine ID. A
+backup of that state can restore the same enrollment on the original
+installation. Another installation must enroll through Add host.
+The macOS host built by `scripts/macos-release` carries the Mesh node too
+(`remote,desktop,plugin-mesh`, #221) and follows the same enrollment rules.
 The build requires `--channel`; there is no default. Use `--channel stable`
 for the workspace version. Both architecture binaries and signed `VERSION`
 carry the same stamped identity.
 The build marks the binaries as release builds: missing public releases and
 verification failures cannot enable the development fallback.
+
+## The macOS binary (#483)
+
+A release can also carry `infraternal-aarch64-darwin`. That is the
+default-feature `infraternal` for Apple silicon Macs, which a Mac runs with
+`infraternal up <server>`. Linux cannot link it: its native dependencies need
+the Apple SDK and `/usr/bin/clang` (#379). So it is built first, on the Mac,
+and then handed to the Linux build:
+
+```sh
+# On the Mac build machine, in the repository's nix shell:
+nix develop -c scripts/release/build-darwin --channel edge /Users/Shared/release-darwin
+# Copy that directory to the Linux release builder, then:
+scripts/release/build --channel edge --darwin /path/to/release-darwin
+```
+
+`build-darwin` stamps a new edge version, or the workspace version for
+`stable`, and checks that the binary links only libraries macOS ships. It signs
+the binary ad hoc with the hardened runtime: no identity and no timestamp, so
+a rebuild of the same tree signs to the same bytes. `BUILD-INFO` records the
+source, toolchain, SDK, size and digest. `build --darwin` takes the release
+version from that directory's `VERSION`, so the Linux and Mac binaries carry
+one identity. It refuses a binary that is not arm64 Mach-O, or that lacks that
+version string. The binary goes into `SHA256SUMS`, and `publish` uploads it,
+so the signer covers it like every other payload. No other key is involved.
+The Mac binary is optional: a bundle built without `--darwin` is Linux-only,
+as before. When a signed manifest lists it, verification downloads it and
+checks its digest. Intel Macs have no binary.
+
+People install it by hand for now, which the one-command join (D311) will
+replace:
+
+```sh
+v=<version>; b=https://builds.infraternal.com/releases/$v
+curl -fsSLO "$b/SHA256SUMS" -O "$b/SHA256SUMS.sig" -O "$b/infraternal-aarch64-darwin"
+ssh-keygen -Y verify -f allowed_signers -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
+shasum -a 256 --ignore-missing -c SHA256SUMS
+chmod +x infraternal-aarch64-darwin && ./infraternal-aarch64-darwin up https://<server>
+```
+
+`allowed_signers` is `release/allowed_signers` from this repository.
 
 The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` and
 `RELEASE_CALLER_TOKEN` in the publishing process environment, then runs:

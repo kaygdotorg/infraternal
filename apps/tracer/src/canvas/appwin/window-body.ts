@@ -36,6 +36,7 @@ import { shapeStreamWindow } from "./shape";
 import type { AppTarget } from "./inventory";
 import type { StreamConnection } from "./adapter";
 
+/** Options passed to the canvas binding for one app or screen stream. */
 export interface AppBodyOptions {
   connection: StreamConnection;
   hostId: string;
@@ -43,6 +44,8 @@ export interface AppBodyOptions {
   /** The machine's name, for the words a state uses. */
   machine: string;
   app: string;
+  /** The listed app's real icon, once it is fetched (a `blob:` URL); the pill keeps its glyph until then. */
+  icon?: Promise<string | undefined>;
   /** The machine's window shape (width / height) as listed: the window takes it before the stream starts. */
   aspect?: number;
 }
@@ -60,6 +63,7 @@ const CONTROL_ICON = '<path d="M5 4l5 15 2.4-6.2L19 10.4z"/>';
 const VIEW_ICON = '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>';
 const PAUSE_ICON = '<path d="M9 6v12M15 6v12"/>';
 
+/** Connects one app or screen stream to the canvas session lifecycle, DOM, and input. */
 export class AppBinding implements SessionBinding {
   private stream: AppStream;
   private stage!: HTMLElement;
@@ -116,6 +120,7 @@ export class AppBinding implements SessionBinding {
 
   // ---- DOM ------------------------------------------------------------------------------------------------------
 
+  /** Attaches the card to the canvas and wires its surface, resize, and input behavior. */
   mount(body: HTMLElement): void {
     this.root = el("div", "aw");
     this.stage = el("div", "aw-stage");
@@ -125,12 +130,37 @@ export class AppBinding implements SessionBinding {
     this.card.setAttribute("role", "status");
     this.root.append(this.stage, this.card);
     body.append(this.root);
+    this.paintPillIcon();
     this.wireInput();
     // The box the machine's window follows (A2): layout size, not the camera's zoom. The first size starts the stream.
     this.observer = new ResizeObserver(() => this.measure(false));
     this.observer.observe(this.stage);
     this.paintState({ kind: "idle" });
     this.measure(true);
+  }
+
+  /** Shows the app's 64 px icon in the pill's mark once it arrives, keeping the platform glyph if it never does or fails to decode. */
+  private paintPillIcon(): void {
+    if (this.o.target.type !== "window" || !this.o.icon) return;
+    void this.o.icon.then((url) => { if (url && !this.disposed) this.showPillIcon(url); });
+  }
+
+  /** Puts the icon at `url` in the pill's mark in place of its glyph. */
+  private showPillIcon(url: string): void {
+    const mark = this.rec.card.pill.querySelector<HTMLElement>(".ui-window-mark");
+    const glyph = mark?.querySelector("svg");
+    if (!mark || !glyph) return;
+    const fallback = glyph.cloneNode(true);
+    const image = document.createElement("img");
+    image.className = "aw-app-pill-icon";
+    image.alt = "";
+    image.setAttribute("aria-hidden", "true");
+    image.width = 64;
+    image.height = 64;
+    image.decoding = "async";
+    image.src = url;
+    image.addEventListener("error", () => mark.replaceChildren(fallback), { once: true });
+    mark.replaceChildren(image);
   }
 
   private css(): { width: number; height: number; density: number } {

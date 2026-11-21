@@ -54,6 +54,7 @@ fn captured_peer(key: PublicKey, endpoint: &str) -> Peer {
             ipv6: "fd01::2".parse().unwrap(),
         },
         endpoint: Some(endpoint.parse().unwrap()),
+        candidates: Vec::new(),
     }
 }
 

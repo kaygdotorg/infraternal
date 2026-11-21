@@ -14,14 +14,22 @@
 //! - **Revocation:** every packet of a tracked flow is checked against the grants published
 //!   now. A revoked grant therefore ends its flows the moment the new policy is published,
 //!   whatever their timeout. The sweep after a publish frees their slots.
-//! - **Memory:** about 0.1 KB per configured peer, plus about 68 KB for each peer that has
-//!   flows. Its 64 fragment slots are allocated separately, the first time the peer fragments.
-//!   The table must fit the 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`], checked at build time).
-//!   At D393's design scale of 1,000 peers with 10 of them active, the filter adds under
-//!   1 MiB. With all of D393's tested 4,096 peers active (one flow each) it adds 214 MiB, about
-//!   52 KiB per flow table (J750, #265; fragment tables would add about 15 KiB each). That is
-//!   the worst case and stays within the per-peer budget: each authenticated peer in the policy
-//!   gets at most one flow table and one fragment table, and only after a grant check passes.
+//! - **Memory:** about 0.1 KB per configured peer, plus the peer's fixed tables once it has
+//!   flows. The flow table is 512 slots of 104 bytes: 53,248 bytes, 52 KiB. The fragment table
+//!   (64 slots of 104 bytes and 64 coverage records of 134 bytes: 15,232 bytes, about 15 KiB)
+//!   is allocated separately, the first time the peer fragments. All of a peer's state is
+//!   68,672 bytes (67 KiB, or 68.7 kB in decimal units): both tables plus 192 bytes of cell and
+//!   policy entry, as `flow_table_memory_per_peer_times_one_thousand_peers` prints. It must
+//!   fit the 72 KiB budget ([`PER_PEER_MEMORY_BUDGET`], checked at build time). At D393's design scale of
+//!   1,000 peers with 10 of them active, the filter adds under 1 MiB.
+//!   - **Measured (J750, #265):** all 4,096 of D393's tested peers active with one flow each
+//!     added 214,396 KiB, 209 MiB (about 52 KiB per peer: the first flow writes the whole flow
+//!     table, and no fragment table exists yet).
+//!   - **Bound:** at most 288 MiB, the 72 KiB budget times 4,096 peers, with every peer's flow
+//!     table and fragment table in use (68,672 bytes each, 268 MiB, for the current sizes). No
+//!     path can exceed it: each authenticated peer in the policy gets at most one flow table
+//!     and one fragment table, and only after a grant check passes.
+//!
 //!   Compiling a policy allocates no tables, so publishing never doubles memory.
 //! - **Freeing:** a table is freed only by the sweep after a publish, when it is empty or its
 //!   peer has left the policy. A peer that was busy once keeps its table, expired entries and
@@ -181,7 +189,8 @@ const FLOW_SLOTS_PER_PEER_HASH: u64 = 512;
 /// The memory budget for the fixed filter tables of one peer that has flows: 72 KiB.
 ///
 /// Why this number: it is the footprint already reviewed and measured for D394 (J618: 68,144
-/// bytes per peer) with a little room, so raising the flow quota does not grow the filter.
+/// bytes per peer, 66.5 KiB) with a little room, so raising the flow quota does not grow the
+/// filter.
 /// Measured at J675 (`flow_table_memory_per_peer_times_one_thousand_peers` prints it): a flow
 /// slot is 104 bytes, so the 512 flow slots take 53,248 bytes; the 64 fragment associations
 /// with their 32-range coverage records take about 15 KiB. Since J721 only peers with flows
@@ -436,8 +445,8 @@ impl PacketFilter {
     /// packet after a publish.
     ///
     /// The bound pointer is read without a lock on every later packet. Binding takes the
-    /// `tables` lock once per peer per publish. A new cell is about 100 bytes; the 68 KB table
-    /// inside it is allocated, fallibly, only when a flow is admitted (see
+    /// `tables` lock once per peer per publish. A new cell is about 100 bytes; the 52 KiB flow
+    /// table inside it is allocated, fallibly, only when a flow is admitted (see
     /// [`Self::start_flow`]).
     fn flows_for<'policy>(&self, peer: &'policy PeerAccess) -> &'policy PeerFlows {
         if let Some(cell) = peer.flows.get() {
@@ -1188,7 +1197,7 @@ impl PeerAccess {
 ///
 /// The table stays `None` until the peer's first flow is admitted, and returns to `None` when
 /// the sweep after a publish finds it empty. An idle peer therefore costs this cell (about
-/// 100 bytes), not the 68 KB table (J721, #265).
+/// 100 bytes), not the 52 KiB flow table (J721, #265).
 #[derive(Default)]
 struct PeerFlows {
     table: Mutex<Option<FlowShard>>,

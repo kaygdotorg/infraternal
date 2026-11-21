@@ -3,24 +3,57 @@
 set -euo pipefail
 
 # Ghostty VT and vendored C share the one checksum-pinned Zig [94][213].
-repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 [[ "$target_dir" = /* ]] || target_dir="$repo_root/$target_dir"
 # Exported so unit tests that place private fixtures under the target folder
 # (release staging tests) find it whether or not the caller set it.
 export CARGO_TARGET_DIR="$target_dir"
-"$repo_root/scripts/auth-toolchain"
-export PATH="$target_dir/auth-tools/zig:$PATH"
 
-# Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
-# these explicitly; the documented Nix invocation supplies them here when absent.
-if ! command -v make >/dev/null || ! command -v perl >/dev/null; then
-    if command -v nix >/dev/null; then
-        exec nix shell nixpkgs#gnumake nixpkgs#perl -c "$0" "$@"
+# Cargo does not make a target directory safe to share between source roots.
+# Remember the last checkout and revision so a comparison with reused artifacts
+# is visible before the verifier starts building or reading from that target.
+source_revision="unavailable"
+if ! source_revision="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null)"; then
+    source_revision="unavailable"
+fi
+source_identity="$(printf '%s\n%s' "$repo_root" "$source_revision")"
+source_marker="$target_dir/.infraternal-source-identity"
+mkdir -p "$target_dir"
+if [[ -f "$source_marker" ]]; then
+    previous_identity="$(cat -- "$source_marker")"
+    if [[ "$previous_identity" != "$source_identity" ]]; then
+        previous_root="$(sed -n '1p' "$source_marker")"
+        previous_revision="$(sed -n '2p' "$source_marker")"
+        printf 'WARNING: CARGO_TARGET_DIR %s was last used by %s at %s; current source is %s at %s. Use a separate target for each source worktree/revision (#542).\n' \
+            "$target_dir" "${previous_root:-unknown}" "${previous_revision:-unknown}" \
+            "$repo_root" "$source_revision" >&2
     fi
-    printf 'verify requires make and perl for vendored OpenSSL
-' >&2
-    exit 1
+fi
+source_marker_tmp="${source_marker}.tmp.$$"
+printf '%s\n%s\n' "$repo_root" "$source_revision" > "$source_marker_tmp"
+mv -f -- "$source_marker_tmp" "$source_marker"
+
+# The latency profile can measure a binary built elsewhere (INFRATERNAL_LATENCY_BINARY, #447):
+# the perf VM never builds, so it has no Zig, no cargo and no OpenSSL build drivers to prepare.
+prebuilt_latency=0
+if [[ "${1:-}" == latency && -n "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+    prebuilt_latency=1
+fi
+
+if [[ "$prebuilt_latency" == 0 ]]; then
+    "$repo_root/scripts/auth-toolchain"
+    export PATH="$target_dir/auth-tools/zig:$PATH"
+
+    # Nix hosts may expose Rust but omit OpenSSL's native build drivers. CI installs
+    # these explicitly; the documented Nix invocation supplies them here when absent.
+    if ! command -v make >/dev/null || ! command -v perl >/dev/null; then
+        if command -v nix >/dev/null; then
+            exec nix shell nixpkgs#gnumake nixpkgs#perl -c "$0" "$@"
+        fi
+        printf 'verify requires make and perl for vendored OpenSSL\n' >&2
+        exit 1
+    fi
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +61,28 @@ source "${script_dir}/verify.d/rust.sh"
 source "${script_dir}/verify.d/ts.sh"
 source "${script_dir}/verify.d/quick.sh"
 
+# The latency profile (D375): runs every producer of a D375 row, keeps the whole
+# output as evidence outside the checkout, and ends with the ten-row table. The
+# run fails when any step fails or when a row is missing or misses its gate.
 verify_latency() {
+    local evidence_dir
+    evidence_dir="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import evidence_path; print(evidence_path.evidence_directory("latency"))' "$script_dir")"
+    mkdir -p "$evidence_dir"
+    local log="$evidence_dir/verify-latency-$(date -u +%Y%m%dT%H%M%SZ).log"
+    local status
+    # Every row producer reads this to take full samples (and the browser-only rows run at all).
+    export INFRATERNAL_LATENCY_PROFILE=1
+    set +e
+    verify_latency_steps 2>&1 | tee "$log"
+    status="${PIPESTATUS[0]}"
+    set -e
+    python3 "${script_dir}/latency_targets.py" report "$log" || status=1
+    printf 'latency profile log: %s\n' "$log"
+    return "$status"
+}
+
+# The measuring steps of the latency profile; verify_latency records and reports them.
+verify_latency_steps() {
     local repo_dir="$(cd -- "${script_dir}/.." && pwd)"
     local target_dir="${CARGO_TARGET_DIR:-$repo_dir/target}"
     local failed=0
@@ -48,24 +102,51 @@ verify_latency() {
     report_environment setup
 
     python3 "${script_dir}/latency_proxy.py" self-test --samples 31 || failed=1
-    if scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl; then
+    # The host's own target: the native rows run the agent, so they need a binary this
+    # machine executes (the profile runs on compute01 x86_64 and dev-02 aarch64).
+    local native_target="$(uname -m)-unknown-linux-musl"
+    if [[ -n "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+        # A binary built elsewhere (the nightly perf-VM run, #447): measure exactly these bytes.
+        report_environment native
+        python3 "${script_dir}/verify-latency.py" --binary "$INFRATERNAL_LATENCY_BINARY" || failed=1
+    elif scripts/static-cargo build --locked --release --package infraternal --target "$native_target"; then
         report_environment native
         python3 "${script_dir}/verify-latency.py" \
-            --binary "$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal" || failed=1
+            --binary "$CARGO_TARGET_DIR/$native_target/release/infraternal" || failed=1
     else
         failed=1
     fi
 
-    report_environment auth-browser
-    "${script_dir}/verify-auth-browser" || failed=1
+    # The auth-browser check is a functional gate, not a D375 row producer, and it builds a Rust example:
+    # a prebuilt-binary run (the perf VM has no cargo) leaves it to `verify fast` and the nightly suite.
+    if [[ -z "${INFRATERNAL_LATENCY_BINARY:-}" ]]; then
+        report_environment auth-browser
+        "${script_dir}/verify-auth-browser" || failed=1
+    fi
     # `set -e` does not apply inside a subshell on the left of `||`, so the steps are
     # chained: a failed install or typecheck must fail the row, not only the browser run.
+    # Only the specs that print D375 rows run here; the whole functional browser suite
+    # belongs to `verify fast` and the nightly, and took about 5 h on one worker (#447).
+    # They run twice: unthrottled (vsync and the frame-rate limit off, so frame-bound rows
+    # measure our own work; this run gates) and at headless Chromium's normal 60 Hz pacing
+    # (reported beside it). The report checks the unthrottled run really ran above 60 Hz.
+    local row_specs=(test/terminal.spec.ts test/latency-profile.spec.ts)
+    local unthrottled_flags="--disable-renderer-backgrounding --disable-gpu-vsync --disable-frame-rate-limit"
     (
         cd -- "$repo_dir/apps/tracer" &&
             bun install --frozen-lockfile &&
-            bun run check &&
-            report_environment tracer-browser &&
-            TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test
+            bun run check
+    ) || failed=1
+    report_environment tracer-browser-unthrottled
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_LATENCY_DISPLAY=unthrottled TRACER_CHROMIUM_FLAGS="$unthrottled_flags" \
+                TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test "${row_specs[@]}"
+    ) || failed=1
+    report_environment tracer-browser-60hz
+    (
+        cd -- "$repo_dir/apps/tracer" &&
+            INFRATERNAL_LATENCY_DISPLAY=60hz TRACER_TEST_PORT="$TRACER_TEST_PORT" bun x playwright test "${row_specs[@]}"
     ) || failed=1
     report_environment finish
     return "$failed"
@@ -81,7 +162,7 @@ verify_integration() {
         scripts/static-cargo build --locked --release --package infraternal --target x86_64-unknown-linux-musl || return 1
         export INFRATERNAL_BIN="$CARGO_TARGET_DIR/x86_64-unknown-linux-musl/release/infraternal"
     fi
-    # Chained for the same reason as verify_latency: the caller may test this function's
+    # Chained for the same reason as verify_latency_steps: the caller may test this function's
     # status, which turns `set -e` off inside it.
     (
         cd -- "$repo_dir/apps/tracer" &&

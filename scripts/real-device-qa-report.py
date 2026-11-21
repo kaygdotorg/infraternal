@@ -130,6 +130,18 @@ def check_theme(theme_dir: Path, facts: dict):
         ok = r.get("console-visible") == "PASS"
         add("1 sign in", "PASS" if ok else "FAIL", "the app shows its Console after load (`console-visible`); shots: " + ", ".join(shots(theme_dir, "signin", ["console"])))
 
+    # 1a theme picked: measured on the picture (mean brightness of the page), so a "dark" run in a light app is a FAIL.
+    th = shots(theme_dir, "theme", ["theme-picked"])
+    want_dark = theme_dir.name == "dark"
+    if not th:
+        add("1a theme applied", "FAIL", "phase did not run")
+    else:
+        w, h, rows_ = png_gray(theme_dir.parent / th[0])
+        band = [row[x] for row in rows_[int(h * 0.25):int(h * 0.55)] for x in range(0, w, 8)]
+        mean = sum(band) / len(band)
+        ok = (mean < 110) == want_dark
+        add("1a theme applied", "PASS" if ok else "FAIL", f"page brightness {mean:.0f}/255 in the {theme_dir.name} run (dark < 110); shot: {th[0]}")
+
     # 2 shell and exit
     sh = phase_lines(theme_dir, "shell")
     r = results(sh)

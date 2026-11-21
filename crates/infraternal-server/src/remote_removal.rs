@@ -461,13 +461,13 @@ impl Removal {
             .await?;
         // Retirement's trigger creates a cleanup obligation. Forget deliberately cancels it,
         // along with the uninstall outbox and unfinished-bootstrap intent, after recording history.
-        for table in [
-            "remote_host_removals",
-            "remote_login_cleanup",
-            "remote_host_bootstrap",
-            "remote_bootstrap_retirement_intents",
+        for statement in [
+            "DELETE FROM remote_host_removals WHERE host_id=?",
+            "DELETE FROM remote_login_cleanup WHERE host_id=?",
+            "DELETE FROM remote_host_bootstrap WHERE host_id=?",
+            "DELETE FROM remote_bootstrap_retirement_intents WHERE host_id=?",
         ] {
-            sqlx::query(&format!("DELETE FROM {table} WHERE host_id=?"))
+            sqlx::query(statement)
                 .bind(entry.host.as_bytes().as_slice())
                 .execute(&mut *tx)
                 .await?;
@@ -552,8 +552,8 @@ impl Removal {
                 Some(*audit_id)
             }
         };
-        // A coordinates row means infraternal setup installed this host; only
-        // then does a known installation exist to remove by hand (#235).
+        // SSH setup records coordinates. A device-approved install instead
+        // records its origin on the host row and must have redeemed its join.
         let bootstrap: Option<Option<String>> =
             sqlx::query_scalar("SELECT trust_lookup FROM remote_host_bootstrap WHERE host_id=?")
                 .bind(entry.host.as_bytes().as_slice())
@@ -561,10 +561,70 @@ impl Removal {
                 .await?;
         let installed_by_setup = bootstrap.is_some();
         let lookup = bootstrap.flatten();
-        let (mode, name): (String, String) = sqlx::query_as("SELECT h.mode,COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?")
-            .bind(entry.host.as_bytes().as_slice())
-            .fetch_one(&mut *tx)
-            .await?;
+        let (mode, name, mac_recovery): (String, String, bool) = sqlx::query_as(
+            "SELECT h.mode,COALESCE(b.address,lower(hex(h.id))),
+             h.device_approved=1 AND h.mode='rootful'
+                 AND (h.device_os IS NULL OR h.device_os='macOS')
+                 AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)
+             FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=?",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        let host = entry.host.simple().to_string();
+        let installation = if installed_by_setup {
+            Some(Installation::Bootstrap(&host))
+        } else {
+            mac_recovery.then_some(Installation::Mac(&host))
+        };
+        // A host's id is the durable key for its one removal request. A repeat
+        // observes that outbox entry under the writer lock, preserving the
+        // original uninstall choice and avoiding another cleanup attempt.
+        let existing_cleanup: Option<String> = sqlx::query_scalar(
+            "SELECT r.host_cleanup FROM remote_host_removals r
+             JOIN remote_login_cleanup q ON q.host_id=r.host_id AND q.person_id=r.owner_id
+             WHERE r.host_id=? AND r.owner_id=? AND r.uninstall=1
+               AND r.host_cleanup='pending' AND q.confirmed=0",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .bind(&entry.user)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(cleanup) = existing_cleanup {
+            if let Some(audit_id) = audit_id {
+                let updated = sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result=? WHERE id=? AND state='pending'")
+                    .bind(live)
+                    .bind(if Uuid::parse_str(&entry.user).is_ok() {
+                        "revoked, cleanup pending"
+                    } else {
+                        "removed"
+                    })
+                    .bind(audit_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected();
+                if updated != 1 {
+                    return Err(crate::auth::Error::Denied);
+                }
+            }
+            tx.commit().await?;
+            let (message, manual) = outcome(
+                &cleanup,
+                &mode,
+                display_name(&name),
+                &[],
+                installation,
+                true,
+            );
+            return Ok(json!({
+                "host_id": entry.host,
+                "state": "pending",
+                "host_cleanup": cleanup,
+                "message": message,
+                "manual": manual,
+                "left": [],
+            }));
+        }
         // Record the authorized request before the node effect; the same writer
         // transaction publishes its outcome together with the denial tombstone.
         sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES(?,?,?,?,'pending')")
@@ -638,7 +698,6 @@ impl Removal {
             .commit_revocation_intent(tx, entry.host, live)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
-        let installation = installed_by_setup.then(|| entry.host.simple().to_string());
         // A connected host answers through the outbox within about a second of
         // the cut (#409). Wait for that, after the commit and so outside the
         // writer lock, so the result can say what happened and which kernel
@@ -657,7 +716,7 @@ impl Removal {
                     &mode,
                     display_name(&name),
                     &left,
-                    installation.as_deref(),
+                    installation,
                     false,
                 );
                 return Ok(
@@ -670,7 +729,7 @@ impl Removal {
             &mode,
             display_name(&name),
             &left,
-            installation.as_deref(),
+            installation,
             pending,
         );
         Ok(
@@ -678,21 +737,35 @@ impl Removal {
         )
     }
 }
+/// The local installation whose own executable recognizes the host receipt.
+#[derive(Clone, Copy)]
+enum Installation<'a> {
+    /// SSH bootstrap uses the canonical launcher for its recorded mode.
+    Bootstrap(&'a str),
+    /// A Mac checks its launchd installation and can recover without its PATH link.
+    Mac(&'a str),
+}
+
 /// Describe removal once, distinguishing pending cleanup from completed retirement.
 /// Pending responses keep the ownership-checked manual command available.
 /// A command ends the text verbatim so copying it cannot include sentence punctuation.
 ///
-/// `installation` is the host id when infraternal setup installed the host:
-/// only then are there commands, because only then is there an installation
-/// whose ownership the host can check.
+/// `installation` is the host id for a managed install with a local ownership check.
 fn outcome(
     cleanup: &str,
     mode: &str,
     name: &str,
     left: &[&str],
-    installation: Option<&str>,
+    installation: Option<Installation<'_>>,
     pending: bool,
 ) -> (String, Option<String>) {
+    // Hosts that enrolled before platform facts were retained can be offline
+    // today. The command is explicitly for macOS and checks ownership locally.
+    let account = match installation {
+        Some(Installation::Mac(_)) => "on macOS as root",
+        _ if mode == "rootful" => "as root",
+        _ => "as the account it was added with",
+    };
     if pending {
         let (detail, manual) = match cleanup {
             "requested" => {
@@ -708,8 +781,7 @@ fn outcome(
             // The outbox asks the host when it next connects (#409). Hand over
             // the manual command too, for a machine that never comes back.
             "pending" if installation.is_some() => {
-                let commands = manual_uninstall(mode, installation.unwrap_or_default());
-                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                let commands = manual_uninstall(mode, installation);
                 (format!("its infraternal agent uninstalls itself as soon as it connects. If it never does, remove it there {account} by running: {commands}"), Some(commands))
             }
             _ if installation.is_none() => (
@@ -717,8 +789,7 @@ fn outcome(
                 None,
             ),
             _ => {
-                let commands = manual_uninstall(mode, installation.unwrap_or_default());
-                let account = if mode == "rootful" { "as root" } else { "as the account it was added with" };
+                let commands = manual_uninstall(mode, installation);
                 (format!("infraternal is still installed on it, so remove it there {account} by running: {commands}"), Some(commands))
             }
         };
@@ -753,12 +824,7 @@ fn outcome(
         // Say plainly that the machine still runs it, and how to remove it
         // there while automatic cleanup remains unconfirmed (#235).
         _ => {
-            let commands = manual_uninstall(mode, installation.unwrap_or_default());
-            let account = if mode == "rootful" {
-                "as root"
-            } else {
-                "as the account it was added with"
-            };
+            let commands = manual_uninstall(mode, installation);
             (
                 format!(
                     "{name} was removed here, but infraternal is still installed on it. Remove it there {account} by running: {commands}"
@@ -884,11 +950,18 @@ fn display_name(address: &str) -> &str {
 /// installation recorded them, in either packet-filter frontend; the server's
 /// CA and a joined node's data stay. It stops at its first failure. No
 /// names are deleted directly.
-fn manual_uninstall(mode: &str, host: &str) -> String {
-    if mode == "rootful" {
-        format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
-    } else {
-        format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
+fn manual_uninstall(mode: &str, installation: Option<Installation<'_>>) -> String {
+    match installation {
+        Some(Installation::Mac(host)) => format!(
+            "'/Library/Application Support/infraternal/bin/infraternal' --bootstrap-uninstall {host}"
+        ),
+        Some(Installation::Bootstrap(host)) if mode == "rootful" => {
+            format!("/usr/local/bin/infraternal --bootstrap-uninstall {host}")
+        }
+        Some(Installation::Bootstrap(host)) => {
+            format!("~/.local/bin/infraternal --bootstrap-uninstall {host}")
+        }
+        None => String::new(),
     }
 }
 /// The removal service reports a full admission as busy, not as refused (#519).
