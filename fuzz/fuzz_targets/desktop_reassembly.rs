@@ -34,13 +34,14 @@ fuzz_target!(|data: &[u8]| {
     let Some((specs, script)) = rest.split_at_checked(count * 4) else {
         return;
     };
-    // Build the frames. Sizes reach a few fragments, and the last one is
-    // allowed to be the maximum so the bound is exercised.
+    // Build the frames. Sizes reach a few fragments; a rare 0xFFFF size is
+    // the maximum, so the memory bound is exercised without every input
+    // paying for a 4 MiB frame (that ran at about 400 inputs a second).
     let mut sent_frames = Vec::new();
     let mut sequence = 0u64;
     for spec in specs.as_chunks::<4>().0 {
         sequence += u64::from(spec[0] % 4) + 1;
-        let len = if spec[1] == 0xFF {
+        let len = if spec[1] == 0xFF && spec[2] == 0xFF {
             MAX_VIDEO_BYTES
         } else {
             usize::from(u16::from_be_bytes([spec[1], spec[2]])) % (6 * FRAGMENT_BYTES) + 1
@@ -52,12 +53,13 @@ fuzz_target!(|data: &[u8]| {
             bytes: vec![spec[3]; len].into(),
         });
     }
-    let mut pieces: Vec<Vec<(u32, Vec<u8>)>> = Vec::new();
+    // Each fragment as (offset, length) into its frame, so no bytes are copied.
+    let mut pieces: Vec<Vec<(u32, usize)>> = Vec::new();
     for video in &sent_frames {
         let mut list = Vec::new();
         let sent = fragments(&SESSION, video, |message| {
             if let Message::Fragment { offset, bytes, .. } = message {
-                list.push((offset, bytes.to_vec()));
+                list.push((offset, bytes.len()));
             }
             Ok(())
         });
@@ -75,8 +77,9 @@ fuzz_target!(|data: &[u8]| {
         let which = usize::from(step[0]) % sent_frames.len();
         let video = &sent_frames[which];
         let list = &pieces[which];
-        let (offset, original) = &list[usize::from(step[1]) % list.len()];
-        let mut bytes = original.clone();
+        let (offset, len) = list[usize::from(step[1]) % list.len()];
+        let from = usize::try_from(offset).unwrap();
+        let mut bytes = video.bytes[from..from + len].to_vec();
         let mode = step[0] >> 5;
         if mode == 6 {
             bytes[0] ^= 1;
@@ -91,7 +94,7 @@ fuzz_target!(|data: &[u8]| {
             capture_ns: video.capture_ns,
             keyframe: video.keyframe,
             total: u32::try_from(video.bytes.len()).unwrap(),
-            offset: *offset,
+            offset,
             bytes: &bytes,
         };
         let result = reassembler.push(message, now);
