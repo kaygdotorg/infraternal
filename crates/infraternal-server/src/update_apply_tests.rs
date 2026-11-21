@@ -157,6 +157,21 @@ async fn the_database_copy_is_private_and_complete() {
     let _ = std::fs::remove_file(&source);
 }
 
+/// The staging fault list names one fault per release; other releases, unknown fault
+/// names and malformed entries get none.
+#[test]
+fn a_staging_fault_applies_only_to_the_release_it_names() {
+    let list = "edge-1=unhealthy edge-2=timeout edge-3=migration edge-4=exec edge-5=melt bare";
+    assert_eq!(parse_fault(list, "edge-1"), Some(StagingFault::Unhealthy));
+    assert_eq!(parse_fault(list, "edge-2"), Some(StagingFault::Timeout));
+    assert_eq!(parse_fault(list, "edge-3"), Some(StagingFault::Migration));
+    assert_eq!(parse_fault(list, "edge-4"), Some(StagingFault::Exec));
+    assert_eq!(parse_fault(list, "edge-5"), None);
+    assert_eq!(parse_fault(list, "edge-9"), None);
+    assert_eq!(parse_fault(list, "bare"), None);
+    assert_eq!(parse_fault("", "edge-1"), None);
+}
+
 /// A server that is not a release on trial never asks for an undo when serving fails:
 /// its error ends the process as before.
 #[test]

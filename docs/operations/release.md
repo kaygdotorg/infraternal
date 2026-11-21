@@ -316,11 +316,13 @@ start` (the exec was refused).
 `check-production-trust.py` refuses them) read three more variables:
 `INFRATERNAL_STAGING_BUILDS_ORIGIN` (a `http://127.0.0.1:` channel),
 `INFRATERNAL_STAGING_UPDATE_SECONDS` (first check, check period and quiet window)
-and `INFRATERNAL_STAGING_UNHEALTHY_VERSION` (that version fails its health
-check). The root proof
-`deploy_staging::update_staging::auto_update_applies_warm_and_undoes_a_bad_release`
-uses them to test a bad release, updates off, a withdrawn release and a good
-release on a real unit.
+and `INFRATERNAL_STAGING_FAULTS`, space-separated `<version>=<fault>` entries
+where the fault is `unhealthy` (the health check fails), `timeout` (it never
+answers, so the 2-minute limit ends the trial), `migration` (startup fails like a
+broken migration) or `exec` (the exec of that release is refused).
+`scripts/update-proof-vm` runs the root proof in a throwaway NixOS microVM, with
+real terminal sessions, and covers each of those faults plus a kill and a hard
+reboot during the trial, updates off, a withdrawn release and a good release.
 
 # Add-host payloads
 

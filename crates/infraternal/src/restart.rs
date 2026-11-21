@@ -553,6 +553,10 @@ pub(crate) struct Replacement {
     /// An auto-update undo (#211 S4, D295): like an explicit rollback, a failed Mesh mirror
     /// refuses the older image, which must never start without its Mesh identity.
     mesh_required: bool,
+    /// The staging proof's `exec` fault: the exec of the new image is refused as if the
+    /// kernel had refused it, so the late-exec recovery runs (#211 S4).
+    #[cfg(feature = "staging-trust")]
+    refuse_exec: bool,
 }
 impl Replacement {
     /// Describe whether the selected image can receive a warm CA handoff.
@@ -591,6 +595,8 @@ impl Replacement {
             mesh_handoff: None,
             rollback_reply: None,
             mesh_required: false,
+            #[cfg(feature = "staging-trust")]
+            refuse_exec: false,
         })
     }
 
@@ -657,6 +663,13 @@ impl Replacement {
     /// verified file) lives until then and is closed by the exec.
     pub(crate) fn exec(self) -> io::Error {
         let _hold = self.hold;
+        #[cfg(feature = "staging-trust")]
+        let error = if self.refuse_exec {
+            io::ErrorKind::PermissionDenied.into()
+        } else {
+            execute_image(&self.binary, self.input.as_ref())
+        };
+        #[cfg(not(feature = "staging-trust"))]
         let error = execute_image(&self.binary, self.input.as_ref());
         drop(self.input);
         tracing::warn!(error_kind = ?error.kind(), outcome = "recovering", "invalid image refused; recovering current image");
@@ -777,6 +790,12 @@ pub(crate) fn switch(
                 return None;
             };
             record_request("update", None, Some(switch.path()), replacement.outcome());
+            #[cfg(feature = "staging-trust")]
+            {
+                use infraternal_server::update_apply::{StagingFault, staging_fault};
+                replacement.refuse_exec =
+                    staging_fault(switch.version()) == Some(StagingFault::Exec);
+            }
             let _ = reply.send(Ok(()));
             replacement.hold = Some(Box::new(switch));
             Some(replacement)

@@ -29,9 +29,9 @@
 //! **Staging hooks.** These are compiled only with the non-default `staging-trust`
 //! feature, which production builds refuse (`check-production-trust.py`).
 //! `INFRATERNAL_STAGING_UPDATE_SECONDS` shortens the first check, the check period and
-//! the quiet window, and `INFRATERNAL_STAGING_UNHEALTHY_VERSION` fails the health check
-//! of that one version. Together they let a real root server prove the rollback
-//! without publishing anything.
+//! the quiet window. `INFRATERNAL_STAGING_FAULTS` gives named releases one fault each
+//! (see [`StagingFault`]). Together they let a real root server prove every rollback
+//! path without publishing anything.
 use infraternal_plugin_release::{
     apply::{self, Pending, Phase, Resume, Switch, Undo},
     update::{self, Updater},
@@ -203,6 +203,59 @@ pub fn failed_start_undo(data: &Path) -> Option<Undo> {
     apply::begin_rollback(data, &trial, artifact, apply::FAILED_TO_START)
         .inspect_err(|reason| tracing::error!(reason, "update_undo_not_marked"))
         .ok()
+}
+
+/// A fault the staging proof gives one release, named in `INFRATERNAL_STAGING_FAULTS`
+/// as space-separated `<version>=<fault>` entries (`staging-trust` builds only).
+#[cfg(any(test, feature = "staging-trust"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagingFault {
+    /// `unhealthy`: the release's health check fails at once.
+    Unhealthy,
+    /// `timeout`: the release's health check never answers, so the trial limit ends it.
+    Timeout,
+    /// `migration`: the release's database migration fails at startup.
+    Migration,
+    /// `exec`: the running release's exec of this release is refused, so the late-exec
+    /// recovery brings the running release back.
+    Exec,
+}
+
+/// The fault `list` (the `INFRATERNAL_STAGING_FAULTS` format) gives `version`, if any.
+/// Unknown fault names are ignored.
+#[cfg(any(test, feature = "staging-trust"))]
+fn parse_fault(list: &str, version: &str) -> Option<StagingFault> {
+    list.split_whitespace().find_map(|entry| {
+        let (named, fault) = entry.split_once('=')?;
+        if named != version {
+            return None;
+        }
+        match fault {
+            "unhealthy" => Some(StagingFault::Unhealthy),
+            "timeout" => Some(StagingFault::Timeout),
+            "migration" => Some(StagingFault::Migration),
+            "exec" => Some(StagingFault::Exec),
+            _ => None,
+        }
+    })
+}
+
+/// The fault the staging proof gives release `version`, from `INFRATERNAL_STAGING_FAULTS`.
+#[cfg(feature = "staging-trust")]
+#[must_use]
+pub fn staging_fault(version: &str) -> Option<StagingFault> {
+    parse_fault(&std::env::var("INFRATERNAL_STAGING_FAULTS").ok()?, version)
+}
+
+/// Whether this process is a release on trial with the staging `migration` fault: its
+/// startup then fails the way a broken migration does.
+#[cfg(feature = "staging-trust")]
+pub(crate) fn staging_migration_fails() -> bool {
+    staging_fault(infraternal_plugin_api::VERSION) == Some(StagingFault::Migration)
+        && TRIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
 }
 
 /// The quiet window and the check timing, shortened only by the staging hook.
@@ -492,10 +545,13 @@ async fn healthy(
         return Err("the new release did not receive the unlocked CA");
     }
     #[cfg(feature = "staging-trust")]
-    if std::env::var("INFRATERNAL_STAGING_UNHEALTHY_VERSION")
-        .is_ok_and(|version| version == infraternal_plugin_api::VERSION)
-    {
-        return Err("staging: this version is set to fail its health check");
+    match staging_fault(infraternal_plugin_api::VERSION) {
+        Some(StagingFault::Unhealthy) => {
+            return Err("staging: this version is set to fail its health check");
+        }
+        // Never answer, so the trial limit decides (the real 2 minutes).
+        Some(StagingFault::Timeout) => std::future::pending::<()>().await,
+        _ => {}
     }
     let address = loopback(listen);
     loop {
