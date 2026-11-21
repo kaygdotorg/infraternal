@@ -4613,6 +4613,7 @@ mod tests {
             .expect("mode");
     }
 
+    /// An enrolled restore binds this Mac, restores again, and refuses a folder from another Mac (#221).
     #[test]
     fn an_enrolled_restore_binds_this_mac_and_refuses_a_folder_from_another() {
         let directory = test_directory();
@@ -4653,6 +4654,7 @@ mod tests {
         );
     }
 
+    /// The real hardware identity can be read and does not change between reads.
     #[test]
     fn this_mac_reports_a_stable_hardware_fingerprint() {
         let first = crate::macos_machine::fingerprint().expect("hardware identity");

@@ -2,7 +2,7 @@
 //!
 //! Linux ties the saved enrolment to `/etc/machine-id`. A Mac has no such file, so the state
 //! folder carried no record of its machine: copying it to another Mac would start a second node
-//! with the same WireGuard key. This module gives the Mac the same guarantee.
+//! with the same `WireGuard` key. This module gives the Mac the same guarantee.
 //!
 //! The binding is one fingerprint of two public facts, so that both kinds of change refuse:
 //!
@@ -98,7 +98,6 @@ pub(crate) fn fingerprint() -> Option<[u8; 32]> {
 pub(crate) fn check(state: &Path, current: Option<[u8; 32]>) -> io::Result<()> {
     let record: Option<MachineRecord> = read_public(&state.join(MACHINE_FILE))?;
     let refusal = match (record, current) {
-        (None, _) => None,
         (Some(_), None) => Some(MachineBindingError::MissingId),
         (Some(saved), Some(now)) if saved.machine != now => {
             Some(MachineBindingError::ForeignMachine)
@@ -136,13 +135,18 @@ pub(crate) fn bind(state: &Path, current: Option<[u8; 32]>) -> io::Result<()> {
     Ok(())
 }
 
+/// Unit tests with injected `ioreg`/`diskutil` text and temporary state folders.
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
+    /// `ioreg` output of a Mac, as the real tool prints it.
     const IOREG: &str = "+-o Root  <class IORegistryEntry>\n  +-o MacBookAir10,1  <class IOPlatformExpertDevice>\n    {\n      \"IOPlatformSerialNumber\" = \"X\"\n      \"IOPlatformUUID\" = \"e233fdb1-f660-59d3-a7bc-606aaa50a521\"\n    }\n";
+    /// `diskutil info` output of its Data volume.
     const DISK: &str = "   Device Identifier:         disk3s5\n   Volume Name:               Data\n   Volume UUID:               64E88BF5-E195-4DA2-80E9-4B92AE21034C\n   Disk / Partition UUID:     11111111-E195-4DA2-80E9-4B92AE21034C\n";
 
+    /// A fresh private (0700) state folder.
     fn state() -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -156,10 +160,12 @@ mod tests {
         path
     }
 
+    /// The typed binding refusal inside an `io::Error`.
     fn refusal(error: &io::Error) -> &MachineBindingError {
         error.get_ref().unwrap().downcast_ref().unwrap()
     }
 
+    /// Both UUIDs are read, upper-cased, and the partition UUID is not mistaken for the volume UUID.
     #[test]
     fn parses_both_uuids_and_ignores_the_partition_uuid() {
         assert_eq!(
@@ -172,6 +178,7 @@ mod tests {
         );
     }
 
+    /// Without both UUIDs there is no fingerprint to trust.
     #[test]
     fn a_missing_or_malformed_uuid_gives_no_fingerprint() {
         assert!(fingerprint_from(IOREG, DISK).is_some());
@@ -180,6 +187,7 @@ mod tests {
         assert!(fingerprint_from(&IOREG.replace("e233fdb1", "zzzzzzzz"), DISK).is_none());
     }
 
+    /// A different Mac or an erased disk gives a different fingerprint.
     #[test]
     fn another_mac_or_a_reinstalled_disk_changes_the_fingerprint() {
         let base = fingerprint_from(IOREG, DISK);
@@ -203,6 +211,7 @@ mod tests {
         );
     }
 
+    /// The first start records the binding and the same Mac keeps restoring.
     #[test]
     fn the_first_start_records_and_the_same_machine_restores() {
         let dir = state();
@@ -214,6 +223,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A folder recorded on another Mac is refused and its record is unchanged.
     #[test]
     fn a_folder_recorded_on_another_mac_is_refused_and_left_untouched() {
         let dir = state();
@@ -234,6 +244,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A reinstall on the same hardware (new volume) is refused like Linux refuses a new machine ID.
     #[test]
     fn a_reinstall_on_the_same_hardware_is_refused() {
         let dir = state();
@@ -247,6 +258,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// No readable identity is a refusal, never a pass.
     #[test]
     fn an_unreadable_identity_is_refused_rather_than_trusted() {
         let dir = state();
@@ -258,6 +270,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A state folder open to group or others is refused.
     #[test]
     fn an_exposed_folder_is_refused() {
         use std::os::unix::fs::PermissionsExt as _;
