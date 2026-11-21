@@ -9,6 +9,9 @@ target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
 # Exported so unit tests that place private fixtures under the target folder
 # (release staging tests) find it whether or not the caller set it.
 export CARGO_TARGET_DIR="$target_dir"
+# A gate builds each crate once, so incremental caches never get reused but cost about a fifth of
+# the target (12 of 56 GB, #574). Callers that iterate on one checkout may still set it to 1.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
 
 # Cargo does not make a target directory safe to share between source roots.
 # Remember the last checkout and revision so a comparison with reused artifacts
