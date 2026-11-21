@@ -71,6 +71,8 @@ pub struct RenewalIdentity {
     roots: Vec<X509>,
     publisher: Arc<dyn CertificatePublisher>,
     rotation: Option<crate::identity_rotation::IdentityRotation>,
+    /// The enrollment's newest accepted server leaf; recovery dials check it (#559).
+    server_leaf: Arc<crate::server_leaf_floor::ServerLeafFloor>,
 }
 impl RenewalIdentity {
     /// Retain the host key, public pins and the installation publication adapter.
@@ -88,7 +90,19 @@ impl RenewalIdentity {
             roots: roots.to_vec(),
             publisher,
             rotation: None,
+            server_leaf: Arc::default(),
         }
+    }
+    /// Share the enrollment's server-leaf floor with the recovery dial, so a
+    /// recovery attempt refuses the same stale server leaves as ordinary dials.
+    /// Without this call recovery uses its own in-memory floor.
+    #[must_use]
+    pub fn with_server_leaf(
+        mut self,
+        floor: Arc<crate::server_leaf_floor::ServerLeafFloor>,
+    ) -> Self {
+        self.server_leaf = floor;
+        self
     }
     /// Enable rotation only when the installation supplies durable private-state publication.
     /// # Errors
@@ -148,8 +162,14 @@ impl RenewalIdentity {
         server_name: &str,
     ) -> io::Result<()> {
         let current = self.current()?;
-        let certificate =
-            crate::remote_recovery::exchange(address, server_name, &current, &self.roots).await?;
+        let certificate = crate::remote_recovery::exchange(
+            address,
+            server_name,
+            &current,
+            &self.roots,
+            &self.server_leaf,
+        )
+        .await?;
         let verify_at = epoch_seconds(certificate.not_before())?;
         let mut identity = self.identity.try_write().map_err(|error| match error {
             std::sync::TryLockError::WouldBlock => io::Error::from(io::ErrorKind::WouldBlock),

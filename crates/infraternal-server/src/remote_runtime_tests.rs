@@ -394,6 +394,7 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
         "localhost",
         &fixture.expired,
         std::slice::from_ref(&fixture.root),
+        &infraternal_agent::server_leaf_floor::ServerLeafFloor::default(),
     )
     .await
     .unwrap();
@@ -417,6 +418,7 @@ async fn verify_completed_recovery_retries(fixture: &RecoveryTlsFixture, recover
             "localhost",
             &fixture.expired,
             std::slice::from_ref(&fixture.root),
+            &infraternal_agent::server_leaf_floor::ServerLeafFloor::default(),
         )
         .await
         .is_err(),
