@@ -103,7 +103,7 @@ pub(crate) async fn serve(
         loop {
             tokio::select! {
                 result = &mut serving => return result.map(|()| Outcome::Stopped),
-                replacement = control.requested(source.as_deref()) => {
+                replacement = control.requested(source.as_ref()) => {
                     match replacement {
                         Ok(replacement) => return Ok(Outcome::Restart(replacement)),
                         Err(error) => {

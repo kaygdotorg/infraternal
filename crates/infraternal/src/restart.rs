@@ -77,7 +77,7 @@ impl Control {
     /// Wait for the next control request and answer it: status, or a restart into a verified replacement.
     pub(crate) async fn requested(
         &mut self,
-        source: Option<&dyn infraternal_server::ca::CaKeySource>,
+        source: Option<&std::sync::Arc<dyn infraternal_server::ca::CaKeySource>>,
     ) -> io::Result<Replacement> {
         loop {
             let mut socket = tokio::select! {
@@ -92,7 +92,7 @@ impl Control {
                     };
                     match crate::restart_binary::Opened::open_reload(target.clone()) {
                         Ok(binary) => {
-                            let Ok(replacement) = Replacement::new(binary, source) else {
+                            let Ok(replacement) = Replacement::new(binary, source.cloned()) else {
                                 record_request("SIGHUP", None, Some(&target), "refused"); continue;
                             };
                             record_request("SIGHUP", None, Some(&replacement.binary.path), replacement.outcome());
@@ -132,7 +132,12 @@ impl Control {
                 rollback,
             } = request
             else {
-                let sent = send_status(&mut socket, source, &self.clock_health).await;
+                let sent = send_status(
+                    &mut socket,
+                    source.map(|source| &**source),
+                    &self.clock_health,
+                )
+                .await;
                 if sent.is_ok() {
                     record_request("status", peer.as_ref(), None, "replied");
                 } else {
@@ -150,7 +155,7 @@ impl Control {
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
             };
-            let Ok(mut replacement) = Replacement::new(opened, source) else {
+            let Ok(mut replacement) = Replacement::new(opened, source.cloned()) else {
                 record_request("socket", peer.as_ref(), Some(&binary), "refused");
                 let _ = socket.write_all(b"REFUSED\n").await;
                 continue;
@@ -182,7 +187,7 @@ impl Control {
                 replacement.rollback_reply = Some(reply);
                 return Ok(replacement);
             }
-            let reply = if replacement.input.is_some() {
+            let reply = if replacement.warm_at_request {
                 b"RESTARTING\n".as_slice()
             } else {
                 b"RESTARTING COLD (CA locked)\n".as_slice()
@@ -535,8 +540,20 @@ pub(crate) async fn request(
 /// rollback is acknowledged only after that mirror is complete.
 pub(crate) struct Replacement {
     binary: crate::restart_binary::Opened,
+    /// The live key source, kept so the CA is exported only right before exec (#559, J1099).
+    ///
+    /// Exporting when the request arrives would freeze the lock state for the whole shutdown
+    /// window (up to 4 s of runtime shutdown plus the Mesh mirror). An administrator's unlock that
+    /// finished inside that window answered "unlocked", yet the successor started cold.
+    source: Option<std::sync::Arc<dyn infraternal_server::ca::CaKeySource>>,
+    /// Whether the selected image would start warm if exec happened now; this only shapes the
+    /// requester's reply and the request log. The actual frame is built later by `export_ca`.
+    warm_at_request: bool,
+    /// The successor's frame, filled by `export_ca` just before the selected image executes.
     input: Option<std::os::unix::net::UnixStream>,
     recovery: crate::restart_binary::Opened,
+    /// The recovery image's own frame, filled just before recovery executes. A failed exec must
+    /// never reuse or partially consume the successor's frame, so each image gets its own.
     recovery_input: Option<std::os::unix::net::UnixStream>,
     /// Durable and legacy Mesh directories to mirror after quiescence, when a binary was named.
     mesh_handoff: Option<(PathBuf, PathBuf)>,
@@ -546,37 +563,60 @@ pub(crate) struct Replacement {
 impl Replacement {
     /// Describe whether the selected image can receive a warm CA handoff.
     fn outcome(&self) -> &'static str {
-        if self.input.is_some() { "warm" } else { "cold" }
+        if self.warm_at_request { "warm" } else { "cold" }
     }
-    /// Prepare the requested executable and pin the current image for recovery.
+    /// Pin the requested executable and the current image for recovery, keeping the key source.
     ///
-    /// Both images and any warm-start input stay open until the selected image is executed.
+    /// No CA material leaves the source here: both frames are built by `export_ca` right before
+    /// their exec, so an unlock that lands while the runtime shuts down still reaches the
+    /// successor. Both images stay open until the selected image is executed.
     /// # Errors
     /// Returns an error if the current image cannot be opened for recovery.
     pub(crate) fn new(
         binary: crate::restart_binary::Opened,
-        source: Option<&dyn infraternal_server::ca::CaKeySource>,
+        source: Option<std::sync::Arc<dyn infraternal_server::ca::CaKeySource>>,
     ) -> io::Result<Self> {
-        // Pin recovery before exporting anything or dropping the serving future.
+        // Pin recovery before dropping the serving future.
         let recovery = crate::restart_binary::Opened::running()?;
-        let recovery_input = if recovery.warm {
-            source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok())
-        } else {
-            None
-        };
-        let input = if binary.warm {
-            source.and_then(|source| infraternal_server::ca_handoff::prepare(source).ok())
-        } else {
-            None
-        };
-        Ok(Self {
+        Ok(Self::with_recovery(binary, recovery, source))
+    }
+
+    /// Assemble a replacement from the selected image and an already pinned recovery image.
+    ///
+    /// Split from [`Replacement::new`] so tests can pass signed fixture images: a debug test
+    /// executable is larger than the running-image bound `Opened::running` enforces.
+    fn with_recovery(
+        binary: crate::restart_binary::Opened,
+        recovery: crate::restart_binary::Opened,
+        source: Option<std::sync::Arc<dyn infraternal_server::ca::CaKeySource>>,
+    ) -> Self {
+        // A cheap probe for the reply only; the material it clones is dropped at once.
+        let warm_at_request =
+            binary.warm && source.as_ref().is_some_and(|source| source.load().is_ok());
+        Self {
             binary,
-            input,
+            source,
+            warm_at_request,
+            input: None,
             recovery,
-            recovery_input,
+            recovery_input: None,
             mesh_handoff: None,
             rollback_reply: None,
-        })
+        }
+    }
+
+    /// Build one image's CA frame from the source's current state, or `None` to start cold.
+    ///
+    /// Called once per image, immediately before that image executes. A locked source, a cold-only
+    /// image or a failed export all mean a cold start (D217: a failed handoff stays locked).
+    fn export_ca(
+        source: Option<&std::sync::Arc<dyn infraternal_server::ca::CaKeySource>>,
+        image: &crate::restart_binary::Opened,
+    ) -> Option<std::os::unix::net::UnixStream> {
+        if !image.warm {
+            return None;
+        }
+        source.and_then(|source| infraternal_server::ca_handoff::prepare(source.as_ref()).ok())
     }
 
     /// Mirror Mesh state to the legacy path once writers stop, before another image starts.
@@ -632,17 +672,22 @@ impl Replacement {
     /// Restart only this image after rollback refusal, without ever executing the older image.
     fn exec_recovery_only(mut self) -> io::Error {
         drop(self.input.take());
+        self.recovery_input = Self::export_ca(self.source.as_ref(), &self.recovery);
         let error = execute_image(&self.recovery, self.recovery_input.as_ref());
         drop(self.recovery_input.take());
         error
     }
 
-    pub(crate) fn exec(self) -> io::Error {
+    /// Execute the selected image with a CA frame exported now, or recover this image if the
+    /// kernel refuses it. Returns only when both execs failed.
+    pub(crate) fn exec(mut self) -> io::Error {
+        self.input = Self::export_ca(self.source.as_ref(), &self.binary);
         let error = execute_image(&self.binary, self.input.as_ref());
-        drop(self.input);
+        drop(self.input.take());
         tracing::warn!(error_kind = ?error.kind(), outcome = "recovering", "invalid image refused; recovering current image");
         // The first receiver may have been mapped to stdin. A separate frame is
         // essential: failed exec must never reuse or partially consume that frame.
+        self.recovery_input = Self::export_ca(self.source.as_ref(), &self.recovery);
         execute_image(&self.recovery, self.recovery_input.as_ref())
     }
 }
