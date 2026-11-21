@@ -283,3 +283,176 @@ async fn resume_refusals_distinguish_connection_state_and_lost_token_rotation() 
         .unwrap();
     assert!(matches!(refused, sqlx::Error::Protocol(ref check) if check == "token_mismatch"));
 }
+
+/// A WAL database file under a fresh private directory, shaped like the server's
+/// own, so `Auth` puts its D379 writer in front of it (#562).
+async fn disk_database() -> (SqlitePool, String, [u8; 16], Auth, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("infraternal-claim-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.join("infraternal.sqlite"))
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap();
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    assert!(
+        auth.database().is_some(),
+        "an on-disk Auth owns a D379 pool"
+    );
+    let user = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES (?,'writer','writer','Writer',1,'unused-test-hash')")
+        .bind(&user).execute(&pool).await.unwrap();
+    let session = [7; 16];
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,input_acked_u64) VALUES (?,?,0,0,?)")
+        .bind(session.as_slice()).bind(&user).bind(77_u64.to_be_bytes().as_slice()).execute(&pool).await.unwrap();
+    (pool, user, session, auth, dir)
+}
+
+/// Claim through the D379 writer with the sqlx test's inputs.
+async fn claim_on_writer(
+    auth: &Auth,
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+    authority: Option<&str>,
+    limit: i64,
+) -> Result<(u64, u32), ()> {
+    crate::terminal_writer_claim::claim(
+        auth,
+        crate::terminal_writer_claim::Claim {
+            user,
+            connection,
+            stream,
+            session,
+            authority,
+            limit,
+        },
+    )
+    .await
+    .expect("an on-disk Auth has a writer")
+}
+
+/// The D379 claim keeps every rule of the sqlx `owned_writer`: a device gets
+/// its own identity and offset, a repeat claim returns the same row, another
+/// account or an unknown session is refused, the per-socket limit holds, ids
+/// never repeat after a socket is deleted, and a logged-out session is refused.
+#[tokio::test]
+async fn writer_claim_on_the_d379_writer_keeps_the_sqlx_rules() {
+    let (pool, user, session, auth, dir) = disk_database().await;
+    let a = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let b = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (offset, first) = claim_on_writer(&auth, &user, &a.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert_eq!(
+        (offset, first % 2),
+        (0, 0),
+        "a fresh writer starts at zero, even id"
+    );
+    let (_, other_device) = claim_on_writer(&auth, &user, &b.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert_ne!(first, other_device);
+    let high = u64::MAX - 1;
+    sqlx::query(
+        "UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=1",
+    )
+    .bind(high.to_be_bytes().as_slice())
+    .bind(a.connection_id.as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        claim_on_writer(&auth, &user, &a.connection_id, 1, &session, None, 32).await,
+        Ok((high, first)),
+        "a repeat claim returns the stored offset and identity"
+    );
+    assert!(
+        claim_on_writer(
+            &auth,
+            "someone-else",
+            &a.connection_id,
+            1,
+            &session,
+            None,
+            32
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        claim_on_writer(&auth, &user, &a.connection_id, 1, &[8; 16], None, 32)
+            .await
+            .is_err()
+    );
+    claim_on_writer(&auth, &user, &a.connection_id, 3, &session, None, 2)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(&auth, &user, &a.connection_id, 5, &session, None, 2)
+            .await
+            .is_err(),
+        "the per-socket limit holds"
+    );
+    sqlx::query("DELETE FROM websocket_connections WHERE connection_id=?")
+        .bind(a.connection_id.as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let c = new_connection(&pool, &user, 0, None, None).await.unwrap();
+    let (_, later) = claim_on_writer(&auth, &user, &c.connection_id, 1, &session, None, 32)
+        .await
+        .unwrap();
+    assert!(
+        later > first,
+        "a new writer reused a retired input identity"
+    );
+
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("claim-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'claim',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    claim_on_writer(&auth, &user, &c.connection_id, 3, &session, Some(&hash), 32)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(
+            &auth,
+            &user,
+            &c.connection_id,
+            5,
+            &session,
+            Some("not-a-session"),
+            32
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("DELETE FROM sessions WHERE token_hash=?")
+        .bind(&hash)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        claim_on_writer(&auth, &user, &c.connection_id, 3, &session, Some(&hash), 32)
+            .await
+            .is_err(),
+        "a logged-out session cannot claim"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

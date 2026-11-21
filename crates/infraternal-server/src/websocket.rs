@@ -2279,8 +2279,8 @@ where
                 NO_SESSION
             };
             let host_id = owned_host.flatten();
-            let Ok((input_acked, writer_stream)) = owned_writer(
-                &state.pool,
+            let Ok((input_acked, writer_stream)) = claim_writer(
+                state,
                 user_id,
                 connection_id,
                 stream_id,
@@ -3376,6 +3376,37 @@ impl EndedStreams {
             _ => Err(()),
         }
     }
+}
+
+/// Claim the device's durable writer for an attachment: on the D379 writer
+/// thread when the server has one, otherwise (in-memory test databases) on
+/// sqlx with the same rules (#562). Returns the acknowledged input offset and
+/// the wire writer id.
+async fn claim_writer(
+    state: &WebSocketState,
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+    authority: Option<&str>,
+) -> Result<(u64, u32), ()> {
+    let limit = i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())?;
+    if let Some(result) = crate::terminal_writer_claim::claim(
+        &state.auth,
+        crate::terminal_writer_claim::Claim {
+            user,
+            connection,
+            stream,
+            session,
+            authority,
+            limit,
+        },
+    )
+    .await
+    {
+        return result;
+    }
+    owned_writer(&state.pool, user, connection, stream, session, authority).await
 }
 
 async fn owned_writer(
