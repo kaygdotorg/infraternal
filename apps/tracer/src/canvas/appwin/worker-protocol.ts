@@ -9,6 +9,7 @@
  */
 
 import type { FrameTrace, ReceiveTrace } from "./frame-trace";
+import type { TileStats } from "./tiles";
 
 /** Main thread to worker. */
 export type ToWorker =
@@ -50,4 +51,6 @@ export interface WorkerStats {
   /** High-water marks for coded references awaiting decoder admission; decoded pictures are never queued here. */
   pendingPeak: number;
   pendingBytesPeak: number;
+  /** The tile lane's counters (#146 proposal C); present in every reply from the worker. */
+  tiles?: TileStats;
 }
