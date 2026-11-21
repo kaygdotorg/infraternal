@@ -2732,8 +2732,8 @@ mod inherited_login_process_tests {
     ///
     /// The pin must never replace the readiness source. The body runs in a fresh fixture process
     /// (selected by an environment marker) so that the descriptor numbers are predictable.
-    /// Known issue (#553): in that fresh table, `dup2` onto fd 5 closes a clone that still owns fd 5,
-    /// so the fixture aborts with an IO-safety violation. Holding fds 3 and 4 open avoids this.
+    /// The test's own copies are made at 10 and up, so each descriptor has exactly one owner
+    /// whether fds 3 and 4 are free or held (#553).
     #[test]
     fn reserved_ready_source_survives_process_pin_transfer() {
         const FIXTURE: &str = "INFRATERNAL_READY_PIN_FIXTURE";
@@ -2753,13 +2753,24 @@ mod inherited_login_process_tests {
             return;
         }
         let (parent, ready) = std::os::unix::net::UnixStream::pair().unwrap();
-        let parent_copy = parent.try_clone().unwrap();
-        let ready_copy = ready.try_clone().unwrap();
+        // Copies take numbers from 10 up, whatever fds 3 to 9 hold. try_clone
+        // would take the lowest free number, which can be 5 (the dup2 target
+        // below). An owned copy overwritten there leaves two owners of one
+        // descriptor, and the second close aborts with an IO-safety violation.
+        let dup_from_ten = |socket: &std::os::unix::net::UnixStream| {
+            let raw = fcntl(socket.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(10)).unwrap();
+            // SAFETY: fcntl returned a fresh descriptor that nothing else owns.
+            unsafe { std::os::unix::net::UnixStream::from_raw_fd(raw) }
+        };
+        let parent_copy = dup_from_ten(&parent);
+        let ready_copy = dup_from_ten(&ready);
         drop(parent);
         drop(ready);
-        // SAFETY: this isolated fixture owns no descriptor 5 after its original
-        // socket pair closes. Duplicate the ready socket onto the reserved pin
-        // slot to reproduce callback ordering with a small descriptor table.
+        // SAFETY: every descriptor this test owns is now either a copy at 10 or
+        // above or was closed above, so dup2 can only replace a number nothing
+        // owns. Duplicate the ready socket onto the reserved slot 5 to reproduce
+        // callback ordering with a small descriptor table. `ready` is the only
+        // owner of fd 5 from here on.
         assert_ne!(unsafe { nix::libc::dup2(ready_copy.as_raw_fd(), 5) }, -1);
         let ready = unsafe { File::from_raw_fd(5) };
         // Open the process pin after reserving fd 5 so the fixture cannot
