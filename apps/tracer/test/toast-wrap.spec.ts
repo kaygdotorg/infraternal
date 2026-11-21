@@ -18,18 +18,27 @@ import { motionSettled } from "./motion";
 
 declare global { interface Window { __toast?: { dismiss(...id: [string?]): void; show(value: Record<string, unknown>): string } } }
 
+/** Names the output folder (before or after); the same spec produces both sets of screenshots. */
 const LABEL = process.env.TOAST_SHOTS_LABEL ?? "after";
+/** Where this run writes its screenshots. */
 const OUT = tracerEvidencePath("toast-wrap", LABEL);
+/** The measurements describe the fixed layout, so a "before" run only takes screenshots. */
 const MEASURE = LABEL !== "before";
 
 /** Icon bodies as the product draws them (packages/ui/src/icons.ts); the spec cannot import them into the page. */
 const TERMINAL = '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="m7 10 3 2-3 2M13 14h4"/>';
+/** The info mark. */
 const INFO = '<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 7.8v.01"/>';
+/** The lock. */
 const LOCK = '<rect x="5" y="11" width="14" height="9.5" rx="2.5"/><path d="M8.5 11V8a3.5 3.5 0 0 1 7 0v3"/>';
+/** The tick for a choice. */
 const CHECK = '<path d="m5 12.5 4.5 4.5L19 7.5"/>';
+/** The cross for a choice. */
 const X = '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>';
+/** The question mark for a choice. */
 const HELP = '<circle cx="12" cy="12" r="8.5"/><path d="M9.7 9.7a2.4 2.4 0 1 1 3.4 2.2c-.7.4-1.1.9-1.1 1.7M12 16.8v.01"/>';
 
+/** One toast as a caller can ask for it: wording, tone, icon, buttons, choices and how often it repeats. */
 interface Shape { id: string; message: string; tone?: "error"; icon?: string; dismissible?: boolean; action?: string; secondary?: string; choices?: boolean; repeat?: number }
 
 /** One toast per layout the product can produce, with real wording. */
@@ -48,6 +57,7 @@ const SHAPES: Shape[] = [
   { id: "count", message: "That layout change was not saved. The saved layout is back.", tone: "error", repeat: 3 },
 ];
 
+/** Opens the production mock in a theme and clears the welcome notices, so each case starts with an empty stack. */
 async function open(page: Page, theme: "ink" | "paper"): Promise<void> {
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none&sessions=0`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
@@ -56,6 +66,7 @@ async function open(page: Page, theme: "ink" | "paper"): Promise<void> {
   await expect(page.locator(".ui-toast")).toHaveCount(0);
 }
 
+/** Shows one toast with the product wording and waits until its card is open and still. */
 async function show(page: Page, s: Shape): Promise<void> {
   await page.evaluate(({ s: shape, icons }) => {
     const value: Record<string, unknown> = { message: shape.message, duration: 0, key: shape.id };
@@ -75,6 +86,7 @@ async function show(page: Page, s: Shape): Promise<void> {
   await expect(page.locator(".ui-toast")).toHaveAttribute("data-open", "true");
   await motionSettled(page);
   // The tick draws itself in; measure and photograph the finished card.
+  // sleep: the tick draws itself in with no signal to wait for; measure and photograph the finished card.
   await page.waitForTimeout(700);
 }
 

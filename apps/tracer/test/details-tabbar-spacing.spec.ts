@@ -11,9 +11,13 @@ for (const theme of ["ink", "paper"]) test(`${name} ${theme}`, async ({ browser 
   const ctx = await browser.newContext({ viewport: vp, deviceScaleFactor: touch ? 3 : 2, hasTouch: touch, isMobile: touch, colorScheme: theme === "ink" ? "dark" : "light" });
   const page = await ctx.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=3&theme=${theme}&bg=none&sessions=0`);
-  await page.waitForSelector(".cl-mockup"); await page.waitForTimeout(1500);
+  await page.waitForSelector(".cl-mockup");
+  // sleep: the canvas flies its windows into place with no signal to wait for.
+  await page.waitForTimeout(1500);
   await page.locator(`.ui-window .ui-window-pill`).first().click();
-  await page.waitForSelector(".canvas-popover"); await page.waitForTimeout(800);
+  await page.waitForSelector(".canvas-popover");
+  // sleep: the popover opens and its tab capsule settles with no signal to wait for.
+  await page.waitForTimeout(800);
   const m = await page.evaluate(() => {
     const r = (s: string) => document.querySelector(s)!.getBoundingClientRect();
     const p = r(".canvas-popover"), t = r(".canvas-popover-tabs .ui-tabs"), s = r(".canvas-popover-scroll"), h = r(".canvas-popover-head");

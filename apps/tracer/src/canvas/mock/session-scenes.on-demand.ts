@@ -10,6 +10,7 @@ import { reduced } from "../dom";
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import type { MockInventory } from "./inventory";
 
+/** One scene: its review number (`n`, see session-scene-list.ts), its palette words and what it does when run. */
 interface SceneDef { n: number; title: string; hint: string; run(): void | Promise<void> }
 
 export interface SessionScenes {
