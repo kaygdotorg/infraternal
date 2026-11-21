@@ -29,6 +29,8 @@ import { createAddHost } from "../addhost";
 import { createAuthorityControl } from "../addhost/authority-unlock";
 import { mockInboxItems } from "./inbox-items";
 import { inboxFor } from "../inbox-host";
+import { createAccessReportInbox } from "../access-left.on-demand";
+import { mockAccessReports } from "./access-reports";
 import { createOverlayFlowHost } from "../addhost/flow-host";
 import { createWindowFlowHost } from "../addhost/window-host";
 import { installDocsSource } from "../docs/docs-source";
@@ -85,6 +87,12 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const authority = createAuthorityControl(core, { service: async () => provisioning, canUnlock: () => world.role === "operator", hasRemoteHosts: () => query.get("nohosts") !== "1" && sessions.hosts().length > 0, onHostsChange: (listener) => sessions.onChange(listener) });
   // `?inbox=3` adds two more kinds of waiting item, to see the card with several lines (test double only).
   if (new URLSearchParams(location.search).get("inbox") === "3") inboxFor(core).set("mock-extra", mockInboxItems());
+  // `?accessleft=changed|clean|unchecked|all` (D398): the owner's Inbox reports of what a revoked person left behind.
+  const accessScene = query.get("accessleft");
+  const accessLater = query.get("accesslater") === "1";
+  const accessLeft = accessScene ? createAccessReportInbox(core, mockAccessReports(accessScene, world.role === "operator", accessLater)) : undefined;
+  // The "arrives while the page is open" scene asks again soon, rather than waiting a minute.
+  if (accessLater) window.setTimeout(() => { void accessLeft?.refresh(); }, 3500);
   const addHost = createAddHost(core, {
     host: createWindowFlowHost(() => canvas.cx, createOverlayFlowHost(core.stage)),
     service: provisioning,
@@ -386,6 +394,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   return {
     dispose() {
       authority.dispose();
+      accessLeft?.dispose();
       setupDemo?.dispose();
       startupDemo?.dispose();
       events.abort();

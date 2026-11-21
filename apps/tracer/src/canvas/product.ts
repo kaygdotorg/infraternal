@@ -236,6 +236,16 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     hasRemoteHosts: () => sessions.hosts().some((entry) => entry.id !== "embedded"),
     onHostsChange: (listener) => sessions.onChange(listener),
   });
+  // What a revoked person left behind (D398): the owner's Inbox reports. Loaded when the browser is idle; the server
+  // answers anyone but the owner with a refusal, which ends the asking.
+  let accessLeft: import("./access-left.on-demand").AccessReportInbox | undefined;
+  let accessLeftDisposed = false;
+  whenIdle(() => {
+    void onDemand(() => import("./access-left.on-demand")).then((module) => {
+      if (!accessLeftDisposed) accessLeft = module.createAccessReportInbox(core, module.serverAccessReports(), (listener) => sessions.onChange(listener));
+    }).catch(() => undefined);
+  }, 1000);
+  const disposeAccessLeft = (): void => { accessLeftDisposed = true; accessLeft?.dispose(); };
   let welcomedOnce = false;
   const offAuthorityWelcome = connection.onWelcome(() => {
     // A restart can lock the CA while this page retains its old unlocked state.
@@ -261,7 +271,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   /** Ends the takeover toast and its listeners (both teardown paths). */
   const disposeTakeover = (): void => { offTakeoverWelcome(); document.removeEventListener("visibilitychange", onTakeoverVisibility); takeover.dispose(); };
   if (options.isCurrent?.() === false) {
-    disposed = true; disposeTakeover(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
+    disposed = true; disposeTakeover(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); store.dispose?.(); offRoundTrip(); offSessionInventory(); offAuthorityWelcome(); authority.dispose(); disposeAccessLeft(); addHost.dispose(); inventory.dispose(); sessions.dispose(); pool.dispose(); connection.dispose();
     throw Error("The signed-in screen changed while layout was loading.");
   }
   // Positions the person pinned in the Mesh graph come back from the canvas document (D180).
@@ -469,6 +479,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       offSessionInventory();
       offAuthorityWelcome();
       authority.dispose();
+      disposeAccessLeft();
       startupHints.dispose();
       offMeshView();
       addHost.dispose(); docs.dispose();
