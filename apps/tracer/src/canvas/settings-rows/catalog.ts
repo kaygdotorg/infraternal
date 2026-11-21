@@ -11,8 +11,8 @@
  *
  * The map is the owner's of 2026-11-02 (names in Title Case, no brackets); the owner approved the rows on 2026-11-03 (#304). The
  * table says where a setting LIVES and what values it allows; it does not say whether the server can store it. That is
- * `backing.ts`: a setting nobody backs shows no control, and a window with nothing to show says so in one plain line
- * ("Not available yet"). The table holds no invented data: lists of facts and keys come from the source, never from here.
+ * `backing.ts`: a setting nobody backs shows no control, and a window with nothing to show names the settings that will
+ * appear there, once the server can store them (`emptyGroupNote`). The table holds no invented data: lists of facts and keys come from the source, never from here.
  * Defaults and ranges the owner gave: 7 d connection keys, 7 d machine identity, 90 d renewal grace, 30 d keys last (1–365,
  * the server's own rule), 30 d browser sign-in (1–90), 15 min add link, 10 min join code. The other ranges are my proposals.
  *

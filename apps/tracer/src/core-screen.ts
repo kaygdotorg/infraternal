@@ -360,7 +360,8 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
     }).catch(() => {
       if (screenDisposed || request !== settingsRequest) return;
       settingsOpening = false;
-      toast.show({ message: "Settings could not be loaded. Try again.", duration: 4000 });
+      // The failure names its own next step: the action runs the same open again, so the person does not have to find the control twice.
+      toast.show({ message: "Could not load settings.", tone: "error", duration: 4000, action: { label: "Try again", onSelect: () => openSettingsSection(section, source) } });
     });
   };
   /** Opens the app's About panel or sends the product canvas to its Appearance settings. */
@@ -1390,9 +1391,12 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
       }).catch(() => {
         if (disposed) return;
         const notice = document.createElement("span");
-        notice.textContent = "Settings could not be loaded.";
+        notice.textContent = "Could not load settings.";
+        // The shared secondary button (packages/ui `.ui-button`), so this retry looks like every other one in the app.
         const retry = document.createElement("button");
         retry.type = "button";
+        retry.className = "ui-button";
+        retry.dataset.button = "secondary";
         retry.textContent = "Try again";
         retry.addEventListener("click", load, { once: true });
         container.replaceChildren(notice, retry);
