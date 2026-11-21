@@ -16,6 +16,8 @@ out=$share/out
 state=/var/lib/iproof-runner
 mkdir -p "$out"
 mkdir -p -m 700 "$state"
+# The unit's boot-pointer chain, element by element, for the record.
+chain() { namei -l /var/lib/infraternal-proof/current/infraternal-x86_64-musl >> "$out/chain-$1.log" 2>&1; sync "$out/chain-$1.log"; }
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$out/runner.log"; sync "$out/runner.log"; }
 finish() {
     journalctl -u infraternal-proof.service --no-pager -o short-iso > "$out/journal.log" 2>&1
@@ -63,6 +65,7 @@ if [ "$phase" = 1 ]; then
         sync "$state/phase"
         journalctl -u infraternal-proof.service --no-pager -o short-iso > "$out/journal-boot1.log" 2>&1
         sync "$out"/*
+        chain before-reset
         log "hard reset during the reboot release's trial"
         echo b > /proc/sysrq-trigger
         sleep 30
@@ -70,6 +73,7 @@ if [ "$phase" = 1 ]; then
     finish "$rc" 1
 fi
 
+chain after-boot
 log "phase 2 start run=$run"
 timeout 1200 ./server-tests --ignored --exact "$tests::auto_update_after_reboot" \
     --nocapture --test-threads=1 > "$out/phase2.log" 2>&1
