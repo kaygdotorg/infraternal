@@ -4,6 +4,8 @@ use crate::{
     desktop::{Delivery, Input, MAX_VIDEO_BYTES, Message},
     encode_frame_into, encode_muxed_frame_into,
 };
+/// Every desktop message, including `VideoPressure` (0x46), survives encoding and decoding at every
+/// stream split, and fixed-size bodies refuse trailing bytes.
 #[test]
 fn desktop_messages_roundtrip_at_every_split_and_reject_trailing_fixed_fields() {
     let id = [7; 16];
@@ -52,6 +54,7 @@ fn desktop_messages_roundtrip_at_every_split_and_reject_trailing_fixed_fields() 
         Message::Repair {
             last_sequence: u64::MAX,
         },
+        Message::Pressure { waited_ms: 65_535 },
         Message::Fragment {
             session_id: &id,
             sequence: 1,

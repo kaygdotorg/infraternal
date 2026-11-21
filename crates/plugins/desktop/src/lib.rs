@@ -14,6 +14,13 @@
 //! crate forbids `unsafe` code.
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
+/// Age-bounded frame queues at each video hand-off (#146, D254).
+#[cfg(any(
+    feature = "source",
+    feature = "server",
+    all(feature = "desktop", any(target_os = "macos", test))
+))]
+pub mod backlog;
 /// Platform-neutral capture trait and geometry.
 pub mod capture;
 /// Runs the helper as a switchable child process.

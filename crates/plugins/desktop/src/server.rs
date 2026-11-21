@@ -1035,13 +1035,21 @@ async fn send_viewer_close(
         }
     }
 }
+/// How far behind a viewer may fall (see `viewer_loop`) before it reports
+/// pressure. Half the backlog's 100 ms bound, so the encoder slows
+/// down before frames have to be dropped; above the 36 ms a 450 KB sharp
+/// refresh takes on a 100 Mbit/s link, so a fast link never reports one.
+const PRESSURE_WAIT: Duration = Duration::from_millis(50);
 /// The task behind one attached viewer: forwards commands from the browser to
 /// the session and the session's frames back to the browser on `stream`.
 ///
 /// Input and size changes wait for room in the host queue but give way to a
-/// stop. Frames are sent one at a time, each waiting for its socket write (1
-/// second limit), so a slow browser never accumulates a queue; the latest-frame
-/// source skips ahead instead. Keyframes carry only the parameter sets chosen
+/// stop. Frames are sent one at a time, in order, each waiting for its socket
+/// write (1 second limit), so the socket never holds a queue of its own; frames
+/// wait in the session's short recent-frame window instead, and a viewer that
+/// falls beyond it skips ahead. A lag of [`PRESSURE_WAIT`] or more (a frame
+/// that waited, or was skipped after waiting, that long; or a write that took
+/// that long) makes the viewer report pressure to the host. Keyframes carry only the parameter sets chosen
 /// with the `Parameters` command. Returns `Ok` on normal end and `Err` on a
 /// protocol or delivery failure.
 async fn viewer_loop(
@@ -1056,7 +1064,9 @@ async fn viewer_loop(
     let replies = replies.with_authority(authority.clone());
     let mut parameters = crate::parameter_sets::Parameters::default();
     let mut pending_parameters = None;
-    let mut delivery: Option<Operation<'static, Result<(), ()>>> = None;
+    let mut delivery: Option<Operation<'static, Result<Duration, ()>>> = None;
+    // How long the last completed video write took; it counts towards the lag.
+    let mut last_write = Duration::ZERO;
     loop {
         tokio::select! { biased;
             () = async { if !*stopped.borrow_and_update() { let _ = stopped.changed().await; } } => return Ok(()),
@@ -1087,12 +1097,18 @@ async fn viewer_loop(
                 }
             }
             completed = async { if let Some(delivery) = delivery.as_mut() { delivery.await } else { std::future::pending().await } }, if delivery.is_some() => {
-                completed?;
+                last_write = completed?;
                 delivery = None;
             }
             frame = viewer.next(), if delivery.is_none() => {
                 let frame = frame.map_err(|_| ())?;
                 crate::measurement::frame("viewer_dequeue", &frame);
+                // Video waiting this long for the browser leg, or a write that
+                // blocked this long, means the link or the page cannot keep up:
+                // lower the shared bit rate before the backlog bound is reached
+                // and a keyframe becomes necessary.
+                let lag = viewer.take_lag().max(std::mem::take(&mut last_write));
+                if lag >= PRESSURE_WAIT { viewer.report_pressure(lag).map_err(|_| ())?; }
                 if frame.keyframe && let Some(choice) = pending_parameters.take() { parameters = choice; }
                 let bytes = if frame.keyframe { crate::parameter_sets::select(&frame.bytes, parameters)? } else { frame.bytes.clone() };
                 let mut encoded = Vec::new();
@@ -1101,7 +1117,9 @@ async fn viewer_loop(
                 // browser from accumulating a second per-viewer bulk queue.
                 let replies = if measuring { replies.with_authority(crate::measurement::delivery(authority.clone(), &frame)) } else { replies.clone() };
                 delivery = Some(Box::pin(async move {
-                    tokio::time::timeout(Duration::from_secs(1), replies.send_and_wait(Bytes::from(encoded))).await.map_err(|_| ())?
+                    let began = tokio::time::Instant::now();
+                    tokio::time::timeout(Duration::from_secs(1), replies.send_and_wait(Bytes::from(encoded))).await.map_err(|_| ())??;
+                    Ok(began.elapsed())
                 }));
             }
         }

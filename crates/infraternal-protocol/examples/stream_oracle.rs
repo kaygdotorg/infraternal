@@ -7,6 +7,7 @@ use infraternal_protocol::{
 use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
+/// The decoded fields of `frame` as JSON, in the shape the browser codec's tests compare against.
 fn fields(frame: &Frame<'_>) -> Value {
     match frame {
         Frame::Desktop(message) => {
@@ -66,6 +67,9 @@ fn fields(frame: &Frame<'_>) -> Value {
                 }
                 Message::Repair { last_sequence } => {
                     json!({"kind":"repair","lastSequence":last_sequence.to_string()})
+                }
+                Message::Pressure { waited_ms } => {
+                    json!({"kind":"pressure","waitedMs":waited_ms})
                 }
                 Message::Fragment {
                     session_id,

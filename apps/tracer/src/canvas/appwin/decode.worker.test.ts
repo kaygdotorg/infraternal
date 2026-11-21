@@ -1,5 +1,5 @@
 /** Exercises worker presentation through its real message/decoder callbacks without a display clock. */
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import type { FromWorker, ToWorker } from "./worker-protocol";
 import { MAX_VIDEO_BYTES } from "../../../../../packages/protocol/src/desktop";
 
@@ -141,17 +141,30 @@ test("decoder output presents the newest admitted picture immediately and releas
     }
     expect(completed.chunks).toHaveLength(6);
 
-    // Count overload discards the whole unsubmitted chain. Even a repair IDR
-    // arriving while the codec is full waits safely instead of being dropped.
+    // Count overload (more than 32 waiting units, #146) discards the whole unsubmitted
+    // chain. Even a repair IDR arriving while the codec is full waits safely instead of being dropped.
     send({ t: "reset" }); key(1); delta(2);
-    for (let sequence = 3; sequence <= 11; sequence++) delta(sequence);
+    for (let sequence = 3; sequence <= 35; sequence++) delta(sequence);
     const counted = current!;
     expect(counted.chunks).toHaveLength(2);
     const beforeCounted = drawn.length;
-    key(12);
+    key(36);
     for (let index = 0; index < 3; index++) finish(counted, index);
     expect(counted.chunks).toHaveLength(3);
     expect(drawn.length - beforeCounted).toBe(1);
+
+    // Age overload (#146): a decoder that keeps a unit waiting for longer than 100 ms is behind. The
+    // waiting chain is discarded, later deltas are refused, and the next IDR starts again.
+    send({ t: "reset" }); key(1); delta(2); delta(3);
+    const aged = current!;
+    const started = performance.now();
+    const clock = spyOn(performance, "now").mockReturnValue(started + 150);
+    delta(4); delta(5);
+    clock.mockRestore();
+    finish(aged, 0); finish(aged, 1);
+    expect(aged.chunks, "units 3-5 waited past the bound and were discarded").toHaveLength(2);
+    key(6); finish(aged, 2);
+    expect(aged.chunks).toHaveLength(3);
 
     // Byte overload must also refuse a broken chain when its unit count fits.
     send({ t: "reset" }); key(1); delta(2);
@@ -225,7 +238,7 @@ test("decoder output presents the newest admitted picture immediately and releas
       expect(recovered.chunks).toHaveLength(start + 2);
     }
     send({ t: "stats" });
-    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { pendingPeak: 8, pendingBytesPeak: MAX_VIDEO_BYTES } });
+    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { pendingPeak: 32, pendingBytesPeak: MAX_VIDEO_BYTES } });
     expect(messages.filter(m => m.t === "trace")).toHaveLength(0);
     send({ t: "reset" });
     send({ t: "init", canvas, hardware: "no-preference", measure: true });
@@ -291,6 +304,25 @@ test("decoder output presents the newest admitted picture immediately and releas
     expect(layers).toEqual(["video", "video", "tile77", "video"]);
     send({ t: "stats" });
     expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { tiles: { received: 1, painted: 1, waited: 1 } } });
+
+    // A stale decoder and the tile lane (#146): a tile that arrives while the oldest waiting video unit has waited past
+    // 100 ms overflows like video. The waiting video is dropped, no tile is drawn over the older picture, and later
+    // tiles wait for the repair keyframe.
+    send({ t: "reset" }); layers.length = 0; holdDecoder = true;
+    send({ t: "chunk", sequence: 20, keyframe: true, bytes: new Uint8Array([0, 0, 0, 1, 0x67, 0x64, 0, 0x28]).buffer });
+    const behind = current!;
+    send({ t: "chunk", sequence: 21, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    send({ t: "chunk", sequence: 22, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
+    const staleStart = performance.now();
+    const staleClock = spyOn(performance, "now").mockReturnValue(staleStart + 150);
+    send({ t: "chunk", sequence: 23, keyframe: false, bytes: tileUnit(88) });
+    send({ t: "chunk", sequence: 24, keyframe: false, bytes: tileUnit(99) });
+    staleClock.mockRestore();
+    // sleep: one task turn lets any tile chain's microtasks run, so a wrongly accepted tile would have drawn.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finish(behind, 0); finish(behind, 1);
+    expect(behind.chunks, "the stale unit 22 was discarded").toHaveLength(2);
+    expect(layers.filter((layer) => layer.startsWith("tile"))).toEqual([]);
 
 
   } finally {
