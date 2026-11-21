@@ -85,9 +85,22 @@ export async function tilePixels(update: TileUpdate): Promise<Uint8ClampedArray 
   if (!update.deflated) return new Uint8ClampedArray(update.data.buffer, update.data.byteOffset, update.data.byteLength);
   try {
     // The browser's own DEFLATE decoder (no library). It is asynchronous, which is why tiles are drawn through one chain.
-    const stream = new Blob([update.data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-    const inflated = await new Response(stream).arrayBuffer();
-    return inflated.byteLength === update.pixelBytes ? new Uint8ClampedArray(inflated) : undefined;
+    // Writing and reading the stream directly skips the Blob and Response wrappers and their extra task hops.
+    const inflate = new DecompressionStream("deflate-raw");
+    const writer = inflate.writable.getWriter();
+    writer.write(update.data).catch(() => {});
+    writer.close().catch(() => {});
+    const reader = inflate.readable.getReader();
+    const pixels = new Uint8ClampedArray(update.pixelBytes);
+    let filled = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (filled + value.byteLength > pixels.length) { reader.cancel().catch(() => {}); return undefined; }
+      pixels.set(value, filled);
+      filled += value.byteLength;
+    }
+    return filled === update.pixelBytes ? pixels : undefined;
   } catch {
     return undefined;
   }
