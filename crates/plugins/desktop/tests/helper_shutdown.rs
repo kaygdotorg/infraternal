@@ -5,6 +5,7 @@
 #[cfg(any(feature = "source", feature = "server"))]
 use infraternal_plugin_desktop::media;
 use infraternal_plugin_desktop::{capture, protocol, socket};
+/// The helper's frame backlog, compiled into this test because `helper.rs` is.
 #[allow(dead_code)]
 #[path = "../src/backlog.rs"]
 mod backlog;

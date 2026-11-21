@@ -194,7 +194,7 @@ async fn slow_link_probe() {
             rate.feedback(now, false);
             stats.min_rate = stats.min_rate.min(rate.current);
             stats.rate_sum += rate.current;
-            if trace && stats.frames % 120 == 0 {
+            if trace && stats.frames.is_multiple_of(120) {
                 println!(
                     "TRACE t={:.0}s rate_mbit_s={:.2} repairs={} pressure={}",
                     epoch.elapsed().as_secs_f64(),

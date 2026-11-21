@@ -692,6 +692,8 @@ fn read_varint(input: &[u8], offset: usize) -> Result<(u32, usize), DecodeError>
     Err(DecodeError::VarintTooLong)
 }
 
+/// Decodes the body of one frame of type `frame_type`: control frames, desktop frames
+/// (`0x40..=0x46`, see [`desktop`]) and the rest. The body has already been split from its header.
 #[inline]
 fn decode_body(frame_type: u8, body: &[u8]) -> Result<Frame<'_>, DecodeError> {
     match frame_type {

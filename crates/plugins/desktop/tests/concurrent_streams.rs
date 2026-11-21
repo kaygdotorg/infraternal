@@ -220,6 +220,8 @@ fn start(index: usize) -> Start {
     }
 }
 
+/// Ten source workers through the real server relay each deliver a keyframe first, each on its own
+/// lane, with one Start and at least one keyframe request per stream at the synthetic companion.
 #[tokio::test]
 async fn ten_concurrent_streams_deliver_their_first_keyframe_through_the_server_relay() {
     // The job target path is longer than Linux's AF_UNIX limit once the source UUID is appended.

@@ -635,6 +635,8 @@ mod pacing_tests {
         );
     }
 
+    /// While a write is blocked, a newer keyframe replaces a waiting keyframe:
+    /// the blocked lane resumes with the newest picture.
     #[tokio::test]
     async fn blocked_source_write_resumes_with_newest_pending_frame() {
         let (entered, mut packets) = mpsc::unbounded_channel();
