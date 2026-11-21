@@ -2713,6 +2713,13 @@ mod inherited_login_process_tests {
     //! Process pins cross exec without asking the child to inspect a protected parent's descriptors.
     use super::*;
     use std::io::Read as _;
+    /// Checks that a login child's readiness descriptor still reaches the reserved socket when the
+    /// process pin is passed to the same child.
+    ///
+    /// The pin must never replace the readiness source. The body runs in a fresh fixture process
+    /// (selected by an environment marker) so that the descriptor numbers are predictable.
+    /// Known issue (#553): in that fresh table, `dup2` onto fd 5 closes a clone that still owns fd 5,
+    /// so the fixture aborts with an IO-safety violation. Holding fds 3 and 4 open avoids this.
     #[test]
     fn reserved_ready_source_survives_process_pin_transfer() {
         const FIXTURE: &str = "INFRATERNAL_READY_PIN_FIXTURE";
