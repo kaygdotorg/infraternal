@@ -286,26 +286,43 @@ fn approved(id: &str, scope: &str) -> bool {
     HARMLESS_ACTIONS.contains(&id) || (scope == "active" && CONSOLE_POWER_ACTIONS.contains(&id))
 }
 
-/// Whether one `annotation:` line of an approved action keeps its grant
-/// inside the approved set. polkit authorizes every action an
-/// `org.freedesktop.policykit.imply` annotation names along with the action
-/// itself, so an approved id that implies anything else hands out that other
-/// action too. `org.freedesktop.policykit.exec.path` makes `pkexec` run the
-/// named program as root under the action's defaults. Only an implication of
-/// further approved ids is accepted; every other annotation, including one
-/// this reader does not know, extends the grant (#355).
-fn annotation_stays_approved(annotation: &str) -> bool {
-    annotation
-        .strip_prefix("org.freedesktop.policykit.imply ->")
-        .is_some_and(|ids| {
-            let mut ids = ids.split_ascii_whitespace().peekable();
-            ids.peek().is_some()
-                && ids.all(|id| {
-                    HARMLESS_ACTIONS.contains(&id)
-                        || CONSOLE_POWER_ACTIONS.contains(&id)
-                        || IMPLIED_ONLY.contains(&id)
-                })
-        })
+/// What one `annotation:` line of an approved action reaches. polkit
+/// authorizes every action an `org.freedesktop.policykit.imply` annotation
+/// names along with the action itself, under the implying action's own
+/// defaults, so an approved id that implies anything else hands out that
+/// other action too. `org.freedesktop.policykit.exec.path` makes `pkexec`
+/// run the named program as root under the action's defaults.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Only ids approved in every session scope ([`HARMLESS_ACTIONS`]).
+    Harmless,
+    /// Also a D382 console power id or an [`IMPLIED_ONLY`] id. That is
+    /// approved only when the implying action's own `yes` is for an active
+    /// session alone; otherwise the implied action reaches inactive and
+    /// remote sessions too (J1051).
+    Console,
+    /// Anything else, including an annotation this reader does not know.
+    Beyond,
+}
+
+/// Classify one `annotation:` line of an approved action (see [`Reach`]).
+/// Only an implication of known ids stays inside the approved set (#355).
+fn annotation_reach(annotation: &str) -> Reach {
+    let Some(ids) = annotation.strip_prefix("org.freedesktop.policykit.imply ->") else {
+        return Reach::Beyond;
+    };
+    // An empty list is not a known implication.
+    let mut reach = Reach::Beyond;
+    for id in ids.split_ascii_whitespace() {
+        if CONSOLE_POWER_ACTIONS.contains(&id) || IMPLIED_ONLY.contains(&id) {
+            reach = Reach::Console;
+        } else if !HARMLESS_ACTIONS.contains(&id) {
+            return Reach::Beyond;
+        } else if reach == Reach::Beyond {
+            reach = Reach::Harmless;
+        }
+    }
+    reach
 }
 
 /// Read effective .policy defaults through polkit's own XML parser. Every
@@ -313,7 +330,8 @@ fn annotation_stays_approved(annotation: &str) -> bool {
 /// Only the exact approved action ids may retain a stock yes default (see
 /// [`approved`]), and an
 /// approved action that keeps one must not reach any other action or program
-/// through its annotations (see [`annotation_stays_approved`]).
+/// through its annotations (see [`Reach`]): a console power id only from an
+/// action whose `yes` is for an active session alone.
 fn action_defaults_allow_or_unknown(text: &str) -> bool {
     let mut action = None;
     let mut scopes = 0u8;
@@ -321,9 +339,15 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
     // whether one of its annotations reaches past that list.
     let mut approved_yes = false;
     let mut extends = false;
+    // Whether that yes also covers inactive or remote sessions, and whether
+    // an annotation implies a console power id (D382: active session only).
+    let mut wide_yes = false;
+    let mut console = false;
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
         if !line.starts_with(char::is_whitespace) {
-            if action.is_some() && (scopes != 7 || (approved_yes && extends)) {
+            if action.is_some()
+                && (scopes != 7 || (approved_yes && (extends || (wide_yes && console))))
+            {
                 return true;
             }
             let Some(id) = line.strip_suffix(':') else {
@@ -340,6 +364,8 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             scopes = 0;
             approved_yes = false;
             extends = false;
+            wide_yes = false;
+            console = false;
         } else if let Some(rest) = line.trim_start().strip_prefix("implicit ") {
             let Some((scope, value)) = rest.split_once(':') else {
                 return true;
@@ -363,6 +389,7 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
                     if action.is_some_and(|id| approved(id, scope)) =>
                 {
                     approved_yes = true;
+                    wide_yes |= scope != "active";
                 }
                 _ => return true,
             }
@@ -371,10 +398,14 @@ fn action_defaults_allow_or_unknown(text: &str) -> bool {
             if action.is_none() {
                 return true;
             }
-            extends |= !annotation_stays_approved(rest.trim());
+            match annotation_reach(rest.trim()) {
+                Reach::Harmless => {}
+                Reach::Console => console = true,
+                Reach::Beyond => extends = true,
+            }
         }
     }
-    action.is_none() || scopes != 7 || (approved_yes && extends)
+    action.is_none() || scopes != 7 || (approved_yes && (extends || (wide_yes && console)))
 }
 
 /// Check all current and legacy polkit roots. Unfamiliar executable policy is
@@ -639,6 +670,55 @@ mod tests {
         };
         assert!(action_defaults_allow_or_unknown(&reaching(reboot)));
         assert!(!action_defaults_allow_or_unknown(&reaching(halt)));
+    }
+
+    /// D382 ignores the console power ids for an active session only. polkit
+    /// grants an implied action with the implying action's own defaults, so
+    /// an approved action whose `yes` also covers other sessions (stock
+    /// `inhibit-delay-shutdown` has `implicit any: yes`, `chvt` has
+    /// `implicit inactive: yes`) must not imply one of them: that hands
+    /// reboot or power-off to every session, SSH included (J1051).
+    #[test]
+    fn console_power_is_never_implied_beyond_an_active_session() {
+        let imply = |from: &str, to: &str| {
+            let header = format!("\n{from}:\n");
+            let at = STOCK_DEBIAN13.find(&header).unwrap() + header.len();
+            format!(
+                "{}  annotation:        org.freedesktop.policykit.imply -> {to}\n{}",
+                &STOCK_DEBIAN13[..at],
+                &STOCK_DEBIAN13[at..]
+            )
+        };
+        for from in [
+            "org.freedesktop.login1.inhibit-delay-shutdown",
+            "org.freedesktop.login1.chvt",
+            "org.freedesktop.login1.set-self-linger",
+        ] {
+            for to in [
+                "org.freedesktop.login1.reboot",
+                "org.freedesktop.login1.power-off-multiple-sessions",
+                "org.freedesktop.login1.set-reboot-to-firmware-setup",
+                "org.freedesktop.login1.set-wall-message",
+            ] {
+                assert!(
+                    action_defaults_allow_or_unknown(&imply(from, to)),
+                    "{from} -> {to}"
+                );
+            }
+            // An all-session action may still imply another all-session one.
+            assert!(
+                !action_defaults_allow_or_unknown(&imply(
+                    from,
+                    "org.freedesktop.login1.inhibit-block-idle"
+                )),
+                "{from}"
+            );
+        }
+        // An active-only console action may imply another console action.
+        assert!(!action_defaults_allow_or_unknown(&imply(
+            "org.freedesktop.login1.suspend",
+            "org.freedesktop.login1.reboot"
+        )));
     }
 
     /// Real host policy goes through the same parser as planted action defaults.
