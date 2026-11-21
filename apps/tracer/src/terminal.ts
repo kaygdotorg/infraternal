@@ -1090,8 +1090,9 @@ export class TerminalClient {
         // A restored renderer may join an already-open shared socket and miss
         // onSocketOpen. Session identity, not callback order, determines resume.
         this.connectionIsResume = this.sessionId !== undefined;
-        // A connection the server does not know starts every writer at zero, like a page reload.
-        if (!resumed && this.hasAttached) this.restartCursors(true);
+        // A connection the server does not know starts every writer at zero. The screen and the output position
+        // stay: the attach below asks for output from the last painted byte (#569).
+        if (!resumed && this.hasAttached) this.restartWriter(true);
         if (!this.sessionId) this.openSession();
         else {
           this.attachRequested = true;
@@ -1422,13 +1423,42 @@ export class TerminalClient {
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
-  /** Fresh writers start at zero; retained typing requires explicit consent before its rebased bytes can replay. */
-  private restartCursors(retainInput = false): void {
+  /**
+   * Starts this terminal over for a different session (or none): a fresh writer, and an empty screen whose output
+   * position is zero, so the next attach replays the new session from its start.
+   */
+  private restartCursors(): void {
     this.cursorEpoch += 1;
     this.receivedOutSeq = 0n;
     this.lastOutSeq = 0n;
     this.parsedOutputVersion += 1;
+    this.restartWriter(false);
+    this.outputQueue.clear();
+    this.replayResponseFence = undefined;
+    this.replayCapturedSize = undefined;
+    this.suppressReplayResponses = this.sessionId !== undefined;
+    this.pendingSnapshot?.bytes.fill(0);
+    this.pendingSnapshot = undefined;
+    this.pendingWriteCompletion = undefined;
+    this.pendingWriteSynchronizedBatch = false;
+    this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
+    this.synchronizedOutput.reset();
+    this.synchronizedOutputBatchPending = false;
+    this.terminal.reset();
+    this.resumeInputIfRoom();
+  }
 
+  /**
+   * Starts a fresh input writer for the same session: its input sequence starts at zero, as the server's new writer
+   * does. With `retainInput`, keys the old writer never had acknowledged are kept aside; they need the person's
+   * consent before they are sent again, because the old writer may already have typed them.
+   *
+   * Output is untouched. Output offsets belong to the session, not to the writer (contracts/wire.md §5), so the
+   * screen, the scrollback and the output position all stay, and the next attach asks only for what was missed. A
+   * fresh connection after a long drop used to blank the terminal and replay the whole session from zero (#569).
+   */
+  private restartWriter(retainInput: boolean): void {
     // A fresh writer has its own sequence space. Keep uncertain earlier bytes aside, so keys typed after this reset
     // can start at sequence zero and flow to the live shell while the person decides what to do with the old bytes.
     const previousLength = retainInput ? this.retainedInput?.byteLength ?? 0 : 0;
@@ -1463,21 +1493,9 @@ export class TerminalClient {
       this.inputResendNotice?.dismiss();
       this.inputResendNoticeVisible = false;
     }
-    this.outputQueue.clear();
     this.staleWatch?.reset();
-    this.replayResponseFence = undefined;
-    this.replayCapturedSize = undefined;
-    this.suppressReplayResponses = this.sessionId !== undefined;
-    this.pendingSnapshot?.bytes.fill(0);
-    this.pendingSnapshot = undefined;
-    this.pendingWriteCompletion = undefined;
-    this.pendingWriteSynchronizedBatch = false;
+    // Predictions are matched by input sequence, which just started over.
     this.prediction?.resetForSnapshot();
-    this.terminalQueries?.reset();
-    this.clipboardWrites.reset();
-    this.synchronizedOutput.reset();
-    this.synchronizedOutputBatchPending = false;
-    this.terminal.reset();
     this.resumeInputIfRoom();
   }
 
