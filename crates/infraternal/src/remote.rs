@@ -803,12 +803,54 @@ pub(crate) fn outbound_tls_connector(root: Option<&X509>) -> Result<SslConnector
         tls.set_cert_store(trust.build());
     } else {
         // Replace OpenSSL's initial environment-derived store with only the approved bundle.
+        #[cfg(not(feature = "test-trust-anchor"))]
         tls.set_cert_store(
             infraternal_plugin_api::tls_roots::public_root_store()
                 .map_err(|_| ClientFailure::TlsConfiguration)?,
         );
+        #[cfg(feature = "test-trust-anchor")]
+        tls.set_cert_store(test_trust_anchor::store()?);
     }
     Ok(tls.build())
+}
+
+/// A test-only way to trust the CA of a disposable test server (#355, #483).
+///
+/// Release builds trust only the fixed public bundle, and since #483 they ignore
+/// `SSL_CERT_FILE` and `SSL_CERT_DIR`. A live test that runs the real CLI against
+/// its own throwaway server needs that server's CA trusted without touching the
+/// host's bundle. This module exists only when the non-default `test-trust-anchor`
+/// Cargo feature is on, so no runtime switch exists in a shipped binary: the
+/// variable name below is not in the image, and the production-trust gate
+/// (`scripts/release/check-production-trust.py`) refuses any image that has it.
+/// The named PEM file's certificates are added to the public store; nothing is
+/// replaced, and an unreadable or invalid file fails closed.
+#[cfg(feature = "test-trust-anchor")]
+mod test_trust_anchor {
+    use super::{ClientFailure, X509};
+    use openssl::x509::store::X509Store;
+
+    /// Names the PEM file whose certificates are trusted in addition to the public bundle.
+    const VARIABLE: &str = "INFRATERNAL_TEST_TRUST_ANCHOR";
+
+    /// The public-root store plus the certificates in `$INFRATERNAL_TEST_TRUST_ANCHOR`, if set.
+    pub(super) fn store() -> Result<X509Store, ClientFailure> {
+        let mut builder = infraternal_plugin_api::tls_roots::public_root_store_builder()
+            .map_err(|_| ClientFailure::TlsConfiguration)?;
+        if let Some(path) = std::env::var_os(VARIABLE) {
+            let pem = std::fs::read(path).map_err(|_| ClientFailure::TlsConfiguration)?;
+            let roots = X509::stack_from_pem(&pem).map_err(|_| ClientFailure::TlsConfiguration)?;
+            if roots.is_empty() {
+                return Err(ClientFailure::TlsConfiguration);
+            }
+            for root in roots {
+                builder
+                    .add_cert(root)
+                    .map_err(|_| ClientFailure::TlsConfiguration)?;
+            }
+        }
+        Ok(builder.build())
+    }
 }
 
 /// Recognize authored Linux Mesh restore messages without exposing raw local errors.

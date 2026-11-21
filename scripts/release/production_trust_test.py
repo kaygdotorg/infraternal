@@ -23,6 +23,9 @@ class ProductionTrustTests(unittest.TestCase):
             binary.write_bytes(b"\x7fELF\0infraternal-staging-trust-v1\xff")
             with self.assertRaises(ValueError):
                 gate.check(binary)
+            binary.write_bytes(b"\x7fELF\0INFRATERNAL_TEST_TRUST_ANCHOR\xff")
+            with self.assertRaises(ValueError):
+                gate.check(binary)
 
 
 if __name__ == "__main__":

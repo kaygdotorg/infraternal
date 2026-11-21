@@ -64,6 +64,10 @@ host-diagnostics = ["process-per-user", "infraternal-shim/host-diagnostics"]
 compact-history = ["process-per-user", "infraternal-shim/compact-history"]
 # Per-run test authority is compiled only into explicit staging images (#188 D1).
 staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
+# Test-only: the CLI also trusts the CA file named by INFRATERNAL_TEST_TRUST_ANCHOR, so a live
+# test can verify its own throwaway server (#355, #483). Never in a shipped build: the static
+# gate refuses an image holding the variable name.
+test-trust-anchor = ["remote"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]
 remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-api/tls-roots", "dep:base64", "dep:futures-util", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:qrcodegen", "dep:tokio-openssl", "dep:tokio-tungstenite", "dep:url", "dep:zeroize"]
 # Private SSH session routes need the host runtime even when its operator role is absent.
