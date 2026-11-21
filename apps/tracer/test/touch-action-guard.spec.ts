@@ -70,6 +70,7 @@ function check(scene: string, probes: Probe[]): { elements: number; changed: num
   return { elements: probes.length, changed, pinchBefore, pinchAfter };
 }
 
+/** Calls a function of the clusters mock's test API (`window.__tracerClusters`) inside the page. */
 const api = (page: Page, fn: string, ...args: unknown[]): Promise<unknown> => page.evaluate(([f, a]) => ((window as unknown as { __tracerClusters: Record<string, (...x: unknown[]) => unknown> }).__tracerClusters[f as string] as (...x: unknown[]) => unknown)(...(a as unknown[])), [fn, args] as const);
 
 /** `TRACER_TEST_BROWSER=webkit` runs the same sweep in WebKit (the engine of iOS Safari); the default is Chromium. The CDP touch pinch only exists in Chromium. */
@@ -81,10 +82,12 @@ test.describe("pinch guard, phone profile", () => {
   test("every view: only silent elements change, none allows a pinch-zoom", async ({ page }, testInfo) => {
     await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
     await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+    // sleep: the mock's opening animation must finish before the sweep reads computed styles
     await page.waitForTimeout(1200);
     const report: Record<string, unknown> = {};
     for (const view of ["console", "containers", "settings"]) {
       await api(page, "flyView", view);
+      // sleep: the view-change flight takes about a second; the sweep must read the settled view
       await page.waitForTimeout(1300);
       report[view] = check(view, await sweep(page));
     }
@@ -126,6 +129,7 @@ test("desktop pointer: typing, wheel and scale are untouched by the guard", asyn
   const page = await context.newPage();
   await page.goto("/?mock=1&proto=clusters&scene=1&theme=ink&bg=none");
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  // sleep: the mock's opening animation must finish before the wheel and scale are read
   await page.waitForTimeout(1000);
   const before = await page.evaluate(() => window.visualViewport?.scale);
   await page.mouse.wheel(0, 200);
