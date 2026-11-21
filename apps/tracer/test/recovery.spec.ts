@@ -53,7 +53,8 @@ test("sign-in exposes recovery key entry with per-word errors", async ({ page })
   await page.getByRole("button", { name: "use recovery key", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Use your recovery key" })).toBeVisible();
   await page.getByRole("textbox", { name: "Word 1", exact: true }).fill("notaword");
-  await expect(page.locator("#recovery-word-error")).toHaveText("Word 1 is not in the recovery word list.");
+  await expect(page.locator("#recovery-word-error")).toHaveText("1 word is not in the recovery word list.");
+  await expect(page.getByRole("textbox", { name: "Word 1", exact: true })).not.toHaveAttribute("aria-invalid", /.*/);
   await expect(page.getByRole("button", { name: "Start recovery" })).toBeDisabled();
   await page.route("**/auth/recovery-resume", route => route.fulfill({ status: 401, json: {} }));
   await page.locator("#recovery-username").fill("fixture_owner");

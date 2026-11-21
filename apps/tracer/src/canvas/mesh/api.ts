@@ -203,12 +203,12 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       undo(); notify(true);
       fail(!(error instanceof ActionRefused) ? `Could not ${what}. Check your connection and try again.`
         // Changing or ending access also needs a recent passkey check; the server answers both "no" and "check first" alike.
-        : error.reason === "forbidden" ? `Could not ${what}. You may not be allowed to, or you need to confirm with your passkey first. Sign in again and try once more.`
+        : error.reason === "forbidden" ? `Could not ${what}. Your account may not allow it, or it needs a fresh passkey check first. Sign in again and try once more.`
         : error.reason === "conflict" ? `Could not ${what}: that already exists.`
         : error.reason === "reserved for the server" ? `Could not ${what}: that name belongs to the server.`
         : error.reason === "not found" ? `Could not ${what}: it is no longer there.`
         : error.reason === "invalid input" ? `Could not ${what}: the server did not accept those details.`
-        : `Could not ${what}. The mesh is busy; please try again in a moment.`);
+        : `Could not ${what}. The mesh is busy. Try again in a moment.`);
       dirty = true; // what the server holds may differ from what was tried: list again once nothing is in flight
       inflight -= 1; settled();
     });
@@ -245,7 +245,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
       case "reserved for the server": return `${head}: ${to} is the name of the server.`;
       case "not found": return `${head}: it is no longer in the mesh.`;
       case "invalid input": return `${head}: ${to} is not a name the server accepts.`;
-      default: return `${head}. The mesh is busy; please try again in a moment.`;
+      default: return `${head}. The mesh is busy. Try again in a moment.`;
     }
   };
   /** A grant's ends are known to the server only through ids: an unknown host cannot be an endpoint. */

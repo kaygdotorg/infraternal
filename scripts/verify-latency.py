@@ -9,6 +9,8 @@ cannot see:
   key-to-paint number; the agent's share is gated here against the same bound;
 - `flood_effect`: how much a flooding terminal (another session, then the same
   one) grows echo p99;
+- `real_flood_effect`: the same flood comparison on a link with the round trip but no jitter (a reported row,
+  #569): the ordinary flood row's own noise is as large as its 8.3 ms budget and has read -7.11 ms;
 - the agent's share of `own_overhead`: echo p99 with no network at all (relay
   delay 0), printed as `own_overhead_agent`; the report adds the browser's
   share to form the row;
@@ -465,7 +467,53 @@ def measure_without_network(binary, state_dir, samples):
         cleanup(state_dir)
 
 
-def run(binary, state_dir, overhead_state, samples):
+def measure_flood_without_jitter(binary, state_dir, samples):
+    """Measure the flood effect again on a link with the round trip but no jitter; returns (other_ms, same_ms, baseline_p99_ms).
+
+    The ordinary flood row compares two p99s measured through a link whose jitter (30 ms at 300 ms) is far bigger than
+    the 8.3 ms effect it looks for; it has read -7.11 ms, which no flood can cause (J1079, #569). Here the link keeps
+    its round trip and loses its jitter, so what is left is the agent's and the shell's own behaviour under a flood.
+    The same phases as `run()`: quiet baseline, another session flooding, then the same PTY flooding.
+    """
+    previous = os.environ.get("INFRATERNAL_TEST_JITTER")
+    os.environ["INFRATERNAL_TEST_JITTER"] = "0"
+    try:
+        client = Binary(binary.resolve(), state_dir)
+    finally:
+        if previous is None:
+            del os.environ["INFRATERNAL_TEST_JITTER"]
+        else:
+            os.environ["INFRATERNAL_TEST_JITTER"] = previous
+    try:
+        budget_ms = targets.round_trip_bound_ms(LatencyConfig.from_environment().rtt_ms, 0) + REAL_ECHO_FRAMES_MS
+        ids = [client.open(), client.open(), client.open()]
+        streams = {stream: new_stream_state(session_id) for stream, session_id in zip((1, 3, 5), ids, strict=True)}
+        attach_streams(client, streams)
+        prepare_cat(client, streams, 1, "__BASELINE_READY__")
+        _, baseline = sample_echoes(client, streams, 1, samples)
+        _, baseline_p99 = metric("keystroke_pty_echo_baseline_nojitter", baseline, budget_ms)
+        start_flood(client, streams, 5, "yes &")
+        _, other = sample_echoes(client, streams, 1, samples)
+        _, other_p99 = metric("keystroke_pty_echo_flood_other_session_nojitter", other, budget_ms)
+        stop_background_flood(client, streams, 5)
+        same = streams[3]
+        same["echo_by_token"] = True
+        send_input(client, streams, 3, TOKEN_PROGRAM)
+        sample_echoes(client, streams, 3, 1)
+        _, same_quiet = sample_echoes(client, streams, 3, samples)
+        _, same_quiet_p99 = metric("keystroke_token_echo_quiet_same_session_nojitter", same_quiet, budget_ms)
+        send_input(client, streams, 3, FLOOD_KEY)
+        start = same["output_bytes"]
+        wait_for(client, streams, lambda: same["output_bytes"] >= start + 64 * 1024)
+        _, same_flood = sample_echoes(client, streams, 3, samples)
+        _, same_flood_p99 = metric("keystroke_pty_echo_flood_same_session_nojitter", same_flood, budget_ms)
+        return other_p99 - baseline_p99, same_flood_p99 - same_quiet_p99, baseline_p99
+    finally:
+        client.kill()
+        cleanup(state_dir)
+
+
+def run(binary, state_dir, overhead_state, samples, flood_state=None):
     """Measure every native D375 row, print them, and raise when a gated row or component failed."""
     config = LatencyConfig.from_environment()
     round_trip_ms = targets.round_trip_bound_ms(config.rtt_ms, config.jitter_ms)
@@ -581,6 +629,14 @@ def run(binary, state_dir, overhead_state, samples):
             "flood_effect", source="real-agent-pty", n=samples, value=worst, unit="ms", target=FLOOD_DELTA_BUDGET_MS,
             extra=f"other_session_ms={other_growth:.2f} same_session_ms={same_growth:.2f} baseline_p99_ms={baseline_echo_p99:.2f}")
         print(flood_line, flush=True)
+        if flood_state is not None:
+            other_nj, same_nj, baseline_nj = measure_flood_without_jitter(binary, flood_state, samples)
+            worst_nj = max(other_nj, same_nj)
+            print(targets.row_line(
+                "real_flood_effect", source="real-agent-pty", n=samples, value=worst_nj, unit="ms",
+                target=FLOOD_DELTA_BUDGET_MS, report_only=True,
+                extra=(f"other_session_ms={other_nj:.2f} same_session_ms={same_nj:.2f} baseline_p99_ms={baseline_nj:.2f} "
+                       f"rtt_ms={config.rtt_ms} jitter_ms=0")), flush=True)
         if failed_metrics:
             raise AssertionError("latency budget failures: " + ", ".join(failed_metrics))
     finally:
@@ -595,6 +651,7 @@ def parser_args():
     parser.add_argument("--samples", type=int, default=PROBE_SAMPLES)
     parser.add_argument("--state", type=Path, default=fixture_state("l"))
     parser.add_argument("--overhead-state", type=Path, default=fixture_state("o"))
+    parser.add_argument("--flood-state", type=Path, default=fixture_state("f"))
     return parser.parse_args()
 
 
@@ -607,9 +664,11 @@ if __name__ == "__main__":
         raise SystemExit("--samples must be at least 20 for p99")
     args.state.mkdir(mode=0o700, parents=True, exist_ok=False)
     args.overhead_state.mkdir(mode=0o700, parents=True, exist_ok=False)
+    args.flood_state.mkdir(mode=0o700, parents=True, exist_ok=False)
     try:
-        run(args.binary, args.state, args.overhead_state, args.samples)
+        run(args.binary, args.state, args.overhead_state, args.samples, args.flood_state)
     finally:
+        cleanup(args.flood_state)
         # Idempotent: a failure before the profile client starts still leaves no state behind.
         cleanup(args.state)
         cleanup(args.overhead_state)

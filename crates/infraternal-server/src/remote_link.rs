@@ -539,6 +539,21 @@ impl Drop for QuicLink {
     }
 }
 
+/// How long a freshly opened SSH link may take to deliver its Hello flight.
+///
+/// Production keeps the tight 5 s bound: a peer that stays silent that long is
+/// not an infraternal agent worth waiting for. Test builds get a hang guard
+/// instead, because their scripted peers are real `python3` processes and a
+/// gate host with a load average far above its core count can take longer than
+/// 5 s just to start one (admission tests failed that way, #443). Nothing
+/// asserts the production expiry, and the wait still ends at the first Hello.
+#[cfg(feature = "ssh")]
+const SSH_GREETING_BOUND: Duration = if cfg!(test) {
+    Duration::from_secs(120)
+} else {
+    Duration::from_secs(5)
+};
+
 impl RemoteLink {
     /// The admitted logical QUIC tuple; TCP and SSH channels cannot move below their transport.
     pub(crate) fn peer_address(&self) -> Option<std::net::SocketAddr> {
@@ -800,6 +815,12 @@ impl RemoteLink {
         }
     }
 
+    /// Wrap an opened SSH helper channel as a link, after reading its Hello flight.
+    ///
+    /// The peer's capabilities are read before the link is admitted; every byte
+    /// that arrived coalesced behind the Hello is kept for the actor's ordinary
+    /// greeting. Fails with `TimedOut` if no Hello arrives within
+    /// [`SSH_GREETING_BOUND`].
     #[cfg(feature = "ssh")]
     pub(crate) async fn ssh(
         channel: infraternal_plugin_ssh::duplex::Duplex,
@@ -809,7 +830,7 @@ impl RemoteLink {
         // write. Read that same flight before admitting capabilities, retaining
         // every coalesced byte for the actor's ordinary greeting and replay.
         let mut prefix = BytesMut::with_capacity(256);
-        let peer_caps = tokio::time::timeout(Duration::from_secs(5), async {
+        let peer_caps = tokio::time::timeout(SSH_GREETING_BOUND, async {
             let mut scratch = [0; 1024];
             loop {
                 match infraternal_protocol::decode_muxed_frame(&prefix) {

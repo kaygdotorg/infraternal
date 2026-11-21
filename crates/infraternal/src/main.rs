@@ -181,6 +181,12 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = infraternal_shim::session_shell::run_if_requested() {
         return result;
     }
+    // The root agent's desktop helper entry, also before any runtime or
+    // thread: it drops to the console user and execs the helper (D203 C2).
+    #[cfg(all(feature = "desktop", target_os = "macos"))]
+    if let Some(result) = infraternal_shim::desktop_user::run_if_requested() {
+        return result;
+    }
     #[cfg(target_os = "linux")]
     if nix::sys::prctl::set_name(c"infraternal").is_err() {
         return ExitCode::FAILURE;
@@ -3048,9 +3054,12 @@ fn run_remote_agent(
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
                     Some(remote::Failure::Challenge) => "CHALLENGE",
-                    Some(remote::Failure::Refused | remote::Failure::IdentityMismatch) | None => {
-                        "REFUSED"
-                    }
+                    Some(
+                        remote::Failure::Refused
+                        | remote::Failure::IdentityMismatch
+                        | remote::Failure::SharedFile,
+                    )
+                    | None => "REFUSED",
                 };
                 println!("PREPARE-REFUSED {class}");
             }
@@ -3160,6 +3169,7 @@ fn run_remote_agent(
                     None if remote::mesh_restore_failure(error).is_some() => Exit::NotAllowed,
                     Some(
                         remote::Failure::Refused
+                        | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
                         | remote::Failure::Challenge,
                     )
