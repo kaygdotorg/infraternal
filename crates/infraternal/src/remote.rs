@@ -44,7 +44,10 @@ struct StoredIdentity {
     https_system_roots: bool,
     ca_der: String,
     certificate_der: String,
-    key_der: String,
+    /// The active private key (PKCS#8, base64). Held in a buffer wiped on drop,
+    /// like the rotation candidate's, so the copy serde makes on every load and
+    /// the one a rotation replaces are not left in freed memory (#559 L1).
+    key_der: Zeroizing<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_rotation: Option<StoredRotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -318,7 +321,9 @@ async fn join_with_key_inner(
         https_system_roots: invitation.https_system_roots,
         ca_der: invitation.ca_der,
         certificate_der: response.certificate_der,
-        key_der: B64.encode(key.private_key_to_pkcs8().map_err(|_| refused())?),
+        key_der: encode_candidate_key(&Zeroizing::new(
+            key.private_key_to_pkcs8().map_err(|_| refused())?,
+        )),
         identity_rotation: None,
         completed_identity_rotation: None,
     };
@@ -392,10 +397,8 @@ fn prepared_key(data: &Path) -> io::Result<PKey<openssl::pkey::Private>> {
     match std::fs::symlink_metadata(data.join("identity.json")) {
         Ok(_) => {
             let (stored, _) = load_snapshot(data)?;
-            return PKey::private_key_from_pkcs8(
-                &B64.decode(&stored.key_der).map_err(|_| refused())?,
-            )
-            .map_err(|_| refused());
+            return PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
+                .map_err(|_| refused());
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused()),
@@ -588,7 +591,8 @@ fn enrolled_key(
             return Err(refused());
         }
     }
-    let key = PKey::private_key_from_pkcs8(&der(&stored.key_der)?).map_err(|_| refused())?;
+    let key = PKey::private_key_from_pkcs8(&decode_candidate_key(&stored.key_der)?)
+        .map_err(|_| refused())?;
     Ok(Some((key, snapshot)))
 }
 
@@ -1069,7 +1073,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     };
     let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
-    let key_der = Zeroizing::new(B64.decode(&stored.key_der).map_err(|_| refused())?);
+    let key_der = decode_candidate_key(&stored.key_der)?;
     let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
     // A mismatched pair can never reconnect. Check it before starting the
     // supervisor, so the service reports the local problem immediately.
@@ -1252,7 +1256,7 @@ impl infraternal_plugin_remote::identity_rotation::RotationPublisher for Identit
         {
             return Err(refused());
         }
-        stored.key_der = std::mem::take(&mut *pending.candidate_key_der);
+        stored.key_der = Zeroizing::new(std::mem::take(&mut *pending.candidate_key_der));
         stored.certificate_der = certificate_der;
         stored.completed_identity_rotation = Some(completed.clone());
         let bytes = serialize_identity_document(&stored)?;
