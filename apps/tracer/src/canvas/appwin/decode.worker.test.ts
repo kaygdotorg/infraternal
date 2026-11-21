@@ -261,7 +261,8 @@ test("decoder output presents the newest admitted picture immediately and releas
     finish(current!, 514);
     expect(messages.at(-1)).toMatchObject({ t: "trace", frame: { sequence: 515, captureNs: "515", outcome: "painted" } });
     // Tile lane [#146 C]: a tile update takes the next order number but never enters the decoder. A delta accepted before
-    // it that decodes after it is still drawn (a tile is not a newer video picture), and the tile is drawn again on top.
+    // it is still drawn when it decodes (a tile is not a newer video picture), and the tile waits for it, then follows in
+    // the same callback.
     send({ t: "reset" }); messages.length = 0;
     globalThis.ImageData ??= class { constructor(readonly data: Uint8ClampedArray, readonly width: number, readonly height: number) {} } as unknown as typeof ImageData;
     const layers: string[] = [];
@@ -282,14 +283,14 @@ test("decoder output presents the newest admitted picture immediately and releas
     // sleep: one task turn lets the tile chain's microtasks draw the raw tile.
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(tiled.chunks).toHaveLength(2);
-    expect(layers).toEqual(["video", "tile77"]);
+    expect(layers).toEqual(["video"]);
     output!({ timestamp: tiled.chunks[1]!.timestamp, displayWidth: 64, displayHeight: 48, close: () => {} } as unknown as VideoFrame);
-    expect(layers).toEqual(["video", "tile77", "video", "tile77"]);
+    expect(layers).toEqual(["video", "video", "tile77"]);
     send({ t: "chunk", sequence: 4, keyframe: false, bytes: new Uint8Array([0x41]).buffer });
     output!({ timestamp: tiled.chunks[2]!.timestamp, displayWidth: 64, displayHeight: 48, close: () => {} } as unknown as VideoFrame);
-    expect(layers).toEqual(["video", "tile77", "video", "tile77", "video"]);
+    expect(layers).toEqual(["video", "video", "tile77", "video"]);
     send({ t: "stats" });
-    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { tiles: { received: 1, painted: 1, redrawn: 1 } } });
+    expect(messages.at(-1)).toMatchObject({ t: "stats", stats: { tiles: { received: 1, painted: 1, waited: 1 } } });
 
 
   } finally {

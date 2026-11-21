@@ -17,8 +17,8 @@
  *   returns, so no presentation queue pins decoder memory or holds newer work behind obsolete conversion.
  *
  * Small changes may arrive as tile updates (exact pixels, #146 proposal C) instead of video. They share the sequence and the
- * decoder-timestamp order with the video, and `TileLayer` (tiles.ts) draws them over the video in that order: a later video
- * picture supersedes a tile, and an earlier one that decodes late gets the newer tiles drawn again on top.
+ * decoder-timestamp order with the video, and `TileLayer` (tiles.ts) draws them over the video in that order: a tile waits
+ * for every older video picture to come out of the decoder, and a newer video picture supersedes it.
  *
  * Nothing is scheduled while no unit arrives and nothing is drawn without a new picture: a window whose machine shows
  * the same pixels costs no work at all (D254). The worker exists only while its window streams; the page ends it when
@@ -139,8 +139,6 @@ function output(frame: VideoFrame): void {
     if (trace) trace.drawStartedAt = traceClock();
     context.drawImage(frame, 0, 0);
     drawn = true;
-    // The whole canvas now shows this picture; tiles that arrived after it go back on top.
-    tiles.videoPainted(frame.timestamp);
     if (trace) { trace.drawFinishedAt = traceClock(); trace.width = frame.displayWidth; trace.height = frame.displayHeight; trace.outcome = "painted"; }
     stats.painted++;
     if (first) { first = false; post({ t: "first", width: frame.displayWidth, height: frame.displayHeight }); }
@@ -149,6 +147,7 @@ function output(frame: VideoFrame): void {
       post({ t: "size", width: shownW, height: shownH });
     }
   } finally {
+    // Tiles that waited for this picture are drawn now, in the same task, so no frame shows it without them.
     tiles.videoRetired(frame.timestamp);
     frame.close();
     if (trace) post({ t: "trace", frame: trace });
@@ -166,9 +165,13 @@ function discardPending(): void {
 
 /** Closes the decoder and forgets its codec and traces. The waiting units are dropped too, unless `keepPending` (a keyframe is replacing the decoder and its followers belong to the new one). */
 function retireDecoder(keepPending = false): void {
-  if (!keepPending) discardPending();
-  // Units inside the closed decoder never come out; only the kept pending ones still will.
-  tiles.videoForgotten(pending.map((unit) => unit.stamp));
+  if (!keepPending) {
+    discardPending();
+    // Units inside the closed decoder never come out, and a repair or a reset follows.
+    tiles.videoForgotten();
+  }
+  // With `keepPending` a keyframe is replacing the decoder. Units left in the old one are older than that keyframe, and
+  // its output retires them for the tile layer, so tiles after it still wait for it.
   if (repairTimer !== undefined) { scope.clearTimeout(repairTimer); repairTimer = undefined; }
   if (decoder && decoder.state !== "closed") decoder.close();
   traces?.clear();

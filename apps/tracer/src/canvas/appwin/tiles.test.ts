@@ -1,7 +1,7 @@
 /** Checks the tile lane's format checks and the ordering rules that keep tiles and video from ever showing older pixels (#146 proposal C). */
 import { expect, test } from "bun:test";
 import { deflateRawSync } from "node:zlib";
-import { isTileUpdate, MAX_LIVE_TILES, parseTileUpdate, TileLayer, type TilePiece } from "./tiles";
+import { isTileUpdate, MAX_WAITING_TILES, parseTileUpdate, TileLayer, type TilePiece } from "./tiles";
 
 /** Bun has no ImageData; the layer only stores and hands it to `draw`. */
 globalThis.ImageData ??= class {
@@ -50,33 +50,53 @@ test("tile updates are told apart from Annex B and every malformed field is refu
   expect(parseTileUpdate(tile({ x: 0, y: 0, w: 64, h: 48 }, 1, false, { width: 64, height: 48 }))).toBeDefined();
 });
 
-test("an older video picture that decodes after a tile gets the tile drawn again on top", async () => {
+test("a tile waits for an older video picture still in the decoder and is drawn in the same turn it comes out", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
-  layer.videoAccepted(1); layer.videoPainted(1);
+  layer.videoAccepted(1); layer.videoRetired(1);
   layer.videoAccepted(2); // a delta still inside the decoder
   layer.accept(3, tile({ x: 1, y: 1, w: 2, h: 2 }, 50, true));
   await layer.settled();
+  expect(s.drawn).toEqual([]); // drawing it now would show the tile ahead of the delta's changes
+  layer.videoRetired(2);
   expect(s.drawn).toEqual([50]);
-  layer.videoPainted(2); // the older picture covers the canvas; the newer tile must return immediately
-  expect(s.drawn).toEqual([50, 50]);
-  expect(layer.stats).toMatchObject({ painted: 1, redrawn: 1, superseded: 0 });
-  layer.videoAccepted(4); layer.videoPainted(4); // a newer picture already contains the tile
-  expect(s.drawn).toEqual([50, 50]);
+  expect(layer.stats).toMatchObject({ painted: 1, waited: 1, superseded: 0 });
+});
+
+test("with nothing older in flight a tile is drawn as soon as it is inflated", async () => {
+  const s = surface(); const layer = new TileLayer(s.surface);
+  layer.videoAccepted(1); layer.videoRetired(1);
+  layer.accept(2, tile({ x: 0, y: 0, w: 2, h: 2 }, 21));
+  await layer.settled();
+  expect(s.drawn).toEqual([21]);
+  expect(layer.stats.waited).toBe(0);
 });
 
 test("a video picture accepted after a tile supersedes it, even when the tile finishes inflating later", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
-  layer.videoAccepted(1); layer.videoPainted(1);
+  layer.videoAccepted(1); layer.videoRetired(1);
   layer.accept(2, tile({ x: 0, y: 0, w: 8, h: 8 }, 70, true));
-  layer.videoAccepted(3); layer.videoPainted(3); // drawn before the tile's async inflate resolves
+  layer.videoAccepted(3); // arrives before the tile's async inflate resolves
   await layer.settled();
+  layer.videoRetired(3);
+  expect(s.drawn).toEqual([]);
+  expect(layer.stats.superseded).toBe(1);
+});
+
+test("a waiting tile is superseded when the older picture is skipped for a newer one", async () => {
+  const s = surface(); const layer = new TileLayer(s.surface);
+  layer.videoAccepted(2);
+  layer.accept(3, tile({ x: 0, y: 0, w: 2, h: 2 }, 60));
+  await layer.settled();
+  layer.videoAccepted(4);
+  layer.videoRetired(2); // not drawn: the decoder already holds 4
+  layer.videoRetired(4);
   expect(s.drawn).toEqual([]);
   expect(layer.stats.superseded).toBe(1);
 });
 
 test("tiles are drawn strictly in arrival order whatever their encoding", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
-  layer.videoAccepted(1); layer.videoPainted(1);
+  layer.videoAccepted(1); layer.videoRetired(1);
   layer.accept(2, tile({ x: 0, y: 0, w: 30, h: 30 }, 11, true)); // slower: inflated
   layer.accept(3, tile({ x: 0, y: 0, w: 2, h: 2 }, 12, false)); // faster: raw
   layer.accept(4, tile({ x: 0, y: 0, w: 2, h: 2 }, 13, true));
@@ -84,19 +104,21 @@ test("tiles are drawn strictly in arrival order whatever their encoding", async 
   expect(s.drawn).toEqual([11, 12, 13]);
 });
 
-test("a tile is kept only while an older picture can still draw over it", async () => {
+test("tiles after a dropped video unit, or a closed decoder, are dropped with it", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
-  layer.videoAccepted(1); layer.videoPainted(1);
-  layer.accept(2, tile({ x: 0, y: 0, w: 2, h: 2 }, 21)); // nothing in flight: final at once
+  layer.videoAccepted(1); layer.videoRetired(1);
+  layer.videoAccepted(2);
+  layer.accept(3, tile({ x: 0, y: 0, w: 2, h: 2 }, 22));
   await layer.settled();
-  layer.videoAccepted(3);
-  layer.accept(4, tile({ x: 0, y: 0, w: 2, h: 2 }, 22));
+  layer.videoDropped(2); // a gap: a repair keyframe follows, and 3 belongs after 2's changes
+  expect(s.drawn).toEqual([]);
+  layer.videoAccepted(4);
+  layer.accept(5, tile({ x: 0, y: 0, w: 2, h: 2 }, 23));
   await layer.settled();
-  layer.videoRetired(3); // superseded inside the decoder, never drawn
-  layer.videoAccepted(5); layer.videoDropped(5); // dropped before the decoder
-  layer.videoAccepted(6); layer.videoForgotten(); // its decoder was closed
-  layer.videoPainted(0); // an impossible older paint redraws nothing: no tile is kept
-  expect(s.drawn).toEqual([21, 22]);
+  layer.videoForgotten();
+  layer.videoRetired(4);
+  expect(s.drawn).toEqual([]);
+  expect(layer.stats.dropped).toBe(2);
 });
 
 test("a tile for a picture size the canvas does not have yet waits for the older picture that resizes it", async () => {
@@ -106,21 +128,23 @@ test("a tile for a picture size the canvas does not have yet waits for the older
   await layer.settled();
   expect(s.drawn).toEqual([]);
   s.current.size = { width: 64, height: 48 };
-  layer.videoPainted(1);
+  layer.videoRetired(1);
   expect(s.drawn).toEqual([31]);
-  // With nothing in flight, a tile for another geometry is ignored.
+  // A tile for another geometry is ignored.
   layer.accept(3, tile({ x: 0, y: 0, w: 2, h: 2 }, 32, false, { width: 32, height: 24 }));
   await layer.settled();
   expect(s.drawn).toEqual([31]);
   expect(layer.stats.dropped).toBe(1);
 });
 
-test("too many kept tiles and unreadable updates ask for a keyframe instead of growing", async () => {
+test("too many waiting tiles and unreadable updates ask for a keyframe instead of growing", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
   layer.videoAccepted(1);
-  for (let order = 2; order <= MAX_LIVE_TILES + 2; order++) layer.accept(order, tile({ x: 0, y: 0, w: 1, h: 1 }, order % 200));
+  for (let order = 2; order <= MAX_WAITING_TILES + 2; order++) layer.accept(order, tile({ x: 0, y: 0, w: 1, h: 1 }, order % 200));
   await layer.settled();
   expect(s.repairs()).toBe(1);
+  layer.videoRetired(1);
+  expect(s.drawn).toEqual([]);
   const corrupt = tile({ x: 0, y: 0, w: 4, h: 4 }, 1, true);
   corrupt[corrupt.length - 1] = corrupt[corrupt.length - 1]! ^ 0xff; corrupt[22] = corrupt[22]! ^ 0xff;
   layer.accept(100, corrupt);
@@ -131,7 +155,7 @@ test("too many kept tiles and unreadable updates ask for a keyframe instead of g
 
 test("reset discards tiles that are still inflating", async () => {
   const s = surface(); const layer = new TileLayer(s.surface);
-  layer.videoAccepted(1); layer.videoPainted(1);
+  layer.videoAccepted(1); layer.videoRetired(1);
   layer.accept(2, tile({ x: 0, y: 0, w: 4, h: 4 }, 41, true));
   layer.reset();
   // sleep: the discarded inflate resolves on its own; give it time to (not) draw.
