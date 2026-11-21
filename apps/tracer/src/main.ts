@@ -32,6 +32,8 @@ declare global {
     __tracerPerformanceProbe?: {
       /** Returns content-free probe stage times for the current synthetic key run. */
       trace: () => ProbeTraceSample[];
+      /** How much history the terminal holds, as counts (#569). */
+      scrollbackSummary: (prefix: string) => { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } | undefined;
       /** The typing recorder for a driver that types like a person (see `PerformanceProbe.startHumanRecording`). */
       human: {
         start: () => void;
@@ -658,6 +660,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     performanceProbe = new PerformanceProbe(screen.probePanel, probeCount(query.get("n")));
     window.__tracerPerformanceProbe = {
       trace: () => performanceProbe?.traceSamples() ?? [],
+      scrollbackSummary: (prefix) => currentTerminal?.scrollbackSummary(prefix),
       human: {
         start: () => performanceProbe?.startHumanRecording(),
         stop: () => performanceProbe?.stopHumanRecording(),
