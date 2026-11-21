@@ -150,7 +150,7 @@ pub(crate) async fn quic(
 /// What every accepted TCP connection needs: TLS, the host registry, the store, limits and, when enabled, recovery.
 #[derive(Clone)]
 struct TcpContext {
-    tls: Arc<openssl::ssl::SslAcceptor>,
+    tls: Arc<crate::remote_runtime::ServerTls>,
     hosts: RemoteHosts,
     store: EnrollmentStore,
     limits: Arc<Limits>,
@@ -170,7 +170,7 @@ struct TcpAdmission {
 /// Accept host TCP connections: TLS, then mTLS admission or, when enabled, certificate recovery.
 pub(crate) async fn tcp(
     tcp: TcpListener,
-    tls: Arc<openssl::ssl::SslAcceptor>,
+    tls: Arc<crate::remote_runtime::ServerTls>,
     hosts: RemoteHosts,
     store: EnrollmentStore,
     limits: Arc<Limits>,
@@ -271,8 +271,10 @@ async fn handle_tcp_connection(
     let Some(permits) = permits else {
         return;
     };
+    // The acceptor current now: a rotated leaf applies from the next handshake (#559).
+    let tls = context.tls.current();
     let connection = if let Some(service) = context.recovery.as_ref() {
-        match remote_tls::accept_recovery_aware(socket, &context.tls).await {
+        match remote_tls::accept_recovery_aware(socket, &tls).await {
             Ok(remote_tls::AcceptedConnection::Host(connection)) => connection,
             Ok(remote_tls::AcceptedConnection::Recovery(connection)) => {
                 service.serve(connection.channel, address).await;
@@ -281,7 +283,7 @@ async fn handle_tcp_connection(
             Err(_) => return,
         }
     } else {
-        let Ok(connection) = remote_tls::accept(socket, &context.tls).await else {
+        let Ok(connection) = remote_tls::accept(socket, &tls).await else {
             return;
         };
         connection

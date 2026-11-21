@@ -744,6 +744,10 @@ mod standby;
 #[path = "remote_listener_tests.rs"]
 mod additional_listeners;
 
+/// Live listeners serving a rotated server leaf (#559).
+#[path = "server_leaf_listener_tests.rs"]
+mod server_leaf_listeners;
+
 #[cfg(all(feature = "mesh-transport-proof", target_os = "linux"))]
 #[path = "remote_mesh_namespace_tests.rs"]
 pub(crate) mod mesh_namespace;
