@@ -35,6 +35,7 @@ fn merge_review_replies_cannot_consume_space_reserved_for_deferred_typing() {
             stopping: false,
             request: None,
             replay_awaits_size: false,
+            echo_hidden_told: false,
         };
         (peer, remote)
     };
@@ -154,6 +155,7 @@ fn negotiated_queue_deferral_validates_ranges_before_waiting() {
         stopping: false,
         request: None,
         replay_awaits_size: false,
+        echo_hidden_told: false,
     };
     let mut cursors = Inputs::with_geometry(peer.size);
     cursors.select(7, peer.size).unwrap();
@@ -252,6 +254,7 @@ fn a_completed_deferred_frame_gives_its_trailing_input_a_fresh_ticket() {
             stopping: false,
             request: None,
             replay_awaits_size: false,
+            echo_hidden_told: false,
         }
     };
     let mut first = peer(7);
@@ -409,6 +412,7 @@ fn coalesced_probe_and_input_preserve_the_written_ack_in_both_orders() {
             stopping: false,
             request: None,
             replay_awaits_size: false,
+            echo_hidden_told: false,
         };
         let mut cursors = Inputs::with_geometry(peer.size);
         cursors.select(7, peer.size).unwrap();
@@ -484,6 +488,7 @@ fn coalesced_ack_never_overwrites_a_partial_output_and_cursors_survive_peer_loss
         stopping: false,
         request: None,
         replay_awaits_size: false,
+        echo_hidden_told: false,
     };
     let mut cursors = InputCursors::default();
     let mut queue = VecDeque::new();
