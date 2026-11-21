@@ -711,9 +711,10 @@ idempotent; conflicting fragments and metadata are errors. Idle
 receivers have no repair timer. A skipped delta forces IDR recovery; an IDR
 supersedes prior incomplete frames. No unbounded retransmission backlog.
 
-VideoPressure tells the host that video waited at least 50 ms at the server
-for one of the session's viewers (leg A is backed up); `waited_ms` is that
-wait, saturating at 65535, and is informational. The host's encoder lowers its
+VideoPressure tells the host that one of the session's viewers is at least
+50 ms behind (leg A is backed up): a unit it took or skipped had waited that
+long at the server, or its last video write took that long. `waited_ms` is that
+lag, saturating at 65535, and is informational. The host's encoder lowers its
 bit rate as for its own congestion signal. The server sends at most one per
 250 ms per session and never fills the last two slots of its bounded host
 command queue with one. Browsers neither send nor receive it.

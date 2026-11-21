@@ -76,12 +76,11 @@ async fn briefly_stalled_viewer_catches_up_with_deltas_and_costs_no_keyframe() {
     }
     for sequence in 2..=10 {
         assert_eq!(slow.next().await.unwrap().sequence, sequence);
-        if sequence == 2 {
-            // Published at 8 ms, taken at 72 ms.
-            assert_eq!(slow.waited(), Duration::from_millis(64));
-        }
     }
-    assert_eq!(fast.waited(), Duration::ZERO);
+    // Frame 2 was published at 8 ms and taken at 72 ms.
+    assert_eq!(slow.take_lag(), Duration::from_millis(64));
+    assert_eq!(slow.take_lag(), Duration::ZERO, "taking the lag resets it");
+    assert_eq!(fast.take_lag(), Duration::ZERO);
     assert!(commands.try_recv().is_err(), "no repair was needed");
     assert_eq!(session.retained_bytes(), 1000, "frames 1..=10 are retained");
 }
@@ -108,6 +107,8 @@ async fn stalled_viewer_repairs_without_stalling_sibling_and_session_survives_de
             .is_err()
     );
     assert_eq!(commands.recv().await, Some(HostCommand::Keyframe));
+    // The skipped frame 5 had waited 100 ms: the viewer that fell behind shows it.
+    assert_eq!(slow.take_lag(), Duration::from_millis(100));
     // The keyframe (still cached) and frames 5..=10, the last 100 ms.
     assert_eq!(session.retained_bytes(), 700);
     session.publish(video(11, true, 100)).unwrap();
@@ -134,16 +135,17 @@ async fn waiting_viewer_reports_pressure_at_most_every_250_ms() {
     session.publish(video(2, false, 100)).unwrap();
     tokio::time::advance(Duration::from_millis(60)).await;
     assert_eq!(viewer.next().await.unwrap().sequence, 2);
-    assert_eq!(viewer.waited(), Duration::from_millis(60));
-    viewer.report_pressure().unwrap();
-    viewer.report_pressure().unwrap();
+    let lag = viewer.take_lag();
+    assert_eq!(lag, Duration::from_millis(60));
+    viewer.report_pressure(lag).unwrap();
+    viewer.report_pressure(lag).unwrap();
     assert_eq!(
         commands.try_recv(),
         Ok(HostCommand::Pressure { waited_ms: 60 })
     );
     assert!(commands.try_recv().is_err(), "merged within 250 ms");
     tokio::time::advance(Duration::from_millis(250)).await;
-    viewer.report_pressure().unwrap();
+    viewer.report_pressure(lag).unwrap();
     assert!(matches!(
         commands.try_recv(),
         Ok(HostCommand::Pressure { .. })

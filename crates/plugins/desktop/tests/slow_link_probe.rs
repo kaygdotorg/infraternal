@@ -57,6 +57,11 @@ struct Bitrate {
     last: Option<Instant>,
     /// Healthy frames in a row, capped at 8.
     healthy: u32,
+    /// When the rate was last cut.
+    last_cut: Option<Instant>,
+    /// Experiment (`PROBE_AIMD_SPLIT=1`): a cut waits 0.5 s after the last
+    /// cut only, not after the last increase as the Swift controller does.
+    split: bool,
 }
 impl Bitrate {
     /// Starts at `maximum` (at least 500 kbit/s).
@@ -67,6 +72,8 @@ impl Bitrate {
             current: maximum,
             last: None,
             healthy: 0,
+            last_cut: None,
+            split: std::env::var_os("PROBE_AIMD_SPLIT").is_some(),
         }
     }
     /// Reports one frame's outcome, as the Swift controller does.
@@ -76,9 +83,13 @@ impl Bitrate {
             .map_or(f64::INFINITY, |last| (now - last).as_secs_f64());
         if congested {
             self.healthy = 0;
-            if since >= 0.5 {
+            let since_cut = self
+                .last_cut
+                .map_or(f64::INFINITY, |last| (now - last).as_secs_f64());
+            if (if self.split { since_cut } else { since }) >= 0.5 {
                 self.current = (self.current * 0.7).max(500_000.0);
                 self.last = Some(now);
+                self.last_cut = Some(now);
             }
         } else {
             self.healthy = (self.healthy + 1).min(8);
@@ -142,6 +153,7 @@ async fn slow_link_probe() {
         };
         let mut force = true;
         let mut sequence = 0;
+        let trace = std::env::var_os("PROBE_TRACE").is_some();
         while epoch.elapsed() < duration {
             tick.tick().await;
             let now = Instant::now();
@@ -182,6 +194,15 @@ async fn slow_link_probe() {
             rate.feedback(now, false);
             stats.min_rate = stats.min_rate.min(rate.current);
             stats.rate_sum += rate.current;
+            if trace && stats.frames % 120 == 0 {
+                println!(
+                    "TRACE t={:.0}s rate_mbit_s={:.2} repairs={} pressure={}",
+                    epoch.elapsed().as_secs_f64(),
+                    rate.current / 1e6,
+                    stats.repairs_asked,
+                    stats.pressure_reports
+                );
+            }
         }
         encoder_session.close();
         stats
@@ -191,10 +212,19 @@ async fn slow_link_probe() {
     let writer_sent = Arc::clone(&sent);
     let writer = tokio::spawn(async move {
         let mut wire = Vec::new();
+        let mut last_write = Duration::ZERO;
+        // after-only begin
+        // Experiment knob: the lag that reports pressure (the server uses 50 ms).
+        let pressure_at = Duration::from_millis(
+            std::env::var("PROBE_PRESSURE_MS").map_or(50, |ms| ms.parse().unwrap()),
+        );
+        // after-only end
         while let Ok(frame) = viewer.next().await {
             // after-only begin
-            if viewer.waited() >= Duration::from_millis(50) {
-                let _ = viewer.report_pressure();
+            // As the server's viewer loop: the frame lag or the last write time.
+            let lag = viewer.take_lag().max(std::mem::take(&mut last_write));
+            if lag >= pressure_at {
+                let _ = viewer.report_pressure(lag);
             }
             // after-only end
             wire.clear();
@@ -203,8 +233,10 @@ async fn slow_link_probe() {
             wire.extend_from_slice(&frame.capture_ns.to_be_bytes());
             wire.push(u8::from(frame.keyframe));
             wire.extend_from_slice(&frame.bytes);
+            let began = Instant::now();
             let written =
                 tokio::time::timeout(Duration::from_secs(1), write.write_all(&wire)).await;
+            last_write = began.elapsed();
             let mut sent = writer_sent.lock().unwrap();
             if let Ok(Ok(())) = written {
                 sent.0 += 1;

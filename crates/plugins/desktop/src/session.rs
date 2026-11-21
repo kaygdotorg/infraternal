@@ -10,9 +10,10 @@
 //! it skips to the newest frames, waits for a keyframe, and the session asks
 //! the host for one, once (D254's drop-to-newest, beyond the bound).
 //!
-//! A viewer also reports how long its frames waited for it
-//! ([`Viewer::waited`]); the socket adapter turns a long wait into
-//! [`Viewer::report_pressure`], which lowers the shared encoder's bit rate.
+//! A viewer also measures how far behind it is ([`Viewer::take_lag`]: the
+//! longest any frame it took or skipped had waited); the socket adapter turns
+//! a long lag into [`Viewer::report_pressure`], which lowers the shared
+//! encoder's bit rate.
 //!
 //! The session also decides who may steer the capture. One viewer at a time is
 //! the controller; its input and resize commands go to the host through a small
@@ -301,7 +302,7 @@ impl Session {
             cached,
             last_sequence: 0,
             waiting_keyframe: true,
-            waited: Duration::ZERO,
+            lag: Duration::ZERO,
         })
     }
     /// The command that re-announces the current controller to a reconnected
@@ -604,9 +605,10 @@ pub struct Viewer {
     last_sequence: u64,
     /// A frame was missed, so deltas are skipped until a keyframe arrives.
     waiting_keyframe: bool,
-    /// How long the frame last returned by [`Viewer::next`] waited for this
-    /// viewer after it was published.
-    waited: Duration,
+    /// The longest any frame returned or skipped by [`Viewer::next`] had
+    /// waited for this viewer since it was published, since the last
+    /// [`Viewer::take_lag`].
+    lag: Duration,
 }
 impl Viewer {
     /// Retain identity, never the Viewer itself, across a bounded transport queue.
@@ -665,7 +667,6 @@ impl Viewer {
                 }
                 if let Some(cached) = self.cached.take() {
                     self.last_sequence = cached.sequence;
-                    self.waited = Duration::ZERO;
                     return Ok(cached);
                 }
                 state
@@ -688,8 +689,14 @@ impl Viewer {
             };
             let continuous = self.last_sequence.checked_add(1) == Some(frame.sequence);
             // Step past this frame whatever happens: a skipped delta is never
-            // looked at again, and only a later keyframe can resume.
+            // looked at again, and only a later keyframe can resume. A skipped
+            // frame counts towards the lag too: a viewer that fell beyond the
+            // bound is the one most behind.
             self.last_sequence = frame.sequence;
+            let waited = tokio::time::Instant::now()
+                .into_std()
+                .saturating_duration_since(published);
+            self.lag = self.lag.max(waited);
             if frame.keyframe {
                 self.waiting_keyframe = false;
             } else if self.waiting_keyframe || !continuous {
@@ -698,29 +705,26 @@ impl Viewer {
                 self.session.repair(&mut state)?;
                 continue;
             }
-            self.waited = tokio::time::Instant::now()
-                .into_std()
-                .saturating_duration_since(published);
             return Ok(frame);
         }
     }
-    /// How long the frame last returned by [`Viewer::next`] waited for this
-    /// viewer after it was published: zero while the viewer keeps up, growing
-    /// when its connection or browser falls behind. A cached keyframe counts
-    /// as zero.
-    #[must_use]
-    pub const fn waited(&self) -> Duration {
-        self.waited
+    /// Returns, and starts again from zero, the longest time any frame that
+    /// [`Viewer::next`] returned or skipped had waited for this viewer since
+    /// it was published. Zero while the viewer keeps up; it grows when the
+    /// viewer's connection or browser falls behind. The cached keyframe given
+    /// at attach does not count.
+    pub fn take_lag(&mut self) -> Duration {
+        std::mem::take(&mut self.lag)
     }
-    /// Tells the host that this viewer's connection is backed up, so the
-    /// shared encoder lowers its bit rate. One encode serves every viewer, so
+    /// Tells the host that this viewer's connection is backed up by `lag`
+    /// (informational), so the shared encoder lowers its bit rate. One encode serves every viewer, so
     /// the slowest viewer sets the rate: the alternative, skipping and repairing
     /// with keyframes, costs every viewer far more bytes. Reports are merged to
     /// at most one per 250 ms per session, and a full host queue drops one
     /// rather than waiting (it is only a hint).
     /// # Errors
     /// Refuses withdrawn access.
-    pub fn report_pressure(&self) -> Result<(), Error> {
+    pub fn report_pressure(&self, lag: Duration) -> Result<(), Error> {
         self.allowed(false)?;
         let mut state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
         if state.closed {
@@ -740,7 +744,7 @@ impl Viewer {
                 .session
                 .commands
                 .try_send(HostCommand::Pressure {
-                    waited_ms: u16::try_from(self.waited.as_millis()).unwrap_or(u16::MAX),
+                    waited_ms: u16::try_from(lag.as_millis()).unwrap_or(u16::MAX),
                 })
                 .is_ok()
         {
