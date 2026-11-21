@@ -595,6 +595,71 @@ fn environment_root_probe() {
     );
 }
 
+/// A `test-trust-anchor` build trusts the one extra CA a live test names, and nothing else (#355,
+/// #483). The child gets the file only through `INFRATERNAL_TEST_TRUST_ANCHOR`: its own CA is
+/// accepted, an unrelated CA is still refused, and a missing file fails closed.
+#[cfg(feature = "test-trust-anchor")]
+#[test]
+fn test_trust_anchor_adds_only_the_named_ca() {
+    let directory = Directory::new();
+    let anchor = environment_ca(&PKey::generate_ed25519().unwrap());
+    let other = environment_ca(&PKey::generate_ed25519().unwrap());
+    let anchor_path = directory.0.join("anchor.pem");
+    let other_path = directory.0.join("other.pem");
+    std::fs::write(&anchor_path, anchor.to_pem().unwrap()).unwrap();
+    std::fs::write(&other_path, other.to_pem().unwrap()).unwrap();
+    let probe = |anchor: &Path, subject: &Path| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "remote::tests::test_trust_anchor_probe",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("INFRATERNAL_TEST_TRUST_ANCHOR", anchor)
+            .env("INFRATERNAL_TEST_SUBJECT", subject)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(probe(&anchor_path, &anchor_path), "the named CA is trusted");
+    assert!(!probe(&anchor_path, &other_path), "an unnamed CA stays untrusted");
+    assert!(
+        !probe(&directory.0.join("missing.pem"), &anchor_path),
+        "a missing anchor file fails closed"
+    );
+}
+
+/// Child of `test_trust_anchor_adds_only_the_named_ca`: exit success only when the connector
+/// built with the environment's anchor accepts `INFRATERNAL_TEST_SUBJECT` as a root.
+#[cfg(feature = "test-trust-anchor")]
+#[test]
+#[ignore = "child of test_trust_anchor_adds_only_the_named_ca"]
+fn test_trust_anchor_probe() {
+    let subject = X509::from_pem(
+        &std::fs::read(std::env::var_os("INFRATERNAL_TEST_SUBJECT").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let ssl = outbound_tls_connector(None)
+        .unwrap()
+        .configure()
+        .unwrap()
+        .into_ssl("anchor.invalid")
+        .unwrap();
+    let mut context = openssl::x509::X509StoreContext::new().unwrap();
+    let chain = openssl::stack::Stack::new().unwrap();
+    let accepted = context
+        .init(
+            ssl.ssl_context().cert_store(),
+            &subject,
+            &chain,
+            openssl::x509::X509StoreContextRef::verify_cert,
+        )
+        .unwrap_or(false);
+    assert!(accepted);
+}
+
 /// SSH setup copies the host's enrolled identity into its transaction before
 /// joining, and a published-setup Retry joins again for the same host (#230).
 /// Join must re-enroll that host's own key instead of refusing the identity;

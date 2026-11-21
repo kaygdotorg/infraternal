@@ -10,6 +10,8 @@ def check(binary):
         with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as image:
             if image.find(b"infraternal-staging-trust-v1") >= 0:
                 raise ValueError("production binary contains staging-trust authority")
+            if image.find(b"INFRATERNAL_TEST_TRUST_ANCHOR") >= 0:
+                raise ValueError("production binary contains the test trust anchor switch")
 
 
 if __name__ == "__main__":
@@ -18,4 +20,4 @@ if __name__ == "__main__":
     except (OSError, ValueError, IndexError):
         print("production trust: FAIL (missing image or staging authority)", file=sys.stderr)
         raise SystemExit(1) from None
-    print("production trust: PASS (staging-trust authority absent)")
+    print("production trust: PASS (staging-trust authority and test trust anchor absent)")
