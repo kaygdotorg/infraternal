@@ -2,9 +2,10 @@
 //!
 //! One non-persistent queue is attached to the owned mesh interface. The kernel sends coalesced
 //! TCP packets with virtio metadata; this adapter validates and segments them before `GotaTun` sees
-//! them. Decrypted packets go back to the host stack through one writer task, which merges
-//! consecutive segments of a TCP flow into virtio GSO frames (GRO), so the kernel takes a run of
-//! segments in one write and one pass through its stack.
+//! them. Decrypted packets go back to the host stack in the task that hands them over: each run
+//! `GotaTun` delivers is written at once, with consecutive segments of a TCP flow merged into
+//! virtio GSO frames (GRO), so the kernel takes a run of segments in one write and one pass
+//! through its stack (#260, J1122: no writer task, so no wake between decryption and the write).
 
 use crate::policy::model::PublicKey;
 use bytes::BytesMut;
@@ -18,22 +19,18 @@ use std::{
     fs::File,
     io,
     sync::{
-        Arc, OnceLock, RwLock,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 use tokio::{
     io::unix::AsyncFd,
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, watch},
 };
 
 const VNET_HEADER_LEN: usize = 10;
 const MAX_IP_PACKET_LEN: usize = 40 + u16::MAX as usize;
 const MAX_TUN_FRAME_LEN: usize = VNET_HEADER_LEN + MAX_IP_PACKET_LEN;
-/// Decrypted packets queued for the TUN writer.
-const WRITE_QUEUE: usize = 256;
-/// Most queued packets the writer takes in one pass.
-const GRO_BATCH: usize = 64;
 /// Most TCP segments merged into one GSO frame.
 const GRO_MAX_SEGMENTS: usize = 64;
 /// Writable space after each TCP segment for 16-byte alignment and the transport envelope.
@@ -64,7 +61,7 @@ pub(crate) struct LinuxTun {
 
 impl LinuxTun {
     /// Create one non-persistent Linux TUN queue, preferring virtio TSO offloads. Must run inside
-    /// the engine's Tokio runtime, which also runs the TUN writer task.
+    /// the engine's Tokio runtime, whose I/O driver the descriptor registers with.
     ///
     /// The value comes from configured peer endpoint routes before this interface is opened.
     /// The owner key is checked before later MTU writes so a replaced shared name is not changed.
@@ -90,7 +87,7 @@ impl LinuxTun {
         #[allow(deprecated)]
         let fd = Arc::new(AsyncFd::new(device.into_file())?);
         Ok(Self {
-            writer: TunWriter::spawn(Arc::clone(&fd), vnet_header, endpoint_refresh),
+            writer: TunWriter::new(Arc::clone(&fd), vnet_header, endpoint_refresh),
             fd,
             name: Arc::from(name),
             owner: Arc::new(RwLock::new(owner)),
@@ -114,7 +111,7 @@ impl LinuxTun {
         let fd = Arc::new(AsyncFd::new(File::from(device))?);
         let (mtu_updates, mtu) = crate::mesh_mtu::watcher(crate::mesh_mtu::IPV6_MINIMUM_MTU);
         Ok(Self {
-            writer: TunWriter::spawn(
+            writer: TunWriter::new(
                 Arc::clone(&fd),
                 vnet_header,
                 Arc::new(crate::gotatun_node::EndpointRefreshSignal::default()),
@@ -187,14 +184,28 @@ impl LinuxTun {
     /// The authenticated, decrypted packet delivery seam for future in-process services.
     /// Any interception belongs before the final TUN write; relay framing remains ciphertext-only.
     async fn send_packet(&mut self, packet: Packet<Ip>) -> io::Result<()> {
-        let packet = packet.into_bytes();
-        let mut mtu = self.mtu.clone();
-        if packet.len() > usize::from(mtu.get()) {
-            // GotaTun treats adapter errors as fatal to its packet workers. A decrypted oversized
-            // packet cannot be delivered, but dropping it must not stop later valid traffic.
-            return Ok(());
-        }
-        self.writer.send(packet).await
+        let mut packets = vec![packet];
+        self.send_packets(&mut packets).await
+    }
+
+    /// Write a run of decrypted packets in order, merging what can merge, and empty `packets`.
+    ///
+    /// A packet larger than the MTU is dropped: `GotaTun` treats adapter errors as fatal to its
+    /// packet workers, and an oversized decrypted packet cannot be delivered, but dropping it must
+    /// not stop later valid traffic. Only a gone device is an error.
+    async fn send_packets(&mut self, packets: &mut Vec<Packet<Ip>>) -> io::Result<()> {
+        let mtu = usize::from(self.mtu.clone().get());
+        let mut run = std::mem::take(&mut self.writer.run.0);
+        run.extend(
+            packets
+                .drain(..)
+                .map(Packet::into_bytes)
+                .filter(|packet| packet.len() <= mtu),
+        );
+        let written = self.writer.write(&run).await;
+        run.clear();
+        self.writer.run.0 = run;
+        written
     }
 
     /// Read the next decodable frame from the host stack.
@@ -244,6 +255,10 @@ impl IpSend for LinuxTun {
     async fn send(&mut self, packet: Packet<Ip>) -> io::Result<()> {
         self.send_packet(packet).await
     }
+
+    async fn send_many(&mut self, packets: &mut Vec<Packet<Ip>>) -> io::Result<()> {
+        self.send_packets(packets).await
+    }
 }
 
 impl IpRecv for LinuxTun {
@@ -259,78 +274,86 @@ impl IpRecv for LinuxTun {
     }
 }
 
-/// Hands decrypted packets to the task that owns every TUN write.
+/// Writes decrypted packets to the TUN in the caller's task (#260, J1122).
 ///
-/// `GotaTun` calls the adapter one packet at a time from its own send task, so the adapter cannot
-/// see what follows a packet. The writer takes whatever is queued when it runs: a busy link fills
-/// a batch for GRO, and a single packet on an idle link is written at once, without a timer.
+/// `GotaTun` hands over each decrypted run whole ([`IpSend::send_many`]), so the run itself is
+/// the GRO batch: consecutive segments of one flow become one GSO frame, and a lone packet is
+/// written at once, without a timer. This used to be a task fed one packet at a time through a
+/// 256-packet channel, because `GotaTun` only called `send`; that cost a cross-thread wake per
+/// run on top of `GotaTun`'s own send queue (J1120). `GotaTun`'s queue still absorbs a TUN that
+/// is slow to take frames, and its order rules decide when a run is written.
 #[derive(Clone)]
 struct TunWriter {
-    packets: mpsc::Sender<Packet<[u8]>>,
+    fd: Arc<AsyncFd<File>>,
+    vnet_header: bool,
     /// Coalesced route-refresh wakeups, raised by host-bound writes here and by host reads in
     /// `recv_packets`.
     endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
-    /// The device error that ended the writer; `GotaTun` stops its send task on it too.
-    failure: Arc<OnceLock<Errno>>,
+    /// Reused GSO frame buffer; each clone grows its own on first use.
+    frame: Scratch<u8>,
+    /// Reused run of packets being written; empty between writes.
+    run: Scratch<Packet<[u8]>>,
+}
+
+/// A reusable buffer whose clones start empty, so cloning the TUN handle copies no packet data.
+struct Scratch<T>(Vec<T>);
+
+impl<T> Clone for Scratch<T> {
+    fn clone(&self) -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T> std::ops::Deref for Scratch<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for Scratch<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        &mut self.0
+    }
 }
 
 impl TunWriter {
-    /// Spawn the writer on the current Tokio runtime and retain its coalesced route-refresh signal.
-    fn spawn(
+    /// A writer for `fd` that signals `endpoint_refresh` after host-bound writes.
+    fn new(
         fd: Arc<AsyncFd<File>>,
         vnet_header: bool,
         endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
     ) -> Self {
-        let (packets, queue) = mpsc::channel(WRITE_QUEUE);
-        let failure = Arc::new(OnceLock::new());
-        tokio::spawn(write_queued(fd, vnet_header, queue, Arc::clone(&failure)));
         Self {
-            packets,
+            fd,
+            vnet_header,
             endpoint_refresh,
-            failure,
+            frame: Scratch(Vec::new()),
+            run: Scratch(Vec::new()),
         }
     }
 
-    /// Queue one packet and signal a possible endpoint change after the queue accepts it.
-    ///
-    /// The queue remains the packet's owner until the TUN writer has written it.
-    async fn send(&self, packet: Packet<[u8]>) -> io::Result<()> {
-        if self.packets.send(packet).await.is_ok() {
-            self.endpoint_refresh.traffic();
+    /// Write `run` in order, then signal a possible endpoint change.
+    /// # Errors
+    /// Only a device that is gone; a frame the kernel refuses is dropped.
+    async fn write(&mut self, run: &[Packet<[u8]>]) -> io::Result<()> {
+        if run.is_empty() {
             return Ok(());
         }
-        Err(self
-            .failure
-            .get()
-            .map_or_else(|| io::ErrorKind::BrokenPipe.into(), |errno| (*errno).into()))
-    }
-}
-
-async fn write_queued(
-    fd: Arc<AsyncFd<File>>,
-    vnet_header: bool,
-    mut queue: mpsc::Receiver<Packet<[u8]>>,
-    failure: Arc<OnceLock<Errno>>,
-) {
-    let mut batch = Vec::with_capacity(GRO_BATCH);
-    let mut frame = Vec::with_capacity(MAX_TUN_FRAME_LEN);
-    while queue.recv_many(&mut batch, GRO_BATCH).await != 0 {
-        if let Err(errno) = write_batch(&fd, vnet_header, &batch, &mut frame).await {
-            let _ = failure.set(errno);
-            return;
-        }
-        batch.clear();
+        write_batch(&self.fd, self.vnet_header, run, &mut self.frame).await?;
+        self.endpoint_refresh.traffic();
+        Ok(())
     }
 }
 
 /// Write one batch in order. A frame the kernel refuses is dropped, as on a congested link; only a
-/// device that is gone ends the writer.
+/// device that is gone is an error.
 async fn write_batch(
     fd: &AsyncFd<File>,
     vnet_header: bool,
     batch: &[Packet<[u8]>],
     frame: &mut Vec<u8>,
-) -> Result<(), Errno> {
+) -> io::Result<()> {
     let mut start = 0;
     while start < batch.len() {
         let run = if vnet_header {
@@ -359,9 +382,9 @@ async fn write_batch(
             }
         };
         if let Err(error) = result
-            && let Some(errno) = device_gone(&error)
+            && device_gone(&error).is_some()
         {
-            return Err(errno);
+            return Err(error);
         }
         start += run;
     }
@@ -1041,20 +1064,20 @@ fn invalid_tun_owned(message: String) -> io::Error {
 }
 
 #[cfg(test)]
-/// Tests for TUN packet framing, checksums and queued writes.
+/// Tests for TUN packet framing, checksums and run writes.
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, TunWriter,
-        build_gso_frame, coalescible_run, decode_frame, internet_checksum, ip_details,
-        recompute_ipv4_checksum, recompute_transport_checksum,
+        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, build_gso_frame,
+        coalescible_run, decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
+        recompute_transport_checksum,
     };
     use bytes::BytesMut;
     use gotatun::{
         noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
         packet::{Ip, Packet, PacketBufPool, WgData, WgKind},
-        tun::MtuWatcher,
+        tun::{IpSend, MtuWatcher},
         udp::{
             UdpSend,
             socket::{SockOpt, UdpSocket},
@@ -1062,7 +1085,6 @@ mod tests {
         x25519,
     };
     use std::{
-        fs::File,
         io::Read as _,
         os::{
             fd::OwnedFd,
@@ -1071,7 +1093,6 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
-    use tokio::io::unix::AsyncFd;
 
     fn ipv4_packet(length: usize) -> Packet<Ip> {
         let mut bytes = vec![0; length];
@@ -1142,6 +1163,8 @@ mod tests {
         assert_eq!(closed.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
+    /// A decrypted packet larger than the MTU is dropped, and the next valid packet is still
+    /// written: an adapter error would stop `GotaTun`'s receive path for good.
     #[tokio::test]
     async fn oversized_decrypted_packet_does_not_stop_the_next_valid_send() {
         let (mut reader, writer) = UnixStream::pair().unwrap();
@@ -1155,7 +1178,7 @@ mod tests {
         let expected = ipv4_packet(20).into_bytes().to_vec();
         tun.send_packet(ipv4_packet(20)).await.unwrap();
 
-        // Read off the runtime thread so the writer task can run.
+        // The write happened in this task; read it off the runtime thread anyway.
         let length = expected.len();
         let actual = tokio::task::spawn_blocking(move || {
             let mut actual = vec![0; length];
@@ -1397,46 +1420,42 @@ mod tests {
         }
     }
 
-    /// Verify that queued GSO segments merge while a standalone packet stays unchanged.
+    /// A run handed over whole is written in the caller's task: its segments merge into one GSO
+    /// frame and the standalone packet behind them is written unchanged (#260, J1122).
     #[tokio::test]
-    async fn writer_merges_queued_segments_and_writes_a_lone_packet_unchanged() {
+    async fn send_many_merges_a_runs_segments_and_writes_a_lone_packet_unchanged() {
         let (reader, writer) = UnixDatagram::pair().unwrap();
         writer.set_nonblocking(true).unwrap();
-        let writer: OwnedFd = writer.into();
-        #[allow(deprecated)]
-        let fd = Arc::new(AsyncFd::new(File::from(writer)).unwrap());
-        let tun_writer = TunWriter::spawn(
-            Arc::clone(&fd),
-            true,
-            Arc::new(crate::gotatun_node::EndpointRefreshSignal::default()),
-        );
+        reader.set_nonblocking(true).unwrap();
+        let mut tun = test_tun(writer.into(), true);
         let segments = flow(true, 3);
         let lone = tcp_segment(true, 90_000, 10, TCP_ACK | TCP_PSH, 9);
-        // The writer runs only once this task waits, so it finds all four queued.
-        for packet in packets(&segments)
+        let mut run = packets(&segments)
             .into_iter()
             .chain(packets(std::slice::from_ref(&lone)))
-        {
-            tun_writer.send(packet).await.unwrap();
-        }
-        let frames = tokio::task::spawn_blocking(move || {
-            (0..2)
-                .map(|_| {
-                    let mut frame = vec![0; 70_000];
-                    let length = reader.recv(&mut frame).unwrap();
-                    frame.truncate(length);
-                    frame
-                })
-                .collect::<Vec<_>>()
-        })
-        .await
-        .unwrap();
+            .map(|packet| packet.try_into_ip().unwrap())
+            .collect::<Vec<_>>();
+        tun.send_many(&mut run).await.unwrap();
+        assert!(run.is_empty());
+        // Both frames are already written when `send_many` returns: no task has to run first.
+        let frames = (0..2)
+            .map(|_| {
+                let mut frame = vec![0; 70_000];
+                let length = reader.recv(&mut frame).unwrap();
+                frame.truncate(length);
+                frame
+            })
+            .collect::<Vec<_>>();
         let mut merged = Vec::new();
         build_gso_frame(&packets(&segments), &mut merged).unwrap();
         assert_eq!(frames[0], merged);
         let mut plain = vec![0; 10];
         plain.extend_from_slice(&lone);
         assert_eq!(frames[1], plain);
+        assert!(
+            reader.recv(&mut [0; 16]).is_err(),
+            "nothing else was written"
+        );
     }
 
     fn ipv4_tcp_frame(payload_len: usize) -> Vec<u8> {
