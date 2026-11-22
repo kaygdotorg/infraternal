@@ -240,7 +240,7 @@ async fn the_trial_waits_for_every_live_recorded_session() {
         let (expected, folder) = (expected.clone(), folder.clone());
         let (inventory, count) = (inventory, waiting_count.clone());
         tokio::spawn(async move {
-            sessions_listed(&expected, Some(&folder), Some(inventory), &count).await
+            sessions_listed(&expected, Some(&folder), Some(inventory), &count).await;
         })
     };
     // sleep: the new release lists nothing yet; give the trial time to (wrongly) pass.
