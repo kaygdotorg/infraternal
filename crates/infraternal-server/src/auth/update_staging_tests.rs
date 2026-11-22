@@ -1507,16 +1507,15 @@ async fn auto_update_after_reboot() {
             "no session echoed after the roll back in {} attempts",
             attempts - 1
         );
-        match std::panic::AssertUnwindSafe(server.echo("after-rollback"))
+        if let Ok(count) = std::panic::AssertUnwindSafe(server.echo("after-rollback"))
             .catch_unwind()
             .await
         {
-            Ok(count) => echoed = count,
-            Err(_) => {
-                println!("UPDATE step=echo_retry attempt={attempts}");
-                // sleep: the restarted server re-adopts the live sessions before they can be attached.
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
+            echoed = count;
+        } else {
+            println!("UPDATE step=echo_retry attempt={attempts}");
+            // sleep: the restarted server re-adopts the live sessions before they can be attached.
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
     println!("UPDATE step=echo_after_rollback attempts={attempts}");
