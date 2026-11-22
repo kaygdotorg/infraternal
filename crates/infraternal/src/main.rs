@@ -10,6 +10,9 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+/// `infraternal server update …` over the server's private control socket (#211, D400).
+#[cfg(feature = "release")]
+mod server_update_cli;
 #[cfg(feature = "process-per-user")]
 mod user_host_cli;
 

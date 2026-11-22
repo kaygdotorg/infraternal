@@ -311,5 +311,113 @@ pub fn server_cli_actions() -> Vec<infraternal_plugin_api::ActionDefinition> {
         }
         action
     })
+    .chain(server_update_cli_actions())
     .collect()
+}
+
+/// What every `infraternal server update` command says about who may run it (D400).
+pub const LOCAL_UPDATE_RULE: &str = "Run it on the server machine as root (or the account the server runs as). It talks to the running server over its private control socket, so no passkey is needed there; from any other device, use the web app, which asks the owner for a recent passkey tap.";
+
+/// How long `apply` and `rollback` wait for the outcome before they stop waiting.
+pub const UPDATE_WAIT_MINUTES: u64 = 5;
+
+/// The `infraternal server update …` commands (#211, D400): a thin client over the same
+/// `release.update.*` actions as the web app, sent to the running server over its private control
+/// socket. Each command carries its hosted action, so `infraternal skill server update <command>`
+/// shows the same contract an AI agent sees for the API, with the local rule instead of the
+/// passkey sentence.
+fn server_update_cli_actions() -> impl Iterator<Item = infraternal_plugin_api::ActionDefinition> {
+    use infraternal_plugin_api::{
+        ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun, CliHandler,
+        JsonSchema,
+    };
+    [
+        (&UPDATE_STATUS, "status", ("server update status --json", "Read the update state as JSON.")),
+        (&UPDATE_CHECK, "check", ("server update check", "Check the channel now and stage a newer release.")),
+        (&UPDATE_APPLY, "apply", ("server update apply --json", "Switch to the staged release and wait for its health check.")),
+        (&UPDATE_ROLLBACK, "rollback", ("server update rollback", "Go back to the version that ran before the last update.")),
+        (&UPDATE_CANCEL, "cancel", ("server update cancel", "Drop a release that was staged by version.")),
+        (&UPDATE_HISTORY, "history", ("server update history", "List what the updater did, newest first.")),
+        (&UPDATE_SETTINGS, "settings", ("server update settings --quiet-minutes 10", "Wait for 10 idle minutes before an automatic update.")),
+    ]
+    .into_iter()
+    .map(|(source, name, example)| {
+        let mut fields = vec![(
+            "data".to_owned(),
+            JsonSchema::string("Data folder of the running server."),
+        )];
+        let mut required = Vec::new();
+        let mut positionals = Vec::new();
+        if matches!(name, "check" | "apply") {
+            fields.push((
+                "version".to_owned(),
+                JsonSchema::string(if name == "check" {
+                    "Stage exactly this release (even an older one or another channel's). Leave it out to check the channel."
+                } else {
+                    "Apply only if this is the staged release."
+                }),
+            ));
+            positionals.push("version".to_owned());
+        }
+        if matches!(name, "apply" | "rollback") {
+            fields.push((
+                "no_wait".to_owned(),
+                JsonSchema::boolean(
+                    "Return once the switch has started instead of waiting for its outcome.",
+                ),
+            ));
+        }
+        if name == "settings" {
+            fields.push((
+                "quiet_minutes".to_owned(),
+                JsonSchema::integer(
+                    "Minutes nobody may type or attach before an update applies by itself (1 to 1440).",
+                ),
+            ));
+            required.push("quiet_minutes".to_owned());
+        }
+        let mut instructions: Vec<&'static str> = source
+            .instructions
+            .iter()
+            .copied()
+            .filter(|line| !line.contains("passkey tap"))
+            .collect();
+        if matches!(name, "apply" | "rollback") {
+            instructions.push("It waits until the server has switched and passed its health check, or went back by itself, for up to 5 minutes; the exit code is non-zero when the update was undone.");
+        }
+        instructions.push(LOCAL_UPDATE_RULE);
+        let effect = if source.effect == Effect::Read {
+            ActionEffect::Read
+        } else {
+            ActionEffect::Write
+        };
+        let mut action = ActionDefinition::new(
+            ["server", "update", name],
+            source.summary,
+            "Use this on the machine that runs the server, as root, to update it from a shell or a script.",
+            instructions,
+            JsonSchema::object(fields, required),
+            JsonSchema::command_result_with(JsonSchema::object(
+                [(
+                    "update".to_owned(),
+                    JsonSchema {
+                        additional_properties: Some(true),
+                        ..JsonSchema::empty_object()
+                    },
+                )],
+                std::iter::empty(),
+            )),
+            ActionContract::new(
+                ActionTarget::Global,
+                effect,
+                "server.configure",
+                CliDryRun::Unsupported,
+            ),
+        )
+        .with_cli_handler(CliHandler::ServerPlugin)
+        .with_example(example.0, example.1);
+        action.hosted = Some(*source);
+        action.cli_positionals = positionals;
+        action
+    })
 }

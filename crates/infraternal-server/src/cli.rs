@@ -30,7 +30,12 @@ pub fn plugin() -> PluginDefinition {
         plugin
             .actions
             .extend(infraternal_plugin_release::descriptor::server_cli_actions());
-        plugin = plugin.with_group("server release", "Look at the server's releases.");
+        plugin = plugin
+            .with_group("server release", "Look at the server's releases.")
+            .with_group(
+                "server update",
+                "Update the running server to a signed release, or go back, from the server machine.",
+            );
     }
     plugin
         .actions
