@@ -41,7 +41,7 @@ function confirmedClient(status = "") {
     inputScratch: new Uint8Array(16 * 1024), nextInSeq: 0n, ackedInSeq: 0n,
     streamId: 1, lastOutSeq: 0n, receivedOutSeq: 0n, sessionId: new Uint8Array(16),
     config: { hooks: {}, status: { textContent: status, hidden: status === "" } },
-    conn: { streamAttached: (ready: boolean) => readiness.push(ready) },
+    conn: { streamAttached: (ready: boolean) => readiness.push(ready), retryForInput: () => {} },
     sampleRoundTrip: () => {}, startPings: () => {},
     protocolFailure: (message: string) => failures.push(message),
     sendFrame: (_stream: number, frame: WireFrame) => {
