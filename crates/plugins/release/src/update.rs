@@ -47,8 +47,9 @@
 //! updates/
 //!   state.json         UpdateState, 0600, replaced atomically
 //!   staged/            at most one verified release: VERSION, SHA256SUMS,
-//!                      SHA256SUMS.sig, infraternal-<arch>-musl and, when the
-//!                      signed list names it, infraternal-web.tar (#211 S6)
+//!                      SHA256SUMS.sig, the server image `infraternal` (never
+//!                      an `infraternal-<arch>-musl` add-host payload) and, when
+//!                      the signed list names it, infraternal-web.tar (#211 S6)
 //!   download-<uuid>/   one check in progress
 //!   retired-<uuid>/    the previous staged release while it is being replaced
 //! ```
@@ -322,19 +323,37 @@ fn read_state(path: &Path) -> Option<UpdateState> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// The release image name for this machine, as the release signer lists it and
-/// `restart --binary` admits it. `None` where no server image is published.
+/// The file name of the server image in every release bundle.
+///
+/// `scripts/package-release` installs the full server build as `infraternal`. The
+/// `infraternal-<arch>-musl` files beside it are the add-host payloads: smaller builds
+/// without the `server` command, which cannot run a server. Staging, the switch, the
+/// boot pointer and `server update adopt` all use this name; only the add-host payload
+/// code uses the `-musl` names (J1134: S3 to S6 once staged the `x86_64` host payload).
+pub const SERVER_IMAGE: &str = "infraternal";
+
+/// The server image the updater stages on this machine, or `None` where releases publish
+/// no server image for it.
+///
+/// A release bundle carries one server image, [`SERVER_IMAGE`], built for `x86_64` Linux
+/// (`scripts/release/build` pins that architecture, because the name does not carry
+/// one). An aarch64 server would download an `x86_64` binary under the same name, so
+/// updates are off there until the pipeline publishes an aarch64 server image under
+/// its own name.
 #[must_use]
-pub fn artifact_name() -> Option<&'static str> {
+pub fn server_image() -> Option<&'static str> {
     match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => Some("infraternal-x86_64-musl"),
-        ("aarch64", "linux") => Some("infraternal-aarch64-musl"),
+        ("x86_64", "linux") => Some(SERVER_IMAGE),
         _ => None,
     }
 }
 
-/// Why updates are off on a non-Linux host or one without a published server image.
-pub const OFF_PLATFORM: &str = "auto-update runs only on Linux servers (x86_64 or aarch64)";
+/// Why updates are off on a machine the releases publish no server image for.
+pub const OFF_PLATFORM: &str =
+    "auto-update runs only on x86_64 Linux servers, the only server image releases publish";
+/// Why a check stops when the release's signed list does not name the server image
+/// (J1134): only add-host payloads would be left to download, and they cannot run a server.
+pub const NO_SERVER_IMAGE: &str = "the release does not publish a server image for this machine";
 /// Why updates are off in a development build, whose version is not a signed release.
 pub const OFF_DEVELOPMENT: &str =
     "this is a development build; only signed release builds update themselves";
@@ -351,7 +370,7 @@ pub const OFF_NOT_ROOT: &str =
 /// # Errors
 /// [`OFF_PLATFORM`], [`OFF_DEVELOPMENT`] or [`OFF_NOT_ROOT`], in that order.
 pub fn availability(release_build: bool) -> Result<&'static str, &'static str> {
-    let artifact = artifact_name().ok_or(OFF_PLATFORM)?;
+    let artifact = server_image().ok_or(OFF_PLATFORM)?;
     if !release_build {
         return Err(OFF_DEVELOPMENT);
     }
@@ -377,7 +396,7 @@ pub struct Updater {
     origin: String,
     /// The running version.
     current: String,
-    /// The image to stage, for example `infraternal-x86_64-musl`.
+    /// The server image to stage, [`SERVER_IMAGE`] (see [`server_image`]).
     artifact: String,
     engine: Arc<dyn ReleaseEngine>,
     settings: Settings,
@@ -426,8 +445,8 @@ impl From<&'static str> for Stop {
 impl Updater {
     /// Bind an updater to the data folder `data`; start nothing.
     ///
-    /// `current` is the running version, `artifact` the image name for this machine
-    /// (see [`artifact_name`]), `engine` the server's downloader and verifier, and
+    /// `current` is the running version, `artifact` the server image name for this
+    /// machine (see [`server_image`]), `engine` the server's downloader and verifier, and
     /// `settings` reads the release plugin's switch and channel.
     #[must_use]
     pub fn new(
@@ -622,6 +641,11 @@ impl Updater {
         }
         if staged.as_deref() == Some(version.as_str()) {
             return Ok(Outcome::Staged(version));
+        }
+        // The signed list (verified by the metadata fetch above) must name the server
+        // image. A release without one is refused before any image download (J1134).
+        if !lists(&signed_list(&download.path)?, &self.artifact) {
+            return Err(Stop::Fault(NO_SERVER_IMAGE));
         }
         if free_space(&self.directory)? < self.required_space {
             return Err(Stop::Fault(
@@ -1061,6 +1085,21 @@ fn signed_list(directory: &Path) -> Result<Vec<u8>, &'static str> {
         return Err("the downloaded release is oversized");
     }
     Ok(bytes)
+}
+
+/// Whether the signed list `sums` names the file `name`.
+///
+/// `sha256sum` writes "<hex>  <name>" (text) or "<hex> *<name>" (binary). This only looks
+/// for the name; the file itself is still verified against the signature before use.
+fn lists(sums: &[u8], name: &str) -> bool {
+    let name = name.as_bytes();
+    sums.split(|byte| *byte == b'\n').any(|line| {
+        line.get(64..).is_some_and(|rest| {
+            rest.strip_prefix(b"  ")
+                .or_else(|| rest.strip_prefix(b" *"))
+                .is_some_and(|listed| listed == name)
+        })
+    })
 }
 
 /// Whether `announced` is a newer release than `staged` on the same channel, so the

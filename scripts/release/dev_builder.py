@@ -84,7 +84,9 @@ def build(repo, sha, cache, scratch, gate_mode="local", context=""):
             run("scripts/package-release", str(staging / "bundle"), "x86_64", "--built", cwd=source, env=env)
         else:
             gate["context"] = context
-            run("scripts/package-release", str(staging / "bundle"), cwd=source, env=env)
+            # Always the x86_64 server: `infraternal` names no architecture, and updaters
+            # stage it only on x86_64 Linux (J1134).
+            run("scripts/package-release", str(staging / "bundle"), "x86_64", cwd=source, env=env)
         for item in (staging / "bundle").iterdir():
             item.rename(staging / item.name)
         (staging / "bundle").rmdir()

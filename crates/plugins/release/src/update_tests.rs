@@ -162,7 +162,7 @@ fn a_second_check_waits_for_the_lock_and_the_sweep_keeps_foreign_entries() {
         .mode(0o700)
         .create(&abandoned)
         .unwrap();
-    std::fs::write(abandoned.join("infraternal-x86_64-musl"), b"partial").unwrap();
+    std::fs::write(abandoned.join("infraternal"), b"partial").unwrap();
     let retired = updates.join(format!("retired-{}", uuid::Uuid::new_v4()));
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -289,4 +289,34 @@ fn automatic_apply_defaults_on_and_round_trips_off() {
     };
     let back: UpdateState = serde_json::from_slice(&serde_json::to_vec(&off).unwrap()).unwrap();
     assert!(!back.automatic);
+}
+
+/// The updater stages the server image `infraternal`, never an `infraternal-<arch>-musl`
+/// add-host payload, and only on `x86_64` Linux, the one server image releases publish (J1134).
+#[test]
+fn the_server_image_is_the_release_server_never_a_host_payload() {
+    assert_eq!(SERVER_IMAGE, "infraternal");
+    let expected =
+        (cfg!(target_os = "linux") && cfg!(target_arch = "x86_64")).then_some("infraternal");
+    assert_eq!(server_image(), expected);
+    // The list `scripts/release/build` signs names the server and both host payloads.
+    let hex = "0".repeat(64);
+    let real = format!(
+        "{hex}  VERSION\n{hex}  infraternal\n{hex}  infraternal-aarch64-musl\n{hex}  infraternal-x86_64-musl\n"
+    );
+    assert!(lists(real.as_bytes(), SERVER_IMAGE));
+    assert!(lists(
+        format!("{hex} *infraternal\n").as_bytes(),
+        SERVER_IMAGE
+    ));
+    // Host payloads, session payloads and other names that start with it never count.
+    let hosts_only = format!(
+        "{hex}  VERSION\n{hex}  infraternal-x86_64-musl\n{hex}  infraternal-x86_64-session-musl\n{hex}  infraternal-web.tar\n"
+    );
+    assert!(!lists(hosts_only.as_bytes(), SERVER_IMAGE));
+    assert!(!lists(
+        format!("{hex}  infraternalx\n{hex} infraternal\n").as_bytes(),
+        SERVER_IMAGE
+    ));
+    assert!(!lists(b"short  infraternal\n", SERVER_IMAGE));
 }

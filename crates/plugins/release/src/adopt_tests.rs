@@ -8,8 +8,8 @@ use super::*;
 use std::fmt::Write as _;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
-/// The image name used by these tests.
-const IMAGE: &str = "infraternal-x86_64-musl";
+/// The image name used by these tests: the server image a release really carries.
+const IMAGE: &str = crate::update::SERVER_IMAGE;
 /// The signed version of every test release.
 const VERSION: &str = "edge-20261122T010203Z";
 

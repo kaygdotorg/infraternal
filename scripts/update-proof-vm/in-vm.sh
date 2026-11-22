@@ -18,7 +18,7 @@ state=/var/lib/iproof-runner
 mkdir -p "$out"
 mkdir -p -m 700 "$state"
 # The unit's boot-pointer chain, element by element, for the record.
-chain() { namei -l /var/lib/infraternal-proof/current/infraternal-x86_64-musl >> "$out/chain-$1.log" 2>&1; sync "$out/chain-$1.log"; }
+chain() { namei -l /var/lib/infraternal-proof/current/infraternal >> "$out/chain-$1.log" 2>&1; sync "$out/chain-$1.log"; }
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$out/runner.log"; sync "$out/runner.log"; }
 finish() {
     journalctl -u infraternal-proof.service --no-pager -o short-iso > "$out/journal.log" 2>&1

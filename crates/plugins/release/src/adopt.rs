@@ -91,7 +91,8 @@ pub fn plan(
 /// Install the signed release folder `source` as `<data>/updates/releases/<version>/` and
 /// point `current` at it (see the module docs).
 ///
-/// `artifact` is this machine's image name (`infraternal-x86_64-musl`). The updates folder
+/// `artifact` is this machine's server image name ([`crate::update::SERVER_IMAGE`], never an
+/// `infraternal-<arch>-musl` add-host payload). The updates folder
 /// is created (0700, owned by this account) if needed, as the updater does.
 /// # Errors
 /// A fixed sentence: an update check or switch holds the folder or a switch is in flight;

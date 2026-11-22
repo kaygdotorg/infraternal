@@ -174,14 +174,29 @@ impl Release {
     pub(crate) fn with_version(size: usize, version: &str) -> Self {
         Self::with_manifest_entries(size, version, 0)
     }
+    /// A signed release `version` with `size`-byte images and `extra` filler entries in
+    /// its signed list, for checks of the list's size bound.
     pub(crate) fn with_manifest_entries(size: usize, version: &str, extra: usize) -> Self {
-        Self::with_artifacts(size, version, extra, false)
+        Self::with_artifacts(size, version, extra, false, true)
     }
+    /// A signed release `version` that also carries both session-only payloads.
     fn with_sessions(version: &str) -> Self {
-        Self::with_artifacts(1024, version, 0, true)
+        Self::with_artifacts(1024, version, 0, true, true)
     }
-    /// Builds a release of `size` bytes plus `extra` filler; `sessions` adds the session-capable artifact.
-    fn with_artifacts(size: usize, version: &str, extra: usize, sessions: bool) -> Self {
+    /// A signed release `version` that carries only the add-host payloads and no server
+    /// image, for proving the updater refuses it (J1134).
+    pub(crate) fn without_server_image(version: &str) -> Self {
+        Self::with_artifacts(4096, version, 0, false, false)
+    }
+    /// Builds a release of `size` bytes plus `extra` filler; `sessions` adds the
+    /// session-capable artifact and `server` the server image `infraternal`.
+    fn with_artifacts(
+        size: usize,
+        version: &str,
+        extra: usize,
+        sessions: bool,
+        server: bool,
+    ) -> Self {
         use sha2::{Digest, Sha256};
         use std::process::Command;
         // The downloader bounds every write and fsync at 30 s; the slow build disk's
@@ -206,10 +221,15 @@ impl Release {
         );
         let payload = vec![0x42; size];
         // Both signed binaries let the same test exercise a remote download on x86_64 and aarch64.
-        let full_payloads = [
+        // `infraternal` is the server image with its own bytes, as in the bundles
+        // `scripts/release/build` makes: the updater must stage it, never a host payload (J1134).
+        let mut full_payloads = vec![
             ("infraternal-aarch64-musl", payload.clone()),
             ("infraternal-x86_64-musl", payload),
         ];
+        if server {
+            full_payloads.insert(0, ("infraternal", vec![0x53; size]));
+        }
         let version_name = version;
         let version = format!("{version}\n").into_bytes();
         let mut sums = format!(

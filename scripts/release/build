@@ -52,7 +52,11 @@ destination="$release_target/releases/$release_version"
 [[ ! -e "$destination" ]] || { printf 'release bundle already exists\n' >&2; exit 1; }
 staging="$(mktemp -d "$release_scratch/build.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
-scripts/package-release "$staging/bundle"
+# The server image is published as plain `infraternal`, a name without an architecture,
+# and servers' updaters stage it only on x86_64 Linux (update::server_image, J1134). So it
+# is always the x86_64 build, whatever this builder runs on; the -musl files are the
+# add-host payloads for both architectures.
+scripts/package-release "$staging/bundle" x86_64
 if [[ -n "$darwin" ]]; then
     install -m 755 "$darwin/infraternal-aarch64-darwin" "$staging/bundle/infraternal-aarch64-darwin"
 fi

@@ -741,19 +741,19 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
 /// Accept that identity as well as the ordinary command name; an arbitrary
 /// program with a `server` argument must not select this CLI's data directory.
 ///
-/// A server that follows its updates starts the boot pointer's release image,
-/// `<data>/updates/current/infraternal-<arch>-musl` (#211 S6), so the signed Linux
-/// release image names count too.
+/// A server that follows its updates starts the boot pointer's server image,
+/// `<data>/updates/current/infraternal` (#211 S6), which the plain name already covers.
+/// The `infraternal-<arch>-musl` add-host payloads have no `server` command, so a unit
+/// naming one is not a server (J1134).
 fn is_infraternal_program(program: &Path) -> bool {
-    program.file_name().is_some_and(|name| {
-        name == "infraternal"
-            || name == "infraternal-x86_64-musl"
-            || name == "infraternal-aarch64-musl"
-    }) || (program.is_absolute()
-        && std::env::current_exe().is_ok_and(|current| {
-            program == current
-                || fs::canonicalize(program).is_ok_and(|resolved| resolved == current)
-        }))
+    program
+        .file_name()
+        .is_some_and(|name| name == "infraternal")
+        || (program.is_absolute()
+            && std::env::current_exe().is_ok_and(|current| {
+                program == current
+                    || fs::canonicalize(program).is_ok_and(|resolved| resolved == current)
+            }))
 }
 
 /// Split a systemd `ExecStart` value into arguments for status and installation preflight.

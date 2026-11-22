@@ -69,7 +69,7 @@ fn the_checksum_list_names_the_archive_only_as_a_whole_name() {
     ));
     assert!(listed(format!("{hex} *infraternal-web.tar\n").as_bytes()));
     assert!(!listed(
-        format!("{hex}  VERSION\n{hex}  infraternal-x86_64-musl\n").as_bytes()
+        format!("{hex}  VERSION\n{hex}  infraternal\n").as_bytes()
     ));
     assert!(!listed(
         format!("{hex}  infraternal-web.tar.old\n").as_bytes()
@@ -234,7 +234,7 @@ fn installed(scratch: &Scratch, version: &str, web: bool) -> PathBuf {
         .recursive(true)
         .create(&release)
         .unwrap();
-    std::fs::write(release.join("infraternal-x86_64-musl"), b"image").unwrap();
+    std::fs::write(release.join("infraternal"), b"image").unwrap();
     if web {
         std::fs::DirBuilder::new()
             .mode(0o700)
@@ -258,13 +258,13 @@ fn a_release_image_serves_its_own_web_folder_even_through_the_boot_pointer() {
     let release = data.join("updates/releases/edge-20261122T000000Z");
     let real = std::fs::canonicalize(release.join(FOLDER)).unwrap();
     assert_eq!(
-        release_web(&release.join("infraternal-x86_64-musl"), &data),
+        release_web(&release.join("infraternal"), &data),
         Some(real.clone())
     );
     // A cold start runs `current/<image>`; the rule resolves it to the release folder now,
     // so a later move of the pointer does not change what this process serves.
     assert_eq!(
-        release_web(&data.join("updates/current/infraternal-x86_64-musl"), &data),
+        release_web(&data.join("updates/current/infraternal"), &data),
         Some(real)
     );
 }
@@ -276,7 +276,7 @@ fn other_images_keep_their_web_root_flag() {
     let data = installed(&scratch, "edge-20261122T000000Z", false);
     // A release without a web build.
     assert_eq!(
-        release_web(&data.join("updates/current/infraternal-x86_64-musl"), &data),
+        release_web(&data.join("updates/current/infraternal"), &data),
         None
     );
     // A fixed install path, like an operator's /opt/infraternal/<build>/infraternal.
@@ -288,10 +288,7 @@ fn other_images_keep_their_web_root_flag() {
     assert_eq!(release_web(Path::new("infraternal"), &data), None);
     let elsewhere = installed(&Scratch::new("elsewhere"), "edge-20261122T000000Z", true);
     assert_eq!(
-        release_web(
-            &elsewhere.join("updates/current/infraternal-x86_64-musl"),
-            &data
-        ),
+        release_web(&elsewhere.join("updates/current/infraternal"), &data),
         None
     );
 }
