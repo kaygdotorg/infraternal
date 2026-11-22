@@ -3,6 +3,8 @@
 name = "infraternal-release-signer"
 main = "src/index.js"
 compatibility_date = "2026-10-01"
+# One address only (D224): wrangler otherwise turns on wildcard preview URLs.
+preview_urls = false
 
 [[r2_buckets]]
 binding = "BUILDS"
