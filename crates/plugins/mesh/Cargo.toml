@@ -74,7 +74,10 @@ url = { workspace = true, optional = true }
 # sendmsg_x and, from 15.6, arrive through recvmsg_x, on every socket where that
 # measured faster; both are looked up at run time and fall back to one datagram
 # per call. GOTATUN_MAC_BATCH=off turns them off (#554, J1036).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "4e20c3d9ed40c0faa013ed5717b3649ee5679ae6", default-features = false, features = ["device", "ring"], optional = true }
+# On Linux, crypto runs of up to 48 packets are sealed or opened on the task that
+# read them; only full 64-packet chunks go to a crypto worker. That removes
+# 12-30% of futex calls per Gbit at unchanged throughput (#260, J1121).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "cd9ab066d8780a28e145b3c2e33454bb1240fdc9", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
