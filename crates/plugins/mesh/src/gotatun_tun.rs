@@ -1028,22 +1028,38 @@ fn recompute_ipv4_checksum(packet: &mut [u8], details: IpDetails) {
     packet[10..12].copy_from_slice(&checksum.to_be_bytes());
 }
 
+/// The Internet checksum (RFC 1071) of `parts`: the complement of their one's-complement sum of
+/// 16-bit big-endian words, each part padded with a zero byte to an even length on its own (every
+/// caller passes even-length parts before the last one, so this equals the sum over their
+/// concatenation).
+///
+/// The sender runs this over every byte it sends (J1120: 2.4% of engine cycles), so it adds
+/// 32-bit little-endian words into a 64-bit accumulator, which the compiler vectorises, instead
+/// of one byte-swapped 16-bit word at a time. That gives the same result: 2^16 is 1 modulo
+/// 2^16 - 1, so a 32-bit word adds the same as its two halves, and the one's-complement sum is
+/// independent of byte order (RFC 1071 §2(B)), so the little-endian sum only needs one swap at
+/// the end. 64 KiB of 32-bit words stay far below 2^64, so the accumulator cannot overflow.
 fn internet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum = 0_u64;
     for bytes in parts {
-        let (chunks, remainder) = bytes.as_chunks::<2>();
-        for word in chunks {
-            sum += u64::from(u16::from_be_bytes(*word));
+        let (words, rest) = bytes.as_chunks::<4>();
+        sum += words
+            .iter()
+            .map(|word| u64::from(u32::from_le_bytes(*word)))
+            .sum::<u64>();
+        let (pair, last) = rest.as_chunks::<2>();
+        if let [pair] = pair {
+            sum += u64::from(u16::from_le_bytes(*pair));
         }
-        if let [last] = remainder {
-            sum += u64::from(u16::from_be_bytes([*last, 0]));
+        if let [last] = last {
+            sum += u64::from(u16::from_le_bytes([*last, 0]));
         }
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    let folded = sum.to_be_bytes();
-    !u16::from_be_bytes([folded[6], folded[7]])
+    let folded = u16::try_from(sum).unwrap_or(u16::MAX);
+    !folded.swap_bytes()
 }
 
 fn packet_from_pool(bytes: &[u8], pool: &PacketBufPool) -> io::Result<Packet<Ip>> {
@@ -1756,5 +1772,74 @@ mod tests {
         let mut frame = ipv4_tcp_frame(100);
         frame[0] |= 0x80;
         assert!(decode_frame(&frame, true, &pool).is_err());
+    }
+    /// The checksum as it was summed before J1129, one big-endian 16-bit word at a time: the
+    /// reference the wide sum must match bit for bit.
+    fn word_at_a_time_checksum(parts: &[&[u8]]) -> u16 {
+        let mut sum = 0_u64;
+        for bytes in parts {
+            let (chunks, remainder) = bytes.as_chunks::<2>();
+            for word in chunks {
+                sum += u64::from(u16::from_be_bytes(*word));
+            }
+            if let [last] = remainder {
+                sum += u64::from(u16::from_be_bytes([*last, 0]));
+            }
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !u16::try_from(sum).unwrap()
+    }
+
+    /// A small deterministic generator, so the randomised tests replay exactly.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next()).unwrap() % bound
+        }
+    }
+
+    #[test]
+    fn wide_checksum_matches_the_word_at_a_time_sum() {
+        let mut random = Lcg(7);
+        let data: Vec<u8> = (0..70_000)
+            .map(|_| u8::try_from(random.next() & 0xff).unwrap())
+            .collect();
+        let pseudo = &data[..12];
+        let lengths = (0..300).chain([1399, 1400, 1448, 8191, 65_535, 65_536]);
+        for length in lengths {
+            for offset in [0, 1, 3] {
+                let bytes = &data[offset..offset + length];
+                assert_eq!(
+                    internet_checksum(&[bytes]),
+                    word_at_a_time_checksum(&[bytes]),
+                    "length {length}, offset {offset}"
+                );
+                assert_eq!(
+                    internet_checksum(&[pseudo, bytes]),
+                    word_at_a_time_checksum(&[pseudo, bytes]),
+                    "pseudo header and length {length}"
+                );
+            }
+        }
+        for fill in [0x00, 0xff, 0x80, 0x01] {
+            let bytes = vec![fill; 65_535];
+            assert_eq!(
+                internet_checksum(&[&bytes]),
+                word_at_a_time_checksum(&[&bytes]),
+                "every byte {fill:#x}"
+            );
+        }
+        assert_eq!(internet_checksum(&[]), 0xffff, "an empty sum is all ones");
     }
 }
