@@ -663,13 +663,21 @@ fn decode_frame(
             if raw_gso_type & 0x80 != 0 || gso_size != 0 {
                 return Err(invalid_tun("invalid metadata for a non-GSO packet"));
             }
-            let mut packet = packet.to_vec();
-            let details = ip_details(&packet)?;
-            packet.truncate(details.total_len);
+            // One copy, straight into the pool buffer GotaTun encrypts in place; the partial
+            // checksum is completed there (J1129: this used to copy the packet twice).
+            let details = ip_details(packet)?;
+            let mut decoded = pool.get();
+            let buffer = decoded.buf_mut();
+            buffer.clear();
+            buffer.extend_from_slice(&packet[..details.total_len]);
             if flags & 0x01 != 0 {
-                complete_partial_checksum(&mut packet, details, csum_start, csum_offset)?;
+                complete_partial_checksum(buffer, details, csum_start, csum_offset)?;
             }
-            Ok(vec![packet_from_pool(&packet, pool)?])
+            Ok(vec![
+                decoded
+                    .try_into_ip()
+                    .map_err(|error| invalid_tun_owned(error.to_string()))?,
+            ])
         }
         1 | 4 => segment_tcp(
             packet,
