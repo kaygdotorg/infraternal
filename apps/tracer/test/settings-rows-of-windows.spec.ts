@@ -377,6 +377,15 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   expect(await checkRows(page, "s-you-apps")).toBe(1);
   const keys = page.locator('[data-window-id="s-you-apps"] .cl-keys .ui-sp-device');
   await expect(keys).toHaveCount(3);
+  // The key icon sits on the name line's centre, not the middle of the four-line block (#577), and the text keeps the row's top.
+  for (const row of await keys.all()) {
+    const m = await row.evaluate((li) => {
+      const mid = (s: string): number => { const r = li.querySelector(s)!.getBoundingClientRect(); return (r.top + r.bottom) / 2; };
+      return { icon: mid(".ui-sp-kind svg"), name: mid(".ui-sp-name"), top: li.querySelector(".ui-sp-names")!.getBoundingClientRect().top - li.getBoundingClientRect().top };
+    });
+    expect(Math.abs(m.icon - m.name), `key icon centre ${m.icon.toFixed(2)} vs name centre ${m.name.toFixed(2)}`).toBeLessThanOrEqual(1);
+    expect(m.top, "text block starts at the row's top").toBeLessThanOrEqual(0.5);
+  }
   await keys.first().locator('button[aria-label^="Revoke"]').click();
   await page.waitForTimeout(500);
   await shot(page, "13-you-apps-revoke");

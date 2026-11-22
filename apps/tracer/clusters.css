@@ -425,6 +425,12 @@
    product's cap is half of it, for the lock, and cut "Published Services" to "Published Serv…"). The room left is the group's: 28 px per button and the gap. */
 .cl[data-view="settings"] .ui-window-pill { max-width: calc(100% - 3rem); }
 .cl-keys .ui-sp-sub { white-space: pre-line; }
+/* A key's facts take several lines, so the row's icon belongs to the name line, not the middle of the block: its box is exactly one
+   name line tall (the label font's own line height) and sits at the top, so the glyph centres on the name at every theme size.
+   Revoke stays at the row's middle: it is a 30 px target, taller than the line, and would poke out above the first row. */
+.cl-keys .ui-sp-device { align-items: flex-start; }
+.cl-keys .ui-sp-kind { height: 1lh; font: var(--ui-type-label); }
+.cl-keys .ui-sp-actions { align-self: center; }
 
 /* ---- Appearance themes (D322, D338, D341, #323; canvas/themes) ----
    One tint and one blur for the page, written on the root by themes/apply.ts as --look-tint (0 to 1) and --look-blur (px).
