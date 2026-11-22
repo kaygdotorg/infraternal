@@ -144,24 +144,40 @@ pub(crate) fn release_build() -> bool {
 }
 
 /// Bind declared release actions to an existing private state directory; never initialize a server.
+///
+/// Where updates can run (see [`infraternal_plugin_release::update::availability`]) the service also gets
+/// an updater for the owner controls (#211 S5): check now, stage a version, apply, cancel. It shares
+/// nothing with the timer's updater but the folder and its lock, so one check runs at a time. Apply and
+/// rollback refuse until S4's applier is plugged in with `with_applier`.
 #[must_use]
 pub fn release_service(pool: sqlx::SqlitePool, state: &Path) -> ReleaseService {
-    ReleaseService::new(
-        pool,
-        Arc::new(
-            VerifiedLookup::new(
-                state.to_owned(),
-                origin(),
-                Arc::new(Engine {
-                    #[cfg(test)]
-                    trust: None,
-                }),
-            )
-            .with_updates(
-                infraternal_plugin_release::update::availability(release_build()).map(|_| ()),
-            ),
-        ),
-    )
+    let availability = infraternal_plugin_release::update::availability(release_build());
+    let engine = || {
+        Arc::new(Engine {
+            #[cfg(test)]
+            trust: None,
+        })
+    };
+    let mut lookup = VerifiedLookup::new(state.to_owned(), origin(), engine())
+        .with_updates(availability.map(|_| ()));
+    if let Ok(artifact) = availability {
+        lookup = lookup.with_updater(Arc::new(infraternal_plugin_release::update::Updater::new(
+            state,
+            origin(),
+            infraternal_plugin_api::VERSION.into(),
+            artifact.into(),
+            engine(),
+            infraternal_plugin_release::service::settings_reader(pool.clone()),
+        )));
+    }
+    let service = ReleaseService::new(pool, Arc::new(lookup));
+    // S4 does the switching and the undo; the owner controls only decide who may ask for them (#211 S5).
+    match availability {
+        Ok(artifact) => service.with_applier(Arc::new(crate::update_apply::ServerApplier::new(
+            state, artifact,
+        ))),
+        Err(_) => service,
+    }
 }
 pub(crate) async fn plugin(
     pool: sqlx::SqlitePool,

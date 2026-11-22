@@ -1251,13 +1251,48 @@ impl Locked {
             .open(&temporary)
             .map_err(|_| saved)?;
         let bytes = serde_json::to_vec(state).map_err(|_| saved)?;
+        let before = read_state(&self.directory.join("state.json"));
         file.write_all(&bytes)
             .and_then(|()| file.sync_all())
             .map_err(|_| saved)?;
         std::fs::rename(&temporary, self.directory.join("state.json")).map_err(|_| saved)?;
         self.sync()?;
+        self.record_changes(before.as_ref(), state);
         CHANGES.send_modify(|count| *count = count.wrapping_add(1));
         Ok(())
+    }
+
+    /// Add to the history what this write changed: a release newly staged, or a staged
+    /// release newly removed. Doing it where the state is written covers every path that
+    /// stages or retires a release, so none can forget to say so (#211 S5).
+    fn record_changes(&self, before: Option<&UpdateState>, after: &UpdateState) {
+        use crate::history::{Entry, Kind, append, now};
+        if let Some(version) = &after.staged
+            && before.and_then(|b| b.staged.as_ref()) != Some(version)
+        {
+            append(
+                &self.directory,
+                Entry {
+                    at: now(),
+                    kind: Kind::Staged,
+                    version: Some(version.clone()),
+                    detail: None,
+                },
+            );
+        }
+        if let Some(removed) = &after.removed
+            && before.and_then(|b| b.removed.as_ref()) != Some(removed)
+        {
+            append(
+                &self.directory,
+                Entry {
+                    at: removed.at,
+                    kind: Kind::Removed,
+                    version: removed.version.clone(),
+                    detail: Some(removed.reason.clone()),
+                },
+            );
+        }
     }
 
     /// Flush `updates/` itself so renames inside it survive a crash.

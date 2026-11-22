@@ -73,6 +73,11 @@ pub enum SwitchRequest {
     },
 }
 
+/// Set when the owner asks to apply now (#211 S5): the next attempt skips the quiet window.
+static FORCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Wakes the quiet-window task when [`FORCE`] is set.
+static NOW: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
 /// The restart loop's inbox; `None` until the CLI registers with [`switch_requests`].
 static SWITCHES: Mutex<Option<mpsc::Sender<SwitchRequest>>> = Mutex::new(None);
 /// The trial [`startup`] found, for [`start`] to run once the server serves. It stays
@@ -175,6 +180,119 @@ async fn sessions_listed(expected: &[String], folder: Option<&Path>) {
         }
         // sleep: the census refreshes as the infraternal agent reattaches each shim.
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The owner controls' way into S4 (#211 S5): "Update now" and "Roll back" ask the same tasks and the
+/// same restart loop that the quiet-window update and the failed-trial undo use, so there is one switch
+/// path and one warm handoff (the CA stays unlocked, D217).
+pub struct ServerApplier {
+    /// The data folder.
+    data: PathBuf,
+    /// The server image's file name inside a release folder.
+    artifact: &'static str,
+}
+
+impl ServerApplier {
+    /// An applier for the data folder `data` on a platform whose server image is `artifact`.
+    #[must_use]
+    pub fn new(data: &Path, artifact: &'static str) -> Self {
+        Self {
+            data: data.to_owned(),
+            artifact,
+        }
+    }
+}
+
+impl infraternal_plugin_release::applier::UpdateApplier for ServerApplier {
+    /// Wakes the quiet-window task and tells it to skip the quiet window for the staged release. The
+    /// task confirms the stage again (the channel may have withdrawn it) and does the whole switch, so
+    /// `release` is dropped here to free the folder lock for it. The answer means "started": a switch
+    /// that fails afterwards is recorded in the history and shown in the state, not returned here.
+    fn apply(
+        &self,
+        release: update::Confirmed,
+    ) -> infraternal_plugin_api::Operation<
+        '_,
+        Result<infraternal_plugin_release::applier::Started, &'static str>,
+    > {
+        Box::pin(async move {
+            if apply::in_flight(&self.data) {
+                return Err("an earlier update switch has not finished");
+            }
+            let to = release.version().to_owned();
+            drop(release);
+            FORCE.store(true, std::sync::atomic::Ordering::SeqCst);
+            NOW.notify_one();
+            Ok(infraternal_plugin_release::applier::Started {
+                to,
+                lost_since: None,
+            })
+        })
+    }
+
+    /// D295 by hand: the previous image and the database copy kept at the last update come back through
+    /// the same warm undo a failed health check uses (`apply::begin_manual_rollback`, then
+    /// [`SwitchRequest::Undo`]). No passkey is needed because the CA frame travels with the exec.
+    fn rollback(
+        &self,
+    ) -> infraternal_plugin_api::Operation<
+        '_,
+        Result<infraternal_plugin_release::applier::Started, &'static str>,
+    > {
+        Box::pin(async move {
+            let plan = infraternal_plugin_release::apply::rollback_plan(
+                &self.data,
+                infraternal_plugin_api::VERSION,
+                self.artifact,
+            )
+            .ok_or("there is no earlier version to go back to")?;
+            let (data, artifact) = (self.data.clone(), self.artifact);
+            let undo = tokio::task::spawn_blocking(move || {
+                let running = std::fs::File::open("/proc/self/exe")
+                    .map_err(|_| "the running image could not be read")?;
+                let own = apply::digest(&running)?;
+                apply::begin_manual_rollback(&data, artifact, infraternal_plugin_api::VERSION, &own)
+            })
+            .await
+            .map_err(|_| "the roll back could not be prepared")??;
+            let sender = SWITCHES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let refused = |data: &Path| {
+                let _ = apply::cancel_manual_rollback(data, infraternal_plugin_api::VERSION);
+                Err("the restart control refused the roll back")
+            };
+            let Some(sender) = sender else {
+                return refused(&self.data);
+            };
+            // Nothing new may be acknowledged to a shim between the copy and the exec (J1085).
+            crate::update_activity::freeze(true);
+            let (reply, answer) = oneshot::channel();
+            if sender
+                .send(SwitchRequest::Undo { undo, reply })
+                .await
+                .is_err()
+                || !matches!(answer.await, Ok(Ok(())))
+            {
+                crate::update_activity::freeze(false);
+                return refused(&self.data);
+            }
+            Ok(infraternal_plugin_release::applier::Started {
+                to: plan.to_version,
+                lost_since: Some(plan.copy_taken_at),
+            })
+        })
+    }
+
+    fn rollback_plan(&self) -> Option<infraternal_plugin_release::applier::RollbackPlan> {
+        apply::rollback_plan(&self.data, infraternal_plugin_api::VERSION, self.artifact).map(
+            |plan| infraternal_plugin_release::applier::RollbackPlan {
+                to: plan.to_version,
+                copy_taken_at: plan.copy_taken_at,
+            },
+        )
     }
 }
 
@@ -455,13 +573,23 @@ async fn quiet_window(
             }
             continue;
         }
+        let forced = FORCE.load(std::sync::atomic::Ordering::SeqCst);
         let idle = crate::update_activity::idle_for();
-        if idle < quiet {
-            // Sleep until the window could close; typing meanwhile only moves it.
-            tokio::time::sleep(quiet.saturating_sub(idle)).await;
+        if !forced && idle < quiet {
+            // Sleep until the window could close; typing meanwhile only moves it. The owner
+            // choosing "Update now" ends the wait at once.
+            tokio::select! {
+                () = tokio::time::sleep(quiet.saturating_sub(idle)) => {}
+                () = NOW.notified() => {}
+            }
             continue;
         }
-        match switch_once(updater, pool, data, artifact, quiet).await {
+        // The owner's request skips the quiet window for this one attempt (an update never
+        // waits for it when the owner asked for it by name); a failure is not forced again.
+        let window = if forced { Duration::ZERO } else { quiet };
+        let attempt = switch_once(updater, pool, data, artifact, window).await;
+        FORCE.store(false, std::sync::atomic::Ordering::SeqCst);
+        match attempt {
             // The restart loop is about to exec the new release.
             Ok(()) => return std::future::pending().await,
             Err(Retry::Soon) => {}

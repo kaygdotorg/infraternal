@@ -46,11 +46,26 @@
 //! after the undo: the copy really replaced the database (D295 accepts losing the
 //! trial's writes).
 //!
+//! **The owner's controls (#211 S5, J1075),** at the end of phase 2, with the sessions still open:
+//!
+//! - `update_now`: the `later` release is staged while someone keeps attaching, so the quiet window never
+//!   opens and nothing applies by itself. A session with an old passkey proof is refused; with a current one,
+//!   `release.update.apply` applies it at once, warm (same PID, CA unlocked, shims kept).
+//! - `manual_rollback`: `release.update.status` names the previous version; a write made after the update is
+//!   then lost; `release.update.rollback` (stale session refused first) returns the previous release warm
+//!   with the D295 database copy, records the undo as the owner's, pauses the undone version (it does not
+//!   come back by itself) and leaves the boot pointer on a file that resolves to the running image.
+//! - `update_after_rollback`: a newer release (`newest`) still applies in the quiet window and the boot
+//!   pointer follows it.
+//!
+//! The harness signs in with one passkey long before these cases, so it stamps the session's last proof
+//! (`stamp_fresh`) instead of repeating a ceremony: stale to prove the refusal, current to admit the call.
+//!
 //! Every case prints one `UPDATE case=… bucket=warm|cold …` line with the `/healthz`
 //! outage the switch caused; the VM script collects them into the S4 matrix.
 //!
 //! Inputs (prepared by the VM script, never by this test): signed release folders in
-//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and nine versions, oldest
+//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and eleven versions, oldest
 //! first, in `INFRATERNAL_UPDATE_TEST_VERSIONS`: the running release, then the
 //! `unhealthy`, `timeout`, `migration`, `exec`, `kill` and `reboot` releases, then the
 //! good release. No signing key is present.
@@ -79,7 +94,7 @@ const BUCKET: &str = "127.0.0.1:4813";
 /// What phase 1 leaves for phase 2, inside the test root.
 const CARRY: &str = "carry.json";
 
-/// The nine releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
+/// The eleven releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Versions {
     /// The release that runs first and must come back after every undo.
@@ -100,6 +115,11 @@ struct Versions {
     good: String,
     /// Newer than the good release; its trial lists no live session (owner F4 decision).
     unlisted: String,
+    /// A healthy release newer than all of the above: the owner's "Update now" applies it, and the owner's
+    /// roll back undoes it (#211 S5).
+    later: String,
+    /// A healthy release newer than `later`: proves a normal update still works after a manual roll back.
+    newest: String,
 }
 impl Versions {
     /// Read the versions from the environment.
@@ -115,7 +135,9 @@ impl Versions {
             reboot,
             good,
             unlisted,
-        ]: [String; 9] = versions
+            later,
+            newest,
+        ]: [String; 11] = versions
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>()
@@ -131,6 +153,8 @@ impl Versions {
             reboot,
             good,
             unlisted,
+            later,
+            newest,
         }
     }
     /// The `INFRATERNAL_STAGING_FAULTS` value: the kill and reboot releases never pass
@@ -225,6 +249,75 @@ async fn database_write(database: &Path, statement: &'static str, value: Option<
     }
     query.execute(&pool).await.unwrap();
     pool.close().await;
+}
+
+/// Call one release action the way the browser does (a control-stream call on the owner's
+/// socket) and return `(ok, json)`. The reply is the plugin's own answer, so a refusal reads as
+/// `(false, {"error": "<sentence>"})`.
+async fn owner_call(
+    address: SocketAddr,
+    session: &str,
+    action: &str,
+    input: Value,
+) -> (bool, Value) {
+    use infraternal_protocol::{Frame, decode_muxed_frame};
+    let mut socket = crate::ca_handoff::shipping_tests::Browser::new(
+        crate::ca_handoff::shipping_tests::connect_browser(address, session, ORIGIN).await,
+    );
+    let hello = wire_read(&mut socket).await;
+    assert!(matches!(
+        decode_muxed_frame(&hello).unwrap().frame,
+        Frame::Hello { .. }
+    ));
+    wire_send(
+        &mut socket,
+        0,
+        &Frame::Hello {
+            version: 1,
+            caps: 0,
+            client_info: "update-proof",
+        },
+    )
+    .await;
+    let _welcome = wire_read(&mut socket).await;
+    let body = serde_json::to_vec(&input).unwrap();
+    wire_send(
+        &mut socket,
+        0,
+        &Frame::Call {
+            call_id: 1,
+            action_id: action,
+            input_json: &body,
+        },
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let bytes = wire_read(&mut socket).await;
+            if let Frame::Result {
+                call_id: 1,
+                ok,
+                json,
+            } = decode_muxed_frame(&bytes).unwrap().frame
+            {
+                return (ok, serde_json::from_slice(json).unwrap_or(Value::Null));
+            }
+        }
+    })
+    .await
+    .expect("the owner call was answered")
+}
+
+/// Stamp the owner session's last passkey proof `seconds_ago` seconds in the past. The harness signs in
+/// with a passkey once, long before the owner cases; stamping stands for a fresh tap (a stale stamp proves
+/// the gate refuses, a current one that it admits). Throwaway VM database only.
+async fn stamp_fresh(database: &Path, seconds_ago: i64) {
+    database_write(
+        database,
+        "UPDATE sessions SET fresh=unixepoch()-?",
+        Some(seconds_ago),
+    )
+    .await;
 }
 
 /// Switch the release plugin on or off, on the edge channel.
@@ -1089,6 +1182,8 @@ async fn auto_update_after_reboot() {
         &versions.reboot,
         &versions.good,
         &versions.unlisted,
+        &versions.later,
+        &versions.newest,
     ]
     .into_iter()
     .map(|version| {
@@ -1204,6 +1299,290 @@ async fn auto_update_after_reboot() {
         state.applied.as_ref().unwrap().reason,
         server.shims.len(),
     );
+    // ---- The owner's controls (#211 S5, J1075): Update now, manual Roll back, and an update after it. ----
+    // Update now: a healthy release is staged while someone keeps attaching, so the quiet window never
+    // opens; only the owner's request (a fresh session) applies it.
+    // Each pulse runs in its own task: a pulse the server refuses (it is busy, or switching) fails alone and
+    // the next one still keeps the window open. The counts are logged, so a window that opened anyway can be
+    // told apart from pulses that never reached the server.
+    let pulses = Arc::new((
+        std::sync::atomic::AtomicU32::new(0),
+        std::sync::atomic::AtomicU32::new(0),
+    ));
+    let attaching = {
+        let session = server.session.clone();
+        let pulses = Arc::clone(&pulses);
+        tokio::spawn(async move {
+            loop {
+                let one = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    tokio::spawn({
+                        let session = session.clone();
+                        async move { attach_pulse(address, &session).await }
+                    }),
+                )
+                .await;
+                let counter = if matches!(one, Ok(Ok(()))) {
+                    &pulses.0
+                } else {
+                    &pulses.1
+                };
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // sleep: an attach once a second keeps the quiet window open (D251).
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+    };
+    write_marker(&database, 31).await;
+    announce(&bucket, Some(&versions.later));
+    wait_for(Duration::from_secs(120), "later release staged", || {
+        update_state(&data).staged.as_deref() == Some(versions.later.as_str())
+    })
+    .await;
+    // sleep: more than a quiet window plus a check must pass, with attaches, without an apply.
+    tokio::time::sleep(Duration::from_secs(STEP * 4)).await;
+    println!(
+        "UPDATE step=pulses ok={} failed={} applied_yet={}",
+        pulses.0.load(std::sync::atomic::Ordering::Relaxed),
+        pulses.1.load(std::sync::atomic::Ordering::Relaxed),
+        update_state(&data)
+            .applied
+            .as_ref()
+            .is_some_and(|applied| applied.version == versions.later)
+    );
+    assert_eq!(
+        update_state(&data).staged.as_deref(),
+        Some(versions.later.as_str()),
+        "still waiting for a quiet moment"
+    );
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.good],
+        "nothing applied by itself"
+    );
+    let (_, status) =
+        owner_call(address, &server.session, "release.update.status", json!({})).await;
+    assert_eq!(status["mode"], "auto", "status: {status}");
+    assert_eq!(
+        status["staged"],
+        versions.later.as_str(),
+        "status: {status}"
+    );
+    // A session whose passkey proof is old is refused, and nothing happens.
+    stamp_fresh(&database, 3600).await;
+    let (ok, refused) =
+        owner_call(address, &server.session, "release.update.apply", json!({})).await;
+    assert!(
+        !ok && refused["error"].is_string(),
+        "a stale session must be refused: {refused}"
+    );
+    assert_eq!(running_digest(server.pid), server.digests[&versions.good]);
+    stamp_fresh(&database, 0).await;
+    let downtime = Downtime::start(address);
+    let (ok, started) =
+        owner_call(address, &server.session, "release.update.apply", json!({})).await;
+    assert!(ok, "update now was accepted: {started}");
+    assert_eq!(started["to"], versions.later.as_str());
+    let state = wait_outcome(&data, Duration::from_secs(240), &versions.later, "applied").await;
+    serving(address).await;
+    let gap = downtime.take_ms();
+    attaching.abort();
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.later],
+        "the later release runs"
+    );
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(
+        shim_pids(&server.sessions),
+        server.shims,
+        "the sessions were kept"
+    );
+    assert_eq!(
+        server.pointer(),
+        Path::new("releases").join(&versions.later)
+    );
+    assert_eq!(read_marker(&database).await, 31);
+    let echoed = server.echo("after-update-now").await;
+    println!(
+        "UPDATE case=update_now bucket=warm outcome=applied outside_quiet_window=true stale_session_refused=true pointer=releases/{} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_kept=true max_healthz_gap_ms={gap} paused={:?}",
+        versions.later,
+        server.shims.len(),
+        state.paused
+    );
+
+    // Manual Roll back: the status names what comes back, a write after the update is lost, and the
+    // previous release returns warm with the database copy.
+    write_marker(&database, 32).await;
+    let (_, status) =
+        owner_call(address, &server.session, "release.update.status", json!({})).await;
+    assert_eq!(
+        status["rollback"]["to"],
+        versions.good.as_str(),
+        "status: {status}"
+    );
+    let taken_at = status["rollback"]["copy_taken_at"].as_i64().unwrap();
+    assert!(taken_at > 0);
+    stamp_fresh(&database, 3600).await;
+    let (ok, refused) = owner_call(
+        address,
+        &server.session,
+        "release.update.rollback",
+        json!({}),
+    )
+    .await;
+    assert!(
+        !ok && refused["error"].is_string(),
+        "a stale session must be refused: {refused}"
+    );
+    assert_eq!(running_digest(server.pid), server.digests[&versions.later]);
+    stamp_fresh(&database, 0).await;
+    downtime.take_ms();
+    // The warm restart that follows closes every connection, the asking one included, so the answer may
+    // never arrive (the applier says so). The call runs in its own task: a dropped connection fails it alone,
+    // and the proof of what happened is the state below, not the reply.
+    let reply = tokio::spawn({
+        let session = server.session.clone();
+        async move { owner_call(address, &session, "release.update.rollback", json!({})).await }
+    })
+    .await;
+    if let Ok((ok, rolled)) = &reply {
+        assert!(*ok, "roll back was accepted: {rolled}");
+        assert_eq!(rolled["to"], versions.good.as_str());
+        assert_eq!(rolled["lost_since"].as_i64(), Some(taken_at));
+    }
+    let reply_seen = reply.is_ok();
+    let state = wait_outcome(&data, Duration::from_secs(240), &versions.later, "undone").await;
+    serving(address).await;
+    let gap = downtime.take_ms();
+    assert_eq!(
+        state.applied.as_ref().unwrap().reason.as_deref(),
+        Some(infraternal_plugin_release::apply::MANUAL)
+    );
+    assert_eq!(
+        state.paused.as_deref(),
+        Some(versions.later.as_str()),
+        "the undone version is paused"
+    );
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.good],
+        "the good release runs again"
+    );
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(
+        shim_pids(&server.sessions),
+        server.shims,
+        "the sessions were kept"
+    );
+    assert_eq!(
+        read_marker(&database).await,
+        31,
+        "the database copy came back; the later write is gone"
+    );
+    // The boot pointer names the running release and its file resolves: a cold start now would run it.
+    assert_eq!(server.pointer(), Path::new("releases").join(&versions.good));
+    assert_eq!(
+        file_digest(&data.join("updates/current").join(IMAGE)),
+        server.digests[&versions.good],
+        "the boot pointer resolves to the good release"
+    );
+    assert!(!data.join("updates/pending.json").exists());
+    // The restarted server adopts the live sessions again before they can be attached; each attempt that
+    // arrives too early fails alone and is counted, so a session that never comes back still fails the proof.
+    let mut echoed = 0;
+    let mut attempts = 0;
+    while echoed == 0 {
+        attempts += 1;
+        assert!(
+            attempts <= 8,
+            "no session echoed after the roll back in {} attempts",
+            attempts - 1
+        );
+        match std::panic::AssertUnwindSafe(server.echo("after-rollback"))
+            .catch_unwind()
+            .await
+        {
+            Ok(count) => echoed = count,
+            Err(_) => {
+                println!("UPDATE step=echo_retry attempt={attempts}");
+                // sleep: the restarted server re-adopts the live sessions before they can be attached.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    println!("UPDATE step=echo_after_rollback attempts={attempts}");
+    // sleep: a full quiet window plus checks pass; the paused version must not come back by itself.
+    tokio::time::sleep(Duration::from_secs(STEP * 4)).await;
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.good],
+        "the undone version stays paused"
+    );
+    assert_eq!(update_state(&data).staged, None);
+    println!(
+        "UPDATE case=manual_rollback bucket=warm outcome=undone reason={:?} stale_session_refused=true reply_seen={reply_seen} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_restored=31 write_after_update_lost=true pointer=releases/{} pointer_resolves=true paused_stays_paused=true max_healthz_gap_ms={gap}",
+        state.applied.as_ref().unwrap().reason,
+        server.shims.len(),
+        versions.good
+    );
+
+    // A later update after the roll back still works: a newer release applies in the quiet window and
+    // the boot pointer follows it.
+    write_marker(&database, 33).await;
+    downtime.take_ms();
+    announce(&bucket, Some(&versions.newest));
+    let state = wait_outcome(&data, Duration::from_secs(300), &versions.newest, "applied").await;
+    serving(address).await;
+    let gap = downtime.take_ms();
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.newest],
+        "the newest release runs"
+    );
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(
+        shim_pids(&server.sessions),
+        server.shims,
+        "the sessions were kept"
+    );
+    assert_eq!(
+        server.pointer(),
+        Path::new("releases").join(&versions.newest)
+    );
+    assert_eq!(
+        file_digest(&data.join("updates/current").join(IMAGE)),
+        server.digests[&versions.newest],
+        "the boot pointer resolves to the newest release"
+    );
+    assert_eq!(read_marker(&database).await, 33);
+    let (_, status) =
+        owner_call(address, &server.session, "release.update.status", json!({})).await;
+    assert_eq!(
+        status["rollback"]["to"],
+        versions.good.as_str(),
+        "status: {status}"
+    );
+    let echoed = server.echo("after-later-update").await;
+    println!(
+        "UPDATE case=update_after_rollback bucket=warm outcome=applied pointer=releases/{} pointer_resolves=true same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_kept=true max_healthz_gap_ms={gap} paused={:?}",
+        versions.newest,
+        server.shims.len(),
+        state.paused
+    );
+
     println!(
         "METRIC name=auto_update_matrix real_pty_sessions={} unlock_ceremonies={} ca_unlocked=true",
         server.sessions.len(),

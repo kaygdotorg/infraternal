@@ -53,6 +53,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The record of the release that ran before the last switch, inside `previous/`: its
+/// version and executable path. [`Switch::begin`] writes it, so a manual roll back
+/// knows what `previous/` holds long after the marker is gone (#211 S5).
+pub const FROM: &str = "from.json";
+/// Why the owner undid a committed update by hand; the recorded reason of a manual roll back.
+pub const MANUAL: &str = "the owner rolled the update back";
 /// The marker of a switch in flight, inside `updates/`.
 pub const PENDING: &str = "pending.json";
 /// The database file every server keeps in its data folder.
@@ -268,6 +274,8 @@ impl Switch {
     /// # Errors
     /// The marker could not be saved.
     pub fn begin(&self, pending: &Pending) -> Result<(), &'static str> {
+        // The record of what `previous/` holds goes first, so a marker always has it.
+        write_from(&self.lock, &pending.from_version, &pending.from_path)?;
         write_pending(&self.lock, pending)
     }
 
@@ -390,10 +398,16 @@ pub fn resume(
 /// only these known texts are ever copied into the update state.
 #[must_use]
 pub fn undo_reason(reason: Option<&str>) -> &'static str {
-    [UNHEALTHY, TIMED_OUT, FAILED_TO_START, SESSIONS_MISSING]
-        .into_iter()
-        .find(|known| Some(*known) == reason)
-        .unwrap_or(STOPPED_IN_TRIAL)
+    [
+        UNHEALTHY,
+        TIMED_OUT,
+        FAILED_TO_START,
+        SESSIONS_MISSING,
+        MANUAL,
+    ]
+    .into_iter()
+    .find(|known| Some(*known) == reason)
+    .unwrap_or(STOPPED_IN_TRIAL)
 }
 
 /// Settle a marker that outlived its switch, once this release serves (J1085).
@@ -525,6 +539,173 @@ pub fn begin_rollback(
         sha256: pending.from_sha256,
         path: pending.from_path,
     })
+}
+
+/// What `previous/` holds, as [`FROM`] records it.
+#[derive(Serialize, Deserialize)]
+struct Previous {
+    /// The version that ran before the last switch.
+    version: String,
+    /// Its executable path (argv\[0\]).
+    path: PathBuf,
+}
+
+/// Write `previous/from.json` (private, flushed). `previous/` exists: [`Switch::save_previous`] made it.
+fn write_from(lock: &Locked, version: &str, path: &Path) -> Result<(), &'static str> {
+    let saved = "the previous release could not be recorded";
+    // Without a kept release there is nothing to record (and nothing to roll back to).
+    if !lock.directory().join("previous").is_dir() {
+        return Ok(());
+    }
+    let target = lock.directory().join("previous").join(FROM);
+    let temporary = target.with_extension("tmp");
+    let _ = std::fs::remove_file(&temporary);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(|_| saved)?;
+    let bytes = serde_json::to_vec(&Previous {
+        version: version.to_owned(),
+        path: path.to_owned(),
+    })
+    .map_err(|_| saved)?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| saved)?;
+    std::fs::rename(&temporary, &target).map_err(|_| saved)?;
+    lock.sync()
+}
+
+/// Read `previous/from.json`; `None` when absent, unsafe or not a release version.
+fn read_from(updates: &Path) -> Option<Previous> {
+    let file = open_private(&updates.join("previous").join(FROM)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PENDING + 1).read_to_end(&mut bytes).ok()?;
+    let previous: Previous = serde_json::from_slice(&bytes).ok()?;
+    infraternal_plugin_api::release_version::channel(&previous.version).map(|_| previous)
+}
+
+/// What a manual roll back would restore: the previous version, and when its database copy was taken.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RollbackPlan {
+    /// The version that would run again.
+    pub to_version: String,
+    /// When the D295 database copy was taken (Unix seconds). Everything written after it is lost.
+    pub copy_taken_at: i64,
+}
+
+/// What a manual roll back of the committed update would do now, or `None` when there is nothing to go
+/// back to: no kept image or database copy, a switch still in flight, or the kept version is the running one.
+///
+/// D295 keeps `previous/` (the old image and one database copy) until the next update, "for a manual
+/// roll back" ([`commit`]). This is where that promise is read.
+#[must_use]
+pub fn rollback_plan(data: &Path, current: &str, artifact: &str) -> Option<RollbackPlan> {
+    let updates = data.join("updates");
+    if in_flight(data) {
+        return None;
+    }
+    let previous = read_from(&updates)?;
+    if previous.version == current {
+        return None;
+    }
+    open_private(&updates.join("previous").join(artifact)).ok()?;
+    let copy = std::fs::metadata(updates.join("previous").join(DATABASE)).ok()?;
+    let taken = copy
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(RollbackPlan {
+        to_version: previous.version,
+        copy_taken_at: i64::try_from(taken.as_secs()).ok()?,
+    })
+}
+
+/// Begin the owner's roll back of the committed update: mark phase [`Phase::Rollback`] (reason [`MANUAL`]) and
+/// return what the running release needs to exec the previous one warm. The previous release then restores
+/// the database copy at its own start, records the update as undone and pauses this version, exactly as
+/// after a failed health check ([`resume`]).
+///
+/// The boot pointer moves to the previous release first (a hard link of its image under `releases/`, so a
+/// later update replacing `previous/` cannot leave `current` dangling): a cold start after the undo must run
+/// the version the owner chose. `own_sha256` is the SHA-256 of the running image. A refused exec is undone
+/// with [`cancel_manual_rollback`].
+/// # Errors
+/// Nothing to go back to, a switch in flight, or the marker or pointer could not be saved.
+pub fn begin_manual_rollback(
+    data: &Path,
+    artifact: &str,
+    current: &str,
+    own_sha256: &str,
+) -> Result<Undo, &'static str> {
+    let updates = data.join("updates");
+    let lock = Locked::open(&updates)?;
+    if in_flight(data) {
+        return Err("an update switch has not finished");
+    }
+    let previous = read_from(&updates)
+        .filter(|p| p.version != current)
+        .ok_or("there is no earlier version to go back to")?;
+    let image = updates.join("previous").join(artifact);
+    let sha256 = digest(&open_private(&image)?)?;
+    let saved = "the earlier version could not be prepared";
+    // The pointer: releases/<previous>/<image> is a hard link of the kept image.
+    let releases = updates.join("releases");
+    private_folder(&releases).map_err(|()| saved)?;
+    let folder = releases.join(&previous.version);
+    remove_entry(&lock, &folder)?;
+    private_folder(&folder).map_err(|()| saved)?;
+    std::fs::hard_link(&image, folder.join(artifact)).map_err(|_| saved)?;
+    sync(&folder).map_err(|()| saved)?;
+    point_current(&lock, &previous.version)?;
+    let pending = Pending {
+        phase: Phase::Rollback,
+        from_version: previous.version.clone(),
+        from_sha256: sha256.clone(),
+        from_path: previous.path.clone(),
+        to_version: current.to_owned(),
+        to_sha256: own_sha256.to_owned(),
+        ca_warm: false,
+        started: now(),
+        reason: Some(MANUAL.to_owned()),
+        undo_attempts: 0,
+        sessions: Vec::new(),
+    };
+    if let Err(reason) = write_pending(&lock, &pending) {
+        let _ = point_current(&lock, current);
+        return Err(reason);
+    }
+    Ok(Undo {
+        image,
+        sha256,
+        path: previous.path,
+    })
+}
+
+/// Take a manual roll back back after the exec was refused: remove the marker and point the boot
+/// pointer at the running version again. The running release keeps serving, as before.
+/// # Errors
+/// The folder could not be cleaned up.
+pub fn cancel_manual_rollback(data: &Path, current: &str) -> Result<(), &'static str> {
+    let lock = Locked::open(&data.join("updates"))?;
+    remove_pending(&lock)?;
+    point_current(&lock, current)
+}
+
+/// Point `current` at `releases/<version>` (atomic rename of a new symlink, then a flush).
+fn point_current(lock: &Locked, version: &str) -> Result<(), &'static str> {
+    let saved = "the boot pointer could not be saved";
+    let updates = lock.directory();
+    let temporary = updates.join("current.tmp");
+    let _ = std::fs::remove_file(&temporary);
+    std::os::unix::fs::symlink(Path::new("releases").join(version), &temporary)
+        .map_err(|_| saved)?;
+    std::fs::rename(&temporary, updates.join("current")).map_err(|_| saved)?;
+    lock.sync()
 }
 
 /// SHA-256 of everything in `file`, as lowercase hex, read with positional reads.

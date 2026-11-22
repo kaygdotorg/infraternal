@@ -517,3 +517,104 @@ fn a_new_release_that_cannot_record_its_trial_is_told_so() {
         "the marker still says B never ran, so A keeps its database"
     );
 }
+
+/// A data folder as it is after a committed update A → B: `previous/` holds A's image, its database copy and
+/// `from.json`, `releases/<B>/` the running image, and `current` points at B.
+fn committed(data: &Data) {
+    let updates = data.updates();
+    let previous = updates.join("previous");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&previous)
+        .unwrap();
+    write_file(&previous.join(IMAGE), b"image-a");
+    write_file(&previous.join(DATABASE), b"a-copy");
+    write_file(
+        &previous.join(FROM),
+        format!(r#"{{"version":"{A}","path":"/opt/a/infraternal"}}"#).as_bytes(),
+    );
+    let release = updates.join("releases").join(B);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&release)
+        .unwrap();
+    write_file(&release.join(IMAGE), b"image-b");
+    std::os::unix::fs::symlink(Path::new("releases").join(B), updates.join("current")).unwrap();
+    write_file(&data.0.join(DATABASE), b"written-since-the-update");
+}
+
+/// The owner's roll back (#211 S5): the plan names the previous version and when its copy was taken; beginning
+/// it marks phase rollback with the manual reason, moves the boot pointer to the kept image, and the previous
+/// release then restores the copy, records the update as undone for that reason and pauses B.
+#[test]
+fn a_manual_rollback_goes_through_the_same_undo_as_a_failed_trial() {
+    let data = Data::new();
+    committed(&data);
+    let plan = rollback_plan(&data.0, B, IMAGE).unwrap();
+    assert_eq!(plan.to_version, A);
+    assert!(plan.copy_taken_at > 0);
+    assert_eq!(
+        rollback_plan(&data.0, A, IMAGE),
+        None,
+        "the kept version is the running one"
+    );
+    let undo = begin_manual_rollback(&data.0, IMAGE, B, &"bb".repeat(32)).unwrap();
+    assert_eq!(undo.path, Path::new("/opt/a/infraternal"));
+    assert_eq!(undo.sha256, apply_digest(b"image-a"));
+    assert!(in_flight(&data.0));
+    assert_eq!(
+        rollback_plan(&data.0, B, IMAGE),
+        None,
+        "nothing more to start while one is in flight"
+    );
+    // The boot pointer already names A, through a hard link that a later `previous/` replacement cannot break.
+    assert_eq!(
+        std::fs::read_link(data.updates().join("current")).unwrap(),
+        Path::new("releases").join(A)
+    );
+    assert_eq!(
+        std::fs::read(data.updates().join("current").join(IMAGE)).unwrap(),
+        b"image-a"
+    );
+    // A starts: it restores the copy, drops B and pauses it.
+    assert_eq!(
+        resume(&data.0, A, || Ok(apply_digest(b"image-a"))),
+        Ok(Resume::Finished(UNDONE))
+    );
+    assert_eq!(std::fs::read(data.0.join(DATABASE)).unwrap(), b"a-copy");
+    assert!(!data.updates().join("releases").join(B).exists());
+    let state = data.state();
+    assert_eq!(state.paused.as_deref(), Some(B));
+    assert_eq!(state.applied.unwrap().reason.as_deref(), Some(MANUAL));
+}
+
+/// A refused exec puts everything back: no marker, the boot pointer on the running version, the database untouched.
+#[test]
+fn a_refused_manual_rollback_leaves_the_running_release_in_place() {
+    let data = Data::new();
+    committed(&data);
+    begin_manual_rollback(&data.0, IMAGE, B, &"bb".repeat(32)).unwrap();
+    cancel_manual_rollback(&data.0, B).unwrap();
+    assert!(!in_flight(&data.0));
+    assert_eq!(
+        std::fs::read_link(data.updates().join("current")).unwrap(),
+        Path::new("releases").join(B)
+    );
+    assert_eq!(
+        std::fs::read(data.0.join(DATABASE)).unwrap(),
+        b"written-since-the-update"
+    );
+}
+
+/// With nothing kept, or an unreadable record, there is nothing to go back to and nothing is changed.
+#[test]
+fn there_is_nothing_to_roll_back_to_without_a_kept_release() {
+    let data = Data::new();
+    assert_eq!(rollback_plan(&data.0, B, IMAGE), None);
+    assert!(begin_manual_rollback(&data.0, IMAGE, B, &"bb".repeat(32)).is_err());
+    assert!(!in_flight(&data.0));
+    committed(&data);
+    std::fs::remove_file(data.updates().join("previous").join(FROM)).unwrap();
+    assert_eq!(rollback_plan(&data.0, B, IMAGE), None);
+}

@@ -69,7 +69,7 @@ pub const UPDATE_STATUS: ActionDef = ActionDef {
     id: "release.update.status",
     summary: "Show the server's update state.",
     instructions: &[
-        "Read the running version, the channel, the newest verified release, the staged release, and the last and next check.",
+        "Read the running version, the channel, the quiet window, the newest verified release, the staged release, the last and next check, and the rollback plan (what going back would restore and lose).",
         "A staged release is verified and waiting; staging never applies it.",
         "mode is auto or off; when off, reason says why updates are off on this host.",
         "Subscribe to release.update to receive the same state whenever it changes.",
@@ -84,14 +84,151 @@ pub const UPDATE_STATUS: ActionDef = ActionDef {
     api_scope: None,
     fresh_passkey: false,
 };
+/// Ask for an update check now, or stage one exact release (#211 S5). Without `version` it is the
+/// periodic check run on demand (owner). With `version` it is an explicit request: an older version
+/// (a rollback target) or another channel's release may be staged, held until applied or cancelled,
+/// and it needs the owner with a fresh passkey session.
+pub const UPDATE_CHECK: ActionDef = ActionDef {
+    id: "release.update.check",
+    summary: "Check for an update now, or stage one exact release.",
+    instructions: &[
+        "Without a version, check the channel now and stage a newer release if there is one.",
+        "With a version, stage exactly that release, even an older one or one from the other channel. This needs the owner with a recent passkey tap.",
+        "A release staged by version is held: periodic checks leave it until it is applied or cancelled.",
+        "The release is verified before it is staged; staging never applies it.",
+    ],
+    input: SchemaRef(
+        r#"{"type":"object","properties":{"version":{"type":"string","maxLength":64}},"additionalProperties":false}"#,
+    ),
+    output: SchemaRef("UpdateCheck"),
+    permission: Permission::One("server.configure"),
+    effect: Effect::Write,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// Apply the staged release (#211 S5, switch by S4).
+pub const UPDATE_APPLY: ActionDef = ActionDef {
+    id: "release.update.apply",
+    summary: "Update the server to the staged release now.",
+    instructions: &[
+        "Re-verify the staged release against the channel, then switch the server to it.",
+        "The server restarts warm: sessions and the unlocked authority stay. If the new version fails its health check the server goes back by itself and the Inbox says so.",
+        "Pass version to be sure the release you saw is the one applied; it is refused if another is staged.",
+        "This needs the owner with a recent passkey tap.",
+    ],
+    input: SchemaRef(
+        r#"{"type":"object","properties":{"version":{"type":"string","maxLength":64}},"additionalProperties":false}"#,
+    ),
+    output: SchemaRef("UpdateStarted"),
+    permission: Permission::One("server.configure"),
+    // Write, not Destructive: a destructive action must offer a required dry run, and an update has none.
+    effect: Effect::Write,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// Go back to the previous version (#211 S5, D295 undo by S4).
+pub const UPDATE_ROLLBACK: ActionDef = ActionDef {
+    id: "release.update.rollback",
+    summary: "Go back to the version the server ran before the last update.",
+    instructions: &[
+        "Restore the previous binary and the database copy taken right before the last update (D295).",
+        "Everything written after that copy was taken is lost; the answer says since when.",
+        "release.update.status shows the plan (rollback) before you ask.",
+        "This needs the owner with a recent passkey tap, but no passkey is needed to unlock afterwards.",
+    ],
+    input: CHANNEL_GET.input,
+    output: SchemaRef("UpdateStarted"),
+    permission: Permission::One("server.configure"),
+    // Write, not Destructive: a destructive action must offer a required dry run, and an update has none.
+    effect: Effect::Write,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// Drop a release staged by version without applying it (#211 S5).
+pub const UPDATE_CANCEL: ActionDef = ActionDef {
+    id: "release.update.cancel",
+    summary: "Cancel a release that was staged by version.",
+    instructions: &[
+        "Remove the held release and let periodic checks run again.",
+        "This needs the owner with a recent passkey tap.",
+    ],
+    input: CHANNEL_GET.input,
+    output: SchemaRef("UpdateState"),
+    permission: Permission::One("server.configure"),
+    effect: Effect::Write,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// Read what the updater did, newest first (#211 S5).
+pub const UPDATE_HISTORY: ActionDef = ActionDef {
+    id: "release.update.history",
+    summary: "Show what the updater did, newest first.",
+    instructions: &[
+        "Each entry says when, what (staged, removed, applied, rolled_back, failed), which version and why.",
+        "The list keeps the newest 30 entries.",
+    ],
+    input: CHANNEL_GET.input,
+    output: SchemaRef("UpdateHistory"),
+    permission: Permission::One("server.configure"),
+    effect: Effect::Read,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
+/// Set the quiet window the apply step waits for (#211 S5).
+pub const UPDATE_SETTINGS: ActionDef = ActionDef {
+    id: "release.update.settings",
+    summary: "Set how long the server must be idle before it applies an update by itself.",
+    instructions: &[
+        "quiet_minutes is how long nobody may have typed or attached before an automatic update applies (default 5, 1 to 1440).",
+        "The channel is set with release.channel.set.",
+        "This needs the owner with a recent passkey tap.",
+    ],
+    input: SchemaRef(
+        r#"{"type":"object","properties":{"quiet_minutes":{"type":"integer","minimum":1,"maximum":1440}},"required":["quiet_minutes"],"additionalProperties":false}"#,
+    ),
+    output: SchemaRef("UpdateState"),
+    permission: Permission::One("server.configure"),
+    effect: Effect::Write,
+    target: Target::Global,
+    dry_run: DryRun::Unsupported,
+    opens: None,
+    api_scope: None,
+    fresh_passkey: false,
+};
 /// The release plugin's declaration: channel actions, `release.latest`, the update status action and the `release.update` topic.
 pub const DESCRIPTOR: PluginDescriptor = PluginDescriptor {
     id: "release",
     api: infraternal_plugin_api::API_VERSION,
-    actions: &[CHANNEL_GET, CHANNEL_SET, LATEST, UPDATE_STATUS],
+    actions: &[
+        CHANNEL_GET,
+        CHANNEL_SET,
+        LATEST,
+        UPDATE_STATUS,
+        UPDATE_CHECK,
+        UPDATE_APPLY,
+        UPDATE_ROLLBACK,
+        UPDATE_CANCEL,
+        UPDATE_HISTORY,
+        UPDATE_SETTINGS,
+    ],
     topics: &[UPDATE_TOPIC],
     settings: Some(SchemaRef(
-        r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true},"channel":{"enum":["stable","edge"],"default":"stable"}},"additionalProperties":false}"#,
+        r#"{"type":"object","properties":{"enabled":{"type":"boolean","default":true},"channel":{"enum":["stable","edge"],"default":"stable"},"quiet_minutes":{"type":"integer","minimum":1,"maximum":1440,"default":5}},"additionalProperties":false}"#,
     )),
     events: &[],
     streams: &[],
