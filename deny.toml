@@ -3,12 +3,14 @@
 version = 2
 # Time-limited exceptions. cargo-deny has no native expiry, so each entry states its date and
 # the owner must remove it (or renew it with a fresh analysis) by then.
-# Added 2026-11-17; remove or reassess by 2026-11-24 (#532).
+# Added 2026-11-17, renewed 2026-11-22; remove or reassess by 2026-12-08 (#532).
 # russh-util 0.52.0 needs chrono for its wasm32 clock; our native builds do not
-# compile that path. Keep this one unmaintained advisory scoped until an upstream
-# fix or an owner-approved wasm clock removes the remaining dependency.
+# compile that path, so no shipped binary contains chrono. Upstream replaced
+# chrono with web-time in russh-util (russh PR #825, merged 2026-11-21) but has
+# not released it yet. Remove this entry once a russh-util release with that
+# change is in Cargo.lock; if none is out by the date, patch to the upstream commit.
 ignore = [
-    { id = "RUSTSEC-2026-0543", reason = "#532: russh-util wasm32 clock still requires chrono; reassess by 2026-11-24" },
+    { id = "RUSTSEC-2026-0543", reason = "#532: russh-util wasm32 clock still requires chrono until russh PR #825 is released; reassess by 2026-12-08" },
 ]
 
 [bans]
