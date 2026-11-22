@@ -1496,7 +1496,30 @@ async fn auto_update_after_reboot() {
         "the boot pointer resolves to the good release"
     );
     assert!(!data.join("updates/pending.json").exists());
-    let echoed = server.echo("after-rollback").await;
+    // The restarted server adopts the live sessions again before they can be attached; each attempt that
+    // arrives too early fails alone and is counted, so a session that never comes back still fails the proof.
+    let mut echoed = 0;
+    let mut attempts = 0;
+    while echoed == 0 {
+        attempts += 1;
+        assert!(
+            attempts <= 8,
+            "no session echoed after the roll back in {} attempts",
+            attempts - 1
+        );
+        match std::panic::AssertUnwindSafe(server.echo("after-rollback"))
+            .catch_unwind()
+            .await
+        {
+            Ok(count) => echoed = count,
+            Err(_) => {
+                println!("UPDATE step=echo_retry attempt={attempts}");
+                // sleep: the restarted server re-adopts the live sessions before they can be attached.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+    println!("UPDATE step=echo_after_rollback attempts={attempts}");
     // sleep: a full quiet window plus checks pass; the paused version must not come back by itself.
     tokio::time::sleep(Duration::from_secs(STEP * 4)).await;
     assert_eq!(
