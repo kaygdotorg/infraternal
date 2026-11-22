@@ -1064,20 +1064,20 @@ fn invalid_tun_owned(message: String) -> io::Error {
 }
 
 #[cfg(test)]
-/// Tests for TUN packet framing, checksums and queued writes.
+/// Tests for TUN packet framing, checksums and run writes.
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM,
-        build_gso_frame, coalescible_run, decode_frame, internet_checksum, ip_details,
-        recompute_ipv4_checksum, recompute_transport_checksum,
+        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, build_gso_frame,
+        coalescible_run, decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
+        recompute_transport_checksum,
     };
     use bytes::BytesMut;
     use gotatun::{
         noise::{Tunn, TunnResult, index_table::IndexTable, rate_limiter::RateLimiter},
         packet::{Ip, Packet, PacketBufPool, WgData, WgKind},
-        tun::MtuWatcher,
+        tun::{IpSend, MtuWatcher},
         udp::{
             UdpSend,
             socket::{SockOpt, UdpSocket},
@@ -1085,7 +1085,6 @@ mod tests {
         x25519,
     };
     use std::{
-        fs::File,
         io::Read as _,
         os::{
             fd::OwnedFd,
@@ -1094,7 +1093,6 @@ mod tests {
         sync::Arc,
         time::Duration,
     };
-    use tokio::io::unix::AsyncFd;
 
     fn ipv4_packet(length: usize) -> Packet<Ip> {
         let mut bytes = vec![0; length];
@@ -1165,6 +1163,8 @@ mod tests {
         assert_eq!(closed.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
+    /// A decrypted packet larger than the MTU is dropped, and the next valid packet is still
+    /// written: an adapter error would stop `GotaTun`'s receive path for good.
     #[tokio::test]
     async fn oversized_decrypted_packet_does_not_stop_the_next_valid_send() {
         let (mut reader, writer) = UnixStream::pair().unwrap();
@@ -1452,7 +1452,10 @@ mod tests {
         let mut plain = vec![0; 10];
         plain.extend_from_slice(&lone);
         assert_eq!(frames[1], plain);
-        assert!(reader.recv(&mut [0; 16]).is_err(), "nothing else was written");
+        assert!(
+            reader.recv(&mut [0; 16]).is_err(),
+            "nothing else was written"
+        );
     }
 
     fn ipv4_tcp_frame(payload_len: usize) -> Vec<u8> {
