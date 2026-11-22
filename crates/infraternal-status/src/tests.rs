@@ -968,14 +968,15 @@ fn recorded_server_unit_reads_the_named_unit_in_its_own_scope() {
     assert_eq!(recorded_server_unit(&roots, Scope::System, "other"), None);
 }
 
-/// A server that follows its updates starts the boot pointer's release image (#211 S6),
-/// and is still read as an infraternal server, with its data folder.
+/// A server that follows its updates starts the boot pointer's server image `infraternal`
+/// (#211 S6) and is still read as an infraternal server, with its data folder. An
+/// `infraternal-<arch>-musl` add-host payload never runs a server, so it does not count (J1134).
 #[test]
 fn recorded_server_unit_reads_a_unit_that_starts_the_boot_pointer() {
     let fixture = Fixture::new();
     fixture.write(
         "etc/infraternal-server.service",
-        "[Service]\nExecStart=\"/var/lib/infraternal/updates/current/infraternal-x86_64-musl\" \"server\" \"--data\" \"/var/lib/infraternal\"\n",
+        "[Service]\nExecStart=\"/var/lib/infraternal/updates/current/infraternal\" \"server\" \"--data\" \"/var/lib/infraternal\"\n",
     );
     fixture.write(
         "etc/arm.service",
@@ -991,7 +992,7 @@ fn recorded_server_unit_reads_a_unit_that_starts_the_boot_pointer() {
             .and_then(|unit| unit.data),
         Some("/var/lib/infraternal".into())
     );
-    assert!(recorded_server_unit(&roots, Scope::System, "arm").is_some());
+    assert_eq!(recorded_server_unit(&roots, Scope::System, "arm"), None);
     assert_eq!(recorded_server_unit(&roots, Scope::System, "other"), None);
 }
 

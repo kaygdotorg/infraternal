@@ -165,7 +165,7 @@ async fn adopt_server(
             "Run it as root on the server machine, for example with sudo.",
         ));
     }
-    let artifact = update::artifact_name().ok_or_else(|| {
+    let artifact = update::server_image().ok_or_else(|| {
         Refusal::refused(update::OFF_PLATFORM, "Run it on the Linux server machine.")
     })?;
     if !release.is_absolute() {

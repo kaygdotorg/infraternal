@@ -16,11 +16,11 @@ fn words(exec: &str) -> Vec<String> {
 #[test]
 fn the_rewrite_starts_the_boot_pointer_and_keeps_every_other_flag() {
     let exec = single_exec(OPERATOR_UNIT).unwrap();
-    let pointer = Path::new("/var/lib/infraternal/updates/current/infraternal-x86_64-musl");
+    let pointer = Path::new("/var/lib/infraternal/updates/current/infraternal");
     let with_web = rewrite_exec(&words(&exec), pointer, true).unwrap();
     assert_eq!(
         with_web,
-        "\"/var/lib/infraternal/updates/current/infraternal-x86_64-musl\" \"server\" \"--listen\" \"172.18.0.1:7011\" \"--data\" \"/var/lib/infraternal\" \"--public-origin\" \"https://infraternal.kayg.org\" \"--behind-proxy\" \"--trusted-proxy\" \"172.18.0.2\""
+        "\"/var/lib/infraternal/updates/current/infraternal\" \"server\" \"--listen\" \"172.18.0.1:7011\" \"--data\" \"/var/lib/infraternal\" \"--public-origin\" \"https://infraternal.kayg.org\" \"--behind-proxy\" \"--trusted-proxy\" \"172.18.0.2\""
     );
     // A release without its own web build keeps the operator's web folder.
     let without_web = rewrite_exec(&words(&exec), pointer, false).unwrap();
@@ -77,4 +77,33 @@ fn the_data_folder_is_read_in_both_spellings() {
         Some(PathBuf::from("/srv/y"))
     );
     assert_eq!(option(&words("/a server"), "--data"), None);
+}
+
+/// `adopt`, the boot pointer that `server init --system` writes into the unit and
+/// `restart --binary` all name the release's server image, the one the updater stages,
+/// never an `infraternal-<arch>-musl` add-host payload (J1134). The latter two keep their
+/// own copy of the name because they build without the release plugin.
+#[test]
+fn every_server_image_name_is_the_one_the_updater_stages() {
+    use std::os::unix::fs::DirBuilderExt;
+    assert_eq!(crate::restart_binary::artifact_name(), update::SERVER_IMAGE);
+    let data = std::env::temp_dir().join(format!("adopt-names-{}", uuid::Uuid::new_v4()));
+    let release = data.join("updates/releases/edge-20261122T000000Z");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&release)
+        .unwrap();
+    std::fs::write(release.join(update::SERVER_IMAGE), b"server").unwrap();
+    std::os::unix::fs::symlink(
+        "releases/edge-20261122T000000Z",
+        data.join("updates/current"),
+    )
+    .unwrap();
+    let pointer = crate::install::boot_pointer(&data);
+    assert_eq!(
+        pointer.as_deref().and_then(Path::file_name),
+        update::server_image().map(std::ffi::OsStr::new)
+    );
+    std::fs::remove_dir_all(&data).unwrap();
 }

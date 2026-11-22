@@ -31,10 +31,11 @@ const NEW: &str = "edge-20261114T000000Z";
 /// A later release, for replacement and tampering cases.
 const NEWER: &str = "edge-20261115T000000Z";
 
-/// The image name the fixture signs for this machine.
+/// The server image the updater stages, as every release names it. The updater takes the
+/// name as an argument, so these checks run on aarch64 build hosts too, where
+/// `update::server_image()` is `None` and the real server never stages anything.
 fn artifact() -> &'static str {
-    infraternal_plugin_release::update::artifact_name()
-        .expect("tests run on Linux x86_64 or aarch64")
+    infraternal_plugin_release::update::SERVER_IMAGE
 }
 
 /// A signed release `version` served from a loopback bucket whose edge pointer names it.
@@ -403,6 +404,36 @@ async fn a_full_disk_is_refused_before_the_image_download() {
     );
     assert_eq!(image_requests(&bucket), 4, "no image is downloaded");
     assert_eq!(leftovers(&release), ["state.json"]);
+}
+
+/// A release whose signed list names only the add-host payloads (`infraternal-<arch>-musl`,
+/// which cannot run a server) and no server image is refused before any image download, and
+/// nothing is staged (J1134: S3 once staged the `x86_64` host payload from real releases).
+#[tokio::test]
+async fn a_release_without_a_server_image_is_refused_and_nothing_is_staged() {
+    let release = Release::without_server_image(NEW);
+    let bucket = Bucket::new(release.files.clone());
+    point(&bucket, NEW);
+    let updater = updater(&release, &bucket.origin, OLD);
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Err("the release does not publish a server image for this machine")
+    );
+    // Pointer, SHA256SUMS, SHA256SUMS.sig and VERSION; no image.
+    assert_eq!(image_requests(&bucket), 4, "no image is downloaded");
+    assert_eq!(leftovers(&release), ["state.json"]);
+    let saved = state(&release, OLD);
+    assert_eq!(saved.staged, None);
+    assert_eq!(
+        saved.last_error.as_deref(),
+        Some("the release does not publish a server image for this machine")
+    );
+    // An explicit request for that release is refused the same way.
+    assert_eq!(
+        updater.check(Some(NEW), Admission::Explicit).await,
+        Err("the release does not publish a server image for this machine")
+    );
+    assert_eq!(state(&release, OLD).staged, None);
 }
 
 /// A newer release replaces the staged one, so only one release is ever staged.

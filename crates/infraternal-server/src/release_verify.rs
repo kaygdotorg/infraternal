@@ -74,7 +74,7 @@ pub(crate) fn verify_with_trust(
 /// `sums` and `sig` are the release's `SHA256SUMS` and `SHA256SUMS.sig`. `version` is
 /// the release's `VERSION` file and `image` the executable, both already open (callers
 /// pass sealed copies so the bytes cannot change after the check). `name` is the
-/// artifact name `image` must match in `SHA256SUMS`, for example `infraternal-x86_64-musl`.
+/// artifact name `image` must match in `SHA256SUMS`, for example `infraternal` (the server image).
 /// Returns the signed version, for example `edge-20261114T000000Z`.
 /// # Errors
 /// Refuses an untrusted or malformed signature, a list that does not name both `VERSION`

@@ -150,7 +150,7 @@ async fn owners_get_the_state_now_and_after_each_check_others_are_refused() {
             &data,
             "http://127.0.0.1:9".into(),
             "edge-20261101T000000Z".into(),
-            "infraternal-x86_64-musl".into(),
+            "infraternal".into(),
             Arc::new(Empty),
             settings_reader(pool.clone()),
         );

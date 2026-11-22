@@ -222,10 +222,16 @@ fn verify_release_fd(file: &File, path: &Path) -> io::Result<()> {
     )
 }
 
+/// The name a replacement image must carry in the release's signed `SHA256SUMS`.
+///
+/// On Linux that is the release's server image, `infraternal` (the release plugin's
+/// `update::SERVER_IMAGE`; this module builds without that plugin), on either architecture: a
+/// replacement is a server, and the `infraternal-<arch>-musl` add-host payloads have no
+/// `server` command (J1134). An image built for another architecture still fails the
+/// admission probe, which executes it.
 pub(crate) fn artifact_name() -> &'static str {
     match (std::env::consts::ARCH, std::env::consts::OS) {
-        ("x86_64", "linux") => "infraternal-x86_64-musl",
-        ("aarch64", "linux") => "infraternal-aarch64-musl",
+        ("x86_64" | "aarch64", "linux") => "infraternal",
         ("x86_64", "macos") => "infraternal-x86_64-macos",
         ("aarch64", "macos") => "infraternal-aarch64-macos",
         _ => "unsupported-target",

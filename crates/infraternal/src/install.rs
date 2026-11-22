@@ -812,16 +812,19 @@ fn user_unit_directory(
     }
 }
 
-/// The boot pointer's image in `data`, `<data>/updates/current/infraternal-<arch>-musl`,
-/// when the server's updater has installed a release there (#211 S6).
+/// The boot pointer's image in `data`, `<data>/updates/current/infraternal`, when the
+/// server's updater has installed a release there (#211 S6).
 ///
 /// A unit that starts this path follows every update across cold starts: the updater
-/// moves `current` only after a new release passed its health check (D295). Only the
-/// Linux release image names count; the folder is root-only (0700) by construction.
+/// moves `current` only after a new release passed its health check (D295). The image is
+/// the release's server image (the release plugin's `update::server_image`, which this
+/// module cannot call: it builds without that plugin), never an `infraternal-<arch>-musl`
+/// add-host payload, which has no `server` command (J1134). Machines the releases publish
+/// no server image for (everything but `x86_64` Linux) have no boot pointer. The folder is
+/// root-only (0700) by construction.
 pub(super) fn boot_pointer(data: &Path) -> Option<PathBuf> {
     let image = match (env::consts::ARCH, env::consts::OS) {
-        ("x86_64", "linux") => "infraternal-x86_64-musl",
-        ("aarch64", "linux") => "infraternal-aarch64-musl",
+        ("x86_64", "linux") => "infraternal",
         _ => return None,
     };
     let current = data.join("updates").join("current");
@@ -1197,19 +1200,14 @@ mod tests {
 
     /// With a release installed in the data folder, the unit starts the boot pointer, so an
     /// applied update survives a cold start; a release with its own web build drops
-    /// `--web-root`, and every other flag stays (#211 S6).
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
+    /// `--web-root`, and every other flag stays (#211 S6). The pointer is the server image
+    /// `infraternal`: an `infraternal-x86_64-musl` add-host payload there never counts (J1134).
+    /// Only `x86_64` Linux has a published server image, so only it has a boot pointer.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn a_unit_starts_the_boot_pointer_once_a_release_is_installed() {
         use std::os::unix::fs::DirBuilderExt;
-        let image = if cfg!(target_arch = "x86_64") {
-            "infraternal-x86_64-musl"
-        } else {
-            "infraternal-aarch64-musl"
-        };
+        let image = "infraternal";
         let data = env::temp_dir().join(format!("init-pointer-{}", std::process::id()));
         let _ = fs::remove_dir_all(&data);
         fs::DirBuilder::new()
@@ -1255,12 +1253,26 @@ mod tests {
 
         let release = data.join("updates/releases/edge-20261122T000000Z");
         fs::create_dir_all(&release).unwrap();
-        fs::write(release.join(image), b"image").unwrap();
+        fs::write(release.join("infraternal-x86_64-musl"), b"host payload").unwrap();
         std::os::unix::fs::symlink(
             "releases/edge-20261122T000000Z",
             data.join("updates/current"),
         )
         .unwrap();
+        let host_payload_only = exec(
+            render_unit(
+                &args,
+                "infraternal-server",
+                "https://localhost:47362",
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(
+            host_payload_only.starts_with(&running),
+            "a host payload is never the boot pointer: {host_payload_only}"
+        );
+        fs::write(release.join(image), b"image").unwrap();
         let pointer = format!("\"{}/updates/current/{image}\"", data.display());
         let without_web = exec(
             render_unit(
