@@ -1302,11 +1302,32 @@ async fn auto_update_after_reboot() {
     // ---- The owner's controls (#211 S5, J1075): Update now, manual Roll back, and an update after it. ----
     // Update now: a healthy release is staged while someone keeps attaching, so the quiet window never
     // opens; only the owner's request (a fresh session) applies it.
+    // Each pulse runs in its own task: a pulse the server refuses (it is busy, or switching) fails alone and
+    // the next one still keeps the window open. The counts are logged, so a window that opened anyway can be
+    // told apart from pulses that never reached the server.
+    let pulses = Arc::new((
+        std::sync::atomic::AtomicU32::new(0),
+        std::sync::atomic::AtomicU32::new(0),
+    ));
     let attaching = {
         let session = server.session.clone();
+        let pulses = Arc::clone(&pulses);
         tokio::spawn(async move {
             loop {
-                attach_pulse(address, &session).await;
+                let one = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    tokio::spawn({
+                        let session = session.clone();
+                        async move { attach_pulse(address, &session).await }
+                    }),
+                )
+                .await;
+                let counter = if matches!(one, Ok(Ok(()))) {
+                    &pulses.0
+                } else {
+                    &pulses.1
+                };
+                counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // sleep: an attach once a second keeps the quiet window open (D251).
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -1320,6 +1341,15 @@ async fn auto_update_after_reboot() {
     .await;
     // sleep: more than a quiet window plus a check must pass, with attaches, without an apply.
     tokio::time::sleep(Duration::from_secs(STEP * 4)).await;
+    println!(
+        "UPDATE step=pulses ok={} failed={} applied_yet={}",
+        pulses.0.load(std::sync::atomic::Ordering::Relaxed),
+        pulses.1.load(std::sync::atomic::Ordering::Relaxed),
+        update_state(&data)
+            .applied
+            .as_ref()
+            .is_some_and(|applied| applied.version == versions.later)
+    );
     assert_eq!(
         update_state(&data).staged.as_deref(),
         Some(versions.later.as_str()),
