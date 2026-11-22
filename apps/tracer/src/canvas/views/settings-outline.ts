@@ -8,7 +8,7 @@
 
 /**
  * Where a setting's value lives. A setting without one shows no control: there is nothing to save it to (a window that has
- * nothing to show says "Not available yet"). `write` resolves to a sentence when the store refused the value.
+ * nothing to show names the settings that will appear there, `emptyGroupNote`). `write` resolves to a sentence when the store refused the value.
  */
 export interface SettingBacking {
   /** The stored value; undefined when this person cannot read it (the row then says so). */

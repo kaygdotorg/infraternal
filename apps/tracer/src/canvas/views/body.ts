@@ -56,9 +56,24 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
     return;
   }
   if (m.kind === "app" || m.kind === "screen") {
-    void onDemand(() => import("../appwin/body.on-demand")).then((module) => {
-      module.mountAppWindowBody(cx, rec);
-    }).catch(() => { if (!rec.closing) body.textContent = "Could not load app windows. Try again."; });
+    // A failed load leaves the window's own Try again button in place of the picture; that button runs the same load again.
+    const load = (): void => {
+      void onDemand(() => import("../appwin/body.on-demand")).then((module) => {
+        module.mountAppWindowBody(cx, rec);
+      }).catch(() => {
+        if (rec.closing) return;
+        const line = document.createElement("p");
+        line.textContent = "Could not load app windows.";
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "ui-button";
+        retry.dataset.button = "primary";
+        retry.textContent = "Try again";
+        retry.addEventListener("click", () => { body.replaceChildren(); load(); }, { once: true });
+        body.replaceChildren(line, retry);
+      });
+    };
+    load();
     return;
   }
   if (m.kind === "settings") {

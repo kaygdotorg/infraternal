@@ -6,8 +6,8 @@
  * the breadcrumb names the component, so the body repeats neither (TASTE: never repeat the heading in the rows below it). The
  * "?" that opens the group's docs is the first button of the window's action group (`docs/docs-adapter.ts`), not part of the body.
  *
- * A setting is drawn only when its source has a store for it (`SettingsSource.backing`); a window with nothing to show says
- * "Not available yet." in one plain line and keeps its place, so nothing here is a control that saves nowhere.
+ * A setting is drawn only when its source has a store for it (`SettingsSource.backing`); a window with nothing to show names
+ * the settings that will appear there (`emptyGroupNote`) and keeps its place, so nothing here is a control that saves nowhere.
  */
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import { createSettingRow, type SettingRow } from "../../../../../packages/ui/src/setting-row";
@@ -17,7 +17,8 @@ import { onDemand } from "../../on-demand";
 import type { Ctx } from "../context";
 import { el } from "../dom";
 import type { GroupDef, KeyDef, PanelId } from "./catalog";
-import { SETTING_DEFS } from "./definitions.on-demand";
+import { SETTING_DEFS, type SettingDef } from "./definitions.on-demand";
+import { emptyGroupNote } from "./empty-note";
 import type { Spot } from "./model";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
@@ -84,7 +85,9 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
   const backed = (group.settings ?? []).filter((id) => source.backing?.(id)).map((id) => SETTING_DEFS[id]!);
   if (backed.length) {
     const list = el("div", "ui-setting-list");
-    for (const def of backed) {
+    // Draws one setting. A failed read (a dropped connection, a store that is down) leaves a note with a Try again button in
+    // the row's place; the button draws the row again, so a retry that works gives the person the control back.
+    const mount = (def: SettingDef): void => {
       const backing = source.backing!(def.id)!;
       const row = createSettingRow({ id: def.id, title: def.title, explain: def.explain, spec: def.spec, onSave: (v) => backing.write(v) });
       mine.set(def.id, row);
@@ -97,8 +100,27 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
         if (gone) return;
         if (v === undefined) { row.dispose(); mine.delete(def.id); if (!list.children.length) list.remove(); note("Only the owner can change this."); }
         else row.set(v);
-      }, () => { if (!gone) { row.dispose(); mine.delete(def.id); note("This could not be read just now. Try again later."); } });
-    }
+      }, () => {
+        if (gone) return;
+        row.dispose();
+        mine.delete(def.id);
+        const line = note("This could not be read just now.");
+        const retry = el("button", "ui-button");
+        retry.type = "button";
+        retry.dataset.button = "primary";
+        retry.textContent = "Try again";
+        pane.append(retry);
+        retry.addEventListener("click", () => {
+          line.remove();
+          retry.remove();
+          // The list leaves the pane when every row was owner-only; a retry that brings a row back puts it back.
+          if (!pane.isConnected) return;
+          if (!list.isConnected) pane.append(list);
+          mount(def);
+        }, { once: true });
+      });
+    };
+    for (const def of backed) mount(def);
     pane.append(list);
     shown++;
   }
@@ -131,6 +153,7 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
     });
     disposers.push(() => { gone = true; stop?.(); holder.remove(); });
   }
-  if (!shown) note("Not available yet.");
+  // Nothing to draw: say which settings will appear here and that the server has to store them first (#568).
+  if (!shown) note(emptyGroupNote((group.settings ?? []).map((id) => SETTING_DEFS[id]?.title).filter((t): t is string => t !== undefined)));
   return () => { if (live.get(windowId) === mine) live.delete(windowId); for (const d of disposers) d(); };
 }
