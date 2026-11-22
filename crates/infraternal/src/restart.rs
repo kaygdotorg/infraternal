@@ -108,10 +108,21 @@ impl Control {
                 accepted = self.socket.listener.accept() => accepted?.0,
             };
             let peer = socket.peer_cred().ok();
-            if peer
+            let same = peer
                 .as_ref()
-                .is_none_or(|peer| !crate::server_control::same_account(peer))
-            {
+                .is_some_and(crate::server_control::same_account);
+            // Root may also run update actions on a server that runs as another account
+            // (D400); every other request stays the server account's own.
+            #[cfg(feature = "release")]
+            let update_caller = peer.as_ref().is_some_and(|peer| {
+                infraternal_server::release_control::caller_allowed(
+                    peer.uid(),
+                    nix::unistd::Uid::effective().as_raw(),
+                )
+            });
+            #[cfg(not(feature = "release"))]
+            let update_caller = false;
+            if !same && !update_caller {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             }
@@ -121,6 +132,21 @@ impl Control {
                 record_request("socket", peer.as_ref(), None, "refused");
                 continue;
             };
+            // `infraternal server update` (D400): the action runs in its own task, because an
+            // apply or roll back ends in a warm restart that this loop must stay free to perform.
+            #[cfg(feature = "release")]
+            if matches!(request, ControlRequest::Release) {
+                record_request("update", peer.as_ref(), None, "accepted");
+                let service = infraternal_server::release_control::registered(&self.data);
+                tokio::spawn(async move {
+                    let _ = infraternal_server::release_control::answer(&mut socket, service).await;
+                });
+                continue;
+            }
+            if !same {
+                record_request("socket", peer.as_ref(), None, "refused");
+                continue;
+            }
             #[cfg(target_os = "linux")]
             if matches!(request, ControlRequest::Database) {
                 let _ = crate::server_control::send_database(&mut socket, &self.data).await;
@@ -237,6 +263,9 @@ enum ControlRequest {
     /// The live SQLite handle used during install relocation.
     #[cfg(target_os = "linux")]
     Database,
+    /// Run one `release.update.*` action for `infraternal server update` (D400).
+    #[cfg(feature = "release")]
+    Release,
     /// Replace this process with a verified binary.
     Restart {
         binary: PathBuf,
@@ -258,6 +287,8 @@ async fn read_request(socket: &mut UnixStream) -> io::Result<ControlRequest> {
             1 => Ok(ControlRequest::Status),
             #[cfg(target_os = "linux")]
             2 => Ok(ControlRequest::Database),
+            #[cfg(feature = "release")]
+            infraternal_server::release_control::RELEASE_OPCODE => Ok(ControlRequest::Release),
             _ => Err(io::ErrorKind::InvalidInput.into()),
         };
     }

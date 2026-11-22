@@ -39,6 +39,9 @@ fn confirmed(channel: Option<&str>, yes: bool) -> bool {
 }
 /// Refuse implicit server creation and use the same service as the socket API.
 ///
+/// `infraternal server update …` commands are handed to [`crate::server_update_cli::run`],
+/// which talks to the running server instead of its database.
+///
 /// Runs `infraternal server release latest`, `infraternal server channel` (read the
 /// channel) or `infraternal server channel <stable|edge> [--yes]` (switch it), as selected
 /// by `definition`. `matches` carries `--data` (the server's data folder) and, for a switch,
@@ -55,6 +58,12 @@ pub(crate) fn run(
     matches: &clap::ArgMatches,
     json_output: bool,
 ) -> ExitCode {
+    if definition
+        .hosted
+        .is_some_and(|source| source.id.starts_with("release.update."))
+    {
+        return crate::server_update_cli::run(definition, matches, json_output);
+    }
     let command = definition.command.join(" ");
     let latest = match definition.hosted.map(|source| source.id) {
         Some(id) if id == LATEST.id => true,

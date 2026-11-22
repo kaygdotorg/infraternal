@@ -351,6 +351,50 @@ broken migration) or `exec` (the exec of that release is refused).
 real terminal sessions, and covers each of those faults plus a kill and a hard
 reboot during the trial, updates off, a withdrawn release and a good release.
 
+## Updating from the server machine (#211, D400)
+
+On the machine that runs the server, root (or the account the server runs as)
+controls updates from a shell:
+
+```sh
+sudo infraternal server update status
+sudo infraternal server update check                 # check the channel now
+sudo infraternal server update check <version>       # stage exactly this release (held)
+sudo infraternal server update apply [<version>]     # switch now, wait for the health check
+sudo infraternal server update rollback              # back to the previous version (D295)
+sudo infraternal server update cancel                # drop a held release
+sudo infraternal server update history
+sudo infraternal server update settings --quiet-minutes 10
+infraternal skill server update apply                # the contract an AI agent reads
+```
+
+Every command takes `--data <folder>` (default: the installed server's data
+folder) and `--json` for the stable result envelope; the whole answer of the
+action is in `data.update`.
+
+These are the same `release.update.*` actions as the web app's Updates page,
+run inside the running server over its private control socket
+(`<data>/restart/control.sock`, 0600 in a 0700 folder). The server checks the
+caller's kernel credentials (`SO_PEERCRED`): only root and the server's own
+account are served, and they need **no passkey**, because they can already
+replace the binary (D400). From any other device the owner still needs a recent
+passkey tap. The client checks the other end too: the process behind the socket
+must run as this account, or, for root, as the account that owns the data folder.
+
+`apply` and `rollback` wait (up to 5 minutes) until the switch is over: the new
+release passed its 2-minute health check and became the boot pointer, or the
+server went back by itself. The exit code is 0 only when the update applied (or
+the roll back finished); an undone update exits 1 with the reason. The warm
+restart closes the connection that asked, so the outcome is read from the status
+the server records, not from the reply. `--no-wait` returns once the switch has
+started. A server older than this command does not answer the request (the
+command says so); move it once with `infraternal server restart --binary`.
+
+The production flow (owner, 2026-11-22): publish a signed edge release after
+each green dev gate, then on the server `sudo infraternal server update check`
+and `sudo infraternal server update apply`. Automatic apply in the quiet window
+keeps working alongside.
+
 # Add-host payloads
 
 For the server's own architecture, bootstrap copies the running executable.

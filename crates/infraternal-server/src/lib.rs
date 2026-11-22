@@ -43,6 +43,9 @@ pub mod embedded_mesh_state;
 mod node_bridge;
 /// The bounded run-and-wait queue of one socket's plugin calls (#556).
 mod plugin_calls;
+/// `release.update.*` actions over the private control socket, for `infraternal server update` (#211, D400).
+#[cfg(feature = "release")]
+pub mod release_control;
 #[cfg(any(feature = "ssh", feature = "release"))]
 mod release_http;
 #[cfg(feature = "release")]
