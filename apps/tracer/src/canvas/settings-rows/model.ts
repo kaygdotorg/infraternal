@@ -23,11 +23,37 @@ import { SETTINGS_MAP, type ComponentDef, type GroupDef } from "./catalog";
 export const winId = (comp: string, group: string): string => `s-${comp}-${group}`;
 export interface Spot { comp: ComponentDef; group: GroupDef }
 
-/** The rows a viewer may see: administrators see everything, others only what is not marked `admin`. */
-export function visibleMap(admin: boolean): ComponentDef[] {
+/**
+ * Whether a window has anything to show, asked of a viewer's source (#568). The owner chose to hide a window with nothing in it
+ * (and its place in the sidebar, the breadcrumb and ⌘K) rather than draw an empty one, and to bring it back when its source can
+ * show something. It is a pure question of the table and the source, so the unit test needs no browser.
+ */
+export interface Showing {
+  /** Whether a setting of the table has a store behind it. */
+  backed(settingId: string): boolean;
+  /** Whether the source fills the group with lists of facts or keys. */
+  hasData(comp: string, group: string): boolean;
+  /** Whether the Devices panel is offered. */
+  devices: boolean;
+}
+
+/** True when the window has a themes editor, a panel the source offers, a backed setting, or data to list. */
+export function hasContent(comp: ComponentDef, group: GroupDef, showing: Showing): boolean {
+  if (group.themes) return true;
+  const panels = group.panel === undefined ? [] : typeof group.panel === "string" ? [group.panel] : group.panel;
+  if (panels.some((id) => id !== "devices" || showing.devices)) return true;
+  if ((group.settings ?? []).some((id) => showing.backed(id))) return true;
+  return showing.hasData(comp.id, group.id);
+}
+
+/**
+ * The rows a viewer may see: administrators see everything, others only what is not marked `admin`. With `showing`, a window
+ * with nothing to show is left out, and a row left with no windows goes too; without it the whole table is returned.
+ */
+export function visibleMap(admin: boolean, showing?: Showing): ComponentDef[] {
   return SETTINGS_MAP
     .filter((c) => admin || !c.admin)
-    .map((c) => ({ ...c, groups: c.groups.filter((g) => admin || !g.admin) }))
+    .map((c) => ({ ...c, groups: c.groups.filter((g) => (admin || !g.admin) && (!showing || hasContent(c, g, showing))) }))
     .filter((c) => c.groups.length > 0);
 }
 

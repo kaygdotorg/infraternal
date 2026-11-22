@@ -4,8 +4,9 @@
  * A Settings read that fails says what happened and offers Try again; Try again draws the setting back in place. The double
  * refuses the first read of Keys Last when `settingread=fail` is in the URL (`canvas/mock/settings.ts`).
  *
- * The empty-window line (`emptyGroupNote`) is not checked here: the test double backs every setting and supplies data for
- * every other group, so no window of the double is empty. Its wording is pinned by `empty-note.test.ts`.
+ * A window with nothing to show is hidden, not drawn empty (owner, 2026-11-22): `settingempty=you.apps` gives the Apps window
+ * nothing (`canvas/mock/settings.ts`), and the window, its place in the sidebar and its ⌘K row must be gone, while the
+ * rest of the You row stays.
  *
  * `DEAD_END_SHOTS=<dir>` also writes the captures (1440x900 at DPR 2, 393x852 at DPR 3), before and after the
  * assertions, so the same spec makes the before/after evidence on origin/dev and on the branch.
@@ -58,6 +59,19 @@ for (const [size, use] of Object.entries(SIZES)) {
       await expect(page.getByText(READ_FAILED, { exact: true })).toHaveCount(0);
       await expect(page.getByText(KEYS_LAST, { exact: true })).toBeVisible({ timeout: 10_000 });
       await shot(page, `${size}-03-read-retried`);
+    });
+
+    test("a Settings window with nothing to show is hidden everywhere, and the same window is there when it has something", async ({ page }) => {
+      const WINDOW = '[data-window-id="s-you-apps"]';
+      await open(page, "&at=you.profile&settingempty=you.apps");
+      await shot(page, `${size}-04-apps-hidden`);
+      await expect(page.getByText("Keys Last", { exact: true })).toHaveCount(0);
+      await expect(page.locator(WINDOW)).toHaveCount(0);
+      // The row keeps its other windows: Passkeys is still there.
+      await expect(page.getByText("Passkeys", { exact: true }).first()).toBeVisible();
+      await open(page, "&at=you.apps");
+      await expect(page.getByText("Keys Last", { exact: true })).toBeVisible({ timeout: 10_000 });
+      await shot(page, `${size}-05-apps-shown`);
     });
   });
 }

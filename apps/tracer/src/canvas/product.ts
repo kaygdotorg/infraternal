@@ -44,7 +44,7 @@ import { createLiveInventory } from "./sessions/live-inventory";
 import { teachOnce } from "../hints";
 import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
-import { buildSettingsMapView, visibleMap } from "./settings-rows/model";
+import { buildSettingsMapView } from "./settings-rows/model";
 import { createRowsDocs } from "./settings-rows/docs-adapter";
 import { createProductRows } from "./settings-rows/product-source";
 
@@ -359,7 +359,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     // First run, or nothing left to restore: one new shell.
     if (!doc && !saved) cols = [{ id: "c1", w: m.colW, wins: [sessions.open(options.host.name)] }];
     const console_: ViewModel = { id: "console", name: "Console", layout: "tiled", cols, nodes: [], x: (doc?.cell.x ?? 0) * CELL, y: (doc?.cell.y ?? 0) * CELL };
-    const settings = buildSettingsMapView(visibleMap(true), m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
+    const settings = buildSettingsMapView(productRows.map(), m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
     settings.x = boxOf(console_, m).w + CELL;
     const recovered = (saved?.views ?? []).filter((v) => v.id !== "console" && v.id !== "mesh").map((v) => viewFromDocument(v, v.layout.type === "tiled" ? columnsFromDocument(v.layout, m, resolve) : []));
     return [console_, ...recovered, settings];

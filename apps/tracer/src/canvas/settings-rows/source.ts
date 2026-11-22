@@ -11,24 +11,40 @@ import { onDemand } from "../../on-demand";
 import type { SettingValue } from "../../../../../packages/ui/src/setting-value";
 import type { SettingDef } from "./definitions.on-demand";
 import type { OutlineEntry } from "../views/settings-outline";
+import type { ComponentDef } from "./catalog";
 import { rowsOf, spotBySection, visibleMap } from "./model";
 
+/** What a viewer's Settings source supplies: who is an administrator, what it stores, and what it lists. Absent parts mean the windows that need them are hidden (#568). */
 export interface RowsOptions {
   /** Whether the viewer sees the administrator rows (Machines, Mesh, Sharing). */
   admin(): boolean;
   backing?: SettingsSource["backing"];
   data?: SettingsSource["data"];
+  /** The section ids the source renders itself; "devices" offers the Devices panel. */
+  sections?: readonly string[];
   /** The value ⌘K shows beside a setting; its default when absent. */
   value?(setting: SettingDef, standard: SettingValue): SettingValue;
 }
 
-export function createRowsSource(options: RowsOptions): Pick<SettingsSource, "outline" | "render"> & Pick<SettingsSource, "backing" | "data"> {
-  const map = () => visibleMap(options.admin());
+/**
+ * What the Settings view is built from: the rows and windows this viewer's source has something to show in. The view, the
+ * sidebar, the breadcrumb and ⌘K all read it, so a window with nothing in it is hidden everywhere at once (#568).
+ */
+export type RowsSource = Pick<SettingsSource, "outline" | "render" | "backing" | "data"> & { map(): ComponentDef[] };
+
+/** Builds the Settings source (outline, render, `map`) from what `options` back and fill in; the product and the test double both use it. */
+export function createRowsSource(options: RowsOptions): RowsSource {
   const backed = (id: string): boolean => options.backing?.(id) !== undefined;
+  const map = () => visibleMap(options.admin(), {
+    backed,
+    hasData: (comp, group) => { const d = options.data?.(comp, group); return Boolean(d?.facts?.length || d?.keys); },
+    devices: options.sections?.includes("devices") ?? false,
+  });
   // The wording of every setting loads when ⌘K first asks for the rows (D188); the palette is told when it has arrived.
   let entries: typeof import("./entries.on-demand") | undefined, loading = false;
   const waiting = new Set<() => void>();
   return {
+    map,
     ...(options.backing ? { backing: options.backing } : {}),
     ...(options.data ? { data: options.data } : {}),
     outline: { rows: () => rowsOf(map()), entries: (): OutlineEntry[] => {
