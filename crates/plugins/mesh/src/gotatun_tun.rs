@@ -17,7 +17,7 @@ use infraternal_linux_tun::Device as TunDevice;
 use nix::errno::Errno;
 use std::{
     fs::File,
-    io,
+    io::{self, IoSlice, Write as _},
     sync::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -274,14 +274,17 @@ impl IpRecv for LinuxTun {
     }
 }
 
-/// Writes decrypted packets to the TUN in the caller's task (#260, J1122).
+/// Writes decrypted packets to the TUN in the caller's task (#260, J1122, J1129).
 ///
 /// `GotaTun` hands over each decrypted run whole ([`IpSend::send_many`]), so the run itself is
-/// the GRO batch: consecutive segments of one flow become one GSO frame, and a lone packet is
-/// written at once, without a timer. This used to be a task fed one packet at a time through a
-/// 256-packet channel, because `GotaTun` only called `send`; that cost a cross-thread wake per
-/// run on top of `GotaTun`'s own send queue (J1120). `GotaTun`'s queue still absorbs a TUN that
-/// is slow to take frames, and its order rules decide when a run is written.
+/// the GRO batch: segments of one TCP flow become one GSO frame even when other flows' segments
+/// sit between them, and a packet that cannot merge is written at once, without a timer. Each
+/// frame goes to the kernel as one gather write of its header and the packets' own bytes, so no
+/// payload is copied in userspace on the way (J1129). This used to be a task fed one packet at
+/// a time through a 256-packet channel, because `GotaTun` only called `send`; that cost a
+/// cross-thread wake per run on top of `GotaTun`'s own send queue (J1120). `GotaTun`'s queue
+/// still absorbs a TUN that is slow to take frames, and its order rules decide when a run is
+/// written.
 #[derive(Clone)]
 struct TunWriter {
     fd: Arc<AsyncFd<File>>,
@@ -289,30 +292,30 @@ struct TunWriter {
     /// Coalesced route-refresh wakeups, raised by host-bound writes here and by host reads in
     /// `recv_packets`.
     endpoint_refresh: Arc<crate::gotatun_node::EndpointRefreshSignal>,
-    /// Reused GSO frame buffer; each clone grows its own on first use.
-    frame: Scratch<u8>,
+    /// Reused frame plan for the run being written; each clone grows its own on first use.
+    plan: Scratch<FramePlan>,
     /// Reused run of packets being written; empty between writes.
-    run: Scratch<Packet<[u8]>>,
+    run: Scratch<Vec<Packet<[u8]>>>,
 }
 
 /// A reusable buffer whose clones start empty, so cloning the TUN handle copies no packet data.
-struct Scratch<T>(Vec<T>);
+struct Scratch<T>(T);
 
-impl<T> Clone for Scratch<T> {
+impl<T: Default> Clone for Scratch<T> {
     fn clone(&self) -> Self {
-        Self(Vec::new())
+        Self(T::default())
     }
 }
 
 impl<T> std::ops::Deref for Scratch<T> {
-    type Target = Vec<T>;
-    fn deref(&self) -> &Vec<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
         &self.0
     }
 }
 
 impl<T> std::ops::DerefMut for Scratch<T> {
-    fn deref_mut(&mut self) -> &mut Vec<T> {
+    fn deref_mut(&mut self) -> &mut T {
         &mut self.0
     }
 }
@@ -328,7 +331,7 @@ impl TunWriter {
             fd,
             vnet_header,
             endpoint_refresh,
-            frame: Scratch(Vec::new()),
+            plan: Scratch(FramePlan::default()),
             run: Scratch(Vec::new()),
         }
     }
@@ -340,10 +343,194 @@ impl TunWriter {
         if run.is_empty() {
             return Ok(());
         }
-        write_batch(&self.fd, self.vnet_header, run, &mut self.frame).await?;
+        write_batch(&self.fd, self.vnet_header, run, &mut self.plan).await?;
         self.endpoint_refresh.traffic();
         Ok(())
     }
+}
+
+/// Most TCP flows that may each hold an open GSO frame while a run is planned. A ninth flow
+/// closes the oldest open frame, so a run of many interleaved flows still writes in bounded
+/// state; 8 matches the bulk flow counts the perf kit drives and costs a short linear search.
+const GRO_MAX_FLOWS: usize = 8;
+
+/// Marks the end of a frame's member list in [`FramePlan::next`].
+const NO_MEMBER: usize = usize::MAX;
+
+/// The longest header block of a GSO frame: the virtio header, then an IPv6 header (an IPv4
+/// header with options never merges) and a TCP header with the most options.
+const GSO_HEADER_MAX: usize = VNET_HEADER_LEN + 40 + 60;
+
+/// A virtio header that asks nothing of the kernel, for a packet written alone.
+const PLAIN_VNET_HEADER: [u8; VNET_HEADER_LEN] = [0; VNET_HEADER_LEN];
+
+/// One TUN write being planned: a packet alone, or a GSO frame over in-order segments of one
+/// TCP flow, whose members are linked through [`FramePlan::next`] from `first` to `last`.
+#[derive(Clone, Copy)]
+struct PlannedFrame {
+    /// Index in the run of the first member, whose headers the frame carries.
+    first: usize,
+    /// Index of the latest member, after which the next one is linked.
+    last: usize,
+    members: usize,
+    /// The first member's merge fields; `None` for a packet that can never merge.
+    head: Option<GroSegment>,
+    /// IP and TCP headers plus every member's payload so far.
+    length: usize,
+    /// The sequence number and IPv4 identification the next member must carry.
+    next_sequence: u32,
+    next_identification: u16,
+    /// Payload bytes of all members, as the GSO frame's TCP payload.
+    payload_len: usize,
+}
+
+/// How one run is cut into TUN writes, kept between runs so planning allocates nothing.
+#[derive(Default)]
+struct FramePlan {
+    /// Frames in the order of their first member, which is the order they are written in.
+    frames: Vec<PlannedFrame>,
+    /// For each packet of the run, the index of the next member of its frame, or [`NO_MEMBER`].
+    next: Vec<usize>,
+    /// Frames that later segments may still join, oldest first; at most [`GRO_MAX_FLOWS`].
+    open: Vec<usize>,
+}
+
+impl FramePlan {
+    /// Cut `batch` into frames, in place of the previous plan.
+    ///
+    /// The rules keep every flow's packets in order and every packet that cannot merge in its
+    /// place relative to everything before and after it; only segments of *different* TCP flows
+    /// may change places, as they do in the kernel's own GRO:
+    /// - A packet that cannot merge closes every open frame and goes out alone, so nothing that
+    ///   arrives after it can be written before it.
+    /// - A segment joins the open frame of its flow (same addresses and ports) when it continues
+    ///   it exactly ([`continues_flow`], sequence, identification, size). Otherwise it closes that
+    ///   frame and starts the next one, so no later segment can join the earlier frame.
+    /// - A frame closes after a shorter or pushed segment, at [`GRO_MAX_SEGMENTS`] and at the IP
+    ///   length limit. A pushed segment that starts a frame goes out alone.
+    ///
+    /// Frames are written in the order of their first member, so a frame always follows every
+    /// frame that its flow closed before it.
+    fn plan(&mut self, batch: &[Packet<[u8]>], vnet_header: bool) {
+        self.frames.clear();
+        self.open.clear();
+        self.next.clear();
+        self.next.resize(batch.len(), NO_MEMBER);
+        for (index, packet) in batch.iter().enumerate() {
+            let segment = if vnet_header {
+                gro_segment(packet)
+            } else {
+                None
+            };
+            let Some(segment) = segment else {
+                self.open.clear();
+                self.frames
+                    .push(PlannedFrame::alone(index, packet.len(), None));
+                continue;
+            };
+            if let Some(position) = self.open.iter().position(|&frame| {
+                let frame = &self.frames[frame];
+                frame
+                    .head
+                    .is_some_and(|head| same_flow(&batch[frame.first], head, packet, segment))
+            }) {
+                let frame = self.open[position];
+                if self.frames[frame].accepts(&batch[self.frames[frame].first], packet, segment) {
+                    let planned = &mut self.frames[frame];
+                    self.next[planned.last] = index;
+                    planned.add(index, segment);
+                    let full = planned.members == GRO_MAX_SEGMENTS
+                        || planned
+                            .head
+                            .is_some_and(|head| segment.payload_len < head.payload_len)
+                        || segment.flags & TCP_PSH != 0;
+                    if full {
+                        self.open.remove(position);
+                    }
+                    continue;
+                }
+                self.open.remove(position);
+            }
+            self.frames
+                .push(PlannedFrame::alone(index, packet.len(), Some(segment)));
+            if segment.flags & TCP_PSH == 0 {
+                if self.open.len() == GRO_MAX_FLOWS {
+                    self.open.remove(0);
+                }
+                self.open.push(self.frames.len() - 1);
+            }
+        }
+    }
+
+    /// The run indices of `frame`'s members, in order.
+    fn members(&self, frame: &PlannedFrame) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(Some(frame.first), |&index| {
+            Some(self.next[index]).filter(|&next| next != NO_MEMBER)
+        })
+    }
+}
+
+impl PlannedFrame {
+    /// A frame holding only the packet at `index`, `length` bytes long.
+    fn alone(index: usize, length: usize, head: Option<GroSegment>) -> Self {
+        let (next_sequence, next_identification, payload_len) = head.map_or((0, 0, 0), |head| {
+            (
+                head.sequence
+                    .wrapping_add(payload_sequence(head.payload_len)),
+                head.identification.wrapping_add(1),
+                head.payload_len,
+            )
+        });
+        Self {
+            first: index,
+            last: index,
+            members: 1,
+            head,
+            length,
+            next_sequence,
+            next_identification,
+            payload_len,
+        }
+    }
+
+    /// Whether `next`, a segment of this frame's flow, may join as its next member: the merged
+    /// frame must re-segment into exactly the segments it was built from (see
+    /// [`coalescing rules`](FramePlan::plan)).
+    fn accepts(&self, first: &[u8], next: &[u8], segment: GroSegment) -> bool {
+        let Some(head) = self.head else {
+            return false;
+        };
+        self.members < GRO_MAX_SEGMENTS
+            && continues_flow(first, head, next, segment)
+            && segment.sequence == self.next_sequence
+            && (!head.ipv4 || segment.identification == self.next_identification)
+            && segment.payload_len <= head.payload_len
+            && u16::try_from(self.length + segment.payload_len).is_ok()
+    }
+
+    /// Link the segment at `index` as the newest member.
+    fn add(&mut self, index: usize, segment: GroSegment) {
+        self.last = index;
+        self.members += 1;
+        self.length += segment.payload_len;
+        self.payload_len += segment.payload_len;
+        self.next_sequence = self
+            .next_sequence
+            .wrapping_add(payload_sequence(segment.payload_len));
+        self.next_identification = self.next_identification.wrapping_add(1);
+    }
+}
+
+/// Whether `next` belongs to the TCP flow of `first`: the same IP version, addresses and ports.
+/// Unlike [`continues_flow`], other header fields may differ; such a segment ends the flow's
+/// frame instead of starting a second open frame for the same flow, which could reorder it.
+fn same_flow(first: &[u8], head: GroSegment, next: &[u8], segment: GroSegment) -> bool {
+    if head.ipv4 != segment.ipv4 || head.ip_header_len != segment.ip_header_len {
+        return false;
+    }
+    let addresses = if head.ipv4 { 12..20 } else { 8..40 };
+    let ports = head.ip_header_len..head.ip_header_len + 4;
+    first[addresses.clone()] == next[addresses] && first[ports.clone()] == next[ports]
 }
 
 /// Write one batch in order. A frame the kernel refuses is dropped, as on a congested link; only a
@@ -352,33 +539,19 @@ async fn write_batch(
     fd: &AsyncFd<File>,
     vnet_header: bool,
     batch: &[Packet<[u8]>],
-    frame: &mut Vec<u8>,
+    plan: &mut FramePlan,
 ) -> io::Result<()> {
-    let mut start = 0;
-    while start < batch.len() {
-        let run = if vnet_header {
-            coalescible_run(batch, start)
+    plan.plan(batch, vnet_header);
+    for frame in &plan.frames {
+        let result = if frame.members == 1 {
+            write_alone(fd, vnet_header, &batch[frame.first]).await
         } else {
-            1
-        };
-        let segments = &batch[start..start + run];
-        let result = if run == 1 {
-            frame.clear();
-            if vnet_header {
-                frame.extend_from_slice(&[0; VNET_HEADER_LEN]);
-            }
-            frame.extend_from_slice(&segments[0]);
-            write_frame(fd, frame).await
-        } else {
-            match build_gso_frame(segments, frame) {
-                Ok(()) => match write_frame(fd, frame).await {
-                    // The kernel refused the merged frame: deliver its segments one at a time.
-                    Err(error) if error.raw_os_error() == Some(Errno::EINVAL as i32) => {
-                        write_each(fd, segments, frame).await
-                    }
-                    written => written,
-                },
-                Err(_) => write_each(fd, segments, frame).await,
+            match write_gso_frame(fd, batch, plan, frame).await {
+                // The kernel refused the merged frame: deliver its segments one at a time.
+                Err(error) if error.raw_os_error() == Some(Errno::EINVAL as i32) => {
+                    write_each(fd, batch, plan, frame).await
+                }
+                written => written,
             }
         };
         if let Err(error) = result
@@ -386,21 +559,19 @@ async fn write_batch(
         {
             return Err(error);
         }
-        start += run;
     }
     Ok(())
 }
 
+/// Write every member of `frame` as its own packet, for a merged frame the kernel refused.
 async fn write_each(
     fd: &AsyncFd<File>,
-    segments: &[Packet<[u8]>],
-    frame: &mut Vec<u8>,
+    batch: &[Packet<[u8]>],
+    plan: &FramePlan,
+    frame: &PlannedFrame,
 ) -> io::Result<()> {
-    for segment in segments {
-        frame.clear();
-        frame.extend_from_slice(&[0; VNET_HEADER_LEN]);
-        frame.extend_from_slice(segment);
-        if let Err(error) = write_frame(fd, frame).await
+    for index in plan.members(frame) {
+        if let Err(error) = write_alone(fd, true, &batch[index]).await
             && device_gone(&error).is_some()
         {
             return Err(error);
@@ -409,13 +580,65 @@ async fn write_each(
     Ok(())
 }
 
-async fn write_frame(fd: &AsyncFd<File>, frame: &[u8]) -> io::Result<()> {
+/// Write one packet as it is, behind a plain virtio header when the TUN expects one.
+async fn write_alone(fd: &AsyncFd<File>, vnet_header: bool, packet: &[u8]) -> io::Result<()> {
+    if vnet_header {
+        write_frame(
+            fd,
+            &[IoSlice::new(&PLAIN_VNET_HEADER), IoSlice::new(packet)],
+        )
+        .await
+    } else {
+        write_frame(fd, &[IoSlice::new(packet)]).await
+    }
+}
+
+/// Write `frame` as one GSO frame: its header block, then each member's payload straight from
+/// the decrypted packet buffers.
+async fn write_gso_frame(
+    fd: &AsyncFd<File>,
+    batch: &[Packet<[u8]>],
+    plan: &FramePlan,
+    frame: &PlannedFrame,
+) -> io::Result<()> {
+    let head = frame
+        .head
+        .ok_or_else(|| invalid_tun("GSO frame without a TCP segment"))?;
+    let mut header = [0_u8; GSO_HEADER_MAX];
+    let last_flags = batch[frame.last][head.ip_header_len + 13];
+    let header_len = gso_header(
+        &batch[frame.first],
+        head,
+        last_flags,
+        frame.payload_len,
+        &mut header,
+    )?;
+    let mut parts = [IoSlice::new(&[]); GRO_MAX_SEGMENTS + 1];
+    parts[0] = IoSlice::new(&header[..header_len]);
+    let mut count = 1;
+    for index in plan.members(frame) {
+        let payload = batch[index]
+            .get(head.header_len..)
+            .ok_or_else(|| invalid_tun("GRO segment is shorter than the frame's headers"))?;
+        parts[count] = IoSlice::new(payload);
+        count += 1;
+    }
+    write_frame(fd, &parts[..count]).await
+}
+
+/// Write `parts` as one TUN frame with a single gather write, so the kernel copies each part
+/// straight from its buffer.
+async fn write_frame(fd: &AsyncFd<File>, parts: &[IoSlice<'_>]) -> io::Result<()> {
+    let length: usize = parts.iter().map(|part| part.len()).sum();
     loop {
         let mut ready = fd.writable().await?;
-        match ready.try_io(|fd| nix::unistd::write(fd.get_ref(), frame).map_err(io::Error::from)) {
+        match ready.try_io(|fd| {
+            let mut file = fd.get_ref();
+            file.write_vectored(parts)
+        }) {
             Err(_) => {}
             Ok(Err(error)) => return Err(error),
-            Ok(Ok(written)) if written == frame.len() => return Ok(()),
+            Ok(Ok(written)) if written == length => return Ok(()),
             Ok(Ok(_)) => return Err(io::ErrorKind::WriteZero.into()),
         }
     }
@@ -515,91 +738,46 @@ fn continues_flow(first: &[u8], head: GroSegment, next: &[u8], segment: GroSegme
         && first[tcp + 18..head.header_len] == next[tcp + 18..head.header_len]
 }
 
-/// How many packets from `start` form one GSO frame: consecutive in-sequence segments of one flow,
-/// each the size of the first except a shorter or pushed last one, within one IP packet's length.
-///
-/// The kernel re-segments a GSO frame by copying the first segment's headers and counting the
-/// IPv4 identification up by one per segment, so an IPv4 run also needs consecutive
-/// identifications, as the kernel's own GRO requires. Re-segmentation then gives back every
-/// original segment byte for byte. Senders that randomise the identification do not merge.
-fn coalescible_run(batch: &[Packet<[u8]>], start: usize) -> usize {
-    let first = &batch[start];
-    let Some(head) = gro_segment(first) else {
-        return 1;
-    };
-    if head.flags & TCP_PSH != 0 {
-        return 1;
-    }
-    let mut length = head.header_len + head.payload_len;
-    let mut next_sequence = head
-        .sequence
-        .wrapping_add(payload_sequence(head.payload_len));
-    let mut next_identification = head.identification.wrapping_add(1);
-    let mut run = 1;
-    for next in &batch[start + 1..] {
-        if run == GRO_MAX_SEGMENTS {
-            break;
-        }
-        let Some(segment) = gro_segment(next) else {
-            break;
-        };
-        if !continues_flow(first, head, next, segment)
-            || segment.sequence != next_sequence
-            || (head.ipv4 && segment.identification != next_identification)
-            || segment.payload_len > head.payload_len
-            || length + segment.payload_len > usize::from(u16::MAX)
-        {
-            break;
-        }
-        length += segment.payload_len;
-        next_sequence = next_sequence.wrapping_add(payload_sequence(segment.payload_len));
-        next_identification = next_identification.wrapping_add(1);
-        run += 1;
-        if segment.payload_len < head.payload_len || segment.flags & TCP_PSH != 0 {
-            break;
-        }
-    }
-    run
-}
-
 /// A segment payload fits in one IP packet, so its length always fits the sequence space.
 fn payload_sequence(payload_len: usize) -> u32 {
     u32::try_from(payload_len).unwrap_or(u32::MAX)
 }
 
-/// Lay out `segments`, a run from `coalescible_run`, as one virtio GSO frame: the first segment's
-/// headers with the lengths, the IPv4 header checksum and the last segment's PSH updated, then
-/// every payload in order. The TCP checksum holds the pseudo-header sum for the kernel to complete
+/// Lay out the header block of a virtio GSO frame into `out` and return its length: the virtio
+/// header, then the first segment's headers with the lengths, the IPv4 header checksum and the
+/// last segment's PSH updated. The members' payloads (`payload_len` bytes in all) follow it in
+/// the same write. The TCP checksum holds the pseudo-header sum for the kernel to complete
 /// (`NEEDS_CSUM`), as for any GSO frame; `WireGuard` already authenticated every payload.
-fn build_gso_frame(segments: &[Packet<[u8]>], frame: &mut Vec<u8>) -> io::Result<()> {
-    let first = segments
-        .first()
-        .ok_or_else(|| invalid_tun("empty GRO run"))?;
-    let head = gro_segment(first).ok_or_else(|| invalid_tun("GRO run without a TCP segment"))?;
+fn gso_header(
+    first: &[u8],
+    head: GroSegment,
+    last_flags: u8,
+    payload_len: usize,
+    out: &mut [u8; GSO_HEADER_MAX],
+) -> io::Result<usize> {
     let field =
         |value: usize| u16::try_from(value).map_err(|_| invalid_tun("GSO frame is too large"));
-    frame.clear();
-    frame.push(VIRTIO_NET_HDR_F_NEEDS_CSUM);
-    frame.push(if head.ipv4 {
+    let header_end = VNET_HEADER_LEN + head.header_len;
+    let headers = first
+        .get(..head.header_len)
+        .ok_or_else(|| invalid_tun("GRO segment is shorter than its headers"))?;
+    let block = out
+        .get_mut(..header_end)
+        .ok_or_else(|| invalid_tun("GSO headers are too long"))?;
+    block[0] = VIRTIO_NET_HDR_F_NEEDS_CSUM;
+    block[1] = if head.ipv4 {
         VIRTIO_NET_HDR_GSO_TCPV4
     } else {
         VIRTIO_NET_HDR_GSO_TCPV6
-    });
-    frame.extend_from_slice(&field(head.header_len)?.to_ne_bytes());
-    frame.extend_from_slice(&field(head.payload_len)?.to_ne_bytes());
-    frame.extend_from_slice(&field(head.ip_header_len)?.to_ne_bytes());
-    frame.extend_from_slice(&16_u16.to_ne_bytes());
-    frame.extend_from_slice(&first[..head.header_len]);
-    for segment in segments {
-        let payload = segment
-            .get(head.header_len..)
-            .ok_or_else(|| invalid_tun("GRO segment is shorter than the run's headers"))?;
-        frame.extend_from_slice(payload);
-    }
-    let length = frame.len() - VNET_HEADER_LEN;
-    let packet = &mut frame[VNET_HEADER_LEN..];
+    };
+    block[2..4].copy_from_slice(&field(head.header_len)?.to_ne_bytes());
+    block[4..6].copy_from_slice(&field(head.payload_len)?.to_ne_bytes());
+    block[6..8].copy_from_slice(&field(head.ip_header_len)?.to_ne_bytes());
+    block[8..10].copy_from_slice(&16_u16.to_ne_bytes());
+    block[VNET_HEADER_LEN..].copy_from_slice(headers);
+    let length = head.header_len + payload_len;
+    let packet = &mut block[VNET_HEADER_LEN..];
     let tcp = head.ip_header_len;
-    let last_flags = segments.last().map_or(0, |last| last[tcp + 13]);
     packet[tcp + 13] |= last_flags & TCP_PSH;
     let transport_len = length - tcp;
     let pseudo_sum = if head.ipv4 {
@@ -621,7 +799,7 @@ fn build_gso_frame(segments: &[Packet<[u8]>], frame: &mut Vec<u8>) -> io::Result
         !internet_checksum(&[&pseudo])
     };
     packet[tcp + 16..tcp + 18].copy_from_slice(&pseudo_sum.to_be_bytes());
-    Ok(())
+    Ok(header_end)
 }
 
 fn rootless_tun_error(error: io::Error) -> io::Error {
@@ -635,6 +813,11 @@ fn rootless_tun_error(error: io::Error) -> io::Error {
     }
 }
 
+/// Turn one frame read from the TUN into the IP packets `GotaTun` encrypts: a plain packet as
+/// it is, a packet whose checksum the kernel left partial with that checksum completed, and a
+/// TSO frame cut into its segments. Every packet lands in a buffer `GotaTun` can encrypt in place.
+/// # Errors
+/// `InvalidData` for any frame this adapter refuses; the caller drops and counts it.
 fn decode_frame(
     frame: &[u8],
     vnet_header: bool,
@@ -663,13 +846,21 @@ fn decode_frame(
             if raw_gso_type & 0x80 != 0 || gso_size != 0 {
                 return Err(invalid_tun("invalid metadata for a non-GSO packet"));
             }
-            let mut packet = packet.to_vec();
-            let details = ip_details(&packet)?;
-            packet.truncate(details.total_len);
+            // One copy, straight into the pool buffer GotaTun encrypts in place; the partial
+            // checksum is completed there (J1129: this used to copy the packet twice).
+            let details = ip_details(packet)?;
+            let mut decoded = pool.get();
+            let buffer = decoded.buf_mut();
+            buffer.clear();
+            buffer.extend_from_slice(&packet[..details.total_len]);
             if flags & 0x01 != 0 {
-                complete_partial_checksum(&mut packet, details, csum_start, csum_offset)?;
+                complete_partial_checksum(buffer, details, csum_start, csum_offset)?;
             }
-            Ok(vec![packet_from_pool(&packet, pool)?])
+            Ok(vec![
+                decoded
+                    .try_into_ip()
+                    .map_err(|error| invalid_tun_owned(error.to_string()))?,
+            ])
         }
         1 | 4 => segment_tcp(
             packet,
@@ -1028,22 +1219,38 @@ fn recompute_ipv4_checksum(packet: &mut [u8], details: IpDetails) {
     packet[10..12].copy_from_slice(&checksum.to_be_bytes());
 }
 
+/// The Internet checksum (RFC 1071) of `parts`: the complement of their one's-complement sum of
+/// 16-bit big-endian words, each part padded with a zero byte to an even length on its own (every
+/// caller passes even-length parts before the last one, so this equals the sum over their
+/// concatenation).
+///
+/// The sender runs this over every byte it sends (J1120: 2.4% of engine cycles), so it adds
+/// 32-bit little-endian words into a 64-bit accumulator, which the compiler vectorises, instead
+/// of one byte-swapped 16-bit word at a time. That gives the same result: 2^16 is 1 modulo
+/// 2^16 - 1, so a 32-bit word adds the same as its two halves, and the one's-complement sum is
+/// independent of byte order (RFC 1071 §2(B)), so the little-endian sum only needs one swap at
+/// the end. 64 KiB of 32-bit words stay far below 2^64, so the accumulator cannot overflow.
 fn internet_checksum(parts: &[&[u8]]) -> u16 {
     let mut sum = 0_u64;
     for bytes in parts {
-        let (chunks, remainder) = bytes.as_chunks::<2>();
-        for word in chunks {
-            sum += u64::from(u16::from_be_bytes(*word));
+        let (words, rest) = bytes.as_chunks::<4>();
+        sum += words
+            .iter()
+            .map(|word| u64::from(u32::from_le_bytes(*word)))
+            .sum::<u64>();
+        let (pair, last) = rest.as_chunks::<2>();
+        if let [pair] = pair {
+            sum += u64::from(u16::from_le_bytes(*pair));
         }
-        if let [last] = remainder {
-            sum += u64::from(u16::from_be_bytes([*last, 0]));
+        if let [last] = last {
+            sum += u64::from(u16::from_le_bytes([*last, 0]));
         }
     }
     while sum >> 16 != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
-    let folded = sum.to_be_bytes();
-    !u16::from_be_bytes([folded[6], folded[7]])
+    let folded = u16::try_from(sum).unwrap_or(u16::MAX);
+    !folded.swap_bytes()
 }
 
 fn packet_from_pool(bytes: &[u8], pool: &PacketBufPool) -> io::Result<Packet<Ip>> {
@@ -1069,9 +1276,9 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::{
-        GRO_MAX_SEGMENTS, LinuxTun, TCP_ACK, TCP_PSH, TCP_SEGMENT_TAILROOM, build_gso_frame,
-        coalescible_run, decode_frame, internet_checksum, ip_details, recompute_ipv4_checksum,
-        recompute_transport_checksum,
+        FramePlan, GRO_MAX_FLOWS, GRO_MAX_SEGMENTS, GSO_HEADER_MAX, LinuxTun, TCP_ACK, TCP_PSH,
+        TCP_SEGMENT_TAILROOM, decode_frame, gro_segment, gso_header, internet_checksum, ip_details,
+        recompute_ipv4_checksum, recompute_transport_checksum,
     };
     use bytes::BytesMut;
     use gotatun::{
@@ -1094,6 +1301,7 @@ mod tests {
         time::Duration,
     };
 
+    /// A zero-filled IPv4 UDP packet of `length` bytes, with only its lengths and TTL set.
     fn ipv4_packet(length: usize) -> Packet<Ip> {
         let mut bytes = vec![0; length];
         bytes[0] = 0x45;
@@ -1103,6 +1311,60 @@ mod tests {
         Packet::from_bytes(bytes::BytesMut::from(bytes.as_slice()))
             .try_into_ip()
             .unwrap()
+    }
+
+    /// How many packets from `start` the planner puts into the first frame of `batch[start..]`.
+    fn coalescible_run(batch: &[Packet<[u8]>], start: usize) -> usize {
+        let mut plan = FramePlan::default();
+        plan.plan(&batch[start..], true);
+        plan.frames[0].members
+    }
+
+    /// Every TUN frame the planner writes for `batch`, each laid out as the kernel reads it.
+    fn planned_frames(batch: &[Packet<[u8]>]) -> Vec<Vec<u8>> {
+        let mut plan = FramePlan::default();
+        plan.plan(batch, true);
+        plan.frames
+            .iter()
+            .map(|frame| {
+                let members: Vec<_> = plan
+                    .members(frame)
+                    .map(|index| BytesMut::from(&batch[index][..]))
+                    .collect();
+                let mut bytes = Vec::new();
+                if members.len() == 1 {
+                    bytes.extend_from_slice(&[0; 10]);
+                    bytes.extend_from_slice(&members[0]);
+                } else {
+                    build_gso_frame(&packets(&members), &mut bytes).unwrap();
+                }
+                bytes
+            })
+            .collect()
+    }
+
+    /// The bytes of a GSO frame over `segments`, which must be one frame's members in order.
+    fn build_gso_frame(segments: &[Packet<[u8]>], frame: &mut Vec<u8>) -> std::io::Result<()> {
+        let head = gro_segment(&segments[0]).unwrap();
+        let last = segments.last().unwrap();
+        let payload_len = segments
+            .iter()
+            .map(|segment| segment.len() - head.header_len)
+            .sum();
+        let mut header = [0; GSO_HEADER_MAX];
+        let length = gso_header(
+            &segments[0],
+            head,
+            last[head.ip_header_len + 13],
+            payload_len,
+            &mut header,
+        )?;
+        frame.clear();
+        frame.extend_from_slice(&header[..length]);
+        for segment in segments {
+            frame.extend_from_slice(&segment[head.header_len..]);
+        }
+        Ok(())
     }
 
     fn test_tun(device: OwnedFd, vnet_header: bool) -> LinuxTun {
@@ -1756,5 +2018,275 @@ mod tests {
         let mut frame = ipv4_tcp_frame(100);
         frame[0] |= 0x80;
         assert!(decode_frame(&frame, true, &pool).is_err());
+    }
+
+    /// The checksum as it was summed before J1129, one big-endian 16-bit word at a time: the
+    /// reference the wide sum must match bit for bit.
+    fn word_at_a_time_checksum(parts: &[&[u8]]) -> u16 {
+        let mut sum = 0_u64;
+        for bytes in parts {
+            let (chunks, remainder) = bytes.as_chunks::<2>();
+            for word in chunks {
+                sum += u64::from(u16::from_be_bytes(*word));
+            }
+            if let [last] = remainder {
+                sum += u64::from(u16::from_be_bytes([*last, 0]));
+            }
+        }
+        while sum >> 16 != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !u16::try_from(sum).unwrap()
+    }
+
+    /// A small deterministic generator, so the randomised tests replay exactly.
+    struct Lcg(u64);
+
+    impl Lcg {
+        /// The next 31-bit value of the sequence.
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        /// A value in `0..bound`.
+        fn below(&mut self, bound: usize) -> usize {
+            usize::try_from(self.next()).unwrap() % bound
+        }
+    }
+
+    /// The wide checksum equals the word-at-a-time one for every length, offset and fill tried
+    /// (J1129).
+    #[test]
+    fn wide_checksum_matches_the_word_at_a_time_sum() {
+        let mut random = Lcg(7);
+        let data: Vec<u8> = (0..70_000)
+            .map(|_| u8::try_from(random.next() & 0xff).unwrap())
+            .collect();
+        let pseudo = &data[..12];
+        let lengths = (0..300).chain([1399, 1400, 1448, 8191, 65_535, 65_536]);
+        for length in lengths {
+            for offset in [0, 1, 3] {
+                let bytes = &data[offset..offset + length];
+                assert_eq!(
+                    internet_checksum(&[bytes]),
+                    word_at_a_time_checksum(&[bytes]),
+                    "length {length}, offset {offset}"
+                );
+                assert_eq!(
+                    internet_checksum(&[pseudo, bytes]),
+                    word_at_a_time_checksum(&[pseudo, bytes]),
+                    "pseudo header and length {length}"
+                );
+            }
+        }
+        for fill in [0x00, 0xff, 0x80, 0x01] {
+            let bytes = vec![fill; 65_535];
+            assert_eq!(
+                internet_checksum(&[&bytes]),
+                word_at_a_time_checksum(&[&bytes]),
+                "every byte {fill:#x}"
+            );
+        }
+        assert_eq!(internet_checksum(&[]), 0xffff, "an empty sum is all ones");
+    }
+
+    /// `segment` moved to source port `port`, with its TCP checksum repaired.
+    fn on_port(segment: &BytesMut, port: u16) -> BytesMut {
+        let mut bytes = segment.to_vec();
+        let tcp = if bytes[0] >> 4 == 4 { 20 } else { 40 };
+        bytes[tcp..tcp + 2].copy_from_slice(&port.to_be_bytes());
+        let details = ip_details(&bytes).unwrap();
+        recompute_transport_checksum(&mut bytes, details, tcp, 16).unwrap();
+        BytesMut::from(bytes.as_slice())
+    }
+
+    /// Segment `index` of a 1000-byte-per-segment IPv4 flow from source port `port`.
+    fn flow_segment(port: u16, index: u32, flags: u8) -> BytesMut {
+        let id = 100 + u16::try_from(index).unwrap();
+        on_port(&tcp_segment(true, 1000 * index, 1000, flags, id), port)
+    }
+
+    /// Segments of different flows that arrive interleaved still merge per flow, and each GSO
+    /// frame re-segments into exactly its flow's segments in their order (J1129).
+    #[test]
+    fn interleaved_flows_merge_per_flow() {
+        let ack = TCP_ACK;
+        let mut batch = Vec::new();
+        let mut flows = [Vec::new(), Vec::new()];
+        for index in 0..3 {
+            let flags = if index == 2 { ack | TCP_PSH } else { ack };
+            for (flow, port) in flows.iter_mut().zip([40_000, 40_001]) {
+                let segment = flow_segment(port, index, flags);
+                flow.push(segment.clone());
+                batch.push(segment);
+            }
+        }
+        let frames = planned_frames(&packets(&batch));
+        assert_eq!(frames.len(), 2, "one frame per flow");
+        let pool = PacketBufPool::new(8);
+        for (frame, flow) in frames.iter().zip(&flows) {
+            let resegmented = decode_frame(frame, true, &pool).unwrap();
+            let resegmented: Vec<_> = resegmented
+                .into_iter()
+                .map(|packet| packet.into_bytes().as_ref().to_vec())
+                .collect();
+            let original: Vec<_> = flow.iter().map(|segment| segment.to_vec()).collect();
+            assert_eq!(resegmented, original);
+        }
+    }
+
+    /// A packet that cannot merge is a barrier: what came before it is written before it, and
+    /// what came after it is written after it, even for segments that could have merged.
+    #[test]
+    fn a_packet_that_cannot_merge_keeps_its_place() {
+        let ack = TCP_ACK;
+        let udp = ipv4_packet(100).into_bytes();
+        let udp = BytesMut::from(udp.as_ref());
+        let batch = [
+            flow_segment(40_000, 0, ack),
+            flow_segment(40_000, 1, ack),
+            udp,
+            flow_segment(40_000, 2, ack),
+            flow_segment(40_000, 3, ack),
+        ];
+        let mut plan = FramePlan::default();
+        plan.plan(&packets(&batch), true);
+        let order: Vec<Vec<usize>> = plan
+            .frames
+            .iter()
+            .map(|frame| plan.members(frame).collect())
+            .collect();
+        assert_eq!(order, [vec![0, 1], vec![2], vec![3, 4]]);
+    }
+
+    /// A segment of an open flow whose other headers changed (here the window) ends that frame
+    /// and starts the next, so no later segment can join the earlier frame out of order.
+    #[test]
+    fn a_changed_header_ends_the_flows_frame_without_reordering() {
+        let ack = TCP_ACK;
+        let window = |segment: BytesMut| {
+            let mut bytes = segment.to_vec();
+            bytes[34..36].copy_from_slice(&2048_u16.to_be_bytes());
+            let details = ip_details(&bytes).unwrap();
+            recompute_transport_checksum(&mut bytes, details, 20, 16).unwrap();
+            BytesMut::from(bytes.as_slice())
+        };
+        let batch = [
+            flow_segment(40_000, 0, ack),
+            flow_segment(40_000, 1, ack),
+            window(flow_segment(40_000, 2, ack)),
+            flow_segment(40_001, 0, ack),
+            window(flow_segment(40_000, 3, ack)),
+        ];
+        let mut plan = FramePlan::default();
+        plan.plan(&packets(&batch), true);
+        let order: Vec<Vec<usize>> = plan
+            .frames
+            .iter()
+            .map(|frame| plan.members(frame).collect())
+            .collect();
+        assert_eq!(order, [vec![0, 1], vec![2, 4], vec![3]]);
+    }
+
+    /// Up to `GRO_MAX_FLOWS` interleaved flows each keep an open frame; one more flow closes the
+    /// oldest frame each time, which bounds the planner's state.
+    #[test]
+    fn open_frames_are_bounded_by_the_flow_limit() {
+        let interleaved = |flows: u16| {
+            let mut batch = Vec::new();
+            for index in 0..2 {
+                for flow in 0..flows {
+                    batch.push(flow_segment(40_000 + flow, index, TCP_ACK));
+                }
+            }
+            let mut plan = FramePlan::default();
+            plan.plan(&packets(&batch), true);
+            plan.frames.len()
+        };
+        let limit = u16::try_from(GRO_MAX_FLOWS).unwrap();
+        assert_eq!(interleaved(limit), GRO_MAX_FLOWS, "every flow merges");
+        assert_eq!(
+            interleaved(limit + 1),
+            2 * (GRO_MAX_FLOWS + 1),
+            "one flow too many writes every segment alone"
+        );
+    }
+
+    /// Random interleavings of three flows with gaps, pushes, changed headers and packets that
+    /// cannot merge: every flow's packets are written in their order, every barrier in its
+    /// place, every packet exactly once, and every GSO frame re-segments to its members.
+    #[test]
+    fn planned_frames_keep_each_flows_order_and_every_barrier() {
+        let mut random = Lcg(260);
+        let pool = PacketBufPool::new(64);
+        for _ in 0..300 {
+            let mut next_index = [0_u32; 3];
+            let mut batch = Vec::new();
+            let mut flow_of = Vec::new();
+            for _ in 0..=random.below(80) {
+                let choice = random.below(10);
+                if choice == 0 {
+                    let udp = ipv4_packet(60).into_bytes();
+                    batch.push(BytesMut::from(udp.as_ref()));
+                    flow_of.push(None);
+                    continue;
+                }
+                let flow = choice % 3;
+                if random.below(8) == 0 {
+                    next_index[flow] += 1;
+                }
+                let flags = if random.below(12) == 0 {
+                    TCP_ACK | TCP_PSH
+                } else {
+                    TCP_ACK
+                };
+                let mut segment = flow_segment(
+                    40_000 + u16::try_from(flow).unwrap(),
+                    next_index[flow],
+                    flags,
+                );
+                if random.below(15) == 0 {
+                    segment[1] = 0x02;
+                    let details = ip_details(&segment).unwrap();
+                    recompute_ipv4_checksum(&mut segment, details);
+                }
+                next_index[flow] += 1;
+                batch.push(segment);
+                flow_of.push(Some(flow));
+            }
+            let run = packets(&batch);
+            let mut plan = FramePlan::default();
+            plan.plan(&run, true);
+            let written: Vec<usize> = plan
+                .frames
+                .iter()
+                .flat_map(|frame| plan.members(frame).collect::<Vec<_>>())
+                .collect();
+            let mut sorted = written.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                sorted,
+                (0..batch.len()).collect::<Vec<_>>(),
+                "each packet once"
+            );
+            for (position, &index) in written.iter().enumerate() {
+                for &later in &written[position + 1..] {
+                    let same_flow = flow_of[index].is_some() && flow_of[index] == flow_of[later];
+                    let barrier = flow_of[index].is_none() || flow_of[later].is_none();
+                    if same_flow || barrier {
+                        assert!(index < later, "{index} written before {later}");
+                    }
+                }
+            }
+            for frame in planned_frames(&run) {
+                if frame[1] != 0 {
+                    decode_frame(&frame, true, &pool).unwrap();
+                }
+            }
+        }
     }
 }
