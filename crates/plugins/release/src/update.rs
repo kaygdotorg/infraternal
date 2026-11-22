@@ -1262,9 +1262,13 @@ impl Locked {
         Ok(())
     }
 
-    /// Add to the history what this write changed: a release newly staged, or a staged
-    /// release newly removed. Doing it where the state is written covers every path that
-    /// stages or retires a release, so none can forget to say so (#211 S5).
+    /// Add to the history what this write changed: a release newly staged, a staged
+    /// release newly removed, or a new last-switch outcome (applied, undone, not applied).
+    /// Doing it where the state is written covers every path that stages, retires or
+    /// switches a release, so none can forget to say so (#211 S5, J1130). Every path that
+    /// ends a switch writes a fresh [`Applied`] (it carries its own timestamp) exactly once
+    /// and removes the marker, so the warm restart and the cold-start undo each record the
+    /// switch once. A state rewrite that leaves `applied` as it was records nothing.
     fn record_changes(&self, before: Option<&UpdateState>, after: &UpdateState) {
         use crate::history::{Entry, Kind, append, now};
         if let Some(version) = &after.staged
@@ -1277,6 +1281,28 @@ impl Locked {
                     kind: Kind::Staged,
                     version: Some(version.clone()),
                     detail: None,
+                },
+            );
+        }
+        if let Some(applied) = &after.applied
+            && before.and_then(|b| b.applied.as_ref()) != Some(applied)
+            // "restore pending" is an interim note: the marker stays and the retry (or the
+            // settle once serving) records the switch's final outcome, so skip it here.
+            && applied.reason.as_deref() != Some(crate::apply::RESTORE_PENDING)
+        {
+            use crate::history::Kind;
+            let kind = match applied.outcome.as_str() {
+                APPLIED => Kind::Applied,
+                UNDONE => Kind::RolledBack,
+                _ => Kind::Failed,
+            };
+            append(
+                &self.directory,
+                Entry {
+                    at: applied.at,
+                    kind,
+                    version: Some(applied.version.clone()),
+                    detail: applied.reason.clone(),
                 },
             );
         }

@@ -6,8 +6,9 @@
 //! atomically, so a reader sees the old or the new list, never a torn one. A missing or malformed
 //! file reads as an empty history: the history is a convenience, never a gate.
 //!
-//! The updater records what it does itself (a release staged, a staged release removed). S4's apply
-//! and undo record `applied`, `rolled_back` and `failed` through [`append`].
+//! The updater records what it does itself: a release staged, a staged release removed, and every
+//! switch outcome (`applied`, `rolled_back` for an undo or a manual roll back, `failed`). All of
+//! them are written where `state.json` changes, in `UpdateLock::write_state` (J1130).
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
