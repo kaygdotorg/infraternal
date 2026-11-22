@@ -64,7 +64,7 @@ let
           unitConfig.ConditionPathExists = "/var/lib/infraternal-proof.env";
           serviceConfig = {
             EnvironmentFile = "/var/lib/infraternal-proof.env";
-            ExecStart = "/var/lib/infraternal-proof/current/infraternal-x86_64-musl $INFRATERNAL_PROOF_ARGS";
+            ExecStart = "/var/lib/infraternal-proof/current/infraternal $INFRATERNAL_PROOF_ARGS";
             Restart = "always";
             RestartSec = "1s";
             LimitMEMLOCK = "infinity";

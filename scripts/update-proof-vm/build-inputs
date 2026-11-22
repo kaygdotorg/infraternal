@@ -13,9 +13,16 @@ It writes, into the (new) output folder:
   newer than it whose trial lists no session (unlisted), two healthy ones newer
   still (later, newest) for the owner's Update now and Roll back (#211 S5), and one
   more (cli) that root applies and rolls back with `infraternal server update`
-  (D400). Each holds
-  VERSION, the image, an unused arm placeholder, SHA256SUMS and its OpenSSH
-  signature, the format the release signer produces (#211 S1);
+  (D400). Each holds the file set `scripts/release/build` publishes (J1134), read
+  from that script so the two cannot drift: VERSION, the server image
+  `infraternal` (the staging build), a real x86_64 add-host payload
+  `infraternal-x86_64-musl` (built once with the release's host feature set, so it
+  has no `server` command), the web build `infraternal-web.tar`, the license
+  notices, and placeholders for the files the x86_64 proof never reads (the arm and
+  session payloads, the proxy manifests); then SHA256SUMS over all of them and its
+  OpenSSH signature, the format the release signer produces (#211 S1). An updater
+  that picked the add-host payload instead of the server image would start a binary
+  that cannot serve, and the proof would fail;
 - `versions`: the twelve versions in that order, for INFRATERNAL_UPDATE_TEST_VERSIONS;
 - `server-tests`: the server crate's test executable with `remote,staging-trust`,
   which holds the proof (`deploy_staging::update_staging`).
@@ -23,8 +30,8 @@ It writes, into the (new) output folder:
 With `PROOF=adopt` it builds the S6 proof's four instead (#211 S6): `opt` (started
 from a fixed /opt path by an operator-written unit), `adopted` (the release
 `infraternal server update adopt` moves it onto), `newer` (applied with `server update
-apply`) and `faulty` (fails its health check), and every release folder also carries a
-signed `infraternal-web.tar` whose page names its build ("proof-web <version>"), so the
+apply`) and `faulty` (fails its health check). Every release folder's
+`infraternal-web.tar` has a page that names its build ("proof-web <version>"), so the
 proof can tell which web build a server serves. It also writes `mode` ("adopt"), which
 the VM runner reads.
 
@@ -55,8 +62,50 @@ ADOPT_ROLES = ("opt", "adopted", "newer", "faulty")
 WEB = "infraternal-web.tar"
 #: The static target the proof VM runs.
 TARGET = "x86_64-unknown-linux-musl"
-#: The image name the updater asks for on x86_64.
-IMAGE = "infraternal-x86_64-musl"
+#: The server image every release carries, which the updater stages (J1134).
+IMAGE = "infraternal"
+#: The x86_64 add-host payload: a real host build, never a server.
+HOST_PAYLOAD = "infraternal-x86_64-musl"
+#: The build folder of the host payload, apart from the server's, as package-release keeps it.
+HOST_TARGET = "bootstrap"
+
+
+def release_file_set():
+    """The names `scripts/release/build` lists in a bundle's SHA256SUMS (without the
+    optional macOS binary), read from that script and `scripts/release/common`, so the
+    proof's releases cannot drift from what the pipeline publishes."""
+    import re
+    build = re.search(r"sha256sum (VERSION .*?) > SHA256SUMS\)",
+                      (REPOSITORY / "scripts/release/build").read_text())
+    licenses = re.search(r"release_license_files=\(([^)]*)\)",
+                         (REPOSITORY / "scripts/release/common").read_text())
+    if build is None or licenses is None:
+        raise ValueError("scripts/release/build or common no longer lists the bundle in the expected form")
+    names, signed_licenses = [], False
+    for token in build.group(1).split():
+        if token.startswith("${darwin_files"):
+            continue  # only bundles built with --darwin carry the macOS binary
+        if token == '"${release_license_files[@]}"':
+            names += licenses.group(1).split()
+            signed_licenses = True
+        elif "$" in token or '"' in token:
+            raise ValueError(f"scripts/release/build lists an unexpected word {token!r}")
+        else:
+            names.append(token)
+    for required in ("VERSION", IMAGE, HOST_PAYLOAD, WEB):
+        if required not in names:
+            raise ValueError(f"the release file set has no {required}")
+    if not signed_licenses:
+        raise ValueError("scripts/release/build no longer signs the license notices")
+    return names
+
+
+def host_cargo_args():
+    """The release's add-host payload cargo arguments, from scripts/release/feature-sets."""
+    listed = subprocess.run(
+        ["bash", "-c", 'source scripts/release/feature-sets && printf "%s\\n" "${release_host_cargo_args[@]}"'],
+        cwd=REPOSITORY, check=True, stdout=subprocess.PIPE, text=True)
+    return listed.stdout.split()
 
 
 def command(arguments, **kwargs):
@@ -78,20 +127,30 @@ def web_archive(path, version):
             archive.addfile(info, io.BytesIO(data))
 
 
-def bundle(destination, binary, key, version, web=False):
-    """Write one signed release folder for `binary` stamped `version` (with a web build
-    when `web`)."""
+def bundle(destination, binary, host, key, version, names):
+    """Write one signed release folder stamped `version` with the bundle file set `names`
+    (see `release_file_set`): `binary` is the server image, `host` the x86_64 add-host
+    payload."""
     destination.mkdir(mode=0o700)
-    shutil.copy2(binary, destination / IMAGE)
-    (destination / IMAGE).chmod(0o700)
-    # The x86-only proof never runs this; the signed list still names one arm file,
-    # as a real release does.
-    (destination / "infraternal-aarch64-musl").write_bytes(b"staging-unused-arm-payload\n")
-    (destination / "VERSION").write_text(version + "\n")
-    names = ["VERSION", IMAGE, "infraternal-aarch64-musl"]
-    if web:
-        web_archive(destination / WEB, version)
-        names.append(WEB)
+    for name in names:
+        path = destination / name
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if name == "VERSION":
+            path.write_text(version + "\n")
+        elif name == IMAGE:
+            shutil.copy2(binary, path)
+            path.chmod(0o700)
+        elif name == HOST_PAYLOAD:
+            shutil.copy2(host, path)
+            path.chmod(0o700)
+        elif name == WEB:
+            web_archive(path, version)
+        elif name.startswith("licenses/"):
+            shutil.copy2(REPOSITORY / name, path)
+        else:
+            # The x86-only proof never reads these; the signed list still names them,
+            # as a real release does.
+            path.write_bytes(f"staging-unused {name}\n".encode())
     names = sorted(names)
     (destination / "SHA256SUMS").write_text("".join(
         hashlib.sha256((destination / name).read_bytes()).hexdigest() + "  " + name + "\n"
@@ -112,6 +171,7 @@ def main():
     adopt = os.environ.get("PROOF") == "adopt"
     roles = ADOPT_ROLES if adopt else ROLES
     target = Path(os.environ.get("CARGO_TARGET_DIR", REPOSITORY / "target"))
+    names = release_file_set()
     env = dict(os.environ, INFRATERNAL_RELEASE_BUILD="1", CARGO_PROFILE_TEST_DEBUG="0")
     # One base time, one second per release, so versions sort oldest first.
     base = time.strftime("%Y%m%dT%H%M", time.gmtime())
@@ -124,6 +184,22 @@ def main():
         public_key = key.with_suffix(".pub").read_text().split()[1].encode()
         command(["scripts/auth-toolchain"], cwd=REPOSITORY, env=env)
         env["PATH"] = str(target / "auth-tools/zig") + ":" + env["PATH"]
+        # One real add-host payload for every release, from its own build folder as
+        # package-release keeps it. It has no `server` command, which is the point.
+        started = time.monotonic()
+        host_target = target / HOST_TARGET
+        command(["scripts/auth-toolchain"], cwd=REPOSITORY, env=dict(env, CARGO_TARGET_DIR=str(host_target)))
+        command(["scripts/static-cargo", "build", "--locked", "--release", *host_cargo_args(),
+                 "--target", TARGET], cwd=REPOSITORY,
+                env=dict(env, CARGO_TARGET_DIR=str(host_target), INFRATERNAL_RELEASE_VERSION=versions[0]))
+        host = host_target / TARGET / "release/infraternal"
+        refused = subprocess.run([str(host), "server", "--help"], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, env={}, timeout=30)
+        if refused.returncode == 0:
+            raise ValueError("the add-host payload has a server command; the proof would not tell them apart")
+        print(f"BUILD role=host-payload bytes={host.stat().st_size} "
+              f"sha256={hashlib.sha256(host.read_bytes()).hexdigest()} server_command=absent "
+              f"seconds={time.monotonic() - started:.0f}", flush=True)
         for role, version in zip(roles, versions):
             started = time.monotonic()
             command(["scripts/static-cargo", "build", "--locked", "--release", "-p", "infraternal",
@@ -135,7 +211,7 @@ def main():
                 raise ValueError(f"{role}: the staging image lost its compiled authority")
             if version.encode() not in stamped:
                 raise ValueError(f"{role}: the image is not stamped {version}")
-            bundle(releases / version, image, key, version, web=adopt)
+            bundle(releases / version, image, host, key, version, names)
             print(f"BUILD role={role} version={version} bytes={len(stamped)} "
                   f"sha256={hashlib.sha256(stamped).hexdigest()} seconds={time.monotonic() - started:.0f}",
                   flush=True)

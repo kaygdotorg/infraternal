@@ -13,7 +13,7 @@
 //! 2. **`adopt`.** Root runs `infraternal server update adopt <release> --dry-run` (it
 //!    must change nothing), then for real, with the `adopted` release's own binary. The
 //!    move must be warm (same PID, CA unlocked, shims kept, the sessions still echo), the
-//!    unit must start `<data>/updates/current/infraternal-x86_64-musl` without
+//!    unit must start `<data>/updates/current/infraternal` without
 //!    `--web-root` and keep every other line, a backup of the old unit must exist, and
 //!    the server must serve the `adopted` release's own web build. A second run changes
 //!    nothing.

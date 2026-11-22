@@ -79,8 +79,9 @@ use crate::release_payload::tests::Bucket;
 use futures_util::FutureExt;
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-/// The image name for this machine.
-const IMAGE: &str = "infraternal-x86_64-musl";
+/// The server image a release carries and the boot pointer starts (J1134: never the
+/// `infraternal-x86_64-musl` add-host payload beside it).
+const IMAGE: &str = infraternal_plugin_release::update::SERVER_IMAGE;
 /// The staging check period and quiet window, in seconds.
 const STEP: u64 = 10;
 /// The VM's server unit (defined by `scripts/update-proof-vm/vm.nix`).
@@ -212,20 +213,24 @@ struct Carry {
 }
 
 /// Every file of every release folder under `releases`, keyed by bucket path.
+///
+/// Release folders have the layout `scripts/release/build` publishes, including the
+/// nested `licenses/libghostty-vt/` notices, so folders are walked to any depth.
 fn release_files(releases: &std::path::Path) -> HashMap<String, Vec<u8>> {
-    let mut files = HashMap::new();
-    for release in std::fs::read_dir(releases).unwrap() {
-        let release = release.unwrap();
-        let version = release.file_name().into_string().unwrap();
-        for file in std::fs::read_dir(release.path()).unwrap() {
+    /// Add every file under `folder` with the bucket path prefix `prefix`.
+    fn walk(folder: &std::path::Path, prefix: &str, files: &mut HashMap<String, Vec<u8>>) {
+        for file in std::fs::read_dir(folder).unwrap() {
             let file = file.unwrap();
-            let name = file.file_name().into_string().unwrap();
-            files.insert(
-                format!("/releases/{version}/{name}"),
-                std::fs::read(file.path()).unwrap(),
-            );
+            let name = format!("{prefix}/{}", file.file_name().into_string().unwrap());
+            if file.file_type().unwrap().is_dir() {
+                walk(&file.path(), &name, files);
+            } else {
+                files.insert(name, std::fs::read(file.path()).unwrap());
+            }
         }
     }
+    let mut files = HashMap::new();
+    walk(releases, "/releases", &mut files);
     files
 }
 
