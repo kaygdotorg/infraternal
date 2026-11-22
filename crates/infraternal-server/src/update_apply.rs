@@ -123,14 +123,21 @@ pub(crate) fn set_session_inventory(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(inventory);
 }
 
-/// The live sessions in the latest complete census, or `None` when there is none yet
-/// (or the infraternal agent link is down).
-fn live_sessions() -> Option<Vec<[u8; 16]>> {
-    let inventory = INVENTORY
+/// The registered census, if the WebSocket state has registered one.
+fn registered_inventory()
+-> Option<tokio::sync::watch::Receiver<crate::embedded::SessionInventoryState>> {
+    INVENTORY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()?;
-    match &*inventory.borrow() {
+        .clone()
+}
+
+/// The live sessions in the latest complete census of `inventory`, or `None` when there
+/// is none yet (or the infraternal agent link is down).
+fn live_sessions(
+    inventory: Option<&tokio::sync::watch::Receiver<crate::embedded::SessionInventoryState>>,
+) -> Option<Vec<[u8; 16]>> {
+    match &*inventory?.borrow() {
         crate::embedded::SessionInventoryState::Available(ids) => Some(ids.to_vec()),
         _ => None,
     }
@@ -155,14 +162,24 @@ fn shim_alive(sessions: Option<&Path>, id: &[u8; 16]) -> bool {
 /// the marker) whose shim is still alive in the shim folder `folder`. A session that
 /// exited during the trial is not required (owner, 2026-11-21). Returns only once they
 /// are all listed; the trial limit bounds the wait.
-async fn sessions_listed(expected: &[String], folder: Option<&Path>) {
+///
+/// The census and the missing-session counter are arguments, not read from the
+/// process-wide statics here, so a test gives itself its own and cannot race another
+/// test in the same binary that registers a census (J1130; the production caller
+/// passes [`registered_inventory`] and [`SESSIONS_WAITING`]).
+async fn sessions_listed(
+    expected: &[String],
+    folder: Option<&Path>,
+    inventory: Option<tokio::sync::watch::Receiver<crate::embedded::SessionInventoryState>>,
+    waiting: &std::sync::atomic::AtomicUsize,
+) {
     let expected: Vec<[u8; 16]> = expected
         .iter()
         .filter_map(|id| uuid::Uuid::parse_str(id).ok())
         .map(uuid::Uuid::into_bytes)
         .collect();
     loop {
-        let listed = live_sessions().unwrap_or_default();
+        let listed = live_sessions(inventory.as_ref()).unwrap_or_default();
         #[cfg(feature = "staging-trust")]
         let listed =
             if staging_fault(infraternal_plugin_api::VERSION) == Some(StagingFault::Unlisted) {
@@ -174,7 +191,7 @@ async fn sessions_listed(expected: &[String], folder: Option<&Path>) {
             .iter()
             .filter(|id| !listed.contains(id) && shim_alive(folder, id))
             .count();
-        SESSIONS_WAITING.store(missing, std::sync::atomic::Ordering::Relaxed);
+        waiting.store(missing, std::sync::atomic::Ordering::Relaxed);
         if missing == 0 {
             return;
         }
@@ -644,7 +661,7 @@ async fn switch_once(
         Retry::Later(reason)
     };
     // The new release must list these again before it commits (owner, 2026-11-21).
-    let Some(sessions) = live_sessions() else {
+    let Some(sessions) = live_sessions(registered_inventory().as_ref()) else {
         return Err(give_up(switch, "the live sessions could not be listed"));
     };
     // From the copy to the exec no terminal input is taken, so nothing the copy lacks
@@ -892,7 +909,13 @@ async fn healthy(
     let folder = infraternal_agent::sessions::state_path(None)
         .ok()
         .map(|state| state.join("sessions"));
-    sessions_listed(&trial.sessions, folder.as_deref()).await;
+    sessions_listed(
+        &trial.sessions,
+        folder.as_deref(),
+        registered_inventory(),
+        &SESSIONS_WAITING,
+    )
+    .await;
     Ok(())
 }
 

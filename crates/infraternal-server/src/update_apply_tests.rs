@@ -234,19 +234,19 @@ async fn the_trial_waits_for_every_live_recorded_session() {
     let (census, inventory) = tokio::sync::watch::channel(SessionInventoryState::Available(
         Vec::<[u8; 16]>::new().into(),
     ));
-    set_session_inventory(inventory);
+    let waiting_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let expected = vec![alive.simple().to_string(), exited.simple().to_string()];
     let waiting = {
         let (expected, folder) = (expected.clone(), folder.clone());
-        tokio::spawn(async move { sessions_listed(&expected, Some(&folder)).await })
+        let (inventory, count) = (inventory, waiting_count.clone());
+        tokio::spawn(async move {
+            sessions_listed(&expected, Some(&folder), Some(inventory), &count).await
+        })
     };
     // sleep: the new release lists nothing yet; give the trial time to (wrongly) pass.
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(!waiting.is_finished(), "a live recorded session is missing");
-    assert_eq!(
-        SESSIONS_WAITING.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
+    assert_eq!(waiting_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     census.send_replace(SessionInventoryState::Available(
         vec![*alive.as_bytes()].into(),
     ));
