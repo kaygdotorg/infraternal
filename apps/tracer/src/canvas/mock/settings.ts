@@ -7,7 +7,7 @@ import { renderDevices } from "../../../../../packages/ui/src/settings-panels";
 import type { SettingValue } from "../../../../../packages/ui/src/setting-value";
 import type { SettingsSource } from "../views/settings-body.on-demand";
 import type { ViewId } from "../model/types";
-import type { GroupData } from "../settings-rows/catalog";
+import { SETTINGS_MAP, type ComponentDef, type GroupData } from "../settings-rows/catalog";
 import { onDemand } from "../../on-demand";
 import { createRowsSource } from "../settings-rows/source";
 import type { MockWorld } from "./world";
@@ -19,6 +19,11 @@ const values = new Map<string, SettingValue>();
  * message and its Try again button (#568). Later reads succeed, as a store that came back does. Test double only.
  */
 const failFirstKeyRead = new URLSearchParams(location.search).get("settingread") === "fail";
+/**
+ * `?settingempty=you.apps` (component.group) gives that window nothing to show: no setting of it has a store and the double
+ * lists nothing for it, so the browser test can check that the window is hidden (#568). Test double only.
+ */
+const emptied = new URLSearchParams(location.search).get("settingempty");
 /** Whether the one refused read has happened, so the retry reads normally. */
 let keyReadRefused = false;
 /** The wording and rules of each setting load on demand, as they do in the product (D188). */
@@ -43,17 +48,18 @@ const EXAMPLE: Readonly<Record<string, GroupData>> = {
  * the server cannot list yet, and the `settingread=fail` switch on Keys Last (#568). Its rows and windows come from the same
  * table the product uses, so the double shows the same layout.
  */
-export function createMockSettings(world: MockWorld): SettingsSource {
+export function createMockSettings(world: MockWorld): SettingsSource & { map(): ComponentDef[] } {
   const rows = createRowsSource({
       admin: () => world.role === "operator",
-      backing: (id) => ({
+      sections: ["devices"],
+      backing: (id) => emptied && SETTINGS_MAP.some((c) => c.groups.some((g) => `${c.id}.${g.id}` === emptied && g.settings?.includes(id))) ? undefined : ({
         read: async () => {
           if (id === "app-key" && failFirstKeyRead && !keyReadRefused) { keyReadRefused = true; throw new Error("test double: the setting could not be read"); }
           const m = await defs(), def = m.SETTING_DEFS[id]; return def ? values.get(id) ?? m.defaultOf(def) : undefined;
         },
         write: async (v) => { const m = await defs(), def = m.SETTING_DEFS[id]; if (def && v === m.defaultOf(def)) values.delete(id); else values.set(id, v); },
       }),
-      data: (comp, group) => EXAMPLE[`${comp}.${group}`],
+      data: (comp, group) => `${comp}.${group}` === emptied ? undefined : EXAMPLE[`${comp}.${group}`],
       value: (s, standard) => values.get(s.id) ?? standard,
   });
   return {

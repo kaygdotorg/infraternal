@@ -163,3 +163,30 @@ test("the table and the definitions agree: every id in a window is defined, and 
 test("the Themes window is the one the theme editor fills, and no other window is", () => {
   expect(spots(SETTINGS_MAP).filter((s) => s.group.themes).map((s) => `${s.comp.id}.${s.group.id}`)).toEqual(["appearance.themes"]);
 });
+
+test("a window with nothing to show is hidden, and shows again once its source has something (#568)", () => {
+  const showing = (over: Partial<import("./model").Showing> = {}): import("./model").Showing => ({ backed: () => false, hasData: () => false, devices: false, ...over });
+  const ids = (s: import("./model").Showing, admin = true) => spots(visibleMap(admin, s)).map((x) => `${x.comp.id}.${x.group.id}`);
+  // A source that stores and lists nothing still shows the client-side windows (themes, panels), never an empty one.
+  const bare = ids(showing());
+  expect(bare).toContain("appearance.themes");
+  expect(bare).toContain("terminal.hosts");
+  expect(bare).not.toContain("mesh.keys");
+  expect(bare).not.toContain("machines.updates");
+  expect(bare).not.toContain("you.devices");
+  expect(visibleMap(true, showing()).map((c) => c.id)).not.toContain("mesh");
+  expect(visibleMap(true, showing()).map((c) => c.id)).not.toContain("sharing");
+  // The server reports a store for one setting: its window appears, in its place in the table, and the row with it.
+  const later = ids(showing({ backed: (id) => id === "connection-keys" }));
+  expect(later).toContain("mesh.keys");
+  expect(later).not.toContain("mesh.names");
+  // Data alone is enough, and so is an offered panel.
+  expect(ids(showing({ hasData: (c, g) => c === "mesh" && g === "access" }))).toContain("mesh.access");
+  expect(ids(showing({ devices: true }))).toContain("you.devices");
+  // The view built from it has a window for exactly the windows shown, none for the hidden.
+  const m = metricsFor(1440, 900, false);
+  const view = buildSettingsMapView(visibleMap(true, showing()), m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
+  expect(view.cols.flatMap((c) => c.wins.map((w) => w.id)).sort()).toEqual(bare.map((x) => `s-${x.replace(".", "-")}`).sort());
+  // Hidden windows cannot be reached by name either (⌘K, deep links).
+  return locate(visibleMap(true, showing()), "mesh.keys").then((r) => expect(r).toBeUndefined());
+});

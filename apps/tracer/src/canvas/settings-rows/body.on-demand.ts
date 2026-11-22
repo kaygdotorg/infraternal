@@ -6,8 +6,8 @@
  * the breadcrumb names the component, so the body repeats neither (TASTE: never repeat the heading in the rows below it). The
  * "?" that opens the group's docs is the first button of the window's action group (`docs/docs-adapter.ts`), not part of the body.
  *
- * A setting is drawn only when its source has a store for it (`SettingsSource.backing`); a window with nothing to show names
- * the settings that will appear there (`emptyGroupNote`) and keeps its place, so nothing here is a control that saves nowhere.
+ * A setting is drawn only when its source has a store for it (`SettingsSource.backing`), so nothing here is a control that
+ * saves nowhere. A window with nothing to show is not drawn at all: the model leaves it out (`visibleMap`, #568).
  */
 import { ICONS } from "../../../../../packages/ui/src/icons";
 import { createSettingRow, type SettingRow } from "../../../../../packages/ui/src/setting-row";
@@ -18,7 +18,6 @@ import type { Ctx } from "../context";
 import { el } from "../dom";
 import type { GroupDef, KeyDef, PanelId } from "./catalog";
 import { SETTING_DEFS, type SettingDef } from "./definitions.on-demand";
-import { emptyGroupNote } from "./empty-note";
 import type { Spot } from "./model";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
@@ -78,7 +77,6 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
   const mine = new Map<string, SettingRow>();
   live.set(windowId, mine);
   const source = cx.adapters.settings;
-  let shown = 0;
   const note = (text: string): HTMLElement => { const n = el("p", "cl-settings-later"); n.textContent = text; pane.append(n); return n; };
 
   // Settings with a store get a row; the rest get nothing (no control that saves nowhere).
@@ -122,18 +120,16 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
     };
     for (const def of backed) mount(def);
     pane.append(list);
-    shown++;
   }
   const data = source.data?.(comp.id, group.id);
-  if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); shown++; }
-  if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); shown++; }
+  if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); }
+  if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); }
 
   // The Appearance Themes window: the strip of theme cards, then the controls that edit the selected one. Loaded when the window draws (D188).
   if (group.themes) {
     let gone = false, stop: (() => void) | undefined;
     void onDemand(() => import("../themes/editor.on-demand")).then((mod) => { if (!gone) stop = mod.renderThemeEditor(pane); });
     disposers.push(() => { gone = true; stop?.(); });
-    shown++;
   }
 
   // Existing panels, unchanged. A panel the source does not offer (devices, in the product today) is not shown.
@@ -141,7 +137,6 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
   for (const id of panels) {
     const holder = el("div", "cl-settings-nest");
     pane.append(holder);
-    shown++;
     let gone = false, stop: (() => void) | undefined;
     void onDemand(() => import("../views/settings-body.on-demand")).then((mod) => {
       if (gone) return;
@@ -153,7 +148,5 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
     });
     disposers.push(() => { gone = true; stop?.(); holder.remove(); });
   }
-  // Nothing to draw: say which settings will appear here and that the server has to store them first (#568).
-  if (!shown) note(emptyGroupNote((group.settings ?? []).map((id) => SETTING_DEFS[id]?.title).filter((t): t is string => t !== undefined)));
   return () => { if (live.get(windowId) === mine) live.delete(windowId); for (const d of disposers) d(); };
 }

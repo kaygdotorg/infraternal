@@ -53,7 +53,7 @@ import { createDataMode, mountDataToggle } from "./data-mode";
 import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account/mount.on-demand";
 import { createStartupDemo } from "./startup-demo";
-import { buildSettingsMapView, visibleMap } from "../settings-rows/model";
+import { buildSettingsMapView } from "../settings-rows/model";
 import { createRowsDocs } from "../settings-rows/docs-adapter";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
@@ -68,6 +68,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   const stage = core.stage;
   const world = await createMockWorld(options.role ?? "operator", Boolean(options.role));
   const inventory = await createMockInventory(world);
+  const mockSettings = createMockSettings(world);
   const sessions = createMockSessions(core, world, inventory);
   const mesh = createMockMesh(world);
   const events = new AbortController();
@@ -129,7 +130,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     adapters: {
       teach: (hint) => teachOnce("mock", hint),
       ...(startupDemo ? { startupHints: startupDemo.hints } : {}),
-      sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: createMockSettings(world),
+      sessions, inventory, details: () => onDemand(() => import("./details.on-demand")).then((m) => m.createMockDetails(world, inventory)), mesh, store: new MemoryCanvasStore(), sharing: createMockSharing(world), settings: mockSettings,
       docs: createRowsDocs(() => docs),
       containers: { host: "build-01", rows: () => (world.role === "operator" ? CONTAINERS : []) },
       // `?privilege=<scenario>`: the machine details offer the privileged-access consent (the product has no service for it yet).
@@ -165,7 +166,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       const built = views.map((v) => {
         if (v.id === "console" && noAccess) return { ...v, cols: v.cols.map((col) => ({ ...col, wins: col.wins.map((w) => (w.kind === "terminal" && w.host === noAccess ? { ...w, noAccess: true, lines: [] } : w)) })) };
         if (v.id !== "settings") return v;
-        return buildSettingsMapView(visibleMap(world.role === "operator"), m, v);
+        return buildSettingsMapView(mockSettings.map(), m, v);
       });
       return built;
     });
