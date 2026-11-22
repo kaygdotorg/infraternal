@@ -1792,6 +1792,12 @@ fn render_exec(words: &[String], path: &Path) -> Result<String, MoveError> {
 
 /// Format a UTC calendar timestamp for the dated backup.
 fn utc_stamp(seconds: u64) -> String {
+    let (year, month, day, hour, minute, second) = utc_parts(seconds);
+    format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
+}
+
+/// Split Unix `seconds` into a UTC date and time: year, month, day, hour, minute, second.
+pub(crate) fn utc_parts(seconds: u64) -> (i64, i64, i64, u64, u64, u64) {
     let days = i64::try_from(seconds / 86_400).unwrap_or(0);
     let rest = seconds % 86_400;
     // Howard Hinnant's days-to-civil algorithm, valid for every date after 1970.
@@ -1809,12 +1815,7 @@ fn utc_stamp(seconds: u64) -> String {
         month_index - 9
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}{month:02}{day:02}-{:02}{:02}{:02}",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
+    (year, month, day, rest / 3600, rest % 3600 / 60, rest % 60)
 }
 
 /// Single-quote a path for a shell command line.
