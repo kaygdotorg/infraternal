@@ -813,6 +813,11 @@ fn rootless_tun_error(error: io::Error) -> io::Error {
     }
 }
 
+/// Turn one frame read from the TUN into the IP packets `GotaTun` encrypts: a plain packet as
+/// it is, a packet whose checksum the kernel left partial with that checksum completed, and a
+/// TSO frame cut into its segments. Every packet lands in a buffer `GotaTun` can encrypt in place.
+/// # Errors
+/// `InvalidData` for any frame this adapter refuses; the caller drops and counts it.
 fn decode_frame(
     frame: &[u8],
     vnet_header: bool,
@@ -1296,6 +1301,7 @@ mod tests {
         time::Duration,
     };
 
+    /// A zero-filled IPv4 UDP packet of `length` bytes, with only its lengths and TTL set.
     fn ipv4_packet(length: usize) -> Packet<Ip> {
         let mut bytes = vec![0; length];
         bytes[0] = 0x45;
@@ -2037,6 +2043,7 @@ mod tests {
     struct Lcg(u64);
 
     impl Lcg {
+        /// The next 31-bit value of the sequence.
         fn next(&mut self) -> u64 {
             self.0 = self
                 .0
@@ -2045,11 +2052,14 @@ mod tests {
             self.0 >> 33
         }
 
+        /// A value in `0..bound`.
         fn below(&mut self, bound: usize) -> usize {
             usize::try_from(self.next()).unwrap() % bound
         }
     }
 
+    /// The wide checksum equals the word-at-a-time one for every length, offset and fill tried
+    /// (J1129).
     #[test]
     fn wide_checksum_matches_the_word_at_a_time_sum() {
         let mut random = Lcg(7);
