@@ -40,7 +40,8 @@ fn confirmed(channel: Option<&str>, yes: bool) -> bool {
 /// Refuse implicit server creation and use the same service as the socket API.
 ///
 /// `infraternal server update …` commands are handed to [`crate::server_update_cli::run`],
-/// which talks to the running server instead of its database.
+/// which talks to the running server instead of its database, and `server update adopt`
+/// to `crate::server_adopt::run`, which moves this machine's server onto the boot pointer.
 ///
 /// Runs `infraternal server release latest`, `infraternal server channel` (read the
 /// channel) or `infraternal server channel <stable|edge> [--yes]` (switch it), as selected
@@ -58,6 +59,18 @@ pub(crate) fn run(
     matches: &clap::ArgMatches,
     json_output: bool,
 ) -> ExitCode {
+    if definition.command == ["server", "update", "adopt"] {
+        #[cfg(all(feature = "remote", target_os = "linux"))]
+        return crate::server_adopt::run(matches, json_output);
+        #[cfg(not(all(feature = "remote", target_os = "linux")))]
+        return refusal(
+            "server update adopt",
+            json_output,
+            "This build cannot move a server onto the boot pointer.",
+            "Use the Linux server build.",
+            Exit::Usage,
+        );
+    }
     if definition
         .hosted
         .is_some_and(|source| source.id.starts_with("release.update."))

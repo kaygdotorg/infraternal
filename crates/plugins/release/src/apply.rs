@@ -761,7 +761,7 @@ pub fn cancel_manual_rollback(data: &Path, current: &str) -> Result<(), &'static
 }
 
 /// Point `current` at `releases/<version>` (atomic rename of a new symlink, then a flush).
-fn point_current(lock: &Locked, version: &str) -> Result<(), &'static str> {
+pub(crate) fn point_current(lock: &Locked, version: &str) -> Result<(), &'static str> {
     let saved = "the boot pointer could not be saved";
     let updates = lock.directory();
     let temporary = updates.join("current.tmp");

@@ -487,7 +487,7 @@ pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
 }
 
 /// A `systemctl` command with the child hygiene every install command gets and no stdin.
-fn systemctl_command(program: &Path) -> Command {
+pub(super) fn systemctl_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     infraternal_shim::prepare_child(&mut command);
     command.stdin(std::process::Stdio::null());

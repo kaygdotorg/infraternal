@@ -15,3 +15,15 @@ mod socket;
 pub mod update;
 #[cfg(feature = "server")]
 pub use socket::ReleasePlugin;
+/// Installing a signed release folder by hand, to move an existing server onto the boot pointer (#211 S6).
+#[cfg(feature = "server")]
+pub mod adopt;
+/// The applier trait the owner controls call for apply and rollback; the server implements it with S4 (#211 S5).
+#[cfg(feature = "server")]
+pub mod applier;
+/// The bounded update history shown in the Updates row (#211 S5).
+#[cfg(feature = "server")]
+pub mod history;
+/// The web app build a release carries, and the rule that a release image serves it (#211 S6).
+#[cfg(feature = "server")]
+pub mod web;
