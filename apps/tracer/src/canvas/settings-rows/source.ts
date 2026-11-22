@@ -14,6 +14,7 @@ import type { OutlineEntry } from "../views/settings-outline";
 import type { ComponentDef } from "./catalog";
 import { rowsOf, spotBySection, visibleMap } from "./model";
 
+/** What a viewer's Settings source supplies: who is an administrator, what it stores, and what it lists. Absent parts mean the windows that need them are hidden (#568). */
 export interface RowsOptions {
   /** Whether the viewer sees the administrator rows (Machines, Mesh, Sharing). */
   admin(): boolean;
@@ -31,6 +32,7 @@ export interface RowsOptions {
  */
 export type RowsSource = Pick<SettingsSource, "outline" | "render" | "backing" | "data"> & { map(): ComponentDef[] };
 
+/** Builds the Settings source (outline, render, `map`) from what `options` back and fill in; the product and the test double both use it. */
 export function createRowsSource(options: RowsOptions): RowsSource {
   const backed = (id: string): boolean => options.backing?.(id) !== undefined;
   const map = () => visibleMap(options.admin(), {
