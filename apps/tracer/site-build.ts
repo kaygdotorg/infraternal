@@ -86,18 +86,22 @@ ${command("curl -fsSL https://builds.infraternal.com/install.sh | sh")}
 `;
 }
 
-/** The download rows of `/install`: one binary per architecture, with its checksum and signature next to it (D223, D184). */
+/**
+ * The download row of `/install`: the server image `infraternal`, with its checksum and signature next to it (D223, D184).
+ * Only the server image is offered. The `infraternal-<arch>-musl` files in a release are the add-host payloads: they have no
+ * `server` command, and the server installs them on each machine you add, so nobody downloads or runs them by hand.
+ * The server image is built for x86-64 Linux only (docs/operations/release.md).
+ */
 function downloads(): string {
   const base = "https://builds.infraternal.com/releases/latest";
-  const row = (arch: string, label: string): string => `<li><span><strong>${label}</strong><br><span>infraternal-${arch}-musl</span></span><span><a href="${base}/infraternal-${arch}-musl">Download</a> · <a href="${base}/SHA256SUMS">Checksums</a> · <a href="${base}/SHA256SUMS.sig">Signature</a></span></li>`;
-  return `<ul class="downloads">${row("x86_64", "Linux, x86-64")}${row("aarch64", "Linux, arm64")}</ul>`;
+  return `<ul class="downloads"><li><span><strong>Server, Linux x86-64</strong><br><span>infraternal</span></span><span><a href="${base}/infraternal">Download</a> · <a href="${base}/SHA256SUMS">Checksums</a> · <a href="${base}/SHA256SUMS.sig">Signature</a></span></li></ul>`;
 }
 
 /** The install page. The links are placeholders for the first published release; the note says so on the page. */
 function install(): string {
   return `<div class="plain">
 <h1>Install Infraternal</h1>
-<p class="lede">One static program per architecture. It is the server, and the same program is the infraternal agent that runs on each machine you add.</p>
+<p class="lede">One static program is the server. It runs on a Linux x86-64 machine. When you add a machine, the server installs the infraternal agent there for you, so you never download that part.</p>
 <div class="note"><p><strong>Placeholder links.</strong> No release is published yet. These addresses are where the first one will be (D223).</p></div>
 <h2>1. Download</h2>
 ${downloads()}
@@ -105,7 +109,7 @@ ${downloads()}
 ${command("sha256sum --check --ignore-missing SHA256SUMS")}
 <h2>2. Run the server</h2>
 <p>Set it up as a service on the machine that will be your server. <code>--dry-run</code> prints the plan first. The server then prints a one-time setup code you use to create the first account.</p>
-${command("chmod +x infraternal-x86_64-musl\n./infraternal-x86_64-musl server init --dry-run")}
+${command("chmod +x infraternal\n./infraternal server init --dry-run")}
 <h2>3. Open the app</h2>
 <p>There is nothing to install on your devices: open your server's address in a browser. On an iPhone, choose Share, then Add to Home Screen.</p>
 <p>Then add your first machine. <a href="/docs/user/start/">Get started</a> · <a href="/docs/admin/">Admin guide</a></p>
