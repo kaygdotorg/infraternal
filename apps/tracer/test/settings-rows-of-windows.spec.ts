@@ -1439,3 +1439,25 @@ for (const [label, size, key, value] of [["1440x900", SIZES.desktop, "tracer.win
     await context.close();
   });
 }
+
+/** The key icon sits on the name line's centre, not the middle of the four-line block (#577); the text keeps the row's top. */
+for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] as const) {
+  test(`${tag}: a key's icon is centred on its name line`, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const context = await browser.newContext({ ...size, baseURL: baseURL() });
+    const page = await context.newPage();
+    await open(page, "&at=you.apps");
+    const keys = page.locator('[data-window-id="s-you-apps"] .cl-keys .ui-sp-device');
+    await expect(keys).toHaveCount(3);
+    await shot(page, `keys-${tag}-${process.env.SETTINGS_THEME ?? "mocha"}`);
+    for (const row of await keys.all()) {
+      const m = await row.evaluate((li) => {
+        const mid = (s: string): number => { const r = li.querySelector(s)!.getBoundingClientRect(); return (r.top + r.bottom) / 2; };
+        return { icon: mid(".ui-sp-kind svg"), name: mid(".ui-sp-name"), top: li.querySelector(".ui-sp-names")!.getBoundingClientRect().top - li.getBoundingClientRect().top };
+      });
+      expect(Math.abs(m.icon - m.name), `key icon centre ${m.icon.toFixed(2)} vs name centre ${m.name.toFixed(2)}`).toBeLessThanOrEqual(1);
+      expect(m.top, "the text block starts at the row's top").toBeLessThanOrEqual(0.5);
+    }
+    await context.close();
+  });
+}
