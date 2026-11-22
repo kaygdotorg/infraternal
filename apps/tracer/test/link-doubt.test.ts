@@ -6,6 +6,7 @@
 import { expect, test } from "bun:test";
 import { MuxConnection, type StreamHandler } from "../src/connection";
 import { TerminalClient } from "../src/terminal";
+import { KeyAckRtt } from "../src/key-ack-rtt";
 import { decodeMuxedFrame, type WireFrame } from "../../../packages/protocol/src/codec";
 
 const SESSION = "00000000-0000-0000-0000-000000000000";
@@ -41,7 +42,7 @@ function confirmedClient(status = "") {
     inputScratch: new Uint8Array(16 * 1024), nextInSeq: 0n, ackedInSeq: 0n,
     streamId: 1, lastOutSeq: 0n, receivedOutSeq: 0n, sessionId: new Uint8Array(16),
     config: { hooks: {}, status: { textContent: status, hidden: status === "" } },
-    conn: { streamAttached: (ready: boolean) => readiness.push(ready), retryForInput: () => {} },
+    conn: { streamAttached: (ready: boolean) => readiness.push(ready), retryForInput: () => {} }, keyAck: new KeyAckRtt(),
     sampleRoundTrip: () => {}, startPings: () => {},
     protocolFailure: (message: string) => failures.push(message),
     sendFrame: (_stream: number, frame: WireFrame) => {
