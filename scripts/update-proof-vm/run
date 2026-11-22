@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Run the S4 auto-update proof in a throwaway NixOS microVM (#211 S4).
+# Run the S4 auto-update proof, or the S6 boot-pointer proof, in a throwaway NixOS microVM (#211 S4, S6).
 #
 #   scripts/update-proof-vm/run <inputs folder> <evidence folder>
 #
 # <inputs folder> is what scripts/update-proof-vm/build-inputs wrote (releases/,
-# versions, server-tests). The script builds the VM from vm.nix, boots it under
+# versions, server-tests, and `mode` for the S6 proof). The script builds the VM from vm.nix, boots it under
 # KVM (4 vCPUs, 4 GiB, no network device), waits until the in-VM runner reports
 # DONE (the proof includes a hard reset of the VM, so it boots twice), copies the
 # logs into <evidence folder> and prints the S4 matrix.
@@ -50,6 +50,12 @@ share=$scratch/share
 mkdir -m 700 "$share" "$share/out"
 cp -a "$inputs/releases" "$share/releases"
 cp "$inputs/versions" "$inputs/server-tests" "$share/"
+# PROOF=adopt inputs (#211 S6) carry a mode file: one boot, the S6 proof only.
+mode=s4
+if [[ -e "$inputs/mode" ]]; then
+    cp "$inputs/mode" "$share/mode"
+    mode=$(cat "$inputs/mode")
+fi
 cp "$here/in-vm.sh" "$share/in-vm.sh"
 mkdir -m 700 "$scratch/tmp"
 
@@ -77,6 +83,10 @@ done
 for _ in $(seq 1 60); do kill -0 "$vm_pid" 2>/dev/null || break; sleep 1; done
 cp -a "$share/out/." "$evidence/" 2>/dev/null || true
 printf 'UPDATE_VM finished seconds=%s\n' "$(( $(date +%s) - started ))"
-grep -hE '^(UPDATE|METRIC) |test result|failure_' "$evidence"/phase1.log "$evidence"/phase2.log 2>/dev/null || true
+grep -hE '^(UPDATE|METRIC) |test result|failure_' "$evidence"/phase1.log "$evidence"/phase2.log "$evidence"/adopt.log 2>/dev/null || true
 cat "$evidence/DONE" 2>/dev/null || { printf 'PROOF_DONE missing\n'; exit 1; }
-grep -q '^PROOF_DONE rc=0 phase=2$' "$evidence/DONE"
+if [[ "$mode" == adopt ]]; then
+    grep -q '^PROOF_DONE rc=0 phase=adopt$' "$evidence/DONE"
+else
+    grep -q '^PROOF_DONE rc=0 phase=2$' "$evidence/DONE"
+fi

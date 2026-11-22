@@ -14,6 +14,8 @@ files=(VERSION infraternal infraternal-x86_64-musl infraternal-aarch64-musl infr
 # The macOS binary is optional: only a bundle built with --darwin has it (#483).
 # When present it is uploaded like every payload, so the signer lists it in SHA256SUMS.
 [[ ! -e "$bundle/infraternal-aarch64-darwin" ]] || files+=(infraternal-aarch64-darwin)
+# The web build (#211 S6): every new bundle has it; a bundle built before it existed does not.
+[[ ! -e "$bundle/infraternal-web.tar" ]] || files+=(infraternal-web.tar)
 component_archives=(components/$1/proxy/darwin/amd64/traefik_v3.7.17_darwin_amd64.tar.gz components/$1/proxy/darwin/arm64/traefik_v3.7.17_darwin_arm64.tar.gz components/$1/proxy/linux/amd64/traefik_v3.7.17_linux_amd64.tar.gz components/$1/proxy/linux/arm64/traefik_v3.7.17_linux_arm64.tar.gz)
 for name in "${files[@]}" "${component_archives[@]}"; do [[ -f "$bundle/$name" ]] || { printf 'build the release bundle first\n' >&2; exit 1; }; done
 printf '%s\n' "$1" | cmp - "$bundle/VERSION" || { printf 'the built bundle belongs to another version\n' >&2; exit 1; }

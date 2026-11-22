@@ -47,7 +47,8 @@
 //! updates/
 //!   state.json         UpdateState, 0600, replaced atomically
 //!   staged/            at most one verified release: VERSION, SHA256SUMS,
-//!                      SHA256SUMS.sig and infraternal-<arch>-musl
+//!                      SHA256SUMS.sig, infraternal-<arch>-musl and, when the
+//!                      signed list names it, infraternal-web.tar (#211 S6)
 //!   download-<uuid>/   one check in progress
 //!   retired-<uuid>/    the previous staged release while it is being replaced
 //! ```
@@ -380,7 +381,8 @@ pub struct Updater {
     artifact: String,
     engine: Arc<dyn ReleaseEngine>,
     settings: Settings,
-    /// Free space required before the image download: the image bound plus the reserve.
+    /// Free space required before the image download: the image and web build bounds
+    /// plus the reserve.
     /// Tests raise it to prove the disk-full refusal.
     required_space: u64,
     /// The largest image accepted. Tests lower it to cut a download off midway.
@@ -443,7 +445,7 @@ impl Updater {
             artifact,
             engine,
             settings,
-            required_space: MAX_IMAGE + RESERVE,
+            required_space: MAX_IMAGE + crate::web::MAX_ARCHIVE + RESERVE,
             max_image: MAX_IMAGE,
             period: PERIOD,
         }
@@ -634,6 +636,18 @@ impl Updater {
             )
             .await
             .map_err(|error| error.reason())?;
+        // The web build the release carries (#211 S6). A release whose signed list names
+        // one must have it; older releases without one still stage.
+        if crate::web::listed(&signed_list(&download.path)?) {
+            self.engine
+                .download(
+                    &format!("{}/releases/{version}/{}", self.origin, crate::web::ARCHIVE),
+                    &download.path.join(crate::web::ARCHIVE),
+                    crate::web::MAX_ARCHIVE,
+                )
+                .await
+                .map_err(|error| error.reason())?;
+        }
         // Hashing a ~30 MB image takes tens of milliseconds; keep it off the async
         // workers that serve terminals. The files stay open in the blocking task, so a
         // cancelled check that deletes the folder cannot change what it verifies.
@@ -1022,10 +1036,31 @@ fn verify_staged_image(
     };
     let sums = read("SHA256SUMS", 65_536)?;
     let signature = read("SHA256SUMS.sig", 1024)?;
-    let version = open_private(&directory.join("VERSION"))?;
+    let signed = open_private(&directory.join("VERSION"))?;
     let image = open_private(&directory.join(artifact))?;
-    let version = engine.verify_image(&version, &image, artifact, &sums, &signature)?;
+    let version = engine.verify_image(&signed, &image, artifact, &sums, &signature)?;
+    // A release that lists a web build is verified with it (#211 S6): a staged folder
+    // whose archive is missing or changed fails as a whole.
+    if crate::web::listed(&sums) {
+        let archive = open_private(&directory.join(crate::web::ARCHIVE))?;
+        engine.verify_image(&signed, &archive, crate::web::ARCHIVE, &sums, &signature)?;
+    }
     Ok((version, image))
+}
+
+/// The downloaded `SHA256SUMS` in `directory` (bounded, private), before it is verified:
+/// only used to see whether the release lists a web build, which verification then checks.
+fn signed_list(directory: &Path) -> Result<Vec<u8>, &'static str> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    open_private(&directory.join("SHA256SUMS"))?
+        .take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "the downloaded release could not be read")?;
+    if bytes.len() > 65_536 {
+        return Err("the downloaded release is oversized");
+    }
+    Ok(bytes)
 }
 
 /// Whether `announced` is a newer release than `staged` on the same channel, so the

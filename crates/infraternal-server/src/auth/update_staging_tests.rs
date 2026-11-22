@@ -1789,3 +1789,8 @@ async fn cli_root(server: &mut Server, bucket: &Bucket, root: &Path) {
         versions.cli
     );
 }
+
+/// The S6 proof: an operator-installed server moves onto the boot pointer, and cold starts
+/// follow its updates (#211 S6). It reuses this module's helpers.
+#[path = "update_adopt_tests.rs"]
+mod adopt;

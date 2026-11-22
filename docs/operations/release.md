@@ -5,7 +5,7 @@ Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
 use `edge-YYYYMMDDTHHMMSSZ`, stamped from UTC at build time [226]. The public bucket
 contains `releases/<version>/infraternal-{x86_64,aarch64}-musl`, the initial-shell
 `infraternal-{x86_64,aarch64}-session-musl` images, the server
-`infraternal` copy, `VERSION`, `SHA256SUMS`, `SHA256SUMS.sig`, `releases/index.json`, and `releases/channels/<channel>.json`.
+`infraternal` copy, the web app `infraternal-web.tar` (#211 S6), `VERSION`, `SHA256SUMS`, `SHA256SUMS.sig`, `releases/index.json`, and `releases/channels/<channel>.json`.
 The release-signer Worker hashes R2 objects itself, signs the manifest and adds
 the index entry and channel pointer. The pipeline never holds the signing private key [224]. The signed `VERSION`
 file contains the build version followed by a newline. The channel comes from
@@ -24,7 +24,10 @@ scripts/release/build --channel edge
 
 This reuses `scripts/package-release`, `.cargo/musl-{cc,ar}.sh` and
 `scripts/auth-toolchain` (checksum-pinned Zig 0.15.2 [213]). It produces the
-complete immutable bundle in `$CARGO_TARGET_DIR/releases/<version>`. New
+complete immutable bundle in `$CARGO_TARGET_DIR/releases/<version>`. It also
+builds the web app (`scripts/release/web-archive`, which needs `bun`) and packs it
+as `infraternal-web.tar`: the browser app the release's images serve (see
+"Starting the boot pointer" below). New
 publication requires both host images and both session images before network
 work begins. Every image is uploaded and included in the signer-generated
 checksums. Public verification still accepts older signed releases without
@@ -231,13 +234,14 @@ recorded, not logged as warnings.
 
 A check reads the channel pointer and the release's signed metadata. When the
 release is strictly newer than the running version and on the same channel,
-the server downloads `infraternal-<arch>-musl`, verifies it with the same
+the server downloads `infraternal-<arch>-musl`, and `infraternal-web.tar` when the
+signed list names it, verifies them with the same
 verifier as `restart --binary` (signed `SHA256SUMS`, `SHA256SUMS.sig` and
-`VERSION`) and keeps it in `<data>/updates/staged/`. The same version does
+`VERSION`) and keeps them in `<data>/updates/staged/`. The same version does
 nothing. An older version or another channel's release is refused; only an
 explicit request (a D295 rollback or a channel switch, coming in S4/S5) may
-stage one, and never without the signature. Staging needs 192 MiB free
-(the 128 MiB image bound plus a 64 MiB reserve) and keeps only one release.
+stage one, and never without the signature. Staging needs 256 MiB free
+(the 128 MiB image bound, the 64 MiB web build bound and a 64 MiB reserve) and keeps only one release.
 Interrupted downloads are deleted and start over at the next check. Nothing is
 applied: switching to a staged release is S4.
 
@@ -295,9 +299,10 @@ Before the switch, the server:
    locked until the exec;
 2. moves it to `<data>/updates/releases/<version>/` (a rename, so the file that
    was verified is the file that runs; the switch re-checks its signature on a
-   sealed copy and never reopens it by path);
-3. copies its own image to `updates/previous/` and writes one database copy
-   beside it (`VACUUM INTO`, D295);
+   sealed copy and never reopens it by path), with its web build unpacked into
+   `web/` beside the image;
+3. copies its own image to `updates/previous/`, with its own release's `web/`
+   (hard links), and writes one database copy beside it (`VACUUM INTO`, D295);
 4. writes `updates/pending.json`, naming both releases by the SHA-256 of their
    images.
 
@@ -330,9 +335,8 @@ Data written during the trial is lost, as D295 accepts.
 `not-applied`, with a reason) and the paused version as `paused`.
 
 **For services to follow updates across cold starts,** start the server from
-`<data>/updates/current/infraternal-<arch>-musl` (S6 points the production unit
-there). A unit that starts a fixed path runs the updated release only until its
-next cold start.
+`<data>/updates/current/infraternal-<arch>-musl` (S6, below). A unit that starts a
+fixed path runs the updated release only until its next cold start.
 
 The undo is recorded with its reason: `the new release failed its health check`,
 `… did not pass its health check in time`, `… could not start serving`, `… stopped
@@ -403,6 +407,127 @@ in the quiet window. `settings --automatic off` (or `{"automatic": false}` in
 restores the default. The choice is `automatic` in `state.json` and in the status, and it
 survives the D295 database restore of an undone update. Production is set to off, so it moves
 only when the owner or the orchestrator says so.
+
+## Starting the boot pointer, and moving an existing install onto it (#211 S6)
+
+**What starts.** A server that follows its updates is started from
+`<data>/updates/current/infraternal-<arch>-musl`. `current` is the boot pointer: it
+names `releases/<version>/`, and only a release that passed its health check moves it
+(D295). So a cold start (a crash, `systemctl restart`, a reboot) starts the newest
+healthy release, and after an undone update it starts the previous one.
+
+**Which web build is served.** A release carries its web app as `infraternal-web.tar`,
+which is unpacked into `releases/<version>/web/`. A server whose image runs from
+`<data>/updates/releases/<version>/` (directly or through `current`; resolved once at
+start) and whose folder has `web/` serves that folder, and ignores an inherited
+`--web-root` (the start log says `release_web_root` and names the ignored flag). The
+flag is inherited because a warm switch keeps the process's arguments, so after an
+update it would name the build that ran before, whose script chunks the new server
+does not have. `updates/previous/` keeps the running release's `web/` too, so a manual
+roll back serves its own. Anything else (a fixed install path, a release without a web
+build) serves `--web-root` as before.
+
+**`server init --system`** writes `ExecStart=<data>/updates/current/<image> server …`
+once the data folder has a boot pointer, keeping every other flag, and leaves out
+`--web-root` when that release has its own web build. A fresh install has no pointer
+yet and starts the installed binary, as before.
+
+**`infraternal server update adopt <release folder>`** moves an existing server, once,
+from a fixed path onto the boot pointer. It runs as root on the server machine. It
+first checks everything and refuses with the reason if anything does not match: the
+unit systemd loaded (`FragmentPath`) is a plain file with one `ExecStart` that runs an
+infraternal server for this `--data`, no drop-in overrides `ExecStart`, the server runs
+as root and is active, the running server says its version on its control socket, and
+the release folder is signed (verified like `restart --binary`), for this machine, and
+not older than the running version. Then it:
+
+1. copies the release into `<data>/updates/releases/<version>/`, verifies the copies
+   (image and web build), unpacks `web/`, and points `current` at it;
+2. backs the unit up to `<data>/unit-backups/<unit>.<UTC stamp>` and rewrites only
+   its `ExecStart` line: the program becomes the boot pointer, every flag stays, and
+   `--web-root` goes when the release has its own web build; then `systemctl
+   daemon-reload`;
+3. restarts the running server warm into `releases/<version>/<image>`, the same
+   request as `infraternal server restart --binary`: same PID, the terminal sessions
+   keep running, and the unlocked CA is handed over (D217);
+4. waits up to a minute for the server to answer with the release's version. If it
+   does not, the old unit is put back, and the command says how to start the
+   previous build.
+
+`--dry-run` does the checks and prints exactly what would change (the files, the old
+and new `ExecStart`, the commands) and changes nothing. A second run on an adopted
+server changes nothing. `--unit <name>` names another unit (default
+`infraternal-server`), `--json` gives the envelope (`data.adopt`).
+
+### Moving production (owner plan, 2026-11-22)
+
+Production today: root, data `/var/lib/infraternal`, unit
+`infraternal-server.service` written by the operator, `ExecStart=/opt/infraternal/<build>/infraternal server --data /var/lib/infraternal --web-root /opt/infraternal/<build>/web …`, CA unlocked.
+
+1. **Run a build that has the update controls.** The running server must answer
+   `sudo infraternal server update status` (J1127, dev `c621304ac` or later). Note the
+   version it runs; the release you adopt must be the same or newer, on the same channel.
+2. **Follow edge.** Existing servers default to stable, and only edge is published:
+   `sudo infraternal server --data /var/lib/infraternal channel edge --yes`.
+3. **Publish a signed edge release** from a green dev gate: `scripts/release/build
+   --channel edge`, `scripts/release/publish <version>`, `scripts/release/verify
+   <version>`.
+4. **Fetch its server files onto the server** into a root-only folder:
+   ```sh
+   v=<version>; b=https://builds.infraternal.com/releases/$v
+   sudo install -d -m 700 /root/releases/$v && cd /root/releases/$v
+   for f in SHA256SUMS SHA256SUMS.sig VERSION infraternal-x86_64-musl infraternal-web.tar; do
+     sudo curl -fsSLo "$f" "$b/$f"
+   done
+   sudo chmod 700 infraternal-x86_64-musl
+   ```
+5. **Dry run, with the release's own binary** (the installed `infraternal` predates
+   the command):
+   ```sh
+   sudo /root/releases/$v/infraternal-x86_64-musl server update adopt /root/releases/$v --data /var/lib/infraternal --dry-run
+   ```
+   Read the `- ExecStart=` and `+ ExecStart=` lines: the program becomes
+   `/var/lib/infraternal/updates/current/infraternal-x86_64-musl`, `--web-root` goes,
+   everything else stays.
+6. **Move:** the same command without `--dry-run`. It answers "Moved the server from
+   <old> onto <version> and the boot pointer, warm".
+7. **Turn automatic apply off, right away** (production moves only when the owner or
+   the orchestrator says so; J1130):
+   ```sh
+   sudo /root/releases/$v/infraternal-x86_64-musl server update settings --automatic off --data /var/lib/infraternal
+   ```
+   `server update status` then shows `automatic` off. The server still checks and
+   stages, but never switches by itself.
+8. **Check:** `sudo infraternal server update status` shows the version;
+   `systemctl cat infraternal-server` shows the new `ExecStart`; the web app loads
+   with the new build; the CA is still unlocked; terminals kept running.
+9. **From now on** updates are `sudo infraternal server update check` and `sudo
+   infraternal server update apply` after each publication (D400). Until the
+   `infraternal` on `PATH` is a build with these commands, call the boot pointer's
+   image, `/var/lib/infraternal/updates/current/infraternal-x86_64-musl`, instead.
+   `deploy.sh` must not be used any more: it replaces the `/opt` build and
+   cold-restarts the unit, which now starts the boot pointer, so it would lock the CA
+   and change nothing that runs.
+
+**Undo the move:** put the backup back and restart into the old build warm:
+```sh
+sudo cp /var/lib/infraternal/unit-backups/infraternal-server.service.<stamp> /etc/systemd/system/infraternal-server.service
+sudo systemctl daemon-reload
+sudo infraternal server restart --binary /opt/infraternal/<build>/infraternal --rollback
+```
+`--rollback` hands the mesh identity back first (see `server restart`). `restart
+--binary` admits only a signed image, so the `/opt` folder must still hold its signed
+`SHA256SUMS`, `SHA256SUMS.sig` and `VERSION`; otherwise `sudo systemctl restart
+infraternal-server` starts it cold (the CA then needs a passkey unlock). The boot
+pointer stays in `updates/`, unused.
+
+**Proof.** `PROOF=adopt scripts/update-proof-vm/build-inputs <inputs>` and
+`scripts/update-proof-vm/run <inputs> <evidence>` run
+`deploy_staging::update_staging::adopt::boot_pointer_adoption` as root in the throwaway
+microVM: the production shape above (fixed `/opt` path, operator unit, live sessions,
+CA unlocked), `adopt` warm, `server update apply` to a newer release, a cold
+`systemctl restart` that starts the newer release from the boot pointer and serves its
+web build, and a cold start after an undone update that starts the previous release.
 
 # Add-host payloads
 

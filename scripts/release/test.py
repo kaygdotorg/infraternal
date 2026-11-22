@@ -111,6 +111,9 @@ name=f"traefik_v3.7.17_{a.os}_{a.arch}.tar.gz"; relative=f"components/{a.release
 manifest={"component":"traefik","version":"3.7.17","release_version":a.release_version,"os":a.os,"arch":a.arch,"archive_filename":name,"archive_url":f"https://github.com/traefik/traefik/releases/download/v3.7.17/{name}","mirror_path":relative,"archive_sha256":hashlib.sha256(payload).hexdigest(),"archive_size":len(payload),"executable":"traefik","executable_sha256":"0"*64,"executable_size":1,"license":"MIT"}
 (a.output/f"proxy-traefik-{a.os}-{a.arch}.json").write_text(json.dumps(manifest)+"\\n")
 ''')
+            # The web build stand-in: a tiny archive, so the test needs no bun (#211 S6).
+            (repo / 'scripts/release/web-archive').write_text('#!/usr/bin/env bash\nset -eu\nprintf "web-fixture\\n" > "$1"\n')
+            (repo / 'scripts/release/web-archive').chmod(0o755)
             # This isolated packaging stand-in observes build inputs; real binaries are checked separately.
             for name, body in (
                 ('auth-toolchain', '#!/usr/bin/env bash\nexit 0\n'),
@@ -147,6 +150,7 @@ manifest={"component":"traefik","version":"3.7.17","release_version":a.release_v
                     self.assertLessEqual(stamp, finished)
                 for name in ('VERSION','infraternal','infraternal-x86_64-musl','infraternal-aarch64-musl','infraternal-x86_64-session-musl','infraternal-aarch64-session-musl'):
                     self.assertEqual((bundle / name).read_text(), bundle.name+'\n')
+                self.assertEqual((bundle / 'infraternal-web.tar').read_text(), 'web-fixture\n')
                 targets = [('linux', 'amd64'), ('linux', 'arm64'), ('darwin', 'amd64'), ('darwin', 'arm64')]
                 for os_name, arch in targets:
                     name = f'traefik_v3.7.17_{os_name}_{arch}.tar.gz'

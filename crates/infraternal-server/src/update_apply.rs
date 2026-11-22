@@ -654,11 +654,19 @@ async fn switch_once(
         return Err(Retry::Soon);
     }
     let to_version = confirmed.version().to_owned();
+    // The running release's own web build, kept with its image so a manual roll back
+    // serves it again (#211 S6). Resolved before install, which may replace `current`.
+    let running_web = infraternal_plugin_release::web::release_web(&running_path(), data);
     let prepared = tokio::task::spawn_blocking(move || {
         let switch = apply::install(confirmed, artifact)?;
         let running = std::fs::File::open("/proc/self/exe")
             .map_err(|_| "the running image could not be read")?;
         let from_sha256 = switch.save_previous(&running, artifact)?;
+        // Only a later manual roll back needs it, so a failure never blocks the update:
+        // that roll back would then serve `--web-root` (or no web build).
+        if let Err(reason) = switch.save_previous_web(running_web.as_deref()) {
+            tracing::warn!(reason, outcome = "previous_web_not_kept", "update_prepare");
+        }
         let to_sha256 = switch.digest()?;
         Ok::<_, &'static str>((switch, from_sha256, to_sha256))
     })

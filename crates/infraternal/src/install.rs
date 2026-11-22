@@ -487,7 +487,7 @@ pub(super) fn systemctl_program() -> Result<PathBuf, InstallError> {
 }
 
 /// A `systemctl` command with the child hygiene every install command gets and no stdin.
-fn systemctl_command(program: &Path) -> Command {
+pub(super) fn systemctl_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     infraternal_shim::prepare_child(&mut command);
     command.stdin(std::process::Stdio::null());
@@ -812,9 +812,31 @@ fn user_unit_directory(
     }
 }
 
+/// The boot pointer's image in `data`, `<data>/updates/current/infraternal-<arch>-musl`,
+/// when the server's updater has installed a release there (#211 S6).
+///
+/// A unit that starts this path follows every update across cold starts: the updater
+/// moves `current` only after a new release passed its health check (D295). Only the
+/// Linux release image names count; the folder is root-only (0700) by construction.
+pub(super) fn boot_pointer(data: &Path) -> Option<PathBuf> {
+    let image = match (env::consts::ARCH, env::consts::OS) {
+        ("x86_64", "linux") => "infraternal-x86_64-musl",
+        ("aarch64", "linux") => "infraternal-aarch64-musl",
+        _ => return None,
+    };
+    let current = data.join("updates").join("current");
+    let pointer = current.join(image);
+    (fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        && fs::metadata(&pointer).is_ok_and(|metadata| metadata.is_file()))
+    .then_some(pointer)
+}
+
 /// Render the server process unit and preserve all typed runtime options.
 ///
-/// Every path in `ExecStart` is absolute and quoted.
+/// Every path in `ExecStart` is absolute and quoted. When the data folder holds an
+/// installed release ([`boot_pointer`]), the unit starts that image instead of the
+/// running binary, so an applied update survives the next cold start; a release that
+/// carries its own web build serves it, so `--web-root` is left out then (#211 S6).
 /// System services wait for network-online and pull that target into the boot
 /// transaction. The user manager has no system-wide network target, so its
 /// existing ordering stays unchanged; the listener's bounded bind retry covers
@@ -825,8 +847,17 @@ fn render_unit(
     origin: &str,
     user: bool,
 ) -> Result<String, InstallError> {
-    let binary = service_program().map_err(InstallError::Io)?;
     let data = absolute(&args.data)?;
+    let pointer = boot_pointer(&data);
+    let release_web = pointer.as_ref().is_some_and(|pointer| {
+        pointer
+            .parent()
+            .is_some_and(|release| release.join("web").is_dir())
+    });
+    let binary = match pointer {
+        Some(pointer) => pointer,
+        None => service_program().map_err(InstallError::Io)?,
+    };
     let mut command = vec![binary.into_os_string()];
     command.extend([
         OsString::from("server"),
@@ -837,7 +868,7 @@ fn render_unit(
         OsString::from("--public-origin"),
         OsString::from(origin),
     ]);
-    if let Some(web_root) = &args.web_root {
+    if let Some(web_root) = args.web_root.as_ref().filter(|_| !release_web) {
         command.push(OsString::from("--web-root"));
         command.push(absolute(web_root)?.into_os_string());
     }
@@ -1162,6 +1193,104 @@ mod tests {
         let output = install(&args, &options).unwrap();
         assert!(output.contains("Data folder: /srv/state\n"));
         assert!(output.contains("Web folder: /srv/web\n"));
+    }
+
+    /// With a release installed in the data folder, the unit starts the boot pointer, so an
+    /// applied update survives a cold start; a release with its own web build drops
+    /// `--web-root`, and every other flag stays (#211 S6).
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn a_unit_starts_the_boot_pointer_once_a_release_is_installed() {
+        use std::os::unix::fs::DirBuilderExt;
+        let image = if cfg!(target_arch = "x86_64") {
+            "infraternal-x86_64-musl"
+        } else {
+            "infraternal-aarch64-musl"
+        };
+        let data = env::temp_dir().join(format!("init-pointer-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&data);
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&data)
+            .unwrap();
+        let args = ServerArgs {
+            remote: super::super::remote_server::Options::default(),
+            listen: SocketAddr::from(([127, 0, 0, 1], 47362)),
+            data: data.clone(),
+            public_origin: Some("https://localhost:47362".to_owned()),
+            web_root: Some(PathBuf::from("/opt/infraternal/old/web")),
+            tls_cert: None,
+            tls_key: None,
+            behind_proxy: true,
+            trusted_proxies: vec!["127.0.0.1".parse().unwrap()],
+            host_firewall_listen_interface: None,
+            host_firewall_remote_interface: None,
+            host_firewall_remote_sources: Vec::new(),
+            host_firewall_accept_interfaces: Vec::new(),
+            host_firewall_allow: Vec::new(),
+            host_firewall_off: false,
+        };
+        let exec = |unit: String| {
+            unit.lines()
+                .find_map(|line| line.strip_prefix("ExecStart="))
+                .unwrap()
+                .to_owned()
+        };
+        let running = quote_systemd(service_program().unwrap().as_os_str()).unwrap();
+        let before = exec(
+            render_unit(
+                &args,
+                "infraternal-server",
+                "https://localhost:47362",
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(before.starts_with(&running), "{before}");
+        assert!(before.contains("\"--web-root\" \"/opt/infraternal/old/web\""));
+
+        let release = data.join("updates/releases/edge-20261122T000000Z");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join(image), b"image").unwrap();
+        std::os::unix::fs::symlink(
+            "releases/edge-20261122T000000Z",
+            data.join("updates/current"),
+        )
+        .unwrap();
+        let pointer = format!("\"{}/updates/current/{image}\"", data.display());
+        let without_web = exec(
+            render_unit(
+                &args,
+                "infraternal-server",
+                "https://localhost:47362",
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(without_web.starts_with(&pointer), "{without_web}");
+        assert!(
+            without_web.contains("--web-root"),
+            "a release without web keeps the flag"
+        );
+
+        fs::create_dir(release.join("web")).unwrap();
+        let with_web = exec(
+            render_unit(
+                &args,
+                "infraternal-server",
+                "https://localhost:47362",
+                false,
+            )
+            .unwrap(),
+        );
+        assert!(with_web.starts_with(&pointer));
+        assert!(!with_web.contains("--web-root"), "{with_web}");
+        assert!(with_web.contains("\"--behind-proxy\" \"--trusted-proxy\" \"127.0.0.1\""));
+        fs::remove_dir_all(&data).unwrap();
     }
 
     /// `server init` refuses when sshd's port is unknown and names the port it needs (J608, J658, J671).

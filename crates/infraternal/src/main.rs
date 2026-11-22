@@ -10,6 +10,9 @@ mod embedded_cli;
 mod host_remove;
 #[cfg(feature = "release")]
 mod release_cli;
+/// `infraternal server update adopt`: move an existing server onto the boot pointer (#211 S6).
+#[cfg(all(feature = "release", feature = "remote", target_os = "linux"))]
+mod server_adopt;
 /// `infraternal server update …` over the server's private control socket (#211, D400).
 #[cfg(feature = "release")]
 mod server_update_cli;
@@ -2093,6 +2096,11 @@ fn stop_server_runtime(runtime: tokio::runtime::Runtime) {
     runtime.shutdown_timeout(SERVER_STOP_BLOCKING_GRACE);
 }
 
+/// Run the configured server in this process until it stops or restarts into another image.
+///
+/// A server started from an installed release serves that release's own web build
+/// (`serve_release_web`, #211 S6). Returns the command's exit code; a warm restart never
+/// returns, because the process execs the replacement.
 #[cfg(feature = "plugin-server")]
 fn run_server_foreground(
     mut args: ServerArgs,
@@ -2102,6 +2110,8 @@ fn run_server_foreground(
     let options = std::mem::take(&mut args.remote);
     let action_id = options.action_id();
     let remote_requested = options.remote_listen.is_some();
+    #[cfg(feature = "release")]
+    let release_web = serve_release_web(&mut args);
     let config = match server_config(args) {
         Ok(config) => config,
         Err(error) => {
@@ -2118,6 +2128,11 @@ fn run_server_foreground(
         "public_origin": config.public_origin,
     });
     infraternal_server::configure_logging(json_output);
+    #[cfg(feature = "release")]
+    if let Some((flag, web)) = &release_web {
+        tracing::info!(web_root = %web.display(), ignored_web_root = ?flag, outcome = "release_web_root",
+            "serving the web build signed with this release");
+    }
     let stopped = match block_on(&runtime, remote_server::serve(config, options)) {
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
@@ -2682,9 +2697,26 @@ async fn read_setup_token(data_dir: &Path) -> Result<String, SetupTokenReadError
     String::from_utf8(response[..43].to_vec()).map_err(|_| "invalid local token response".into())
 }
 
+/// Without Unix sockets there is no local setup-token endpoint, so this always refuses.
 #[cfg(all(not(unix), feature = "plugin-server"))]
 async fn read_setup_token(_data_dir: &Path) -> Result<String, SetupTokenReadError> {
     Err("local token retrieval requires a Unix socket".into())
+}
+
+/// Serve the web build of the release this process runs from, when it runs from one (#211 S6).
+///
+/// A server started from `<data>/updates/releases/<version>/` (directly, or through the
+/// `current` boot pointer) whose folder holds `web/` serves that folder: it is the web
+/// build signed with this image. An inherited `--web-root` (a warm switch keeps the
+/// process's arguments, so it names the build that ran before) is replaced. Returns the
+/// replaced flag value and the folder now served, for the start log; `None` leaves
+/// `--web-root` as it was. See `infraternal_plugin_release::web`.
+#[cfg(feature = "release")]
+fn serve_release_web(args: &mut ServerArgs) -> Option<(Option<PathBuf>, PathBuf)> {
+    let executable = std::env::args_os().next().map(PathBuf::from)?;
+    let web = infraternal_plugin_release::web::release_web(&executable, &args.data)?;
+    let replaced = args.web_root.replace(web.clone());
+    Some((replaced, web))
 }
 
 #[cfg(feature = "plugin-server")]

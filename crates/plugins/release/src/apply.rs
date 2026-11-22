@@ -36,9 +36,10 @@
 //!
 //! ```text
 //! current -> releases/<v>     the release that starts (after its health check)
-//! releases/<v>/               VERSION, SHA256SUMS, SHA256SUMS.sig and the image (0700)
-//! previous/                   the image that ran before the last switch, and
-//!                             database.sqlite, its D295 database copy
+//! releases/<v>/               VERSION, SHA256SUMS, SHA256SUMS.sig and the image (0700),
+//!                             plus web/, the release's unpacked web build (#211 S6)
+//! previous/                   the image that ran before the last switch, its web/
+//!                             (hard links), and database.sqlite, its D295 database copy
 //! pending.json                the switch in flight (see [`Pending`])
 //! ```
 use crate::update::{
@@ -167,7 +168,9 @@ pub struct Switch {
 /// Install the confirmed release as `releases/<version>/` and keep it locked.
 ///
 /// The staged folder is renamed, never copied, so the open verified image stays the
-/// file that runs. The image is made executable (0700) so `current/<image>` can be a
+/// file that runs. A release that carries a web build (`infraternal-web.tar`, verified
+/// with the image when the stage was confirmed) gets it unpacked into
+/// `releases/<version>/web/`, which the release then serves ([`crate::web`], #211 S6). The image is made executable (0700) so `current/<image>` can be a
 /// service's executable after [`commit`]. The installed image is still checked against
 /// its signature on a sealed copy before the exec; see the server's switch.
 /// # Errors
@@ -181,7 +184,17 @@ pub fn install(confirmed: Confirmed, artifact: &str) -> Result<Switch, &'static 
     private_folder(&releases).map_err(|()| saved)?;
     let target = releases.join(&version);
     remove_entry(&lock, &target)?;
+    // The web build is unpacked before the rename, into a folder the sweep removes if
+    // this stops halfway, so `releases/<version>/` appears whole or not at all.
+    let web = unpack_web(&lock, &updates.join("staged"))?;
     std::fs::rename(updates.join("staged"), &target).map_err(|_| saved)?;
+    if let Some(web) = &web {
+        std::fs::rename(
+            web.path.join(crate::web::FOLDER),
+            target.join(crate::web::FOLDER),
+        )
+        .map_err(|_| saved)?;
+    }
     image
         .set_permissions(std::fs::Permissions::from_mode(0o700))
         .map_err(|_| saved)?;
@@ -193,6 +206,25 @@ pub fn install(confirmed: Confirmed, artifact: &str) -> Result<Switch, &'static 
         image,
         lock,
     })
+}
+
+/// Unpack the staged web build, when the stage has one, into a fresh `download-*`
+/// folder and return it (its `web/` is moved into place by [`install`]).
+///
+/// The archive was verified with the image by [`crate::update::Updater::confirm_staged`],
+/// and the folder lock held since then keeps it unchanged.
+fn unpack_web(
+    lock: &Locked,
+    staged: &Path,
+) -> Result<Option<crate::update::Download>, &'static str> {
+    let archive = staged.join(crate::web::ARCHIVE);
+    if std::fs::symlink_metadata(&archive).is_err() {
+        return Ok(None);
+    }
+    let archive = open_private(&archive)?;
+    let folder = lock.download()?;
+    crate::web::extract(&archive, &folder.path.join(crate::web::FOLDER))?;
+    Ok(Some(folder))
 }
 
 impl Switch {
@@ -261,6 +293,33 @@ impl Switch {
         folder.published = true;
         self.lock.sync()?;
         Ok(hex(&hasher.finalize()))
+    }
+
+    /// Keep the running release's web build beside its image in `previous/web/` (hard
+    /// links), after [`Switch::save_previous`], so a manual roll back that starts the
+    /// previous release again also serves its own web build (#211 S6).
+    ///
+    /// `web` is the running release's own web folder ([`crate::web::release_web`]);
+    /// `None` (an image outside `releases/`, or a release without one) keeps nothing.
+    /// # Errors
+    /// The links could not be made or saved.
+    pub fn save_previous_web(&self, web: Option<&Path>) -> Result<(), &'static str> {
+        let Some(web) = web else {
+            return Ok(());
+        };
+        let saved = "the previous release's web build could not be kept";
+        // Mirrored into a sweepable folder first, so `previous/web/` is whole or absent;
+        // the emptied folder is removed when `folder` drops.
+        let folder = self.lock.download()?;
+        crate::web::mirror(web, &folder.path.join(crate::web::FOLDER))?;
+        let target = self
+            .lock
+            .directory()
+            .join("previous")
+            .join(crate::web::FOLDER);
+        remove_entry(&self.lock, &target)?;
+        std::fs::rename(folder.path.join(crate::web::FOLDER), &target).map_err(|_| saved)?;
+        sync(&self.lock.directory().join("previous")).map_err(|()| saved)
     }
 
     /// Where the server writes its D295 database copy (`VACUUM INTO`), after
@@ -660,6 +719,11 @@ pub fn begin_manual_rollback(
     remove_entry(&lock, &folder)?;
     private_folder(&folder).map_err(|()| saved)?;
     std::fs::hard_link(&image, folder.join(artifact)).map_err(|_| saved)?;
+    // Its web build too, when it was kept, so the previous release serves its own (#211 S6).
+    let kept_web = updates.join("previous").join(crate::web::FOLDER);
+    if std::fs::symlink_metadata(&kept_web).is_ok_and(|metadata| metadata.is_dir()) {
+        crate::web::mirror(&kept_web, &folder.join(crate::web::FOLDER))?;
+    }
     sync(&folder).map_err(|()| saved)?;
     point_current(&lock, &previous.version)?;
     let pending = Pending {
@@ -697,7 +761,7 @@ pub fn cancel_manual_rollback(data: &Path, current: &str) -> Result<(), &'static
 }
 
 /// Point `current` at `releases/<version>` (atomic rename of a new symlink, then a flush).
-fn point_current(lock: &Locked, version: &str) -> Result<(), &'static str> {
+pub(crate) fn point_current(lock: &Locked, version: &str) -> Result<(), &'static str> {
     let saved = "the boot pointer could not be saved";
     let updates = lock.directory();
     let temporary = updates.join("current.tmp");

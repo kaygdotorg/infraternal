@@ -313,7 +313,83 @@ pub fn server_cli_actions() -> Vec<infraternal_plugin_api::ActionDefinition> {
         action
     })
     .chain(server_update_cli_actions())
+    .chain(std::iter::once(adopt_cli_action()))
     .collect()
+}
+
+/// `infraternal server update adopt <RELEASE>` (#211 S6): move an existing install onto the
+/// updater's boot pointer, once. It runs on the server machine only (it rewrites the
+/// service unit and asks the running server to restart), so it is a CLI command with no
+/// hosted action; `crates/infraternal/src/server_adopt.rs` carries it out.
+fn adopt_cli_action() -> infraternal_plugin_api::ActionDefinition {
+    use infraternal_plugin_api::{
+        ActionContract, ActionDefinition, ActionEffect, ActionTarget, CliDryRun, CliHandler,
+        JsonSchema, SafetyNotes,
+    };
+    let mut action = ActionDefinition::new(
+        ["server", "update", "adopt"],
+        "Move this server onto signed releases that update themselves.",
+        "Use this once, as root on the server machine, to move a server that a service starts from a fixed path onto the boot pointer, so updates survive restarts.",
+        [
+            "Pass the folder of a signed release (as the release build writes it, with SHA256SUMS, SHA256SUMS.sig, VERSION and the image for this machine).",
+            "It checks the running server, its service unit and the release first, and refuses with the reason if anything does not match.",
+            "It installs the release under the data folder's updates/releases/, points updates/current at it, backs up the unit and rewrites only its ExecStart to start updates/current/<image>, keeping every other flag.",
+            "Then it restarts the running server into the release warm: the PID, the open terminal sessions and the unlocked certificate authority stay.",
+            "Run it with --dry-run first: that prints the exact unit change and the files it would write, and changes nothing.",
+            "Running it again on an adopted server changes nothing.",
+        ],
+        JsonSchema::object(
+            [
+                (
+                    "release".to_owned(),
+                    JsonSchema::string("Folder of the signed release to move onto."),
+                ),
+                (
+                    "data".to_owned(),
+                    JsonSchema::string("Data folder of the running server."),
+                ),
+                (
+                    "unit".to_owned(),
+                    JsonSchema::string("Name of the server's systemd unit (default infraternal-server)."),
+                ),
+                (
+                    "dry_run".to_owned(),
+                    JsonSchema::boolean("Show what would change and change nothing."),
+                ),
+            ],
+            ["release".to_owned()],
+        ),
+        JsonSchema::command_result_with(JsonSchema::object(
+            [(
+                "adopt".to_owned(),
+                JsonSchema {
+                    additional_properties: Some(true),
+                    ..JsonSchema::empty_object()
+                },
+            )],
+            std::iter::empty(),
+        )),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Write,
+            "server.configure",
+            CliDryRun::Supported,
+        ),
+    )
+    .with_cli_handler(CliHandler::ServerPlugin)
+    .with_safety(SafetyNotes {
+        destructive: false,
+        dry_run_first: true,
+        notes: vec![
+            "The unit is backed up next to the server's data first; if the server does not come back on the release, the old unit is put back.".to_owned(),
+        ],
+    })
+    .with_example(
+        "server update adopt /root/releases/edge-20261122T120000Z --dry-run",
+        "Show what moving onto that release would change.",
+    );
+    action.cli_positionals.push("release".to_owned());
+    action
 }
 
 /// What every `infraternal server update` command says about who may run it (D400).
