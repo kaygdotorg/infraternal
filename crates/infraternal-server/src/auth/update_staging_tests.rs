@@ -58,6 +58,11 @@
 //! - `update_after_rollback`: a newer release (`newest`) still applies in the quiet window and the boot
 //!   pointer follows it.
 //!
+//! - `cli_root` (D400, J1127): root on the VM runs `infraternal server update` against the unit over its
+//!   private control socket, with the owner's session made stale first, so no passkey is involved: a
+//!   non-root account is refused, `check` stages the `cli` release, `apply` switches to it warm and waits
+//!   for the health check, `rollback` brings `newest` back warm, and `history` records both.
+//!
 //! The harness signs in with one passkey long before these cases, so it stamps the session's last proof
 //! (`stamp_fresh`) instead of repeating a ceremony: stale to prove the refusal, current to admit the call.
 //!
@@ -65,7 +70,7 @@
 //! outage the switch caused; the VM script collects them into the S4 matrix.
 //!
 //! Inputs (prepared by the VM script, never by this test): signed release folders in
-//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and eleven versions, oldest
+//! `$INFRATERNAL_DEPLOY_TEST_ROOT/releases/<version>/`, and twelve versions, oldest
 //! first, in `INFRATERNAL_UPDATE_TEST_VERSIONS`: the running release, then the
 //! `unhealthy`, `timeout`, `migration`, `exec`, `kill` and `reboot` releases, then the
 //! good release. No signing key is present.
@@ -94,7 +99,7 @@ const BUCKET: &str = "127.0.0.1:4813";
 /// What phase 1 leaves for phase 2, inside the test root.
 const CARRY: &str = "carry.json";
 
-/// The eleven releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
+/// The twelve releases of the proof, from `INFRATERNAL_UPDATE_TEST_VERSIONS`.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Versions {
     /// The release that runs first and must come back after every undo.
@@ -120,6 +125,9 @@ struct Versions {
     later: String,
     /// A healthy release newer than `later`: proves a normal update still works after a manual roll back.
     newest: String,
+    /// A healthy release newer than `newest`: root applies it, and rolls it back, with
+    /// `infraternal server update` on the VM itself, with no passkey (D400, J1127).
+    cli: String,
 }
 impl Versions {
     /// Read the versions from the environment.
@@ -137,7 +145,8 @@ impl Versions {
             unlisted,
             later,
             newest,
-        ]: [String; 11] = versions
+            cli,
+        ]: [String; 12] = versions
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>()
@@ -155,6 +164,7 @@ impl Versions {
             unlisted,
             later,
             newest,
+            cli,
         }
     }
     /// The `INFRATERNAL_STAGING_FAULTS` value: the kill and reboot releases never pass
@@ -1184,6 +1194,7 @@ async fn auto_update_after_reboot() {
         &versions.unlisted,
         &versions.later,
         &versions.newest,
+        &versions.cli,
     ]
     .into_iter()
     .map(|version| {
@@ -1582,6 +1593,8 @@ async fn auto_update_after_reboot() {
         state.paused
     );
 
+    cli_root(&mut server, &bucket, &root).await;
+
     println!(
         "METRIC name=auto_update_matrix real_pty_sessions={} unlock_ceremonies={} ca_unlocked=true",
         server.sessions.len(),
@@ -1594,5 +1607,185 @@ async fn auto_update_after_reboot() {
         carry.refused_after_undo.is_empty(),
         "sessions refused input after the undo in: {:?}",
         carry.refused_after_undo
+    );
+}
+
+/// Run the `infraternal` binary at `binary` with `arguments` plus `--json`, optionally as the
+/// unprivileged `nobody` account, and return its exit code and its one result envelope.
+fn run_cli(binary: &Path, arguments: &[&str], as_nobody: bool) -> (i32, Value) {
+    let mut command = if as_nobody {
+        let mut command = Command::new("setpriv");
+        command
+            .args(["--reuid=65534", "--regid=65534", "--clear-groups", "--"])
+            .arg(binary);
+        command
+    } else {
+        Command::new(binary)
+    };
+    let output = command
+        .args(arguments)
+        .arg("--json")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope = stdout
+        .lines()
+        .rev()
+        .find(|line| line.starts_with('{'))
+        .and_then(|line| serde_json::from_str(line).ok())
+        .unwrap_or(Value::Null);
+    println!(
+        "UPDATE step=cli command={arguments:?} nobody={as_nobody} exit={:?} message={:?}",
+        output.status.code(),
+        envelope["message"]
+    );
+    (output.status.code().unwrap_or(-1), envelope)
+}
+
+/// `infraternal server update` as root on the server machine (D400, J1127); see the module docs.
+///
+/// The CLI is the shipping binary of the `newest` release, copied out of the release folder
+/// (world-executable, so `nobody` can start it too). The owner's session is made stale first, so
+/// the WebSocket API would refuse every one of these requests: the CLI's only authority is the
+/// kernel's word that the caller is root.
+async fn cli_root(server: &mut Server, bucket: &Bucket, root: &Path) {
+    let versions = server.versions.clone();
+    let address = server.address;
+    let binary = PathBuf::from("/tmp/j1127-infraternal");
+    std::fs::copy(
+        root.join("releases").join(&versions.newest).join(IMAGE),
+        &binary,
+    )
+    .unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let data = server.data.display().to_string();
+    let update = |command: &'static str| ["server", "update", command, "--data", data.as_str()];
+    stamp_fresh(&server.database, 3600).await;
+    write_marker(&server.database, 41).await;
+
+    // Another account is refused before anything happens.
+    for command in ["status", "apply", "rollback"] {
+        let (code, refused) = run_cli(&binary, &update(command), true);
+        assert_eq!(code, 3, "nobody may not run update {command}: {refused}");
+        assert_eq!(refused["error"]["code"], "not_allowed");
+    }
+    assert_eq!(running_digest(server.pid), server.digests[&versions.newest]);
+
+    // Keep the quiet window closed, so nothing applies by itself while root drives the update.
+    let attaching = {
+        let session = server.session.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    tokio::spawn({
+                        let session = session.clone();
+                        async move { attach_pulse(address, &session).await }
+                    }),
+                )
+                .await;
+                // sleep: an attach once a second keeps the quiet window open (D251).
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        })
+    };
+    announce(bucket, Some(&versions.cli));
+    let (code, checked) = run_cli(&binary, &update("check"), false);
+    assert_eq!(code, 0, "check: {checked}");
+    wait_for(Duration::from_secs(120), "cli release staged", || {
+        update_state(&server.data).staged.as_deref() == Some(versions.cli.as_str())
+    })
+    .await;
+    let (code, status) = run_cli(&binary, &update("status"), false);
+    assert_eq!(code, 0, "status: {status}");
+    assert_eq!(status["data"]["update"]["staged"], versions.cli.as_str());
+    assert_eq!(status["data"]["update"]["mode"], "auto");
+
+    // apply waits for the switch and its health check.
+    let downtime = Downtime::start(address);
+    let started = std::time::Instant::now();
+    let (code, applied) = run_cli(&binary, &update("apply"), false);
+    let apply_seconds = started.elapsed().as_secs_f64();
+    assert_eq!(code, 0, "apply: {applied}");
+    assert_eq!(
+        applied["data"]["update"]["state"]["applied"]["outcome"], "applied",
+        "{applied}"
+    );
+    serving(address).await;
+    let apply_gap = downtime.take_ms();
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.cli],
+        "the cli release runs"
+    );
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(
+        shim_pids(&server.sessions),
+        server.shims,
+        "the sessions were kept"
+    );
+    assert_eq!(server.pointer(), Path::new("releases").join(&versions.cli));
+    assert_eq!(read_marker(&server.database).await, 41);
+    println!(
+        "UPDATE case=cli_apply bucket=warm outcome=applied as=root passkey=none stale_session=true nobody_refused=true same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} pointer=releases/{} cli_seconds={apply_seconds:.1} max_healthz_gap_ms={apply_gap:.1}",
+        server.shims.len(),
+        versions.cli
+    );
+
+    // rollback waits until the previous release runs again.
+    let started = std::time::Instant::now();
+    let (code, rolled) = run_cli(&binary, &update("rollback"), false);
+    let rollback_seconds = started.elapsed().as_secs_f64();
+    assert_eq!(code, 0, "rollback: {rolled}");
+    serving(address).await;
+    let rollback_gap = downtime.take_ms();
+    attaching.abort();
+    assert_eq!(
+        running_digest(server.pid),
+        server.digests[&versions.newest],
+        "the newest release runs again"
+    );
+    assert_eq!(main_pid(), server.pid, "one server process throughout");
+    assert!(
+        ca_unlocked(address, &server.session).await,
+        "the CA stayed unlocked"
+    );
+    assert_eq!(
+        shim_pids(&server.sessions),
+        server.shims,
+        "the sessions were kept"
+    );
+    assert_eq!(
+        server.pointer(),
+        Path::new("releases").join(&versions.newest)
+    );
+    assert_eq!(
+        update_state(&server.data).paused.as_deref(),
+        Some(versions.cli.as_str())
+    );
+    let (code, history) = run_cli(&binary, &update("history"), false);
+    assert_eq!(code, 0, "history: {history}");
+    // The history lists the cli release's staging. (Switches themselves are not recorded in the
+    // history yet: nothing writes its applied or rolled_back kinds; reported on #211 by J1127.)
+    let entries = history["data"]["update"]["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["kind"] == "staged" && entry["version"] == versions.cli.as_str()),
+        "history: {history}"
+    );
+    let echoed = server.echo("after-cli").await;
+    drop(downtime);
+    let _ = std::fs::remove_file(&binary);
+    println!(
+        "UPDATE case=cli_rollback bucket=warm outcome=undone as=root passkey=none same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} pointer=releases/{} paused={} cli_seconds={rollback_seconds:.1} max_healthz_gap_ms={rollback_gap:.1}",
+        server.shims.len(),
+        versions.newest,
+        versions.cli
     );
 }
