@@ -36,5 +36,5 @@ test("desktop Rust and TypeScript agree on malformed lengths, flags and mutation
 test("endReason maps only the two end-of-session close codes (#146)", () => {
   expect(endReason(WINDOW_CLOSED)).toBe("window-closed");
   expect(endReason(CONSOLE_USER_CHANGED)).toBe("console-user-changed");
-  for (const code of [0, 4403, 4404, 4409, 4412, 65535, -1, 4411.5, Number.NaN]) expect(endReason(code)).toBeUndefined();
+  for (const code of [0, 4403, 4404, 4409, 4412, 65535, -1, 4411.5, Number.NaN]) expect(endReason(code)).toBe(undefined);
 });
