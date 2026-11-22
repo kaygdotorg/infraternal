@@ -477,6 +477,7 @@ mod tests {
             peer: Peer::Local { reader, writer },
             execution_uid: 0,
             pid: None,
+            _child_slot: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],
             encode: Vec::new(),
@@ -515,6 +516,7 @@ mod tests {
         assert!(!attachments[&1].replaying);
     }
 
+    /// Person cleanup calls still go out when the native control lane is full.
     #[tokio::test]
     async fn person_cleanup_is_admitted_when_native_control_lane_is_full() {
         use super::super::{BytesMut, write_frame};
@@ -525,6 +527,7 @@ mod tests {
             peer: Peer::Remote(link),
             execution_uid: 0,
             pid: None,
+            _child_slot: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],
             encode: Vec::new(),
@@ -629,6 +632,7 @@ mod tests {
             peer: Peer::Remote(link),
             execution_uid: 0,
             pid: None,
+            _child_slot: None,
             receive: BytesMut::new(),
             scratch: vec![0; 4096],
             encode: Vec::new(),

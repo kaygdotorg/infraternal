@@ -81,56 +81,103 @@ impl ReleaseEngine for Engine {
 /// The builds host every release lookup and update check uses (D184).
 const ORIGIN: &str = "https://builds.infraternal.com";
 
-/// Start the server's periodic update check for the data folder `data` (#211 S3).
+/// The builds host to use: [`ORIGIN`], or in a `staging-trust` build only, the
+/// `INFRATERNAL_STAGING_BUILDS_ORIGIN` loopback channel a root staging proof serves.
+fn origin() -> String {
+    #[cfg(feature = "staging-trust")]
+    if let Ok(origin) = std::env::var("INFRATERNAL_STAGING_BUILDS_ORIGIN")
+        && origin.starts_with("http://127.0.0.1:")
+    {
+        return origin;
+    }
+    ORIGIN.into()
+}
+
+/// Start the server's periodic update check and the S4 apply for the data folder
+/// `data` (#211 S3, S4).
 ///
 /// It runs only where an update could ever be applied: a pipeline release build
 /// (`INFRATERNAL_RELEASE_BUILD=1`, so the version is a real signed identity), running
 /// as root (the D295 switch replaces a root-owned binary, and the staging folder must
 /// be root-only), on a platform with a published server image. Everywhere else it
-/// returns `None` and starts nothing. The returned task sleeps between checks and is
-/// stopped by aborting it; it never applies a release.
+/// returns `None` and starts nothing. The check task sleeps between checks and is
+/// stopped by aborting it. The apply task ([`crate::update_apply`]) waits for a staged
+/// release and a quiet window, and runs this process's trial if it is one. `listen` is
+/// the HTTP listener the trial's health check calls.
 pub(crate) fn start_updates(
     pool: sqlx::SqlitePool,
     data: &Path,
+    listen: std::net::SocketAddr,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let artifact = infraternal_plugin_release::update::availability(release_build()).ok()?;
-    let updater = infraternal_plugin_release::update::Updater::new(
+    let timing = crate::update_apply::Timing::from_environment();
+    let mut updater = infraternal_plugin_release::update::Updater::new(
         data,
-        ORIGIN.into(),
+        origin(),
         infraternal_plugin_api::VERSION.into(),
         artifact.into(),
         Arc::new(Engine {
             #[cfg(test)]
             trust: None,
         }),
-        infraternal_plugin_release::service::settings_reader(pool),
+        infraternal_plugin_release::service::settings_reader(pool.clone()),
     );
-    Some(Arc::new(updater).spawn())
+    if let Some(period) = timing.checks {
+        updater = updater.with_period(period);
+    }
+    let updater = Arc::new(updater);
+    crate::update_apply::start(
+        Arc::clone(&updater),
+        pool,
+        data.to_owned(),
+        listen,
+        artifact,
+    );
+    Some(match timing.checks {
+        Some(first) => updater.spawn_after(first),
+        None => updater.spawn(),
+    })
 }
 /// Whether this binary is a pipeline release build (`INFRATERNAL_RELEASE_BUILD=1`).
-fn release_build() -> bool {
+pub(crate) fn release_build() -> bool {
     env!("INFRATERNAL_RELEASE_BUILD") == "1"
 }
 
 /// Bind declared release actions to an existing private state directory; never initialize a server.
+///
+/// Where updates can run (see [`infraternal_plugin_release::update::availability`]) the service also gets
+/// an updater for the owner controls (#211 S5): check now, stage a version, apply, cancel. It shares
+/// nothing with the timer's updater but the folder and its lock, so one check runs at a time. Apply and
+/// rollback refuse until S4's applier is plugged in with `with_applier`.
 #[must_use]
 pub fn release_service(pool: sqlx::SqlitePool, state: &Path) -> ReleaseService {
-    ReleaseService::new(
-        pool,
-        Arc::new(
-            VerifiedLookup::new(
-                state.to_owned(),
-                ORIGIN.into(),
-                Arc::new(Engine {
-                    #[cfg(test)]
-                    trust: None,
-                }),
-            )
-            .with_updates(
-                infraternal_plugin_release::update::availability(release_build()).map(|_| ()),
-            ),
-        ),
-    )
+    let availability = infraternal_plugin_release::update::availability(release_build());
+    let engine = || {
+        Arc::new(Engine {
+            #[cfg(test)]
+            trust: None,
+        })
+    };
+    let mut lookup = VerifiedLookup::new(state.to_owned(), origin(), engine())
+        .with_updates(availability.map(|_| ()));
+    if let Ok(artifact) = availability {
+        lookup = lookup.with_updater(Arc::new(infraternal_plugin_release::update::Updater::new(
+            state,
+            origin(),
+            infraternal_plugin_api::VERSION.into(),
+            artifact.into(),
+            engine(),
+            infraternal_plugin_release::service::settings_reader(pool.clone()),
+        )));
+    }
+    let service = ReleaseService::new(pool, Arc::new(lookup));
+    // S4 does the switching and the undo; the owner controls only decide who may ask for them (#211 S5).
+    match availability {
+        Ok(artifact) => service.with_applier(Arc::new(crate::update_apply::ServerApplier::new(
+            state, artifact,
+        ))),
+        Err(_) => service,
+    }
 }
 pub(crate) async fn plugin(
     pool: sqlx::SqlitePool,

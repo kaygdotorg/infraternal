@@ -9,7 +9,6 @@ mkdir -p "$release_scratch"
 release_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$release_root/Cargo.toml")"
 release_public=https://builds.infraternal.com
 release_signer=https://infraternal-release-signer.mail-111.workers.dev
-release_api=https://api.cloudflare.com/client/v4
 # Keep the vendored engine's complete readable notice inventory in every new signed bundle.
 release_license_files=(
     licenses/libghostty-vt/README.md
@@ -30,7 +29,7 @@ if [[ -n "${RELEASE_TEST_ORIGIN:-}" ]]; then
     [[ "$RELEASE_TEST_ORIGIN" =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { printf 'invalid local test origin\n' >&2; exit 2; }
     release_public="$RELEASE_TEST_ORIGIN/builds"
     release_signer="$RELEASE_TEST_ORIGIN/signer"
-    release_api="$RELEASE_TEST_ORIGIN/api"
+    release_s3_origin="$RELEASE_TEST_ORIGIN/s3"
 fi
 valid_version() { [[ "$1" =~ ^([0-9]+\.[0-9]+\.[0-9]+|edge-[0-9]{8}T[0-9]{6}Z)$ ]]; }
 request() {
@@ -41,6 +40,15 @@ request() {
     { if [[ -n "$token" ]]; then printf 'header = "Authorization: Bearer %s"\n' "$token"; fi; } |
         curl --config - --silent --show-error --fail --connect-timeout 10 --max-time 180 \
             --user-agent "infraternal-release/$release_version" "$@"
+}
+# Signed S3 request to the release bucket (#211). The R2 access key pair reaches
+# curl only through its configuration on stdin: never argv, a file or a log.
+# curl derives the SigV4 signature itself (region "auto", service "s3").
+s3_request() {
+    [[ "$R2_ACCESS_KEY_ID" != *[!a-zA-Z0-9]* && "$R2_SECRET_ACCESS_KEY" != *[!a-zA-Z0-9_.~+/=-]* ]] || { printf 'unsupported key encoding\n' >&2; return 1; }
+    printf 'user = "%s:%s"\n' "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" |
+        curl --config - --silent --show-error --fail --connect-timeout 10 --max-time 180 \
+            --aws-sigv4 'aws:amz:auto:s3' --user-agent "infraternal-release/$release_version" "$@"
 }
 publication_version() {
     valid_version "$1" || { printf 'version must be x.y.z or edge-YYYYMMDDTHHMMSSZ\n' >&2; exit 2; }

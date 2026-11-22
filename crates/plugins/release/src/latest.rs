@@ -17,6 +17,8 @@ pub struct VerifiedLookup {
     engine: Arc<dyn ReleaseEngine>,
     /// Whether this server runs the update check, or why not; see [`VerifiedLookup::with_updates`].
     updates: Result<(), &'static str>,
+    /// The server's updater, when it runs one; see [`VerifiedLookup::with_updater`].
+    updater: Option<Arc<crate::update::Updater>>,
 }
 struct Staging {
     path: PathBuf,
@@ -115,6 +117,7 @@ impl VerifiedLookup {
             origin,
             engine,
             updates: Err(NO_UPDATER),
+            updater: None,
         }
     }
 
@@ -338,6 +341,14 @@ fn cleanup_abandoned_staging(state: &Path) -> std::io::Result<()> {
 const NO_UPDATER: &str = "this server does not run the update check";
 
 impl VerifiedLookup {
+    /// Give the lookup the server's updater, so the check, apply and cancel actions can
+    /// reach it (#211 S5). Without it they answer with the reason updates are off.
+    #[must_use]
+    pub fn with_updater(mut self, updater: Arc<crate::update::Updater>) -> Self {
+        self.updater = Some(updater);
+        self
+    }
+
     /// Say whether this server runs the update check (`Ok`) or why not (the reason from
     /// [`crate::update::availability`]), so `release.update.status` can report it
     /// plainly (J725 P3-4). Without this call the status reports updates as off.
@@ -355,6 +366,15 @@ impl ReleaseLookup for VerifiedLookup {
                 .await
                 .map_err(|_| "release check exceeded its time limit")?
         })
+    }
+    fn updater(&self) -> Result<Arc<crate::update::Updater>, &'static str> {
+        self.updater.clone().ok_or(match self.updates {
+            Err(reason) => reason,
+            Ok(()) => NO_UPDATER,
+        })
+    }
+    fn update_history(&self) -> Vec<crate::history::Entry> {
+        crate::history::read(&self.state)
     }
     /// The data folder's `updates/state.json`, read without a lock (#211 S3), plus
     /// `mode` (`auto` or `off`) and `reason` (why it is off, else null).

@@ -412,6 +412,11 @@ pub mod benchmark;
 #[cfg(test)]
 mod read_ahead_tests;
 
+/// Fuzz entry point for the same buffered packet reads (#538); off in shipping builds.
+#[cfg(feature = "fuzz-hooks")]
+#[doc(hidden)]
+pub mod fuzz_hook;
+
 #[cfg(all(test, feature = "des"))]
 mod tests {
     use super::*;

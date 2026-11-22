@@ -35,6 +35,7 @@ impl Drop for StateDirectory {
     }
 }
 
+/// A rootless identity bound to another uid is refused before any dial.
 #[tokio::test]
 async fn rootless_uid_mismatch_is_refused_before_dial() {
     let ca = root();
@@ -48,6 +49,7 @@ async fn rootless_uid_mismatch_is_refused_before_dial() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw().wrapping_add(1),
+        server_leaf: std::sync::Arc::default(),
     };
     let result = run(&identity, None).await.unwrap_err();
     assert_eq!(result.kind(), io::ErrorKind::PermissionDenied);
@@ -171,6 +173,7 @@ async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let state = StateDirectory::new();
     let state_path = state.0.clone();
@@ -225,6 +228,7 @@ async fn unavailable_udp_does_not_add_seconds_before_tcp_admission() {
     );
 }
 
+/// When QUIC wins the dial race, the unfinished TLS dial is dropped before control dispatch.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
@@ -251,6 +255,7 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let state = StateDirectory::new();
     let state_path = state.0.clone();
@@ -334,6 +339,7 @@ async fn tcp_greeting(
         }
     }
 }
+/// An enrollment identity for the supervisor fixtures.
 fn supervisor_identity(
     ca: &Identity,
     client: &Identity,
@@ -352,6 +358,7 @@ fn supervisor_identity(
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     }
 }
 #[cfg(target_os = "linux")]
@@ -594,6 +601,7 @@ async fn tcp_winner_cancels_silent_udp_drivers_without_waiting_for_drain() {
     );
 }
 
+/// Expired local credentials keep retrying without creating any local state.
 #[tokio::test]
 async fn unavailable_local_credentials_retry_without_creating_state() {
     let ca = root();
@@ -629,6 +637,7 @@ async fn unavailable_local_credentials_retry_without_creating_state() {
         https_root: None,
         https_system_roots: false,
         execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
     };
     let directory = StateDirectory::new();
     let result = tokio::time::timeout(
@@ -948,4 +957,179 @@ async fn capability_fixture_retries_a_port_held_by_the_other_transport() {
     );
     assert_ne!(listener.local_addr().unwrap(), occupied);
     assert_eq!(held.local_addr().unwrap(), occupied);
+}
+
+/// A server leaf for `localhost` signed by `ca`, valid from `not_before` for a day.
+fn server_leaf_starting(ca: &Identity, not_before: i64) -> Identity {
+    use openssl::{
+        asn1::Asn1Time,
+        x509::{
+            X509NameBuilder,
+            extension::{BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName},
+        },
+    };
+    let key = openssl::pkey::PKey::generate_ed25519().unwrap();
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", "server leaf").unwrap();
+    let mut certificate = X509::builder().unwrap();
+    certificate.set_version(2).unwrap();
+    certificate.set_subject_name(&name.build()).unwrap();
+    certificate
+        .set_issuer_name(ca.certificate.subject_name())
+        .unwrap();
+    certificate.set_pubkey(&key).unwrap();
+    certificate
+        .set_not_before(&Asn1Time::from_unix(not_before).unwrap())
+        .unwrap();
+    certificate
+        .set_not_after(&Asn1Time::from_unix(not_before + 86_400).unwrap())
+        .unwrap();
+    certificate
+        .append_extension(BasicConstraints::new().critical().build().unwrap())
+        .unwrap();
+    certificate
+        .append_extension(
+            KeyUsage::new()
+                .critical()
+                .digital_signature()
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+    certificate
+        .append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap())
+        .unwrap();
+    let san = SubjectAlternativeName::new()
+        .dns("localhost")
+        .build(&certificate.x509v3_context(Some(&ca.certificate), None))
+        .unwrap();
+    certificate.append_extension(san).unwrap();
+    certificate
+        .sign(&ca.key, openssl::hash::MessageDigest::null())
+        .unwrap();
+    Identity {
+        certificate: certificate.build(),
+        key,
+    }
+}
+
+/// Unix seconds now.
+fn unix_now() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .unwrap()
+}
+
+/// An enrollment identity that dials `endpoint` as `client`.
+fn dialing_identity(ca: &Identity, client: &Identity, endpoint: SocketAddr) -> RemoteIdentity {
+    RemoteIdentity {
+        host_id: uuid::Uuid::new_v4(),
+        identity: Identity {
+            certificate: client.certificate.clone(),
+            key: client.key.clone(),
+        },
+        roots: vec![ca.certificate.clone()],
+        endpoint: Some(endpoint),
+        server_name: "localhost".into(),
+        public_origin: None,
+        https_root: None,
+        https_system_roots: false,
+        execution_uid: nix::unistd::Uid::effective().as_raw(),
+        server_leaf: std::sync::Arc::default(),
+    }
+}
+
+/// #559 over QUIC: a server still presenting an older (for example copied)
+/// leaf is accepted by an enrollment with no history, and refused, with no
+/// stream opened, once the enrollment has accepted a newer leaf.
+#[tokio::test]
+async fn quic_dial_refuses_a_server_leaf_older_than_one_already_accepted() {
+    let ca = root();
+    let old = server_leaf_starting(&ca, unix_now() - 7_200);
+    let newer = server_leaf_starting(&ca, unix_now() - 3_600);
+    let client = leaf(&ca, false);
+    let server = quinn::Endpoint::server(
+        remote_quic::server_config(&old, std::slice::from_ref(&ca.certificate)).unwrap(),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .unwrap();
+    let identity = dialing_identity(&ca, &client, server.local_addr().unwrap());
+    let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    endpoint.set_default_client_config(
+        remote_quic::client_config(&client, std::slice::from_ref(&ca.certificate)).unwrap(),
+    );
+
+    let (accepted, admitted) = tokio::join!(quic_connect(&endpoint, &identity), async {
+        server.accept().await.unwrap().await.unwrap()
+    });
+    accepted.expect("no history: the older leaf still passes chain and name checks");
+    drop(admitted);
+
+    identity.server_leaf.admit(&newer.certificate).unwrap();
+    let (refused, admitted) = tokio::join!(quic_connect(&endpoint, &identity), async {
+        server.accept().await.unwrap().await
+    });
+    assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    // The close may even overtake the server's own handshake completion.
+    if let Ok(admitted) = admitted {
+        let stream = tokio::time::timeout(Duration::from_secs(5), admitted.accept_bi())
+            .await
+            .expect("a refused dial must close the connection");
+        assert!(
+            stream.is_err(),
+            "no stream may follow a refused server leaf"
+        );
+    }
+}
+
+/// #559 over the TCP/TLS fallback: the same refusal, before any byte is sent.
+#[tokio::test]
+async fn tcp_fallback_refuses_a_server_leaf_older_than_one_already_accepted() {
+    let ca = root();
+    let old = server_leaf_starting(&ca, unix_now() - 7_200);
+    let newer = server_leaf_starting(&ca, unix_now() - 3_600);
+    let client = leaf(&ca, false);
+    // TCP only: the address has no QUIC listener, so the fallback carries the dial.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor = remote_tls::server_config(&old, std::slice::from_ref(&ca.certificate)).unwrap();
+    let server = tokio::spawn(async move {
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await.unwrap();
+            // A refusing client may close right after its Finished.
+            let Ok(peer) = remote_tls::accept(socket, &acceptor).await else {
+                received.push(0);
+                continue;
+            };
+            let mut byte = [0];
+            received.push(
+                tokio::time::timeout(Duration::from_secs(10), peer.channel.read(&mut byte))
+                    .await
+                    .map_or(0, |read| read.unwrap_or(0)),
+            );
+        }
+        received
+    });
+    let identity = dialing_identity(&ca, &client, address);
+    let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    let tls = remote_tls::client_config(&client, std::slice::from_ref(&ca.certificate)).unwrap();
+
+    let accepted = dial_preferred(&endpoint, &identity, &tls)
+        .await
+        .expect("no history: the older leaf still passes chain and name checks");
+    assert!(matches!(accepted, Connected::Tcp(_)));
+    drop(accepted);
+
+    identity.server_leaf.admit(&newer.certificate).unwrap();
+    assert!(dial_preferred(&endpoint, &identity, &tls).await.is_err());
+    assert_eq!(
+        server.await.unwrap(),
+        [0, 0],
+        "the server must receive no application byte"
+    );
 }

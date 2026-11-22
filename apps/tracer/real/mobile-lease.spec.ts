@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { personName, startRealServer } from "./server";
 import { tracerEvidencePath } from "../test/evidence-path";
 
-test("hidden mobile page keeps its terminal and a refused resume attaches afresh once", async ({ browser }) => {
+test("hidden mobile page keeps its terminal and a stale resume attaches afresh on the same socket", async ({ browser }) => {
   test.setTimeout(150_000);
   const server = await startRealServer({ latencyMs: Number(process.env.MOBILE_ONE_WAY_MS ?? 75), remoteListen: `127.0.0.1:${Number(process.env.TRACER_TEST_PORT ?? 4444) + 1000}` });
   const context = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true });
@@ -30,10 +30,6 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     await page.getByRole("button", { name: "Open infraternal" }).click();
     await page.locator(".cl-viewport").waitFor();
     await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    const unlock = page.getByLabel("Hosts settings").getByRole("button", { name: "Unlock", exact: true, includeHidden: true });
-    await expect(unlock).toHaveAttribute("data-shown", "true");
-    await unlock.evaluate(button => (button as HTMLButtonElement).click());
-    await expect.poll(() => page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).toEqual({ locked: false, initialized: true });
     const terminal = page.locator('.cl[data-view="console"] .ui-window').first();
     await expect(terminal).toHaveAttribute("data-status", "live");
     console.log("MOBILE_UI terminal ready");
@@ -69,8 +65,13 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     // Failed upgrades while the process restarts are ordinary retries. Count
     // actual handshake refusals and fresh Hellos rather than TCP attempts.
     const recovered = () => server.bridges.slice(before);
-    await expect.poll(() => recovered().filter(bridge => bridge.serverClose === "s0 the server refused to resume the connection").length, { timeout: 30_000 }).toBe(1);
-    await expect.poll(() => recovered().filter(bridge => bridge.helloResume === false).length, { timeout: 30_000 }).toBe(1);
+    // The server no longer knows the connection, so the socket that asked to resume is welcomed fresh, with a new
+    // connection id, instead of being refused and replaced by a second handshake (#569).
+    const earlierIds = new Set(server.bridges.slice(0, before).map(bridge => bridge.welcomeId).filter(id => id !== undefined));
+    expect(earlierIds.size).toBeGreaterThan(0);
+    await expect.poll(() => recovered().filter(bridge => bridge.helloResume === true && bridge.welcomeId !== undefined && !earlierIds.has(bridge.welcomeId)).length, { timeout: 30_000 }).toBe(1);
+    expect(recovered().filter(bridge => bridge.serverClose === "s0 the server refused to resume the connection").length).toBe(0);
+    expect(recovered().filter(bridge => bridge.helloResume === false).length).toBe(0);
     await expect(terminal).toHaveAttribute("data-status", "live", { timeout: 30_000 });
     console.log("MOBILE_UI fresh attach ready");
     const resend = page.getByRole("button", { name: "Send again", exact: true });
@@ -104,7 +105,8 @@ test("hidden mobile page keeps its terminal and a refused resume attaches afresh
     const attached = server.bridges.length;
     await page.waitForTimeout(2000);
     expect(server.bridges.length).toBe(attached);
-    expect(recovered().filter(bridge => bridge.helloResume === false).length).toBe(1);
+    // Still no second handshake: the stale resume was welcomed fresh on the socket that asked (#569).
+    expect(recovered().filter(bridge => bridge.helloResume === false).length).toBe(0);
     await terminal.locator(".terminal-host").click({ position: { x: 40, y: 40 } });
     await terminal.locator(".terminal-host textarea").focus();
     await page.keyboard.type("echo mobile-resumed-$((6*7))\n", { delay: 5 });

@@ -70,6 +70,7 @@ async fn mesh_namespace_client() {
         https_root: None,
         https_system_roots: false,
         execution_uid: 0,
+        server_leaf: std::sync::Arc::default(),
     };
     let state = infraternal_agent::sessions::state(Some(bundle.state.clone())).unwrap();
     let session = if let Some(session) = bundle.session {

@@ -279,7 +279,7 @@ async fn cleanup_remains_admitted_beyond_the_former_reserve_limit() {
     for _ in 0..RESERVE {
         let weak = weak.clone();
         held.push(tokio::spawn(async move {
-            weak.revoke_login(Uuid::from_u128(0x99)).await
+            weak.revoke_login(Uuid::from_u128(0x99), true).await
         }));
     }
     tokio::time::timeout(Duration::from_secs(10), reserve_full)
@@ -288,10 +288,18 @@ async fn cleanup_remains_admitted_beyond_the_former_reserve_limit() {
         .unwrap();
     for _ in 0..RESERVE {
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), weak.revoke_login(Uuid::new_v4()))
-                .await
-                .unwrap(),
-            Ok(())
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                weak.revoke_login(Uuid::new_v4(), true)
+            )
+            .await
+            .unwrap(),
+            // The fake host answers like an agent older than D356.
+            Ok(crate::embedded::Revoked {
+                report: Some(crate::access_report::AccessReport::not_checked(
+                    crate::access_report::Reason::OlderAgent
+                )),
+            })
         );
     }
     for task in held {

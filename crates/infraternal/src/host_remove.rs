@@ -1,6 +1,7 @@
 //! Adapts the remote plugin's removal action to private-stdin HTTPS requests and organized CLI
 //! results [16][168][202], #87. The start is the dry run; the finish sends its review, inside the
-//! session's admin window (D339).
+//! session's admin window (D339). A removal deletes infraternal and its state and nothing else
+//! (D398): it asks the host for no access report and shows none.
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -17,8 +18,29 @@ struct Input {
     #[serde(default)]
     review: Option<String>,
 }
+/// Which removal request one run sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Step {
+    /// The dry run.
+    Start,
+    /// The removal, with the review from the dry run.
+    Finish,
+}
+impl Step {
+    /// `--finish` removes and its absence is the dry run.
+    pub(crate) fn from_flags(finish: bool) -> Self {
+        if finish { Self::Finish } else { Self::Start }
+    }
+    /// The server route this step posts to.
+    fn path(self) -> &'static str {
+        match self {
+            Self::Start => "/remote/hosts/remove/start",
+            Self::Finish => "/remote/hosts/remove/finish",
+        }
+    }
+}
 /// Session cookies and reviews enter only through bounded private stdin.
-pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine: bool) -> ExitCode {
+pub(crate) fn run(server: &str, host: Uuid, step: Step, retain: bool, machine: bool) -> ExitCode {
     let operation = || -> io::Result<Value> {
         let mut bytes = Vec::new();
         io::stdin().take(32769).read_to_end(&mut bytes)?;
@@ -26,10 +48,9 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
             return Err(denied());
         }
         let input: Input = serde_json::from_slice(&bytes).map_err(|_| denied())?;
-        let body = if finish {
-            json!({"host_id":host,"review":input.review.ok_or_else(denied)?})
-        } else {
-            json!({"host_id":host,"uninstall":!retain})
+        let body = match step {
+            Step::Finish => json!({"host_id":host,"review":input.review.ok_or_else(denied)?}),
+            Step::Start => json!({"host_id":host,"uninstall":!retain}),
         };
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -37,7 +58,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         crate::block_on(&runtime, async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(20),
-                request(server, &input.session, finish, body),
+                request(server, &input.session, step.path(), body),
             )
             .await
             .map_err(|_| denied())?
@@ -47,7 +68,7 @@ pub(crate) fn run(server: &str, host: Uuid, finish: bool, retain: bool, machine:
         // The review or the result of the hosted action travels in `data`; the
         // sentence says which step the person is on.
         Ok(value) => {
-            let result = command_result(value, finish, machine);
+            let result = command_result(value, step == Step::Finish, machine);
             emit(result, machine, Exit::Ok)
         }
         Err(_) => super::output::refuse(
@@ -99,6 +120,7 @@ fn command_result(value: Value, finish: bool, machine: bool) -> CommandResult<Va
     }
     result
 }
+
 /// The TLS client for the removal routes: the connector `sign-in` and the hosted actions use,
 /// so all of them trust the host's public CA bundle even when the linked OpenSSL's default paths
 /// hold no roots (a vendored build names its build prefix). TLS 1.3, peer and hostname
@@ -109,7 +131,9 @@ fn removal_tls_connector() -> io::Result<openssl::ssl::SslConnector> {
 fn denied() -> io::Error {
     io::ErrorKind::PermissionDenied.into()
 }
-async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::Result<Value> {
+/// Post `body` to `path` on `server` over verified TLS with the session cookie,
+/// and read a bounded JSON answer. Anything but 200 is refused.
+async fn request(server: &str, cookie: &str, path: &str, body: Value) -> io::Result<Value> {
     use http_body_util::BodyExt;
     let url = url::Url::parse(server).map_err(|_| denied())?;
     if url.scheme() != "https"
@@ -144,11 +168,7 @@ async fn request(server: &str, cookie: &str, finish: bool, body: Value) -> io::R
     }));
     let request = hyper::Request::builder()
         .method("POST")
-        .uri(if finish {
-            "/remote/hosts/remove/finish"
-        } else {
-            "/remote/hosts/remove/start"
-        })
+        .uri(path)
         .header(
             "host",
             url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),

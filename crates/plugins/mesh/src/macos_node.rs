@@ -424,7 +424,8 @@ fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
 /// Callers pass a staging MTU no smaller than either the old or new peer budget until route
 /// metrics have been updated. No other tunnel or resolver is changed.
 fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string(), "up"])?;
+    // Kernel ioctls, not an `ifconfig` process: the spawn cost about 3.5 ms per start (#221).
+    crate::macos_utun_ioctl::set_mtu_and_up(interface, mtu)?;
     if let Some(config) = config {
         run_ifconfig([
             interface,
@@ -448,9 +449,9 @@ fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io
 
 /// Change the packet size on the already-owned utun interface.
 /// # Errors
-/// Reports a rejected `ifconfig` request.
+/// Reports a rejected kernel request (`SIOCSIFMTU`).
 fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
-    run_ifconfig([interface, "mtu", &mtu.to_string()])
+    crate::macos_utun_ioctl::set_mtu(interface, mtu)
 }
 
 fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
@@ -490,7 +491,7 @@ fn is_false(value: &bool) -> bool {
     !value
 }
 
-pub use crate::enrolment::Enrolment;
+pub use crate::enrolment::{Enrolment, MachineBindingError};
 
 /// Apply the binding rule to saved state; `true` means the key must rotate.
 ///
@@ -1402,7 +1403,11 @@ async fn bind_udp(
         return Err(io::ErrorKind::InvalidInput.into());
     }
     let admission = Arc::new(RwLock::new(PeerAdmission::new(private_key)));
-    let mut factory = UdpSocketFactory::default();
+    // The product's S choice, the same one the worker starts its route listener with.
+    let mut factory = UdpSocketFactory {
+        mac_connected: Some(walks::mac_connected_sends_enabled()),
+        ..UdpSocketFactory::default()
+    };
     if request.port != 0 {
         let params = UdpTransportFactoryParams {
             addr: None,
@@ -1599,7 +1604,7 @@ impl RuntimeState {
         &mut self,
         config: Config,
         budgets: PathBudgets,
-        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         self.apply_with_rollback(config, budgets, true, before)
             .await
@@ -1716,7 +1721,7 @@ impl RuntimeState {
         config: Config,
         budgets: PathBudgets,
         rollback_on_failure: bool,
-        before: &BTreeMap<PublicKey, crate::candidate_walks::EngineEndpoint>,
+        before: &BTreeMap<crate::policy::model::PublicKey, crate::candidate_walks::EngineEndpoint>,
     ) -> io::Result<RuntimeInfo> {
         let policy = PacketFilter::prepare_policy(&config, MeshProxyIngress::default())?;
         let utun = self.utun.as_ref().ok_or(io::ErrorKind::NotConnected)?;
@@ -2139,12 +2144,23 @@ fn valid_rotation_request(operation_id: &str, sequence: u64) -> bool {
 }
 
 impl Node {
+    /// Refuse a folder bound to another Mac before the supervisor starts (see `macos_machine`).
+    /// # Errors
+    /// `PermissionDenied` carrying a [`MachineBindingError`].
+    pub fn check_enrolled_machine(state_directory: &Path) -> io::Result<()> {
+        crate::macos_machine::check_existing(state_directory)
+    }
+
     /// Restore accepted public intent, clean only old utun routes, and resume before coordinator dialing.
     ///
     /// State that another enrolment issued is discarded first (see [`reconcile`]).
     /// # Errors
     /// Refuses unsafe state, an unreadable node key or failed utun/device startup.
     pub fn restore(state_directory: &Path, enrolment: Option<&Enrolment>) -> io::Result<Self> {
+        // An enrolled node belongs to one Mac: refuse a copied folder first (#221).
+        if enrolment.is_some() {
+            crate::macos_machine::bind(state_directory, crate::macos_machine::fingerprint())?;
+        }
         #[cfg(feature = "mesh-dns")]
         crate::dns_integration::DnsIntegration::default().remove()?;
         let path = state_directory.join(PUBLIC_STATE);
@@ -3147,6 +3163,9 @@ mod tests {
     mod authority_mtu;
     /// The Mac UDP listener: socket reuse and the handshake admission guard.
     mod listener;
+    /// An enrolled restore binds the folder to this Mac and refuses another Mac's (#221).
+    mod machine_binding;
+    use machine_binding::bind_this_mac;
     /// A failed retirement save leaves a peer-free deny snapshot, written before the worker fence.
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
@@ -4089,6 +4108,54 @@ mod tests {
         );
     }
 
+    /// A fresh utun comes up at the requested MTU through ioctls alone, and a later MTU change
+    /// keeps it up (#221). `ifconfig` is used only to read the result back.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges."]
+    fn utun_ioctls_set_mtu_and_bring_the_interface_up() {
+        let open = super::OpenUtun::open().expect("open a utun (needs root)");
+        // A new utun is already up at MTU 1500 on current macOS, so take it down first: that is
+        // the state in which setting IFF_UP has to work.
+        let down = std::process::Command::new("/sbin/ifconfig")
+            .args([open.name.as_str(), "down"])
+            .status()
+            .expect("run ifconfig down");
+        assert!(down.success(), "ifconfig down failed");
+        let before = ifconfig_text(&open.name);
+        assert!(
+            !before.contains("<UP,"),
+            "the utun is down before: {before}"
+        );
+        assert!(
+            !before.contains("mtu 1280"),
+            "MTU is not 1280 before: {before}"
+        );
+        super::configure_interface(&open.name, None, 1280).expect("mtu and up by ioctl");
+        let after = ifconfig_text(&open.name);
+        assert!(after.contains("mtu 1280"), "MTU 1280 expected: {after}");
+        assert!(after.contains("<UP,"), "interface up expected: {after}");
+        super::set_interface_mtu(&open.name, 1400).expect("mtu change by ioctl");
+        let changed = ifconfig_text(&open.name);
+        assert!(changed.contains("mtu 1400"), "MTU 1400 expected: {changed}");
+        assert!(
+            changed.contains("<UP,"),
+            "still up after the change: {changed}"
+        );
+        assert!(
+            super::set_interface_mtu("utun999999", 1280).is_err(),
+            "no such interface"
+        );
+    }
+
+    /// `ifconfig <name>` output, for reading a result back.
+    fn ifconfig_text(name: &str) -> String {
+        let output = std::process::Command::new("/sbin/ifconfig")
+            .arg(name)
+            .output()
+            .expect("run ifconfig");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
@@ -4569,9 +4636,12 @@ mod tests {
             .collect()
     }
 
+    /// State from an unbound (slice-1) node loses its key and peers once, then keeps everything.
     #[test]
     fn restoring_unbound_state_removes_the_key_and_logs_why() {
         let directory = test_directory();
+        // Bind while empty: state with no record is refused.
+        bind_this_mac(&directory);
         let current = enrolment(b"coordinator B");
         write_public_state(&directory.join(PUBLIC_STATE), &bound_state(None))
             .expect("write slice-1 state");
@@ -4593,9 +4663,12 @@ mod tests {
         assert_eq!(rotation_reasons(&directory), ["enrolment_changed"]);
     }
 
+    /// Restoring under a new enrolment retires the old key and records the new binding.
     #[test]
     fn restore_under_a_new_enrolment_removes_the_old_key_and_records_the_binding() {
         let directory = test_directory();
+        // Bind while empty: state with no record is refused.
+        bind_this_mac(&directory);
         let old = enrolment(b"coordinator A");
         let new = enrolment(b"coordinator B");
         write_public_state(

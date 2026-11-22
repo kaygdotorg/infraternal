@@ -5,6 +5,10 @@
 #[cfg(any(feature = "source", feature = "server"))]
 use infraternal_plugin_desktop::media;
 use infraternal_plugin_desktop::{capture, protocol, socket};
+/// The helper's frame backlog, compiled into this test because `helper.rs` is.
+#[allow(dead_code)]
+#[path = "../src/backlog.rs"]
+mod backlog;
 #[path = "../src/helper.rs"]
 mod helper;
 #[allow(dead_code)]
@@ -123,7 +127,13 @@ while True:
     let path = executable.clone();
     let (sent, received) = mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let result = helper::session(server, &mut companion, &path, &stop);
+        let result = helper::session(
+            server,
+            &mut companion,
+            &path,
+            &stop,
+            &infraternal_plugin_desktop::socket::Peer::SameUser,
+        );
         drop(companion);
         sent.send(result).unwrap();
     });

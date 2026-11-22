@@ -271,8 +271,19 @@ struct Open {
 pub(crate) use crate::daemon_writer::hello_capabilities;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+/// The trusted server's request to revoke one person's host logins (`terminal.login.revoke`).
 struct RevokeLogin {
     person: uuid::Uuid,
+    /// Whether the D356 access report is wanted. The server leaves it out
+    /// for a host removal (D398), so the default is to scan: a caller that
+    /// says nothing is a person's revoke.
+    #[serde(default = "wants_report")]
+    report: bool,
+}
+
+/// The default of [`RevokeLogin::report`].
+fn wants_report() -> bool {
+    true
 }
 
 struct Opened {
@@ -581,6 +592,259 @@ fn spawn_open(opens: &mut OpenTasks, stream: u32, call_id: u32, task: OpenTask) 
     });
 }
 
+/// Serialized size the revoke reply stays under, below the control-frame
+/// JSON limit with room for the envelope.
+const REVOKE_REPLY_BUDGET: usize = 30 * 1024;
+
+/// The revoke result for the server: `revoked`, D353's `warning` when
+/// background programs may remain, and D356's `access` report, which
+/// only the person revoking sees (never a log). If the report would not fit a
+/// control frame, its last lines are dropped and it says it is truncated.
+fn revoke_reply(revoked: &crate::logins::Revoked, report: bool) -> Vec<u8> {
+    let mut access = revoked.access.clone();
+    loop {
+        let mut reply = serde_json::json!({ "revoked": true });
+        if revoked.background_may_remain {
+            // D353: others still share the account, or linger came back (J308).
+            reply["warning"] = "Background programs of this host account may still be running: other people still have access to it, linger returned, or account shutdown could not be verified.".into();
+        }
+        // D356: always sent, so "nothing changed" is never confused with
+        // "not checked" (an older agent sends none).
+        // A revoke that was not asked for a report (a host removal, D398)
+        // sends none; the server never reads one then.
+        if report {
+            reply["access"] = serde_json::to_value(&access).unwrap_or_default();
+        }
+        let bytes = serde_json::to_vec(&reply).unwrap_or_else(|_| b"{\"revoked\":true}".to_vec());
+        if bytes.len() <= REVOKE_REPLY_BUDGET {
+            return bytes;
+        }
+        // Lines go first; then whole files, counted, never silently.
+        if !trim_report(&mut access) {
+            return bytes;
+        }
+    }
+}
+
+/// How much the person revoking needs to see a reported file: what admits
+/// a login most, then what runs without one, then the rest. Trimming takes
+/// from the least first, so `authorized_keys*` goes last (J334 P2-2).
+fn report_value(path: &str) -> u8 {
+    if path.contains("/.ssh/authorized_keys") {
+        3
+    } else if path == "crontab"
+        || path.starts_with("at job")
+        || path.contains("/systemd/user")
+        || path.contains("/environment.d")
+    {
+        2
+    } else {
+        1
+    }
+}
+
+/// Makes the report smaller by one step, marking the account it took from
+/// truncated. The order is by value, across kinds: lines of the least
+/// valuable files, then of the middling ones, then not-scanned names, then
+/// whole files from the least valuable up (counted in `omitted_files`), and
+/// only last what admits a login (J334 P2-2). `false` when nothing is left.
+fn trim_report(access: &mut crate::access_files::Access) -> bool {
+    /// One step of the order.
+    enum Step {
+        /// A line of a file worth this much.
+        Line(u8),
+        /// A not-scanned name.
+        Unscanned,
+        /// A whole file worth this much.
+        File(u8),
+    }
+    for account in access.accounts.iter_mut().rev() {
+        if !account.processes.is_empty() {
+            account.processes.truncate(account.processes.len() / 2);
+            // Keep programs_may_remain: trimming evidence never proves shutdown.
+            return true;
+        }
+    }
+    let order = [
+        Step::Line(1),
+        Step::Line(2),
+        Step::Unscanned,
+        Step::File(1),
+        Step::File(2),
+        Step::Line(3),
+        Step::File(3),
+    ];
+    for step in order {
+        let found = match step {
+            Step::Unscanned => access
+                .accounts
+                .iter()
+                .rposition(|account| !account.unscanned.is_empty())
+                .map(|a| (a, None)),
+            Step::Line(value) | Step::File(value) => {
+                let lines = matches!(step, Step::Line(_));
+                access
+                    .accounts
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find_map(|(a, account)| {
+                        account
+                            .files
+                            .iter()
+                            .rposition(|file| {
+                                report_value(&file.path) == value
+                                    && (!lines || !file.lines.is_empty())
+                            })
+                            .map(|f| (a, Some((f, lines))))
+                    })
+            }
+        };
+        let Some((a, place)) = found else {
+            continue;
+        };
+        let account = &mut access.accounts[a];
+        match place {
+            None => {
+                account.unscanned.pop();
+            }
+            Some((f, true)) => {
+                let file = &mut account.files[f];
+                file.lines.pop();
+                let more = "more new lines than the report shows";
+                match &mut file.note {
+                    Some(note) if note.contains(more) => {}
+                    Some(note) => {
+                        note.push_str("; ");
+                        note.push_str(more);
+                    }
+                    None => file.note = Some(more.to_owned()),
+                }
+            }
+            Some((f, false)) => {
+                account.files.remove(f);
+                account.omitted_files += 1;
+            }
+        }
+        account.truncated = true;
+        account.complete = false;
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod revoke_reply_tests {
+    //! D356: the revoke reply always says what was checked, and fits a frame.
+    use crate::access_files::{Access, AccountReport, Change, ChangeKind, State};
+
+    /// A report far over the frame budget is cut to fit; lines go first,
+    /// then not-scanned names, then whole files, which are counted, and the
+    /// account says truncated. J334's hostile reply (P2-2): 300 not-scanned
+    /// names of control characters and 400 big files cannot push out the
+    /// planted key, which is the last thing trimmed. A report with nothing
+    /// changed still carries its outcome.
+    #[test]
+    fn the_reply_fits_a_frame_and_counts_what_it_drops() {
+        let file = |index: usize| Change {
+            path: format!("~/.config/autostart/{index}.desktop"),
+            change: ChangeKind::Added,
+            lines: vec!["x".repeat(190); 4],
+            note: None,
+        };
+        let mut files = vec![Change {
+            path: "~/.ssh/authorized_keys".into(),
+            change: ChangeKind::Added,
+            lines: vec!["ssh-ed25519 AAAAplanted left-behind".into()],
+            note: None,
+        }];
+        files.extend((0..400).map(file));
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            access: Access {
+                state: State::Changed,
+                reason: None,
+                omitted_accounts: 3,
+                accounts: vec![AccountReport {
+                    account: "deploy".into(),
+                    state: State::Changed,
+                    files,
+                    unscanned: (0..300).map(|_| "\u{fffd}".repeat(200)).collect(),
+                    ..AccountReport::default()
+                }],
+            },
+        };
+        let bytes = super::revoke_reply(&revoked, true);
+        assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
+        let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["access"]["omitted_accounts"], 3);
+        let account = &reply["access"]["accounts"][0];
+        assert_eq!(account["truncated"], true);
+        let listed = account["files"].as_array().unwrap().len();
+        assert_eq!(
+            listed + usize::try_from(account["omitted_files"].as_u64().unwrap()).unwrap(),
+            401
+        );
+        assert_eq!(
+            account["files"][0]["lines"][0], "ssh-ed25519 AAAAplanted left-behind",
+            "the planted key was trimmed before less valuable files"
+        );
+        assert!(reply["warning"].is_string(), "D353's warning was dropped");
+        let clean = super::revoke_reply(&crate::logins::Revoked::default(), true);
+        let clean: serde_json::Value = serde_json::from_slice(&clean).unwrap();
+        assert_eq!(clean["access"]["state"], "unchanged");
+    }
+    /// D398: a revoke that was not asked for a report (a host removal) sends
+    /// none, and still carries the receipt and D353's warning.
+    #[test]
+    fn a_revoke_without_a_report_sends_only_the_receipt() {
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            ..crate::logins::Revoked::default()
+        };
+        let reply: serde_json::Value =
+            serde_json::from_slice(&super::revoke_reply(&revoked, false)).unwrap();
+        assert_eq!(reply["revoked"], true);
+        assert!(reply.get("access").is_none(), "a report was sent: {reply}");
+        assert!(reply["warning"].is_string());
+        let asked: serde_json::Value =
+            serde_json::from_slice(&super::revoke_reply(&revoked, true)).unwrap();
+        assert!(asked.get("access").is_some());
+    }
+    /// D362 process evidence cannot overflow a reply or lose its warning during trimming.
+    #[test]
+    fn process_lists_fit_the_reply_without_claiming_shutdown() {
+        use crate::access_files::{Access, AccountReport, Reason, State};
+        let account = AccountReport {
+            state: State::NotChecked,
+            reason: Some(Reason::ProgramsMayRemain),
+            programs_may_remain: true,
+            processes: vec![format!("1234 {}", "w".repeat(64)); 64],
+            ..AccountReport::default()
+        };
+        let revoked = crate::logins::Revoked {
+            background_may_remain: true,
+            access: Access {
+                state: State::NotChecked,
+                reason: Some(Reason::ProgramsMayRemain),
+                omitted_accounts: 0,
+                accounts: vec![account; 64],
+            },
+        };
+        let bytes = super::revoke_reply(&revoked, true);
+        assert!(bytes.len() <= super::REVOKE_REPLY_BUDGET);
+        let reply: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            reply["access"]["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|account| account["programs_may_remain"] == true
+                    && account["state"] == "not_checked")
+        );
+    }
+}
+
 /// Revoke or restore one person's terminals on its own task, after the first login operation has chosen a manager.
 #[cold]
 #[inline(never)]
@@ -589,6 +853,7 @@ fn spawn_revocation(
     manager: LoginManager,
     person: uuid::Uuid,
     restore: bool,
+    report: bool,
     finished: oneshot::Sender<OpenResult>,
 ) -> tokio::task::JoinHandle<()> {
     use infraternal_plugin_api::admission::OpenRefusal;
@@ -599,16 +864,9 @@ fn spawn_revocation(
                 .await
                 .map(|()| b"{\"restored\":true}".to_vec())
         } else {
-            crate::logins::revoke(&state, manager, person)
+            crate::logins::revoke_reporting(&state, manager, person, report)
                 .await
-                .map(|revoked| {
-                    if revoked.background_may_remain {
-                        // D353: others still share the account, or linger came back (J308).
-                        b"{\"revoked\":true,\"warning\":\"Background programs of this host account may still be running: other people still have access to it, or its own programs turned linger back on.\"}".to_vec()
-                    } else {
-                        b"{\"revoked\":true}".to_vec()
-                    }
-                })
+                .map(|revoked| revoke_reply(&revoked, report))
         }
         .map(|json| Opened {
             session: None,
@@ -1424,7 +1682,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 // remaining resource quota, and keeps terminal dispatch live.
                                 revocations.retain(|task| !task.is_finished());
                                 let (finished, result) = tokio::sync::oneshot::channel();
-                                revocations.push(spawn_revocation(state.clone(), login_manager(&mut login_manager_slot), input.person, action == "terminal.login.restore", finished));
+                                revocations.push(spawn_revocation(state.clone(), login_manager(&mut login_manager_slot), input.person, action == "terminal.login.restore", input.report, finished));
                                 opens.spawn(async move {
                                     (stream, call_id, result.await.unwrap_or(Err(OpenRefusal::ResourceUnavailable)))
                                 });
@@ -1503,8 +1761,15 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 reply(&control, Message::Ended(stream))?;
                                 continue;
                             }
-                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS || streams.contains_key(&stream) {
-                                return Err(sessions::invalid("terminal stream already attached or limit reached"));
+                            if streams.contains_key(&stream) {
+                                return Err(sessions::invalid("terminal stream already attached"));
+                            }
+                            // A full link refuses this one stream at once and keeps
+                            // its siblings: the server turns the Close into a plain
+                            // sentence for the person (#562).
+                            if streams.len() >= infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
+                                reply(&control, Message::Close(stream, "terminal stream limit"))?;
+                                continue;
                             }
                             // The registry only caches shims this process has seen. A miss is not
                             // proof of death, and never a reason to drop every sibling stream: the
@@ -1787,12 +2052,19 @@ impl Link {
         })
         .await
     }
+    /// Read the next shim frame, refusing frames of a capability this link did
+    /// not select (approximate Snapshots, echo state) as a protocol error.
     async fn read(&mut self) -> io::Result<Shim> {
         let frame = self.reader.read(&mut self.session.peer).await?;
         if matches!(frame, Shim::SnapshotWithFlags(..))
             && self.session.caps & APPROXIMATE_SNAPSHOT == 0
         {
             return Err(sessions::invalid("unnegotiated approximate Snapshot"));
+        }
+        if matches!(frame, Shim::EchoState(..))
+            && self.session.caps & infraternal_shim::frame::ECHO_STATE == 0
+        {
+            return Err(sessions::invalid("unnegotiated echo state"));
         }
         Ok(frame)
     }
@@ -2752,6 +3024,16 @@ async fn terminal_run(
                             let (nonce, sent_us) = probe.take().ok_or_else(|| sessions::invalid("missing liveness fence"))?;
                             capture_io!(emit(&tx, Message::Pong(stream, nonce, sent_us)))?;
                         }
+                    }
+                    Shim::EchoState(seq, flags) => {
+                        // A state, not a cursor fence: it may pass output held
+                        // for credit, so a prompt's report is never late (#569).
+                        let json = terminal_events::Notice::Echo {
+                            session_id: uuid::Uuid::from_bytes(id),
+                            seq,
+                            hidden: flags & infraternal_shim::frame::ECHO_HIDDEN != 0,
+                        }.json()?;
+                        emit(&tx, Message::Event(stream, json)).await?;
                     }
                     Shim::Exited(status, final_seq) => {
                         release_key_cover(&priority, stream, attachment, key_repaint_target).await?;

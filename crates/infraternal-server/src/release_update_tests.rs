@@ -11,7 +11,9 @@
 //! re-verified (or removed) before use; and a release the channel withdraws is removed,
 //! both by the periodic check and by S4's apply-time confirmation; policy refusals and
 //! "updates off" never back off the timer; and an explicit rollback holds until it is
-//! applied or cancelled; and the status says when updates are off on this host, and why.
+//! applied or cancelled; and the status says when updates are off on this host, and why;
+//! and the owner controls (#211 S5) check, stage, apply, cancel and list history only for an
+//! owner with a fresh session, through the applier seam.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
 use crate::release_payload::tests::{Bucket, Release};
@@ -19,6 +21,7 @@ use infraternal_plugin_release::update::{
     Admission, NOTHING_STAGED, Outcome, REMOVED_UNVERIFIED, REMOVED_WITHDRAWN, UPDATES_OFF,
     UpdateState, Updater, status,
 };
+use serde_json::json;
 use std::{os::unix::fs::PermissionsExt, sync::atomic::Ordering};
 
 /// The running version in most cases: older than the published release.
@@ -75,11 +78,13 @@ fn state(release: &Release, current: &str) -> UpdateState {
     status(&release.root, current)
 }
 
-/// Names left in `updates/`, sorted.
+/// Names left in `updates/`, sorted, without `history.json` (S5's record, which tests of the
+/// folder's hygiene do not care about).
 fn leftovers(release: &Release) -> Vec<String> {
     let mut names: Vec<_> = std::fs::read_dir(release.root.join("updates"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name != "history.json")
         .collect();
     names.sort();
     names
@@ -725,4 +730,302 @@ async fn refusals_and_disabled_updates_never_back_off() {
     );
     assert_eq!(image_requests(&bucket), requests, "no request while off");
     assert_eq!(state(&release, OLD).failures, 0);
+}
+
+/// A signed-in owner's socket in the owner-controls test.
+struct OwnerHost;
+impl infraternal_plugin_api::SocketHost for OwnerHost {
+    fn user_id(&self) -> &'static str {
+        "owner"
+    }
+    fn token_hash(&self) -> &'static str {
+        "session-hash"
+    }
+    fn authorized<'a>(
+        &'a self,
+        op: infraternal_plugin_api::Operation<'a, Result<(), ()>>,
+    ) -> infraternal_plugin_api::Operation<'a, Result<(), ()>> {
+        op
+    }
+    fn fresh(&self, _now: i64) -> infraternal_plugin_api::Operation<'_, bool> {
+        Box::pin(async { true })
+    }
+    fn live(&self) -> infraternal_plugin_api::Operation<'_, bool> {
+        Box::pin(async { true })
+    }
+    fn may_configure(&self) -> infraternal_plugin_api::Operation<'_, bool> {
+        Box::pin(async { true })
+    }
+}
+
+/// An applier that only records which release it was handed, standing in for S4.
+struct Recorder(std::sync::Mutex<Vec<String>>);
+impl infraternal_plugin_release::applier::UpdateApplier for Recorder {
+    fn apply(
+        &self,
+        release: infraternal_plugin_release::update::Confirmed,
+    ) -> infraternal_plugin_api::Operation<
+        '_,
+        Result<infraternal_plugin_release::applier::Started, &'static str>,
+    > {
+        self.0.lock().unwrap().push(release.version().to_owned());
+        let to = release.version().to_owned();
+        Box::pin(async move {
+            Ok(infraternal_plugin_release::applier::Started {
+                to,
+                lost_since: None,
+            })
+        })
+    }
+    fn rollback(
+        &self,
+    ) -> infraternal_plugin_api::Operation<
+        '_,
+        Result<infraternal_plugin_release::applier::Started, &'static str>,
+    > {
+        self.0.lock().unwrap().push("rollback".into());
+        Box::pin(async {
+            Ok(infraternal_plugin_release::applier::Started {
+                to: OLD.into(),
+                lost_since: Some(1_700_000_000),
+            })
+        })
+    }
+    fn rollback_plan(&self) -> Option<infraternal_plugin_release::applier::RollbackPlan> {
+        Some(infraternal_plugin_release::applier::RollbackPlan {
+            to: OLD.into(),
+            copy_taken_at: 1_700_000_000,
+        })
+    }
+}
+
+/// The owner controls (#211 S5): everything that changes what the server runs needs an owner
+/// with a fresh session; a plain check needs only the owner; apply refuses a release other than
+/// the one the owner saw; cancel and settings work; history lists newest first; and status
+/// carries the quiet window and the rollback plan (what going back restores).
+#[tokio::test]
+async fn owner_controls_need_a_fresh_owner_and_reach_the_applier() {
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let trust = format!("{}{}", release.trust, old.trust);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE plugin_settings(role TEXT,plugin TEXT,enabled INTEGER,settings TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(role,plugin)); CREATE TABLE users(id TEXT,owner INTEGER); CREATE TABLE sessions(token_hash TEXT,user_id TEXT,unlocked INTEGER,expires INTEGER,fresh INTEGER); INSERT INTO users VALUES('owner',1); INSERT INTO plugin_settings VALUES('server','release',1,'{\"channel\":\"edge\"}');")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lookup = infraternal_plugin_release::latest::VerifiedLookup::new(
+        release.root.clone(),
+        bucket.origin.clone(),
+        Arc::new(Engine {
+            trust: Some(trust.clone()),
+        }),
+    )
+    .with_updates(Ok(()))
+    .with_updater(Arc::new(updater_with_trust(
+        &release,
+        &bucket.origin,
+        NEW,
+        &trust,
+    )));
+    let recorder = Arc::new(Recorder(std::sync::Mutex::default()));
+    let service =
+        infraternal_plugin_release::service::ReleaseService::new(pool.clone(), Arc::new(lookup))
+            .with_applier(recorder.clone());
+    let host: Option<&dyn infraternal_plugin_api::SocketHost> = Some(&OwnerHost);
+    let call = |action: &'static str, input: &'static [u8]| {
+        let service = service.clone();
+        async move { service.call(action, input, host).await }
+    };
+    // An owner whose session is not fresh may check the channel, and nothing else.
+    assert_eq!(
+        call("release.update.check", b"{}").await.unwrap()["outcome"],
+        "current"
+    );
+    for (action, input) in [
+        ("release.update.check", format!("{{\"version\":\"{OLD}\"}}")),
+        ("release.update.apply", "{}".into()),
+        ("release.update.rollback", "{}".into()),
+        ("release.update.cancel", "{}".into()),
+        ("release.update.settings", "{\"quiet_minutes\":30}".into()),
+    ] {
+        let input: &'static [u8] = Box::leak(input.into_bytes().into_boxed_slice());
+        assert_eq!(call(action, input).await, Err("not permitted"), "{action}");
+    }
+    assert!(recorder.0.lock().unwrap().is_empty());
+    // A non-owner is refused even the plain check.
+    sqlx::query("UPDATE users SET owner=0")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        call("release.update.check", b"{}").await,
+        Err("not permitted")
+    );
+    sqlx::query("UPDATE users SET owner=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions VALUES('session-hash','owner',1,unixepoch()+600,unixepoch())",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Stage the older release by version: held, listed in the status.
+    let input: &'static [u8] = Box::leak(
+        format!("{{\"version\":\"{OLD}\"}}")
+            .into_bytes()
+            .into_boxed_slice(),
+    );
+    let staged = call("release.update.check", input).await.unwrap();
+    assert_eq!(
+        (&staged["outcome"], &staged["version"]),
+        (&json!("staged"), &json!(OLD))
+    );
+    assert_eq!(staged["state"]["hold"], OLD);
+    // Apply refuses a release other than the one named, then applies the staged one.
+    let wrong: &'static [u8] = Box::leak(
+        format!("{{\"version\":\"{NEWER}\"}}")
+            .into_bytes()
+            .into_boxed_slice(),
+    );
+    assert_eq!(
+        call("release.update.apply", wrong).await,
+        Err("a different release is staged")
+    );
+    assert!(recorder.0.lock().unwrap().is_empty());
+    let started = call("release.update.apply", input).await.unwrap();
+    assert_eq!(started["to"], OLD);
+    assert_eq!(recorder.0.lock().unwrap().as_slice(), [OLD]);
+    // Status: quiet window default, then saved; rollback plan; invalid windows refused.
+    let shown = call("release.update.status", b"{}").await.unwrap();
+    assert_eq!(shown["quiet_minutes"], 5);
+    assert_eq!(
+        shown["rollback"],
+        json!({"to":OLD,"copy_taken_at":1_700_000_000})
+    );
+    let shown = call("release.update.settings", b"{\"quiet_minutes\":30}")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&shown["quiet_minutes"], &shown["channel"]),
+        (&json!(30), &json!("edge"))
+    );
+    for bad in [
+        b"{\"quiet_minutes\":0}".as_slice(),
+        b"{\"quiet_minutes\":1441}",
+        b"{\"quiet_minutes\":-1}",
+        b"{}",
+    ] {
+        assert_eq!(
+            call("release.update.settings", bad).await,
+            Err("invalid input")
+        );
+    }
+    // Rollback reaches the applier and says which data is lost.
+    let back = call("release.update.rollback", b"{}").await.unwrap();
+    assert_eq!(back["lost_since"], 1_700_000_000);
+    // Cancel removes the hold; history lists newest first.
+    let cancelled = call("release.update.cancel", b"{}").await.unwrap();
+    assert!(cancelled["hold"].is_null() && cancelled["staged"].is_null());
+    let history = call("release.update.history", b"{}").await.unwrap();
+    let kinds: Vec<_> = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["removed", "staged"]);
+    assert_eq!(history["entries"][0]["version"], OLD);
+}
+
+/// Updates switched off win over a held explicit stage (J734 P3-a): the owner turned
+/// the release plugin off after staging a rollback, so the apply-time confirmation
+/// refuses it and nothing applies. The stage itself is kept for when updates return.
+#[tokio::test]
+async fn switched_off_updates_refuse_even_a_held_stage() {
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let switch = Arc::clone(&enabled);
+    let running_new = Updater::new(
+        &release.root,
+        bucket.origin.clone(),
+        NEW.into(),
+        artifact().into(),
+        Arc::new(Engine {
+            trust: Some(format!("{}{}", release.trust, old.trust)),
+        }),
+        Arc::new(move || {
+            let on = switch.load(Ordering::Relaxed);
+            Box::pin(async move { Ok((on, "edge".to_owned())) })
+        }),
+    );
+    assert_eq!(
+        running_new.check(Some(OLD), Admission::Explicit).await,
+        Ok(Outcome::Staged(OLD.into()))
+    );
+    enabled.store(false, Ordering::Relaxed);
+    assert_eq!(running_new.confirm_staged().await.err(), Some(UPDATES_OFF));
+    let saved = state(&release, NEW);
+    assert_eq!(
+        (saved.staged.as_deref(), saved.hold.as_deref()),
+        (Some(OLD), Some(OLD))
+    );
+    enabled.store(true, Ordering::Relaxed);
+    assert_eq!(running_new.confirm_staged().await.unwrap().version(), OLD);
+}
+
+/// A pointer that moves on to a newer release keeps the staged one until the newer one
+/// is staged (J734 P3-c). Here the newer release's signed metadata is published but its
+/// image is not there yet, so the check verifies the pointer, then fails the download:
+/// the older release stays staged and nothing calls it withdrawn. At apply time the
+/// confirmation refuses it, because the channel now offers something newer, but keeps
+/// it; once the newer image arrives it replaces the staged one.
+#[tokio::test]
+async fn a_superseded_release_stays_staged_until_its_successor_is_ready() {
+    use infraternal_plugin_release::update::SUPERSEDED;
+    let (release, bucket) = channel(NEW);
+    // NEWER is signed by its own fixture key; the updater trusts both (D224 spare key).
+    let newer = Release::with_version(4096, NEWER);
+    let updater = updater_with_trust(
+        &release,
+        &bucket.origin,
+        OLD,
+        &format!("{}{}", release.trust, newer.trust),
+    );
+    assert!(updater.check(None, Admission::Forward).await.is_ok());
+    let image = format!("/releases/{NEWER}/{}", artifact());
+    bucket.files.lock().unwrap().extend(
+        newer
+            .files
+            .iter()
+            .filter(|(path, _)| **path != image)
+            .map(|(path, bytes)| (path.clone(), bytes.clone())),
+    );
+    point(&bucket, NEWER);
+    assert!(updater.check(None, Admission::Forward).await.is_err());
+    let saved = state(&release, OLD);
+    assert_eq!(saved.available.as_deref(), Some(NEWER));
+    assert_eq!((saved.staged.as_deref(), saved.removed), (Some(NEW), None));
+    assert_eq!(updater.confirm_staged().await.err(), Some(SUPERSEDED));
+    let saved = state(&release, OLD);
+    assert_eq!((saved.staged.as_deref(), saved.removed), (Some(NEW), None));
+    // NEWER's image arrives: it replaces NEW.
+    bucket
+        .files
+        .lock()
+        .unwrap()
+        .insert(image.clone(), newer.files[&image].clone());
+    assert_eq!(
+        updater.check(None, Admission::Forward).await,
+        Ok(Outcome::Staged(NEWER.into()))
+    );
+    assert_eq!(state(&release, OLD).removed, None);
 }

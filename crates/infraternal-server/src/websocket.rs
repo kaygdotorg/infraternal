@@ -23,9 +23,10 @@ use crate::{
     stream_close::{
         AGENT_CONNECTION_DROPPED, AGENT_CONNECTION_REFUSED, AGENT_STREAM_ENDED, ATTACH_REFUSED,
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
-        CloseOwner, CloseReason, CloseRecord, CloseWho, INPUT_QUEUE_FULL, NO_SESSION,
-        PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER, TERMINAL_ROUTE_IDLE,
-        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
+        CloseOwner, CloseReason, CloseRecord, CloseWho, HOST_STREAM_LIMIT, INPUT_QUEUE_FULL,
+        NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER,
+        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
+        safe_websocket_reason,
     },
 };
 use axum::{
@@ -102,6 +103,11 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(25);
 const REFUSAL_LOG_TIMEOUT: Duration = Duration::from_millis(250);
 // Expired rows are pruned during new handshakes; this caps retained bearer metadata globally.
 const MAX_RESUME_ROWS: i64 = 4096;
+/// Disconnected, still-resumable rows one account keeps. A new connection evicts that account's oldest beyond
+/// this, so one account's connect-and-drop loop can no longer fill [`MAX_RESUME_ROWS`] and refuse every other
+/// account's new sockets (#572 finding 4). 64 is four times the live limit: a person whose 16 tabs all drop and
+/// reconnect several times inside the 120 s window still resumes each of them. The global cap stays the backstop.
+const MAX_USER_RESUME_ROWS: i64 = 64;
 // Reject further AttachTerm requests on a socket at this bound.
 pub(super) const MAX_ATTACHMENTS: usize = 32;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
@@ -273,6 +279,9 @@ impl WebSocketState {
         let queries: Arc<std::sync::Mutex<crate::terminal_queries::Registry>> = Arc::default();
         let inventory_queries = queries.clone();
         let mut inventory = agent.session_inventory();
+        // Update switches record the live sessions, and trials require them (#211 S4).
+        #[cfg(feature = "release")]
+        crate::update_apply::set_session_inventory(inventory.clone());
         let inventory_pool = pool.clone();
         let inventory_changes = session_changes.clone();
         tokio::spawn(async move {
@@ -529,6 +538,9 @@ async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // A new release on trial takes no terminal traffic until the trial commits (#211 S4).
+    #[cfg(feature = "release")]
+    crate::update_apply::terminals_admitted().await;
     if headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -735,39 +747,8 @@ async fn run_socket(
         drop(sink);
         drop(source);
         if let Some(connection_id) = resume_attempt {
-            // After the socket is closed, so a busy database never delays the refusal;
-            // bounded, so it never holds the task either. A timeout only loses lines.
-            let rows = tokio::time::timeout(
-                REFUSAL_LOG_TIMEOUT,
-                sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
-                    .bind(connection_id.as_slice())
-                    .bind(&user_id)
-                    .fetch_all(&state.pool),
-            )
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default();
-            for row in rows {
-                let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice())
-                else {
-                    continue;
-                };
-                let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
-                let host_id = host_bytes
-                    .as_deref()
-                    .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
-                let stream_id =
-                    u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
-                state.close_logs.record(&CloseRecord::new(
-                    CloseOwner::of(&user_id),
-                    CloseWho::Server,
-                    RESUME_REFUSED,
-                    host_id,
-                    session_id,
-                    stream_id,
-                ));
-            }
+            // After the socket is closed, so a busy database never delays the refusal.
+            log_refused_resume_writers(&state, &user_id, connection_id).await;
         }
         if let Some(welcome) = pending_welcome.take() {
             rollback_connection(&state.pool, &user_id, &welcome).await;
@@ -776,6 +757,16 @@ async fn run_socket(
     };
     // Welcome was sent while authorized; subsequent drops use the normal resume cleanup.
     pending_welcome.take();
+    // True when this socket asked to resume but was welcomed as a fresh connection (#569). Attaches the browser sent
+    // right behind its Resume still name the old connection's input acknowledgement; see `handle_client_frame`.
+    let fresh_after_resume = resume_attempt.is_some_and(|asked| asked != connection_id);
+    if let Some(stale) = resume_attempt.filter(|asked| *asked != connection_id) {
+        // A stale resume was welcomed as a fresh connection: the old connection's writers ended here. Log them
+        // without holding up this socket's first frames.
+        let state = state.clone();
+        let user_id = user_id.clone();
+        tokio::spawn(async move { log_refused_resume_writers(&state, &user_id, stale).await });
+    }
     // The socket owns this task and aborts it on drop. Polling preparation
     // only inside select can hold a SQLite connection while a selected frame
     // awaits authority from the same bounded pool, so it must progress during
@@ -1042,6 +1033,7 @@ async fn run_socket(
                                 owner,
                                 &mut pending_plugin_calls,
                                 &connection_id,
+                                fresh_after_resume,
                                 &mut attachments,
                                 &mut ended,
                                 &output_tx,
@@ -1585,7 +1577,8 @@ where
             .is_ok()
         }
         TerminalOutput::Event { event_json } => {
-            let ended = crate::terminal_exit::record(
+            let ended = crate::terminal_exit::record_on_writer(
+                &state.auth,
                 &state.pool,
                 user_id,
                 session_token,
@@ -1666,30 +1659,25 @@ where
             attachment.last_in_acked = in_seq_acked;
             // Each device acknowledges only its durable writer range. The old
             // session column is retained for diagnostics, never new input authority.
-            let changed = sqlx::query("UPDATE terminal_writers SET input_acked=? WHERE connection_id=? AND client_stream=? AND session_id=? AND input_acked<=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(in_seq_acked.to_be_bytes().as_slice()).bind(connection_id.as_slice()).bind(stream_id)
-                .bind(attachment.session_id.as_slice()).bind(in_seq_acked.to_be_bytes().as_slice())
-                .bind(crate::auth::hash(session_token)).bind(user_id).execute(&state.pool).await;
-            if !matches!(changed, Ok(result) if result.rows_affected() == 1) {
-                return Err(());
-            }
-            let legacy_acked = i64::try_from(in_seq_acked).unwrap_or(-1);
-            let acked_u64 = in_seq_acked.to_be_bytes();
+            // Both rows change in one transaction on the D379 writer (#562).
             let Ok(now) = unix_seconds() else {
                 return Err(());
             };
-            let result = sqlx::query("UPDATE terminal_sessions SET input_acked_u64=CASE WHEN input_acked_u64<? THEN ? ELSE input_acked_u64 END, input_acked=CASE WHEN ?>=0 THEN MAX(input_acked,?) ELSE input_acked END, last_seen=? WHERE id=? AND user_id=? AND EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch())")
-                .bind(acked_u64.as_slice())
-                .bind(acked_u64.as_slice())
-                .bind(legacy_acked)
-                .bind(legacy_acked)
-                .bind(now)
-                .bind(attachment.session_id.as_slice())
-                .bind(user_id)
-                .bind(crate::auth::hash(session_token)).bind(user_id)
-                .execute(&state.pool)
-                .await;
-            if !matches!(result, Ok(result) if result.rows_affected() == 1) {
+            let recorded = crate::terminal_input_ack::record(
+                &state.auth,
+                &state.pool,
+                crate::terminal_input_ack::InputAck {
+                    connection_id,
+                    client_stream: stream_id,
+                    session_id: attachment.session_id,
+                    in_seq_acked,
+                    user_id,
+                    session_token,
+                    now,
+                },
+            )
+            .await;
+            if !recorded {
                 return Err(());
             }
             if !session_is_live(state, user_id, session_token).await {
@@ -1753,6 +1741,46 @@ fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'s
     }
 }
 
+/// Records one close line for each terminal writer of a connection whose resume was refused, so the session's close
+/// log says why that writer ended. Called after a refused handshake has closed its socket, and in the background when
+/// a stale resume was welcomed as a fresh connection instead (#569): either way the old connection's writers are gone.
+/// Bounded, so it never holds the task: a timeout only loses lines.
+async fn log_refused_resume_writers(
+    state: &WebSocketState,
+    user_id: &str,
+    connection_id: [u8; 16],
+) {
+    let rows = tokio::time::timeout(
+            REFUSAL_LOG_TIMEOUT,
+            sqlx::query("SELECT w.client_stream,t.id,t.remote_host_id FROM terminal_writers w JOIN terminal_sessions t ON t.id=w.session_id WHERE w.connection_id=? AND t.user_id=?")
+                .bind(connection_id.as_slice())
+                .bind(user_id)
+                .fetch_all(&state.pool),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    for row in rows {
+        let Ok(session_id) = <[u8; 16]>::try_from(row.get::<Vec<u8>, _>("id").as_slice()) else {
+            continue;
+        };
+        let host_bytes: Option<Vec<u8>> = row.get("remote_host_id");
+        let host_id = host_bytes
+            .as_deref()
+            .and_then(|bytes| uuid::Uuid::from_slice(bytes).ok());
+        let stream_id = u32::try_from(row.get::<i64, _>("client_stream")).unwrap_or_default();
+        state.close_logs.record(&CloseRecord::new(
+            CloseOwner::of(user_id),
+            CloseWho::Server,
+            RESUME_REFUSED,
+            host_id,
+            session_id,
+            stream_id,
+        ));
+    }
+}
+
 async fn handshake<S, K>(
     source: &mut S,
     sink: &mut K,
@@ -1807,7 +1835,7 @@ where
             _ => return Err(()),
         };
         *resume_attempt = Some(id);
-        resume_connection(
+        match resume_connection(
             &state.pool,
             user_id,
             id,
@@ -1817,7 +1845,31 @@ where
             Some(pending_welcome),
         )
         .await
-        .map_err(|error| *over_limit = is_connection_limit(&error))?
+        {
+            Ok(welcome) => welcome,
+            // The resume itself is stale (its window ran out, the id is unknown, the token does not match, the old
+            // socket still holds it, or a parallel resume won). The cookie session was checked at the upgrade and
+            // is checked again inside `new_connection`, so the same socket is welcomed as a fresh connection: the
+            // browser gets exactly what it would get by closing and reconnecting without the token, one handshake
+            // and a backoff sooner (#569, D265). The resume token grants nothing here: a fresh connection never
+            // inherits the old one's writers, and the browser sees the new connection id.
+            Err(error) if is_stale_resume(&error) => {
+                *pending_welcome = None;
+                new_connection(
+                    &state.pool,
+                    user_id,
+                    unix_seconds()?,
+                    Some(&crate::auth::hash(session_token)),
+                    Some(pending_welcome),
+                )
+                .await
+                .map_err(|error| *over_limit = is_connection_limit(&error))?
+            }
+            Err(error) => {
+                *over_limit = is_connection_limit(&error);
+                return Err(());
+            }
+        }
     } else {
         new_connection(
             &state.pool,
@@ -1904,6 +1956,14 @@ async fn new_connection(
     if active >= MAX_USER_CONNECTION_ROWS {
         return Err(sqlx::Error::Protocol(CONNECTION_LIMIT_ERROR.into()));
     }
+    // Keep only this account's newest resumable rows (by disconnect time), so its own churn evicts its own
+    // oldest resume first and never spends another account's share of the global cap.
+    sqlx::query("DELETE FROM websocket_connections WHERE user_id=? AND active=0 AND connection_id NOT IN (SELECT connection_id FROM websocket_connections WHERE user_id=? AND active=0 ORDER BY expires_at DESC LIMIT ?)")
+        .bind(user_id)
+        .bind(user_id)
+        .bind(MAX_USER_RESUME_ROWS - 1)
+        .execute(&mut *transaction)
+        .await?;
     let retained: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM websocket_connections WHERE active=1 OR expires_at>=?",
     )
@@ -2023,6 +2083,26 @@ async fn resume_connection(
     Ok(welcome)
 }
 
+/// The [`resume_refused`] categories that say only that this resume cannot continue, not that the socket may not
+/// connect at all. A handshake that meets one of them welcomes the socket as a fresh connection instead of closing it
+/// (#569). Left out on purpose: the account's connection limit ([`RESUME_CAPACITY_CHECK`]), which the browser must
+/// keep its capability for (#523); a cookie session that ended (`session_authority`); and storage errors.
+const STALE_RESUME_CHECKS: [&str; 8] = [
+    "connection_owner",
+    "connection_active",
+    "resume_expired",
+    "connection_state",
+    "connection_missing",
+    "token_mismatch",
+    "token_shape",
+    "rotation_conflict",
+];
+
+/// True when a refused resume is only stale (see [`STALE_RESUME_CHECKS`]), so the socket may still start fresh.
+fn is_stale_resume(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Protocol(check) if STALE_RESUME_CHECKS.contains(&check.as_str()))
+}
+
 /// Fixed diagnostic categories only: clients retain the generic refusal and
 /// administrators can distinguish expiry, overlap and a lost rotation (#244).
 fn resume_refused(check: &'static str) -> sqlx::Error {
@@ -2066,6 +2146,7 @@ fn token_hash(token: &[u8; 32]) -> [u8; 32] {
 
 /// Validates one browser frame and routes it without allocating a second terminal payload. A plugin call goes
 /// to `pending_plugin_calls`, which runs it now or queues it behind the busy ones (#556); only a full queue refuses.
+/// `fresh_after_resume` says the socket asked to resume but was welcomed as a fresh connection (#569).
 async fn handle_client_frame<K>(
     wire: Bytes,
     state: &WebSocketState,
@@ -2074,6 +2155,7 @@ async fn handle_client_frame<K>(
     owner: bool,
     pending_plugin_calls: &mut PluginCalls,
     connection_id: &[u8; 16],
+    fresh_after_resume: bool,
     attachments: &mut HashMap<u32, ClientAttachment>,
     ended: &mut EndedStreams,
     output_tx: &mpsc::Sender<(u32, TerminalOutput)>,
@@ -2107,6 +2189,11 @@ where
             action_id: action_id @ ("terminal.open" | "ssh.session.open"),
             input_json,
         } if stream_id == CONTROL_STREAM => {
+            // A session opened during an update switch would be missing from the
+            // database copy an undo restores (J1085).
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             let request = if action_id == "ssh.session.open" {
                 serde_json::from_slice::<BrowserTerminalOpen>(input_json)
                     .ok()
@@ -2261,6 +2348,12 @@ where
         } if stream_id != 0 && stream_id % 2 == 1 => {
             #[cfg(test)]
             addhost_timeline("attach_received");
+            // An attach in progress keeps the update quiet window open (D251). During an
+            // update switch the socket closes instead; the browser attaches again later.
+            crate::update_activity::note();
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             if attachments.contains_key(&stream_id) || attachments.len() >= MAX_ATTACHMENTS {
                 return Err(());
             }
@@ -2286,8 +2379,8 @@ where
                 NO_SESSION
             };
             let host_id = owned_host.flatten();
-            let Ok((input_acked, writer_stream)) = owned_writer(
-                &state.pool,
+            let Ok((input_acked, writer_stream)) = claim_writer(
+                state,
                 user_id,
                 connection_id,
                 stream_id,
@@ -2359,7 +2452,13 @@ where
                 )
                 .await;
             };
-            if last_in_seq > input_acked {
+            // A browser resuming sends its AttachTerm right behind the Resume, before it has seen the Welcome, with the
+            // input its old writer had acknowledged. When the resume was stale and the socket got a fresh connection,
+            // that writer no longer exists: the fresh one starts at zero, and the browser starts its own input at zero
+            // when the fresh Welcome arrives, before this attach's Ack. So the bound below cannot apply to such an
+            // attach. Nothing else reads `last_in_seq`: the infraternal agent gets the server's own `input_acked`,
+            // so no input can be skipped or repeated (contracts/wire.md section 5).
+            if last_in_seq > input_acked && !fresh_after_resume {
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::Server,
@@ -2418,16 +2517,23 @@ where
             };
             #[cfg(test)]
             addhost_timeline("attach_agent_resolved");
-            let Ok(Ok(attachment)) = tokio::time::timeout(
+            let attached = tokio::time::timeout(
                 BACKEND_TIMEOUT,
                 agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
             )
-            .await
-            else {
+            .await;
+            let Ok(Ok(attachment)) = attached else {
+                // A full link refuses at once with its own plain sentence (#562);
+                // every other failure keeps the generic one.
+                let refusal = if matches!(attached, Ok(Err(AgentError::StreamLimit))) {
+                    HOST_STREAM_LIMIT
+                } else {
+                    AGENT_CONNECTION_REFUSED
+                };
                 let mut close = CloseRecord::new(
                     CloseOwner::of(user_id),
                     CloseWho::InfraternalAgent,
-                    AGENT_CONNECTION_REFUSED,
+                    refusal,
                     host_id,
                     session,
                     stream_id,
@@ -2561,6 +2667,13 @@ where
             Ok(())
         }
         Frame::Input { in_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
+            // Typing keeps the update quiet window open (D251); one relaxed store. During
+            // an update switch the socket closes: the browser keeps the unacknowledged
+            // input and sends it to the next process.
+            crate::update_activity::note();
+            if crate::update_activity::frozen() {
+                return Err(());
+            }
             let attachment = attachments.get_mut(&stream_id).ok_or(())?;
             let end = in_seq
                 .checked_add(u64::try_from(bytes.len()).map_err(|_| ())?)
@@ -3255,18 +3368,20 @@ async fn open_terminal(
     }
     let session_id = opened.session_id;
     let now = unix_seconds().map_err(|()| crate::embedded::AgentError::Unavailable)?;
-    let changed = sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))")
-        .bind(session_id.as_slice())
-        .bind(user_id)
-        .bind(now)
-        .bind(now)
-        .bind(host.map(|id| id.as_bytes().to_vec()))
-        .bind(crate::auth::hash(session_token)).bind(user_id)
-        .bind(host.map(|id| id.as_bytes().to_vec())).bind(host.map(|id| id.as_bytes().to_vec())).bind(user_id)
-        .execute(&state.pool)
-        .await
-        .map_err(|_| crate::embedded::AgentError::Unavailable)?;
-    if changed.rows_affected() != 1 {
+    // The row is written on the D379 writer thread (#562).
+    let recorded = crate::terminal_session_record::record(
+        &state.auth,
+        &state.pool,
+        crate::terminal_session_record::NewSession {
+            session_id,
+            user_id,
+            host: host.map(|id| id.as_bytes().to_vec()),
+            session_token,
+            now,
+        },
+    )
+    .await;
+    if !recorded {
         #[cfg(test)]
         eprintln!("remote terminal open stage=session-persist result=unavailable");
         return Err(crate::embedded::AgentError::Unavailable);
@@ -3399,6 +3514,37 @@ impl EndedStreams {
     }
 }
 
+/// Claim the device's durable writer for an attachment: on the D379 writer
+/// thread when the server has one, otherwise (in-memory test databases) on
+/// sqlx with the same rules (#562). Returns the acknowledged input offset and
+/// the wire writer id.
+async fn claim_writer(
+    state: &WebSocketState,
+    user: &str,
+    connection: &[u8; 16],
+    stream: u32,
+    session: &[u8; 16],
+    authority: Option<&str>,
+) -> Result<(u64, u32), ()> {
+    let limit = i64::try_from(MAX_ATTACHMENTS).map_err(|_| ())?;
+    if let Some(result) = crate::terminal_writer_claim::claim(
+        &state.auth,
+        crate::terminal_writer_claim::Claim {
+            user,
+            connection,
+            stream,
+            session,
+            authority,
+            limit,
+        },
+    )
+    .await
+    {
+        return result;
+    }
+    owned_writer(&state.pool, user, connection, stream, session, authority).await
+}
+
 async fn owned_writer(
     pool: &SqlitePool,
     user: &str,
@@ -3517,6 +3663,11 @@ where
 #[cfg(test)]
 #[path = "websocket_receive_tests.rs"]
 mod receive_tests;
+
+/// Fuzz entry point for [`receive_wire`] and the terminal-open bodies (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[path = "websocket_receive_checks.rs"]
+pub(crate) mod receive_checks;
 
 pub(super) async fn receive_wire<S>(
     source: &mut S,

@@ -516,6 +516,11 @@ pub async fn run(
             let address = std::net::IpAddr::V4(config.addresses.ipv4);
             update_listener(channel.as_ref(), address, &mut listener).await;
         }
+        // Presence polls the server's own node only while it holds a delivered configuration (#562).
+        // Other nodes' workers never speak for the server.
+        if channel.is_server() {
+            service.set_server_configured(installed.is_some());
+        }
         // Consume our completed finalizer's publication before reading durable receipts.
         // Coalesced peer progress is covered by that read; later progress stays unseen.
         rotation_updates.borrow_and_update();
@@ -1190,6 +1195,7 @@ mod tests {
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
     }
 
+    /// The server's listener lives only while its worker has applied an enabled configuration.
     #[tokio::test]
     async fn server_listener_belongs_to_applied_enabled_worker() {
         let service = service().await;
@@ -1240,6 +1246,40 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert_eq!(channel.leases.load(Ordering::Acquire), 0);
+    }
+
+    /// The server's node worker tells presence when its node holds a delivered configuration (#562); an
+    /// ordinary node's worker never speaks for the server.
+    #[tokio::test]
+    async fn the_servers_worker_publishes_that_its_node_has_a_mesh_configuration() {
+        let service = service().await;
+        let mut configured = service.subscribe_server_configured();
+        assert!(!*configured.borrow(), "nothing is delivered yet");
+        let ordinary = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            Channel::new(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        // sleep: an ordinary worker publishes nothing, so there is no event to wait for.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!*configured.borrow(), "an ordinary node does not set it");
+        ordinary.abort();
+        let channel = Channel::with_server(true);
+        let task = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            configured.wait_for(|on| *on),
+        )
+        .await
+        .expect("a delivered configuration is announced")
+        .unwrap();
+        task.abort();
     }
 
     /// A restarted server sends its fresh authority epoch when policy is otherwise identical.
@@ -2701,6 +2741,185 @@ mod tests {
                 .unwrap(),
             "the active relay-only peer has not applied the candidate view"
         );
+    }
+
+    /// Reload mesh state from the database the way a server restart does, and say whether it loads.
+    async fn state_loads(service: &MeshService) -> Result<(), crate::api::MeshApiError> {
+        let server = service.dataplane().node_for_host("server").await.unwrap();
+        crate::store::Store::new(service.pool_for_tests())
+            .config(server)
+            .await
+            .map(|_| ())
+    }
+
+    /// Attach `host` as a node that supports rotation, presenting `key`.
+    async fn attach_rotating_capable(
+        service: &MeshService,
+        host: &str,
+        key: PublicKey,
+    ) -> Result<(NodeId, bool), &'static str> {
+        service
+            .dataplane()
+            .attach_named_with_capability(
+                host,
+                key,
+                Some("192.0.2.2:44000".parse().unwrap()),
+                false,
+                None,
+                true,
+            )
+            .await
+    }
+
+    /// #572 finding 1 (J1082): while node V rotates, V's old key lives only in its rotation row. Another node
+    /// that presents that key used to pass the UNIQUE index on `mesh_nodes.public_key`, and every later load
+    /// then failed with "Mesh allocation invalid." because the checkpoint held the key twice. Attach (an
+    /// existing node or a new one) and enrollment must refuse it, and the state must keep loading.
+    #[tokio::test]
+    async fn no_node_can_take_a_key_another_node_is_rotating_away_from() {
+        let service = service().await;
+        let mallory = "00000000-0000-4000-8000-000000000002";
+        attach_rotating_capable(&service, mallory, PublicKey([5; 32]))
+            .await
+            .unwrap();
+        let (victim, victim_id, operation) = rotating_node(
+            &service,
+            "00000000-0000-4000-8000-000000000001",
+            PublicKey([2; 32]),
+        )
+        .await;
+        service
+            .dataplane()
+            .start_rotation_overlap(
+                victim,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let (current, _, phase, candidate, previous, _) = rotation_row(&service, victim_id).await;
+        assert_eq!(phase.as_deref(), Some("overlap"));
+        assert_eq!(current, vec![3; 32]);
+        assert_eq!(candidate, Some(vec![3; 32]));
+        assert_eq!(previous, Some(vec![2; 32]));
+        state_loads(&service).await.unwrap();
+
+        for key in [PublicKey([2; 32]), PublicKey([3; 32])] {
+            assert!(
+                attach_rotating_capable(&service, mallory, key)
+                    .await
+                    .is_err(),
+                "an enrolled node must not re-attach with the rotating node's previous or candidate key"
+            );
+            assert!(
+                attach_rotating_capable(&service, "00000000-0000-4000-8000-000000000003", key)
+                    .await
+                    .is_err(),
+                "a new node must not attach with the rotating node's previous or candidate key"
+            );
+        }
+        let enrolled = "00000000-0000-4000-8000-000000000004";
+        sqlx::query(
+            "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootful',0,1)",
+        )
+        .bind(uuid::Uuid::parse_str(enrolled).unwrap().as_bytes().as_slice())
+        .execute(&service.pool_for_tests())
+        .await
+        .unwrap();
+        let enroll = service
+            .execute(
+                "owner",
+                "mesh.node.enroll",
+                &serde_json::to_vec(&serde_json::json!({
+                    "name":"previous-key-squatter",
+                    "public_key":PublicKey([2; 32]),
+                    "host_id":enrolled
+                }))
+                .unwrap(),
+                1_800_000_000,
+            )
+            .await;
+        assert!(
+            matches!(enroll, Err(crate::api::MeshApiError::Conflict)),
+            "enrollment must refuse a key a rotating node still owns: {enroll:?}"
+        );
+        state_loads(&service)
+            .await
+            .expect("mesh state must still load after the refused attaches");
+
+        // Once the rotation is committed (retiring), the previous key is still reserved.
+        service
+            .dataplane()
+            .commit_rotation(victim, &operation.operation_id)
+            .await
+            .unwrap();
+        let (_, _, phase, _, previous, _) = rotation_row(&service, victim_id).await;
+        assert_eq!(phase.as_deref(), Some("retiring"));
+        assert_eq!(previous, Some(vec![2; 32]));
+        assert!(
+            attach_rotating_capable(&service, mallory, PublicKey([2; 32]))
+                .await
+                .is_err()
+        );
+        state_loads(&service).await.unwrap();
+    }
+
+    /// #572 finding 1, the other direction: a node publishing its rotation candidate must not pick a key
+    /// another rotating node still holds as its previous key, or the next load sees that key twice.
+    #[tokio::test]
+    async fn a_rotation_candidate_cannot_be_another_nodes_previous_key() {
+        let service = service().await;
+        let second = "00000000-0000-4000-8000-000000000002";
+        let (mallory, _) = attach_rotating_capable(&service, second, PublicKey([5; 32]))
+            .await
+            .unwrap();
+        let (victim, _, operation) = rotating_node(
+            &service,
+            "00000000-0000-4000-8000-000000000001",
+            PublicKey([2; 32]),
+        )
+        .await;
+        let store = service.dataplane();
+        store
+            .start_rotation_overlap(
+                victim,
+                &operation.operation_id,
+                PublicKey([3; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await
+            .unwrap();
+        let mallory_operation = "00000000-0000-4000-8000-0000000000aa";
+        sqlx::query(
+            "UPDATE mesh_node_key_rotation SET rotation_phase='preparing',operation_id=?,sequence=sequence+1 WHERE node_id=?",
+        )
+        .bind(mallory_operation)
+        .bind(i64::try_from(mallory.0).unwrap())
+        .execute(&service.pool_for_tests())
+        .await
+        .unwrap();
+        let overlap = store
+            .start_rotation_overlap(
+                mallory,
+                mallory_operation,
+                PublicKey([2; 32]),
+                100,
+                "test-boot",
+                1_000,
+            )
+            .await;
+        assert!(
+            matches!(overlap, Err(crate::api::MeshApiError::Conflict)),
+            "a candidate equal to another node's previous key must be refused: {overlap:?}"
+        );
+        state_loads(&service)
+            .await
+            .expect("mesh state must still load after the refused overlap");
     }
 }
 

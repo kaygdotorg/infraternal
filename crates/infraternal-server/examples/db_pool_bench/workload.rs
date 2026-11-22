@@ -18,7 +18,7 @@ pub const NOW: i64 = 1_800_000_000;
 pub const SESSION: i64 = 30 * 24 * 3600;
 /// Live session tokens seeded (80 per user for 50 users).
 pub const LIVE_SESSIONS: u64 = 4000;
-/// Users (design point D170/D246: 50 users).
+/// Users (design point D170: 50 users).
 pub const USERS: u64 = 50;
 /// Owners that hold the 1,000 hosts (100 each).
 pub const HOST_OWNERS: u64 = 10;

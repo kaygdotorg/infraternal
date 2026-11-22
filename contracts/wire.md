@@ -261,6 +261,17 @@ frames are binary, because they carry each keystroke and each output chunk.
 - **Window.** A connection can resume for `resume window seconds` (default
   120). After that, the client opens a new connection and attaches by
   session id. The session itself lives in the shim, without a time limit.
+- **Stale resume (#569).** When a `Resume` cannot continue its connection
+  (the window ran out, the id is unknown or still held by the old socket, the
+  token does not match, or a parallel resume won), the server welcomes the
+  same socket as a fresh connection instead of closing it. The fresh
+  `Welcome` carries a new connection id; a resumed one keeps the id the client
+  sent, which is how the client tells them apart. A fresh connection never
+  inherits the old connection's writers, so the client starts each writer's
+  input at zero, but it keeps its screen and attaches with its own
+  `last_out_seq`, since output offsets belong to the session. The account's
+  connection limit, an ended sign-in session and storage errors still close
+  with 1008 as before.
 - Target: < 300 ms from network return to a usable terminal (DECISIONS 41).
 
 ## 6. Flow control and catch-up
@@ -614,8 +625,11 @@ input; ordinary retirement still closes only that terminal stream. A stalled
 browser route becomes disconnected before the
 client requests WebSocket closure: an intermediary need not deliver a close
 event. Replacement sockets ignore all late events from the retired route. A
-shared daemon link is replaced independently of graceful child reaping; session
-shims remain alive. Before automatic rebinding, each retained stream receives
+shared daemon link is retired at once, independently of graceful child reaping;
+session shims remain alive. A replacement embedded infraternal agent starts
+only after the retired one has been reaped (at most its 2 s SIGTERM grace), so
+two embedded agents never share the per-user sockets and stop hooks (#562).
+Before automatic rebinding, each retained stream receives
 `{"type":"terminal.reconnecting","session_id":"UUID"}` on its Event channel.
 The window stops advertising readiness and holds input in its existing bounded
 queue; the replacement's painted `terminal.replay_complete` fence confirms
@@ -648,11 +662,12 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | type | name | body (little endian) |
 | ---: | --- | --- |
 | 0x40 | AttachDesktop | 16-byte session UUID, u8 delivery (0 reliable, 1 datagram) |
-| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit |
+| 0x41 | Video | u64 sequence, u64 capture_ns, u8 keyframe (0/1), Annex-B access unit or tile update (desktop-helper.md) |
 | 0x42 | VideoSize | u16 width, u16 height, u16 density_milli |
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
 | 0x45 | VideoFragment | 16-byte session UUID, u64 sequence, u64 capture_ns, u8 keyframe, u32 total, u32 offset, fragment bytes |
+| 0x46 | VideoPressure | u16 waited_ms (leg B only, server to host) |
 
 Video sequence starts at 1 and never decreases within a session. `capture_ns`
 is the Mac host's monotonic capture-request clock, converted to nanoseconds;
@@ -682,14 +697,21 @@ viewer controls a session; taking control is an explicit handover.
 
 The server holds the session independently of viewers and checks live grants
 for view and control. At most five viewers attach. It retains the latest IDR
-and one pending access unit, sharing immutable bytes between viewers. A new
+and the access units of the last second (at most 128 units and 1 MiB, always
+including the newest; an IDR replaces those before it), sharing immutable
+bytes between viewers. Each viewer reads them in order from its own position,
+so a viewer briefly behind catches up with deltas. A viewer whose next unit is
+no longer retained, or waited more than 100 ms for it, discards deltas until
+IDR and coalesces one repair (#146). The time a viewer spends writing an IDR
+does not count towards the 100 ms of the units behind it. A new
 viewer receives the cached IDR immediately, requests a fresh IDR and waits for
 it before consuming current deltas. Replaying a stale IDR followed by a current
 P-frame is forbidden. A viewer that misses a sequence discards deltas until IDR.
 
-Reliable mode has one pending frame at the sender and a bounded in-flight
-write. A stale pending frame is dropped; its dependent deltas are discarded
-until IDR. Once any bytes of a reliable frame are written it must be completed
+Reliable mode queues frames at the sender within the same bound (oldest
+waiting frame at most 100 ms old, not counting an IDR write in flight; 128
+units; 1 MiB) and has a bounded in-flight write. Past the bound every waiting frame is dropped, deltas are discarded
+until IDR, and the sender asks for one. Once any bytes of a reliable frame are written it must be completed
 or its dedicated video stream reset: partial-frame cancellation cannot splice
 the next frame into it. Control and input use an independently driven reliable
 control direction; they are never queued behind video writes.
@@ -704,6 +726,14 @@ VideoRepair on the reliable control stream. Duplicate identical fragments are
 idempotent; conflicting fragments and metadata are errors. Idle
 receivers have no repair timer. A skipped delta forces IDR recovery; an IDR
 supersedes prior incomplete frames. No unbounded retransmission backlog.
+
+VideoPressure tells the host that one of the session's viewers is at least
+50 ms behind (leg A is backed up): a unit it took or skipped had waited that
+long at the server, or its last video write took that long. `waited_ms` is that
+lag, saturating at 65535, and is informational. The host's encoder lowers its
+bit rate as for its own congestion signal. The server sends at most one per
+250 ms per session and never fills the last two slots of its bounded host
+command queue with one. Browsers neither send nor receive it.
 
 Path selection consumes the same measured relay/direct observations as terminals.
 The server session and grant authority remain stable across path changes.
@@ -879,6 +909,25 @@ agent sends `terminal.query_replies_unavailable` with its `session_id`; the
 server validates and forwards it only in response to marked input, so an old
 browser never receives this new notice. The browser says to open a new shell.
 Ordinary legacy Input remains available. No session is automatically ended.
+
+### Echo state notice (#569, D130)
+
+The infraternal agent turns the shim's `EchoState` (shim.md, capability bit 8)
+into an `Event` on the terminal stream, `sub_id: 0`:
+`{"type":"terminal.echo","session_id":"<UUID>","seq":u64,"hidden":bool}`.
+`hidden: true` means the host terminal reads a line with echo off (a password
+prompt, in any language); `false` means it echoes again. `seq` is the shim's
+output head when the mode was read. The notice is not a cursor fence and may
+pass output held for credit. The server admits it in its closed notice list
+and forwards it unchanged; across a hedged secondary link (D215) it forwards a
+copy only when its `seq` is newer, or equal with a different state, than the
+last echo state it forwarded on that stream. The viewer draws no predicted key
+while `hidden` is true and drops predictions already drawn; a new attachment
+starts at "echo on" until told otherwise. Viewers ignore notice types they do
+not know (since 2026-10-17), so no leg-A capability is needed. Leg B has no
+free core capability bit: an agent sends it only to a server of the same
+release (lockstep updates, D135), because an older server refuses unknown
+notices and retires the agent link.
 
 ### Layout session incarnation (#250, D312)
 

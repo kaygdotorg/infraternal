@@ -138,3 +138,95 @@ async fn an_unchanged_reading_is_not_announced_and_a_lost_session_goes_offline()
     assert_eq!(nodes[1]["live"], false);
     assert!(nodes[1].get("path").is_none());
 }
+
+/// A server node channel that only counts the calls presence makes on it (#562).
+struct CountingChannel {
+    calls: std::sync::atomic::AtomicUsize,
+    notices: tokio::sync::watch::Sender<()>,
+}
+
+impl infraternal_plugin_api::node_channel::NodeChannel for CountingChannel {
+    fn id(&self) -> &'static str {
+        "server"
+    }
+    fn observed_ip(&self) -> std::net::IpAddr {
+        std::net::Ipv4Addr::LOCALHOST.into()
+    }
+    fn is_server(&self) -> bool {
+        true
+    }
+    fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.notices.subscribe()
+    }
+    fn call(
+        &self,
+        action: &str,
+        _input: Vec<u8>,
+    ) -> infraternal_plugin_api::PluginOperation<'_, Vec<u8>> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let reply = if action == "mesh.status" {
+            br#"{"state":"On"}"#.to_vec()
+        } else {
+            br#"{"peers":[],"next_cursor":null}"#.to_vec()
+        };
+        Box::pin(async move { Ok(reply) })
+    }
+}
+
+/// D81, #562: a server whose node has no mesh configuration makes no presence call at all; polling starts when a
+/// configuration is delivered and stops, with every node reading offline, when it goes away.
+#[tokio::test]
+async fn presence_polls_only_while_the_servers_node_has_a_mesh_configuration() {
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::time::Duration;
+    let (service, server, _peer) = service().await;
+    let channel = std::sync::Arc::new(CountingChannel {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        notices: tokio::sync::watch::channel(()).0,
+    });
+    let period = Duration::from_millis(40);
+    let worker = tokio::spawn(infraternal_plugin_mesh::presence::run_every(
+        service.clone(),
+        channel.clone(),
+        period,
+    ));
+    // No configuration: the first poll used to run at once, then every period.
+    // sleep: waiting out absent polls; "nothing happens" has no event to wait for.
+    tokio::time::sleep(period * 10).await;
+    assert_eq!(
+        channel.calls.load(Relaxed),
+        0,
+        "an idle server polls nothing"
+    );
+
+    service.set_server_configured(true);
+    // sleep: waiting out absent polls; "nothing happens" has no event to wait for.
+    tokio::time::sleep(period * 10).await;
+    let polling = channel.calls.load(Relaxed);
+    assert!(
+        polling >= 4,
+        "polling starts at once and repeats: {polling}"
+    );
+    assert!(service.subscribe_presence().borrow().contains_key(&server));
+
+    service.set_server_configured(false);
+    // A poll in flight may finish; none starts after the signal.
+    // sleep: waiting out absent polls; "nothing happens" has no event to wait for.
+    tokio::time::sleep(period * 3).await;
+    let stopped = channel.calls.load(Relaxed);
+    // sleep: waiting out absent polls; "nothing happens" has no event to wait for.
+    tokio::time::sleep(period * 10).await;
+    assert_eq!(channel.calls.load(Relaxed), stopped, "polling stopped");
+    assert!(
+        service.subscribe_presence().borrow().is_empty(),
+        "nodes read offline once the mesh is off"
+    );
+
+    // Turned on again later, it resumes.
+    service.set_server_configured(true);
+    // sleep: waiting out absent polls; "nothing happens" has no event to wait for.
+    tokio::time::sleep(period * 5).await;
+    assert!(channel.calls.load(Relaxed) > stopped);
+    worker.abort();
+}

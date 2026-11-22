@@ -76,12 +76,14 @@ access (#341 B19).
       `~/.local/share/infraternal` for rootless agents.
     - The upgrade handshake is frozen forever.
     - A downgrade needs a signature and an explicit request from the server.
+    - *Later (owner, 2026-11-21, #557):* D395 amends this entry's install paths (system data in /var/lib/infraternal, server data in /var/lib/infraternal/server/).
 18. **Rootful and rootless agents.** The SSH bootstrap auto-detects sudo, the
     engine sockets, `systemd --user` and linger, and then proposes a mode. A
     host has one agent. When root becomes available, the agent upgrades to a
     root agent, moves the contexts (root docker, kayg podman, …) to it and
     removes the user agent. The agent supports systemd, openrc, runit, s6 and a
     fallback.
+    - *Later (owner, 2026-11-21, #557):* on macOS, D203 C2 (amended 2026-11-20) makes user mode the default; root mode is the opt-in.
 19. **Deployment.** One node, SQLite, and first-class backups (scheduled
     snapshot plus a restore command). No HA: HA comes from Kubernetes or
     Proxmox. The server ships as a static binary with a systemd unit, and also
@@ -107,6 +109,7 @@ access (#341 B19).
 
 24. **Passkeys only.** Each user has one passkey and a recovery key
     (mandatory) and can add one more passkey (optional). No passwords.
+    - *Later (owner, 2026-11-21, #557):* D375 A2 (2026-11-09) adds sign-in through an identity provider ("Continue with: Passkey, OIDC"), so passkeys are no longer the only way in.
 25. **Recovery key.** 24 words. Recovery waits 24 h. Signed-in devices can
     cancel it.
     *Pointer (2026-11-08, #341 B3):* D113 settles the delay: recovery is
@@ -134,6 +137,7 @@ access (#341 B19).
     separate repository `kayg/infraternal-enterprise`, so this repository has no
     `ee/` directory. D334 confirms that invites and multi-user management live
     there.
+    - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 32. **Tiers.** Community: free, one user, all features, unlimited hosts.
     Homelab: one-time payment, about 10 users. Team: per user per month.
     Enterprise: contact sales. Apps: a subscription for iOS and macOS, with
@@ -142,6 +146,7 @@ access (#341 B19).
     `ee/` directory, the license check and the role model.
 
 ## Plugins and order
+    - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 
 34. **Slices.**
     - S0: website, repo skeleton, gates.
@@ -204,6 +209,7 @@ access (#341 B19).
     - Idle agent below 15 MB RSS.
 
     Only the owner can loosen a budget.
+    - *Later (owner, 2026-11-21, #557):* rewritten by D375 (2026-11-09): D375's 120 Hz table replaces these budgets. The 5 ms keystroke and 300 ms reconnect bounds above no longer gate anything; D375 governs (reconnect rows: D267, D375, D382).
 42. **CI.** A Forgejo runner on infraternal-dev runs builds and tests. A
     separate, pinned perf VM runs the benchmarks.
 43. **Repo.** Forgejo `kayg/infraternal` is the source of truth, with a mirror
@@ -216,6 +222,7 @@ access (#341 B19).
     `apps/website`. Docs use Astro Starlight in `apps/docs`, served at `/docs`.
     Deploy to Cloudflare Pages through Forgejo Actions and
     `wrangler pages deploy` (direct upload).
+    - *Later (owner, 2026-11-21, #557):* the tree has no apps/website, apps/docs or apps/web: the product app is apps/tracer and the docs live in docs/user (D317).
 45. **Positioning.** The hook is SSH: "a self-hosted terminal that feels local,
     on every device". The all-in-one control plane is the vision and the
     roadmap. Claim only what works.
@@ -724,6 +731,7 @@ access (#341 B19).
      sessions alive and fail closed when it is gone (D128). High
      availability is planned later as a commercial (`ee/`) feature, not in
      the open product.
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 137. **Transport proof before UI (T7):** the orchestrator enrolls o1, o2 and
      minipc01 with the operator join command and runs chaos tests
      (NetBird/Tailscale restarts, agent restarts, network loss, a 300 ms+
@@ -1030,6 +1038,7 @@ access (#341 B19).
      triggers. Standalone docs pages keep the browser's zoom, which readers
      need for accessibility. Zoomed out to thumbnails on an unlocked canvas,
      a pinch zooms the canvas so you can get back in.
+     - *Later (owner, 2026-11-21, #557):* D374 A17 and D377 replace D275's vertical column step and Shift+wheel behaviour.
 160. **One reusable, per-instance-extensible component per UI concept:**
      every UI concept (overlay/popover/sheet material, pill, capsule tabs,
      rows, tooltip, tick and copy swap, toast, buttons, spring) exists
@@ -1282,6 +1291,7 @@ access (#341 B19).
        opens the same editor in place (wiggle, drag, hide, add). A
        horizontal swipe on the top pill steps between views with motion,
        and the canvas lock re-engages on landing.
+     - *Later (owner, 2026-11-21, #557):* D374 A17 and D377 replace D275's vertical column step and Shift+wheel behaviour.
 178. **Sessions, the per-account canvas and the sidebar (owner, 2026-10-08, #89):**
      - **The canvas belongs to the account:** open windows and their
        arrangement are the same on every device; each device keeps only
@@ -1477,6 +1487,7 @@ access (#341 B19).
      #259 rename work alone reached 307,714 B; the owner chose a moderate
      raise that keeps the gate (growth stays visible) over removing it or
      loading rename on demand. Big features still load on demand.
+     - *Later (owner, 2026-11-21, #557):* the deferred budget is 60 KiB gzip / 54 KiB brotli for the whole class and the on-demand budget 20 KiB gzip / 18 KiB brotli per chunk, as `apps/tracer/transfer-budget.ts` enforces. The owner: "they're really small numbers for modern browsers, it's fine."
 189. **Card and window transparency (owner, 2026-10-08; superseded by D322):** four levels for each,
      "Glass" renamed **Frosted**. Dark/light tint and blur:
      - **Solid:** cards 1.00/1.00, 0 px; windows 1.00/1.00, 0 px.
@@ -2131,6 +2142,7 @@ access (#341 B19).
      - **The server's own host** is reached through the embedded
        infraternal agent, the same way as every other host, with no SSH to
        itself.
+     - *Later (owner, 2026-11-21, #557):* on macOS, D203 C2 (amended 2026-11-20) makes user mode the default; root mode is the opt-in.
 230. **Account names (owner, 2026-10-11, Q12):** setup asks for a username
      (required; no spaces; it names the passkey and the account) and a
      display name (optional, a real name). Sign-in asks only for the
@@ -2256,6 +2268,7 @@ access (#341 B19).
        ignores the policy. The community connection log keeps 30 days.
        A link always needs the person's own passkey; an administrator cannot
        approve one on their behalf (a visible machine grant is the stopgap).
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 236. **Session rows say what is in them (owner, 2026-10-11):** a session's
      label is, in order, the name a person gave it, the foreground program
      (`htop`, `cargo test`), or the current folder's last component (`~` for
@@ -2934,6 +2947,7 @@ access (#341 B19).
          unclear), and refusing while root-only things are in use (prompt
          1 already lists them).
        Removing the host removes everything (D273).
+     - *Later (owner, 2026-11-21, #557):* commercial code is not an ee/ directory: it lives in kayg/infraternal-enterprise (D277).
 275. **The wheel scrolls what is under it (owner, 2026-10-15; refines D177,
      #215):** today a snapped canvas sends every wheel to window navigation,
      so a window's own list (Access) cannot scroll without the input lock.
@@ -2962,6 +2976,7 @@ access (#341 B19).
        width (no neighbours showing)" is removed; phones keep "Edge to edge"
        and "Comfortable". The owner: "simplify and make UI/UX extremely
        easy".
+     - *Later (owner, 2026-11-21, #557):* D374 A17 replaces the vertical column step, and D377 replaces the Shift+wheel behaviour.
 276. **Inbox items can be dismissed (owner, 2026-10-15, #215):** every Inbox
      item can be dismissed, except the few that block something from
      working until they are acted on (for example "Allow host connections").
@@ -3537,6 +3552,7 @@ access (#341 B19).
      *Pointer (2026-11-08, #341 B16):* The lume VM `macos-02-std` named in the
      app windows bullet no longer exists. macOS builds and app-window tests run
      on `macos-01-std`.
+     - *Later (owner, 2026-11-21, #557):* D375 A1 replaces the "permanent keys rejected" rule (every API key has an approved hard end), and D383 amends it again: API keys have two dates and both can be "forever".
 312. **Layout edits live per tab; the server is the only saved copy
      (owner, 2026-10-30, #250; replaces the multi-tab layout journal):**
      - Each tab keeps its unconfirmed canvas layout edits in memory and
@@ -3858,6 +3874,7 @@ access (#341 B19).
        aimed at the 11–14 MiB per endpoint that stays after load: "yes
        please, we gotta really optimise it."
      - Testing: "please extensively test it on linux and macos".
+     - *Later (owner, 2026-11-21, #557):* the fork pin has moved since: see D348 and D397.
 332. **When GotaTun becomes the Linux default (owner, 2026-11-03, #260;
      amends D163):** kernel WireGuard stays the Linux default until the
      integrated GotaTun engine matches it on both throughput and loaded
@@ -3866,6 +3883,7 @@ access (#341 B19).
      tonight". The userspace interface survives an infraternal agent
      restart, as kernel WireGuard's does, so routes the person added and
      open flows are kept: "correct!".
+     - *Later (owner, 2026-11-21, #557):* D346 amends this entry.
 333. **When a passkey is asked (owner, 2026-11-03; refines D28, D311,
      D319):** "I don't want a passkey ask everytime I wanna do admin
      operations. because I should be able to ask my agent to do those
@@ -3900,6 +3918,7 @@ access (#341 B19).
        as a new host with a new key and retires the old infraternal agent
        (#305). The owner treats the failing re-add of `code` as a bug ("bug
        is not fixed?"), so this path is built.
+     - *Later (owner, 2026-11-21, #557):* D203 C2 (amended 2026-11-20) makes user mode the macOS default, so a plain shell started by the root daemon is the root-mode case only.
 336. **Morning answers (owner, 2026-11-04):**
      - Traefik containment (#281, docs/design/proxy-containment.md): a
        cgroup per Traefik child now, measured first: "let's do it".
@@ -4410,6 +4429,7 @@ access (#341 B19).
      and paper, and the contrast gate enforces it; schemes are adjusted to
      pass. The rejected options were 3:1 for secondary text and keeping D80
      as written.
+     - *Later (owner, 2026-11-21, #557):* this rule covers glass too, as D380 and the code cite it: text on a glass surface (frosted cards, popovers, menus) reaches 4.5:1 against whatever is behind it, and glass that cannot reach it at up to 80% opacity turns into the theme's solid card (#448).
 366. **The interface font follows the account (owner, 2026-11-08, #400):**
      theme, terminal font and transparency follow the account across
      devices (D352). The owner chose "Follow the account" for the interface
@@ -4639,6 +4659,37 @@ access (#341 B19).
        are removed after their offline time (D370). D166 amended.
      - **Solid material (A16):** overlays are never opaque, except when the
        person chooses Solid. D160 amended.
+     - **Amendment (owner, 2026-11-21, #569, #573; J1079's audit and J1090):**
+       the owner answered "agreed" to two changes.
+       1. **Row 1 is reworded.** "Key to letter on screen, prediction on:
+          8.3 ms p99" becomes "our own work at most 4 ms p99, and the letter
+          appears in the first frame after the key". On a real 120 Hz panel
+          the wait for the next frame is uniform between 0 and 8.3 ms before
+          any work, so the old row could not be met; it passed in the profile
+          only because vsync was off. The row now measures our work and the
+          frame the letter lands in, with vsync on (the 60 Hz run gates; the
+          unthrottled run is shown beside it).
+       2. **Two first-paint rows on real phone networks.** "First paint,
+          mid-range phone" stays. Beside it the report adds first paint on 4G
+          (9 Mbps, 170 ms) and on fast 3G, each for "sign-in visible" and
+          "terminal connected", on a cold cache with the CPU slowed 4x. They
+          are reported now and become gates once the first-paint fixes of
+          J1069 and J1100 land (#573).
+       No other target changes. The rows that measure real overlapping typing
+       into a real shell (#569 finding 2) run beside the old rows and are
+       reported until they are stable; the old rows keep gating.
+     - **Second burst: an eleventh gated row (owner, 2026-11-21, #569;
+       amends the table above).** Output that arrives right behind a
+       previous burst (a key's echo followed by its prompt redraw) is drawn
+       by the same frame, never the next one: **0 extra frames, p99**,
+       measured by `test/second-burst.spec.ts`. The owner, as relayed by the
+       orchestrator: "make 'second-burst extra frames = 0' a gated D375
+       row". Why: the terminal parsed one write at a time and started the
+       next only after the previous one was painted, which put the second
+       burst one frame (8.3 ms at 120 Hz) late; measured on the perf VM that
+       was 52% of such second bursts, and 0% after the fix. The row counts
+       frames, not milliseconds, so it is valid on the unthrottled run that
+       gates and on the 60 Hz run beside it. It gates from its first run.
 
 376. **Upgrading a host to root, design round (owner, 2026-11-09, #399;
      completes D274's round):**
@@ -5118,7 +5169,37 @@ access (#341 B19).
        its final run (on top of the 512-slot build) holds those numbers. The
        owner, verbatim: "agreed".
 
-398. **Route probes pause while every viewer of a terminal is hidden (owner, 2026-11-21, #562; amends D265 and D300):**
+398. **The left-behind report belongs to revoking a person, not to removing a host (owner, 2026-11-21, #355; refines D356 and D367; confirmed by the owner 2026-11-22):**
+     - **Context:** D356 shows what a person left behind (an SSH key, a
+       cron entry, a user service, a shell startup line) when their access
+       is revoked, and D360/D364/D367 fixed how it is worded. Reviews of it
+       (J1005, J1013, J1051) kept finding routes the scan does not cover,
+       and the report also ran on a host removal, where the host's own
+       owner may simply be leaving infraternal.
+     - **Host removal (default and `--retain`):** the owner, verbatim: "I
+       feel like this is a grey area. what if the user is simply leaving us
+       and is switching to public ssh? i don't think our cleanup should
+       include anything more than deleting our app+appstates." A removal
+       deletes infraternal and its state and nothing else: the host's
+       infraternal agent is not asked to scan anything, the server keeps and
+       reads no report, and the removal screen and `remove-host` offer none
+       (`--access-report` and its route are gone). Keys and crontabs on the
+       host are the person's own.
+     - **Revoking one person while the host stays:** the report stays, as
+       an Inbox item (D234). The owner, verbatim: "agreed! it's an inbox
+       item!" It is owner-only, lists the files and lines that are new, and
+       keeps the D360, D364 and D367 wording ("No changes found in the N
+       places we watch ... Access outside these checks isn't covered."); a
+       report that could not check says why and never reads as clean. The
+       owner dismisses it; a toast says so once when it arrives while they
+       have the page open.
+     - **Renewal for removed hosts (#498):** moot. A removed host has no
+       report to read, so nothing needs a passkey tap there.
+     - **Rejected:** keeping the report on removal (a removal then reaches
+       into files that are not infraternal's), and reporting only on
+       `--retain` (the same files, the same objection).
+
+399. **Route probes pause while every viewer of a terminal is hidden (owner, 2026-11-21, #562; amends D265 and D300):**
      - **Context:** J1034 measured about 41 wakeups per second in each attached terminal's shim (a 25 ms route probe, D265) even when its only viewer was a background tab, a minimised window, a locked phone or a window off the canvas: 4,055 wakeups/s at 100 attached terminals, unchanged with every viewer hidden. Hidden browser sockets already park their own probes (#244, #317), but the route probe to the shim ran on. Under CPU starvation the missed probes also cut the link to the infraternal agent (J1034 finding 7c).
      - **The owner decided, verbatim:** "Pause probes while every viewer is hidden".
      - **Rule:** a viewer is hidden when its page is hidden or its window is off the live canvas. The client tells the server per terminal. The server sends no route probes for an attachment whose viewer is hidden, so a terminal whose viewers are all hidden costs its shim no probe wakeups. The first show starts a fresh probe lease at once (one probe tick, 25 ms, plus one round trip). D265's probe cadence and D300's reply deadlines and miss policy are unchanged for every route that is probed.

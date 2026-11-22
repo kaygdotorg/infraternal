@@ -81,6 +81,13 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+/// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.
+#[cfg(any(
+    all(feature = "agent", target_os = "macos"),
+    all(test, feature = "agent", target_os = "linux")
+))]
+mod macos_machine;
+
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub use macos_node as node;
 
@@ -138,6 +145,11 @@ pub mod macos_node;
 // Pure byte parsing, so its tests also run in the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
+
+/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind the crate's one scoped `allow(unsafe_code)`
+/// (#221). Request building is safe code, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+mod macos_utun_ioctl;
 
 #[cfg(feature = "server")]
 pub mod settings;

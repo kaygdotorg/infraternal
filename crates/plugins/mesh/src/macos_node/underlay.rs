@@ -35,12 +35,18 @@
 //! route or gateway change lost to a full buffer during an apply is not announced; the 25 s
 //! keepalive still covers it, and it takes more than about 6,500 messages in one apply.
 //!
-//! **Known limit: real Wi-Fi Macs (unmeasured).** Links are judged by `IFF_UP | IFF_RUNNING`
-//! and addresses include link-local ones. `awdl0` and `llw0` can come and go during nearby-device
-//! discovery, with their `fe80::` addresses, and each flip announces. That costs one keepalive
-//! per live session, at most 4 per second; nothing is published beyond existing endpoints. The
-//! Mac VM has no Wi-Fi, so its idle window cannot show it. If a real Wi-Fi Mac announces on
-//! these, the fix is to ignore links that carry only link-local addresses.
+//! **Peer-to-peer Wi-Fi links never count.** A Wi-Fi Mac has `awdl0` and `llw0`, the links
+//! macOS uses for nearby-device discovery and transfers. They carry only `fe80::` addresses, so
+//! no peer can reach our endpoint through them, but the kernel adds and deletes host routes for
+//! nearby devices on them all the time. On an idle M1 on Wi-Fi, 48 `awdl0` route deletes in
+//! 5,400 s (one per 112 s) were each judged a change (J1028 on #260); a later raw capture on the
+//! same Mac had 52 adds and 51 deletes in 24 minutes, and the adds count too (J1108). Each one
+//! asked every live session for a keepalive and, with connected sends, marked every pool socket
+//! stale. So their
+//! routes, addresses and link flags are dropped like our own utun's: by interface name (`awdl*`,
+//! `llw*`), and for routes also by a link gateway on such an interface, since the kernel sends
+//! the `RTM_ADD` for a nearby device's route unscoped (interface index 0) with the link only in
+//! the gateway ([`PeerToPeerLinks`]).
 
 use crate::underlay_announce::{AnnouncementWaiter, ChangeBook, UnderlayAnnounce};
 use nix::{
@@ -104,8 +110,85 @@ enum Gateway {
     Link(u16),
 }
 
-/// The host's addresses, links and routes outside our utun, as last seen, so each routing
-/// message can be judged a change or a repeat.
+/// The interface-name prefixes of macOS's peer-to-peer Wi-Fi links (see the module docs).
+const PEER_TO_PEER_PREFIXES: [&str; 2] = ["awdl", "llw"];
+
+/// Whether `name` is one of macOS's peer-to-peer Wi-Fi links, whose changes never move our
+/// endpoint.
+fn is_peer_to_peer(name: &str) -> bool {
+    PEER_TO_PEER_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// Which interface indices are peer-to-peer Wi-Fi links ([`is_peer_to_peer`]), learned from
+/// interface names.
+///
+/// The answer for every interface that existed is filled in when the books are built. An index
+/// first seen in a later message (a link created after the listener opened) is looked up then,
+/// once, by listing the interfaces again. An index that is in no list (an interface already
+/// gone) is not peer-to-peer and is not remembered, so its messages count, which errs on the
+/// side of announcing.
+#[derive(Debug)]
+struct PeerToPeerLinks {
+    /// Each known index and whether it is peer-to-peer.
+    known: std::collections::BTreeMap<u16, bool>,
+    /// Lists the host's interfaces as `(index, name)`: `getifaddrs` in the product, a fixed list
+    /// in tests so synthetic indices never meet the test Mac's real interfaces.
+    list: fn() -> Vec<(u16, String)>,
+}
+
+impl Default for PeerToPeerLinks {
+    fn default() -> Self {
+        Self {
+            known: std::collections::BTreeMap::new(),
+            list: host_interfaces,
+        }
+    }
+}
+
+impl PeerToPeerLinks {
+    /// Record that `index` is called `name`.
+    fn learn(&mut self, index: u16, name: &str) {
+        self.known.insert(index, is_peer_to_peer(name));
+    }
+
+    /// Whether interface `index` is a peer-to-peer Wi-Fi link. Index 0 (an unscoped route) never
+    /// is.
+    fn contains(&mut self, index: u16) -> bool {
+        if index == 0 {
+            return false;
+        }
+        if let Some(known) = self.known.get(&index) {
+            return *known;
+        }
+        for (listed, name) in (self.list)() {
+            self.learn(listed, &name);
+        }
+        self.known.get(&index).copied().unwrap_or(false)
+    }
+}
+
+/// The host's interfaces as `(index, name)`, one entry per interface; empty if they cannot be
+/// listed.
+fn host_interfaces() -> Vec<(u16, String)> {
+    let Ok(interfaces) = nix::ifaddrs::getifaddrs() else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::BTreeMap::new();
+    for interface in interfaces {
+        if let Some(index) = nix::net::if_::if_nametoindex(interface.interface_name.as_str())
+            .ok()
+            .and_then(|index| u16::try_from(index).ok())
+        {
+            seen.entry(index).or_insert(interface.interface_name);
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// The host's addresses, links and routes outside our utun and the peer-to-peer Wi-Fi links, as
+/// last seen, so each routing message can be judged a change or a repeat.
 #[derive(Debug, Default)]
 struct UnderlayBooks {
     /// Every address outside the utun. The value is empty: an address is there or it is not.
@@ -117,11 +200,13 @@ struct UnderlayBooks {
     /// once; routes on an idle Mac are not re-announced, so that costs at most one extra
     /// announcement per route, never a missed change.
     routes: ChangeBook<RouteKey, RouteValue>,
+    /// Which interfaces are peer-to-peer Wi-Fi links; nothing on them counts.
+    peer_to_peer: PeerToPeerLinks,
 }
 
 impl UnderlayBooks {
-    /// Read the host's current addresses and links (outside `utun_index`), so a later repeat of
-    /// one of them is recognised as a repeat.
+    /// Read the host's current addresses and links (outside `utun_index` and the peer-to-peer
+    /// Wi-Fi links), so a later repeat of one of them is recognised as a repeat.
     /// # Errors
     /// Returns the `getifaddrs` error.
     fn current(utun_index: u16) -> io::Result<Self> {
@@ -133,7 +218,10 @@ impl UnderlayBooks {
             let Ok(index) = u16::try_from(index) else {
                 continue;
             };
-            if index == utun_index {
+            books
+                .peer_to_peer
+                .learn(index, interface.interface_name.as_str());
+            if index == utun_index || is_peer_to_peer(interface.interface_name.as_str()) {
                 continue;
             }
             let flags = interface.flags.bits() & LINK_FLAGS;
@@ -191,8 +279,13 @@ impl UnderlayBooks {
         ) else {
             return false;
         };
-        // A failed request changed nothing; our own utun's routes are results, not inputs.
-        if errno != 0 || index == utun_index || flags & IGNORED_ROUTE_FLAGS != 0 {
+        // A failed request changed nothing; our own utun's routes are results, not inputs, and
+        // the peer-to-peer links' routes lead to nearby devices, never to a peer.
+        if errno != 0
+            || index == utun_index
+            || flags & IGNORED_ROUTE_FLAGS != 0
+            || self.peer_to_peer.contains(index)
+        {
             return false;
         }
         let Some(addresses) = message
@@ -212,8 +305,11 @@ impl UnderlayBooks {
                 .map_or(0, prefix_length)
         };
         let gateway = addresses[RTAX_GATEWAY].and_then(gateway);
-        if gateway == Some(Gateway::Link(utun_index)) {
-            return false;
+        if let Some(Gateway::Link(link)) = gateway {
+            // An unscoped route (index 0) names its interface only here.
+            if link == utun_index || self.peer_to_peer.contains(link) {
+                return false;
+            }
         }
         let scope = if flags & libc::RTF_IFSCOPE != 0 {
             index
@@ -238,7 +334,7 @@ impl UnderlayBooks {
         ) else {
             return false;
         };
-        if index == utun_index {
+        if index == utun_index || self.peer_to_peer.contains(index) {
             return false;
         }
         let Some(addresses) = message
@@ -269,7 +365,9 @@ impl UnderlayBooks {
         ) else {
             return false;
         };
-        index != utun_index && self.links.present(index, flags & LINK_FLAGS)
+        index != utun_index
+            && !self.peer_to_peer.contains(index)
+            && self.links.present(index, flags & LINK_FLAGS)
     }
 }
 

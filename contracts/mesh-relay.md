@@ -157,17 +157,60 @@ captured after the endpoint update. A handshake equal to or earlier than that
 instant is stale and allows relay fallback; a later handshake in the same
 second still proves the direct path. This preserves ordering without
 mistaking a fresh same-second handshake for a failed path. Hole punching, ICE
-checks, the D197 selector, and a relay-to-direct upgrade are not implemented
-here.
+checks and a relay-to-direct upgrade are not implemented here. Relay against relay is chosen by measured round trip (below); a direct
+path has no round-trip sample source yet, so direct against relay is still the
+failure rule above.
 
 Each node receives the same ordered relay list and opens one connection to
-each configured relay. While a peer has no active link, the node requests the
-link from every live relay. Once links arrive, both ends retain the lowest
-list index they share and withdraw higher-index links. The list order is a
-temporary deterministic choice for slice 1; it is not measured RTT ranking.
+each configured relay. A relayed peer requests a link from every live relay
+and keeps every link it gets; nothing is withdrawn while the peer is relayed.
+The first link that comes up carries the pair at once. The others are ready
+alternatives, for a failover and for a measured move (#201).
+
+### Relay choice by measured round trip (#201, D185, D313 Q5)
+
+While a pair has two or more links, each end measures every link end to end
+with a link probe: a QUIC DATAGRAM on that link whose payload, after the
+four-byte link ID, is exactly 12 bytes: kind `0xf0` (probe) or `0xf1`
+(answer), three zero bytes, and a big-endian 64-bit token. WireGuard message
+types are 1 to 4, so a probe is never mistaken for ciphertext; the shim
+removes probes before the kernel sees anything. A node answers a probe on the
+same link with the same token, so one round trip covers both legs and the
+relay's queueing. The relay forwards probes like any other DATAGRAM and needs
+no change.
+
+- Probe rounds start only from the send path, after one of the pair's own
+  packets, at most once per second, and only while the pair has two links or
+  more. No timer runs for them, so an idle pair, or a pair with one relay,
+  sends nothing extra.
+- A probe unanswered for 2 s counts as a 2 s sample.
+- A link's samples are cleared whenever that link changes.
+- The pair moves to another link only under the shared rule in
+  `infraternal_mesh::path_choice`: each of the challenger's last five samples,
+  spanning at least 3 s and none older than 30 s, is faster than the current
+  link's median by at least max(5 ms, 15 %). At most one such move happens per
+  10 s. A failover restarts that dwell; setup moves between unmeasured links
+  do not.
+- Until anything is measured, the lowest-indexed link carries the pair, so
+  both ends agree during setup. When every link has its first sample, a link
+  that beats that default by the margin takes over at once (the first measured
+  choice); equal links keep the default.
+- Both ends measure the same quantity and so normally choose the same relay.
+  While they differ, delivery still works, because a node accepts its peer's
+  packets on every link.
+- A relay sees the token and could answer for the peer. It cannot look faster
+  than its own leg, which the node's QUIC connection to it measures, and relays
+  hold the deployment's server-purpose certificate. Authenticated probes are a
+  later hardening step.
+
+A measured move changes only which link carries the pair; the shim address,
+the WireGuard endpoint and the session stay as they are. The route budget uses
+the smaller of the two links' DATAGRAM limits during the move, as a failover
+does.
 
 If the active relay connection ends, the node removes that link and switches
-to the lowest-index remaining live link. If no link remains, the active relay
+at once to the remaining live link with the lowest measured median, or the
+lowest index when none is measured. If no link remains, the active relay
 becomes `None`, packets without a link are counted and dropped, and the node
 requests links again when a relay becomes live. A relay reconnect uses a
 five-second connect deadline. After an established connection drops, the node
@@ -176,12 +219,13 @@ attempts use a 750 ms deadline and failed attempts are separated by at most
 250 ms. After that window, the connect deadline returns to five seconds and
 retry backoff can grow to five seconds. A successful connection resets the
 backoff. QUIC keep-alive is one second and the idle timeout is three seconds.
-When another relay remains active, recovery of a previously lost lower-index
-relay does not move the pair back; this slice does not fail back. The next
+A recovering relay does not take the pair back by itself: it becomes a link
+again and wins only under the measured rule above. The next
 relay's readiness does not guarantee packet-level continuity: UDP datagrams
 may be lost during a failure, while reliable applications recover through
-their own retransmission or resume mechanisms. This behavior does not claim
-the byte-preserving make-before-break selector required by D185/D197.
+their own retransmission or resume mechanisms. A failover is therefore
+not make-before-break. A measured move is: the old link stays up and keeps
+delivering whatever is already in flight on it.
 
 The QUIC path advertises a maximum UDP payload of 1,472 bytes, the IPv4
 payload limit for a 1,500-byte underlay. A 1,500-byte IPv6 underlay permits

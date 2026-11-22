@@ -93,6 +93,11 @@ final class WindowGeometry {
     private var resizeEnabled: Bool
     /// Frames where clicks may go: the window and its overlapping popups. Gaps between them are excluded.
     private var interactive: [CGRect] = []
+    /// Monotonic seconds when `follow` last read the window to the end; `-infinity` until it has.
+    /// Pointer moves reuse that read while it is fresh (see `followIfStale`).
+    private var followedAt = -Double.infinity
+    /// Whether WindowServer listed the window as on screen at the last `follow`.
+    private(set) var onScreen = false
 
     /// Starts following a window.
     ///
@@ -186,6 +191,31 @@ final class WindowGeometry {
         if closed { exists = false }
     }
 
+    /// Like `follow`, but only when the last read is older than the window can safely go unchecked.
+    ///
+    /// Remote pointer moves and scrolls arrive up to 120 times a second and cannot change where the
+    /// window is, so they reuse the geometry that is already known instead of reading the whole
+    /// window list each time (4.8 ms with 26 windows, #146). The cache is invalidated by changes:
+    /// the Accessibility observer calls `follow` on every move, resize, menu and popup of the
+    /// window, and the one-second timer follows it too. A window that has no single matching
+    /// Accessibility element sends no such notifications, so it is re-read after 0.1 s instead of
+    /// 1 s. Clicks and keys always call `follow` or `validateKeyboardTarget` directly.
+    /// - Parameter now: Monotonic seconds; defaults to the current uptime.
+    func followIfStale(now: Double = ProcessInfo.processInfo.systemUptime) {
+        let maxAge = window == nil ? 0.1 : 1.0
+        if !closed, exists, now - followedAt < maxAge { return }
+        follow()
+    }
+
+    /// The process that owns the topmost window at `point` among the windows drawn above this one, or
+    /// `nil` when none of them covers it, so the point reaches this window.
+    ///
+    /// Asks WindowServer only for the windows above this window (0.11 ms in the J1078 probe) instead
+    /// of listing every window. Windows are listed front to back, so the first one that covers the
+    /// point decides; a popup of this app that sits above a foreign window therefore still counts as
+    /// this app's.
+    func ownerCovering(_ point: CGPoint) -> Int32? { topmostOwner(above: id, at: point) }
+
     /// Re-reads the window's state, decides whether to resize it and recomputes `captureRect`,
     /// `content` and the click areas. Sets `exists` to false and `reason` to `closed` when the window
     /// has gone.
@@ -211,6 +241,8 @@ final class WindowGeometry {
             }
         }
         exists = true
+        onScreen = (selected["on_screen"] as? Bool) != false
+        followedAt = ProcessInfo.processInfo.systemUptime
         if let window, let f = axFrame(window) { actual = f } else { actual = cgFrame }
         let density = backingScale(actual)
         desired = CGSize(width:output.width/density,height:output.height/density)

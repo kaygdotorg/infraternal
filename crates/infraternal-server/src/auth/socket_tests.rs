@@ -1044,6 +1044,10 @@ mod review_close_log;
 #[path = "socket_tests/review_mobile_visibility.rs"]
 mod review_mobile_visibility;
 
+/// A stale Resume is welcomed fresh on the same socket, and an attach sent behind it reaches the fresh writer (#569).
+#[path = "socket_tests/stale_resume.rs"]
+mod stale_resume;
+
 #[cfg(all(feature = "canvas", feature = "mesh"))]
 #[path = "socket_tests/canvas.rs"]
 mod canvas;

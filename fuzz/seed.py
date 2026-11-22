@@ -167,5 +167,15 @@ for flags in [0, 1, 2, 255]:
         for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
             (shim / f'cap2-snapshot-{flags}-{length}-{suffix}').write_bytes(value)
 
+# Echo state uses bit 8 and type 0x24: a u64 head and one flag byte, only bit 0
+# defined (#569). Seed both legal flags, undefined bits and short/long payloads.
+for flags in [0, 1, 2, 255]:
+    for extra in [b'', b'\x00']:
+        raw = bytes([0x24]) + (17).to_bytes(8, 'little') + bytes([flags]) + extra
+        framed = len(raw).to_bytes(4, 'little') + raw
+        for suffix, value in [('raw', raw), ('framed', framed), ('twice', framed + framed)]:
+            (shim / f'cap8-echo-{flags}-{len(extra)}-{suffix}').write_bytes(value)
+(shim / 'cap8-echo-short').write_bytes(bytes([0x24]) + bytes(8))
+
 seed_mesh()
 seed_relay()

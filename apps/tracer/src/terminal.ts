@@ -2,17 +2,20 @@
 import { keyboardIsOpen, watchKeyboard } from "./keyboard-viewport";
 import { exitStatusText } from "./canvas/status";
 import { keysIn } from "./input-keys";
+import { concatBytes, hasKeepableContent, keepHistoryVt, SKIPPED_OUTPUT_MARKER, withoutLeadingReset } from "./history-keep";
 import { mountToast, type ToastController, type ToastMessage } from "../../../packages/ui/src/toast";
 import { ICONS } from "../../../packages/ui/src/icons";
 import { bindingLabel } from "../../../packages/ui/src/shortcuts";
 import { TerminalQueries } from "./terminal-queries";
 import { Osc52Scanner } from "./osc52";
 import { readProgramCopy } from "./program-copy";
+import { KeyAckRtt } from "./key-ack-rtt";
 import { writeClipboard, CLIPBOARD } from "../../../packages/ui/src/copy-feedback";
 import { terminalRefusal, type RefusalAction } from "./terminal-refusal";
 import { isCanonicalUuid } from "./identifiers";
 import { reattachReason, recoveringReason } from "./close-reasons";
-import { init, Terminal, type ITheme } from "../vendor/ghostty-web";
+import { Terminal, type Ghostty, type ITheme } from "../vendor/ghostty-web";
+import { loadEngine } from "./engine-wasm";
 import { mountTerminalCursorLayer, type TerminalCursorLayer } from "../../../packages/ui/src/terminal-cursor-layer";
 import { replayedSize, StaleScreenWatch, staleWaitMs, type ScreenSize } from "./stale-screen";
 import { DEFAULT_FONT_ID, fontById, fontStack, loadFont, type MonoFont } from "../../../packages/ui/src/fonts";
@@ -121,6 +124,12 @@ export interface TerminalHooks {
   onSessionGone?: (status?: number) => void;
   onInput?: (data: string, at: number, sequence: bigint) => boolean | void;
   onTrace?: (keyId: string, hop: TerminalTraceHop, at: number) => void;
+  /**
+   * Same facts as {@link onTrace}, for a whole byte range at once: bytes `start` .. `start + length - 1` reached `hop`
+   * at `at`. When set it replaces the per-byte `onTrace` calls for ranges, so a probe costs one call per frame instead
+   * of five BigInt string conversions per output byte (J1065, #569).
+   */
+  onTraceRange?: (start: bigint, length: number, hop: TerminalTraceHop, at: number) => void;
   /** Called after bytes paint; the kind lets paint probes reset when a full screen replaces raw output. */
   onPaintedOutput?: (bytes: Uint8Array, at: number, sequence: bigint, kind?: "output" | "snapshot") => void;
 }
@@ -213,7 +222,7 @@ export interface TerminalConfig {
   getEndedSession?: () => { status?: number } | undefined;
   /** Test-only cap override; normal tracer sessions retain the 10,000-row default. */
   scrollbackLimit?: number;
-  /** Enables the explicit `?predict=1` opt-in; the production default remains off. */
+  /** Turns predictive echo on (`?predict=1`, or the default once the host echo signal ships: see `host-echo-signal.ts`). */
   predictiveEcho?: boolean;
 }
 
@@ -297,6 +306,8 @@ class ByteQueue {
 /** The sole terminal session in the tracer; all network and renderer buffers are bounded. */
 export class TerminalClient {
   private static rendererPreparation: Promise<void> | undefined;
+  /** The loaded engine; set by `prepareResources`, which every path that builds a renderer awaits first. */
+  private static engine: Ghostty | undefined;
   private static readonly rendererWarmups = new Map<string, Promise<void>>();
   private readonly terminal: Terminal;
   private readonly ghostty: GhosttyActivityControls;
@@ -327,6 +338,11 @@ export class TerminalClient {
   private readonly weightMemo = new Map<string, string>();
   private outputWriteInFlight = false;
   private outputWriteLength = 0;
+  /**
+   * True while a paint callback (which the renderer runs inside an animation frame, after its own render pass) drains
+   * the next queued bytes. Those bytes are then drawn in the same frame instead of waiting for the next one (#569).
+   */
+  private drainingInFrame = false;
   /** Parser writes are compared with the latest successful renderer pass on a synchronized release. */
   private parsedOutputVersion = 0;
   private renderedOutputVersion = 0;
@@ -341,6 +357,10 @@ export class TerminalClient {
   private lastPaintedOutputAt = 0;
   private snapshotWriteInFlight = false;
   private pendingSnapshot: PendingSnapshot | undefined;
+  /** The last screen a repaint copied into the history; a repeat of it is not copied again (#569). */
+  private lastKeptScreen: string | undefined;
+  /** How long the last history copy took to read and write out, and how many bytes it came to (probe page, #569). */
+  private lastKeep = { ms: 0, bytes: 0 };
   private receivedOutSeq = 0n;
   private lastOutSeq = 0n;
   private nextInSeq = 0n;
@@ -402,6 +422,8 @@ export class TerminalClient {
   /** D309: after a reattach, silence from the program means its screen may be out of date; see stale-screen.ts. */
   private staleWatch: StaleScreenWatch | undefined;
   private roundTripMs: number | undefined;
+  /** This terminal's own key -> Ack time; what prediction decides on once it has a sample (#569). */
+  private readonly keyAck = new KeyAckRtt();
   private rendererCursorHidden = false;
   /**
    * Whether typing would reach this terminal now. A desktop terminal focuses itself, so it is always ready. On a
@@ -424,6 +446,8 @@ export class TerminalClient {
   /** Stops the keyboard watcher that keeps the screen's height right (keyboard-viewport.ts). */
   private stopKeyboardWatch: (() => void) | undefined;
   private readonly onTerminalActivity = (): void => this.wakeTerminal();
+  /** A tap is as good as a key for cutting a reconnect backoff short. */
+  private readonly onTapRetry = (): void => this.conn.retryForInput();
   private readonly onBlinkInput = (): void => this.restartCursorBlink();
   private readonly onBlinkEnvironment = (): void => this.restartCursorBlink();
   private readonly disposeTouch: () => void;
@@ -487,6 +511,7 @@ export class TerminalClient {
         // and a stall between keydown and the draw (a slow input handler) would not show in the row at all (#447).
         onVisible: (sequence) => config.hooks?.onTrace?.(sequence, "prediction", performance.now()),
         setHostCursorHidden: (hidden) => this.setPredictionCursorHidden(hidden),
+        textBeforeCursor: () => this.textBeforeCursor(),
       })
       : undefined;
     this.cursorLayer = mountTerminalCursorLayer(config.host);
@@ -494,6 +519,7 @@ export class TerminalClient {
     this.staleWatch = new StaleScreenWatch((stale) => config.hooks?.onStaleScreen?.(stale), { after: (ms, run) => window.setTimeout(run, ms), cancel: (handle) => window.clearTimeout(handle as number) });
     config.host.addEventListener("pointerdown", this.onTerminalActivity, { passive: true });
     config.host.addEventListener("pointerdown", this.onBlinkInput, { passive: true });
+    config.host.addEventListener("pointerdown", this.onTapRetry, { passive: true });
     document.addEventListener("visibilitychange", this.onBlinkEnvironment);
     window.addEventListener("blur", this.onBlinkEnvironment);
     window.addEventListener("focus", this.onBlinkEnvironment);
@@ -568,7 +594,8 @@ export class TerminalClient {
     // The round trip is the connection's; every terminal on it reads it (prediction needs it, the pill shows it).
     this.offRoundTrip = this.conn.onRoundTrip((ms) => {
       this.roundTripMs = ms;
-      this.prediction?.setRoundTrip(ms);
+      // A terminal that has timed its own keys keeps that figure: the ping stops at the server, the host may be far behind it.
+      this.prediction?.setRoundTrip(ms === undefined ? undefined : this.keyAck.p90 ?? ms);
       config.onRoundTrip?.(ms);
     });
     this.streamId = this.conn.openStream(this.streamHandler());
@@ -627,9 +654,16 @@ export class TerminalClient {
     }
   }
 
+  /** The loaded engine; a renderer built before `prepareResources` finished is a bug, so it throws. */
+  private static requireEngine(): Ghostty {
+    if (!TerminalClient.engine) throw new Error("The terminal engine is not loaded yet");
+    return TerminalClient.engine;
+  }
+
   /** Builds the renderer's terminal for `font`, with the config's theme or the default (ink) one. */
   private static createRenderer(font: MonoFont, config: Pick<TerminalConfig, "scrollbackLimit" | "theme">): Terminal {
     return new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: fontStack(font),
       fontSize: matchMedia("(pointer: coarse)").matches ? TERMINAL_FONT_SIZE_TOUCH : TERMINAL_FONT_SIZE_DESKTOP,
       cursorBlink: false,
@@ -675,10 +709,15 @@ export class TerminalClient {
     await warmup;
   }
 
+  /**
+   * Loads the font and the terminal engine once and shares the work between every caller: the engine's wasm file is
+   * fetched and compiled here (`src/engine-wasm.ts`), and the loaded engine is kept for the renderers built afterwards.
+   * @param font the face whose upright files gate the first paint
+   */
   private static async prepareResources(font: MonoFont): Promise<void> {
     let renderer = TerminalClient.rendererPreparation;
     if (!renderer) {
-      renderer = init();
+      renderer = loadEngine().then((engine) => { TerminalClient.engine = engine; });
       TerminalClient.rendererPreparation = renderer;
       // Concurrent opens/preparation must share one instance. A failed optional
       // warm-up must not poison the later session's ordinary initialization.
@@ -786,6 +825,28 @@ export class TerminalClient {
     return terminalBufferText(this.terminal, maxRows);
   }
 
+  /**
+   * What the history holds, for the `?probe=1` measurement page (#569): how many rows, how many of them start with
+   * `prefix`, and how many are the "output skipped" marker. It reports counts, never the text itself.
+   */
+  scrollbackSummary(prefix: string): { rows: number; printedRows: number; skippedMarkers: number; lastKeepMs: number; lastKeepBytes: number; unreadableRows: number } {
+    const wasm = this.terminal.wasmTerm;
+    const rows = wasm?.getScrollbackLength() ?? 0;
+    const text = (offset: number): string => (wasm?.getScrollbackLine(offset) ?? [])
+      .filter((cell) => cell.width !== 0)
+      .map((cell) => (cell.codepoint > 32 ? String.fromCodePoint(cell.codepoint) : " ")).join("").trimEnd();
+    let skippedMarkers = 0;
+    let printedRows = 0;
+    let unreadableRows = 0;
+    for (let offset = 0; offset < rows; offset += 1) {
+      if (!wasm?.getScrollbackLine(offset)) unreadableRows += 1;
+      const row = text(offset);
+      if (row === SKIPPED_OUTPUT_MARKER) skippedMarkers += 1;
+      else if (row.startsWith(prefix)) printedRows += 1;
+    }
+    return { rows, printedRows, skippedMarkers, lastKeepMs: this.lastKeep.ms, lastKeepBytes: this.lastKeep.bytes, unreadableRows };
+  }
+
   /** The text the terminal currently has selected ("" when nothing is), for browser checks of touch and mouse selection. */
   readSelectionText(): string {
     return this.terminal.getSelection();
@@ -807,6 +868,7 @@ export class TerminalClient {
     });
     document.body.append(holder);
     const baseline = new Terminal({
+      ghostty: TerminalClient.requireEngine(),
       fontFamily: this.terminal.options.fontFamily,
       fontSize: this.terminal.options.fontSize,
       cursorBlink: false,
@@ -1037,6 +1099,7 @@ export class TerminalClient {
     this.pauseTerminal();
     this.config.host.removeEventListener("pointerdown", this.onTerminalActivity);
     this.config.host.removeEventListener("pointerdown", this.onBlinkInput);
+    this.config.host.removeEventListener("pointerdown", this.onTapRetry);
     document.removeEventListener("visibilitychange", this.onBlinkEnvironment);
     window.removeEventListener("blur", this.onBlinkEnvironment);
     window.removeEventListener("focus", this.onBlinkEnvironment);
@@ -1091,8 +1154,9 @@ export class TerminalClient {
         // A restored renderer may join an already-open shared socket and miss
         // onSocketOpen. Session identity, not callback order, determines resume.
         this.connectionIsResume = this.sessionId !== undefined;
-        // A connection the server does not know starts every writer at zero, like a page reload.
-        if (!resumed && this.hasAttached) this.restartCursors(true);
+        // A connection the server does not know starts every writer at zero. The screen and the output position
+        // stay: the attach below asks for output from the last painted byte (#569).
+        if (!resumed && this.hasAttached) this.restartWriter(true);
         if (!this.sessionId) this.openSession();
         else {
           this.attachRequested = true;
@@ -1185,6 +1249,12 @@ export class TerminalClient {
               this.setStatus("Reconnected. The screen may be slightly out of date.");
               this.config.hooks?.onApproximate?.();
             }
+          } else if (notice.type === "terminal.echo") {
+            // The shim read the PTY's mode: a line is read with echo off (a password
+            // prompt, in any language) or echo is back. It only gates prediction (#569).
+            // `seq` is for relays; above 2^53 it only loses precision here, so its type alone is checked.
+            if (typeof notice.hidden !== "boolean" || typeof notice.seq !== "number" || !(notice.seq >= 0)) throw new Error("invalid echo state");
+            this.prediction?.hostEcho(notice.hidden);
           } else if (notice.type === "terminal.snapshot_unavailable") {
             this.setStatus("Waiting for the screen to catch up.");
           } else if (notice.type === "terminal.replay_complete") {
@@ -1304,6 +1374,8 @@ export class TerminalClient {
     this.attachRequested = false;
     this.attached = true;
     this.attachedAt = performance.now();
+    // A new link starts at "echo on"; the shim reports a hidden line right after replay starts.
+    this.prediction?.hostEcho(false);
     this.sendFrame(this.streamId, {
       type: "AttachTerm",
       sessionId: this.sessionId,
@@ -1439,13 +1511,43 @@ export class TerminalClient {
     else this.setStatus("This session has ended. Open a new shell to continue.");
   }
 
-  /** Fresh writers start at zero; retained typing requires explicit consent before its rebased bytes can replay. */
-  private restartCursors(retainInput = false): void {
+  /**
+   * Starts this terminal over for a different session (or none): a fresh writer, and an empty screen whose output
+   * position is zero, so the next attach replays the new session from its start.
+   */
+  private restartCursors(): void {
     this.cursorEpoch += 1;
     this.receivedOutSeq = 0n;
     this.lastOutSeq = 0n;
     this.parsedOutputVersion += 1;
+    this.restartWriter(false);
+    this.outputQueue.clear();
+    this.replayResponseFence = undefined;
+    this.replayCapturedSize = undefined;
+    this.suppressReplayResponses = this.sessionId !== undefined;
+    this.pendingSnapshot?.bytes.fill(0);
+    this.pendingSnapshot = undefined;
+    this.pendingWriteCompletion = undefined;
+    this.pendingWriteSynchronizedBatch = false;
+    this.terminalQueries?.reset();
+    this.clipboardWrites.reset();
+    this.synchronizedOutput.reset();
+    this.synchronizedOutputBatchPending = false;
+    this.lastKeptScreen = undefined;
+    this.terminal.reset();
+    this.resumeInputIfRoom();
+  }
 
+  /**
+   * Starts a fresh input writer for the same session: its input sequence starts at zero, as the server's new writer
+   * does. With `retainInput`, keys the old writer never had acknowledged are kept aside; they need the person's
+   * consent before they are sent again, because the old writer may already have typed them.
+   *
+   * Output is untouched. Output offsets belong to the session, not to the writer (contracts/wire.md §5), so the
+   * screen, the scrollback and the output position all stay, and the next attach asks only for what was missed. A
+   * fresh connection after a long drop used to blank the terminal and replay the whole session from zero (#569).
+   */
+  private restartWriter(retainInput: boolean): void {
     // A fresh writer has its own sequence space. Keep uncertain earlier bytes aside, so keys typed after this reset
     // can start at sequence zero and flow to the live shell while the person decides what to do with the old bytes.
     const previousLength = retainInput ? this.retainedInput?.byteLength ?? 0 : 0;
@@ -1480,21 +1582,9 @@ export class TerminalClient {
       this.inputResendNotice?.dismiss();
       this.inputResendNoticeVisible = false;
     }
-    this.outputQueue.clear();
     this.staleWatch?.reset();
-    this.replayResponseFence = undefined;
-    this.replayCapturedSize = undefined;
-    this.suppressReplayResponses = this.sessionId !== undefined;
-    this.pendingSnapshot?.bytes.fill(0);
-    this.pendingSnapshot = undefined;
-    this.pendingWriteCompletion = undefined;
-    this.pendingWriteSynchronizedBatch = false;
+    // Predictions are matched by input sequence, which just started over.
     this.prediction?.resetForSnapshot();
-    this.terminalQueries?.reset();
-    this.clipboardWrites.reset();
-    this.synchronizedOutput.reset();
-    this.synchronizedOutputBatchPending = false;
-    this.terminal.reset();
     this.resumeInputIfRoom();
   }
 
@@ -1539,6 +1629,8 @@ export class TerminalClient {
     if (this.inputModifiers.alt === "armed") this.inputModifiers.alt = "off";
     this.config.onInputActivity?.();
     this.sampleRoundTrip();
+    // A key typed while the connection waits out a reconnect backoff retries at once (#569).
+    this.conn.retryForInput();
     data = applyInputModifiers(data, ctrl, alt);
     const at = performance.now();
     const traceInput = this.config.hooks?.onInput?.(data, at, this.nextInSeq) === true;
@@ -1565,6 +1657,7 @@ export class TerminalClient {
     // An Attach request is not a ready shim: per-key frames would fill its
     // bounded handshake queue. Retain them locally until replay confirms it.
     if (this.attachmentConfirmed) {
+      this.keyAck.sent(firstSequence, encoded.byteLength, performance.now());
       for (let offset = 0; offset < encoded.byteLength;) {
         const length = Math.min(INPUT_FRAME_LIMIT, encoded.byteLength - offset);
         this.sendFrame(this.streamId, {
@@ -1724,6 +1817,8 @@ export class TerminalClient {
     }
     this.inputQueue.consume(acknowledged);
     this.ackedInSeq = sequence;
+    const keyRoundTrip = this.keyAck.acked(sequence, performance.now());
+    if (keyRoundTrip !== undefined) this.prediction?.setRoundTrip(keyRoundTrip);
     this.resumeInputIfRoom();
   }
 
@@ -1798,7 +1893,20 @@ export class TerminalClient {
       this.snapshotWriteInFlight = true;
       this.prediction?.resetForSnapshot();
       this.parsedOutputVersion += 1;
+      // A repaint replaces the screen, never the history the device already holds (#569, D381, D130). Read the old
+      // rows before `reset()` frees them; they go back in ahead of the repaint, with a marker where output was dropped.
+      const wasm = this.terminal.wasmTerm;
+      const keepStarted = performance.now();
+      const kept = wasm && hasKeepableContent(wasm)
+        ? keepHistoryVt(wasm, { skipped: snapshot.outSeq > this.lastOutSeq, previousScreen: this.lastKeptScreen })
+        : undefined;
+      if (kept) {
+        this.lastKeptScreen = kept.screen;
+        this.lastKeep = { ms: performance.now() - keepStarted, bytes: kept.bytes.byteLength };
+      }
       this.terminal.reset();
+      const paintBytes = kept ? concatBytes(kept.bytes, withoutLeadingReset(snapshot.bytes)) : snapshot.bytes;
+      kept?.bytes.fill(0);
       this.requestSymbolsIfNeeded(snapshot.bytes);
       this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "termWrite", performance.now());
       const epoch = this.cursorEpoch;
@@ -1828,13 +1936,14 @@ export class TerminalClient {
         this.traceRange(snapshot.outSeq, snapshot.bytes.byteLength, "paint", paintedAt);
         this.config.hooks?.onPaintedOutput?.(snapshot.bytes, paintedAt, snapshot.outSeq, "snapshot");
         snapshot.bytes.fill(0);
+        if (paintBytes !== snapshot.bytes) paintBytes.fill(0);
         this.returnCredit(snapshot.bytes.byteLength);
         this.drainOutput();
         this.tryAttach();
       };
       this.pendingWriteCompletion = onSnapshotWritten;
       this.pendingWriteSynchronizedBatch = false;
-      this.writeSuppressingTerminalResponses(snapshot.bytes, onSnapshotWritten);
+      this.writeSuppressingTerminalResponses(paintBytes, onSnapshotWritten);
       // #528: `reset()` above wiped the canvas, and the render loop draws only in its own animation-frame callback.
       // During a flood this drain runs from an earlier write's callback, which comes after the render loop in the
       // same frame, so the browser would show the wiped canvas for a frame. Drawing the parsed repaint here, in the
@@ -1937,7 +2046,8 @@ export class TerminalClient {
         this.outputWriteLength = 0;
         this.outputWriteInFlight = false;
         this.returnCredit(consumed);
-        this.drainOutput();
+        this.drainingInFrame = true;
+        try { this.drainOutput(); } finally { this.drainingInFrame = false; }
         this.tryAttach();
       };
       this.pendingWriteCompletion = onWritten;
@@ -1988,6 +2098,9 @@ export class TerminalClient {
         // The terminal state includes these bytes now; only their paint is a frame away. Reconcile prediction.
         if (this.predictionUnsafe()) this.prediction?.unsafeScreen();
         else this.prediction?.hostWritten(region!);
+        // Output that was waiting for the previous write's paint is parsed inside a frame, after that frame's render
+        // pass already ran. Left alone, its first draw would be the next frame; draw the dirty rows now so this frame shows it.
+        if (this.drainingInFrame) this.renderDirtyNow();
       }
       return;
     }
@@ -2360,6 +2473,17 @@ export class TerminalClient {
     const buffer = this.terminal.wasmTerm;
     if (!renderer || !buffer || this.closed) return;
     renderer.render(buffer, true, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
+  }
+
+  /**
+   * Draws the rows the parser changed since the last render pass, now, in this task. Unlike {@link repaintAll} it does
+   * not force a full redraw, so it costs only the changed rows; the render wrapper still honours held synchronized output.
+   */
+  private renderDirtyNow(): void {
+    const renderer = this.ghostty.renderer;
+    const buffer = this.terminal.wasmTerm;
+    if (!renderer || !buffer || this.closed || this.suspended || this.surfaceReleased || this.frozen) return;
+    renderer.render(buffer, false, this.terminal.viewportY, this.terminal, this.ghostty.scrollbarOpacity);
   }
 
   /** Draws released VT state in its first available frame, then completes callbacks for what that frame painted. */
@@ -2819,6 +2943,16 @@ export class TerminalClient {
     return { y, bufferType: active.type, wrapped: line.isWrapped, wrapKnown: active.type === "alternate" || y >= scrollback, cells };
   }
 
+  /**
+   * The live screen's text on the cursor's row, left of the cursor, for the secret-prompt check of predictive echo.
+   * Prediction only runs at the live (bottom) viewport, where the cursor row is `rows` from the end of the buffer.
+   */
+  private textBeforeCursor(): string | undefined {
+    const buffer = this.terminal.buffer.active;
+    const row = buffer.length - this.terminal.rows + buffer.cursorY;
+    return buffer.getLine(row)?.translateToString(false, 0, buffer.cursorX);
+  }
+
   /** Uses the same viewport slice the renderer uses for its cursor row. */
   private cursorLine(y: number): unknown[] | null {
     const buffer = this.terminal.wasmTerm;
@@ -2861,9 +2995,15 @@ export class TerminalClient {
     this.conn.send(streamId, frame, (at) => this.traceRange(traceStart, traceLength, "encode", at), () => this.traceRange(traceStart, traceLength, "wsSend", performance.now()));
   }
 
-  /** Maps byte-stream sequence numbers to probe key IDs without changing wire frames. */
+  /**
+   * Maps byte-stream sequence numbers to probe key IDs without changing wire frames. A probe that offers
+   * `onTraceRange` gets the range in one call; otherwise every byte is reported through `onTrace`, which at a 10 MB/s
+   * flood costs more than the terminal itself and made the probe measure its own overhead (J1065, #569).
+   */
   private traceRange(start: bigint, length: number, hop: TerminalTraceHop, at: number): void {
-    const onTrace = this.config.hooks?.onTrace;
+    const hooks = this.config.hooks;
+    if (hooks?.onTraceRange) { hooks.onTraceRange(start, length, hop, at); return; }
+    const onTrace = hooks?.onTrace;
     if (!onTrace) return;
     for (let offset = 0; offset < length; offset += 1) {
       onTrace((start + BigInt(offset)).toString(), hop, at);
@@ -2881,6 +3021,7 @@ export class TerminalClient {
 
   /** Attachment and typing refresh the latency sample; connection liveness continues at idle [D265]. */
   private startPings(): void {
+    this.keyAck.reset();
     this.prediction?.setRoundTrip(undefined);
     this.config.onRoundTrip?.(undefined);
     // The readout was just blanked above, so this probe's answer must be allowed to refill it (#430).

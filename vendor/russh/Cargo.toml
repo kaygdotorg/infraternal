@@ -35,6 +35,8 @@ all-features = true
 
 [features]
 _bench = ["dep:criterion"]
+# Exposes cipher::fuzz_hook for the workspace fuzz harness crate only (#538).
+fuzz-hooks = []
 aws-lc-rs = ["dep:aws-lc-rs"]
 default = [
     "flate2",

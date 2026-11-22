@@ -463,6 +463,42 @@ fn cleanup_frames_reject_payloads_and_preserve_borrowed_decode() {
     }
 }
 
+/// The echo-state report (#569) is a u64 output head and exactly one flag
+/// byte: both defined values round-trip through every fragment split, and a
+/// short or long payload or an undefined flag bit is a framing error rather
+/// than a guess.
+#[test]
+fn echo_state_is_a_head_and_one_strict_flag_byte() {
+    for flags in [0, ECHO_HIDDEN] {
+        let frame = Frame::EchoState(0x0102_0304_0506_0708, flags);
+        let wire = [10, 0, 0, 0, 0x24, 8, 7, 6, 5, 4, 3, 2, 1, flags];
+        assert_eq!(frame.encode().unwrap(), wire);
+        assert_eq!(FrameRef::decode(&wire[4..]).unwrap().into_owned(), frame);
+        for split in 0..=wire.len() {
+            let mut decoder = Decoder::default();
+            let mut frames = decoder.feed(&wire[..split]).unwrap();
+            frames.extend(decoder.feed(&wire[split..]).unwrap());
+            assert_eq!(frames, vec![frame.clone()]);
+        }
+    }
+    let head = [0x24, 0, 0, 0, 0, 0, 0, 0, 0];
+    for body in [
+        &[0x24][..],
+        &head[..8],
+        &head[..],
+        &[&head[..], &[1, 0]].concat()[..],
+        &[&head[..], &[2]].concat()[..],
+        &[&head[..], &[0x80]].concat()[..],
+        &[&head[..], &[0xff]].concat()[..],
+    ] {
+        assert!(Frame::decode(body).is_err(), "{body:?}");
+        assert!(FrameRef::decode(body).is_err(), "{body:?}");
+    }
+    for flags in [2, 0xff] {
+        assert!(Frame::EchoState(0, flags).encode().is_err());
+    }
+}
+
 #[test]
 fn shared_writer_selector_is_fixed_length_and_fragment_safe() {
     let wire = [5, 0, 0, 0, 0x1d, 4, 3, 2, 1];

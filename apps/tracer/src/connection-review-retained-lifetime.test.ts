@@ -1,17 +1,22 @@
 /** Independent #244 retained-typing lifetime and consent controls; all input is synthetic. */
+import { KeyAckRtt } from "./key-ack-rtt";
 import { expect, test } from "bun:test";
 import { Osc52Scanner } from "./osc52";
 import { TerminalClient } from "./terminal";
 import type { ToastMessage } from "../../../packages/ui/src/toast";
 import type { WireFrame } from "../../../packages/protocol/src/codec";
 
+/** The private terminal state and methods these checks drive, reached through the prototype. */
 interface Probe {
   inputNeedsResend: boolean;
   retainedInput?: Uint8Array;
   attachmentConfirmed: boolean;
   closed: boolean;
   nextInSeq: bigint;
-  restartCursors(retain?: boolean): void;
+  /** A different session: empty screen, output and input both at zero. */
+  restartCursors(): void;
+  /** A fresh writer for the same session (#569): input at zero, unacknowledged typing kept for consent. */
+  restartWriter(retain: boolean): void;
   showInputResendNotice(): void;
   resendRetainedInput(): void;
   discardRetainedInput(): void;
@@ -45,7 +50,7 @@ function fixture() {
     inputModifiers: { ctrl: "off", alt: "off" }, cursorEpoch: 0,
     nextInSeq: 0n, ackedInSeq: 0n, sessionId: new Uint8Array(16),
     outputQueue: { clear() {} }, terminal: { reset() {} },
-    config: { hooks: {} }, sampleRoundTrip() {},
+    config: { hooks: {} }, sampleRoundTrip() {}, conn: { retryForInput() {} }, keyAck: new KeyAckRtt(),
     inputResendNotice: {
       show(value: ToastMessage) { notice = value; },
       dismiss() { dismissals += 1; },
@@ -57,10 +62,11 @@ function fixture() {
   return { client, queue, sent, notice: () => notice!, dismissals: () => dismissals };
 }
 
+/** A terminal whose fresh writer holds `text` typed before the drop, attached again and showing the "Send again" notice. */
 function waiting(text = "synthetic-old\n") {
   const f = fixture();
   f.client.handleInput(text);
-  f.client.restartCursors(true);
+  f.client.restartWriter(true);
   f.client.attachmentConfirmed = true;
   f.client.showInputResendNotice();
   return f;
@@ -143,7 +149,7 @@ test("review: another refused writer retains pending and unacknowledged fresh ty
   expect(f.client.inputNeedsResend).toBe(true);
 
   f.client.attachmentConfirmed = false;
-  f.client.restartCursors(true);
+  f.client.restartWriter(true);
   expect(f.client.retainedInput?.byteLength).toBe(19);
   expect(f.queue.length).toBe(0);
   f.sent.length = 0;

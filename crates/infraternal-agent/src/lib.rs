@@ -10,8 +10,28 @@ pub mod cli;
 pub mod daemon;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use control as daemon;
+/// Resolve bounded direct scheduler executables and file arguments (D367).
+mod access_command;
+/// Fingerprints of an account's access files at grant, compared on revoke (D356).
+pub mod access_files;
+/// Observe future system-account work without stopping it (D367).
+mod access_jobs;
+/// Conservative inspection of current and legacy polkit policy.
+mod access_polkit;
+/// Host policy checks for accounts that can exercise root authority.
+mod access_privilege;
+/// Read typed systemd lifecycle commands without losing argument boundaries.
+mod access_units;
+/// Kernel permission checks for bounded system-job targets.
+mod access_write;
+/// Kernel UID observations that verify session shutdown and report leftovers.
+mod account_processes;
 #[path = "daemon_portable.rs"]
 pub mod control;
+/// Fuzz entry point for local control-socket messages and the Hello OS token (tests and `parser-checks` only).
+#[cfg(any(test, feature = "parser-checks"))]
+#[doc(hidden)]
+pub mod control_checks;
 mod daemon_writer;
 /// Admit bounded durable work before moving it off the async runtime.
 mod durable_io;
@@ -63,6 +83,8 @@ pub use infraternal_plugin_remote::remote_quic;
 pub use infraternal_plugin_remote::remote_renewal;
 #[cfg(feature = "remote")]
 pub use infraternal_plugin_remote::remote_tls;
+#[cfg(feature = "remote")]
+pub use infraternal_plugin_remote::server_leaf_floor;
 // Session automation authenticates callers by walking /proc ancestry; it has
 // no macOS process-tree check yet, so it stays Linux-only (#328).
 #[cfg(target_os = "linux")]
@@ -111,6 +133,9 @@ pub fn run_embedded_with_mesh_state(
     state: Option<std::path::PathBuf>,
     mesh_state: Option<std::path::PathBuf>,
 ) -> std::io::Result<()> {
+    // This thread is the agent's whole runtime and relays every terminal byte, so it asks for a
+    // fast core. Timer coalescing is fixed by launchd's `ProcessType`, not here (#554).
+    let _ = infraternal_shim::qos::set_current_thread(infraternal_shim::qos::Qos::UserInteractive);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
