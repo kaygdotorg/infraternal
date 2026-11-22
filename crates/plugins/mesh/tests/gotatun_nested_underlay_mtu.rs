@@ -164,6 +164,39 @@ fn wait_for_route_mtu(ns: &str, destination: &str, expected: u16) -> Option<u16>
     }
 }
 
+/// Make B's packets to A leave from the high-MTU carrier (`high`) or the low-MTU one, for the flap
+/// case: host routes in B's namespace send everything bound for either of A's carrier addresses
+/// out of that carrier, with that carrier's source address.
+///
+/// Both of A's addresses are covered, so the move does not depend on which one B's engine sends
+/// to: an accepted packet from A can roam B's send endpoint to either. A accepts a packet for
+/// any local address on either link (Linux's weak host model), and its reverse-path check passes
+/// because the source lives on the link it arrived on. `GotaTun` sends from a wildcard socket on
+/// Linux, so the kernel takes the source from these routes.
+fn roam_b_source(high: bool) {
+    let (link, source) = if high {
+        ("j502eb", "192.0.2.2")
+    } else {
+        ("j502lb", "198.51.100.2")
+    };
+    for destination in ["192.0.2.1/32", "198.51.100.1/32"] {
+        run(
+            "ip",
+            &[
+                "-n",
+                NS_B,
+                "route",
+                "replace",
+                destination,
+                "dev",
+                link,
+                "src",
+                source,
+            ],
+        );
+    }
+}
+
 /// Fill one reusable buffer with bytes that the receiver can independently reproduce.
 fn fill_pattern(buffer: &mut [u8], offset: u64, seed: u8) {
     for (index, byte) in buffer.iter_mut().enumerate() {
@@ -240,7 +273,11 @@ fn stable_endpoint_recovers_after_underlay_mtu_grows() {
     nested_underlay_case(ReviewCase::Growth);
 }
 
-/// Repeated authenticated endpoint moves converge on the final path in both IP families.
+/// Repeated authenticated endpoint moves converge on the final path, for both inner IP families.
+///
+/// B's source address roams between the two carriers ([`roam_b_source`]); A's IPv4 and IPv6 mesh
+/// routes must follow every move, and a burst of moves faster than the refresh cadence must end
+/// on the last one.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
 fn flapping_authenticated_endpoints_converge_on_final_route_budget() {
@@ -308,7 +345,7 @@ enum ReviewCase {
     ForgedInit,
     /// Exercise large inner IPv6 packets on the nested IPv6 carrier.
     Ipv6Bulk,
-    /// Alternate the authenticated peer between the two carriers.
+    /// Roam the authenticated peer's source address between the two carriers.
     Flap,
 }
 
@@ -667,6 +704,12 @@ fn nested_underlay_case(case: ReviewCase) {
                 drop(sink);
             }
             ReviewCase::Flap => {
+                // Each move is a roam of B's source address, the way a NAT rebinding or a moved
+                // interface looks to A. A coordinator snapshot cannot drive this test any more:
+                // since #483 (J1025) a changed snapshot leaves a live single-address peer on the
+                // address its session authenticated, so B would keep sending where it already
+                // does. A's route budget follows A's confirmed endpoint for B, which is B's
+                // source on its latest authenticated packet, so that is what each step moves.
                 run(
                     "ip",
                     &[
@@ -681,17 +724,7 @@ fn nested_underlay_case(case: ReviewCase) {
                 );
                 for step in 0..8 {
                     let high = step % 2 == 0;
-                    let endpoint = SocketAddr::from((
-                        if high {
-                            [192, 0, 2, 1]
-                        } else {
-                            [198, 51, 100, 1]
-                        },
-                        id_a.port,
-                    ));
-                    let mut changed = snapshot(b, a, endpoint);
-                    changed.version = step + 2;
-                    in_ns(NS_B, || assert!(node_b.chunk(changed).unwrap()));
+                    roam_b_source(high);
                     pulse();
                     let expected = if high { 1360 } else { 1200 };
                     assert_eq!(
@@ -706,28 +739,10 @@ fn nested_underlay_case(case: ReviewCase) {
                     );
                     eprintln!("REVIEW flap={step} high={high} expected_mtu={expected} ipv6={ipv6}");
                 }
-                for (ns, address, link) in [
-                    (NS_A, "2001:db8:523::1/64", "j502la"),
-                    (NS_B, "2001:db8:523::2/64", "j502lb"),
-                ] {
-                    run(
-                        "ip",
-                        &[
-                            "-n", ns, "-6", "address", "add", address, "dev", link, "nodad",
-                        ],
-                    );
-                }
                 // Switch faster than the refresh cadence, then require convergence on the last
                 // authenticated endpoint. Every pulse is received before moving again.
                 for step in 0..40 {
-                    let endpoint = if step % 2 == 0 {
-                        SocketAddr::from(([192, 0, 2, 1], id_a.port))
-                    } else {
-                        SocketAddr::new("2001:db8:523::1".parse().unwrap(), id_a.port)
-                    };
-                    let mut changed = snapshot(b, a, endpoint);
-                    changed.version = step + 10;
-                    in_ns(NS_B, || assert!(node_b.chunk(changed).unwrap()));
+                    roam_b_source(step % 2 == 0);
                     pulse();
                 }
                 assert_eq!(
@@ -740,10 +755,7 @@ fn nested_underlay_case(case: ReviewCase) {
                     .and_then(|counter| counter.endpoint);
                 assert_eq!(
                     final_endpoint,
-                    Some(SocketAddr::new(
-                        "2001:db8:523::2".parse().unwrap(),
-                        id_b.port
-                    ))
+                    Some(SocketAddr::from(([198, 51, 100, 2], id_b.port)))
                 );
                 eprintln!(
                     "REVIEW 40 rapid flaps converged endpoint={final_endpoint:?} route_mtu=1200"
