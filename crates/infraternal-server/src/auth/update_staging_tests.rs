@@ -1442,16 +1442,20 @@ async fn auto_update_after_reboot() {
     assert_eq!(running_digest(server.pid), server.digests[&versions.later]);
     stamp_fresh(&database, 0).await;
     downtime.take_ms();
-    let (ok, rolled) = owner_call(
-        address,
-        &server.session,
-        "release.update.rollback",
-        json!({}),
-    )
+    // The warm restart that follows closes every connection, the asking one included, so the answer may
+    // never arrive (the applier says so). The call runs in its own task: a dropped connection fails it alone,
+    // and the proof of what happened is the state below, not the reply.
+    let reply = tokio::spawn({
+        let session = server.session.clone();
+        async move { owner_call(address, &session, "release.update.rollback", json!({})).await }
+    })
     .await;
-    assert!(ok, "roll back was accepted: {rolled}");
-    assert_eq!(rolled["to"], versions.good.as_str());
-    assert_eq!(rolled["lost_since"].as_i64(), Some(taken_at));
+    if let Ok((ok, rolled)) = &reply {
+        assert!(*ok, "roll back was accepted: {rolled}");
+        assert_eq!(rolled["to"], versions.good.as_str());
+        assert_eq!(rolled["lost_since"].as_i64(), Some(taken_at));
+    }
+    let reply_seen = reply.is_ok();
     let state = wait_outcome(&data, Duration::from_secs(240), &versions.later, "undone").await;
     serving(address).await;
     let gap = downtime.take_ms();
@@ -1502,7 +1506,7 @@ async fn auto_update_after_reboot() {
     );
     assert_eq!(update_state(&data).staged, None);
     println!(
-        "UPDATE case=manual_rollback bucket=warm outcome=undone reason={:?} stale_session_refused=true same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_restored=31 write_after_update_lost=true pointer=releases/{} pointer_resolves=true paused_stays_paused=true max_healthz_gap_ms={gap}",
+        "UPDATE case=manual_rollback bucket=warm outcome=undone reason={:?} stale_session_refused=true reply_seen={reply_seen} same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={echoed} marker_restored=31 write_after_update_lost=true pointer=releases/{} pointer_resolves=true paused_stays_paused=true max_healthz_gap_ms={gap}",
         state.applied.as_ref().unwrap().reason,
         server.shims.len(),
         versions.good
