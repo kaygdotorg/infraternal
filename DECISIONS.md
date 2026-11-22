@@ -5198,3 +5198,10 @@ access (#341 B19).
      - **Rejected:** keeping the report on removal (a removal then reaches
        into files that are not infraternal's), and reporting only on
        `--retain` (the same files, the same objection).
+
+399. **Route probes pause while every viewer of a terminal is hidden (owner, 2026-11-21, #562; amends D265 and D300):**
+     - **Context:** J1034 measured about 41 wakeups per second in each attached terminal's shim (a 25 ms route probe, D265) even when its only viewer was a background tab, a minimised window, a locked phone or a window off the canvas: 4,055 wakeups/s at 100 attached terminals, unchanged with every viewer hidden. Hidden browser sockets already park their own probes (#244, #317), but the route probe to the shim ran on. Under CPU starvation the missed probes also cut the link to the infraternal agent (J1034 finding 7c).
+     - **The owner decided, verbatim:** "Pause probes while every viewer is hidden".
+     - **Rule:** a viewer is hidden when its page is hidden or its window is off the live canvas. The client tells the server per terminal. The server sends no route probes for an attachment whose viewer is hidden, so a terminal whose viewers are all hidden costs its shim no probe wakeups. The first show starts a fresh probe lease at once (one probe tick, 25 ms, plus one round trip). D265's probe cadence and D300's reply deadlines and miss policy are unchanged for every route that is probed.
+     - **Link death while parked:** the host link keeps its own unparked lease (D300), so a dead link is still noticed after about 0.4 s and every attachment reattaches through the normal reconnect. On return the person pays at most that reconnect, one extra round trip, which the owner accepted. A route that died alone (a stuck shim on a healthy link) is found on the first probes after the show, within D265's startup allowance, instead of while nobody could see it.
+     - **Unchanged:** output keeps flowing and credit keeps returning to a hidden terminal; input, replay and writer ownership are untouched. Only liveness probing pauses.

@@ -2632,6 +2632,19 @@ where
             state.close_logs.record(&close);
             Ok(())
         }
+        // A terminal's viewer went hidden or came back (#562): park or resume its route probes. A notice
+        // for a stream that already closed is the usual race with a Close and is dropped.
+        Frame::Event {
+            sub_id: 0,
+            event_json,
+        } if stream_id != 0 && stream_id % 2 == 1 => {
+            let hidden =
+                crate::websocket_transport::terminal_visibility_notice(event_json).ok_or(())?;
+            if let Some(attachment) = attachments.get(&stream_id) {
+                attachment.handle.set_parked(hidden).await.map_err(|_| ())?;
+            }
+            Ok(())
+        }
         Frame::InputReply { query_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
             let attachment = attachments.get(&stream_id).ok_or(())?;
             let expires = state
@@ -3490,7 +3503,8 @@ impl EndedStreams {
             Frame::Input { .. }
             | Frame::InputReply { .. }
             | Frame::Credit { .. }
-            | Frame::Resize { .. } => Ok(true),
+            | Frame::Resize { .. }
+            | Frame::Event { .. } => Ok(true),
             Frame::AttachTerm { .. } => {
                 self.0.remove(&stream_id);
                 Ok(false)

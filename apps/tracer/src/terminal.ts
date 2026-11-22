@@ -965,6 +965,7 @@ export class TerminalClient {
   setSuspended(suspended: boolean): void {
     if (suspended === this.suspended || this.closed) return;
     this.suspended = suspended;
+    this.reportViewerVisibility();
     if (suspended) {
       window.clearTimeout(this.renderIdleTimer);
       this.pauseTerminal();
@@ -1386,9 +1387,25 @@ export class TerminalClient {
     this.sendFrame(this.streamId, { type: "Credit", bytes: INITIAL_CREDIT });
     // An unfitted default is not this viewer's size; the first fit reports the real one (#521).
     if (this.sizeFitted) this.sendFrame(this.streamId, { type: "Resize", ...this.lastSize });
+    // A fresh attachment starts shown on the server; a window that is hidden says so again after every attach.
+    if (this.suspended) this.reportViewerVisibility();
     this.setStatus("Catching up…");
     this.hasAttached = true;
     this.wakeTerminal();
+  }
+
+  /**
+   * Tells the server whether this window's viewer is hidden (page hidden, or the window off the canvas and so
+   * suspended). The server stops its 25 ms route probes to this terminal's shim while every viewer is hidden and
+   * restarts them on the first show, so a background tab costs the host no wakeups (#562, D265). Sent on the
+   * terminal's own stream, only while attached and only to a server that advertised visibility notices.
+   */
+  private reportViewerVisibility(): void {
+    if (!this.attached || this.closed || !this.conn.acceptsViewerVisibility) return;
+    this.sendFrame(this.streamId, {
+      type: "Event", subId: 0,
+      eventJson: new TextEncoder().encode(JSON.stringify({ topic: "terminal.visibility", hidden: this.suspended })),
+    });
   }
 
   /** The session this terminal shows, as a lowercase UUID. */

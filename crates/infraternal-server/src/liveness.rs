@@ -101,6 +101,11 @@ impl Liveness {
         }
     }
 
+    /// True while the viewer is hidden: no probe is due and none is owed [#562].
+    pub(crate) fn is_suspended(&self) -> bool {
+        self.suspended
+    }
+
     /// Restart monitoring on the same transport without reusing a prior probe ID.
     /// Clearing issued requests disarms the lease; the clock and counter survive.
     pub(crate) fn restart(&mut self) {
@@ -253,6 +258,7 @@ impl Liveness {
     }
 }
 
+/// Deadline, suspension and correlation tests for [`Liveness`], on a paused clock.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +282,7 @@ mod tests {
         assert!(route.retired(), "silence is still bounded while visible");
     }
 
+    /// A hidden browser keeps its socket and lease state, owes no reply, and relearns its path on the show.
     #[tokio::test(start_paused = true)]
     async fn suspended_browser_keeps_its_lease_and_relearns_the_mobile_path() {
         let mut route = Liveness::answer_paced();
@@ -284,16 +291,38 @@ mod tests {
         assert!(route.pong(old.0, old.1));
         let queued = route.ping();
         route.set_suspended(true);
+        assert!(route.is_suspended());
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(!route.retired());
         assert!(route.response_deadline().is_none());
         assert!(route.next_probe_due(false).is_none());
         route.set_suspended(false);
+        assert!(!route.is_suspended());
         assert!(!route.pong(queued.0, queued.1));
         let fresh = route.ping();
         tokio::time::advance(Duration::from_millis(600)).await;
         assert!(route.pong(fresh.0, fresh.1));
         assert!(!route.retired());
+    }
+
+    /// A terminal route whose viewer is hidden owes no reply, however long an old probe sat unanswered, and
+    /// its first show starts a fresh lease that still expires on silence [#562].
+    #[tokio::test(start_paused = true)]
+    async fn a_parked_terminal_route_never_expires_and_resumes_with_a_fresh_lease() {
+        let mut route = Liveness::new();
+        route.ping();
+        route.set_suspended(true);
+        tokio::time::advance(Duration::from_secs(30)).await;
+        assert!(!route.expired() && !route.retired());
+        assert!(route.next_probe_due(false).is_none());
+        route.set_suspended(false);
+        assert!(!route.expired(), "the old probe's deadline is gone");
+        route.ping();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(
+            route.expired(),
+            "a route silent after the show still expires"
+        );
     }
 
     #[tokio::test(start_paused = true)]

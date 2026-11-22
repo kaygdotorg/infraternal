@@ -411,6 +411,8 @@ export class MuxConnection {
 
   /** The capability bits the server last advertised, or undefined before its Hello arrives. */
   get serverCaps(): bigint | undefined { return this.serverCapsValue; }
+  /** True when the server welcomed viewer-visibility notices (Hello bit 2): page-level and per-terminal (#244, #562). */
+  get acceptsViewerVisibility(): boolean { return this.serverVisibility; }
 
   /** Runs `listener` now when the server's capabilities are known, and again whenever a Hello states them. */
   onServerCaps(listener: (caps: bigint) => void): () => void {
