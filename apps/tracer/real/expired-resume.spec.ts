@@ -15,7 +15,7 @@
  * | `blank_ms` | time after wake the terminal canvas showed less than half its ink (a blanked screen) |
  * | `last_screen_ms` | wake to the first painted frame of the last screen that stays (one frame when never blanked) |
  * | `live_ms` | wake to the terminal saying it is live (its replay painted, typing goes to the shell) |
- * | `typable_ms` | wake to the echo of a key typed the moment the terminal is live |
+ * | `typable_ms` | wake to the echo of a key typed the moment the terminal is live (`live_to_key_ms` is the harness's own lag) |
  * | `replay_bytes` | terminal output bytes the browser received between wake and live |
  *
  * Ink is counted on a small copy of the terminal's canvas each animation frame: pixels that differ clearly from the
@@ -208,7 +208,16 @@ test("coming back after the resume window keeps the screen and resumes in one ha
         };
         requestAnimationFrame(step);
       }), WATCH_MS);
-      await expect(terminal).toHaveAttribute("data-status", "live", { timeout: WATCH_MS });
+      // Type the moment the page says the terminal is live, as a person waiting at the keyboard would. A polling
+      // `expect(...).toHaveAttribute` retries at growing intervals (up to 1 s) and added hundreds of ms of harness wait
+      // between live and the key; the page's own observer resolves within a task of the change.
+      await page.evaluate((watchMs) => new Promise<void>((done, fail) => {
+        const live = (): boolean => document.querySelector('.cl[data-view="console"] .ui-window[data-status="live"]') !== null;
+        if (live()) { done(); return; }
+        const observer = new MutationObserver(() => { if (live()) { observer.disconnect(); done(); } });
+        observer.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["data-status"] });
+        setTimeout(() => { observer.disconnect(); fail(new Error("terminal never became live")); }, watchMs);
+      }), WATCH_MS);
       // The key goes to the terminal's input whatever had focus while the page was away; both builds pay the same.
       await terminal.locator(".terminal-host textarea").focus();
       const keyAt = Date.now();
@@ -232,7 +241,7 @@ test("coming back after the resume window keeps the screen and resumes in one ha
       const opened = server.bridges.slice(socketsBefore);
       const refusals = opened.filter((bridge) => bridge.serverClose === "s0 the server refused to resume the connection").length;
       const replayBytes = seen.outputs.slice(outputsBefore).filter((output) => output.at < keyAt).reduce((sum, output) => sum + output.bytes, 0);
-      console.log(`METRIC expired_resume sample=${sample} one_way_ms=${ONE_WAY_MS} away_ms=${AWAY_MS} away_lines=${AWAY_LINES} sockets_opened=${opened.length} resume_refusals=${refusals} hello_resume=${opened.map((bridge) => bridge.helloResume ? 1 : 0).join("")} welcome_ms=${(seen.welcomes[welcomesBefore] ?? Number.NaN) - wokeAt} blank_ms=${blankMs.toFixed(1)} last_screen_ms=${lastScreenMs.toFixed(1)} live_ms=${liveMs.toFixed(1)} typable_ms=${echoAt - wokeAt} replay_bytes=${replayBytes} frames=${frames.length} baseline_ink=${baseline} ${firstKey}`);
+      console.log(`METRIC expired_resume sample=${sample} one_way_ms=${ONE_WAY_MS} away_ms=${AWAY_MS} away_lines=${AWAY_LINES} sockets_opened=${opened.length} resume_refusals=${refusals} hello_resume=${opened.map((bridge) => bridge.helloResume ? 1 : 0).join("")} welcome_ms=${(seen.welcomes[welcomesBefore] ?? Number.NaN) - wokeAt} blank_ms=${blankMs.toFixed(1)} last_screen_ms=${lastScreenMs.toFixed(1)} live_ms=${liveMs.toFixed(1)} typable_ms=${echoAt - wokeAt} replay_bytes=${replayBytes} frames=${frames.length} baseline_ink=${baseline} live_to_key_ms=${(keyAt - wokeAt - liveMs).toFixed(1)} ${firstKey}`);
       await page.keyboard.press("Backspace");
       if (AWAY_LINES > 0) await expect.poll(outputText, { timeout: 60_000 }).toContain(`away-${sample}-42`);
       // sleep: let the erase echo settle before the next sample's command.
