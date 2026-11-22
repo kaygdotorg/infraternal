@@ -20,6 +20,14 @@ It writes, into the (new) output folder:
 - `server-tests`: the server crate's test executable with `remote,staging-trust`,
   which holds the proof (`deploy_staging::update_staging`).
 
+With `PROOF=adopt` it builds the S6 proof's four instead (#211 S6): `opt` (started
+from a fixed /opt path by an operator-written unit), `adopted` (the release
+`infraternal server update adopt` moves it onto), `newer` (applied with `server update
+apply`) and `faulty` (fails its health check), and every release folder also carries a
+signed `infraternal-web.tar` whose page names its build ("proof-web <version>"), so the
+proof can tell which web build a server serves. It also writes `mode` ("adopt"), which
+the VM runner reads.
+
 The signing key is a throwaway `ssh-keygen` key made here. Its public half is
 compiled into the staging builds (that is what `staging-trust` means), and the
 private half is deleted before this script exits, so no signing secret ever
@@ -41,6 +49,10 @@ import time
 REPOSITORY = Path(__file__).resolve().parents[2]
 #: The proof's releases, oldest first; see the harness docs.
 ROLES = ("old", "unhealthy", "timeout", "migration", "exec", "kill", "reboot", "good", "unlisted", "later", "newest", "cli")
+#: The S6 proof's builds, oldest first (`PROOF=adopt`); see update_adopt_tests.rs.
+ADOPT_ROLES = ("opt", "adopted", "newer", "faulty")
+#: The release payload that holds a release's web build (#211 S6).
+WEB = "infraternal-web.tar"
 #: The static target the proof VM runs.
 TARGET = "x86_64-unknown-linux-musl"
 #: The image name the updater asks for on x86_64.
@@ -52,8 +64,23 @@ def command(arguments, **kwargs):
     return subprocess.run(arguments, check=True, **kwargs)
 
 
-def bundle(destination, binary, key, version):
-    """Write one signed release folder for `binary` stamped `version`."""
+def web_archive(path, version):
+    """Write a tiny web build for `version` as a release's web payload: an index page that
+    names the build, and one asset, packed like scripts/release/web-archive does."""
+    import io
+    import tarfile
+    with tarfile.open(path, "w", format=tarfile.PAX_FORMAT) as archive:
+        for name, body in (("index.html", f"<!doctype html><title>proof-web {version}</title>\n"),
+                           ("assets/proof.css", f"/* {version} */\n")):
+            data = body.encode()
+            info = tarfile.TarInfo("./" + name)
+            info.size, info.mode, info.mtime = len(data), 0o644, 0
+            archive.addfile(info, io.BytesIO(data))
+
+
+def bundle(destination, binary, key, version, web=False):
+    """Write one signed release folder for `binary` stamped `version` (with a web build
+    when `web`)."""
     destination.mkdir(mode=0o700)
     shutil.copy2(binary, destination / IMAGE)
     (destination / IMAGE).chmod(0o700)
@@ -61,7 +88,11 @@ def bundle(destination, binary, key, version):
     # as a real release does.
     (destination / "infraternal-aarch64-musl").write_bytes(b"staging-unused-arm-payload\n")
     (destination / "VERSION").write_text(version + "\n")
-    names = sorted(("VERSION", IMAGE, "infraternal-aarch64-musl"))
+    names = ["VERSION", IMAGE, "infraternal-aarch64-musl"]
+    if web:
+        web_archive(destination / WEB, version)
+        names.append(WEB)
+    names = sorted(names)
     (destination / "SHA256SUMS").write_text("".join(
         hashlib.sha256((destination / name).read_bytes()).hexdigest() + "  " + name + "\n"
         for name in names))
@@ -78,11 +109,13 @@ def main():
     output.mkdir(mode=0o700)
     releases = output / "releases"
     releases.mkdir(mode=0o700)
+    adopt = os.environ.get("PROOF") == "adopt"
+    roles = ADOPT_ROLES if adopt else ROLES
     target = Path(os.environ.get("CARGO_TARGET_DIR", REPOSITORY / "target"))
     env = dict(os.environ, INFRATERNAL_RELEASE_BUILD="1", CARGO_PROFILE_TEST_DEBUG="0")
     # One base time, one second per release, so versions sort oldest first.
     base = time.strftime("%Y%m%dT%H%M", time.gmtime())
-    versions = [f"edge-{base}{index:02d}Z" for index in range(1, len(ROLES) + 1)]
+    versions = [f"edge-{base}{index:02d}Z" for index in range(1, len(roles) + 1)]
     with tempfile.TemporaryDirectory(prefix="update-proof-key-", dir=output) as temporary:
         key = Path(temporary) / "signing-key"
         command(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "update-proof", "-f", str(key)],
@@ -91,7 +124,7 @@ def main():
         public_key = key.with_suffix(".pub").read_text().split()[1].encode()
         command(["scripts/auth-toolchain"], cwd=REPOSITORY, env=env)
         env["PATH"] = str(target / "auth-tools/zig") + ":" + env["PATH"]
-        for role, version in zip(ROLES, versions):
+        for role, version in zip(roles, versions):
             started = time.monotonic()
             command(["scripts/static-cargo", "build", "--locked", "--release", "-p", "infraternal",
                      "--features", "staging-trust", "--target", TARGET], cwd=REPOSITORY,
@@ -102,7 +135,7 @@ def main():
                 raise ValueError(f"{role}: the staging image lost its compiled authority")
             if version.encode() not in stamped:
                 raise ValueError(f"{role}: the image is not stamped {version}")
-            bundle(releases / version, image, key, version)
+            bundle(releases / version, image, key, version, web=adopt)
             print(f"BUILD role={role} version={version} bytes={len(stamped)} "
                   f"sha256={hashlib.sha256(stamped).hexdigest()} seconds={time.monotonic() - started:.0f}",
                   flush=True)
@@ -120,6 +153,8 @@ def main():
         shutil.copy2(harness, output / "server-tests")
         key.unlink()
     (output / "versions").write_text(" ".join(versions) + "\n")
+    if adopt:
+        (output / "mode").write_text("adopt\n")
     print(f"BUILD harness={output / 'server-tests'} versions={' '.join(versions)}", flush=True)
     return 0
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # The S4 proof's runner inside the microVM (#211 S4); vm.nix starts it at every boot.
+# With /share/mode = adopt it runs the S6 boot-pointer proof instead (#211 S6).
 #
 # Boot 1 runs phase 1 of the proof (`auto_update_failure_matrix`). When that leaves
 # the `reboot` release on trial, this script records "phase 2" on the VM's own disk
@@ -53,6 +54,17 @@ mkdir -p -m 700 "$TMPDIR" "$run/f"
 cd "$run"
 # The server's journal, live, so a stuck run can be read from the host.
 journalctl -f -n 0 -u infraternal-proof.service -o short-iso > "$out/journal-live-$phase.log" 2>&1 &
+
+# The S6 proof (#211 S6): one boot, one test, then power off.
+if [ "$(cat "$share/mode" 2>/dev/null)" = adopt ]; then
+    log "adopt start run=$run"
+    timeout 2400 ./server-tests --ignored --exact "$tests::adopt::boot_pointer_adoption" \
+        --nocapture --test-threads=1 > "$out/adopt.log" 2>&1
+    rc=$?
+    log "adopt rc=$rc"
+    journalctl -u infraternal-server.service --no-pager -o short-iso > "$out/journal-adopt.log" 2>&1
+    finish "$rc" adopt
+fi
 
 if [ "$phase" = 1 ]; then
     log "phase 1 start run=$run"
