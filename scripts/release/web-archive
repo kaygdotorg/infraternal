@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Builds the web app and packs it as a release's signed web payload, infraternal-web.tar (#211 S6).
+#
+#   scripts/release/web-archive <output file>
+#
+# A release image serves the web build signed with it: the updater stages this archive
+# with the image, verifies it against the signed SHA256SUMS and unpacks it into
+# <data>/updates/releases/<version>/web/ (crates/plugins/release/src/web.rs). So the
+# archive holds exactly the tracer build folder (the files the server serves, with their
+# precompressed .br/.gz copies), as plain files and folders only: no links, no owners,
+# no modes beyond 0644/0755, and one fixed time, so the same tree packs to the same
+# bytes. The server's unpacker refuses anything else.
+set -euo pipefail
+[[ $# == 1 ]] || { printf 'usage: scripts/release/web-archive <output file>\n' >&2; exit 2; }
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+output="$1"
+[[ ! -e "$output" ]] || { printf 'the web archive already exists\n' >&2; exit 1; }
+scratch="$(mktemp -d)"
+trap 'rm -rf -- "$scratch"' EXIT
+(cd "$root/apps/tracer" && bun install --frozen-lockfile >&2 && TRACER_DIST="$scratch/web" bun run build >&2)
+[[ -f "$scratch/web/index.html" ]] || { printf 'the web build has no index.html\n' >&2; exit 1; }
+if find "$scratch/web" ! -type f ! -type d | grep -q .; then
+    printf 'the web build holds something that is not a file or a folder\n' >&2; exit 1
+fi
+# pax keeps names longer than ustar's 255 bytes; the options drop the times that would
+# make two packings of one tree differ.
+tar --sort=name --format=pax --pax-option=exthdr.name=%d/PaxHeaders/%f,delete=atime,delete=ctime \
+    --owner=0 --group=0 --numeric-owner --mtime=@0 --mode='u=rwX,go=rX' \
+    -C "$scratch/web" -cf "$output.partial" .
+mv -T -- "$output.partial" "$output"

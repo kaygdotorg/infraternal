@@ -6,6 +6,9 @@
 # so the Linux and macOS binaries carry one stamped identity, and the Mac binary is
 # listed in SHA256SUMS like every other payload. Without it the bundle is
 # Linux-only, as before: the Linux release builder cannot link a Mac binary.
+#
+# Every bundle carries infraternal-web.tar, the web app its images serve
+# (scripts/release/web-archive, #211 S6).
 set -euo pipefail
 source "$(dirname -- "${BASH_SOURCE[0]}")/common"
 usage() { printf 'usage: scripts/release/build --channel {stable|edge} [--darwin DIRECTORY]\n' >&2; exit 2; }
@@ -53,6 +56,8 @@ scripts/package-release "$staging/bundle"
 if [[ -n "$darwin" ]]; then
     install -m 755 "$darwin/infraternal-aarch64-darwin" "$staging/bundle/infraternal-aarch64-darwin"
 fi
+# The web app the release images serve, as one signed payload (#211 S6).
+"$release_root/scripts/release/web-archive" "$staging/bundle/infraternal-web.tar"
 # Component manifests are root artifacts covered by the release signer's
 # SHA256SUMS; their larger archives stay in a content-addressed on-demand tree.
 for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
@@ -62,6 +67,6 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
         --output "$staging/bundle"
 done
 printf '%s\n' "$release_version" > "$staging/bundle/VERSION"
-(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl ${darwin_files[@]+"${darwin_files[@]}"} proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json "${release_license_files[@]}" > SHA256SUMS)
+(cd "$staging/bundle" && sha256sum VERSION infraternal infraternal-aarch64-musl infraternal-x86_64-musl infraternal-aarch64-session-musl infraternal-x86_64-session-musl infraternal-web.tar ${darwin_files[@]+"${darwin_files[@]}"} proxy-traefik-darwin-amd64.json proxy-traefik-darwin-arm64.json proxy-traefik-linux-amd64.json proxy-traefik-linux-arm64.json "${release_license_files[@]}" > SHA256SUMS)
 mkdir -p "$(dirname -- "$destination")"
 mv -T -- "$staging/bundle" "$destination"

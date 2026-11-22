@@ -64,7 +64,8 @@ verify_download() {
         -n infraternal-release -s "$directory/SHA256SUMS.sig" < "$directory/SHA256SUMS"
     # Only fixed bundle names are accepted, even in a trusted signed manifest.
     # Older signed releases may omit session images, and only bundles built with
-    # --darwin carry the macOS binary (#483); advertised images are mandatory
+    # --darwin carry the macOS binary (#483), and only newer ones the web build
+    # infraternal-web.tar (#211 S6); advertised images are mandatory
     # downloads and must match their signed digests.
     awk -v license_files="$license_names" '
         BEGIN {
@@ -76,7 +77,7 @@ verify_download() {
             if (!($2 in allowed_license) && $2 != "infraternal" &&
                 $2 != "infraternal-x86_64-musl" && $2 != "infraternal-aarch64-musl" &&
                 $2 != "infraternal-x86_64-session-musl" && $2 != "infraternal-aarch64-session-musl" &&
-                $2 != "infraternal-aarch64-darwin" &&
+                $2 != "infraternal-aarch64-darwin" && $2 != "infraternal-web.tar" &&
                 $2 != "proxy-traefik-darwin-amd64.json" && $2 != "proxy-traefik-darwin-arm64.json" &&
                 $2 != "proxy-traefik-linux-amd64.json" && $2 != "proxy-traefik-linux-arm64.json" &&
                 $2 != "VERSION") exit 1
@@ -95,6 +96,7 @@ verify_download() {
         local limit=134217728
         [[ "$name" != VERSION ]] || limit=128
         [[ "$name" != proxy-traefik-* ]] || limit=65536
+        [[ "$name" != infraternal-web.tar ]] || limit=67108864
         [[ "$name" != licenses/libghostty-vt/* ]] || limit=2097152
         mkdir -p -- "$(dirname -- "$directory/$name")"
         request '' --max-filesize "$limit" "$release_public/releases/$version/$name" -o "$directory/$name"
