@@ -1029,3 +1029,194 @@ async fn a_superseded_release_stays_staged_until_its_successor_is_ready() {
     );
     assert_eq!(state(&release, OLD).removed, None);
 }
+
+/// Serve the private control socket at `<data>/restart/control.sock` the way the server's restart
+/// control does for update actions (D400): admit a peer only when [`caller_allowed`] says so for a
+/// server running as `server_uid`, read the release header, and answer with `service`. A refused
+/// peer is dropped without an answer, as the restart control drops it. (The server finds `service`
+/// through `release_control::registered`, a process-wide slot that other tests in this binary also
+/// fill, so the test hands it over directly; the microVM proof covers the registered path.)
+///
+/// [`caller_allowed`]: crate::release_control::caller_allowed
+fn serve_control(
+    data: &std::path::Path,
+    server_uid: u32,
+    service: infraternal_plugin_release::service::ReleaseService,
+) -> tokio::task::JoinHandle<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    use tokio::io::AsyncReadExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(data.join("restart"))
+        .unwrap();
+    let listener = tokio::net::UnixListener::bind(data.join("restart/control.sock")).unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let peer = stream.peer_cred().unwrap().uid();
+            if !crate::release_control::caller_allowed(peer, server_uid) {
+                continue;
+            }
+            let mut header = [0; 3];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header, crate::release_control::RELEASE_REQUEST);
+            let service = service.clone();
+            tokio::spawn(async move {
+                let _ = crate::release_control::answer(&mut stream, Some(service)).await;
+            });
+        }
+    })
+}
+
+/// `infraternal server update` on the server machine (D400): over the private control socket, the
+/// server's own account (standing in for root, which the same rule admits) stages an exact release,
+/// applies it, rolls back, cancels, changes the quiet window and reads the history with no passkey and
+/// no session at all, while the same apply through the WebSocket API without a fresh owner session is
+/// still refused. A caller that is neither root nor the server's account gets no answer and changes
+/// nothing.
+#[tokio::test]
+async fn the_local_control_socket_updates_without_a_passkey_and_refuses_other_accounts() {
+    use crate::release_control::{CallError, call};
+    let (release, bucket) = channel(NEW);
+    let old = Release::with_version(4096, OLD);
+    bucket.files.lock().unwrap().extend(old.files.clone());
+    let trust = format!("{}{}", release.trust, old.trust);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    // No sessions at all: nobody has tapped a passkey.
+    sqlx::raw_sql("CREATE TABLE plugin_settings(role TEXT,plugin TEXT,enabled INTEGER,settings TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(role,plugin)); CREATE TABLE users(id TEXT,owner INTEGER); CREATE TABLE sessions(token_hash TEXT,user_id TEXT,unlocked INTEGER,expires INTEGER,fresh INTEGER); INSERT INTO users VALUES('owner',1); INSERT INTO plugin_settings VALUES('server','release',1,'{\"channel\":\"edge\"}');")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let lookup = infraternal_plugin_release::latest::VerifiedLookup::new(
+        release.root.clone(),
+        bucket.origin.clone(),
+        Arc::new(Engine {
+            trust: Some(trust.clone()),
+        }),
+    )
+    .with_updates(Ok(()))
+    .with_updater(Arc::new(updater_with_trust(
+        &release,
+        &bucket.origin,
+        NEW,
+        &trust,
+    )));
+    let recorder = Arc::new(Recorder(std::sync::Mutex::default()));
+    let service =
+        infraternal_plugin_release::service::ReleaseService::new(pool.clone(), Arc::new(lookup))
+            .with_applier(recorder.clone());
+    let me = nix::unistd::geteuid().as_raw();
+    let server = serve_control(&release.root, me, service.clone());
+    let data = release.root.as_path();
+
+    // The WebSocket rule is unchanged: an owner without a fresh passkey tap may not stage by version.
+    let pinned = format!("{{\"version\":\"{OLD}\"}}");
+    assert_eq!(
+        service
+            .call(
+                "release.update.check",
+                pinned.as_bytes(),
+                Some(&OwnerHost as &dyn infraternal_plugin_api::SocketHost)
+            )
+            .await,
+        Err("not permitted")
+    );
+    // Locally, the same requests run as the machine's own authority.
+    let status = call(data, "release.update.status", &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["current"], infraternal_plugin_api::VERSION);
+    let staged = call(data, "release.update.check", &json!({"version": OLD}))
+        .await
+        .unwrap();
+    assert_eq!(
+        (&staged["outcome"], &staged["state"]["hold"]),
+        (&json!("staged"), &json!(OLD))
+    );
+    assert_eq!(
+        call(data, "release.update.apply", &json!({"version": NEWER})).await,
+        Err(CallError::Refused("a different release is staged".into()))
+    );
+    let started = call(data, "release.update.apply", &json!({"version": OLD}))
+        .await
+        .unwrap();
+    assert_eq!(started["to"], OLD);
+    assert_eq!(recorder.0.lock().unwrap().as_slice(), [OLD]);
+    let back = call(data, "release.update.rollback", &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(back["lost_since"], 1_700_000_000);
+    let shown = call(
+        data,
+        "release.update.settings",
+        &json!({"quiet_minutes": 30}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(shown["quiet_minutes"], 30);
+    let cancelled = call(data, "release.update.cancel", &json!({}))
+        .await
+        .unwrap();
+    assert!(cancelled["hold"].is_null() && cancelled["staged"].is_null());
+    let history = call(data, "release.update.history", &json!({}))
+        .await
+        .unwrap();
+    assert_eq!(history["entries"][0]["kind"], "removed");
+    // Only update actions are served here; bad input is refused plainly.
+    assert_eq!(
+        call(data, "release.channel.set", &json!({"channel": "edge"})).await,
+        Err(CallError::Refused("not an update action".into()))
+    );
+    assert_eq!(
+        call(
+            data,
+            "release.update.settings",
+            &json!({"quiet_minutes": 0})
+        )
+        .await,
+        Err(CallError::Refused("invalid input".into()))
+    );
+    server.abort();
+    assert_eq!(
+        recorder.0.lock().unwrap().as_slice(),
+        [OLD, "rollback"],
+        "exactly the local apply and roll back reached the applier"
+    );
+
+    // A server that runs as another account: this (non-root) caller is neither root nor that
+    // account, so it gets no answer, and nothing reaches the applier.
+    if me != 0 {
+        let other = release.root.join("other-account");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let refusing = serve_control(&other, me + 1, service.clone());
+        for action in [
+            "release.update.apply",
+            "release.update.rollback",
+            "release.update.status",
+        ] {
+            assert_eq!(
+                call(&other, action, &json!({})).await,
+                Err(CallError::Closed),
+                "{action}"
+            );
+        }
+        refusing.abort();
+        assert_eq!(recorder.0.lock().unwrap().len(), 2, "nothing more applied");
+    }
+    // No server at all.
+    assert_eq!(
+        call(
+            &release.root.join("nowhere"),
+            "release.update.status",
+            &json!({})
+        )
+        .await,
+        Err(CallError::NotRunning)
+    );
+}

@@ -179,6 +179,12 @@ pub fn release_service(pool: sqlx::SqlitePool, state: &Path) -> ReleaseService {
         Err(_) => service,
     }
 }
+
+/// Build the release plugin for the server whose database is `pool`.
+///
+/// The state folder is the database file's folder (in-memory fixtures get a path that does not
+/// exist). The same service is also registered for the private control socket, so
+/// `infraternal server update` runs through it (D400).
 pub(crate) async fn plugin(
     pool: sqlx::SqlitePool,
 ) -> Result<ReleasePlugin, crate::plugins::PluginError> {
@@ -195,7 +201,12 @@ pub(crate) async fn plugin(
             || PathBuf::from("/nonexistent/infraternal-release-state"),
             Path::to_owned,
         );
-    Ok(ReleasePlugin(release_service(pool, &state)))
+    let service = release_service(pool, &state);
+    // The private control socket runs `infraternal server update` through this same service (D400).
+    if !filename.is_empty() {
+        crate::release_control::register(&state, service.clone());
+    }
+    Ok(ReleasePlugin(service))
 }
 
 #[cfg(all(test, feature = "ssh"))]
