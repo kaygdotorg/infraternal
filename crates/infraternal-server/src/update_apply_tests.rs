@@ -234,19 +234,19 @@ async fn the_trial_waits_for_every_live_recorded_session() {
     let (census, inventory) = tokio::sync::watch::channel(SessionInventoryState::Available(
         Vec::<[u8; 16]>::new().into(),
     ));
-    set_session_inventory(inventory);
+    let waiting_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let expected = vec![alive.simple().to_string(), exited.simple().to_string()];
     let waiting = {
         let (expected, folder) = (expected.clone(), folder.clone());
-        tokio::spawn(async move { sessions_listed(&expected, Some(&folder)).await })
+        let (inventory, count) = (inventory, waiting_count.clone());
+        tokio::spawn(async move {
+            sessions_listed(&expected, Some(&folder), Some(inventory), &count).await
+        })
     };
     // sleep: the new release lists nothing yet; give the trial time to (wrongly) pass.
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert!(!waiting.is_finished(), "a live recorded session is missing");
-    assert_eq!(
-        SESSIONS_WAITING.load(std::sync::atomic::Ordering::Relaxed),
-        1
-    );
+    assert_eq!(waiting_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     census.send_replace(SessionInventoryState::Available(
         vec![*alive.as_bytes()].into(),
     ));
@@ -255,4 +255,34 @@ async fn the_trial_waits_for_every_live_recorded_session() {
         .expect("passes once every live recorded session is listed")
         .unwrap();
     let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// J1130: with automatic apply off a staged release is never switched to by the quiet window,
+/// only by the owner's explicit apply; with it on (the default) the quiet window applies as before.
+#[test]
+fn automatic_apply_off_waits_for_an_explicit_apply() {
+    let staged = update::UpdateState {
+        staged: Some("edge-20261122T000000Z".into()),
+        ..update::UpdateState::default()
+    };
+    assert!(staged.automatic, "on by default");
+    assert!(may_apply(&staged, false), "on: the quiet window applies");
+    let manual = update::UpdateState {
+        automatic: false,
+        ..staged.clone()
+    };
+    assert!(!may_apply(&manual, false), "off: nothing applies alone");
+    assert!(may_apply(&manual, true), "off: an explicit apply switches");
+    let paused = update::UpdateState {
+        paused: staged.staged.clone(),
+        ..manual
+    };
+    assert!(
+        !may_apply(&paused, true),
+        "a paused release is never applied"
+    );
+    assert!(
+        !may_apply(&update::UpdateState::default(), true),
+        "nothing staged"
+    );
 }

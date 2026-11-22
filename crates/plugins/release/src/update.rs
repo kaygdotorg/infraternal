@@ -162,7 +162,7 @@ fn compare(a: &str, b: &str) -> Ordering {
 ///
 /// Times are Unix seconds. Unknown fields from a newer server are ignored, and missing
 /// ones take their defaults, so the file survives upgrades and downgrades.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateState {
     /// The version this server is running.
@@ -196,6 +196,33 @@ pub struct UpdateState {
     /// trial) and was undone (D295). Periodic checks never stage it again; a newer
     /// release, or an explicit request, replaces it.
     pub paused: Option<String>,
+    /// Whether the server applies a staged release by itself in the quiet window (owner
+    /// setting, J1130). Off still checks and stages on schedule, so the status shows what is
+    /// available, but only an explicit `release.update.apply` switches. On by default.
+    pub automatic: bool,
+}
+
+impl Default for UpdateState {
+    /// An empty state: nothing staged or applied, and automatic apply on (the default for
+    /// everyone who never set it; a derived `Default` would have turned it off).
+    fn default() -> Self {
+        Self {
+            current: String::new(),
+            channel: String::new(),
+            available: None,
+            staged: None,
+            last_check: None,
+            next_check: None,
+            last_error: None,
+            refused: None,
+            failures: 0,
+            removed: None,
+            hold: None,
+            applied: None,
+            paused: None,
+            automatic: true,
+        }
+    }
 }
 
 /// The outcome of one switch to a staged release (#211 S4, D295).
@@ -791,6 +818,18 @@ impl Updater {
         lock.write_state(&state)
     }
 
+    /// Turn automatic apply on or off (owner setting, J1130). It lives in `state.json`, beside
+    /// the update's other durable facts, so the D295 database restore of an undone update never
+    /// takes the owner's choice back.
+    /// # Errors
+    /// The update folder is unsafe or the state could not be saved.
+    pub async fn set_automatic(&self, automatic: bool) -> Result<(), &'static str> {
+        let lock = Locked::wait(&self.directory).await?;
+        let mut state = status_of(&self.directory, &self.current);
+        state.automatic = automatic;
+        lock.write_state(&state)
+    }
+
     /// Start the periodic check: one task that sleeps between checks (no polling).
     ///
     /// The first check runs 1–3 minutes after start, then every 15 minutes ±20 %,
@@ -1262,9 +1301,13 @@ impl Locked {
         Ok(())
     }
 
-    /// Add to the history what this write changed: a release newly staged, or a staged
-    /// release newly removed. Doing it where the state is written covers every path that
-    /// stages or retires a release, so none can forget to say so (#211 S5).
+    /// Add to the history what this write changed: a release newly staged, a staged
+    /// release newly removed, or a new last-switch outcome (applied, undone, not applied).
+    /// Doing it where the state is written covers every path that stages, retires or
+    /// switches a release, so none can forget to say so (#211 S5, J1130). Every path that
+    /// ends a switch writes a fresh [`Applied`] (it carries its own timestamp) exactly once
+    /// and removes the marker, so the warm restart and the cold-start undo each record the
+    /// switch once. A state rewrite that leaves `applied` as it was records nothing.
     fn record_changes(&self, before: Option<&UpdateState>, after: &UpdateState) {
         use crate::history::{Entry, Kind, append, now};
         if let Some(version) = &after.staged
@@ -1277,6 +1320,28 @@ impl Locked {
                     kind: Kind::Staged,
                     version: Some(version.clone()),
                     detail: None,
+                },
+            );
+        }
+        if let Some(applied) = &after.applied
+            && before.and_then(|b| b.applied.as_ref()) != Some(applied)
+            // "restore pending" is an interim note: the marker stays and the retry (or the
+            // settle once serving) records the switch's final outcome, so skip it here.
+            && applied.reason.as_deref() != Some(crate::apply::RESTORE_PENDING)
+        {
+            use crate::history::Kind;
+            let kind = match applied.outcome.as_str() {
+                APPLIED => Kind::Applied,
+                UNDONE => Kind::RolledBack,
+                _ => Kind::Failed,
+            };
+            append(
+                &self.directory,
+                Entry {
+                    at: applied.at,
+                    kind,
+                    version: Some(applied.version.clone()),
+                    detail: applied.reason.clone(),
                 },
             );
         }

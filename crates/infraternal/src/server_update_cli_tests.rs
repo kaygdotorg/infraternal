@@ -110,8 +110,8 @@ fn arguments_parse_as_documented() {
     let (_, _, quiet, ..) =
         parse(&["server", "update", "settings", "--quiet-minutes", "30"]).unwrap();
     assert_eq!(quiet, Some(30));
-    // settings needs its value, rollback takes no version, and quiet minutes are whole numbers.
-    assert!(parse(&["server", "update", "settings"]).is_err());
+    // settings with no value parses (the input check refuses it), rollback takes no version, and quiet minutes are whole numbers.
+    assert!(parse(&["server", "update", "settings", "--automatic"]).is_err());
     assert!(parse(&["server", "update", "rollback", "edge-20261122T013516Z"]).is_err());
     assert!(parse(&["server", "update", "settings", "--quiet-minutes", "five"]).is_err());
     assert!(parse(&["server", "update", "status", "--no-wait"]).is_err());
@@ -120,20 +120,41 @@ fn arguments_parse_as_documented() {
 /// Each command sends exactly its action's input, and out-of-range quiet windows are usage errors.
 #[test]
 fn inputs_match_the_actions() {
-    assert_eq!(input("status", None, None).unwrap(), json!({}));
-    assert_eq!(input("check", None, None).unwrap(), json!({}));
+    assert_eq!(input("status", None, None, None).unwrap(), json!({}));
+    assert_eq!(input("check", None, None, None).unwrap(), json!({}));
     assert_eq!(
-        input("apply", Some("edge-20261122T013516Z"), None).unwrap(),
+        input("apply", Some("edge-20261122T013516Z"), None, None).unwrap(),
         json!({"version": "edge-20261122T013516Z"})
     );
     assert_eq!(
-        input("settings", None, Some(1440)).unwrap(),
+        input("settings", None, Some(1440), None).unwrap(),
         json!({"quiet_minutes": 1440})
     );
     for bad in [None, Some(0), Some(1441), Some(-5)] {
-        assert_eq!(input("settings", None, bad).unwrap_err().exit, Exit::Usage);
+        assert_eq!(
+            input("settings", None, bad, None).unwrap_err().exit,
+            Exit::Usage
+        );
     }
-    assert_eq!(input("deploy", None, None).unwrap_err().exit, Exit::Usage);
+    // J1130: `--automatic on|off`, alone or with a quiet window; anything else is a usage error.
+    assert_eq!(
+        input("settings", None, None, Some("off")).unwrap(),
+        json!({"automatic": false})
+    );
+    assert_eq!(
+        input("settings", None, Some(10), Some("on")).unwrap(),
+        json!({"quiet_minutes": 10, "automatic": true})
+    );
+    for bad in ["yes", "", "OFF"] {
+        assert_eq!(
+            input("settings", None, None, Some(bad)).unwrap_err().exit,
+            Exit::Usage
+        );
+    }
+    assert_eq!(
+        input("deploy", None, None, None).unwrap_err().exit,
+        Exit::Usage
+    );
 }
 
 /// Each control-socket failure gets its own sentence and exit code (D303).
@@ -240,6 +261,10 @@ fn other_answers_read_plainly() {
     assert_eq!(
         present("settings", json!({"quiet_minutes": 30})).message,
         "Updates now wait for 30 quiet minutes before they apply by themselves."
+    );
+    assert_eq!(
+        present("settings", json!({"quiet_minutes": 30, "automatic": false})).message,
+        "Automatic apply is off: updates are staged, and only `server update apply` switches."
     );
     let history = present(
         "history",

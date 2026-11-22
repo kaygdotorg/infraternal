@@ -3,6 +3,7 @@
 //! undo. The warm exec and health check are proven in the server and CLI crates.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use super::*;
+use crate::history::Kind;
 use crate::update::{UpdateState, status_of};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 
@@ -51,6 +52,15 @@ impl Data {
         let lock = Locked::open(&self.updates()).unwrap();
         write_pending(&lock, &pending).unwrap();
         pending
+    }
+}
+impl Data {
+    /// The history as `(kind, version, detail)` triples, oldest first (J1130).
+    fn history(&self) -> Vec<(crate::history::Kind, Option<String>, Option<String>)> {
+        crate::history::read(&self.0)
+            .into_iter()
+            .map(|e| (e.kind, e.version, e.detail))
+            .collect()
     }
 }
 impl Drop for Data {
@@ -252,6 +262,11 @@ fn the_previous_release_restores_the_database_after_a_failed_trial() {
             (B, UNDONE)
         );
         assert_eq!(applied.reason.as_deref(), Some(expected));
+        // One entry for the switch, with the reason (J1130).
+        assert_eq!(
+            data.history(),
+            [(Kind::RolledBack, Some(B.into()), Some(expected.into()))]
+        );
     }
 }
 
@@ -272,6 +287,10 @@ fn a_new_release_that_never_started_leaves_the_database_alone() {
         state.applied.unwrap().reason.as_deref(),
         Some(DID_NOT_START)
     );
+    assert_eq!(
+        data.history(),
+        [(Kind::RolledBack, Some(B.into()), Some(DID_NOT_START.into()))]
+    );
 }
 
 /// A marker naming neither side (another binary was deployed by hand) is dropped
@@ -290,6 +309,10 @@ fn a_marker_from_another_binary_is_dropped() {
     let state = data.state();
     assert_eq!(state.paused, None);
     assert_eq!(state.applied.unwrap().reason.as_deref(), Some(INTERRUPTED));
+    assert_eq!(
+        data.history(),
+        [(Kind::Failed, Some(B.into()), Some(INTERRUPTED.into()))]
+    );
 }
 
 /// A commit points `current` at B, drops other installs, keeps `previous/`, removes
@@ -330,6 +353,28 @@ fn commit_moves_the_boot_pointer_only_for_the_running_trial() {
     let state = data.state();
     assert_eq!(state.applied.unwrap().outcome, APPLIED);
     assert_eq!(state.paused, None);
+    assert_eq!(data.history(), [(Kind::Applied, Some(B.into()), None)]);
+}
+
+/// The warm restart into B (switching, then trial) writes no outcome; only the commit does,
+/// once, and a later unrelated state write does not repeat it (J1130).
+#[test]
+fn a_committed_switch_is_recorded_once_across_the_warm_restart() {
+    let data = Data::new();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(data.updates().join("releases").join(B))
+        .unwrap();
+    data.mark(Phase::Switching);
+    let Ok(Resume::Trial(trial)) = resume(&data.0, B, || Ok("bb".repeat(32))) else {
+        panic!("B should start its trial");
+    };
+    assert!(data.history().is_empty(), "nothing is decided yet");
+    commit(&data.0, &trial).unwrap();
+    let lock = Locked::open(&data.updates()).unwrap();
+    lock.write_state(&data.state()).unwrap();
+    assert_eq!(data.history(), [(Kind::Applied, Some(B.into()), None)]);
 }
 
 /// A failed trial marks the rollback with its reason and returns A's kept image, digest
@@ -363,6 +408,10 @@ fn an_abandoned_switch_changes_nothing_that_ran() {
     assert_eq!(
         (applied.outcome.as_str(), applied.reason.as_deref()),
         (NOT_APPLIED, Some("refused"))
+    );
+    assert_eq!(
+        data.history(),
+        [(Kind::Failed, Some(B.into()), Some("refused".into()))]
     );
 }
 
@@ -411,6 +460,10 @@ fn a_failed_restore_pauses_the_new_release_and_retries_at_the_next_start() {
         Some(RESTORE_PENDING)
     );
     assert!(in_flight(&data.0), "the marker stays for the retry");
+    assert!(
+        data.history().is_empty(),
+        "the interim note is not a record"
+    );
     assert_eq!(
         std::fs::read(data.0.join(DATABASE)).unwrap(),
         b"written-by-b"
@@ -426,6 +479,14 @@ fn a_failed_restore_pauses_the_new_release_and_retries_at_the_next_start() {
     );
     assert_eq!(std::fs::read(data.0.join(DATABASE)).unwrap(), b"a-copy");
     assert!(!in_flight(&data.0));
+    assert_eq!(
+        data.history(),
+        [(
+            Kind::RolledBack,
+            Some(B.into()),
+            Some(STOPPED_IN_TRIAL.into())
+        )]
+    );
 }
 
 /// J1085 finding 2 (its experiment 2): once the previous release has served on the
@@ -460,6 +521,10 @@ fn a_release_that_served_unrestored_never_restores_a_stale_copy_later() {
     assert_eq!(state.paused.as_deref(), Some(B));
     assert_eq!(state.applied.unwrap().reason.as_deref(), Some(NOT_RESTORED));
     assert!(!in_flight(&data.0), "the marker is settled");
+    assert_eq!(
+        data.history(),
+        [(Kind::RolledBack, Some(B.into()), Some(NOT_RESTORED.into()))]
+    );
     // Days later the copy is readable again; the next start must leave the data alone.
     std::fs::set_permissions(
         previous.join(DATABASE),
@@ -495,6 +560,10 @@ fn a_new_release_that_gave_up_its_undo_settles_the_marker_when_it_serves() {
     assert!(!in_flight(&data.0));
     // Nothing is left to settle on the next start.
     assert_eq!(settle_served(&data.0, B, || Ok("bb".repeat(32))), Ok(None));
+    assert_eq!(
+        data.history(),
+        [(Kind::Failed, Some(B.into()), Some(UNDO_FAILED.into()))]
+    );
 }
 
 /// J1085 finding 3 (its experiment 3): a new release that cannot record its trial
@@ -587,6 +656,10 @@ fn a_manual_rollback_goes_through_the_same_undo_as_a_failed_trial() {
     let state = data.state();
     assert_eq!(state.paused.as_deref(), Some(B));
     assert_eq!(state.applied.unwrap().reason.as_deref(), Some(MANUAL));
+    assert_eq!(
+        data.history(),
+        [(Kind::RolledBack, Some(B.into()), Some(MANUAL.into()))]
+    );
 }
 
 /// A refused exec puts everything back: no marker, the boot pointer on the running version, the database untouched.

@@ -90,7 +90,10 @@ struct Versioned {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct QuietSet {
-    quiet_minutes: u32,
+    /// How long nobody may type or attach before an automatic update applies.
+    quiet_minutes: Option<u32>,
+    /// Whether a staged release applies by itself (J1130); `false` leaves applying to the owner.
+    automatic: Option<bool>,
 }
 /// Parse an optional exact version (kept out of line, like the other parsers).
 #[inline(never)]
@@ -343,18 +346,26 @@ impl ReleaseService {
     ) -> Result<Value, &'static str> {
         let QuietSet {
             quiet_minutes: minutes,
+            automatic,
         } = parse_quiet(input).map_err(|_| "invalid input")?;
-        if !(1..=MAX_QUIET_MINUTES).contains(&minutes) {
+        if (minutes.is_none() && automatic.is_none())
+            || minutes.is_some_and(|m| !(1..=MAX_QUIET_MINUTES).contains(&m))
+        {
             return Err("invalid input");
         }
         self.require_fresh(host).await?;
-        let _writer = self
-            .writer_admission
-            .acquire()
-            .await
-            .map_err(|_| "release unavailable")?;
-        sqlx::query("INSERT INTO plugin_settings(role,plugin,enabled,settings) VALUES('server','release',1,json_object('quiet_minutes',?)) ON CONFLICT(role,plugin) DO UPDATE SET settings=json_set(plugin_settings.settings,'$.quiet_minutes',?)")
-            .bind(minutes).bind(minutes).execute(&self.pool).await.map_err(|_| "release unavailable")?;
+        if let Some(automatic) = automatic {
+            self.lookup.updater()?.set_automatic(automatic).await?;
+        }
+        if let Some(minutes) = minutes {
+            let _writer = self
+                .writer_admission
+                .acquire()
+                .await
+                .map_err(|_| "release unavailable")?;
+            sqlx::query("INSERT INTO plugin_settings(role,plugin,enabled,settings) VALUES('server','release',1,json_object('quiet_minutes',?)) ON CONFLICT(role,plugin) DO UPDATE SET settings=json_set(plugin_settings.settings,'$.quiet_minutes',?)")
+                .bind(minutes).bind(minutes).execute(&self.pool).await.map_err(|_| "release unavailable")?;
+        }
         self.update_status().await
     }
 

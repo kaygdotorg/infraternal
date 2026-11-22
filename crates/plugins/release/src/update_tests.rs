@@ -275,3 +275,18 @@ fn the_staged_label_is_never_read_through_links_or_from_shared_files() {
     .unwrap();
     assert_eq!(staged_version(&updates), None);
 }
+
+/// J1130: automatic apply is on in an empty or older state file (no field), survives a round
+/// trip when turned off, and is a durable owner choice kept in `state.json`.
+#[test]
+fn automatic_apply_defaults_on_and_round_trips_off() {
+    assert!(UpdateState::default().automatic);
+    let old: UpdateState = serde_json::from_str(r#"{"current":"x"}"#).unwrap();
+    assert!(old.automatic, "a state written before the setting existed");
+    let off = UpdateState {
+        automatic: false,
+        ..UpdateState::default()
+    };
+    let back: UpdateState = serde_json::from_slice(&serde_json::to_vec(&off).unwrap()).unwrap();
+    assert!(!back.automatic);
+}
