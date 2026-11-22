@@ -188,5 +188,5 @@ test("a window with nothing to show is hidden, and shows again once its source h
   const view = buildSettingsMapView(visibleMap(true, showing()), m, { id: "settings", name: "Settings", layout: "tiled", cols: [], nodes: [], x: 0, y: 0 });
   expect(view.cols.flatMap((c) => c.wins.map((w) => w.id)).sort()).toEqual(bare.map((x) => `s-${x.replace(".", "-")}`).sort());
   // Hidden windows cannot be reached by name either (⌘K, deep links).
-  return locate(visibleMap(true, showing()), "mesh.keys").then((r) => expect(r).toBeUndefined());
+  expect(locate(visibleMap(true, showing()), "mesh.keys")).toBeUndefined();
 });
