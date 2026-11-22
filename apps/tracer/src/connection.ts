@@ -882,7 +882,11 @@ export class MuxConnection {
         for (const l of [...this.capListeners]) l(frame.caps);
         this.terminalQueryReplies = (frame.caps & TERMINAL_QUERY_REPLIES) !== 0n;
         return;
-      case "Welcome":
+      case "Welcome": {
+        // A resumed Welcome keeps the connection id the page asked for. When the server cannot resume (the window
+        // ran out, or it no longer knows the id) it welcomes the same socket as a fresh connection with a new id,
+        // instead of closing it and making the page open another (#569, D265).
+        const resumed = this.resumeSent && this.credentials !== undefined && sameBytes(frame.connectionId, this.credentials.connectionId);
         this.sessionIncarnation = frame.sessionIncarnation;
         this.stopRetryHintListeners();
         this.send(CONTROL_STREAM, { type: "Subscribe", subId: RECOVERY_SUBSCRIPTION, filterJson: encoder.encode(JSON.stringify({ topic: "auth.recovery" })) });
@@ -908,13 +912,14 @@ export class MuxConnection {
         else this.pageActivated(true);
         for (const subId of [...this.subscriptions.keys()]) this.openSubscription(subId);
         for (const l of [...this.welcomeListeners]) l();
-        if (!this.resumeSent) this.writersUsed.clear();
-        for (const s of [...this.streams.values()]) s.onWelcome(this.resumeSent);
+        if (!resumed) this.writersUsed.clear();
+        for (const s of [...this.streams.values()]) s.onWelcome(resumed);
         // The link is back. A stream that holds a session reports it when it attaches again; a page with none (every window
         // ended, or only views without terminals) never would, and the top pill would say "offline" for good on a link that
         // is up and carries a live inventory. Only a recovery reports here: the first connect keeps waiting for its attach.
         if (this.linkReported === false && ![...this.streams.values()].some((s) => s.hasSession())) this.reportLink(true);
         return;
+      }
       case "Result": {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
@@ -1048,6 +1053,16 @@ function refusalReason(body: Uint8Array): { reason?: string; memory?: { availabl
     }
     return { reason };
   } catch { return {}; }
+}
+
+/**
+ * Whether two byte strings are equal. Used to compare a Welcome's connection id with the one the page asked to resume;
+ * the id is not a secret (the resume token is), so an early exit is fine.
+ */
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  for (let i = 0; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

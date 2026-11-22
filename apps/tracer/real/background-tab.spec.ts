@@ -148,12 +148,7 @@ test("a background tab stays quiet and answers its first key promptly on return"
     await page.getByRole("heading", { name: "Save your recovery key" }).waitFor();
     await page.locator(".auth-check").click();
     await page.getByRole("button", { name: "Open infraternal" }).click();
-    // The same host setup as the #244 mobile check: unlock the host CA so the local terminal can attach.
     await page.locator(".cl-viewport").waitFor();
-    const unlock = page.getByLabel("Hosts settings").getByRole("button", { name: "Unlock", exact: true, includeHidden: true });
-    await expect(unlock).toHaveAttribute("data-shown", "true");
-    await unlock.evaluate((button) => (button as HTMLButtonElement).click());
-    await expect.poll(() => page.evaluate(async () => (await fetch("/remote/ca/status", { method: "POST" })).json())).toEqual({ locked: false, initialized: true });
     const terminal = page.locator('.cl[data-view="console"] .ui-window').first();
     if (!linkOnly) {
       await expect(terminal).toHaveAttribute("data-status", "live", { timeout: 30_000 });

@@ -391,6 +391,8 @@ async fn browser_websocket_close_logs_its_code_and_safe_reason_for_attached_sess
     server.abort();
 }
 
+/// A resume with a wrong token is stale: the same socket is welcomed as a fresh connection with a new id (#569),
+/// and each writer of the old connection still gets its "refused to resume" close line.
 #[tokio::test]
 async fn failed_client_resume_attempt_logs_each_retained_session() {
     let _serial = SERIAL.lock().await;
@@ -545,19 +547,12 @@ async fn failed_client_resume_attempt_logs_each_retained_session() {
     .unwrap();
     wire.extend_from_slice(&resume);
     retry.send(Message::Binary(wire.into())).await.unwrap();
-    let refusal = read_client_frame(&mut retry).await;
-    let refusal = decode_muxed_frame(&refusal).unwrap().frame;
-    assert!(
-        matches!(
-            refusal,
-            Frame::Close {
-                code: 1008,
-                reason: "the server refused to resume the connection"
-            }
-        ),
-        "unexpected refusal frame: {refusal:?}"
+    let (fresh_id, _) = read_welcome(&mut retry).await;
+    assert_ne!(
+        fresh_id, connection_id,
+        "a stale resume must be welcomed as a new connection, never as the old one"
     );
-    // The server names the refused sessions after it has closed the socket.
+    // The server names the old connection's sessions in the background.
     let resumed = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(event) = capture
