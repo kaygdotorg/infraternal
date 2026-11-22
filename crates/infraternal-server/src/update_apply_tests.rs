@@ -256,3 +256,33 @@ async fn the_trial_waits_for_every_live_recorded_session() {
         .unwrap();
     let _ = std::fs::remove_dir_all(&folder);
 }
+
+/// J1130: with automatic apply off a staged release is never switched to by the quiet window,
+/// only by the owner's explicit apply; with it on (the default) the quiet window applies as before.
+#[test]
+fn automatic_apply_off_waits_for_an_explicit_apply() {
+    let staged = update::UpdateState {
+        staged: Some("edge-20261122T000000Z".into()),
+        ..update::UpdateState::default()
+    };
+    assert!(staged.automatic, "on by default");
+    assert!(may_apply(&staged, false), "on: the quiet window applies");
+    let manual = update::UpdateState {
+        automatic: false,
+        ..staged.clone()
+    };
+    assert!(!may_apply(&manual, false), "off: nothing applies alone");
+    assert!(may_apply(&manual, true), "off: an explicit apply switches");
+    let paused = update::UpdateState {
+        paused: staged.staged.clone(),
+        ..manual
+    };
+    assert!(
+        !may_apply(&paused, true),
+        "a paused release is never applied"
+    );
+    assert!(
+        !may_apply(&update::UpdateState::default(), true),
+        "nothing staged"
+    );
+}

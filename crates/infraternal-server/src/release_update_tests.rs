@@ -916,6 +916,22 @@ async fn owner_controls_need_a_fresh_owner_and_reach_the_applier() {
         (&shown["quiet_minutes"], &shown["channel"]),
         (&json!(30), &json!("edge"))
     );
+    // J1130: automatic apply is on by default, and the owner can turn it off and on again;
+    // the quiet window is kept either way.
+    assert_eq!(shown["automatic"], true);
+    let shown = call("release.update.settings", b"{\"automatic\":false}")
+        .await
+        .unwrap();
+    assert_eq!(
+        (&shown["automatic"], &shown["quiet_minutes"]),
+        (&json!(false), &json!(30))
+    );
+    let shown = call("release.update.status", b"{}").await.unwrap();
+    assert_eq!(shown["automatic"], false);
+    let shown = call("release.update.settings", b"{\"automatic\":true}")
+        .await
+        .unwrap();
+    assert_eq!(shown["automatic"], true);
     for bad in [
         b"{\"quiet_minutes\":0}".as_slice(),
         b"{\"quiet_minutes\":1441}",

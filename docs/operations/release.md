@@ -365,6 +365,7 @@ sudo infraternal server update rollback              # back to the previous vers
 sudo infraternal server update cancel                # drop a held release
 sudo infraternal server update history
 sudo infraternal server update settings --quiet-minutes 10
+sudo infraternal server update settings --automatic off   # stage only; apply when asked
 infraternal skill server update apply                # the contract an AI agent reads
 ```
 
@@ -392,8 +393,16 @@ command says so); move it once with `infraternal server restart --binary`.
 
 The production flow (owner, 2026-11-22): publish a signed edge release after
 each green dev gate, then on the server `sudo infraternal server update check`
-and `sudo infraternal server update apply`. Automatic apply in the quiet window
-keeps working alongside.
+and `sudo infraternal server update apply`.
+
+**Automatic apply (owner setting, J1130).** By default a staged release is applied by itself
+in the quiet window. `settings --automatic off` (or `{"automatic": false}` in
+`release.update.settings`) turns that off: the server still checks and stages on schedule, so
+`status` shows what is available, but it never switches alone; only an explicit
+`release.update.apply` (the `apply` command or the Updates page) does. `--automatic on`
+restores the default. The choice is `automatic` in `state.json` and in the status, and it
+survives the D295 database restore of an undone update. Production is set to off, so it moves
+only when the owner or the orchestrator says so.
 
 # Add-host payloads
 

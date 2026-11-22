@@ -192,14 +192,15 @@ pub const UPDATE_HISTORY: ActionDef = ActionDef {
 /// Set the quiet window the apply step waits for (#211 S5).
 pub const UPDATE_SETTINGS: ActionDef = ActionDef {
     id: "release.update.settings",
-    summary: "Set how long the server must be idle before it applies an update by itself.",
+    summary: "Set how long the server must be idle before it applies an update by itself, and whether it applies updates by itself at all.",
     instructions: &[
         "quiet_minutes is how long nobody may have typed or attached before an automatic update applies (default 5, 1 to 1440).",
+        "automatic false turns automatic apply off: the server still checks and stages on schedule, so the state shows what is available, but it only switches when release.update.apply is called. The default is true. Send quiet_minutes, automatic or both.",
         "The channel is set with release.channel.set.",
         "This needs the owner with a recent passkey tap.",
     ],
     input: SchemaRef(
-        r#"{"type":"object","properties":{"quiet_minutes":{"type":"integer","minimum":1,"maximum":1440}},"required":["quiet_minutes"],"additionalProperties":false}"#,
+        r#"{"type":"object","properties":{"quiet_minutes":{"type":"integer","minimum":1,"maximum":1440},"automatic":{"type":"boolean"}},"minProperties":1,"additionalProperties":false}"#,
     ),
     output: SchemaRef("UpdateState"),
     permission: Permission::One("server.configure"),
@@ -338,7 +339,7 @@ fn server_update_cli_actions() -> impl Iterator<Item = infraternal_plugin_api::A
         (&UPDATE_ROLLBACK, "rollback", ("server update rollback", "Go back to the version that ran before the last update.")),
         (&UPDATE_CANCEL, "cancel", ("server update cancel", "Drop a release that was staged by version.")),
         (&UPDATE_HISTORY, "history", ("server update history", "List what the updater did, newest first.")),
-        (&UPDATE_SETTINGS, "settings", ("server update settings --quiet-minutes 10", "Wait for 10 idle minutes before an automatic update.")),
+        (&UPDATE_SETTINGS, "settings", ("server update settings --automatic off", "Stage updates but apply them only when asked.")),
     ]
     .into_iter()
     .map(|(source, name, example)| {
@@ -346,7 +347,7 @@ fn server_update_cli_actions() -> impl Iterator<Item = infraternal_plugin_api::A
             "data".to_owned(),
             JsonSchema::string("Data folder of the running server."),
         )];
-        let mut required = Vec::new();
+        let required = Vec::new();
         let mut positionals = Vec::new();
         if matches!(name, "check" | "apply") {
             fields.push((
@@ -374,7 +375,12 @@ fn server_update_cli_actions() -> impl Iterator<Item = infraternal_plugin_api::A
                     "Minutes nobody may type or attach before an update applies by itself (1 to 1440).",
                 ),
             ));
-            required.push("quiet_minutes".to_owned());
+            fields.push((
+                "automatic".to_owned(),
+                JsonSchema::string(
+                    "Turn automatic apply off or on. Off stops the server applying staged updates by itself (it still checks and stages), so only `server update apply` switches.",
+                ),
+            ));
         }
         let mut instructions: Vec<&'static str> = source
             .instructions

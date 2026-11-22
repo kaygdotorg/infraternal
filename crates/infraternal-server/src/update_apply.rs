@@ -580,17 +580,16 @@ async fn quiet_window(
     let mut changes = update::changes();
     loop {
         let state = update::status(data, infraternal_plugin_api::VERSION);
-        let ready = state
-            .staged
-            .as_ref()
-            .is_some_and(|staged| state.paused.as_ref() != Some(staged));
-        if !ready {
-            if changes.changed().await.is_err() {
-                return;
+        let forced = FORCE.load(std::sync::atomic::Ordering::SeqCst);
+        if !may_apply(&state, forced) {
+            // Nothing to apply, or automatic apply is off and nobody asked: wait for a change
+            // of state or for the owner's explicit apply (J1130).
+            tokio::select! {
+                result = changes.changed() => if result.is_err() { return },
+                () = NOW.notified() => {}
             }
             continue;
         }
-        let forced = FORCE.load(std::sync::atomic::Ordering::SeqCst);
         let idle = crate::update_activity::idle_for();
         if !forced && idle < quiet {
             // Sleep until the window could close; typing meanwhile only moves it. The owner
@@ -616,6 +615,17 @@ async fn quiet_window(
             }
         }
     }
+}
+
+/// Whether the quiet-window task may start a switch: a release is staged and not paused,
+/// and either the owner asked for it by name (`forced`) or automatic apply is on (J1130).
+/// With automatic apply off the server still checks and stages, but never switches alone.
+fn may_apply(state: &update::UpdateState, forced: bool) -> bool {
+    let ready = state
+        .staged
+        .as_ref()
+        .is_some_and(|staged| state.paused.as_ref() != Some(staged));
+    ready && (state.automatic || forced)
 }
 
 /// Why one apply attempt stopped.

@@ -162,7 +162,7 @@ fn compare(a: &str, b: &str) -> Ordering {
 ///
 /// Times are Unix seconds. Unknown fields from a newer server are ignored, and missing
 /// ones take their defaults, so the file survives upgrades and downgrades.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UpdateState {
     /// The version this server is running.
@@ -196,6 +196,33 @@ pub struct UpdateState {
     /// trial) and was undone (D295). Periodic checks never stage it again; a newer
     /// release, or an explicit request, replaces it.
     pub paused: Option<String>,
+    /// Whether the server applies a staged release by itself in the quiet window (owner
+    /// setting, J1130). Off still checks and stages on schedule, so the status shows what is
+    /// available, but only an explicit `release.update.apply` switches. On by default.
+    pub automatic: bool,
+}
+
+impl Default for UpdateState {
+    /// An empty state: nothing staged or applied, and automatic apply on (the default for
+    /// everyone who never set it; a derived `Default` would have turned it off).
+    fn default() -> Self {
+        Self {
+            current: String::new(),
+            channel: String::new(),
+            available: None,
+            staged: None,
+            last_check: None,
+            next_check: None,
+            last_error: None,
+            refused: None,
+            failures: 0,
+            removed: None,
+            hold: None,
+            applied: None,
+            paused: None,
+            automatic: true,
+        }
+    }
 }
 
 /// The outcome of one switch to a staged release (#211 S4, D295).
@@ -788,6 +815,18 @@ impl Updater {
             return Ok(());
         };
         retire(&lock, &mut state, Some(held), REMOVED_CANCELLED)?;
+        lock.write_state(&state)
+    }
+
+    /// Turn automatic apply on or off (owner setting, J1130). It lives in `state.json`, beside
+    /// the update's other durable facts, so the D295 database restore of an undone update never
+    /// takes the owner's choice back.
+    /// # Errors
+    /// The update folder is unsafe or the state could not be saved.
+    pub async fn set_automatic(&self, automatic: bool) -> Result<(), &'static str> {
+        let lock = Locked::wait(&self.directory).await?;
+        let mut state = status_of(&self.directory, &self.current);
+        state.automatic = automatic;
         lock.write_state(&state)
     }
 

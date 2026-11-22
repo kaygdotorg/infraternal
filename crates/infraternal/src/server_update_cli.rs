@@ -11,7 +11,7 @@
 //! | `rollback [--no-wait]` | `release.update.rollback`, then wait for the outcome |
 //! | `cancel` | `release.update.cancel` |
 //! | `history` | `release.update.history` |
-//! | `settings --quiet-minutes N` | `release.update.settings` |
+//! | `settings [--quiet-minutes N] [--automatic on\|off]` | `release.update.settings` |
 //!
 //! They reach the running server through its private control socket
 //! ([`infraternal_server::release_control`]), so they work only on the server machine, as root or
@@ -51,7 +51,12 @@ pub(crate) fn run(
         .cloned();
     let quiet = matches.try_get_one::<i64>("quiet_minutes").ok().flatten();
     let no_wait = matches.try_get_one::<bool>("no_wait").ok().flatten() == Some(&true);
-    let input = match input(name, version.as_deref(), quiet.copied()) {
+    let automatic = matches
+        .try_get_one::<String>("automatic")
+        .ok()
+        .flatten()
+        .map(String::as_str);
+    let input = match input(name, version.as_deref(), quiet.copied(), automatic) {
         Ok(input) => input,
         Err(refused) => return failure(&command, json_output, &refused),
     };
@@ -205,19 +210,51 @@ fn failure(command: &str, json_output: bool, failure: &Failure) -> ExitCode {
 /// The action's JSON input for command `name`, from its parsed arguments.
 ///
 /// `check` and `apply` send their optional `version`; `settings` needs `--quiet-minutes`
-/// between 1 and 1440 (checked here so a typo is a usage error, not a server refusal); the
-/// other commands send `{}`.
-fn input(name: &str, version: Option<&str>, quiet: Option<i64>) -> Result<Value, Failure> {
+/// between 1 and 1440, `--automatic on|off`, or both (checked here so a typo is a usage
+/// error, not a server refusal); the other commands send `{}`.
+fn input(
+    name: &str,
+    version: Option<&str>,
+    quiet: Option<i64>,
+    automatic: Option<&str>,
+) -> Result<Value, Failure> {
     match name {
         "check" | "apply" => Ok(version.map_or_else(|| json!({}), |v| json!({"version": v}))),
-        "settings" => match quiet {
-            Some(minutes) if (1..=1440).contains(&minutes) => Ok(json!({"quiet_minutes": minutes})),
-            _ => Err(Failure {
-                message: "--quiet-minutes must be a whole number of minutes from 1 to 1440.".into(),
-                next: "infraternal server update settings --quiet-minutes 5",
+        "settings" => {
+            let usage = |message: &str| Failure {
+                message: message.into(),
+                next: "infraternal server update settings --automatic off",
                 exit: Exit::Usage,
-            }),
-        },
+            };
+            let mut body = serde_json::Map::new();
+            match quiet {
+                Some(minutes) if (1..=1440).contains(&minutes) => {
+                    body.insert("quiet_minutes".into(), json!(minutes));
+                }
+                Some(_) => {
+                    return Err(usage(
+                        "--quiet-minutes must be a whole number of minutes from 1 to 1440.",
+                    ));
+                }
+                None => {}
+            }
+            match automatic {
+                Some("on") => {
+                    body.insert("automatic".into(), json!(true));
+                }
+                Some("off") => {
+                    body.insert("automatic".into(), json!(false));
+                }
+                Some(_) => return Err(usage("--automatic must be `on` or `off`.")),
+                None => {}
+            }
+            if body.is_empty() {
+                return Err(usage(
+                    "Give --quiet-minutes N, --automatic on|off, or both.",
+                ));
+            }
+            Ok(Value::Object(body))
+        }
         "status" | "rollback" | "cancel" | "history" => Ok(json!({})),
         _ => Err(Failure::not_update()),
     }
@@ -282,10 +319,14 @@ fn present(name: &str, value: Value) -> Report {
             report
         }
         "settings" => Report::done(
-            format!(
-                "Updates now wait for {} quiet minutes before they apply by themselves.",
-                value["quiet_minutes"]
-            ),
+            if value["automatic"] == false {
+                "Automatic apply is off: updates are staged, and only `server update apply` switches.".to_owned()
+            } else {
+                format!(
+                    "Updates now wait for {} quiet minutes before they apply by themselves.",
+                    value["quiet_minutes"]
+                )
+            },
             value,
         ),
         _ => Report::done("Done.", value),
@@ -480,6 +521,17 @@ fn status_body(state: &Value) -> String {
     }
     if let Some(minutes) = state["quiet_minutes"].as_u64() {
         rows.push(("Quiet window", format!("{minutes} minutes")));
+    }
+    if let Some(automatic) = state["automatic"].as_bool() {
+        rows.push((
+            "Automatic apply",
+            if automatic {
+                "on"
+            } else {
+                "off (only apply switches)"
+            }
+            .to_owned(),
+        ));
     }
     let applied = &state["applied"];
     if let (Some(version), Some(outcome)) =
