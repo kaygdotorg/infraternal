@@ -1449,6 +1449,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     await open(page, "&at=you.apps");
     const keys = page.locator('[data-window-id="s-you-apps"] .cl-keys .ui-sp-device');
     await expect(keys).toHaveCount(3);
+    await shot(page, `keys-${tag}-${process.env.SETTINGS_THEME ?? "mocha"}`);
     for (const row of await keys.all()) {
       const m = await row.evaluate((li) => {
         const mid = (s: string): number => { const r = li.querySelector(s)!.getBoundingClientRect(); return (r.top + r.bottom) / 2; };
@@ -1457,7 +1458,6 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
       expect(Math.abs(m.icon - m.name), `key icon centre ${m.icon.toFixed(2)} vs name centre ${m.name.toFixed(2)}`).toBeLessThanOrEqual(1);
       expect(m.top, "the text block starts at the row's top").toBeLessThanOrEqual(0.5);
     }
-    await shot(page, `keys-${tag}-${process.env.SETTINGS_THEME ?? "mocha"}`);
     await context.close();
   });
 }
