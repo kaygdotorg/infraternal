@@ -60,16 +60,18 @@ for (const [size, use] of Object.entries(SIZES)) {
       await expect(page.getByText(KEYS_LAST, { exact: true })).toBeVisible({ timeout: 10_000 });
       await shot(page, `${size}-03-read-retried`);
     });
+
+    test("a Settings window with nothing to show is hidden everywhere, and the same window is there when it has something", async ({ page }) => {
+      const WINDOW = '[data-window-id="s-you-apps"]';
+      await open(page, "&at=you.profile&settingempty=you.apps");
+      await shot(page, `${size}-04-apps-hidden`);
+      await expect(page.getByText("Keys Last", { exact: true })).toHaveCount(0);
+      await expect(page.locator(WINDOW)).toHaveCount(0);
+      // The row keeps its other windows: Passkeys is still there.
+      await expect(page.getByText("Passkeys", { exact: true }).first()).toBeVisible();
+      await open(page, "&at=you.apps");
+      await expect(page.getByText("Keys Last", { exact: true })).toBeVisible({ timeout: 10_000 });
+      await shot(page, `${size}-05-apps-shown`);
+    });
   });
 }
-
-test("a Settings window with nothing to show is hidden everywhere, and the same window is there when it has something", async ({ page }) => {
-  const WINDOW = '[data-window-id="s-you-apps"]';
-  await open(page, "&at=you.profile&settingempty=you.apps");
-  await expect(page.getByText("Keys Last", { exact: true })).toHaveCount(0);
-  await expect(page.locator(WINDOW)).toHaveCount(0);
-  // The row keeps its other windows: Passkeys is still there.
-  await expect(page.getByText("Passkeys", { exact: true }).first()).toBeVisible();
-  await open(page, "&at=you.apps");
-  await expect(page.getByText("Keys Last", { exact: true })).toBeVisible({ timeout: 10_000 });
-});
