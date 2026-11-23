@@ -375,6 +375,10 @@ pub fn set_mesh_service(factory: MeshServiceFactory) {
 /// this node's addresses and, per peer, whether the Access policy admits
 /// TCP/22 ([`Config::admits_ssh`](infraternal_plugin_mesh::dataplane::Config::admits_ssh):
 /// the policy itself, not the server node's control-plane exemption).
+///
+/// On a host with IPv6 off the mesh link has no IPv6 address (#578), so the
+/// view lists only the IPv4 one and mesh SSH does not try, and log, a bind that
+/// must fail. If the link cannot be read, both addresses stay listed.
 #[cfg(all(feature = "mesh", target_os = "linux"))]
 fn mesh_view(
     config: &infraternal_plugin_mesh::dataplane::Config,
@@ -382,12 +386,13 @@ fn mesh_view(
 ) -> infraternal_plugin_api::mesh_view::MeshView {
     use infraternal_plugin_api::mesh_view::{MeshPeer, MeshView};
     use std::net::IpAddr;
+    let mut addresses = vec![IpAddr::V4(config.addresses.ipv4)];
+    if infraternal_plugin_mesh::wireguard::Device::mesh_ipv6_enabled().unwrap_or(true) {
+        addresses.push(IpAddr::V6(config.addresses.ipv6));
+    }
     MeshView {
         node: config.node.0,
-        addresses: vec![
-            IpAddr::V4(config.addresses.ipv4),
-            IpAddr::V6(config.addresses.ipv6),
-        ],
+        addresses,
         interface: infraternal_plugin_mesh::wireguard::INTERFACE.to_owned(),
         userspace_filter,
         peers: config
