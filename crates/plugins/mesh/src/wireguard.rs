@@ -28,6 +28,10 @@ impl Key {
     /// # Errors
     /// Returns fixed-text errors, never provider diagnostics containing private data.
     pub fn generate() -> io::Result<(Self, PublicKey)> {
+        // X25519 generation does not initialize OpenSSL itself; without this a first key made
+        // here registers OpenSSL's exit-time cleanup, which can free its tables under a thread
+        // still using them while the process exits (#578).
+        openssl::init();
         let key = PKey::generate_x25519().map_err(|_| io::ErrorKind::Other)?;
         let private = Zeroizing::new(key.raw_private_key().map_err(|_| io::ErrorKind::Other)?);
         let public: [u8; 32] = key
@@ -46,6 +50,8 @@ impl Key {
         if bytes.len() != 32 {
             return Err(io::ErrorKind::InvalidData.into());
         }
+        // Initialize before the first OpenSSL call, as in `generate` (#578).
+        openssl::init();
         let key = PKey::private_key_from_raw_bytes(bytes, openssl::pkey::Id::X25519)
             .map_err(|_| io::ErrorKind::InvalidData)?;
         let public: [u8; 32] = key
