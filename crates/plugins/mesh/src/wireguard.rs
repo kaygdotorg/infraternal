@@ -537,9 +537,14 @@ impl Device {
     }
     /// Install local /32+/128 addresses while the link meets IPv6's minimum MTU, then apply the
     /// safe fallback until the node can derive a route-specific packet ceiling.
+    ///
+    /// When IPv6 is off on the mesh link (`net.ipv6.conf.*.disable_ipv6`, or no IPv6 in the
+    /// kernel), only the IPv4 /32 is installed and this returns `false`: the node runs IPv4-only
+    /// instead of refusing the whole configuration (#578). It returns `true` when both
+    /// addresses are installed. A stale IPv6 alias is still reconciled away either way.
     /// # Errors
     /// Returns address, interface lookup or route-netlink errors.
-    pub fn addresses(addresses: Addresses) -> io::Result<()> {
+    pub fn addresses(addresses: Addresses) -> io::Result<bool> {
         let index = index()?;
         // Linux rejects IPv6 address installation below 1280 bytes. A prior
         // route update may already have narrowed this owned link to 1200, so
@@ -548,17 +553,26 @@ impl Device {
             set_link_mtu(index, u32::from(crate::mesh_mtu::IPV6_MINIMUM_MTU))?;
         }
         let mut route = Socket::open(SockProtocol::NetlinkRoute)?;
+        let mut ipv6 = ipv6_enabled_on(&mut route, index)?;
         for (family, prefix, address) in [
             (2_u8, 32, addresses.ipv4.octets().to_vec()),
             (10, 128, addresses.ipv6.octets().to_vec()),
         ] {
+            if family == 10 && !ipv6 {
+                continue;
+            }
             let mut payload = vec![family, prefix, 0, 0];
             payload.extend(index.to_ne_bytes());
             attribute(&mut payload, 1, &address)?;
             attribute(&mut payload, 2, &address)?;
             // IPv6 must be usable immediately; private /128 addresses are unique by coordinator allocation.
             attribute(&mut payload, 8, &0x02_u32.to_ne_bytes())?;
-            route.request(20, 4 | 0x100 | 0x400, &payload)?;
+            if let Err(error) = route.request(20, 4 | 0x100 | 0x400, &payload) {
+                if !ipv6_turned_off(&mut route, index, family, &error)? {
+                    return Err(error);
+                }
+                ipv6 = false;
+            }
         }
         // A removed identity can be explicitly re-enrolled at new host addresses.
         // Reconcile the owned interface on every replay as well, so an abrupt
@@ -588,7 +602,19 @@ impl Device {
                 }
             }
         }
-        activate(index, Some(crate::mesh_mtu::IPV6_MINIMUM_MTU))
+        activate(index, Some(crate::mesh_mtu::IPV6_MINIMUM_MTU))?;
+        Ok(ipv6)
+    }
+    /// Whether the mesh link `infraternal0` currently carries IPv6 (#578). It resolves the shared
+    /// name like [`Device::addresses`], for the node's check that IPv6 is back and for the mesh
+    /// SSH listener's address list.
+    ///
+    /// A missing link or an unreadable reply reports an error; callers that only filter what
+    /// they bind should then keep both families, the behaviour before IPv6-off support.
+    /// # Errors
+    /// Reports a missing interface or malformed link metadata.
+    pub fn mesh_ipv6_enabled() -> io::Result<bool> {
+        ipv6_enabled_on(&mut Socket::open(SockProtocol::NetlinkRoute)?, index()?)
     }
     /// Raise the proven `GotaTun` interface by index with its derived mesh MTU.
     /// # Errors
@@ -699,6 +725,9 @@ impl Device {
         let index = Self::active_link()?
             .ok_or(io::ErrorKind::NotConnected)?
             .ifindex;
+        // An IPv6-off link takes no IPv6 routes (#578). Removal still tries both families: the
+        // kernel already dropped any IPv6 route there, and a missing route is tolerated below.
+        let mut ipv6 = remove || ipv6_enabled_on(&mut socket, index)?;
         for peer in peers {
             let mtu = (!remove).then(|| {
                 overrides
@@ -710,12 +739,22 @@ impl Device {
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
+                if family == 10 && !ipv6 {
+                    continue;
+                }
                 let mut payload = peer_route_payload(family, prefix, &address, index, mtu)?;
                 let result = socket.request(
                     if remove { 25 } else { 24 },
                     if remove { 4 } else { 4 | 0x100 | 0x400 },
                     &payload,
                 );
+                if let Err(error) = &result
+                    && !remove
+                    && ipv6_turned_off(&mut socket, index, family, error)?
+                {
+                    ipv6 = false;
+                    continue;
+                }
                 if let Err(error) = result {
                     // A newer node can stop after replacing an old static route but before its
                     // next restart. Try that legacy owner only after the mesh protocol is absent.
@@ -753,14 +792,24 @@ impl Device {
         }
         Self::verify_repair_link(link)?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        // An IPv6-off link takes only the IPv4 routes (#578).
+        let mut ipv6 = ipv6_enabled_on(&mut socket, link.ifindex)?;
         for (peer, mtu) in routes {
             for (family, prefix, address) in [
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
+                if family == 10 && !ipv6 {
+                    continue;
+                }
                 let payload =
                     peer_route_payload(family, prefix, &address, link.ifindex, Some(*mtu))?;
-                socket.request(24, 4 | 0x100 | 0x400, &payload)?;
+                if let Err(error) = socket.request(24, 4 | 0x100 | 0x400, &payload) {
+                    if !ipv6_turned_off(&mut socket, link.ifindex, family, &error)? {
+                        return Err(error);
+                    }
+                    ipv6 = false;
+                }
             }
         }
         Ok(())
@@ -793,9 +842,15 @@ impl Device {
         };
         let payload = peer_route_payload(family, prefix, &destination, link.ifindex, Some(mtu))?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        // Turning IPv6 off drops every IPv6 route on the link; those deletions are not damage
+        // to repair, and the kernel would refuse the write anyway (#578).
+        if family == 10 && !ipv6_enabled_on(&mut socket, link.ifindex)? {
+            return Ok(false);
+        }
         match socket.request(24, 4 | 0x200 | 0x400, &payload) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) if ipv6_turned_off(&mut socket, link.ifindex, family, &error)? => Ok(false),
             Err(error) => Err(error),
         }
     }
@@ -852,7 +907,12 @@ impl Device {
         mut missing: BTreeSet<IpAddr>,
     ) -> io::Result<BTreeSet<IpAddr>> {
         Self::verify_repair_link(link)?;
-        Socket::open(SockProtocol::NetlinkRoute)?.visit(26, 0x300, &[0; 12], |reply| {
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        // An IPv6-off link never holds the IPv6 routes, so they are not missing (#578).
+        if !ipv6_enabled_on(&mut socket, link.ifindex)? {
+            missing.retain(IpAddr::is_ipv4);
+        }
+        socket.visit(26, 0x300, &[0; 12], |reply| {
             if let Some(address) = mesh_peer_route_destination(reply, link.ifindex)? {
                 missing.remove(&address);
             }
@@ -2366,6 +2426,79 @@ fn link_mtu_on(socket: &mut Socket, index: u32) -> io::Result<u32> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
         .and_then(|field| netlink::u32_at(field.payload, 0))
 }
+/// `IFLA_AF_SPEC`: a link's per-address-family settings, one nested block per family.
+const IFLA_AF_SPEC: u16 = 26;
+/// `AF_INET6`: the IPv6 block inside `IFLA_AF_SPEC`, and the IPv6 address family elsewhere.
+const AF_INET6: u16 = 10;
+/// `IFLA_INET6_CONF`: inside the IPv6 block, the link's IPv6 sysctls as an `i32` array indexed
+/// by `DEVCONF_*`.
+const IFLA_INET6_CONF: u16 = 2;
+/// `DEVCONF_DISABLE_IPV6`: the slot of `net.ipv6.conf.<link>.disable_ipv6` in that array.
+const DEVCONF_DISABLE_IPV6: usize = 26;
+/// `EACCES`: the kernel's answer to an IPv6 address or route on a link with IPv6 disabled.
+const EACCES: i32 = 13;
+
+/// Whether the link at `ifindex` can carry IPv6 (#578).
+///
+/// Many hosts turn IPv6 off (`net.ipv6.conf.all.disable_ipv6=1`, which new links inherit
+/// through `default`), and the kernel then refuses every IPv6 address and route on the mesh
+/// link with `EACCES`. The mesh then runs IPv4-only. The link's own setting is read by index
+/// on `socket`, so it is the value for exactly the link we write to, in the caller's network
+/// namespace, and never a name lookup that could reach another link.
+/// # Errors
+/// Reports a missing link or a malformed reply.
+fn ipv6_enabled_on(socket: &mut Socket, ifindex: u32) -> io::Result<bool> {
+    let mut request = vec![0; 16];
+    request[4..8].copy_from_slice(&ifindex.to_ne_bytes());
+    let replies = socket.request(18, 4, &request)?;
+    let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
+    link_carries_ipv6(reply.get(16..).ok_or(io::ErrorKind::InvalidData)?)
+}
+
+/// Read IPv6 availability from a link message's attributes (everything after `ifinfomsg`).
+///
+/// IPv6 is usable when the `AF_INET6` block's `disable_ipv6` slot is zero. A link message with
+/// no `AF_INET6` block means the kernel has no IPv6 at all (`ipv6.disable=1`), which also reads
+/// as off. A block without its sysctl array, or an array too short to hold the slot, is
+/// malformed: guessing either way could silently drop IPv6 from a host that has it.
+/// # Errors
+/// Returns `InvalidData` for malformed attributes.
+fn link_carries_ipv6(attributes: &[u8]) -> io::Result<bool> {
+    for spec in netlink::attributes(attributes)? {
+        if spec.kind != IFLA_AF_SPEC {
+            continue;
+        }
+        for family in netlink::attributes(spec.payload)? {
+            if family.kind != AF_INET6 {
+                continue;
+            }
+            let conf = netlink::attributes(family.payload)?
+                .into_iter()
+                .find(|field| field.kind == IFLA_INET6_CONF)
+                .ok_or(io::ErrorKind::InvalidData)?;
+            return Ok(netlink::u32_at(conf.payload, DEVCONF_DISABLE_IPV6 * 4)? == 0);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a failed IPv6 write failed only because IPv6 was turned off on the link meanwhile.
+///
+/// The node checks the link before it writes, but `disable_ipv6` can change between the
+/// check and the write. A refused IPv6 write that the link now confirms as IPv6-off is
+/// skipped like the checked case, rather than refusing the configuration (#578).
+/// # Errors
+/// Reports a failed re-check of the link.
+fn ipv6_turned_off(
+    socket: &mut Socket,
+    ifindex: u32,
+    family: u8,
+    error: &io::Error,
+) -> io::Result<bool> {
+    Ok(u16::from(family) == AF_INET6
+        && error.raw_os_error() == Some(EACCES)
+        && !ipv6_enabled_on(socket, ifindex)?)
+}
 /// `IFLA_TXQLEN`: a link's transmit queue length, in packets.
 const IFLA_TXQLEN: u16 = 13;
 fn tx_queue_len_of(index: u32) -> io::Result<u32> {
@@ -2646,6 +2779,7 @@ mod endpoint_tests {
         }
     }
 
+    /// Endpoint encodings of any other size or family are refused.
     #[test]
     fn other_sizes_and_families_are_refused() {
         let v4 = sockaddr("198.51.100.7:1".parse().unwrap());
@@ -2659,6 +2793,65 @@ mod endpoint_tests {
         let mut unknown = v4;
         unknown[..2].copy_from_slice(&1_u16.to_ne_bytes());
         assert!(decode_sockaddr(&unknown).is_err());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod link_ipv6_tests {
+    //! Reading a link's IPv6 availability from its `RTM_NEWLINK` attributes (#578).
+    use super::*;
+
+    /// Link attributes as the kernel sends them: an MTU, then `IFLA_AF_SPEC` holding an IPv4
+    /// block and, when `disable_ipv6` is given, an IPv6 block whose sysctl array has that value
+    /// in its `DEVCONF_DISABLE_IPV6` slot (`slots` entries long).
+    fn link(disable_ipv6: Option<i32>, slots: usize) -> Vec<u8> {
+        let mut families = Vec::new();
+        attribute(&mut families, 2, &[0; 8]).unwrap();
+        if let Some(disabled) = disable_ipv6 {
+            let mut conf = vec![0_u8; slots * 4];
+            if slots > DEVCONF_DISABLE_IPV6 {
+                conf[DEVCONF_DISABLE_IPV6 * 4..DEVCONF_DISABLE_IPV6 * 4 + 4]
+                    .copy_from_slice(&disabled.to_ne_bytes());
+            }
+            let mut inet6 = Vec::new();
+            attribute(&mut inet6, 1, &0_u32.to_ne_bytes()).unwrap();
+            attribute(&mut inet6, IFLA_INET6_CONF, &conf).unwrap();
+            attribute(&mut families, AF_INET6, &inet6).unwrap();
+        }
+        let mut attributes = Vec::new();
+        attribute(&mut attributes, IFLA_MTU, &1420_u32.to_ne_bytes()).unwrap();
+        attribute(&mut attributes, IFLA_AF_SPEC, &families).unwrap();
+        attributes
+    }
+
+    /// The link's own `disable_ipv6` slot alone decides.
+    #[test]
+    fn the_disable_ipv6_slot_decides() {
+        assert!(link_carries_ipv6(&link(Some(0), 60)).unwrap());
+        assert!(!link_carries_ipv6(&link(Some(1), 60)).unwrap());
+    }
+
+    /// A link message without an IPv6 block reads as IPv6 off.
+    #[test]
+    fn a_kernel_without_ipv6_reads_as_off() {
+        // `ipv6.disable=1`: the kernel sends no IPv6 block at all.
+        assert!(!link_carries_ipv6(&link(None, 0)).unwrap());
+    }
+
+    /// A broken IPv6 block is an error, never a guess either way.
+    #[test]
+    fn a_malformed_ipv6_block_is_refused_rather_than_guessed() {
+        // The sysctl array is too short to hold the slot.
+        assert!(link_carries_ipv6(&link(Some(0), DEVCONF_DISABLE_IPV6)).is_err());
+        // An IPv6 block without its sysctl array.
+        let mut inet6 = Vec::new();
+        attribute(&mut inet6, 1, &0_u32.to_ne_bytes()).unwrap();
+        let mut families = Vec::new();
+        attribute(&mut families, AF_INET6, &inet6).unwrap();
+        let mut attributes = Vec::new();
+        attribute(&mut attributes, IFLA_AF_SPEC, &families).unwrap();
+        assert!(link_carries_ipv6(&attributes).is_err());
     }
 }
 

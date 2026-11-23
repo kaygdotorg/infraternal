@@ -890,6 +890,10 @@ pub struct Node {
     kernel_owner: KernelProof,
     // A committed revision remains restrictive until exact retirement succeeds.
     connection_cleanup_pending: bool,
+    /// Whether the last address install put the IPv6 /128 on the mesh link: `Some(false)` while
+    /// the link has IPv6 off and the node runs IPv4-only (#578), `None` before any install in
+    /// this process. It decides when to log the change and when to retry the IPv6 address.
+    mesh_ipv6: Option<bool>,
     client: Option<Client>,
     gotatun: Option<Engine>,
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -920,6 +924,7 @@ impl Default for Node {
             owned: false,
             kernel_owner: KernelProof::default(),
             connection_cleanup_pending: false,
+            mesh_ipv6: None,
             client: None,
             gotatun: None,
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
@@ -2022,6 +2027,31 @@ impl Node {
             return Ok(link);
         }
         self.rotation_link()
+    }
+
+    /// Record whether the mesh link took its IPv6 address, and say so once when that changes.
+    ///
+    /// An IPv6-off host (`net.ipv6.conf.*.disable_ipv6=1`) joins the mesh IPv4-only instead of
+    /// being refused (#578). That is a real loss for the person (no IPv6 mesh address, no IPv6
+    /// routes to peers), so it is said when it starts and when IPv6 is back, never on every
+    /// configuration. It goes to stderr, not `tracing`: an infraternal agent has no tracing
+    /// subscriber, and its stderr is the service journal.
+    fn note_mesh_ipv6(&mut self, ipv6: bool) {
+        if self.mesh_ipv6 == Some(ipv6) {
+            return;
+        }
+        if !ipv6 {
+            eprintln!(
+                "Mesh runs IPv4-only: IPv6 is disabled on {} (net.ipv6.conf disable_ipv6), so its IPv6 mesh address and IPv6 peer routes are skipped.",
+                crate::wireguard::INTERFACE
+            );
+        } else if self.mesh_ipv6.is_some() {
+            eprintln!(
+                "Mesh IPv6 is back: IPv6 is enabled on {} again and its IPv6 mesh address is installed.",
+                crate::wireguard::INTERFACE
+            );
+        }
+        self.mesh_ipv6 = Some(ipv6);
     }
 
     /// Set the MTU on this node's proven interface and keep `GotaTun`'s packet watcher in step.
@@ -3418,8 +3448,13 @@ impl Node {
         }
         #[cfg(feature = "cutoff-measure")]
         drop(validation);
+        // An IPv4-only node (IPv6 off on its link, #578) skips both fast paths below once the
+        // link carries IPv6 again, so the full path installs its IPv6 address and peer routes.
+        // Only that rare state pays for the extra link read.
+        let ipv6_back = self.mesh_ipv6 == Some(false) && Device::mesh_ipv6_enabled()?;
         if let Some(old) = &self.config {
             let endpoints_only = !force_reconcile
+                && !ipv6_back
                 && old.node == config.node
                 && old.addresses == config.addresses
                 && old.peers.len() == config.peers.len()
@@ -3596,6 +3631,7 @@ impl Node {
         #[cfg(feature = "cutoff-measure")]
         drop(inventory);
         if changed.is_empty()
+            && !ipv6_back
             && retired_keys.is_empty()
             && route_overrides_to_clear.is_empty()
             && self.config.as_ref().is_some_and(|old| {
@@ -3748,8 +3784,10 @@ impl Node {
                 .config
                 .as_ref()
                 .is_none_or(|old| old.addresses != config.addresses)
+                || ipv6_back
             {
-                Device::addresses(config.addresses)?;
+                let ipv6 = Device::addresses(config.addresses)?;
+                self.note_mesh_ipv6(ipv6);
             }
             #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
             self.ensure_dns_resolver(config.addresses.ipv4)?;
@@ -3814,7 +3852,8 @@ impl Node {
             self.apply_fence(&fence, &config)?;
             if let Some(old) = &self.config {
                 if old.addresses != config.addresses {
-                    Device::addresses(old.addresses)?;
+                    // Rollback restores the old state quietly; only accepted changes are logged.
+                    self.mesh_ipv6 = Some(Device::addresses(old.addresses)?);
                 }
                 let restore: Vec<_> = old.peers.values().map(|peer| peer.peer.clone()).collect();
                 // If rollback itself fails the restrictive fence remains. Never report an applied version.
