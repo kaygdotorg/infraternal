@@ -213,12 +213,40 @@ fn startup_result<T>(
     }
 }
 
+/// Turn a configuration result into the action reply, and say on stderr why one was refused.
+///
+/// The reply carries only a short fixed reason, and an infraternal agent has no tracing
+/// subscriber, so without this line the kernel or state error behind a refusal was lost: an
+/// IPv6-off host failed to join with nothing logged at all (#578). It is printed once per streak
+/// of refusals, because the coordinator can resend the same snapshot. Errors here are kernel
+/// error numbers or fixed texts, never key material.
+fn configure_result(result: std::io::Result<bool>, failed: &mut bool) -> Result<bool, PluginError> {
+    match result {
+        Ok(applied) => {
+            *failed = false;
+            Ok(applied)
+        }
+        Err(error) => {
+            if !*failed {
+                eprintln!(
+                    "Mesh configuration was refused: {error} (kind={:?}).",
+                    error.kind()
+                );
+            }
+            *failed = true;
+            Err(node_action_error(&error))
+        }
+    }
+}
+
 /// Owns the process's mesh actions and their startup diagnostics.
 pub struct MeshNodePlugin {
     owner: Arc<Mutex<Owner>>,
     changed: AtomicBool,
     /// Reports activation failures once per streak.
     ensure_failed: bool,
+    /// Reports refused configurations once per streak (#578).
+    configure_failed: bool,
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
@@ -354,6 +382,7 @@ impl MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             ensure_failed: false,
+            configure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -372,6 +401,7 @@ impl MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             ensure_failed: false,
+            configure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -422,6 +452,7 @@ impl Default for MeshNodePlugin {
             })),
             changed: AtomicBool::new(false),
             ensure_failed: false,
+            configure_failed: false,
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
@@ -783,9 +814,7 @@ impl AgentPlugin for MeshNodePlugin {
                     status
                 }
                 Request::Configure(chunk) => {
-                    let applied = node
-                        .chunk(*chunk)
-                        .map_err(|error| node_action_error(&error))?;
+                    let applied = configure_result(node.chunk(*chunk), &mut self.configure_failed)?;
                     json!({"applied":applied,"version":node.config().map(|c|c.version)})
                 }
                 Request::Peers(page) => {
@@ -1015,6 +1044,44 @@ mod tests {
         );
     }
     use super::*;
+
+    /// A refused configuration reaches stderr once per streak, with the error behind it (#578),
+    /// and an applied one ends the streak so the next refusal is reported again.
+    #[test]
+    fn a_refused_configuration_is_reported_once_per_streak() {
+        const CHILD: &str = "INFRATERNAL_MESH_CONFIGURE_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut failed = false;
+            let refusal = || Err(std::io::Error::from_raw_os_error(13));
+            for _ in 0..3 {
+                assert_eq!(
+                    configure_result(refusal(), &mut failed),
+                    Err(PluginError::Rejected)
+                );
+            }
+            assert_eq!(configure_result(Ok(true), &mut failed), Ok(true));
+            assert!(configure_result(refusal(), &mut failed).is_err());
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "node_actions::tests::a_refused_configuration_is_reported_once_per_streak",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .expect("run diagnostic child");
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 diagnostic");
+        assert_eq!(
+            stderr
+                .matches("Mesh configuration was refused: Permission denied (os error 13) (kind=PermissionDenied).")
+                .count(),
+            2,
+            "{stderr}"
+        );
+    }
 
     /// `mesh.status` exposes only the live public identity needed to verify persistence.
     #[test]

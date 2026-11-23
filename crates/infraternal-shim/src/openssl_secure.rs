@@ -10,6 +10,29 @@ unsafe extern "C" {
     fn CRYPTO_secure_malloc_init(size: usize, minsize: i32) -> i32;
     /// OpenSSL's count of bytes currently allocated from the secure heap.
     fn CRYPTO_secure_used() -> usize;
+    /// OpenSSL's library initializer: `opts` are `OPENSSL_INIT_*` bits, `settings` may be
+    /// null. Returns 1 on success.
+    fn OPENSSL_init_crypto(opts: u64, settings: *const std::ffi::c_void) -> i32;
+}
+
+/// `OPENSSL_INIT_NO_ATEXIT`: never register `OPENSSL_cleanup` with `atexit`.
+const OPENSSL_INIT_NO_ATEXIT: u64 = 0x0008_0000;
+
+/// Make sure OpenSSL never frees its global state at process exit (#578). Call it first thing
+/// in `main`, before any thread exists; it returns whether OpenSSL accepted it.
+///
+/// OpenSSL decides once per process, at its first initialization, whether `exit` runs
+/// `OPENSSL_cleanup`, and some `openssl` crate calls (X25519 key generation, for one)
+/// initialize without opting out. Then an infraternal agent that returned from `main` while
+/// its plugin thread was still freeing OpenSSL objects had OpenSSL's tables freed under that
+/// thread, and musl's `free` crashed. This asks for nothing but that decision: unlike
+/// `openssl::init()` it loads no configuration, error strings or algorithms, which measured
+/// 0.57 ms on every command start. Later full initializations keep the decision.
+#[must_use]
+pub fn disable_exit_cleanup() -> bool {
+    // SAFETY: a plain library call with a constant option and the documented null settings;
+    // OpenSSL serializes its own initialization and keeps no Rust pointer.
+    unsafe { OPENSSL_init_crypto(OPENSSL_INIT_NO_ATEXIT, std::ptr::null()) == 1 }
 }
 
 /// One process heap, not one per host/session. 32-byte blocks fit Ed25519 and

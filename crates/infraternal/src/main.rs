@@ -147,7 +147,22 @@ struct InstallArgs {
 #[global_allocator]
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// The process entry point: initialize OpenSSL, then dispatch the invocation.
 fn main() -> ExitCode {
+    // OpenSSL's first initialization decides, once for the process, whether it registers
+    // `OPENSSL_cleanup` with `atexit` (#578). Some `openssl` crate calls (X25519 key generation,
+    // for one) initialize without opting out, so the mesh node's first key used to register
+    // the cleanup from the `node-plugins` thread. When the infraternal agent then returned from
+    // `main` while that thread was still dropping its plugins, `exit` freed OpenSSL's global
+    // tables under it, and musl's `free` crashed (`node-plugins` segfault, about 1 in 100
+    // teardowns). Opting out here, before any thread exists, removes the cleanup; the kernel
+    // reclaims everything at process exit as usual.
+    #[cfg(feature = "remote")]
+    let _ = infraternal_shim::openssl_secure::disable_exit_cleanup();
+    // Builds without the shim's OpenSSL boundary take the full initialization, which opts out
+    // as well.
+    #[cfg(all(feature = "plugin-server", not(feature = "remote")))]
+    openssl::init();
     run_invocation()
 }
 
