@@ -407,7 +407,9 @@
 .cl-crumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cl-crumb-sep { display: grid; flex: none; place-items: center; width: 1rem; color: var(--fg-3); }
 .cl-crumb-sep svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-/* On a phone the first pill is its icon (it has its tooltip and its label); the names get the room. */
+/* On a phone the trail becomes an iOS-style header (toolbar/crumbs.on-demand.ts): a back pill "‹ Machines" and the window's own name as the
+   heading. The Settings pill and the separators go; ☰ and + keep the bar's edges because the bar's grid does not change. */
+.cl-crumb-back, .cl-crumb-back-label { display: none; }
 @media (max-width: 720px) {
   .cl-crumb[data-level="view"] { width: var(--pill-h); padding: 0; }
   .cl-crumb[data-level="view"] .cl-crumb-name { display: none; }

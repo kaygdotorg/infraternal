@@ -16,6 +16,11 @@
  * palette) starts from where the breadcrumb is and fades it, in place, with no code of its own for Settings. A capsule that is
  * `display: none` has an empty rectangle, and a morph made from it opens at the top left of the screen.
  *
+ * On a phone (720 px and narrower) the trail does not fit, so it becomes an iOS-style header: a back pill "‹ Machines" (the parent of
+ * the window in view) and the window's own name as the heading. Back flies to the first window of that parent; from the first window
+ * it reads "‹ Settings" and opens the list of views, one level up. The Settings pill and the separators are hidden; ☰ and + stay at
+ * the bar's edges because the bar's grid is unchanged. Desktop keeps the full trail.
+ *
  * A name that changes crossfades (a short rise and fade, no fill left behind, so text is crisp at rest); changes that come
  * faster than the animation (arrowing through windows) do not animate (TASTE: repeated keyboard actions don't animate).
  * A menu opens under its pill, centred on it, in the shared overlay material, grows from the pill, and closes on a press outside, on Escape
@@ -31,6 +36,8 @@ export interface Crumbs { paint(): void; dispose(): void }
 /** The shared easing token (WAAPI cannot read a `var()` in an easing string, so the value is read once). */
 const ease = (): string => getComputedStyle(document.documentElement).getPropertyValue("--ease-out").trim() || "ease-out";
 const CHEVRON = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICON.chevron}</svg>`;
+/** The phone header's back pill is on narrow screens only; this is the width the stylesheet also uses for it. */
+const PHONE = "(max-width: 720px)";
 const TICK = '<svg class="ui-sp-tick" viewBox="0 0 24 24" aria-hidden="true"><path d="m5.5 12.5 4 4 9-9"/></svg>';
 
 /** Builds the breadcrumb pills (view, window, session) in the top bar and returns their controls; a name changed by a key shows at once (#427). */
@@ -54,7 +61,15 @@ export function createCrumbs(cx: Ctx): Crumbs {
   viewPill.querySelector<HTMLElement>(".cl-crumb-icon")!.innerHTML = lineIcon(viewIcon("settings"));
   viewPill.querySelector<HTMLElement>(".cl-crumb-name")!.textContent = "Settings";
   viewPill.setAttribute("aria-label", "Settings, all views");
-  for (const p of [rowPill, groupPill]) { p.querySelector(".cl-crumb-icon")!.remove(); p.setAttribute("aria-haspopup", "true"); p.setAttribute("aria-expanded", "false"); }
+  // The back chevron shows on a phone only (clusters.css); the icon slot of the row pill is it, so the pill's icon keeps its own place.
+  const backIcon = rowPill.querySelector<HTMLElement>(".cl-crumb-icon")!;
+  backIcon.classList.add("cl-crumb-back");
+  backIcon.innerHTML = CHEVRON;
+  // The phone's label of the back pill lives beside the trail's name for the same pill, so the trail (what the specs and a screen reader's tree read) never changes.
+  const backLabel = el("span", "cl-crumb-back-label");
+  rowPill.append(backLabel);
+  groupPill.querySelector(".cl-crumb-icon")!.remove();
+  for (const p of [rowPill, groupPill]) { p.setAttribute("aria-haspopup", "true"); p.setAttribute("aria-expanded", "false"); }
   root.append(viewPill, sep(), rowPill, sep(), groupPill);
   capsule.after(root);
   groupPill.setAttribute("aria-current", "page");
@@ -142,17 +157,33 @@ export function createCrumbs(cx: Ctx): Crumbs {
     cx.win.setActive(rec);
     cx.nav.focusWindow(rec);
   };
+  const phone = matchMedia(PHONE);
+  /** Whether the window in view is its component's first, so its parent on a phone is Settings itself. */
+  const isFirst = (at: NonNullable<ReturnType<typeof place>>): boolean => at.row.groups[0]?.windowId === at.group.windowId;
   const sourceOf = (e: MouseEvent): "pointer" | "keyboard" => (e.detail === 0 ? "keyboard" : "pointer");
   // The views list grows from, and is centred on, the Settings pill (TASTE: a menu opened from a pill is centred on that pill); the morph fades that
   // pill, and the rest of the breadcrumb fades with it, so the list does not open over half a breadcrumb.
-  const rest = [...root.children].filter((n): n is HTMLElement => n !== viewPill);
-  const fadeWatch = new MutationObserver(() => { for (const n of rest) n.style.opacity = viewPill.style.opacity; });
+  // On a phone the back pill is the one the list of views grows from (the Settings pill is hidden), so whichever of the two is the anchor
+  // fades the rest. A pill only copies the fade of the pill that was touched, so the two never feed each other.
+  const fadeWatch = new MutationObserver((records) => {
+    for (const record of records) {
+      const source = record.target as HTMLElement;
+      for (const n of root.children) if (n !== source && n instanceof HTMLElement && n.style.opacity !== source.style.opacity && (source === viewPill || source === rowPill) && !(source === rowPill && n === viewPill)) n.style.opacity = source.style.opacity;
+    }
+  });
   fadeWatch.observe(viewPill, { attributes: true, attributeFilter: ["style"] });
+  fadeWatch.observe(rowPill, { attributes: true, attributeFilter: ["style"] });
   viewPill.addEventListener("click", () => { closeMenu(true); cx.viewList.toggle(viewPill); }, { signal });
   rowPill.addEventListener("click", (e) => {
     if (menu?.anchor === rowPill) { closeMenu(); return; }
     const at = here();
     if (!at) return;
+    if (phone.matches) {
+      // The back button of the phone header: up one level. From the first window of a component that is the list of views.
+      closeMenu(true);
+      if (isFirst(at)) cx.viewList.toggle(rowPill); else focusWindow(at.row.groups[0]?.windowId);
+      return;
+    }
     openMenu(rowPill, "Components of Settings", at.rows.map((r) => ({ label: r.title, icon: r.icon, current: r.id === at.row.id, go: () => focusWindow(r.groups[0]?.windowId) })), sourceOf(e));
   }, { signal });
   groupPill.addEventListener("click", (e) => {
@@ -170,12 +201,21 @@ export function createCrumbs(cx: Ctx): Crumbs {
     top.toggleAttribute("data-crumbs", at !== undefined);
     root.hidden = at === undefined;
     if (!at) { closeMenu(true); return; }
+    const phoneHeader = phone.matches;
+    root.toggleAttribute("data-phone", phoneHeader);
+    // The back pill's phone label names the parent: the component, or Settings from the component's first window. Desktop shows the trail's own name.
+    const parent = isFirst(at) ? "Settings" : at.row.title;
     setName(rowPill, at.row.title);
+    if (backLabel.textContent !== parent) backLabel.textContent = parent;
+    rowPill.setAttribute("aria-label", phoneHeader ? `Back to ${parent}` : at.row.title);
+    rowPill.toggleAttribute("data-back", phoneHeader);
+    if (phoneHeader && isFirst(at)) rowPill.setAttribute("aria-haspopup", "true"); else if (phoneHeader) rowPill.removeAttribute("aria-haspopup"); else rowPill.setAttribute("aria-haspopup", "true");
     setName(groupPill, at.group.title);
     fit();
   };
   // The rows of the view scroll inside it (one band at a time) and the camera does not move for that: a scroll anywhere in the stage
   // (scroll events do not bubble, so the capture phase) repaints the names once a frame.
+  phone.addEventListener("change", () => paint(), { signal });
   let scrollFrame = 0;
   stage.addEventListener("scroll", () => { if (!scrollFrame) scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; paint(); }); }, { capture: true, passive: true, signal });
   return { paint, dispose() { cancelAnimationFrame(scrollFrame); closeMenu(true); sizeWatch.disconnect(); mirrorWatch.disconnect(); fadeWatch.disconnect(); capsule.style.removeProperty("--crumbs-w"); root.remove(); top.removeAttribute("data-crumbs"); } };

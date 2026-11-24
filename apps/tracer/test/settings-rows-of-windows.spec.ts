@@ -405,7 +405,10 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   expect(bar.left).toBeGreaterThanOrEqual(0);
   expect(bar.right).toBeLessThanOrEqual(393);
   expect(Math.abs(bar.cx - 196.5)).toBeLessThanOrEqual(1);
-  const pills = await page.locator(".cl-crumb").evaluateAll((ns) => ns.map((n) => { const r = n.getBoundingClientRect(); return { mid: (r.top + r.bottom) / 2, h: r.height, left: r.left, right: r.right }; }));
+  // On a phone the header is the back pill and the heading; the Settings pill is hidden (it measures nothing).
+  const pills = await page.locator(".cl-crumb:visible").evaluateAll((ns) => ns.map((n) => { const r = n.getBoundingClientRect(); return { mid: (r.top + r.bottom) / 2, h: r.height, left: r.left, right: r.right }; }));
+  expect(pills.length, "the back pill and the heading").toBe(2);
+  expect(await page.locator(".cl-crumb-back-label").textContent(), "Keys is the first window of Mesh, so back goes up to Settings").toBe("Settings");
   for (const p of pills) { near(p.mid, pills[0]!.mid, "phone breadcrumb centre line"); expect(p.h).toBeGreaterThanOrEqual(43.5); }
   for (let i = 1; i < pills.length; i++) expect(pills[i]!.left).toBeGreaterThanOrEqual(pills[i - 1]!.right - 0.5);
   // The phone has the same model as a desktop (D212): one grid, a row of windows for each component, a column for each window of the longest row; the neighbours peek in.
@@ -686,7 +689,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
       return { h: r.height, font: parseFloat(s.fontSize), weight: s.fontWeight, color: s.color };
     }, sel);
     const pillsNow = await page.evaluate(() => {
-      const rects = [...document.querySelectorAll<HTMLElement>(".cl-crumbs > *")].map((n) => n.getBoundingClientRect());
+      const rects = [...document.querySelectorAll<HTMLElement>(".cl-crumbs > *")].map((n) => n.getBoundingClientRect()).filter((r) => r.width > 0);
       const box = document.querySelector(".cl-crumbs")!.getBoundingClientRect(), ghost = document.querySelector("#capsule")!.getBoundingClientRect();
       return { left: Math.min(...rects.map((r) => r.left)), right: Math.max(...rects.map((r) => r.right)), top: Math.min(...rects.map((r) => r.top)), bottom: Math.max(...rects.map((r) => r.bottom)), box: { left: box.left, right: box.right, top: box.top, bottom: box.bottom }, ghost: { left: ghost.left, right: ghost.right, top: ghost.top, bottom: ghost.bottom } };
     });
@@ -694,7 +697,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     expect(Math.abs((pillsNow.left + pillsNow.right) / 2 - centre)).toBeLessThanOrEqual(1);
     for (const k of ["left", "right", "top", "bottom"] as const) near(pillsNow.ghost[k], pillsNow.box[k], `the ghost capsule's ${k} is the breadcrumb's`);
     const crumb = await measure('.cl-crumb[data-level="row"]'), name = await measure('.cl-crumb[data-level="row"] .cl-crumb-name');
-    const icon = await page.evaluate(() => document.querySelector<HTMLElement>(".cl-crumb-icon")!.getBoundingClientRect().width);
+    const icon = await page.evaluate(() => document.querySelector<HTMLElement>('.cl-crumb[data-level="view"] .cl-crumb-icon')!.getBoundingClientRect().width);
     const ancestors = await page.locator(".cl-crumb .cl-crumb-name").evaluateAll((ns) => ns.map((n) => getComputedStyle(n).color));
     await flyConsole(page);
     const main = await measure("#capsule"), mainName = await measure("#capsule-host");
@@ -703,7 +706,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     expect(crumb.font).toBeGreaterThanOrEqual(main.font - 0.01);
     expect(crumb.font).toBeLessThanOrEqual(main.font * 1.1);
     expect(name.weight).toBe(mainName.weight);
-    near(icon, mainIcon, "breadcrumb icon is the main pill's icon");
+    if (tag === "desktop") near(icon, mainIcon, "breadcrumb icon is the main pill's icon");
     for (const colour of ancestors) expect(colour, "every name in the breadcrumb is full colour, like the main pill").toBe(mainName.color);
     await shot(page, `${tag === "desktop" ? "" : "p"}16-main-pill`);
     await goTo(page, "canvas:settings:appearance.themes");
@@ -711,7 +714,9 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     await shot(page, `${tag === "desktop" ? "" : "p"}17-breadcrumb`);
 
     // The views menu: pressing Settings grows the list out of that pill, centred on it (shifted only as far as the screen's inset needs), never at the top left.
-    const frames = await recordMorph(page, ".cl-viewlist", async () => { await page.locator('.cl-crumb[data-level="view"]').click(); }, 900, '.cl-crumb[data-level="view"]', '.cl-crumb[data-level="group"]');
+    // On a phone the Settings pill is hidden: Themes is the first window of Appearance, so the back pill ("‹ Settings") opens the list.
+    const anchor = tag === "desktop" ? '.cl-crumb[data-level="view"]' : '.cl-crumb[data-level="row"]';
+    const frames = await recordMorph(page, ".cl-viewlist", async () => { await page.locator(anchor).click(); }, 900, anchor, '.cl-crumb[data-level="group"]');
     const withPanel = frames.filter((f) => f.p);
     expect(withPanel.length).toBeGreaterThan(8);
     for (const f of withPanel) {
@@ -725,7 +730,7 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     // Closed again: the breadcrumb is fully visible and takes presses (what the morph wrote on the capsule is not left as a fade).
     expect(await page.evaluate(() => { const c = getComputedStyle(document.querySelector(".cl-crumbs")!); return { opacity: c.opacity, events: c.pointerEvents, expanded: document.querySelector("#capsule")!.hasAttribute("aria-expanded") }; })).toEqual({ opacity: "1", events: "auto", expanded: false });
     // Choosing Settings in the list keeps the breadcrumb where it is.
-    await page.locator('.cl-crumb[data-level="view"]').click();
+    await page.locator(anchor).click();
     await page.waitForTimeout(700);
     await page.locator('.cl-viewrow[data-view="settings"]').click({ timeout: 15_000 });
     await page.waitForTimeout(1200);
@@ -761,7 +766,7 @@ test("close-ups of the breadcrumb beside the main pill at DPR 2 and 3 (desktop a
     };
     await strip("breadcrumb", ".cl-crumbs");
     // The morph, frame by frame: the breadcrumb at rest, then 60, 140 and 320 ms after Settings is pressed.
-    await page.locator('.cl-crumb[data-level="view"]').click();
+    await page.locator(".cl-crumb:visible").first().click();
     for (const [i, wait] of [60, 80, 180].entries()) { await page.waitForTimeout(wait); await page.screenshot({ path: `${SHOTS}/morph-${tag}-${i + 1}.png`, clip: { x: 0, y: 0, width: size.viewport.width, height: 360 } }); }
     await page.waitForTimeout(500);
     await page.keyboard.press("Escape");
