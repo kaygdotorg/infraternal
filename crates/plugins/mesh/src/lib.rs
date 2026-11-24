@@ -156,10 +156,17 @@ pub mod macos_helper;
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
 
-/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind the crate's one scoped `allow(unsafe_code)`
-/// (#221). Request building is safe code, so its tests also run in the Linux gate.
+/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind one of the crate's two scoped
+/// `allow(unsafe_code)` modules (#221). Request building is safe code, so its tests also run in
+/// the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 mod macos_utun_ioctl;
+
+/// Which utuns one person's infraternal agent holds, read by the root helper through `libproc`
+/// (#146, J1027 F1); the crate's other scoped `allow(unsafe_code)`. The reply parser is safe
+/// code, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+mod macos_utun_holder;
 
 #[cfg(feature = "server")]
 pub mod settings;

@@ -34,8 +34,11 @@
 //! caller can only change a utun it holds; a name is never taken from the request. Before a
 //! route is added, the routing table and every interface network are read and any overlap is
 //! refused by name ([`crate::macos_user_mode::plan_route`]), so the mesh never takes traffic
-//! from a network the Mac already uses. A resolver request is honoured only when its mesh
-//! address is already on the caller's utun, and only for `internal` or `home.arpa` names, so
+//! from a network the Mac already uses. Another utun with exactly the mesh prefix is replaced
+//! only when the kernel shows it is held by the registered person's installed infraternal binary
+//! ([`crate::macos_utun_holder`], review J1027 F1); otherwise it is another VPN and is refused.
+//! A resolver request is honoured only when its mesh address is already on the caller's utun,
+//! and only for `internal` or `home.arpa` names, so
 //! one person cannot redirect real domains for the Mac's other accounts. The file names
 //! `127.0.0.1` and the agent's high DNS port: macOS sends traffic for a utun's own address
 //! into the tunnel, so the agent also serves its names on loopback.
@@ -293,8 +296,13 @@ fn handle(
             for wanted in routes {
                 let table = routing_table(wanted.is_ipv4())?;
                 let local = local_networks(wanted.is_ipv4())?;
-                let plan =
-                    rules::plan_route(wanted, &interface, &table, &local).map_err(invalid)?;
+                let ours = if rules::same_prefix_utuns(wanted, &interface, &table).is_empty() {
+                    Vec::new()
+                } else {
+                    agent_utuns(uid)
+                };
+                let plan = rules::plan_route(wanted, &interface, &table, &local, &ours)
+                    .map_err(invalid)?;
                 let present = table
                     .iter()
                     .any(|row| row.interface == interface && row.network == wanted);
@@ -343,6 +351,24 @@ fn handle(
             Ok((ok, None))
         }
     }
+}
+
+/// The utuns held right now by the registered person's agent (review J1027 F1).
+///
+/// "The agent" is any process whose real and effective uid are `uid` and whose executable is
+/// that person's installed infraternal binary, found from the password database, never from the
+/// request. Any failure (no such account, no installed binary, a process walk that fails) gives
+/// an empty list, so the helper then refuses to replace the other utun instead of guessing.
+fn agent_utuns(uid: u32) -> Vec<String> {
+    let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) else {
+        return Vec::new();
+    };
+    let Ok(binary) = fs::canonicalize(rules::user_install_binary(&user.dir)) else {
+        return Vec::new();
+    };
+    crate::macos_utun_holder::utuns_held_by(uid, &binary)
+        .map(|held| held.into_iter().collect())
+        .unwrap_or_default()
 }
 
 /// Turn a rule refusal into an I/O error carrying its sentence.

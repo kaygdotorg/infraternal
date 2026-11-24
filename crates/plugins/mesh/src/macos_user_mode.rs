@@ -586,21 +586,46 @@ fn parse_ipv6_destination(destination: &str) -> Option<Network> {
 /// What adding a mesh route needs first.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoutePlan {
-    /// Exact copies of the mesh route on other utun interfaces, to delete before adding ours.
+    /// Exact copies of the mesh route on our own earlier utuns, to delete before adding ours.
     pub replace: Vec<String>,
+}
+
+/// The other utuns that already carry exactly `wanted`, in table order and without repeats.
+///
+/// Each one is either an earlier utun of this person's agent or another VPN with the same
+/// range. The helper finds out which by asking the kernel who holds it
+/// ([`crate::macos_utun_holder`]) and passes the answer to [`plan_route`]. An empty list means
+/// that lookup is not needed at all.
+#[must_use]
+pub fn same_prefix_utuns(wanted: Network, interface: &str, routes: &[Route]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for row in routes {
+        if row.network == wanted
+            && row.interface != interface
+            && row.interface.starts_with("utun")
+            && !found.contains(&row.interface)
+        {
+            found.push(row.interface.clone());
+        }
+    }
+    found
 }
 
 /// Check that nothing on the Mac overlaps `wanted` before it is routed to `interface`.
 ///
 /// `local` holds the networks of every interface address (from `getifaddrs`) with their
 /// interface names; `routes` holds the routing table. Rows on `interface` itself are ours.
-/// A utun that already carries an exact copy of `wanted` is an earlier mesh utun (an agent
-/// that restarted, or a worker being replaced while the old one still runs): its copy is
-/// replaced and its own address rows are not conflicts. Host routes on `lo0` are skipped:
+/// `ours` names the utuns the helper has proved belong to this person's agent (held by a
+/// process of the registered uid that runs the installed infraternal binary). A utun in `ours`
+/// that carries an exact copy of `wanted` is an earlier mesh utun (an agent that restarted, or a
+/// worker being replaced while the old one still runs): its copy is replaced and its own address
+/// rows are not conflicts. A same-prefix utun that is *not* in `ours` is another VPN and is
+/// refused like any other overlap (review J1027 F1): the route alone cannot prove ownership,
+/// because a caller or coordinator can ask for any prefix. Host routes on `lo0` are skipped:
 /// macOS adds one for every local address (including this utun's own IPv6 address), and the
-/// address itself is already checked on its real interface through `local`. Anything else
-/// that overlaps, in either direction, is a conflict: routing the mesh there would take
-/// traffic from a network the Mac already uses.
+/// address itself is already checked on its real interface through `local`. Anything else that
+/// overlaps, in either direction, is a conflict: routing the mesh there would take traffic from
+/// a network the Mac already uses.
 ///
 /// # Errors
 /// Names the first overlapping network and its interface, in words the person can act on.
@@ -609,17 +634,14 @@ pub fn plan_route(
     interface: &str,
     routes: &[Route],
     local: &[Route],
+    ours: &[String],
 ) -> Result<RoutePlan, Refusal> {
-    let mut plan = RoutePlan::default();
-    for row in routes {
-        if row.network == wanted
-            && row.interface != interface
-            && row.interface.starts_with("utun")
-            && !plan.replace.contains(&row.interface)
-        {
-            plan.replace.push(row.interface.clone());
-        }
-    }
+    let plan = RoutePlan {
+        replace: same_prefix_utuns(wanted, interface, routes)
+            .into_iter()
+            .filter(|utun| ours.contains(utun))
+            .collect(),
+    };
     for row in local.iter().chain(routes) {
         let loopback_host = row.interface == "lo0"
             && row.network.prefix == if row.is_ipv4() { 32 } else { 128 }
@@ -883,29 +905,35 @@ mod tests {
         let netbird = route(Network::v4(Ipv4Addr::new(10, 69, 69, 0), 24), "utun100");
         let lan = route(Network::v4(Ipv4Addr::new(192, 168, 64, 0), 24), "en0");
         assert_eq!(
-            plan_route(wanted, "utun7", &[netbird.clone(), lan.clone()], &[]),
+            plan_route(wanted, "utun7", &[netbird.clone(), lan.clone()], &[], &[]),
             Ok(RoutePlan::default())
         );
         let wide_vpn = route(Network::v4(Ipv4Addr::new(10, 0, 0, 0), 8), "utun100");
-        let error = plan_route(wanted, "utun7", &[wide_vpn], &[]).unwrap_err();
+        let error = plan_route(wanted, "utun7", &[wide_vpn], &[], &[]).unwrap_err();
         assert!(
             error.to_string().contains("10.0.0.0/8 on utun100"),
             "{error}"
         );
         let inside = route(Network::v4(Ipv4Addr::new(10, 254, 3, 0), 24), "en1");
-        assert!(plan_route(wanted, "utun7", &[], &[inside]).is_err());
+        assert!(plan_route(wanted, "utun7", &[], &[inside], &[]).is_err());
         let ours = route(Network::v4(Ipv4Addr::new(10, 254, 0, 7), 32), "utun7");
-        assert!(plan_route(wanted, "utun7", &[ours], &[]).is_ok());
+        assert!(plan_route(wanted, "utun7", &[ours], &[], &[]).is_ok());
         let earlier = route(wanted, "utun6");
         assert_eq!(
-            plan_route(wanted, "utun7", std::slice::from_ref(&earlier), &[])
-                .unwrap()
-                .replace,
+            plan_route(
+                wanted,
+                "utun7",
+                std::slice::from_ref(&earlier),
+                &[],
+                &["utun6".to_owned()]
+            )
+            .unwrap()
+            .replace,
             ["utun6"]
         );
         // The same network on a non-utun interface is a real conflict.
         let ethernet = route(wanted, "en5");
-        assert!(plan_route(wanted, "utun7", &[ethernet], &[]).is_err());
+        assert!(plan_route(wanted, "utun7", &[ethernet], &[], &["en5".to_owned()]).is_err());
     }
 
     /// Found on the Mac VM: re-sending an address request on the same utun must not trip over
@@ -929,7 +957,7 @@ mod tests {
             interface: "utun5".to_owned(),
         }];
         assert_eq!(
-            plan_route(wanted, "utun5", &rows, &local),
+            plan_route(wanted, "utun5", &rows, &local, &[]),
             Ok(RoutePlan::default())
         );
         // A local address inside the mesh on another interface is still a conflict.
@@ -937,11 +965,12 @@ mod tests {
             network: Network::v6("fd77:7777:7777::9".parse().unwrap(), 128),
             interface: "lo0".to_owned(),
         }];
-        assert!(plan_route(wanted, "utun5", &rows, &alias).is_err());
+        assert!(plan_route(wanted, "utun5", &rows, &alias, &[]).is_err());
     }
 
     /// Found on the Mac VM: a new utun takes over the mesh route while the old one still
-    /// exists, without the old utun's own address route counting as a conflict.
+    /// exists, without the old utun's own address route counting as a conflict, once the helper
+    /// has proved the old utun is this agent's own (J1027 F1).
     #[test]
     fn a_new_utun_takes_over_while_the_old_one_still_exists() {
         let wanted = Network::v4(Ipv4Addr::new(10, 254, 0, 0), 16);
@@ -961,21 +990,20 @@ mod tests {
             interface: "utun5".to_owned(),
         }];
         assert_eq!(
-            plan_route(wanted, "utun6", &rows, &local).unwrap().replace,
+            plan_route(wanted, "utun6", &rows, &local, &["utun5".to_owned()])
+                .unwrap()
+                .replace,
             ["utun5"]
         );
     }
 
-    /// Review J1027 F1 (#146), red on 9467b9aa4: another VPN's utun that carries exactly the
-    /// prefix asked for is not an earlier mesh utun. Today `plan_route` treats any utun with an
-    /// exact copy of the route as ours, deletes that VPN's route and skips its addresses in the
-    /// overlap check, so the mesh takes the VPN's traffic. Example: a CGNAT VPN routes
-    /// `100.64.0.0/10` (and owns `100.101.102.103`) on `utun3`; a node at `100.64.0.5` whose
-    /// peers span the block asks for `/10`. The helper must refuse unless it knows `utun3`
-    /// belongs to this person's earlier agent. Ignored so the branch gate stays meaningful;
-    /// run with `--ignored`. It must pass, un-ignored, once the helper tells its own utuns apart.
+    /// Review J1027 F1 (#146): another VPN's utun that carries exactly the prefix asked for is
+    /// not an earlier mesh utun. Red on 9467b9aa4, where any utun with an exact copy of the route
+    /// counted as ours, so the helper deleted that VPN's route and took its traffic. Example: a
+    /// CGNAT VPN routes `100.64.0.0/10` (and owns `100.101.102.103`) on `utun3`; a node at
+    /// `100.64.0.5` whose peers span the block asks for `/10`. Unless the helper has proved that
+    /// `utun3` is held by this person's agent, it is refused like any other overlap.
     #[test]
-    #[ignore = "J1027 F1 red: a foreign VPN utun with the same prefix is replaced"]
     fn another_vpn_with_the_same_prefix_is_a_conflict_not_an_earlier_mesh_utun() {
         let wanted = ipv4_route(Ipv4Addr::new(100, 64, 0, 5), 10).unwrap();
         let vpn_route = Route {
@@ -986,12 +1014,9 @@ mod tests {
             network: Network::v4(Ipv4Addr::new(100, 101, 102, 103), 32),
             interface: "utun3".to_owned(),
         };
-        let plan = plan_route(
-            wanted,
-            "utun7",
-            &[vpn_route, vpn_address.clone()],
-            &[vpn_address],
-        );
+        let rows = [vpn_route, vpn_address.clone()];
+        assert_eq!(same_prefix_utuns(wanted, "utun7", &rows), ["utun3"]);
+        let plan = plan_route(wanted, "utun7", &rows, &[vpn_address], &[]);
         assert!(
             plan.is_err(),
             "the helper would delete the VPN's route and take its traffic: {plan:?}"
@@ -1002,7 +1027,13 @@ mod tests {
             network: wanted,
             interface: "utun3".to_owned(),
         };
-        assert!(plan_route(wanted, "utun7", &[vpn_route], &[]).is_err());
+        assert!(plan_route(wanted, "utun7", &[vpn_route], &[], &[]).is_err());
+        // A utun proved ours elsewhere does not make this one ours.
+        let vpn_route = Route {
+            network: wanted,
+            interface: "utun3".to_owned(),
+        };
+        assert!(plan_route(wanted, "utun7", &[vpn_route], &[], &["utun2".to_owned()]).is_err());
     }
 
     /// A user-mode install's paths sit under the person's own `~/Library` (D395), and a receipt
