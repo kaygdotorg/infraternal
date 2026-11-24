@@ -66,11 +66,12 @@ impl Drop for Database {
     }
 }
 
+/// A fixture certificate record with fingerprint `seed` over a fixed Ed25519 key, valid for seven days from 100.
 fn certificate(seed: u8) -> CertificateRecord {
     CertificateRecord {
         fingerprint: [seed; 32],
         issuer_fingerprint: [2; 32],
-        public_key: [3; 32],
+        public_key: infraternal_server::identity_key::IdentityKey::Ed25519([3; 32]),
         not_before: 100,
         not_after: 604_900,
     }

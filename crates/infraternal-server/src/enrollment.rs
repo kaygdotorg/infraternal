@@ -29,8 +29,9 @@ pub struct CertificateRecord {
     pub fingerprint: [u8; 32],
     /// SHA-256 of the signing issuer's certificate DER.
     pub issuer_fingerprint: [u8; 32],
-    /// The validated CSR's Ed25519 public key.
-    pub public_key: [u8; 32],
+    /// The validated CSR's public key: Ed25519 for hosts, P-256 for devices (#580).
+    /// Its algorithm is stored next to it in `remote_certificates.key_algorithm`.
+    pub public_key: crate::identity_key::IdentityKey,
     /// Inclusive certificate validity start, Unix seconds.
     pub not_before: i64,
     /// Exclusive certificate validity end, exactly seven days later.
@@ -439,7 +440,7 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .bind(mode.as_str())
         .bind(digest.as_slice())
-        .bind(Sha256::digest(certificate.public_key).as_slice())
+        .bind(certificate.public_key.digest().as_slice())
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -453,12 +454,13 @@ impl EnrollmentStore {
         // uid the host row holds (J415 R1). The SELECT reads it in this write.
         let inserted = sqlx::query(
             "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, \
-             public_key, not_before, not_after, role, execution_uid) \
-             SELECT ?, h.id, ?, ?, ?, ?, 'active', h.execution_uid FROM remote_hosts h WHERE h.id=?",
+             public_key, key_algorithm, not_before, not_after, role, execution_uid) \
+             SELECT ?, h.id, ?, ?, ?, ?, ?, 'active', h.execution_uid FROM remote_hosts h WHERE h.id=?",
         )
         .bind(certificate.fingerprint.as_slice())
         .bind(certificate.issuer_fingerprint.as_slice())
-        .bind(certificate.public_key.as_slice())
+        .bind(certificate.public_key.as_bytes())
+        .bind(certificate.public_key.algorithm().as_str())
         .bind(certificate.not_before)
         .bind(certificate.not_after)
         .bind(host.as_bytes().as_slice())

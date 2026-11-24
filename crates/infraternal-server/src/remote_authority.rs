@@ -299,16 +299,17 @@ impl EnrollmentStore {
         // INSERT SELECT is one serialized write. Revocation either precedes this
         // statement and refuses it, or follows it and denies both generations.
         let changed = sqlx::query(
-            "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, public_key, not_before, not_after, role, execution_uid) \
-             SELECT ?, old.host_id, ?, ?, ?, ?, old.role, old.execution_uid FROM remote_certificates old \
+            "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, public_key, key_algorithm, not_before, not_after, role, execution_uid) \
+             SELECT ?, old.host_id, ?, ?, old.key_algorithm, ?, ?, old.role, old.execution_uid FROM remote_certificates old \
              JOIN remote_hosts h ON h.id=old.host_id \
-             WHERE old.fingerprint=? AND old.public_key=? AND old.not_before<=? AND old.not_after>? \
+             WHERE old.fingerprint=? AND old.public_key=? AND old.key_algorithm=? AND old.not_before<=? AND old.not_after>? \
              AND old.revoked_at IS NULL AND h.revoked_at IS NULL \
              AND old.role='active' AND old.execution_uid=h.execution_uid \
              AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         ).bind(certificate.fingerprint.as_slice()).bind(certificate.issuer_fingerprint.as_slice())
-            .bind(certificate.public_key.as_slice()).bind(certificate.not_before).bind(certificate.not_after)
-            .bind(predecessor.as_slice()).bind(certificate.public_key.as_slice()).bind(now).bind(now)
+            .bind(certificate.public_key.as_bytes()).bind(certificate.not_before).bind(certificate.not_after)
+            .bind(predecessor.as_slice()).bind(certificate.public_key.as_bytes())
+            .bind(certificate.public_key.algorithm().as_str()).bind(now).bind(now)
             .execute(&self.0).await?.rows_affected();
         if changed != 1 {
             return Err(EnrollmentError::Denied);
@@ -536,11 +537,12 @@ pub(crate) mod tests {
         (store, pool, host)
     }
 
+    /// A fixture certificate record with fingerprint `seed`, valid for seven days from `now`, over a fixed Ed25519 key.
     fn certificate(seed: u8, now: i64) -> CertificateRecord {
         CertificateRecord {
             fingerprint: [seed; 32],
             issuer_fingerprint: [9; 32],
-            public_key: [3; 32],
+            public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
             not_before: now,
             not_after: now + 604_800,
         }
@@ -570,11 +572,12 @@ pub(crate) mod tests {
         ));
     }
 
+    /// Renewal keeps the predecessor's validity overlap, and refuses a changed key or an expired predecessor.
     #[tokio::test]
     async fn renewal_preserves_overlap_and_refuses_changed_key_or_expired_predecessor() {
         let (store, pool, _) = enrolled().await;
         let mut changed = certificate(2, 200);
-        changed.public_key = [4; 32];
+        changed.public_key = crate::identity_key::IdentityKey::Ed25519([4; 32]);
         assert!(matches!(
             store.renew(&[1; 32], &changed, 200).await,
             Err(EnrollmentError::Denied)

@@ -82,7 +82,7 @@ async fn removed() -> Removed {
             &crate::enrollment::CertificateRecord {
                 fingerprint: fingerprint.as_ref().try_into().unwrap(),
                 issuer_fingerprint: [9; 32],
-                public_key: [3; 32],
+                public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
                 not_before: now - 1,
                 not_after: now - 1 + 604_800,
             },

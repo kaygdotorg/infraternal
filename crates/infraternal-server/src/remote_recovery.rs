@@ -749,14 +749,15 @@ impl Service {
             return Err(Denied);
         }
         let inserted = sqlx::query(
-            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,role,execution_uid) \
-             SELECT ?,h.id,?,?,?,?,'active',h.execution_uid FROM remote_hosts h JOIN remote_certificates old ON old.host_id=h.id \
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,key_algorithm,not_before,not_after,role,execution_uid) \
+             SELECT ?,h.id,?,?,?,?,?,'active',h.execution_uid FROM remote_hosts h JOIN remote_certificates old ON old.host_id=h.id \
              WHERE h.id=? AND h.revoked_at IS NULL AND old.fingerprint=? AND old.revoked_at IS NULL \
              AND old.role='active' AND old.execution_uid=h.execution_uid",
         )
         .bind(signed.record.fingerprint.as_slice())
         .bind(signed.record.issuer_fingerprint.as_slice())
-        .bind(signed.record.public_key.as_slice())
+        .bind(signed.record.public_key.as_bytes())
+        .bind(signed.record.public_key.algorithm().as_str())
         .bind(signed.record.not_before)
         .bind(signed.record.not_after)
         .bind(request.host.as_bytes().as_slice())
@@ -838,7 +839,7 @@ fn validate_signed_leaf(
     now: i64,
 ) -> Result<(), Denied> {
     if !eligible(now, not_after)
-        || old_key != signed.record.public_key.as_slice()
+        || old_key != signed.record.public_key.as_bytes()
         || signed.record.not_before > now
         || signed.record.not_after <= now
         || signed.record.not_after - signed.record.not_before != 604_800
@@ -1056,7 +1057,7 @@ mod tests {
             .bind(signed.record.fingerprint.as_slice())
             .bind(host.as_bytes().as_slice())
             .bind(signed.record.issuer_fingerprint.as_slice())
-            .bind(signed.record.public_key.as_slice())
+            .bind(signed.record.public_key.as_bytes())
             .bind(signed.record.not_before)
             .bind(signed.record.not_after)
             .execute(&pool)

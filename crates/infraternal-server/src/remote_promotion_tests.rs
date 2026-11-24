@@ -31,7 +31,7 @@ fn successor(seed: u8, key: u8, now: i64) -> CertificateRecord {
     CertificateRecord {
         fingerprint: [seed; 32],
         issuer_fingerprint: [9; 32],
-        public_key: [key; 32],
+        public_key: crate::identity_key::IdentityKey::Ed25519([key; 32]),
         not_before: now,
         not_after: now + 604_800,
     }
@@ -106,7 +106,7 @@ async fn admission_requires_the_certificates_own_uid_and_renewal_copies_it() {
     let renewed = CertificateRecord {
         fingerprint: [2; 32],
         issuer_fingerprint: [9; 32],
-        public_key: [3; 32],
+        public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
         not_before: 300,
         not_after: 300 + 604_800,
     };
@@ -185,7 +185,7 @@ async fn the_handover_moves_authority_in_one_transaction() {
     let renewed = CertificateRecord {
         fingerprint: [2; 32],
         issuer_fingerprint: [9; 32],
-        public_key: [3; 32],
+        public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
         not_before: 210,
         not_after: 210 + 604_800,
     };

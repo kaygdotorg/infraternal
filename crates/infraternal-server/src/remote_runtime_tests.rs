@@ -216,7 +216,7 @@ async fn expired_identity(
         .bind(previous.record.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(previous.record.issuer_fingerprint.as_slice())
-        .bind(previous.record.public_key.as_slice())
+        .bind(previous.record.public_key.as_bytes())
         .bind(previous.record.not_before)
         .bind(previous.record.not_after)
         .execute(pool)

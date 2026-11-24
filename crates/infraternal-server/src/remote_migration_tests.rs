@@ -625,3 +625,235 @@ async fn fallback_migration_keeps_hand_names_and_uses_the_reported_os() {
         ]
     );
 }
+
+/// The version of the identity-key migration (#580 P2): certificates record their key algorithm.
+const IDENTITY_KEY_ALGORITHM: i64 = 20_261_124_213_330;
+
+/// Opens (creating if needed) a file database with foreign keys on, as the server's pool does.
+async fn file_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+    SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(true)
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap()
+}
+
+/// The migrations as a release before #580 P2 shipped them.
+fn before_identity_key_algorithm() -> sqlx::migrate::Migrator {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version < IDENTITY_KEY_ALGORITHM);
+    migrator
+}
+
+/// Every column of every certificate, in a fixed order, for before/after comparisons.
+async fn certificate_rows(
+    pool: &sqlx::SqlitePool,
+) -> Vec<(
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    i64,
+    Option<i64>,
+    String,
+    Option<i64>,
+)> {
+    sqlx::query_as(
+        "SELECT fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,revoked_at,role,execution_uid \
+         FROM remote_certificates ORDER BY fingerprint",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Inserts one certificate for host 1 with `key` stored as `algorithm`, or without naming one when `None`.
+async fn insert_certificate(
+    pool: &sqlx::SqlitePool,
+    fingerprint: u8,
+    key: &[u8],
+    algorithm: Option<&str>,
+) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    let host = uuid::Uuid::from_u128(1);
+    let Some(algorithm) = algorithm else {
+        // A writer from before #580 names no algorithm and gets the column default.
+        return sqlx::query(
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) \
+             VALUES (?,?,zeroblob(32),?,100,604900,1000)",
+        )
+        .bind([fingerprint; 32].as_slice())
+        .bind(host.as_bytes().as_slice())
+        .bind(key)
+        .execute(pool)
+        .await;
+    };
+    sqlx::query(
+        "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) \
+         VALUES (?,?,zeroblob(32),?,100,604900,1000,?)",
+    )
+    .bind([fingerprint; 32].as_slice())
+    .bind(host.as_bytes().as_slice())
+    .bind(key)
+    .bind(algorithm)
+    .execute(pool)
+    .await
+}
+
+/// #580 P2: the certificate rebuild keeps every Ed25519 row byte for byte as
+/// `ed25519`, admits a P-256 point only when it is named `p256`, keeps the
+/// index and both D376 triggers, makes the key write-once, and a D295 undo to
+/// the pre-update `VACUUM INTO` copy gives the previous release its own
+/// schema and data back, which then migrates again the same way.
+#[tokio::test]
+async fn identity_key_algorithm_migration_keeps_ed25519_rows_and_restores_from_a_pre_migration_copy()
+ {
+    let root = std::env::temp_dir().join(format!("j1176-keyalg-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&root).unwrap();
+    let live = root.join("infraternal.sqlite");
+    let copy = root.join("previous.sqlite");
+    let pool = file_pool(&live).await;
+    before_identity_key_algorithm().run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner','rootless',1000,100)")
+        .bind(uuid::Uuid::from_u128(1).as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (fingerprint, revoked) in [(1_u8, None), (2, Some(150_i64))] {
+        sqlx::query(
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,revoked_at,execution_uid) \
+             VALUES (?,?,zeroblob(32),?,100,604900,?,1000)",
+        )
+        .bind([fingerprint; 32].as_slice())
+        .bind(uuid::Uuid::from_u128(1).as_bytes().as_slice())
+        .bind([fingerprint + 10; 32].as_slice())
+        .bind(revoked)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let before = certificate_rows(&pool).await;
+    // The D295 database copy the update takes before the new release migrates.
+    sqlx::query("VACUUM INTO ?")
+        .bind(copy.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    assert_eq!(certificate_rows(&pool).await, before);
+    let algorithms: Vec<String> =
+        sqlx::query_scalar("SELECT key_algorithm FROM remote_certificates")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(algorithms, ["ed25519", "ed25519"]);
+    let point = [[4_u8].as_slice(), &[7; 64]].concat();
+    insert_certificate(&pool, 3, &[3; 32], None)
+        .await
+        .expect("an existing writer that names no algorithm still stores Ed25519");
+    insert_certificate(&pool, 4, &point, Some("p256"))
+        .await
+        .expect("a P-256 point named p256 is stored");
+    for (fingerprint, key, algorithm) in [
+        (5_u8, point.clone(), None),
+        (6, point.clone(), Some("ed25519")),
+        (7, vec![4; 32], Some("p256")),
+        (8, [[2_u8].as_slice(), &[7; 64]].concat(), Some("p256")),
+        (9, vec![3; 33], Some("p256")),
+        (10, vec![3; 32], Some("rsa")),
+    ] {
+        assert!(
+            insert_certificate(&pool, fingerprint, &key, algorithm)
+                .await
+                .is_err(),
+            "{fingerprint}: {algorithm:?} with {} bytes was stored",
+            key.len()
+        );
+    }
+    assert!(
+        sqlx::query("UPDATE remote_certificates SET public_key=? WHERE fingerprint=?")
+            .bind([9_u8; 32].as_slice())
+            .bind([1_u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .is_err(),
+        "a certificate's key is write-once"
+    );
+    assert!(
+        sqlx::query("UPDATE remote_certificates SET key_algorithm='p256' WHERE fingerprint=?")
+            .bind([1_u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE remote_certificates SET execution_uid=0 WHERE fingerprint=?")
+            .bind([1_u8; 32].as_slice())
+            .execute(&pool)
+            .await
+            .is_err(),
+        "the D376 write-once trigger survives the rebuild"
+    );
+    assert!(
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,role,execution_uid) VALUES (?,?,zeroblob(32),zeroblob(32),100,604900,'successor',1000)")
+            .bind([11_u8; 32].as_slice())
+            .bind(uuid::Uuid::from_u128(1).as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .is_err(),
+        "the D376 successor-is-root trigger survives the rebuild"
+    );
+    sqlx::query("UPDATE remote_certificates SET revoked_at=200, not_before=101, not_after=604901 WHERE fingerprint=?")
+        .bind([1_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .expect("revocation and renewal updates still work");
+    let index: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='remote_certificates_host'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(index, 1);
+    let checks: (String, i64) = sqlx::query_as(
+        "SELECT (SELECT integrity_check FROM pragma_integrity_check), (SELECT count(*) FROM pragma_foreign_key_check)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(checks, ("ok".into(), 0));
+    pool.close().await;
+
+    // The undo: the previous release opens the copy and finds its own schema and rows.
+    let restored = file_pool(&copy).await;
+    before_identity_key_algorithm()
+        .run(&restored)
+        .await
+        .unwrap();
+    assert_eq!(certificate_rows(&restored).await, before);
+    let column: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pragma_table_info('remote_certificates') WHERE name='key_algorithm'",
+    )
+    .fetch_one(&restored)
+    .await
+    .unwrap();
+    assert_eq!(column, 0, "the restored copy is the pre-migration schema");
+    // Updating again from the restored copy migrates it exactly as the first time.
+    sqlx::migrate!("./migrations").run(&restored).await.unwrap();
+    assert_eq!(certificate_rows(&restored).await, before);
+    restored.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -283,7 +283,7 @@ impl Service {
         let candidate_public_key = signed.public_key;
         let signed = signed.signed;
         if signed.record.issuer_fingerprint != challenge.issuer_fingerprint
-            || signed.record.public_key != candidate_public_key
+            || signed.record.public_key.as_bytes() != candidate_public_key.as_slice()
             || signed.der.len() > MAX_CANDIDATE_CERTIFICATE_DER
         {
             return Err(denied());
@@ -519,13 +519,14 @@ impl Service {
         .await
         .map_err(|_| denied())?;
         sqlx::query(
-            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,role,execution_uid) \
-             SELECT ?,h.id,?,?,?,?,'active',h.execution_uid FROM remote_hosts h WHERE h.id=? AND h.revoked_at IS NULL \
+            "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,key_algorithm,not_before,not_after,role,execution_uid) \
+             SELECT ?,h.id,?,?,?,?,?,'active',h.execution_uid FROM remote_hosts h WHERE h.id=? AND h.revoked_at IS NULL \
              ON CONFLICT(fingerprint) DO NOTHING",
         )
         .bind(record.fingerprint.as_slice())
         .bind(record.issuer_fingerprint.as_slice())
-        .bind(record.public_key.as_slice())
+        .bind(record.public_key.as_bytes())
+        .bind(record.public_key.algorithm().as_str())
         .bind(record.not_before)
         .bind(record.not_after)
         .bind(host.as_bytes().as_slice())

@@ -7,7 +7,7 @@
 //! from the invitation or the identity being continued, so this module never
 //! picks an algorithm from the request itself.
 
-use crate::identity_key::KeyAlgorithm;
+use crate::identity_key::{IdentityKey, KeyAlgorithm};
 use openssl::{
     ec::PointConversionForm,
     nid::Nid,
@@ -80,6 +80,16 @@ impl ValidatedCsr {
     #[must_use]
     pub fn algorithm(&self) -> KeyAlgorithm {
         self.algorithm
+    }
+
+    /// The verified key in its stored form, for the certificate record and key digests.
+    /// # Errors
+    /// Never in practice: admission already pinned the key's exact encoding.
+    /// It still fails closed rather than panicking if OpenSSL disagrees.
+    pub fn identity_key(&self) -> Result<IdentityKey, CsrError> {
+        IdentityKey::from_public_key(&self.key)
+            .filter(|key| key.algorithm() == self.algorithm)
+            .ok_or(CsrError)
     }
 }
 
