@@ -50,6 +50,8 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
+/// Mac DNS status.
+mod dns_state;
 /// User-mode helper requests for the utun, its routes and the resolver (#146).
 mod user_mode;
 /// The worker loop, session-keeping peer updates and candidate walks (#515).

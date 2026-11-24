@@ -71,6 +71,8 @@ fn review_j519_missing_tools_are_reported() {
     assert!(trusted_program("resolvectl", RESOLVECTL_PATHS).is_err());
     assert!(trusted_program("nmcli", NMCLI_PATHS).is_err());
     assert!(trusted_program("NetworkManager", NETWORKMANAGER_PATHS).is_err());
+    // The hosts-file fallback refuses a symlinked hosts file, so no safe mechanism remains.
+    std::os::unix::fs::symlink("/nonexistent", HOSTS_PATH).expect("unsafe hosts file");
     let mut integration = DnsIntegration::default();
     let error = integration
         .configure("infraternal0", &records(), 0)
@@ -88,6 +90,7 @@ fn review_j519_missing_tools_are_reported() {
         .configure("infraternal0", &records(), 0)
         .expect_err("the next identical snapshot must retry and report missing tools");
 
+    fs::remove_file(HOSTS_PATH).expect("remove the unsafe hosts file");
     install_nix_profile_tool("resolvectl");
     integration
         .configure("infraternal0", &records(), 0)
@@ -99,6 +102,43 @@ fn review_j519_missing_tools_are_reported() {
         ),
         "the retry should cache the successfully installed resolver only"
     );
+}
+
+/// With no resolver tool at all (`NetBird` owns `resolv.conf`, resolved is off) the mesh names are
+/// listed in a marked `/etc/hosts` block, foreign lines survive, and stop undoes it (#580, J1155).
+#[test]
+#[ignore = "MESH_REVIEW_PROBE: run with scripts/review-j519-dns-regressions in private /etc and Nix profile mounts."]
+fn review_j1155_hosts_fallback_lists_and_clears_names() {
+    let config: crate::dataplane::Config = serde_json::from_value(serde_json::json!({
+        "node": 1, "version": 1, "name": "laptop",
+        "addresses": {"ipv4": "10.254.0.1", "ipv6": "fd01::1"},
+        "default_policy": "Deny", "peers": {}
+    }))
+    .expect("public test configuration");
+    let named = Records::from_config(&config).expect("valid DNS snapshot");
+    let seed = "127.0.0.1 localhost\n# kept by someone else\n";
+    fs::write(HOSTS_PATH, seed).expect("seed hosts");
+    let mut integration = DnsIntegration::default();
+    integration
+        .configure("infraternal0", &named, 0)
+        .expect("hosts fallback");
+    let written = fs::read_to_string(HOSTS_PATH).expect("hosts");
+    assert!(written.starts_with(seed), "{written}");
+    assert!(
+        written.contains("10.254.0.1\tlaptop.internal\n"),
+        "{written}"
+    );
+    assert_eq!(integration.state().mode, "hosts");
+    integration
+        .configure("infraternal0", &named, 0)
+        .expect("unchanged snapshot");
+    assert_eq!(fs::read_to_string(HOSTS_PATH).expect("hosts"), written);
+    // A new process finds the block without any in-memory record and still removes it.
+    let mut restarted = DnsIntegration::default();
+    restarted.remove().expect("stale cleanup");
+    assert_eq!(fs::read_to_string(HOSTS_PATH).expect("hosts"), seed);
+    integration.remove().expect("stop");
+    assert_eq!(fs::read_to_string(HOSTS_PATH).expect("hosts"), seed);
 }
 
 /// A protected root Nix profile supplies the resolver when distro paths are absent.
