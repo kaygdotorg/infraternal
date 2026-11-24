@@ -934,3 +934,177 @@ fn launchctl_checked(arguments: &[&str]) -> io::Result<()> {
         )))
     }
 }
+
+/// Live proofs against the installed helper on a Mac (#146, J1157). Each is ignored: it needs
+/// the helper registered for the account that runs it, which no gate has.
+#[cfg(test)]
+mod mac_proofs {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, ToSocketAddrs};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// The test deployment: a node at 10.254.77.7 / fd12:3456:789a::7 with peer `web` at .9.
+    const OWN_V4: Ipv4Addr = Ipv4Addr::new(10, 254, 77, 7);
+    /// The node's IPv6 address in the test `/48`.
+    fn own_v6() -> Ipv6Addr {
+        "fd12:3456:789a::7".parse().unwrap()
+    }
+
+    /// Ask the helper for a utun and give it the test addresses and the `/16` + `/48` routes.
+    fn utun_with_routes() -> (OwnedFd, String) {
+        let (utun, name) = open_utun().expect("the helper opens a utun");
+        request(
+            &Request::Address {
+                ipv4: OWN_V4,
+                ipv4_prefix: 16,
+                ipv6: own_v6(),
+                mtu: 1280,
+            },
+            Some(utun.as_fd()),
+        )
+        .expect("the helper routes the mesh into the utun");
+        (utun, name)
+    }
+
+    /// Answer resolver queries read from `utun` until `stop` is set, as the agent's receive path
+    /// does, using the same [`crate::tunnel_dns`] code. Returns how many it answered.
+    fn serve(utun: Arc<OwnedFd>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<usize> {
+        std::thread::spawn(move || {
+            use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+            let records = crate::dns::Records::for_tests(
+                OWN_V4,
+                &[("web", Ipv4Addr::new(10, 254, 77, 9))],
+            );
+            let resolver = infraternal_mesh::address::resolver_address(own_v6());
+            let mut answered = 0;
+            let mut frame = vec![0_u8; 2048];
+            while !stop.load(Ordering::SeqCst) {
+                let mut fds = [PollFd::new(utun.as_fd(), PollFlags::POLLIN)];
+                if poll(&mut fds, PollTimeout::from(100_u16)).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let Ok(length) = nix::unistd::read(utun.as_fd(), &mut frame) else {
+                    continue;
+                };
+                let packet = &frame[4.min(length)..length];
+                if let Some(reply) = crate::tunnel_dns::answer(packet, resolver, &records, 1280) {
+                    let mut out = 30_u32.to_be_bytes().to_vec();
+                    out.extend_from_slice(&reply);
+                    if nix::unistd::write(utun.as_fd(), &out).is_ok() {
+                        answered += 1;
+                    }
+                }
+            }
+            answered
+        })
+    }
+
+    /// J1027 F2: with the resolver files written by the helper, the system resolver's queries for
+    /// `web.internal` reach the in-mesh resolver address through the utun and are answered from
+    /// there. Nobody can bind that address, and once the utun is gone nothing answers.
+    #[test]
+    #[ignore = "Run on a Mac as the account the helper is registered for."]
+    fn the_system_resolver_is_answered_from_the_tunnel() {
+        let (utun, name) = utun_with_routes();
+        request(
+            &Request::Resolver {
+                suffixes: vec!["internal".to_owned()],
+            },
+            Some(utun.as_fd()),
+        )
+        .expect("the helper writes the resolver files");
+        let file = fs::read_to_string("/etc/resolver/internal").unwrap();
+        println!("utun {name}; /etc/resolver/internal:\n{file}");
+        assert!(file.contains("nameserver fd12:3456:789a:ffff::53\nport 53\n"), "{file}");
+        let resolver = infraternal_mesh::address::resolver_address(own_v6());
+        let squat = std::net::UdpSocket::bind((resolver, 53));
+        println!("binding [{resolver}]:53 as this account: {squat:?}");
+        assert!(squat.is_err(), "no local program can hold the resolver address");
+
+        let utun = Arc::new(utun);
+        let stop = Arc::new(AtomicBool::new(false));
+        let server = serve(Arc::clone(&utun), Arc::clone(&stop));
+        let started = Instant::now();
+        let found: Vec<_> = ("web.internal", 0)
+            .to_socket_addrs()
+            .expect("the system resolver answers web.internal")
+            .collect();
+        let first = started.elapsed();
+        println!("web.internal -> {found:?} in {first:?}");
+        assert!(found.iter().any(|a| a.ip() == std::net::IpAddr::V4(Ipv4Addr::new(10, 254, 77, 9))));
+        // Distinct absent names, so each lookup is a real round trip through the tunnel (the
+        // NXDOMAIN path) rather than an answer from the system's cache.
+        let mut times = Vec::new();
+        for round in 0..40 {
+            let started = Instant::now();
+            let _ = (format!("absent{round}.internal"), 0).to_socket_addrs();
+            times.push(started.elapsed());
+        }
+        times.sort();
+        println!(
+            "uncached lookups n=40: p50 {:?} p95 {:?} max {:?}",
+            times[20], times[38], times[39]
+        );
+        stop.store(true, Ordering::SeqCst);
+        let answered = server.join().unwrap();
+        println!("answered from the tunnel: {answered}");
+        assert!(answered >= 1);
+
+        // Without the utun, its routes are gone and nothing on the Mac answers.
+        drop(utun);
+        let started = Instant::now();
+        let gone = ("other.internal", 0).to_socket_addrs();
+        println!("after the utun closed: {:?} in {:?}", gone.as_ref().map(|a| a.clone().count()), started.elapsed());
+        assert!(gone.is_err() || gone.unwrap().count() == 0);
+        request(&Request::ClearResolver, None).expect("clear the resolver files");
+        assert!(!Path::new("/etc/resolver/internal").exists());
+    }
+
+    /// J1027 F1: a second utun asking for the same prefix takes the route over only when the
+    /// first utun is held by the person's installed infraternal binary. Run it twice: from that
+    /// path (`~/Library/Application Support/infraternal/bin/infraternal`), where it must take
+    /// over; and from anywhere else, where the first utun counts as another VPN and is refused.
+    #[test]
+    #[ignore = "Run on a Mac as the account the helper is registered for, from two paths."]
+    fn only_the_installed_binary_takes_its_own_route_over() {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::current()).unwrap().unwrap();
+        let installed = fs::canonicalize(rules::user_install_binary(&user.dir)).ok();
+        let me = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let ours = installed.as_deref() == Some(me.as_path());
+        let (first, first_name) = utun_with_routes();
+        let (second, second_name) = open_utun().unwrap();
+        let started = Instant::now();
+        let takeover = request(
+            &Request::Address {
+                ipv4: OWN_V4,
+                ipv4_prefix: 16,
+                ipv6: own_v6(),
+                mtu: 1280,
+            },
+            Some(second.as_fd()),
+        );
+        let took = started.elapsed();
+        let table = routing_table(true).unwrap();
+        let holder = table
+            .iter()
+            .find(|row| row.network == Network::v4(Ipv4Addr::new(10, 254, 0, 0), 16))
+            .map(|row| row.interface.clone());
+        println!(
+            "running from the installed binary: {ours}; first {first_name}, second {second_name}; \
+             reply {:?} in {took:?}; 10.254/16 is on {holder:?}",
+            takeover.as_ref().map(|(reply, _)| reply.ok).map_err(ToString::to_string)
+        );
+        if ours {
+            assert!(takeover.is_ok());
+            assert_eq!(holder.as_deref(), Some(second_name.as_str()));
+        } else {
+            let error = takeover.unwrap_err().to_string();
+            assert!(error.contains(&format!("on {first_name}")), "{error}");
+            assert_eq!(holder.as_deref(), Some(first_name.as_str()));
+        }
+        drop(second);
+        drop(first);
+    }
+}
