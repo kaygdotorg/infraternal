@@ -1057,12 +1057,20 @@ fn render_with_aliases(
 /// An underlay packet has no mesh identity, so it must never be delivered to a mesh address
 /// [231]. Both the full policy and the `GotaTun` guard use this one rendering, so the two can
 /// never drift apart (J592 P1, #265).
+///
+/// Each rule tests the destination address before the interface name. nftables evaluates a
+/// rule's matches in order and stops at the first that fails, and almost every packet these
+/// hooks see is not addressed to this node's mesh address (every encrypted underlay datagram
+/// passes prerouting and input), so the one-word address compare fails first and the
+/// interface-name set lookup runs only for packets that are actually for a mesh address. The
+/// rule matches exactly the same packets in either order. On the 2-core perf receiver this order
+/// raised reverse `GotaTun` throughput by 4-5% (#260, J1160).
 fn delivery_fence(config: &Config, aliases: &[crate::policy::model::Addresses]) -> String {
     let mut delivery = String::new();
     for addresses in std::iter::once(&config.addresses).chain(aliases) {
         let _ = write!(
             delivery,
-            "iifname != {{ \"{INTERFACE}\", \"lo\" }} ip daddr {} drop; iifname != {{ \"{INTERFACE}\", \"lo\" }} ip6 daddr {} drop;",
+            "ip daddr {} iifname != {{ \"{INTERFACE}\", \"lo\" }} drop; ip6 daddr {} iifname != {{ \"{INTERFACE}\", \"lo\" }} drop;",
             addresses.ipv4, addresses.ipv6
         );
     }
@@ -1434,9 +1442,11 @@ mod tests {
         );
         // The underlay delivery fence covers this node's own addresses in prerouting, input and
         // forward, and never a peer's (J592 P1): LAN traffic to other addresses is untouched.
+        // The address is matched before the interface-name set, so the cheap compare rejects
+        // the many underlay packets first (#260, J1160).
         for fence in [
-            "iifname != { \"infraternal0\", \"lo\" } ip daddr 10.254.0.1 drop;",
-            "iifname != { \"infraternal0\", \"lo\" } ip6 daddr fd01::1 drop;",
+            "ip daddr 10.254.0.1 iifname != { \"infraternal0\", \"lo\" } drop;",
+            "ip6 daddr fd01::1 iifname != { \"infraternal0\", \"lo\" } drop;",
         ] {
             for chain in ["chain ingress", "chain input", "chain forward"] {
                 let line = rules
