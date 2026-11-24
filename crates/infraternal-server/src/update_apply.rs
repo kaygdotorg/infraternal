@@ -540,8 +540,9 @@ pub(crate) fn staging_migration_fails() -> bool {
 /// The quiet window and the check timing, shortened only by the staging hook.
 #[derive(Clone, Copy)]
 pub(crate) struct Timing {
-    /// The quiet window before an apply.
-    pub(crate) quiet: Duration,
+    /// Override for the quiet window before an apply (`staging-trust` only); `None` reads
+    /// the saved `quiet_minutes` setting on each decision, falling back to [`QUIET`].
+    pub(crate) quiet: Option<Duration>,
     /// The first check after start and the period between checks, when overridden.
     pub(crate) checks: Option<Duration>,
 }
@@ -557,15 +558,26 @@ impl Timing {
         {
             let seconds = Duration::from_secs(seconds);
             return Self {
-                quiet: seconds,
+                quiet: Some(seconds),
                 checks: Some(seconds),
             };
         }
         Self {
-            quiet: QUIET,
+            quiet: None,
             checks: None,
         }
     }
+}
+
+/// Resolve the quiet window for one apply decision: the test/staging override when set,
+/// otherwise the owner's saved `quiet_minutes` setting (falling back to [`QUIET`] when
+/// none is saved or the saved value is out of range).
+async fn effective_quiet(pool: &sqlx::SqlitePool, quiet_override: Option<Duration>) -> Duration {
+    if let Some(quiet) = quiet_override {
+        return quiet;
+    }
+    let minutes = infraternal_plugin_release::service::quiet_minutes(pool).await;
+    Duration::from_mins(u64::from(minutes))
 }
 
 /// Wait for a staged release and a quiet window, then switch. Returns only if the
@@ -575,8 +587,31 @@ async fn quiet_window(
     pool: &sqlx::SqlitePool,
     data: &Path,
     artifact: &'static str,
-    quiet: Duration,
+    quiet_override: Option<Duration>,
 ) {
+    quiet_window_with(
+        data,
+        || effective_quiet(pool, quiet_override),
+        crate::update_activity::idle_for,
+        |window| switch_once(updater, pool, data, artifact, window),
+    )
+    .await;
+}
+
+/// The quiet-window apply loop, parameterized on the quiet-window reader, the idle clock,
+/// and the switch step so unit tests can drive it under Tokio's paused clock without
+/// touching process-wide activity statics or background SQLite worker threads.
+async fn quiet_window_with<Q, QFut, F, Fut>(
+    data: &Path,
+    mut read_quiet: Q,
+    idle_for: impl Fn() -> Duration,
+    mut attempt: F,
+) where
+    Q: FnMut() -> QFut,
+    QFut: std::future::Future<Output = Duration>,
+    F: FnMut(Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<(), Retry>>,
+{
     let mut changes = update::changes();
     loop {
         let state = update::status(data, infraternal_plugin_api::VERSION);
@@ -590,22 +625,29 @@ async fn quiet_window(
             }
             continue;
         }
-        let idle = crate::update_activity::idle_for();
-        if !forced && idle < quiet {
-            // Sleep until the window could close; typing meanwhile only moves it. The owner
-            // choosing "Update now" ends the wait at once.
-            tokio::select! {
-                () = tokio::time::sleep(quiet.saturating_sub(idle)) => {}
-                () = NOW.notified() => {}
+        let window = if forced {
+            Duration::ZERO
+        } else {
+            let quiet = read_quiet().await;
+            let idle = idle_for();
+            if idle < quiet {
+                // Sleep until the window could close; typing meanwhile only moves it. A state
+                // or setting change wakes the wait so a shorter quiet window takes effect
+                // without waiting out the previous sleep, and "Update now" ends the wait at once.
+                tokio::select! {
+                    () = tokio::time::sleep(quiet.saturating_sub(idle)) => {}
+                    result = changes.changed() => if result.is_err() { return },
+                    () = NOW.notified() => {}
+                }
+                continue;
             }
-            continue;
-        }
+            quiet
+        };
         // The owner's request skips the quiet window for this one attempt (an update never
         // waits for it when the owner asked for it by name); a failure is not forced again.
-        let window = if forced { Duration::ZERO } else { quiet };
-        let attempt = switch_once(updater, pool, data, artifact, window).await;
+        let outcome = attempt(window).await;
         FORCE.store(false, std::sync::atomic::Ordering::SeqCst);
-        match attempt {
+        match outcome {
             // The restart loop is about to exec the new release.
             Ok(()) => return std::future::pending().await,
             Err(Retry::Soon) => {}

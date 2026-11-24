@@ -365,6 +365,7 @@ impl ReleaseService {
                 .map_err(|_| "release unavailable")?;
             sqlx::query("INSERT INTO plugin_settings(role,plugin,enabled,settings) VALUES('server','release',1,json_object('quiet_minutes',?)) ON CONFLICT(role,plugin) DO UPDATE SET settings=json_set(plugin_settings.settings,'$.quiet_minutes',?)")
                 .bind(minutes).bind(minutes).execute(&self.pool).await.map_err(|_| "release unavailable")?;
+            crate::update::notify_changed();
         }
         self.update_status().await
     }
@@ -405,8 +406,12 @@ fn to_json(started: crate::applier::Started) -> Result<Value, &'static str> {
     serde_json::to_value(started).map_err(|_| "release unavailable")
 }
 
-/// The saved quiet window in minutes: the default when none is saved or the saved one is out of range.
-async fn quiet_minutes(pool: &SqlitePool) -> u32 {
+/// Read the saved quiet window in minutes from `plugin_settings`.
+///
+/// Returns [`DEFAULT_QUIET_MINUTES`] (5 minutes) when no value is saved, the database read
+/// fails, or the saved value is outside `1..=MAX_QUIET_MINUTES`. Both `release.update.status`
+/// and the server's apply loop call this so they always agree.
+pub async fn quiet_minutes(pool: &SqlitePool) -> u32 {
     let saved: Option<i64> = sqlx::query_scalar("SELECT json_extract(settings,'$.quiet_minutes') FROM plugin_settings WHERE role='server' AND plugin='release'")
         .fetch_optional(pool).await.ok().flatten().flatten();
     saved

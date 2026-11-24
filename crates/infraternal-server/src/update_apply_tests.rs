@@ -286,3 +286,267 @@ fn automatic_apply_off_waits_for_an_explicit_apply() {
         "nothing staged"
     );
 }
+
+/// Create a temp data folder whose `updates/state.json` has a staged release ready for
+/// automatic apply.
+fn staged_data_dir() -> PathBuf {
+    let data = std::env::temp_dir().join(format!("s4-quiet-{}", uuid::Uuid::new_v4().simple()));
+    let updates = data.join("updates");
+    std::fs::create_dir_all(&updates).unwrap();
+    let state = update::UpdateState {
+        staged: Some("edge-20261124T000000Z".into()),
+        ..update::UpdateState::default()
+    };
+    std::fs::write(
+        updates.join("state.json"),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    data
+}
+
+/// Create an in-memory SQLite pool with `plugin_settings` for quiet-window storage checks.
+async fn quiet_settings_pool() -> sqlx::SqlitePool {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TABLE plugin_settings(role TEXT,plugin TEXT,enabled INTEGER,settings TEXT NOT NULL DEFAULT '{}',PRIMARY KEY(role,plugin))",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool
+}
+
+/// Save raw JSON `settings` for the `release` server plugin row.
+async fn save_release_settings(pool: &sqlx::SqlitePool, settings: &str) {
+    sqlx::query(
+        "INSERT INTO plugin_settings(role,plugin,enabled,settings) VALUES('server','release',1,?) ON CONFLICT(role,plugin) DO UPDATE SET settings=excluded.settings",
+    )
+    .bind(settings)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Advance Tokio's paused clock by `duration` and let spawned tasks run to quiescence.
+async fn advance_and_settle(duration: Duration) {
+    tokio::time::advance(duration).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// J1145 (#211): `effective_quiet` reads `quiet_minutes` from `plugin_settings` on every
+/// call, falls back to the 5-minute default when unset or out of range, and respects the
+/// test/staging timing override when set.
+#[tokio::test]
+async fn effective_quiet_reads_saved_minutes_falls_back_to_default_and_honors_override() {
+    let pool = quiet_settings_pool().await;
+    // Nothing saved: default 5-minute quiet window applies.
+    assert_eq!(effective_quiet(&pool, None).await, QUIET);
+
+    // Saved N minutes is read immediately on the next call.
+    save_release_settings(&pool, r#"{"quiet_minutes":12}"#).await;
+    assert_eq!(effective_quiet(&pool, None).await, Duration::from_mins(12));
+
+    // Changing the saved value takes effect on the next call without a restart.
+    save_release_settings(&pool, r#"{"quiet_minutes":2}"#).await;
+    assert_eq!(effective_quiet(&pool, None).await, Duration::from_mins(2));
+
+    // Out-of-range and malformed values fall back to the 5-minute default.
+    for raw in [
+        r#"{"quiet_minutes":0}"#,
+        r#"{"quiet_minutes":-5}"#,
+        r#"{"quiet_minutes":1441}"#,
+        r#"{"quiet_minutes":"ten"}"#,
+    ] {
+        save_release_settings(&pool, raw).await;
+        assert_eq!(
+            effective_quiet(&pool, None).await,
+            QUIET,
+            "out-of-range {raw} must fall back to default"
+        );
+    }
+
+    // The test/staging timing override still takes precedence over a saved quiet window.
+    save_release_settings(&pool, r#"{"quiet_minutes":60}"#).await;
+    assert_eq!(
+        effective_quiet(&pool, Some(Duration::from_secs(7))).await,
+        Duration::from_secs(7)
+    );
+}
+
+/// J1145 (#211): a saved quiet window of N minutes delays automatic apply until N minutes
+/// pass without terminal activity, rather than applying at the 5-minute default.
+#[tokio::test(start_paused = true)]
+async fn saved_quiet_window_delays_apply_until_n_minutes_without_activity() {
+    let data = staged_data_dir();
+    let saved = Arc::new(Mutex::new(Duration::from_mins(12)));
+    let last_activity = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let (tx, mut rx) = mpsc::channel(4);
+    let task = {
+        let (data, saved, last_activity) =
+            (data.clone(), Arc::clone(&saved), Arc::clone(&last_activity));
+        tokio::spawn(async move {
+            quiet_window_with(
+                &data,
+                move || {
+                    let quiet = *saved.lock().unwrap();
+                    async move { quiet }
+                },
+                move || last_activity.lock().unwrap().elapsed(),
+                |window| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(window).await;
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        })
+    };
+
+    // Past the old 5-minute default and still short of 12 minutes: must not apply.
+    advance_and_settle(Duration::from_mins(5)).await;
+    assert!(rx.try_recv().is_err(), "must not apply at 5-minute default");
+    advance_and_settle(Duration::from_mins(6)).await;
+    assert!(rx.try_recv().is_err(), "still under 12 minutes");
+
+    // Activity at minute 11 resets the quiet window.
+    *last_activity.lock().unwrap() = tokio::time::Instant::now();
+    advance_and_settle(Duration::from_mins(11)).await;
+    assert!(rx.try_recv().is_err(), "activity reset the 12-minute wait");
+
+    // One more quiet minute completes the full 12-minute window.
+    advance_and_settle(Duration::from_mins(1)).await;
+    assert_eq!(rx.try_recv().ok(), Some(Duration::from_mins(12)));
+
+    task.abort();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// J1145 (#211): changing `quiet_minutes` takes effect on the next decision without a
+/// restart, both when lengthening and when shortening an active wait.
+#[tokio::test(start_paused = true)]
+async fn changing_quiet_window_takes_effect_on_next_decision() {
+    // Lengthening: 3 minutes raised to 10 minutes before apply delays until 10 minutes.
+    let data = staged_data_dir();
+    let saved = Arc::new(Mutex::new(Duration::from_mins(3)));
+    let last_activity = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let (tx, mut rx) = mpsc::channel(4);
+    let task = {
+        let (data, saved, last_activity) =
+            (data.clone(), Arc::clone(&saved), Arc::clone(&last_activity));
+        tokio::spawn(async move {
+            quiet_window_with(
+                &data,
+                move || {
+                    let quiet = *saved.lock().unwrap();
+                    async move { quiet }
+                },
+                move || last_activity.lock().unwrap().elapsed(),
+                |window| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(window).await;
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        })
+    };
+
+    advance_and_settle(Duration::from_mins(2)).await;
+    assert!(rx.try_recv().is_err());
+    *saved.lock().unwrap() = Duration::from_mins(10);
+    update::notify_changed();
+    advance_and_settle(Duration::from_mins(2)).await;
+    assert!(
+        rx.try_recv().is_err(),
+        "lengthened to 10 minutes; must not apply at 4 minutes"
+    );
+    advance_and_settle(Duration::from_mins(6)).await;
+    assert_eq!(rx.try_recv().ok(), Some(Duration::from_mins(10)));
+    task.abort();
+    let _ = std::fs::remove_dir_all(&data);
+
+    // Shortening: 30 minutes lowered to 2 minutes while sleeping applies once 2 minutes idle.
+    let data = staged_data_dir();
+    let saved = Arc::new(Mutex::new(Duration::from_mins(30)));
+    let last_activity = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let (tx, mut rx) = mpsc::channel(4);
+    let task = {
+        let (data, saved, last_activity) =
+            (data.clone(), Arc::clone(&saved), Arc::clone(&last_activity));
+        tokio::spawn(async move {
+            quiet_window_with(
+                &data,
+                move || {
+                    let quiet = *saved.lock().unwrap();
+                    async move { quiet }
+                },
+                move || last_activity.lock().unwrap().elapsed(),
+                |window| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(window).await;
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        })
+    };
+
+    advance_and_settle(Duration::from_mins(2)).await;
+    assert!(rx.try_recv().is_err());
+    *saved.lock().unwrap() = Duration::from_mins(2);
+    update::notify_changed();
+    advance_and_settle(Duration::ZERO).await;
+    assert_eq!(
+        rx.try_recv().ok(),
+        Some(Duration::from_mins(2)),
+        "shortening wakes the wait and applies immediately"
+    );
+    task.abort();
+    let _ = std::fs::remove_dir_all(&data);
+}
+
+/// J1145 (#211): when nothing is saved the 5-minute default applies in the quiet-window loop.
+#[tokio::test(start_paused = true)]
+async fn default_quiet_window_applies_at_five_minutes() {
+    let data = staged_data_dir();
+    let last_activity = Arc::new(Mutex::new(tokio::time::Instant::now()));
+    let (tx, mut rx) = mpsc::channel(4);
+    let task = {
+        let (data, last_activity) = (data.clone(), Arc::clone(&last_activity));
+        tokio::spawn(async move {
+            quiet_window_with(
+                &data,
+                || async { QUIET },
+                move || last_activity.lock().unwrap().elapsed(),
+                |window| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(window).await;
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        })
+    };
+
+    advance_and_settle(Duration::from_mins(4)).await;
+    assert!(rx.try_recv().is_err(), "default is 5 minutes");
+    advance_and_settle(Duration::from_mins(1)).await;
+    assert_eq!(rx.try_recv().ok(), Some(QUIET));
+    task.abort();
+    let _ = std::fs::remove_dir_all(&data);
+}
