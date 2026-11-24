@@ -342,7 +342,7 @@ mod tests {
     /// its own descriptors under the name the kernel gives it. Needs root to open a utun.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "Run on the macOS VM as root: opens a utun."]
+    #[ignore = "Run on the macOS VM with system service privileges: opens a utun."]
     fn this_process_finds_its_own_utun() {
         let open = crate::macos_node::OpenUtun::open_kernel().expect("open a utun (needs root)");
         let pid = i32::try_from(std::process::id()).unwrap();
