@@ -842,3 +842,37 @@ async fn census_close_on_the_writer_reads_the_census_under_the_write_lock() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// While every open row is still in the census (the open-storm case), a
+/// census pass is read-only: it finishes while another connection holds
+/// SQLite's write lock, which a write would wait out for the 5 s busy
+/// timeout. Once a row is missing, the same pass does write and close it
+/// (#562).
+#[tokio::test]
+async fn census_close_with_nothing_missing_takes_no_write_lock() {
+    let (pool, _user, listed, auth, dir) = disk_database().await;
+    let (published, inventory) =
+        watch::channel(SessionInventoryState::Available(Arc::from([listed])));
+    let mut lock = infraternal_plugin_api::storage::begin_immediate(&pool)
+        .await
+        .unwrap();
+    let pass = tokio::time::timeout(
+        Duration::from_secs(2),
+        crate::terminal_census::close_ended(&auth, &pool, &inventory),
+    )
+    .await;
+    assert_eq!(
+        pass,
+        Ok(Ok(0)),
+        "a pass with nothing to close waited for the write lock"
+    );
+    sqlx::query("SELECT 1").execute(&mut *lock).await.unwrap();
+    drop(lock);
+    published.send_replace(SessionInventoryState::Available(Arc::from([])));
+    assert_eq!(
+        crate::terminal_census::close_ended(&auth, &pool, &inventory).await,
+        Ok(1)
+    );
+    assert!(closed_at(&pool, listed[0]).await.is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}

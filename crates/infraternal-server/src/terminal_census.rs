@@ -16,15 +16,23 @@
 //! must never meet a row inserted later, or a brand-new terminal would be
 //! closed (`census_waiting_for_database_does_not_close_a_newly_created_live_session`).
 //!
-//! # Why the writer
+//! # Why the writer, and why read first
 //!
 //! The pass used to be an sqlx `BEGIN IMMEDIATE` plus a scan of every local
 //! row, once per census change, which is about once per terminal open. During
 //! an open storm it fought the D379 writer's inserts for SQLite's write lock
 //! and both sides slept in the busy handler (J1056 counted 150-163 sleeps in
-//! the open phase, #562). Now the scan and the closes run as one transaction
-//! on the D379 writer, queued FIFO with the other terminal writes, with the
-//! same SQL.
+//! the open phase, #562). Now:
+//!
+//! 1. A D379 reader transaction scans the open local rows and compares them
+//!    with the census. While terminals are only opening, nothing is missing,
+//!    and the pass ends there without taking the write lock or a place in
+//!    the writer's queue.
+//! 2. Only when some row is missing does the pass queue one write on the D379
+//!    writer, which repeats the scan and the census read under
+//!    `BEGIN IMMEDIATE` and closes every missing row in that one transaction.
+//!    The rescan keeps the close decision exactly what the old single
+//!    transaction decided, including rows committed after step 1's snapshot.
 //!
 //! Without a D379 pool (in-memory test databases) [`close_ended_on_sqlx`]
 //! runs the original sqlx transaction.
@@ -72,9 +80,9 @@ fn open_local_rows(
 
 /// Close every open local row the latest census no longer lists.
 ///
-/// Call it after each census change. Returns how many rows it closed. A
-/// storage error is `Err(())`; the caller logs it and the next census change
-/// tries again.
+/// Call it after each census change. Returns how many rows it closed, so a
+/// test can tell a read-only pass from a write. A storage error is `Err(())`;
+/// the caller logs it and the next census change tries again.
 pub(crate) async fn close_ended(
     auth: &Auth,
     pool: &sqlx::SqlitePool,
@@ -83,7 +91,35 @@ pub(crate) async fn close_ended(
     let Some(db) = auth.database() else {
         return close_ended_on_sqlx(pool, inventory).await.map_err(|_| ());
     };
+    if !any_ended(db, inventory).await? {
+        return Ok(0);
+    }
     close_ended_on_writer(db, inventory).await
+}
+
+/// The read step of [`close_ended`]: whether any open local row is missing
+/// from the census, checked in a D379 reader transaction that takes no lock
+/// a writer waits for.
+///
+/// The SELECT fixes the reader's snapshot before the watch is read, so this
+/// answers exactly what a write transaction started at that moment would
+/// find. `false` is final for this census: a row that commits after the
+/// snapshot was listed by a census already published (the module's ordering
+/// invariant), and a shim that ends later publishes a new census, which runs
+/// a new pass.
+async fn any_ended(
+    db: &infraternal_db::Database,
+    inventory: &watch::Receiver<SessionInventoryState>,
+) -> Result<bool, ()> {
+    let census = inventory.clone();
+    db.read(move |tx| {
+        let rows = open_local_rows(tx)?;
+        Ok::<_, infraternal_db::Error>(
+            missing_from_census(&census, rows).is_some_and(|missing| !missing.is_empty()),
+        )
+    })
+    .await
+    .map_err(|_| ())
 }
 
 /// The write step of [`close_ended`]: one D379 writer transaction that scans
