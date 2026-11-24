@@ -266,6 +266,11 @@ pub(crate) fn registry_at_with_mesh_state(
             Ok(true) => {
                 infraternal_plugin_mesh::macos_helper::enter_user_mode();
                 eprintln!("Infraternal Mesh node running in user mode through the mesh helper");
+                // A launchd agent needs the person's Local Network permission to reach LAN
+                // peers; root mode is exempt (#576). Ask now, while `up` is in front of them.
+                if let Some(folder) = mesh_state.or(state) {
+                    infraternal_plugin_mesh::macos_local_network::watch(folder);
+                }
                 registry.register(Box::new(darwin_mesh_plugin(
                     mesh_state.or(state),
                     installation,

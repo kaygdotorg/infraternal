@@ -31,6 +31,7 @@ use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use infraternal_plugin_mesh::{
     macos_helper,
+    macos_local_network::{self, LocalNetwork},
     macos_service::MACHINE_BASE,
     macos_user_mode::{self, AGENT_LABEL, Request},
 };
@@ -234,6 +235,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok((fingerprint, short_key)) => {
             install.committed = true;
             let paths = &install.paths;
+            let local_network = wait_for_local_network(&paths.state);
             let path_line = paths.path_line();
             emit(
                 CommandResult::new(
@@ -249,6 +251,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
                         "service": AGENT_LABEL,
                         "status": "active",
                         "path": paths.binary.display().to_string(),
+                        "local_network": local_network.map(LocalNetwork::word),
                     }),
                 )
                 .with_body(format!(
@@ -261,6 +264,58 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         }
         Err(failure) => fail(json_output, failure),
     }
+}
+
+/// How long `up` waits for the person to answer the Local Network alert.
+const LOCAL_NETWORK_WAIT: Duration = Duration::from_secs(90);
+
+/// Tell the person about the Local Network alert and wait for their answer (#576).
+///
+/// The user-mode agent is a launchd agent, so macOS asks the person before it may reach hosts
+/// on this Mac's own networks; the agent raises that alert as soon as it starts and writes what
+/// it learns to its state folder ([`macos_local_network::STATE_FILE`]). `up` waits briefly for
+/// the first answer, and when access is not allowed yet, says what to click and waits up to
+/// [`LOCAL_NETWORK_WAIT`] for it. It never fails the join: peers across the internet work
+/// either way, and the agent keeps checking, so a later Allow works without a restart. Returns
+/// the last state seen, if any.
+fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
+    let file = state.join(macos_local_network::STATE_FILE);
+    let read = || {
+        fs::read_to_string(&file)
+            .ok()
+            .and_then(|text| LocalNetwork::from_word(&text))
+    };
+    let poll = |until: Instant, done: &dyn Fn(LocalNetwork) -> bool| {
+        let mut last = read();
+        while !last.is_some_and(done) && Instant::now() < until {
+            // sleep: the agent publishes its answer only through this file.
+            std::thread::sleep(Duration::from_millis(250));
+            last = read();
+        }
+        last
+    };
+    let first = poll(Instant::now() + Duration::from_secs(5), &|_| true);
+    if matches!(
+        first,
+        Some(LocalNetwork::Allowed | LocalNetwork::NoLocalNetwork)
+    ) {
+        return first;
+    }
+    eprintln!(
+        "macOS asks whether infraternal may find devices on your local network. Click Allow, so this Mac reaches mesh peers on the same network directly. Waiting up to {} seconds…",
+        LOCAL_NETWORK_WAIT.as_secs()
+    );
+    let last = poll(Instant::now() + LOCAL_NETWORK_WAIT, &|state| {
+        state == LocalNetwork::Allowed
+    });
+    if last == Some(LocalNetwork::Allowed) {
+        eprintln!("Local Network access allowed.");
+    } else {
+        eprintln!(
+            "Local Network access is not allowed yet. Peers on other networks work; to reach peers on this network, turn on infraternal under System Settings > Privacy & Security > Local Network. No restart is needed."
+        );
+    }
+    last
 }
 
 /// Bring an existing user-mode install of this account up to this build, or `None` when there

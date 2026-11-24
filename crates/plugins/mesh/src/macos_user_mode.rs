@@ -23,6 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
+/// The bundle identifier embedded in the macOS binary's `Info.plist` section (#576); the
+/// user-mode `LaunchAgent` names it in `AssociatedBundleIdentifiers` so macOS attributes the
+/// agent's Local Network use to infraternal. Must equal `crates/infraternal/macos/Info.plist`.
+pub const BUNDLE_IDENTIFIER: &str = "org.infraternal.infraternal";
 /// The launchd label of the on-demand root helper.
 pub const HELPER_LABEL: &str = "org.infraternal.mesh-helper";
 /// The helper's launchd property list, root-owned.
@@ -736,7 +740,9 @@ pub fn helper_plist_uid(contents: &str) -> Option<u32> {
 ///
 /// It runs `executable agent run --data <data> --state <state>` in the person's login
 /// session, starts at login, restarts after a crash (throttled to every 5 s), and sends its
-/// output to `log` so the person can read why it stopped.
+/// output to `log` so the person can read why it stopped. `AssociatedBundleIdentifiers` names
+/// [`BUNDLE_IDENTIFIER`], which TN3179 asks of a launchd agent not installed through
+/// `SMAppService`, so Local Network privacy finds the responsible code (#576).
 #[must_use]
 pub fn agent_plist(executable: &str, data: &str, state: &str, log: &str) -> String {
     let executable = xml_escape(executable);
@@ -757,6 +763,7 @@ pub fn agent_plist(executable: &str, data: &str, state: &str, log: &str) -> Stri
          <key>KeepAlive</key><true/>\n\
          <key>ThrottleInterval</key><integer>5</integer>\n\
          <key>ProcessType</key><string>Interactive</string>\n\
+         <key>AssociatedBundleIdentifiers</key><array><string>{BUNDLE_IDENTIFIER}</string></array>\n\
          <key>StandardOutPath</key><string>{log}</string>\n\
          <key>StandardErrorPath</key><string>{log}</string>\n\
          </dict></plist>\n"
@@ -1136,5 +1143,20 @@ mod tests {
         );
         assert!(plist.contains("a&amp;b"));
         assert!(plist.contains("<string>--state</string><string>/s</string>"));
+        // Local Network privacy attributes the agent to the binary's embedded bundle (#576).
+        assert!(plist.contains(
+            "<key>AssociatedBundleIdentifiers</key><array><string>org.infraternal.infraternal</string></array>"
+        ));
+    }
+
+    /// The embedded `Info.plist` names the same bundle as the `LaunchAgent`, and carries the
+    /// sentence the Local Network alert shows (#576).
+    #[test]
+    fn the_embedded_info_plist_matches_the_launch_agent() {
+        let info = include_str!("../../../infraternal/macos/Info.plist");
+        assert!(info.contains(&format!(
+            "<key>CFBundleIdentifier</key>\n\t<string>{BUNDLE_IDENTIFIER}</string>"
+        )));
+        assert!(info.contains("<key>NSLocalNetworkUsageDescription</key>"));
     }
 }
