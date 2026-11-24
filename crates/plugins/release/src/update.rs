@@ -294,6 +294,15 @@ pub fn changes() -> tokio::sync::watch::Receiver<u64> {
     CHANGES.subscribe()
 }
 
+/// Wake every [`changes`] subscriber after an update state or setting write.
+///
+/// Called both when `state.json` is replaced and when `release.update.settings` saves a
+/// new `quiet_minutes` value in SQLite, so the apply loop and `release.update` subscribers
+/// re-read immediately without polling.
+pub fn notify_changed() {
+    CHANGES.send_modify(|count| *count = count.wrapping_add(1));
+}
+
 /// Read the persisted update state of the server whose data folder is `data`.
 ///
 /// A server that never checked reports its running version and nothing else. The
@@ -1371,7 +1380,7 @@ impl Locked {
         std::fs::rename(&temporary, self.directory.join("state.json")).map_err(|_| saved)?;
         self.sync()?;
         self.record_changes(before.as_ref(), state);
-        CHANGES.send_modify(|count| *count = count.wrapping_add(1));
+        notify_changed();
         Ok(())
     }
 
