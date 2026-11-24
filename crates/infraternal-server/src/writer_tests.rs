@@ -714,3 +714,131 @@ async fn input_ack_on_the_d379_writer_is_one_transaction_with_the_sqlx_rules() {
     assert_eq!(rows().await.0, high, "and rolled back");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Add a terminal row to the on-disk fixture: `closed_at` set or not, local
+/// or on the remote host `host`.
+async fn census_row(
+    pool: &SqlitePool,
+    user: &str,
+    id: u8,
+    closed_at: Option<i64>,
+    host: Option<&[u8]>,
+) {
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,closed_at,remote_host_id) VALUES (?,?,1,1,?,?)")
+        .bind([id; 16].as_slice()).bind(user).bind(closed_at).bind(host)
+        .execute(pool).await.unwrap();
+}
+
+/// Each row's `closed_at`, by id byte, for the census tests.
+async fn closed_at(pool: &SqlitePool, id: u8) -> Option<i64> {
+    sqlx::query_scalar("SELECT closed_at FROM terminal_sessions WHERE id=?")
+        .bind([id; 16].as_slice())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// A census close on the D379 writer keeps the sqlx rules: an open local row
+/// the census does not list closes; a listed row stays open; an earlier
+/// closure time is kept; a remote host's row is never touched; and a census
+/// that is not available closes nothing (#562).
+#[tokio::test]
+async fn census_close_on_the_d379_writer_keeps_the_sqlx_rules() {
+    let (pool, user, gone, auth, dir) = disk_database().await;
+    let host = [9_u8; 16];
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)")
+        .bind(host.as_slice()).bind(&user).execute(&pool).await.unwrap();
+    census_row(&pool, &user, 1, None, None).await;
+    census_row(&pool, &user, 2, Some(5), None).await;
+    census_row(&pool, &user, 3, None, Some(host.as_slice())).await;
+    let (published, inventory) = watch::channel(SessionInventoryState::Pending);
+    let close = || crate::terminal_census::close_ended(&auth, &pool, &inventory);
+    assert_eq!(close().await, Ok(0), "a pending census closes nothing");
+    published.send_replace(SessionInventoryState::Unavailable);
+    assert_eq!(close().await, Ok(0), "an unavailable census closes nothing");
+    assert_eq!(closed_at(&pool, gone[0]).await, None);
+    published.send_replace(SessionInventoryState::Available(Arc::from([[1_u8; 16]])));
+    assert_eq!(
+        close().await,
+        Ok(1),
+        "only the unlisted open local row closes"
+    );
+    assert!(closed_at(&pool, gone[0]).await.is_some());
+    assert_eq!(closed_at(&pool, 1).await, None, "a listed row stays open");
+    assert_eq!(
+        closed_at(&pool, 2).await,
+        Some(5),
+        "an earlier closure time is kept"
+    );
+    assert_eq!(
+        closed_at(&pool, 3).await,
+        None,
+        "a remote host's row is not the local census's"
+    );
+    assert_eq!(
+        close().await,
+        Ok(0),
+        "a second pass finds nothing left to close"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// The census close reads the census only once its write transaction holds
+/// the lock, not when the write was queued. Here the census changes and a new
+/// terminal's row commits while the close waits behind another write, as when
+/// a terminal opens during the pass (the leg-B census lists a new shim before
+/// its row is inserted). The waiting close must judge the new row against the
+/// new census and leave it open, while still closing the row that is really
+/// gone (#562).
+#[tokio::test]
+async fn census_close_on_the_writer_reads_the_census_under_the_write_lock() {
+    let (pool, user, gone, auth, dir) = disk_database().await;
+    let db = auth.database().unwrap().clone();
+    let opened = [42_u8; 16];
+    let (published, inventory) = watch::channel(SessionInventoryState::Available(Arc::from([])));
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let (holding, writer_held) = tokio::sync::oneshot::channel::<()>();
+    // Hold the writer: this write waits for `release`, then does what an open
+    // does in that window: publish the census with the new shim, then insert
+    // its row, committed before the queued close runs.
+    let open_user = user.clone();
+    let held = tokio::spawn({
+        let db = db.clone();
+        async move {
+            db.write(move |tx| {
+                holding.send(()).unwrap();
+                gate.recv().unwrap();
+                published.send_replace(SessionInventoryState::Available(Arc::from([opened])));
+                tx.execute(
+                    "INSERT INTO terminal_sessions(id,user_id,created_at,last_seen) VALUES(?,?,1,1)",
+                    infraternal_db::rusqlite::params![opened.as_slice(), open_user],
+                )?;
+                Ok::<_, infraternal_db::Error>(())
+            })
+            .await
+        }
+    });
+    writer_held.await.unwrap();
+    // Queue the close behind it while the census is still the old, empty one.
+    let close = crate::terminal_census::close_ended_on_writer(&db, &inventory);
+    tokio::pin!(close);
+    std::future::poll_fn(|cx| {
+        assert!(std::future::Future::poll(close.as_mut(), cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    release.send(()).unwrap();
+    held.await.unwrap().unwrap();
+    assert_eq!(
+        close.await,
+        Ok(1),
+        "only the row that is really gone closes"
+    );
+    assert!(closed_at(&pool, gone[0]).await.is_some());
+    assert_eq!(
+        closed_at(&pool, opened[0]).await,
+        None,
+        "a queued close used the census it saw when queued and closed a new terminal"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

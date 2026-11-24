@@ -30,7 +30,9 @@ async fn reconcile_embedded_sessions(
     ids: &[[u8; 16]],
 ) -> Result<(), sqlx::Error> {
     let (_, inventory) = watch::channel(SessionInventoryState::Available(Arc::from(ids)));
-    reconcile_embedded_inventory(pool, &inventory).await
+    crate::terminal_census::close_ended_on_sqlx(pool, &inventory)
+        .await
+        .map(drop)
 }
 
 #[tokio::test]
@@ -309,6 +311,9 @@ async fn available_snapshot_reports_live_rows_and_bounded_saved_exit_statuses() 
     );
 }
 
+/// On the sqlx path, a census pass that waits for the write lock reads the
+/// census only once it holds the lock: a terminal whose row commits while the
+/// pass waits, and whose shim the newer census lists, stays open.
 #[tokio::test]
 async fn census_waiting_for_database_does_not_close_a_newly_created_live_session() {
     let (pool, user) = database().await;
@@ -320,7 +325,7 @@ async fn census_waiting_for_database_does_not_close_a_newly_created_live_session
     let reconciliation = tokio::spawn(async move {
         // The watch task already copied an empty census. Poll until it parks
         // behind another database operation, as can happen during an open.
-        let future = reconcile_embedded_inventory(&reconcile_pool, &inventory);
+        let future = crate::terminal_census::close_ended_on_sqlx(&reconcile_pool, &inventory);
         tokio::pin!(future);
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(future.as_mut(), cx).is_pending());

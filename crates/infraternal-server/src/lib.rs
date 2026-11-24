@@ -158,6 +158,8 @@ mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]
 mod socket_authority;
 mod stream_close;
+/// Closes local terminal rows a fresh shim census no longer lists, on the D379 writer (#562).
+mod terminal_census;
 mod terminal_exit;
 /// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
 mod terminal_input_ack;
