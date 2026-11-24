@@ -336,3 +336,25 @@ fn a_tail_change_keeps_a_found_peer_on_its_address() {
     assert!(echoed, "traffic stopped after the tail change");
     drop(dead);
 }
+
+/// A snapshot that changes only the networks behind a router peer rewrites that peer (its allowed
+/// IPs carry them, D197 M3), and one that changes nothing rewrites none (#580, J1169).
+#[test]
+fn a_networks_only_change_rewrites_the_router_peer() {
+    use crate::dataplane::{PeerNetworks, ReachableNetwork};
+    use crate::macos_node::walks::{changed_peers, installed_by_key};
+    let applied = config();
+    let previous = installed_by_key(Some(&applied));
+    assert_eq!(changed_peers(&previous, &applied).count(), 0);
+    let mut next = applied.clone();
+    next.peers.get_mut(&NodeId(4)).unwrap().networks = PeerNetworks {
+        through: vec![ReachableNetwork {
+            network: "10.77.0.0/24".parse().unwrap(),
+            outbound: TrafficPolicy::All,
+        }],
+        served: Vec::new(),
+    };
+    let changed: Vec<_> = changed_peers(&previous, &next).collect();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].peer.key, applied.peers[&NodeId(4)].peer.key);
+}

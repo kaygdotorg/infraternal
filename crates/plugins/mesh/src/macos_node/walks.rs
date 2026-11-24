@@ -65,7 +65,8 @@ pub(super) async fn run_worker(
     );
     let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
     confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // A restored configuration may already carry candidates; no session predates it.
+    // A restored configuration may carry subnet routes and candidates; no session predates it.
+    state.sync_networks().await;
     state.refresh_walks(&BTreeMap::new()).await;
     loop {
         let next_walk = state.walks.next_due();
@@ -82,6 +83,11 @@ pub(super) async fn run_worker(
                     } => {
                         let before = state.engine_addresses(&config).await;
                         let result = state.apply(*config, budgets, &before).await;
+                        // Subnet routes follow the snapshot the device accepted (D197 M3), before
+                        // the reply, so `mesh routes` right after it is current.
+                        if result.is_ok() {
+                            state.sync_networks().await;
+                        }
                         // The apply writes routes while the listener is outside the select.
                         if let Some(announcer) = announcer.as_mut() {
                             announcer.resync();
@@ -96,6 +102,9 @@ pub(super) async fn run_worker(
                         reply,
                     } => {
                         let result = state.replace_authority(*config, budgets).await;
+                        if result.is_ok() {
+                            state.sync_networks().await;
+                        }
                         if let Some(announcer) = announcer.as_mut() {
                             announcer.resync();
                         }
@@ -241,9 +250,7 @@ pub(super) async fn update_peers(
         // (which resumes) is the right path here.
         return super::replace_peers(device, peers_for_config(next)?).await;
     }
-    let is_changed = |policy: &&PeerPolicy| previous.get(&policy.peer.key) != Some(&&policy.peer);
-    let changed = installed_peers(next)
-        .filter(is_changed)
+    let changed = changed_peers(&previous, next)
         .map(|policy| {
             let mut peers = peer_for_policy(policy)?;
             let key = active_peer_key(&policy.peer);
@@ -282,12 +289,29 @@ pub(super) async fn update_peers(
         .map_err(|_| io::Error::other("WireGuard peers could not be updated."))
 }
 
-/// The installed peers of `config`, by their current key.
-fn installed_by_key(config: Option<&Config>) -> BTreeMap<PublicKey, &Peer> {
+/// The installed peers of `next` that the device must rewrite: new ones, and those whose peer
+/// settings or networks differ from `previous` ([`installed_by_key`] of the applied snapshot).
+///
+/// The networks behind a router peer are its allowed IPs too (D197 M3): a snapshot that changes
+/// only them must rewrite the peer, or the device keeps sending the old networks to it and
+/// accepting their replies from it.
+pub(super) fn changed_peers<'a>(
+    previous: &'a BTreeMap<PublicKey, (&'a Peer, &'a Vec<crate::dataplane::ReachableNetwork>)>,
+    next: &'a Config,
+) -> impl Iterator<Item = &'a PeerPolicy> + 'a {
+    installed_peers(next).filter(move |policy| {
+        previous.get(&policy.peer.key) != Some(&(&policy.peer, &policy.networks.through))
+    })
+}
+
+/// The installed peers of `config`, by their current key, with the networks behind each.
+pub(super) fn installed_by_key(
+    config: Option<&Config>,
+) -> BTreeMap<PublicKey, (&Peer, &Vec<crate::dataplane::ReachableNetwork>)> {
     config
         .into_iter()
         .flat_map(installed_peers)
-        .map(|policy| (policy.peer.key, &policy.peer))
+        .map(|policy| (policy.peer.key, (&policy.peer, &policy.networks.through)))
         .collect()
 }
 
@@ -304,7 +328,7 @@ pub(super) fn readdressed(applied: Option<&Config>, next: &Config) -> Vec<Public
                 && policy.peer.candidates.is_empty()
                 && previous
                     .get(&policy.peer.key)
-                    .is_some_and(|old| old.endpoint != policy.peer.endpoint)
+                    .is_some_and(|(old, _)| old.endpoint != policy.peer.endpoint)
         })
         .map(|policy| active_peer_key(&policy.peer))
         .collect()
@@ -353,7 +377,16 @@ impl RuntimeState {
             self.walks.clear();
             return;
         };
-        let wanted = walking_peers(installed_peers(config));
+        let mut wanted = walking_peers(installed_peers(config));
+        // A candidate inside a network routed into the utun would send the tunnel into itself.
+        let routed = self.installed_networks();
+        if !routed.is_empty() {
+            for peer in wanted.values_mut() {
+                peer.candidates =
+                    crate::macos_subnet_routes::reachable_candidates(&peer.candidates, &routed);
+            }
+            wanted.retain(|_, peer| !peer.candidates.is_empty());
+        }
         if !self.walks.prepare(&wanted) {
             return;
         }

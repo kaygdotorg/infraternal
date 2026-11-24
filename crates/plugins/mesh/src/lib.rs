@@ -81,8 +81,8 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
-/// Subnet routes on a Linux node: routes to networks behind routers, and forwarding (D197 M3).
-#[cfg(all(feature = "agent", target_os = "linux"))]
+/// Subnet routes on a node: routes to networks behind routers, and (Linux) forwarding (D197 M3).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod subnet_routes;
 
 /// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.

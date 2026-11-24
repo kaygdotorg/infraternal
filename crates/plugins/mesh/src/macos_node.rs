@@ -52,6 +52,8 @@ use zeroize::Zeroizing;
 
 /// Mac DNS status.
 mod dns_state;
+/// Subnet routes on the utun: the worker's reconcile and its published status (D197 M3, #580).
+mod subnet;
 /// User-mode helper requests for the utun, its routes and the resolver (#146).
 mod user_mode;
 /// The worker loop, session-keeping peer updates and candidate walks (#515).
@@ -968,13 +970,22 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 /// Rejects invalid host routes before they reach GotaTun.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = peer
+    let mut addresses = peer
         .routed_addresses()
         .map(|address| {
             IpNetwork::new(address, if address.is_ipv4() { 32 } else { 128 })
                 .map_err(|_| io::ErrorKind::InvalidData.into())
         })
         .collect::<io::Result<Vec<_>>>()?;
+    // Networks behind this router peer (D197 M3), as on Linux: the device sends packets for them
+    // to the peer and accepts their hosts' replies only from it. The packet filter decides which
+    // flows may start; whether the utun routes a network at all is the [`subnet`] plan's call.
+    for network in &policy.networks.through {
+        addresses.push(
+            IpNetwork::new(network.network.address(), network.network.prefix())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+        );
+    }
     let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
@@ -1268,6 +1279,7 @@ impl PendingWorker {
         config: Option<Config>,
         routes: BTreeSet<IpAddr>,
         budgets: PathBudgets,
+        network_status: subnet::NetworkStatus,
     ) -> io::Result<Self> {
         let filter = Arc::new(match config.as_ref() {
             Some(config) => PacketFilter::new(config, MeshProxyIngress::default())?,
@@ -1401,6 +1413,8 @@ impl PendingWorker {
                     config,
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
+                    networks: BTreeMap::new(),
+                    network_status,
                     interface_mtu,
                     port: info.port,
                     admission,
@@ -1634,6 +1648,10 @@ struct RuntimeState {
     config: Option<Config>,
     routes: BTreeSet<IpAddr>,
     route_mtus: BTreeMap<IpAddr, u16>,
+    /// The subnet routes on the utun now, each with the MTU root mode gave it ([`subnet`]).
+    networks: BTreeMap<crate::policy::networks::Network, Option<u16>>,
+    /// What happened to each reachable network, shared with the node for `mesh routes`.
+    network_status: subnet::NetworkStatus,
     /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.
     interface_mtu: u16,
     port: u16,
@@ -1974,6 +1992,8 @@ impl RuntimeState {
             .utun
             .as_ref()
             .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
+        // Subnet routes go with the utun; root mode removes them first, as it does host routes.
+        self.remove_networks();
         // Ending every handshake task drops its device handle, so this one is the last.
         self.handshakes.abort_all();
         while self.handshakes.join_next().await.is_some() {}
@@ -2052,6 +2072,8 @@ pub struct Node {
     port: u16,
     path: Option<PathBuf>,
     binding: Option<Enrolment>,
+    /// What the worker did with each reachable subnet route, for `mesh routes` (D197 M3).
+    network_status: subnet::NetworkStatus,
 }
 
 impl Default for Node {
@@ -2069,6 +2091,7 @@ impl Default for Node {
             port: 0,
             path: None,
             binding: None,
+            network_status: subnet::NetworkStatus::default(),
         }
     }
 }
@@ -2400,6 +2423,7 @@ impl Node {
             self.config.clone(),
             desired_routes.clone(),
             PathBudgets::probe(self.config.as_ref()),
+            self.network_status.clone(),
         )?;
         let info = startup.info().clone();
         let saved_port = if listen_port.allow_fallback {
@@ -2714,6 +2738,16 @@ impl Node {
         self.routes.clear();
         self.interface = None;
         self.persist(false, None, BTreeSet::new(), None)
+    }
+
+    /// Whether the route to `network`, reachable through a router peer, is on the utun, and why
+    /// not, for `mesh routes` (D197 M3).
+    #[must_use]
+    pub fn network_route_state(
+        &self,
+        network: crate::policy::networks::Network,
+    ) -> serde_json::Value {
+        self.network_status.route_json(network)
     }
 
     /// Read current GotaTun peer counters without exposing private key material.

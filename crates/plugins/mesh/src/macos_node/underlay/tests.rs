@@ -702,6 +702,8 @@ fn mac_underlay_announce_device() {
             // The harness's point-to-point address installs the route with the utun.
             routes: Default::default(),
             route_mtus: Default::default(),
+            networks: Default::default(),
+            network_status: Default::default(),
             interface_mtu: 1280,
             port,
             admission,
