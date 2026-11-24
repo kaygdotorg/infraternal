@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
-/// The bundle identifier embedded in the macOS binary's `Info.plist` section (#576); the
-/// user-mode `LaunchAgent` names it in `AssociatedBundleIdentifiers` so macOS attributes the
-/// agent's Local Network use to infraternal. Must equal `crates/infraternal/macos/Info.plist`.
+/// The bundle identifier embedded in the macOS binary's `Info.plist` section (#576), and so its
+/// code-signing identifier; the user-mode `LaunchAgent` names it in `AssociatedBundleIdentifiers`,
+/// as TN3179 asks of agents not installed through `SMAppService`, to tie the agent's Local Network
+/// use to that identity. Must equal `crates/infraternal/macos/Info.plist`.
 pub const BUNDLE_IDENTIFIER: &str = "org.infraternal.infraternal";
 /// The launchd label of the on-demand root helper.
 pub const HELPER_LABEL: &str = "org.infraternal.mesh-helper";

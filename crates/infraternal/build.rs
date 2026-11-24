@@ -37,9 +37,12 @@ fn handoff_note() {
 /// Embeds `macos/Info.plist` in the macOS binary as its `__TEXT,__info_plist` section (#576).
 ///
 /// A plain executable has no bundle, so this section is where macOS finds its bundle identifier
-/// and `NSLocalNetworkUsageDescription`: the user-mode infraternal agent is a launchd agent,
-/// which needs the person's Local Network permission, and the alert and the System Settings
-/// entry name the program from it (Apple's TN3179). Only macOS targets are changed.
+/// and `NSLocalNetworkUsageDescription` (Apple's TN3179). The user-mode infraternal agent is a
+/// launchd agent and needs the person's Local Network permission, which macOS tracks by code
+/// signature; `codesign` takes the signing identifier from this bundle identifier, so the
+/// identity stays the same across builds. macOS 27.2.1 still names the alert and the System
+/// Settings entry after the executable file (measured on the M1, J1157). Only macOS targets
+/// are changed.
 fn macos_info_plist() {
     println!("cargo:rerun-if-changed=macos/Info.plist");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
