@@ -44,6 +44,10 @@
    "documented": 563,
    "total": 1060
   },
+  "rust:crates/infraternal-sign-in": {
+   "documented": 38,
+   "total": 38
+  },
   "rust:crates/infraternal-status": {
    "documented": 50,
    "total": 115

@@ -68,6 +68,7 @@ fi
 portable=(
     infraternal-plugin-api
     infraternal-status
+    infraternal-sign-in
     infraternal-mesh
     infraternal-plugin-mesh
     infraternal-plugin-release

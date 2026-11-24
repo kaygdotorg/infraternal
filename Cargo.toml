@@ -16,6 +16,7 @@ members = [
     "crates/infraternal-shim",
     "crates/infraternal-session",
     "crates/infraternal-status",
+    "crates/infraternal-sign-in",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/proxy",

@@ -2062,6 +2062,7 @@ dependencies = [
  "infraternal-plugin-ssh",
  "infraternal-server",
  "infraternal-shim",
+ "infraternal-sign-in",
  "infraternal-status",
  "mimalloc",
  "nix 0.32.0",
@@ -2455,6 +2456,16 @@ dependencies = [
  "tokio",
  "vt100",
  "vte",
+]
+
+[[package]]
+name = "infraternal-sign-in"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
