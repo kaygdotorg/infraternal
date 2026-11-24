@@ -395,7 +395,10 @@ Post in <https://github.com/mullvad/gotatun/discussions/new?category=ideas>.
 > p99 within run-to-run noise, cut futex calls per Gbit by 12 to 30% and CPU per Gbit by 1 to 2%.
 >
 > **What we do not know.** Whether this helps your clients (few peers, mobile CPUs): all our numbers come from a server-like VM.
-> We have not measured stock 0.10.3 against it on the harness below [to measure].
+> On the harness below (backup01, quiet: a 6-vCPU VM held by one job, two namespaces, 2 CPUs per engine, 3 paired holds, 20 s runs),
+> our whole pin against stock 0.10.3 gives 5.30 to 5.60 Gbit/s against 2.24 to 2.50 (+123 to +146%) and 64 to 66% less CPU per Gbit
+> in all four cells (CUBIC and BBR, 1 and 8 flows). That compares two builds, not one patch: we have not measured the pool alone
+> against stock.
 >
 > **Questions.** (1) Is there an intended direction for parallel crypto? We saw the `os-threads` and `handle-incoming-peer-lock`
 > branches. (2) If a worker pool is welcome, would you want it behind a cargo feature first? (3) Would you review a design note
@@ -420,7 +423,8 @@ Post in <https://github.com/mullvad/gotatun/discussions/new?category=ideas>.
 >
 > **Result on our kit.** Together with a change that writes whole runs to the TUN (see below), at 1 and 8 flows: +10 to +21%
 > Gbit/s, 9 to 14% less CPU per Gbit, loaded p99 flat or lower, no lost probes (CUBIC 1 flow 5.46 → 6.19 Gbit/s, 8 flows 5.29 → 6.14,
-> measured against our previous pin, not against 0.10.3 [to measure]).
+> measured against our previous pin). Against stock 0.10.3 on the harness below (backup01, quiet), our whole pin gives
+> 5.52 and 5.60 Gbit/s against 2.50 and 2.31 at CUBIC 1 and 8 flows; that is every patch together, not the receive path alone.
 >
 > **Cost.** The packet pool no longer sees these packets, so an idle detector needs a count of taken buffers; the pool grows
 > a counter. Chunks can hold memory while any packet from them is alive.
@@ -445,8 +449,12 @@ Post in <https://github.com/mullvad/gotatun/discussions/new?category=ideas>.
 > **Result.** CUBIC, 8 flows: loaded p99 22.4 ms → 6.16 ms, +4.7% Gbit/s, −2.7% CPU per Gbit. Review rounds
 > found clock-step, padding and accounting bugs, now fixed with tests.
 >
-> **What we do not know.** Behaviour on mobile, Windows and macOS (no kernel receive stamps there, so the bound is off), and
-> on stock 0.10.3 [to measure]. It adds about 3,700 lines.
+> **What we do not know.** Behaviour on mobile, Windows and macOS (no kernel receive stamps there, so the bound is off), and the
+> effect of queue control alone on stock 0.10.3. On the harness below (backup01, quiet; TCP round trip under load, not ping), CUBIC
+> with 8 flows has loaded p99 6.58 ms on stock and 4.37 ms on our whole pin (-34.7%, outside the 4.2% A/A floor) while Gbit/s
+> goes from 2.31 to 5.60. Stock is not queue-bound on that VM, so this is not the 22.4 ms case above. One cell went the other
+> way: BBR with 1 flow has p99 1.62 ms on stock and 2.85 ms on the pin (+75%, floor 8.1%), at 2.3 times the throughput.
+> It adds about 3,700 lines.
 >
 > **Questions.** Is queue control in scope for the library, or should it sit with the application? Would you want only the
 > measurement (receive age) exposed as a hook, leaving the policy outside?
