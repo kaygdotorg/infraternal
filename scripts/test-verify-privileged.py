@@ -182,10 +182,11 @@ class PrivilegedAreas(unittest.TestCase):
         self.assertIn('leak|PASS', out)
 
     def test_only_the_privileged_row_is_skippable(self):
-        """Only the privileged row and the macOS compile row (a Linux cross-check that skips without its toolchain) opt in."""
+        """Only the privileged row and the macOS and iOS compile rows (Linux cross-checks that skip off Linux) opt in."""
         rust = (Path(__file__).resolve().parent / 'verify.d/rust.sh').read_text()
         calls = [line.strip() for line in rust.splitlines() if line.strip().startswith('rust_run_gate_skippable ')]
         self.assertEqual(calls, ['rust_run_gate_skippable "macOS compile" rust_check_macos_compile',
+                                 'rust_run_gate_skippable "iOS compile" rust_check_ios_compile',
                                  'rust_run_gate_skippable "privileged integration" verify_privileged'])
 
     def test_gaps_are_named(self):
