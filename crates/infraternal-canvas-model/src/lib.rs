@@ -1,6 +1,6 @@
 //! The account canvas layout tree: the v1 document, its intent reducer and the tiling rules [178,180,183,248].
 //!
-//! This crate holds only pure data code (serde, serde_json, uuid) so that the server plugin, the
+//! This crate holds only pure data code (`serde`, `serde_json`, `uuid`) so that the server plugin, the
 //! fuzz targets and later the client core can share one reducer. `infraternal-plugin-canvas`
 //! re-exports these modules under their old paths.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
