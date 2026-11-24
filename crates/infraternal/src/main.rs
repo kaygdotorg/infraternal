@@ -1651,18 +1651,23 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         // it can serve their own script to a signed-in administrator (#146,
         // J1151). Checked here, before any data move rewrites the path, so
         // it judges the folder as it is now.
-        if let Some(web) = &args.web_root
-            && let Err(problem) = install::check_root_web_folder(web, 0)
-        {
-            if !dry_run {
-                return report_failure(
-                    "server init",
-                    "The web folder is not safe for a service that root runs.",
-                    problem,
-                    json_output,
-                );
+        // The unit stores the canonical path the check returns, so a link
+        // on the path given cannot be repointed afterwards (J1180, F3).
+        if let Some(web) = &args.web_root {
+            match install::check_root_web_folder(web, 0) {
+                Ok(canonical) => args.web_root = Some(canonical),
+                Err(problem) => {
+                    if !dry_run {
+                        return report_failure(
+                            "server init",
+                            "The web folder is not safe for a service that root runs.",
+                            problem,
+                            json_output,
+                        );
+                    }
+                    eprintln!("warning: {problem}; a real install refuses this web folder");
+                }
             }
-            eprintln!("warning: {problem}; a real install refuses this web folder");
         }
     }
     // An existing unit's non-standard folder moves to the D395 one (owner,

@@ -84,7 +84,8 @@ pub(crate) enum FolderError {
 ///
 /// Every folder above it, along the path as given and along its canonical
 /// form, follows [`trusted_program`]'s folder rule, so nobody else can swap
-/// the folder. The folder itself and every folder inside it may not be
+/// the folder; a link along the given path must sit in a folder nobody else
+/// can add to. The folder itself and every folder inside it may not be
 /// group- or world-writable at all (a sticky bit does not excuse them: any
 /// account could add a file that gets served), and every
 /// file is owned by root (or `owner`) and not writable by group or others,
@@ -112,6 +113,25 @@ pub(crate) fn trusted_folder(folder: &Path, owner: u32) -> Result<PathBuf, Folde
         .find(|directory| !protected_directory(directory, owner))
     {
         return Err(FolderError::Untrusted(above.to_owned()));
+    }
+    // The path as given: every folder along it must be protected, and a link
+    // along it must sit in a folder nobody else can add to. In a sticky,
+    // writable folder an account could plant its own link and repoint it
+    // later, so such a link is refused even though the canonical path is fine.
+    let given =
+        std::path::absolute(folder).map_err(|_| FolderError::Untrusted(folder.to_owned()))?;
+    for prefix in given.ancestors() {
+        if !protected_directory(prefix, owner) {
+            return Err(FolderError::Untrusted(prefix.to_owned()));
+        }
+        let is_link = fs::symlink_metadata(prefix).is_ok_and(|m| m.file_type().is_symlink());
+        if is_link
+            && prefix
+                .parent()
+                .is_some_and(|parent| !strict_directory(parent, owner))
+        {
+            return Err(FolderError::Untrusted(prefix.to_owned()));
+        }
     }
     let mut pending = vec![canonical.clone()];
     while let Some(directory) = pending.pop() {
@@ -431,6 +451,23 @@ mod tests {
         let web = folder_in(&temporary);
         fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o1777)).unwrap();
         assert!(trusted_folder(&web, me()).is_ok());
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// A link along the given path that sits in a sticky, writable folder is
+    /// refused (J1180, F3): its owner could repoint it after the check.
+    #[test]
+    fn a_link_in_a_sticky_writable_folder_is_refused() {
+        let target = TemporaryDirectory::new();
+        let web = folder_in(&target);
+        let open = TemporaryDirectory::new();
+        fs::set_permissions(&open.0, fs::Permissions::from_mode(0o1777)).unwrap();
+        let link = open.0.join("web");
+        std::os::unix::fs::symlink(&web, &link).unwrap();
+        assert!(matches!(
+            trusted_folder(&link, me()),
+            Err(FolderError::Untrusted(_))
+        ));
     }
 
     #[cfg(feature = "plugin-server")]
