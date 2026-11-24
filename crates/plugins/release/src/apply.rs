@@ -384,6 +384,27 @@ pub fn resume(
     current: &str,
     own: impl FnOnce() -> Result<String, &'static str>,
 ) -> Result<Resume, &'static str> {
+    resume_with(data, current, own, |_live, _restored| {})
+}
+
+/// [`resume`] with a step the caller runs while a database restore is under way.
+///
+/// `before_swap(live, restored)` runs only when a restore happens, after the copy has
+/// been written to the private `restored` file and before it replaces `live`, which
+/// still holds the database B wrote. The server uses it to carry the writer-ID floor
+/// from `live` into `restored`, so the floor and the restore land in one rename: a
+/// crash at any point leaves either the untouched database or the finished one with
+/// its floor, never a restored database that lost it (J1180 F5). Every other path
+/// (a trial that starts, an exec that failed before B ran, a foreign marker) never
+/// calls it, so it never touches the database (J1085).
+/// # Errors
+/// As [`resume`].
+pub fn resume_with(
+    data: &Path,
+    current: &str,
+    own: impl FnOnce() -> Result<String, &'static str>,
+    before_swap: impl FnOnce(&Path, &Path),
+) -> Result<Resume, &'static str> {
     let updates = data.join("updates");
     if std::fs::symlink_metadata(updates.join(PENDING)).is_err() {
         return Ok(Resume::Idle);
@@ -429,7 +450,8 @@ pub fn resume(
         };
         // B never ran after a failed exec, so the database is still A's own.
         if pending.phase != Phase::Switching
-            && let Err(failed) = restore_database(data, &updates.join("previous").join(DATABASE))
+            && let Err(failed) =
+                restore_database(data, &updates.join("previous").join(DATABASE), before_swap)
         {
             // Never leave B eligible: without the pause the timer would stage and apply
             // it again at once. The marker stays, so the next start retries the restore.
@@ -858,8 +880,14 @@ fn remove_pending(lock: &Locked) -> Result<(), &'static str> {
 /// The copy is written to a private temporary file, flushed and renamed over the
 /// database; the old WAL and shared-memory files are removed first, since they belong
 /// to the database being replaced. The copy itself is kept (a later manual roll back,
-/// or a second failure, can use it again).
-fn restore_database(data: &Path, copy: &Path) -> Result<(), &'static str> {
+/// or a second failure, can use it again). `before_swap` sees the live database and
+/// the flushed private copy just before the swap (see [`resume_with`]); it runs once
+/// per attempt and cannot fail the restore.
+fn restore_database(
+    data: &Path,
+    copy: &Path,
+    before_swap: impl FnOnce(&Path, &Path),
+) -> Result<(), &'static str> {
     let failed = "the database copy could not be restored";
     let mut source = open_private(copy).map_err(|_| failed)?;
     let temporary = data.join("infraternal.sqlite.restore");
@@ -873,6 +901,8 @@ fn restore_database(data: &Path, copy: &Path) -> Result<(), &'static str> {
         .map_err(|_| failed)?;
     std::io::copy(&mut source, &mut target).map_err(|_| failed)?;
     target.sync_all().map_err(|_| failed)?;
+    drop(target);
+    before_swap(&data.join(DATABASE), &temporary);
     for suffix in ["-wal", "-shm"] {
         match std::fs::remove_file(data.join(format!("{DATABASE}{suffix}"))) {
             Ok(()) => {}
