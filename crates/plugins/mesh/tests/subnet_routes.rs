@@ -8,7 +8,9 @@
 //! - keeping the source, C sees A's mesh address (and is given a route back, as an operator would);
 //! - only the granted port reaches C, and nothing on C can open a connection into the mesh;
 //! - a snapshot without the route (revoked) removes A's route and allowed IPs, refuses the
-//!   flow, stops B forwarding and turns IPv4 forwarding back off, as it was before.
+//!   flow, stops B forwarding and turns IPv4 forwarding back off, as it was before;
+//! - a grant to the LAN never reaches the router's own address on it: the router's own services
+//!   are reached only at its mesh address, under the node grant (#580, J1179).
 //!
 //! Run as root, alone, in a disposable mount and network namespace (`unshare -m -n`), with `ip`
 //! and `nft`. Each node runs on a thread that entered its namespace. The documentation addresses
@@ -34,7 +36,7 @@ use std::{
     io::{Read, Write},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::mpsc,
     thread,
@@ -223,11 +225,17 @@ fn cleanup() {
 /// Start a one-shot TCP server on the LAN host at `port` that answers with the source address
 /// it saw. Returns a receiver that yields that address once a client connected.
 fn lan_server(port: u16) -> mpsc::Receiver<Ipv4Addr> {
+    server_at(NS_C, HOST, port)
+}
+
+/// Start a one-shot TCP server in namespace `ns` on `address:port` that answers with the source
+/// address it saw. Returns a receiver that yields that address once a client connected.
+fn server_at(ns: &'static str, address: Ipv4Addr, port: u16) -> mpsc::Receiver<Ipv4Addr> {
     let (ready_tx, ready) = mpsc::channel();
     let (seen_tx, seen) = mpsc::channel();
     thread::spawn(move || {
-        enter(NS_C);
-        let listener = TcpListener::bind((HOST, port)).unwrap();
+        enter(ns);
+        let listener = TcpListener::bind((address, port)).unwrap();
         ready_tx.send(()).unwrap();
         if let Ok((mut stream, peer)) = listener.accept() {
             let std::net::IpAddr::V4(source) = peer.ip() else {
@@ -244,9 +252,15 @@ fn lan_server(port: u16) -> mpsc::Receiver<Ipv4Addr> {
 /// From namespace A, connect to the LAN host at `port` and read its answer; `None` when the
 /// connection fails within a few seconds.
 fn connect_from_a(port: u16) -> Option<String> {
+    connect_from_a_to(HOST, port)
+}
+
+/// From namespace A, connect to `address:port` and read its answer; `None` when the connection
+/// fails within a few seconds.
+fn connect_from_a_to(address: Ipv4Addr, port: u16) -> Option<String> {
     in_ns(NS_A, || {
         let mut stream =
-            TcpStream::connect_timeout(&SocketAddr::from((HOST, port)), Duration::from_secs(4))
+            TcpStream::connect_timeout(&SocketAddr::from((address, port)), Duration::from_secs(4))
                 .ok()?;
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
@@ -276,7 +290,7 @@ fn ip_forward(ns: &str) -> String {
 }
 
 /// Bring up both nodes and apply the routed snapshots at `version`, masquerading unless
-/// `keep_source`.
+/// `keep_source`. Node-to-node access stays `None`; [`routed_with_node_access`] sets it.
 fn routed(
     node_a: &mut Node,
     node_b: &mut Node,
@@ -284,6 +298,27 @@ fn routed(
     endpoints: (SocketAddr, SocketAddr),
     version: u64,
     keep_source: bool,
+) {
+    routed_with_node_access(
+        node_a,
+        node_b,
+        ids,
+        endpoints,
+        version,
+        keep_source,
+        &TrafficPolicy::None,
+    );
+}
+
+/// [`routed`], with `node` as the node grant from A to B (B's inbound and A's outbound).
+fn routed_with_node_access(
+    node_a: &mut Node,
+    node_b: &mut Node,
+    ids: ((u32, PublicKey), (u32, PublicKey)),
+    endpoints: (SocketAddr, SocketAddr),
+    version: u64,
+    keep_source: bool,
+    node: &TrafficPolicy,
 ) {
     let (a, b) = ids;
     let through = PeerNetworks {
@@ -301,11 +336,18 @@ fn routed(
             keep_source,
         }],
     };
+    let with_node = |mut chunk: Chunk| {
+        for policy in chunk.upserted.values_mut() {
+            policy.inbound = node.clone();
+            policy.outbound = node.clone();
+        }
+        chunk
+    };
     let applied_a = in_ns(NS_A, || {
-        node_a.chunk(snapshot(a, b, endpoints.1, version, through))
+        node_a.chunk(with_node(snapshot(a, b, endpoints.1, version, through)))
     });
     let applied_b = in_ns(NS_B, || {
-        node_b.chunk(snapshot(b, a, endpoints.0, version, served))
+        node_b.chunk(with_node(snapshot(b, a, endpoints.0, version, served)))
     });
     assert!(
         applied_a.as_ref().is_ok_and(|applied| *applied),
@@ -452,6 +494,93 @@ fn a_peer_reaches_a_lan_behind_a_router_only_through_an_approved_route() {
     assert_eq!(ip_forward(NS_B), "0", "forwarding was not turned back off");
     let forwarding = in_ns(NS_B, || node_b.forwarding_state());
     assert_eq!(forwarding["state"], "idle", "{forwarding}");
+
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    let _ = fs::remove_dir_all(&state_a);
+    let _ = fs::remove_dir_all(&state_b);
+    cleanup();
+}
+
+/// Start a `GotaTun` node in namespace `ns` from the state at `path`.
+fn start(ns: &str, path: &Path) -> (Node, Identity) {
+    in_ns(ns, || {
+        let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+        let identity: Identity = node.up().unwrap();
+        (node, identity)
+    })
+}
+
+/// A grant to the LAN does not reach the router's own address on that LAN (#580, J1179).
+///
+/// The router owns `ROUTER_LAN`, so the kernel delivers packets for it locally instead of
+/// forwarding them. A network grant is a grant to the hosts on the network, not to the router's
+/// own services: those are reached at the router's mesh address and only under the node grant.
+/// Without the router guard's input fence, A reached a listener on `ROUTER_LAN` with node access
+/// `None`, on the port the network grant opened.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft, issue #580."]
+fn a_network_grant_never_reaches_the_routers_own_address_on_that_network() {
+    cleanup();
+    topology();
+    let (state_a, state_b) = (state("j1179-f1-a"), state("j1179-f1-b"));
+    let (mut node_a, id_a) = start(NS_A, &state_a);
+    let (mut node_b, id_b) = start(NS_B, &state_b);
+    let ids = ((2, id_a.public_key), (3, id_b.public_key));
+    let endpoints = (
+        SocketAddr::from(([192, 0, 2, 1], id_a.port)),
+        SocketAddr::from(([192, 0, 2, 2], id_b.port)),
+    );
+    routed(&mut node_a, &mut node_b, ids, endpoints, 1, false);
+
+    // The route works: the LAN host answers on the granted port.
+    let seen = lan_server(GRANTED);
+    assert!(
+        connect_from_a(GRANTED).is_some(),
+        "the LAN host is unreachable on the granted port"
+    );
+    seen.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    // The router's own LAN address, same port, no node grant: refused.
+    let router_service = server_at(NS_B, ROUTER_LAN, GRANTED);
+    assert_eq!(
+        connect_from_a_to(ROUTER_LAN, GRANTED),
+        None,
+        "a network grant reached the router's own LAN address"
+    );
+    assert!(
+        router_service
+            .recv_timeout(Duration::from_millis(500))
+            .is_err()
+    );
+
+    // With a node grant for the port, the router answers at its mesh address, and its LAN
+    // address stays closed to the mesh.
+    routed_with_node_access(
+        &mut node_a,
+        &mut node_b,
+        ids,
+        endpoints,
+        2,
+        false,
+        &granted(),
+    );
+    let mesh_service = server_at(NS_B, addresses(3).ipv4, GRANTED);
+    assert!(
+        connect_from_a_to(addresses(3).ipv4, GRANTED).is_some(),
+        "the node grant does not reach the router's mesh address"
+    );
+    mesh_service.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(
+        connect_from_a_to(ROUTER_LAN, GRANTED),
+        None,
+        "the router's LAN address opened to the mesh with a node grant"
+    );
+    assert!(
+        router_service
+            .recv_timeout(Duration::from_millis(500))
+            .is_err()
+    );
 
     in_ns(NS_A, || node_a.down().unwrap());
     in_ns(NS_B, || node_b.down().unwrap());
