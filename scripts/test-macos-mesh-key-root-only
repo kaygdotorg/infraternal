@@ -13,6 +13,8 @@
 # Pass: the file open fails with EACCES and the keychain lookup fails.
 # Fail: either read succeeds (exit 1). Setup problems or a probe that did
 # not report exit 2; running as root exits 77.
+# The slice-1 item keeps the name those builds gave it ("org.infraternal.mesh"), not the
+# kayg.infraternal names of today (#580): this probe looks for what once existed.
 # The probe links Foundation so dyld initialises it before the constructor.
 set -eu
 

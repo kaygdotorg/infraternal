@@ -280,7 +280,7 @@ pub(crate) fn registry_at_with_mesh_state(
             // of the root-mode sentence, so the person knows which repair to run (J1087).
             Err(error) => eprintln!(
                 "Infraternal Mesh node skipped: the mesh helper registration could not be read ({error}). Run sudo {} {} and then infraternal up again.",
-                infraternal_plugin_mesh::macos_user_mode::HELPER_BINARY,
+                infraternal_plugin_mesh::macos_helper::installed_binary(),
                 infraternal_plugin_mesh::macos_helper::REMOVE_ENTRY
             ),
             Ok(false) => eprintln!(

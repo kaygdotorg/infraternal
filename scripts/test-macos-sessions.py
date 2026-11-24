@@ -56,7 +56,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from agent_fixture import Binary, cleanup, detach, select_terminal, varint  # noqa: E402
 
-LABEL = 'org.infraternal.test.macos-sessions'
+LABEL = 'kayg.infraternal.test.macos-sessions'
 MARKER = 'ROOT-ONLY-J146-PLANTED-DESCRIPTOR'
 PLANTED_ENV = {
     'DYLD_LIBRARY_PATH': '/private/tmp/j146-planted-dyld',
