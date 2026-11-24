@@ -11,18 +11,24 @@ import { resolve } from "node:path";
 import { expect, test, type BrowserContext, type Locator, type Page } from "playwright/test";
 import { tracerEvidencePath } from "./evidence-path";
 
+/** Where the captures are written (outside the checkout). */
 const OUT = tracerEvidencePath("updates-s5");
+/** The two screen sizes of the review: desktop at DPR 2 and phone at DPR 3. */
 const SIZES = [
   ["desktop", { width: 1440, height: 900 }, 2],
   ["phone", { width: 393, height: 852 }, 3],
 ] as const;
+/** The states the capture visits, in the order of the palette rows. */
 const STATES = ["current", "checking", "downloading", "ready", "switching", "trial", "undone-health", "undone-owner", "failed", "offline", "no-release", "never", "edge", "aged", "off", "long"] as const;
+/** The Updates window's selector. */
 const WINDOW = '[data-window-id="s-machines-updates"]';
 
+/** Opens the preview build on the double in `theme`; the window is idle once the first frame had settled. */
 async function open(context: BrowserContext, theme: string, phone: boolean): Promise<Page> {
   const page = await context.newPage();
   await page.goto(`/?mock=1&proto=clusters&scene=3&updates=1&bg=none&theme=${theme}`);
   await expect(page.locator(".cl-mockup")).toBeVisible({ timeout: 20_000 });
+  // sleep: the preview's opening animation has no event to wait for; the capture must not catch it half way.
   await page.waitForTimeout(1200);
   void phone;
   return page;
@@ -32,9 +38,11 @@ async function open(context: BrowserContext, theme: string, phone: boolean): Pro
 async function scenario(page: Page, id: string): Promise<void> {
   await page.evaluate((action) => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action, source: "keyboard" } })), `proto:upd:${id}`);
   await expect(page.locator(`${WINDOW} .cl-up`)).toBeVisible({ timeout: 10_000 });
+  // sleep: the window's fly-in and the retained-state fade have no event; the capture waits for them to finish.
   await page.waitForTimeout(900);
 }
 
+/** The left edge of `l` on the page, for the alignment checks. */
 const left = async (l: Locator): Promise<number> => (await l.boundingBox())!.x;
 
 for (const [name, viewport, scale] of SIZES) {
@@ -53,6 +61,7 @@ for (const [name, viewport, scale] of SIZES) {
         await page.locator("#sidebar-toggle").click();
         await expect(page.locator(".ui-inbox .ui-inbox-row").first()).toBeVisible();
         await page.locator(".ui-inbox .ui-inbox-row").first().click();
+        // sleep: the Inbox row's expand animation has no event; the capture waits for it.
         await page.waitForTimeout(600);
         await page.screenshot({ path: resolve(OUT, `inbox-ready-${name}-${theme}.png`) });
         await context.close();

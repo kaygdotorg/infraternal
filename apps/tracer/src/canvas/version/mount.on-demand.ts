@@ -36,6 +36,7 @@ function linkStyle(href: string): Promise<HTMLLinkElement> {
   });
 }
 
+/** Mounts the version pill and its panel on `source`; resolves to the area, or nothing when the sidebar has no footer. */
 export async function mountVersionArea(core: CoreScreen, source: VersionSource): Promise<VersionArea | undefined> {
   const foot = core.stage.querySelector<HTMLElement>(".ui-sidebar-foot");
   if (!foot) return undefined;

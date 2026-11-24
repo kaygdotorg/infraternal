@@ -92,6 +92,7 @@ export interface UpdatesSource {
 
 /** The source the Updates window and the notices use; the product registers the live one once its connection is up. */
 let registered: UpdatesSource | undefined;
+/** Calls made when a source is registered or removed. */
 const listeners = new Set<() => void>();
 
 /** Makes `source` the one the Updates window reads, or removes it (`undefined`). Windows already open repaint. */

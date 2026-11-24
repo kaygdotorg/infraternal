@@ -6,14 +6,17 @@
  */
 import type { Channel, UpdateFacts, UpdateHistoryEntry, UpdatesSource } from "../../updates/source";
 
+/** Time units in milliseconds, for the scripted "2 hours ago" times. */
 const MIN = 60_000, HOUR = 60 * MIN, DAY = 24 * HOUR;
 
 /** One state to reach from the palette. */
 export interface UpdatesScenario { id: string; label: string; hint: string; facts: (now: number) => UpdateFacts }
 
+/** The sentence a roll back confirmation shows for what is lost, with a written-out time (the double does not read a clock). */
 const lostSince = (version: string, when: string): string =>
   `Everything saved since ${version} was installed ${when} is lost: new keys, shares, devices and settings changes. Terminal sessions stay open.`;
 
+/** The scripted history of a server that updated twice, undid one update and updated before that. */
 const history = (now: number): UpdateHistoryEntry[] => [
   { version: "0.4.2", from: "0.4.1", outcome: "applied", at: now - 2 * HOUR },
   { version: "0.4.1", from: "0.4.0", outcome: "applied", at: now - 2 * DAY },
@@ -21,11 +24,13 @@ const history = (now: number): UpdateHistoryEntry[] => [
   { version: "0.3.9", from: "0.3.8", outcome: "applied", at: now - 9 * DAY },
 ];
 
+/** The facts of a healthy stable server, with `over` changed: every scenario is this plus what makes it different. */
 const base = (now: number, over: Partial<UpdateFacts>): UpdateFacts => ({
   state: { kind: "current" }, running: "0.4.2", channel: "stable", quietMinutes: 5, checkedAt: now - 2 * MIN, history: history(now),
   rollback: { available: true, to: "0.4.1", lost: lostSince("0.4.2", "2 hours ago"), since: now - 2 * HOUR }, ...over,
 });
 
+/** Every state the palette can put the double in, one row each ("Mockup: updates – …"). */
 export const UPDATE_SCENARIOS: UpdatesScenario[] = [
   { id: "current", label: "up to date", hint: "tick · Check now · Roll back available", facts: (n) => base(n, {}) },
   { id: "checking", label: "checking", hint: "turning arc · every button waits", facts: (n) => base(n, { state: { kind: "checking" } }) },
@@ -56,14 +61,17 @@ export const UPDATE_SCENARIOS: UpdatesScenario[] = [
     history: Array.from({ length: 12 }, (_, i): UpdateHistoryEntry => ({ version: `0.12.${104 - i}-edge.3`, from: `0.12.${103 - i}-edge.3`, outcome: i === 3 ? "failed" : "applied", at: n - (i + 1) * DAY, ...(i === 3 ? { reason: "The new version could not open the database copy, which is read-only on this volume. Nothing was changed." } : {}) })) }) },
 ];
 
+/** Resolves after `ms`: how long a scripted action takes to look like work. */
 const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+/** The double: an `UpdatesSource` that can also be put in a scenario and told to refuse the next call. */
 export interface UpdatesDouble extends UpdatesSource {
   setScenario(id: string): void;
   /** Whether the next call is refused as if the sign-in were stale (the specs and the review use it). */
   refuseNext(sentence: string | undefined): void;
 }
 
+/** Makes a double that starts in the scenario `initial`. */
 export function createUpdatesDouble(initial = "current"): UpdatesDouble {
   const find = (id: string): UpdatesScenario => UPDATE_SCENARIOS.find((s) => s.id === id) ?? UPDATE_SCENARIOS[0]!;
   let state = find(initial).facts(Date.now());

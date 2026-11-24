@@ -9,6 +9,7 @@ import { mountUpdateNotices } from "../../updates/notices";
 import { setUpdatesSource } from "../../updates/source";
 import { createUpdatesDouble, UPDATE_SCENARIOS, type UpdatesDouble } from "./double";
 
+/** The mockup's handle: the double, its palette rows, a way to run a scenario, and the remover. */
 export interface UpdatesMock {
   readonly double: UpdatesDouble;
   entries(): PaletteEntry[];
@@ -17,6 +18,7 @@ export interface UpdatesMock {
   dispose(): void;
 }
 
+/** Starts the Updates mockup on `core`: registers the double as the source and mounts the notices on it. */
 export function createUpdatesMock(core: CoreScreen): UpdatesMock {
   const double = createUpdatesDouble();
   const w = window as unknown as { __updatesReloads?: number; __updatesDouble?: UpdatesDouble };

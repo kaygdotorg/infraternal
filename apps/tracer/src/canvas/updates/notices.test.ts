@@ -1,3 +1,4 @@
+/** Tests of the Inbox item an update raises. */
 import { describe, expect, test } from "bun:test";
 import { createUpdatesDouble } from "../mock/updates/double";
 import { inboxItemFor } from "./notices";

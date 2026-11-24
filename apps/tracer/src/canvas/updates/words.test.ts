@@ -1,7 +1,9 @@
+/** Tests of the plain words of the Updates controls and of the transitions the double plays. */
 import { describe, expect, test } from "bun:test";
 import { createUpdatesDouble, UPDATE_SCENARIOS } from "../mock/updates/double";
 import { ago, buttons, edgeConfirm, historyLine, inboxTitle, rollbackConfirm, statusLine } from "./words";
 
+/** A fixed "now" for the word tests. */
 const NOW = Date.UTC(2026, 10, 21, 12, 0, 0);
 
 describe("Updates words", () => {

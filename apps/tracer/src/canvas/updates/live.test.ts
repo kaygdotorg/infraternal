@@ -1,6 +1,8 @@
+/** Tests of the live Updates source against a scripted server: what the state means, the history, refusals and the passkey retry. */
 import { describe, expect, test } from "bun:test";
 import { connectUpdates, historyOf, stateOf, type UpdatesLink } from "./live";
 
+/** A fixed time (seconds) the scripted statuses are measured from. */
 const NOW = 1_800_000_000;
 
 /** A link with a scripted server: `answers` by action id, every call recorded, and a way to push a topic event. */
@@ -23,6 +25,7 @@ function link(answers: Record<string, () => Record<string, unknown>>, refuseFirs
   return { l, calls, confirmed: () => confirmed, push: (e: Record<string, unknown>) => push?.(e) };
 }
 
+/** A scripted `release.update.status` answer: a healthy stable server with `over` changed. */
 const status = (over: Record<string, unknown> = {}) => (): Record<string, unknown> => ({
   current: "0.4.2", channel: "stable", staged: null, last_check: NOW - 120, last_error: null, applied: null, mode: "auto", reason: null, quiet_minutes: 5, rollback: null, ...over,
 });

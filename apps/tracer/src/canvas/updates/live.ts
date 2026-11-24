@@ -35,6 +35,7 @@ interface ServerState {
   mode?: string; reason?: string | null; quiet_minutes?: number; rollback?: { to?: string; copy_taken_at?: number } | null;
 }
 
+/** The sentence for a refusal that carried none of its own. */
 const SAID_NO = "Only the owner can do this, with a recent passkey sign-in.";
 
 /** The text of a refusal: the server's own sentence when it sent one, else the plain fallback. */
