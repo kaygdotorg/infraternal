@@ -1,0 +1,21 @@
+# Standalone workspace for the J1158 binding and memory prototypes (#580).
+# It is not part of the product workspace: nothing here ships.
+[workspace]
+resolver = "3"
+members = ["uniffi-core", "bridge-core", "cabi-core", "ne-memory"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+# Release settings a shipped client core would use: one codegen unit and fat
+# LTO. Panics unwind (no panic = "abort") because the bindings turn panics
+# into Swift errors. Symbols are stripped from the final executable instead.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+strip = false
+debug = false

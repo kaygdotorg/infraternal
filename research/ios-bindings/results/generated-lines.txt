@@ -1,0 +1,8 @@
+     819 out/gen/uniffi/uniffi_core.swift
+     579 out/gen/uniffi/uniffi_coreFFI.h
+       6 out/gen/uniffi/uniffi_coreFFI.modulemap
+    1347 out/gen/bridge/SwiftBridgeCore.swift
+      13 out/gen/bridge/bridge-core/bridge-core.h
+      41 out/gen/bridge/bridge-core/bridge-core.swift
+      75 out/gen/cabi/cabi_core.h
+    2880 total

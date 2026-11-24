@@ -1,0 +1,19 @@
+# stripped macOS executables (bytes)
+53960 out/bench-baseline.stripped
+1976536 out/bench-bridge.stripped
+1832032 out/bench-cabi.stripped
+1961208 out/bench-uniffi.stripped
+# static libraries (bytes)
+62603760 aarch64-apple-darwin target/aarch64-apple-darwin/release/libuniffi_core.a
+22562128 aarch64-apple-darwin target/aarch64-apple-darwin/release/libbridge_core.a
+21858696 aarch64-apple-darwin target/aarch64-apple-darwin/release/libcabi_core.a
+6423160 aarch64-apple-ios target/aarch64-apple-ios/release/libuniffi_core.a
+6438144 aarch64-apple-ios target/aarch64-apple-ios/release/libbridge_core.a
+6228312 aarch64-apple-ios target/aarch64-apple-ios/release/libcabi_core.a
+6401600 aarch64-apple-ios-sim target/aarch64-apple-ios-sim/release/libuniffi_core.a
+6409304 aarch64-apple-ios-sim target/aarch64-apple-ios-sim/release/libbridge_core.a
+6211736 aarch64-apple-ios-sim target/aarch64-apple-ios-sim/release/libcabi_core.a
+# ne-memory: macOS executable, iOS static libraries (bytes)
+2305784 target/aarch64-apple-darwin/release/ne-memory
+9568360 target/aarch64-apple-ios/release/libne_memory.a
+9521488 target/aarch64-apple-ios-sim/release/libne_memory.a

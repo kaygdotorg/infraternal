@@ -1,0 +1,11 @@
+{"binding":"uniffi","op":"noop","median_ns":1.5,"min_ns":1.2}
+{"binding":"uniffi","op":"add","median_ns":8.5,"min_ns":7.9}
+{"binding":"uniffi","op":"frame_in_64","median_ns":132.2,"min_ns":130.1}
+{"binding":"uniffi","op":"frame_out_64","median_ns":404.0,"min_ns":398.9}
+{"binding":"uniffi","op":"frame_in_4096","median_ns":4531.4,"min_ns":4314.6}
+{"binding":"uniffi","op":"frame_out_4096","median_ns":4858.4,"min_ns":4795.7}
+{"binding":"uniffi","op":"frame_in_65536","median_ns":37071.8,"min_ns":36438.0}
+{"binding":"uniffi","op":"frame_out_65536","median_ns":42232.0,"min_ns":41608.4}
+{"binding":"uniffi","op":"parse_ok","median_ns":50.0,"min_ns":48.8}
+{"binding":"uniffi","op":"parse_err","median_ns":513.6,"min_ns":505.9}
+{"binding":"uniffi","op":"async_spawned_echo","median_us":19.34,"min_us":18.22}
