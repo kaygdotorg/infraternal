@@ -249,6 +249,8 @@ async fn adopt_server(
             ));
         }
     }
+    let selinux = crate::selinux::plan_for_host(&data, dry_run)
+        .map_err(|error| Refusal::refused(error.to_string(), error.next_step()))?;
     let image = data
         .join("updates/releases")
         .join(&plan.version)
@@ -262,7 +264,7 @@ async fn adopt_server(
         backup: &backup,
         image: &image,
     };
-    let lines = plan_lines(&plan, &unit, &target_exec, &places, pid);
+    let lines = plan_lines(&plan, &unit, &target_exec, &places, pid, selinux.as_ref());
     let details = json!({
         "version": plan.version,
         "previous_version": running,
@@ -293,6 +295,11 @@ async fn adopt_server(
             "Fix the cause and run it again; nothing else changed.",
         )
     })?;
+    // Step 2b: on SELinux hosts, label `<data>/updates(/.*)?` executable before rewriting the unit (#211).
+    if let Some(selinux_plan) = selinux.as_ref() {
+        crate::selinux::apply_on_host(selinux_plan)
+            .map_err(|error| Refusal::failed(error.to_string(), error.next_step()))?;
+    }
     // Step 3: the unit (skipped when an interrupted run already rewrote it).
     let ca_before = crate::restart::query_ca_status(&data)
         .ok()
@@ -400,6 +407,7 @@ fn plan_lines(
     target_exec: &str,
     places: &Places<'_>,
     pid: u32,
+    selinux: Option<&crate::selinux::LabelPlan>,
 ) -> Vec<String> {
     let Places {
         data,
@@ -434,6 +442,11 @@ fn plan_lines(
             |current| current.display().to_string()
         )
     ));
+    if let Some(selinux_plan) = selinux {
+        for command in selinux_plan.dry_run_commands() {
+            lines.push(format!("Would run {command}"));
+        }
+    }
     if unit.exec_start == target_exec {
         lines.push(format!(
             "Would leave {} as it is (it already starts the boot pointer)",
