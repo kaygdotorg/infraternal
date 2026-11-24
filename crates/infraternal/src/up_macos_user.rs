@@ -209,6 +209,9 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok(paths) => paths,
         Err(_) => return fail(json_output, Failure::LocalState),
     };
+    if let Some(outcome) = refresh_existing(&paths, uid, &sudo, &executable, json_output) {
+        return outcome;
+    }
     if let Err(error) = preflight(&paths, uid) {
         eprintln!("{error}");
         return fail(json_output, Failure::InstallConflict);
@@ -258,6 +261,142 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         }
         Err(failure) => fail(json_output, failure),
     }
+}
+
+/// Bring an existing user-mode install of this account up to this build, or `None` when there
+/// is nothing to refresh (owner, 2026-11-21, review J1027 L3).
+///
+/// The helper is a root-owned copy of the binary from install time, and it refuses an agent
+/// that speaks another protocol version. Without this, an agent update that changed the
+/// protocol broke the mesh and `up` refused to repair it ("already exists"), leaving only
+/// uninstall and re-join. So when this account already has a user-mode install (its receipt
+/// and a helper registered for its uid) and the helper or the installed agent binary differs
+/// from the running binary, `up` reinstalls the helper from this binary with one `sudo` prompt,
+/// replaces the agent binary, and restarts the agent; the enrollment is kept. Comparing the
+/// bytes, not a version number, also carries a fixed helper to Macs whose protocol did not
+/// change. When both already match, `None` lets [`preflight`] report the existing install.
+fn refresh_existing(
+    paths: &Paths,
+    uid: u32,
+    sudo: &Path,
+    executable: &Path,
+    json_output: bool,
+) -> Option<ExitCode> {
+    if !exists(&paths.receipt()).ok()? || macos_helper::registered_uid().ok()? != Some(uid) {
+        return None;
+    }
+    let helper_current = same_bytes(Path::new(macos_user_mode::HELPER_BINARY), executable);
+    let agent_current = same_bytes(&paths.binary, executable);
+    if helper_current && agent_current {
+        return None;
+    }
+    eprintln!(
+        "infraternal: this Mac already runs infraternal in user mode with another build; updating its mesh helper and infraternal agent to this one."
+    );
+    if !helper_current && let Err(failure) = install_helper(sudo, executable, uid) {
+        return Some(fail(json_output, failure));
+    }
+    let refreshed = (|| {
+        if !agent_current {
+            replace_binary(executable, &paths.binary)?;
+        }
+        restart_agent(uid)
+    })();
+    Some(match refreshed {
+        Ok(()) => emit(
+            CommandResult::new(
+                "up",
+                CommandState::Ready,
+                "This Mac's user-mode install now runs this build; its enrollment is unchanged.",
+                json!({
+                    "mode": "user",
+                    "refreshed": true,
+                    "helper_refreshed": !helper_current,
+                    "agent_refreshed": !agent_current,
+                    "service": AGENT_LABEL,
+                    "status": "active",
+                    "path": paths.binary.display().to_string(),
+                }),
+            )
+            .with_body(format!(
+                "User mode updated to this build.\nService: active ({AGENT_LABEL})\nCommand: {}",
+                paths.binary.display()
+            )),
+            json_output,
+            Exit::Ok,
+        ),
+        Err(error) => {
+            eprintln!("{error}");
+            fail(json_output, Failure::Partial)
+        }
+    })
+}
+
+/// Whether two files hold the same bytes; any read failure counts as different.
+fn same_bytes(left: &Path, right: &Path) -> bool {
+    let (Ok(mut left), Ok(mut right)) = (fs::File::open(left), fs::File::open(right)) else {
+        return false;
+    };
+    match (left.metadata(), right.metadata()) {
+        (Ok(a), Ok(b)) if a.len() == b.len() => {}
+        _ => return false,
+    }
+    let mut a = vec![0_u8; 1 << 16];
+    let mut b = vec![0_u8; 1 << 16];
+    loop {
+        let Ok(read) = left.read(&mut a) else {
+            return false;
+        };
+        if read == 0 {
+            return true;
+        }
+        if right.read_exact(&mut b[..read]).is_err() || a[..read] != b[..read] {
+            return false;
+        }
+    }
+}
+
+/// Replace the installed agent binary with `source`, atomically.
+///
+/// The new image is staged beside the old one with the same checks as a first install
+/// (hashed twice, dyld check), then renamed over it, so the running agent keeps its old image
+/// until it restarts and a failure leaves the old binary in place.
+fn replace_binary(source: &Path, binary: &Path) -> io::Result<()> {
+    let mut input = fs::File::open(source)?;
+    let staging =
+        binary.with_file_name(format!(".infraternal-up-{}.pending", uuid::Uuid::new_v4()));
+    let output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(&staging)?;
+    let staged = super::macos::stage_binary(&mut input, output, &staging)
+        .and_then(|()| fs::rename(&staging, binary));
+    if staged.is_err() {
+        let _ = fs::remove_file(&staging);
+    }
+    staged
+}
+
+/// Restart the user-mode agent so it runs the current binary, and wait until it runs.
+fn restart_agent(uid: u32) -> io::Result<()> {
+    launchctl_checked(&[
+        "kickstart".into(),
+        "-k".into(),
+        format!("gui/{uid}/{AGENT_LABEL}").into(),
+    ])?;
+    let deadline = Instant::now() + START_WAIT;
+    while !agent_running(uid)? {
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "launchd did not report the infraternal agent as running after the update",
+            ));
+        }
+        // sleep: launchd exposes job state only through polling.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
 }
 
 /// The approval, enrollment and activation, all under the install's rollback.

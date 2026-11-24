@@ -472,9 +472,26 @@ fn run_tool(program: &str, arguments: &[&std::ffi::OsStr]) -> io::Result<()> {
 /// changed file fails here rather than at the first service start.
 pub(super) fn publish_binary(
     input: &mut fs::File,
-    mut output: fs::File,
+    output: fs::File,
     staging: &Path,
     destination: &Path,
+) -> io::Result<()> {
+    stage_binary(input, output, staging)?;
+    // A hard link publishes without replacing: it fails if the name exists.
+    fs::hard_link(staging, destination)
+}
+
+/// Copy `input` into the open `output` at `staging`, make it 0755, and check it.
+///
+/// The staged copy is hashed again from disk and must match what was read, and it must pass
+/// the dyld check that a launchd job needs. Callers then publish `staging` under its final
+/// name: a first install by hard link, a user-mode refresh by rename (#146).
+/// # Errors
+/// Reports a failed copy, a changed image, or a dyld check failure.
+pub(super) fn stage_binary(
+    input: &mut fs::File,
+    mut output: fs::File,
+    staging: &Path,
 ) -> io::Result<()> {
     let read = hash_stream(input, Some(&mut output))?;
     output.set_permissions(fs::Permissions::from_mode(0o755))?;
@@ -486,9 +503,7 @@ pub(super) fn publish_binary(
         ));
     }
     // The LaunchDaemon refuses an image that could make dyld load a user's library.
-    infraternal_plugin_mesh::macos_image::check_file(staging)?;
-    // A hard link publishes without replacing: it fails if the name exists.
-    fs::hard_link(staging, destination)
+    infraternal_plugin_mesh::macos_image::check_file(staging)
 }
 
 impl Drop for Install {
