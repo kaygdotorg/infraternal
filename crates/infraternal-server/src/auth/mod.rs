@@ -224,6 +224,11 @@ pub struct Auth {
     recovery_pause: Arc<Mutex<Option<Arc<RecoveryPause>>>>,
     #[cfg(test)]
     authority_reads: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    /// How many times a session read took the writer (a slide or the
+    /// expired-pending cleanup), so tests can prove a read that needs no
+    /// slide writes nothing (#559).
+    #[cfg(test)]
+    session_writes: Arc<std::sync::atomic::AtomicUsize>,
     // i64::MIN leaves HTTP on wall time; tests opt into a shared, advanceable clock.
     #[cfg(test)]
     test_http_time: Arc<AtomicI64>,
@@ -322,6 +327,8 @@ impl Auth {
             #[cfg(test)]
             authority_reads: Arc::default(),
             #[cfg(test)]
+            session_writes: Arc::default(),
+            #[cfg(test)]
             test_http_time: Arc::new(AtomicI64::new(i64::MIN)),
             #[cfg(test)]
             test_recovery_elapsed,
@@ -351,6 +358,7 @@ impl Auth {
         self.db.is_some()
     }
 
+    /// How many socket authority reads ran for `user` so far (tests only).
     #[cfg(test)]
     pub(crate) fn authority_reads(&self, user: &str) -> usize {
         self.authority_reads
@@ -359,6 +367,20 @@ impl Auth {
             .get(user)
             .copied()
             .unwrap_or(0)
+    }
+
+    /// How many session reads have taken the writer so far (tests only).
+    #[cfg(test)]
+    pub(crate) fn session_writes(&self) -> usize {
+        self.session_writes
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Count one session read that takes the writer (tests only).
+    #[cfg(test)]
+    pub(super) fn count_session_write(&self) {
+        self.session_writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Set the HTTP time shared by cloned test routers.

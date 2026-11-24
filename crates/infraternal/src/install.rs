@@ -775,6 +775,40 @@ pub(super) fn check_root_service_program(program: &Path, owner: u32) -> Result<(
     }
 }
 
+/// Check that the web folder a root-run server will serve is one only root can change (#146).
+///
+/// The server sends this folder's files to every browser that signs in,
+/// administrators included. If an account other than root could change a
+/// file in it, or swap the folder or one above it, that account could serve
+/// its own script to an administrator's signed-in page and act with that
+/// session (J1101's question 1). So a `--system` install, or root's own
+/// per-user one, holds the folder to the rule of the binary
+/// ([`check_root_service_program`]): see
+/// [`crate::trusted_program::trusted_folder`].
+///
+/// `owner` is the account trusted besides root: 0 in production, the test
+/// user in tests. The error is a complete sentence that says what to do.
+pub(super) fn check_root_web_folder(web: &Path, owner: u32) -> Result<(), String> {
+    use crate::trusted_program::{FolderError, trusted_folder};
+    match trusted_folder(web, owner) {
+        Ok(_) => Ok(()),
+        Err(FolderError::Missing) => Err(format!(
+            "the web folder {} is not there, so the server cannot serve it; pass --web-root \
+             with the release's web folder",
+            web.display()
+        )),
+        Err(FolderError::Untrusted(path)) => Err(format!(
+            "the server would serve the web folder {} to administrators, but an account other \
+             than root can change {}, because it is not owned by root, can be written by \
+             others, or is a link; move the release folder (the binary and its web folder) \
+             somewhere only root can change, such as /opt/infraternal, and run server init \
+             from there",
+            web.display(),
+            path.display()
+        )),
+    }
+}
+
 /// Whether `binary` lives under the temporary folder, where it may vanish.
 fn in_temporary_folder(binary: &Path) -> bool {
     fs::canonicalize(env::temp_dir()).is_ok_and(|temporary| binary.starts_with(temporary))
@@ -1946,6 +1980,37 @@ mod tests {
         let gone = fixture.0.join("bin/absent");
         let refusal = check_root_service_program(&gone, me()).unwrap_err();
         assert!(refusal.contains("is gone"), "{refusal}");
+    }
+
+    /// #146 (J1151): the web folder beside the binary is held to the same
+    /// rule. Accepted when only the trusted owner can change it; refused,
+    /// naming the folder, the changeable path and the fix, when root would
+    /// serve a folder another account owns or can write; reported by name
+    /// when it is missing.
+    #[test]
+    fn a_root_served_web_folder_must_be_one_only_root_can_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let (fixture, _) = Fixture::new("web", 0o755, 0o755);
+        let web = fixture.0.join("web");
+        fs::create_dir(&web).unwrap();
+        fs::set_permissions(&web, fs::Permissions::from_mode(0o755)).unwrap();
+        let index = web.join("index.html");
+        fs::write(&index, "<!doctype html>").unwrap();
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(check_root_web_folder(&web, me()), Ok(()));
+        if me() != 0 {
+            // Root's view of a release unpacked in a user's folder.
+            let refusal = check_root_web_folder(&web, 0).unwrap_err();
+            assert!(refusal.contains(&web.display().to_string()), "{refusal}");
+            assert!(refusal.contains("/opt/infraternal"), "{refusal}");
+        }
+        // One group-writable file inside is enough to refuse, and is named.
+        fs::set_permissions(&index, fs::Permissions::from_mode(0o664)).unwrap();
+        let refusal = check_root_web_folder(&web, me()).unwrap_err();
+        let named = fs::canonicalize(&index).unwrap();
+        assert!(refusal.contains(&named.display().to_string()), "{refusal}");
+        let refusal = check_root_web_folder(&fixture.0.join("absent"), me()).unwrap_err();
+        assert!(refusal.contains("is not there"), "{refusal}");
     }
 
     /// `server init --system --dry-run` formats `SELinux` commands only when `SELinux` is active (#211).

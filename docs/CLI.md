@@ -129,9 +129,14 @@ units and the command link all name the running binary, which init does not
 copy), so a real `--system` install, or root's own per-user one, refuses a
 binary another account could replace: the file and every folder above it must
 be owned by root and not writable by group or others (a sticky folder such as
-`/tmp` counts as protected). Move the release folder somewhere only root can
-change, such as `/opt/infraternal`, and run init from there; `--dry-run`
-prints a warning instead (#146). A real install creates a missing data
+`/tmp` counts as protected). The web folder the unit serves (`--web-root`, or
+the `web/` beside the binary) is held to the same rule, and so is everything
+inside it: every folder and file must be owned by root and not writable by
+group or others, and it may contain no links, because whoever can change a
+served file can run their own script in a signed-in administrator's page.
+Move the release folder somewhere only root can change, such as
+`/opt/infraternal`, and run init from there; `--dry-run` prints a warning
+instead (#146). A real install creates a missing data
 folder with mode 0700.
 `--dry-run` prints the resolved `Data folder` and `Web folder` as absolute
 paths. The rules live in `crates/infraternal/src/install_paths.rs`.

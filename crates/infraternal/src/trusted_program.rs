@@ -5,7 +5,9 @@
 //! the file, or rename an entry in any of those folders, can make root run
 //! their code. [`trusted_program`] is the one check for that rule. It is used
 //! by `infraternal up` for the tools it starts and by `server init` for the
-//! binary a root service will run (#146, J1087).
+//! binary a root service will run (#146, J1087). [`trusted_folder`] applies
+//! the same rule to a folder whose files a root service serves, such as the
+//! web folder of a `--system` server (#146, J1151).
 //!
 //! The rule: the file is regular, executable, owned by root (or the given
 //! owner, which tests set to themselves) and not writable by group or others.
@@ -63,6 +65,73 @@ pub(crate) fn trusted_program<P: AsRef<Path>>(
     Err(ToolError::Missing)
 }
 
+/// Why a folder's tree is not one only root can change. Only `server init`
+/// asks, so it exists only in builds that carry the server.
+#[cfg(feature = "plugin-server")]
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum FolderError {
+    /// The folder does not exist (or is not a folder).
+    Missing,
+    /// This path, the folder itself, a folder above it or an entry inside
+    /// it, could be changed by someone other than root (or the given
+    /// owner), or could not be inspected.
+    Untrusted(PathBuf),
+}
+
+/// Check that nobody but root (or `owner`, which tests set to themselves)
+/// can change anything a service reads from `folder`, and return the
+/// folder's canonical path.
+///
+/// Every folder above it, along the path as given and along its canonical
+/// form, follows [`trusted_program`]'s folder rule, so nobody else can swap
+/// the folder. Inside it, every folder follows that rule too, and every
+/// file is owned by root (or `owner`) and not writable by group or others,
+/// so nobody else can change what is served. A link inside the tree is
+/// refused, whatever it points to: the server would follow it to a file
+/// this walk did not check, and a release's web build contains none. Other
+/// file types (sockets, pipes, devices) are refused as well.
+#[cfg(feature = "plugin-server")]
+pub(crate) fn trusted_folder(folder: &Path, owner: u32) -> Result<PathBuf, FolderError> {
+    let canonical = match fs::canonicalize(folder) {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => return Err(FolderError::Missing),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(FolderError::Missing),
+        Err(_) => return Err(FolderError::Untrusted(folder.to_owned())),
+    };
+    if let Some(above) = folder
+        .ancestors()
+        .chain(canonical.ancestors())
+        .find(|directory| !protected_directory(directory, owner))
+    {
+        return Err(FolderError::Untrusted(above.to_owned()));
+    }
+    let mut pending = vec![canonical.clone()];
+    while let Some(directory) = pending.pop() {
+        let entries =
+            fs::read_dir(&directory).map_err(|_| FolderError::Untrusted(directory.clone()))?;
+        for entry in entries {
+            let entry = entry.map_err(|_| FolderError::Untrusted(directory.clone()))?;
+            let path = entry.path();
+            // `symlink_metadata`: judge a link itself, never what it points at.
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| FolderError::Untrusted(path.clone()))?;
+            let file_type = metadata.file_type();
+            if file_type.is_dir() {
+                if !protected_directory(&path, owner) {
+                    return Err(FolderError::Untrusted(path));
+                }
+                pending.push(path);
+            } else if !(file_type.is_file()
+                && (metadata.uid() == 0 || metadata.uid() == owner)
+                && metadata.permissions().mode() & 0o022 == 0)
+            {
+                return Err(FolderError::Untrusted(path));
+            }
+        }
+    }
+    Ok(canonical)
+}
+
 /// A regular, executable file owned by root (or `owner`) that nobody else can write.
 fn regular_executable_of(path: &Path, owner: u32) -> bool {
     fs::metadata(path).is_ok_and(|metadata| {
@@ -89,6 +158,8 @@ fn protected_directory(directory: &Path, owner: u32) -> bool {
 /// The trust rule on real files and folders, as the test user (owner = self).
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "plugin-server")]
+    use super::{FolderError, trusted_folder};
     use super::{ToolError, trusted_program};
     use std::{
         fs,
@@ -221,6 +292,122 @@ mod tests {
         assert_eq!(
             trusted_program(&[link.to_str().unwrap()], me()),
             Err(ToolError::Untrusted)
+        );
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// A web-like folder the test user owns: `web/index.html` and
+    /// `web/assets/app.js`, all 0755/0644 under a 0755 parent. Returns the
+    /// folder's canonical path.
+    fn folder_in(temporary: &TemporaryDirectory) -> std::path::PathBuf {
+        fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o755)).unwrap();
+        let web = temporary.0.join("web");
+        fs::create_dir_all(web.join("assets")).unwrap();
+        fs::write(web.join("index.html"), "<!doctype html>").unwrap();
+        fs::write(web.join("assets/app.js"), "").unwrap();
+        for (path, mode) in [
+            (web.clone(), 0o755),
+            (web.join("assets"), 0o755),
+            (web.join("index.html"), 0o644),
+            (web.join("assets/app.js"), 0o644),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        // Canonical, so the paths a refusal names compare equal on systems
+        // whose temporary folder is reached through a link.
+        fs::canonicalize(web).unwrap()
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// A folder whose whole tree only its owner can change is trusted, and
+    /// comes back as its canonical path, also through a trusted link.
+    #[test]
+    fn a_folder_only_its_owner_can_change_is_trusted() {
+        let temporary = TemporaryDirectory::new();
+        let web = folder_in(&temporary);
+        assert_eq!(
+            trusted_folder(&web, me()),
+            Ok(fs::canonicalize(&web).unwrap())
+        );
+        let link = temporary.0.join("current-web");
+        std::os::unix::fs::symlink(&web, &link).unwrap();
+        assert_eq!(
+            trusted_folder(&link, me()),
+            Ok(fs::canonicalize(&web).unwrap())
+        );
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// Anything inside or above the folder that others could change is
+    /// refused, and the refusal names that path.
+    #[test]
+    fn a_folder_others_can_change_anywhere_is_refused_by_name() {
+        for (relative, mode) in [
+            ("", 0o775),
+            ("assets", 0o777),
+            ("index.html", 0o664),
+            ("assets/app.js", 0o646),
+        ] {
+            let temporary = TemporaryDirectory::new();
+            let web = folder_in(&temporary);
+            let changed = if relative.is_empty() {
+                web.clone()
+            } else {
+                web.join(relative)
+            };
+            fs::set_permissions(&changed, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                trusted_folder(&web, me()),
+                Err(FolderError::Untrusted(changed)),
+                "{relative:?} at {mode:o}"
+            );
+        }
+        // A writable folder above it.
+        let temporary = TemporaryDirectory::new();
+        let web = folder_in(&temporary);
+        fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(
+            trusted_folder(&web, me()),
+            Err(FolderError::Untrusted(web.parent().unwrap().to_owned()))
+        );
+        // Owned by someone else entirely: the test user cannot vouch for it.
+        let temporary = TemporaryDirectory::new();
+        let web = folder_in(&temporary);
+        if me() != 0 {
+            assert!(trusted_folder(&web, me().wrapping_add(1)).is_err());
+        }
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// A link inside the tree is refused even when it points at a trusted
+    /// file, and a link to the folder that lives in a writable folder is
+    /// refused too; a missing folder is reported as missing.
+    #[test]
+    fn links_inside_or_through_writable_folders_and_missing_folders_are_refused() {
+        let temporary = TemporaryDirectory::new();
+        let web = folder_in(&temporary);
+        let inner = web.join("linked.html");
+        std::os::unix::fs::symlink(web.join("index.html"), &inner).unwrap();
+        assert_eq!(
+            trusted_folder(&web, me()),
+            Err(FolderError::Untrusted(inner))
+        );
+
+        let target = TemporaryDirectory::new();
+        let web = folder_in(&target);
+        let open = TemporaryDirectory::new();
+        fs::set_permissions(&open.0, fs::Permissions::from_mode(0o777)).unwrap();
+        let link = open.0.join("web");
+        std::os::unix::fs::symlink(&web, &link).unwrap();
+        assert!(matches!(
+            trusted_folder(&link, me()),
+            Err(FolderError::Untrusted(_))
+        ));
+
+        let missing = TemporaryDirectory::new();
+        assert_eq!(
+            trusted_folder(&missing.0.join("absent"), me()),
+            Err(FolderError::Missing)
         );
     }
 }
