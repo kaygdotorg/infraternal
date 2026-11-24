@@ -7,7 +7,8 @@
 //! zones gets `REFUSED`, so a client's stub resolver moves on at once instead of waiting out its
 //! timeout. A message that parses but is not one plain question gets `FORMERR` or `NOTIMP`. Only
 //! bytes that do not parse as DNS, oversized packets and response messages (which must never be
-//! answered, or two resolvers could bounce replies forever) are dropped.
+//! answered, or two resolvers could bounce replies forever) are dropped; each drop is counted in a
+//! rate-limited log line that names no queried name (see [`DropLog`]).
 use crate::{dataplane::Config, policy::model::validate_dns};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
@@ -19,7 +20,7 @@ use std::{
     io::{self, Read as _, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::{fd::AsFd, unix::net::UnixStream},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -48,7 +49,14 @@ const TCP_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_MALFORMED_FRAME_LIMIT: usize = 16;
 /// Maximum number of queued TCP accepts serviced before polling clients again.
 const TCP_ACCEPT_BUDGET: usize = 64;
+/// Shortest time between two "dropped queries" log lines. Drops in between are counted and
+/// reported by the next line, so a flood of junk costs one line a minute, not one per packet.
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Why the resolver sent nothing back for something it received.
+///
+/// The log reports only this reason and a count, never the queried name: names are private to
+/// the peers allowed to reach them (D327), and junk traffic must not be able to fill the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DropReason {
     /// The datagram or TCP frame was larger than [`MAX_PACKET`], or a TCP length prefix was
@@ -58,8 +66,12 @@ enum DropReason {
     Malformed,
     /// The message is a response, not a query. Answering it could start a reply loop.
     NotAQuery,
+    /// The answer would not fit in one TCP frame of at most [`MAX_PACKET`] bytes.
+    AnswerTooLarge,
     /// The reply could not be encoded. This points at a bug or an invalid zone, not the client.
     Unencodable,
+    /// A new TCP connection went over the global or per-source connection limit.
+    ConnectionLimit,
 }
 
 impl DropReason {
@@ -69,8 +81,58 @@ impl DropReason {
             Self::Oversized => "oversized",
             Self::Malformed => "malformed",
             Self::NotAQuery => "not-a-query",
+            Self::AnswerTooLarge => "answer-too-large",
             Self::Unencodable => "unencodable",
+            Self::ConnectionLimit => "tcp-connection-limit",
         }
+    }
+}
+
+/// Counts dropped queries and logs them at most once per [`DROP_LOG_INTERVAL`].
+///
+/// The first drop is logged at once, so an operator sees the problem while reproducing it.
+/// Later drops inside the interval are only counted; the next line after the interval reports
+/// how many there were. Both protocol workers share one log through an [`Arc`].
+#[derive(Default)]
+struct DropLog {
+    window: Mutex<DropWindow>,
+}
+
+/// The mutable part of [`DropLog`]: when it last logged and what it has counted since.
+#[derive(Default)]
+struct DropWindow {
+    logged_at: Option<Instant>,
+    unreported: u64,
+}
+
+impl DropLog {
+    /// Records one drop for `reason` and writes the log line when the interval allows it.
+    fn record(&self, reason: DropReason) {
+        if let Some(dropped) = self.note(Instant::now()) {
+            tracing::info!(
+                dropped,
+                reason = reason.as_str(),
+                "mesh DNS dropped queries it could not answer"
+            );
+        }
+    }
+
+    /// Counts one drop at `now`. Returns the number of drops to report when a line is due
+    /// (this one included), or `None` while the previous line is younger than the interval.
+    fn note(&self, now: Instant) -> Option<u64> {
+        let mut window = self
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        window.unreported += 1;
+        if window
+            .logged_at
+            .is_some_and(|logged_at| now.saturating_duration_since(logged_at) < DROP_LOG_INTERVAL)
+        {
+            return None;
+        }
+        window.logged_at = Some(now);
+        Some(std::mem::take(&mut window.unreported))
     }
 }
 
@@ -306,7 +368,13 @@ fn tcp_poll_timeout(clients: &[TcpClient]) -> PollTimeout {
 }
 
 /// Accepts a bounded batch so a flood of TCP handshakes cannot starve UDP queries.
-fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) -> io::Result<()> {
+///
+/// A connection over the global or per-source limit is closed at once and counted in `drops`.
+fn accept_tcp_connections(
+    listener: &TcpListener,
+    clients: &mut Vec<TcpClient>,
+    drops: &DropLog,
+) -> io::Result<()> {
     for _ in 0..TCP_ACCEPT_BUDGET {
         match listener.accept() {
             Ok((stream, source)) => {
@@ -316,8 +384,11 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
                     .count();
                 if clients.len() >= TCP_CONNECTION_LIMIT
                     || source_connections >= TCP_SOURCE_CONNECTION_LIMIT
-                    || stream.set_nonblocking(true).is_err()
                 {
+                    drops.record(DropReason::ConnectionLimit);
+                    continue;
+                }
+                if stream.set_nonblocking(true).is_err() {
                     continue;
                 }
                 clients.push(TcpClient::new(stream, source));
@@ -332,7 +403,14 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
 }
 
 /// Reads at most one capped, length-prefixed query fragment and queues its UDP-equivalent answer.
-fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> bool {
+///
+/// Returns `false` when the connection should close. A frame that gets no answer is counted in
+/// `drops`; too many of them on one connection close it.
+fn read_tcp_request(
+    client: &mut TcpClient,
+    records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
+) -> bool {
     let mut buffer = [0_u8; MAX_PACKET + 2];
     let target_length = client
         .expected_message_length
@@ -348,6 +426,7 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                 let message_length =
                     usize::from(u16::from_be_bytes([client.input[0], client.input[1]]));
                 if !(12..=MAX_PACKET).contains(&message_length) {
+                    drops.record(DropReason::Oversized);
                     return false;
                 }
                 client.expected_message_length = Some(message_length);
@@ -389,8 +468,12 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                     client.frame_deadline = None;
                     true
                 }
-                Ok(_) => false,
-                Err(_) => {
+                Ok(_) => {
+                    drops.record(DropReason::AnswerTooLarge);
+                    false
+                }
+                Err(reason) => {
+                    drops.record(reason);
                     client.malformed_frames += 1;
                     if client.malformed_frames >= TCP_MALFORMED_FRAME_LIMIT {
                         return false;
@@ -440,12 +523,13 @@ fn service_tcp_client(
     client: &mut TcpClient,
     ready: PollFlags,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) -> bool {
     if ready.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
         return false;
     }
     if client.output.is_empty() {
-        if ready.contains(PollFlags::POLLIN) && !read_tcp_request(client, records) {
+        if ready.contains(PollFlags::POLLIN) && !read_tcp_request(client, records, drops) {
             return false;
         }
     } else if ready.contains(PollFlags::POLLOUT) && !write_tcp_response(client) {
@@ -650,10 +734,13 @@ fn negative_soa(suffix: &str) -> Result<Record, DropReason> {
 }
 
 /// Serves UDP on its own worker so TCP framing and clients cannot delay datagrams.
+///
+/// Every datagram that gets no reply is counted in `drops`.
 fn run_udp_worker(
     sockets: &[UdpSocket],
     shutdown_reader: &UnixStream,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) {
     let mut query = [0_u8; MAX_PACKET + 1];
     'worker: loop {
@@ -697,6 +784,7 @@ fn run_udp_worker(
                 Err(_) => break 'worker,
             };
             if length > MAX_PACKET {
+                drops.record(DropReason::Oversized);
                 continue;
             }
             let response = {
@@ -705,8 +793,11 @@ fn run_udp_worker(
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 response_for_source(&query[..length], &snapshot, source.ip())
             };
-            if let Ok(reply) = response {
-                let _ = socket.send_to(&reply, source);
+            match response {
+                Ok(reply) => {
+                    let _ = socket.send_to(&reply, source);
+                }
+                Err(reason) => drops.record(reason),
             }
         }
     }
@@ -717,6 +808,7 @@ fn run_tcp_worker(
     listeners: &[TcpListener],
     shutdown_reader: &UnixStream,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) {
     let mut clients = Vec::<TcpClient>::new();
     'worker: loop {
@@ -757,13 +849,18 @@ fn run_tcp_worker(
         }
         // One read per ready client per poll turn bounds parser work and lets other clients run.
         for index in (0..polled_client_count).rev() {
-            if !service_tcp_client(&mut clients[index], ready[clients_start + index], records) {
+            if !service_tcp_client(
+                &mut clients[index],
+                ready[clients_start + index],
+                records,
+                drops,
+            ) {
                 clients.swap_remove(index);
             }
         }
         for (index, listener) in listeners.iter().enumerate() {
             if ready[index].contains(PollFlags::POLLIN)
-                && accept_tcp_connections(listener, &mut clients).is_err()
+                && accept_tcp_connections(listener, &mut clients, drops).is_err()
             {
                 break 'worker;
             }
@@ -860,8 +957,8 @@ impl Resolver {
     ///
     /// UDP gets its own poll loop. TCP state is capped by global and per-source connection count,
     /// frame size, whole-message time and idle time; each ready client gets one bounded read per
-    /// poll turn. Packets over the size limit and bytes that do not parse get no reply; malformed
-    /// TCP messages are counted and eventually close that connection.
+    /// poll turn. Packets over the size limit and bytes that do not parse get no reply and are
+    /// logged (rate-limited); malformed TCP messages also count toward closing that connection.
     fn bind_records(
         address: Ipv4Addr,
         initial: Records,
@@ -911,15 +1008,31 @@ impl Resolver {
         let (mut udp_shutdown, udp_shutdown_reader) = UnixStream::pair()?;
         let (tcp_shutdown, tcp_shutdown_reader) = UnixStream::pair()?;
         let records = Arc::new(RwLock::new(initial));
+        // One drop log for both workers, so its rate limit covers the whole resolver.
+        let drops = Arc::new(DropLog::default());
         let udp_records = Arc::clone(&records);
+        let udp_drops = Arc::clone(&drops);
         let udp_worker = thread::Builder::new()
             .name("mesh-dns-udp".to_owned())
-            .spawn(move || run_udp_worker(&worker_sockets, &udp_shutdown_reader, &udp_records))?;
+            .spawn(move || {
+                run_udp_worker(
+                    &worker_sockets,
+                    &udp_shutdown_reader,
+                    &udp_records,
+                    &udp_drops,
+                );
+            })?;
         let tcp_records = Arc::clone(&records);
         let tcp_worker = match thread::Builder::new()
             .name("mesh-dns-tcp".to_owned())
-            .spawn(move || run_tcp_worker(&worker_listeners, &tcp_shutdown_reader, &tcp_records))
-        {
+            .spawn(move || {
+                run_tcp_worker(
+                    &worker_listeners,
+                    &tcp_shutdown_reader,
+                    &tcp_records,
+                    &drops,
+                );
+            }) {
             Ok(worker) => worker,
             Err(error) => {
                 let _ = udp_shutdown.write(&[0]);
@@ -1125,5 +1238,19 @@ mod source_tests {
             response_for_source(&[0; MAX_PACKET + 1], &records, source),
             Err(DropReason::Oversized)
         );
+    }
+
+    /// The first drop is logged at once; drops inside the interval are counted and reported by
+    /// the first line after it, so a flood writes one line a minute.
+    #[test]
+    fn drop_log_reports_the_first_drop_then_one_count_per_interval() {
+        let log = DropLog::default();
+        let start = Instant::now();
+        assert_eq!(log.note(start), Some(1));
+        for second in 1..=59 {
+            assert_eq!(log.note(start + Duration::from_secs(second)), None);
+        }
+        assert_eq!(log.note(start + DROP_LOG_INTERVAL), Some(60));
+        assert_eq!(log.note(start + DROP_LOG_INTERVAL), None);
     }
 }
