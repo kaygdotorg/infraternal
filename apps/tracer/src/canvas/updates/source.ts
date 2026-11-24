@@ -4,7 +4,7 @@
  * settings that steer it (channel, quiet window), the history of past updates, and the four things the owner can ask for
  * (check now, update now, roll back, pick a channel).
  *
- * The Settings window (`panel.on-demand.ts`), the Inbox item and the toast (`notices.ts`) read only this interface, so the
+ * The Settings window (`panel.on-demand.ts`) and the Inbox item (`notices.ts`; no toasts, owner 2026-11-22) read only this interface, so the
  * test double (canvas/mock/updates/double.ts) and the live source (the `release.update.*` RPCs) differ in where the facts come
  * from and never in how they are told. Until the owner approves the mockup (D162) the product registers no source, and the
  * Updates window keeps its "Not available yet" line.
@@ -43,14 +43,17 @@ export type UpdateState =
 export interface UpdateHistoryEntry {
   /** The version it moved to (or tried to). */
   version: string;
-  /** The version it came from. */
-  from: string;
+  /** The version it came from; unknown when the server's record does not say. */
+  from: string | undefined;
   outcome: "applied" | "rolled-back" | "failed";
   /** Why, in a sentence, for an outcome that is not `applied`. */
   reason?: string;
   /** Milliseconds since the epoch. */
   at: number;
 }
+
+/** How long after an install the owner may roll back (owner, 2026-11-22). After a day the loss is too large for one button. */
+export const ROLLBACK_HOURS = 24;
 
 /** What the owner sees: the state, the running version and the settings. */
 export interface UpdateFacts {
@@ -65,10 +68,11 @@ export interface UpdateFacts {
   /** Newest first. */
   history: readonly UpdateHistoryEntry[];
   /**
-   * Whether "Roll back" is offered: a previous version is kept next to the running one. `lost` says what a roll back
-   * costs (D295: what was written since the copy of the database was taken), in a sentence for the confirmation.
+   * What "Roll back" would do: a previous version is kept next to the running one. `lost` says what a roll back costs (D295:
+   * what was written since the copy of the database was taken), in a sentence for the confirmation; `since` is when that copy
+   * was taken (milliseconds since the epoch). The window offers the button only for `ROLLBACK_HOURS` after `since`.
    */
-  rollback: { available: false } | { available: true; to: string; lost: string };
+  rollback: { available: false } | { available: true; to: string; lost: string; since: number };
 }
 
 /** What the window asks of the server. Each call needs the owner and a fresh sign-in; a refusal rejects with a plain sentence. */
@@ -86,7 +90,7 @@ export interface UpdatesSource {
   onChange(run: () => void): () => void;
 }
 
-/** The source the Updates window and the notices use; none until the owner has approved the UI (D162). */
+/** The source the Updates window and the notices use; the product registers the live one once its connection is up. */
 let registered: UpdatesSource | undefined;
 const listeners = new Set<() => void>();
 

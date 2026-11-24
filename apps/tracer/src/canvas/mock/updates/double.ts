@@ -1,7 +1,7 @@
 /**
  * Test double of the owner's Updates controls (#211, S5; `?mock=1&proto=clusters&updates=1`). It decides nothing the real server
  * will: it holds one scripted state and plays the few transitions the buttons cause (check, update now, roll back), so every
- * message of the Updates window, the Inbox item and the toasts can be reached and photographed. Times are taken from now, so
+ * message of the Updates window, and the Inbox item can be reached and photographed. Times are taken from now, so
  * "2 hours ago" is always two hours before the day the double is opened.
  */
 import type { Channel, UpdateFacts, UpdateHistoryEntry, UpdatesSource } from "../../updates/source";
@@ -23,14 +23,14 @@ const history = (now: number): UpdateHistoryEntry[] => [
 
 const base = (now: number, over: Partial<UpdateFacts>): UpdateFacts => ({
   state: { kind: "current" }, running: "0.4.2", channel: "stable", quietMinutes: 5, checkedAt: now - 2 * MIN, history: history(now),
-  rollback: { available: true, to: "0.4.1", lost: lostSince("0.4.2", "2 hours ago") }, ...over,
+  rollback: { available: true, to: "0.4.1", lost: lostSince("0.4.2", "2 hours ago"), since: now - 2 * HOUR }, ...over,
 });
 
 export const UPDATE_SCENARIOS: UpdatesScenario[] = [
   { id: "current", label: "up to date", hint: "tick · Check now · Roll back available", facts: (n) => base(n, {}) },
   { id: "checking", label: "checking", hint: "turning arc · every button waits", facts: (n) => base(n, { state: { kind: "checking" } }) },
   { id: "downloading", label: "downloading", hint: "0.5.0 at 62%", facts: (n) => base(n, { state: { kind: "downloading", version: "0.5.0", percent: 62 } }) },
-  { id: "ready", label: "ready, waiting for a quiet moment", hint: "Inbox item and toast · Update now", facts: (n) => base(n, { state: { kind: "ready", version: "0.5.0" } }) },
+  { id: "ready", label: "ready, waiting for a quiet moment", hint: "Inbox item · Update now", facts: (n) => base(n, { state: { kind: "ready", version: "0.5.0" } }) },
   { id: "switching", label: "installing", hint: "sessions stay open", facts: (n) => base(n, { state: { kind: "applying", version: "0.5.0", phase: "switching" } }) },
   { id: "trial", label: "checking the new version", hint: "the two-minute health check", facts: (n) => base(n, { state: { kind: "applying", version: "0.5.0", phase: "checking" } }) },
   { id: "undone-health", label: "undone: failed its check", hint: "rolled back by itself, with the reason", facts: (n) => base(n, {
@@ -46,8 +46,11 @@ export const UPDATE_SCENARIOS: UpdatesScenario[] = [
   { id: "offline", label: "offline", hint: "cannot reach the release server", facts: (n) => base(n, { state: { kind: "offline", reason: "The release server did not answer. It tries again in 15 minutes." }, checkedAt: n - 3 * HOUR }) },
   { id: "no-release", label: "no release yet", hint: "a fresh channel with nothing published", facts: (n) => base(n, { channel: "edge", running: "0.4.2-edge.1", state: { kind: "offline", reason: "The edge channel has no release yet." }, history: [], rollback: { available: false }, checkedAt: n - MIN }) },
   { id: "never", label: "never checked", hint: "first minutes after the server started", facts: (n) => base(n, { state: { kind: "never" }, checkedAt: undefined, history: [], rollback: { available: false } }) },
-  { id: "edge", label: "channel: edge", hint: "Edge selected, up to date", facts: (n) => base(n, { channel: "edge", running: "0.4.3-edge.18", rollback: { available: true, to: "0.4.3-edge.17", lost: lostSince("0.4.3-edge.18", "40 minutes ago") },
+  { id: "edge", label: "channel: edge", hint: "Edge selected, up to date", facts: (n) => base(n, { channel: "edge", running: "0.4.3-edge.18", rollback: { available: true, to: "0.4.3-edge.17", lost: lostSince("0.4.3-edge.18", "40 minutes ago"), since: n - 40 * MIN },
     history: [{ version: "0.4.3-edge.18", from: "0.4.3-edge.17", outcome: "applied", at: n - 40 * MIN }, { version: "0.4.3-edge.17", from: "0.4.3-edge.16", outcome: "applied", at: n - 3 * HOUR }] }) },
+  { id: "aged", label: "installed 3 days ago", hint: "up to date · Roll back no longer offered (24 h)", facts: (n) => base(n, { running: "0.4.2",
+    rollback: { available: true, to: "0.4.1", lost: lostSince("0.4.2", "3 days ago"), since: n - 3 * DAY },
+    history: history(n).map((e, i) => (i === 0 ? { ...e, at: n - 3 * DAY } : e)) }) },
   { id: "off", label: "automatic updates off", hint: "not available on this server, with the reason", facts: (n) => base(n, { state: { kind: "off", reason: "This server does not run as root, so it cannot replace its own program." }, checkedAt: undefined, history: [], rollback: { available: false } }) },
   { id: "long", label: "long history, long version", hint: "worst case wrapping", facts: (n) => base(n, { running: "0.12.104-edge.3-rc.2+build.20261121.3f9c2ab", state: { kind: "ready", version: "0.12.105-edge.3-rc.2+build.20261121.9ad41c0" },
     history: Array.from({ length: 12 }, (_, i): UpdateHistoryEntry => ({ version: `0.12.${104 - i}-edge.3`, from: `0.12.${103 - i}-edge.3`, outcome: i === 3 ? "failed" : "applied", at: n - (i + 1) * DAY, ...(i === 3 ? { reason: "The new version could not open the database copy, which is read-only on this volume. Nothing was changed." } : {}) })) }) },
@@ -89,7 +92,7 @@ export function createUpdatesDouble(initial = "current"): UpdatesDouble {
       set({ state: { kind: "applying", version: to, phase: "checking" } });
       await wait(1800);
       const entry: UpdateHistoryEntry = { version: to, from, outcome: "applied", at: Date.now() };
-      set({ state: { kind: "current" }, running: to, checkedAt: Date.now(), history: [entry, ...state.history], rollback: { available: true, to: from, lost: lostSince(to, "just now") } });
+      set({ state: { kind: "current" }, running: to, checkedAt: Date.now(), history: [entry, ...state.history], rollback: { available: true, to: from, lost: lostSince(to, "just now"), since: Date.now() } });
     },
     async rollback() {
       guard();

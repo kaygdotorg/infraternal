@@ -2,10 +2,12 @@
 /**
  * The plain words of the Updates controls (#211, S5), as pure functions so every state can be tested without a screen.
  *
+ * No toast ever carries an update (owner, 2026-11-22): the Inbox item and the sidebar mark are the only voices outside this window.
+ *
  * TASTE: a message says what happens to the person, in one sentence, with no ids or enum names; a button is a verb; the
  * version is written once. Times read as "2 hours ago".
  */
-import type { UpdateFacts, UpdateHistoryEntry, UpdateState } from "./source";
+import { ROLLBACK_HOURS, type UpdateFacts, type UpdateHistoryEntry, type UpdateState } from "./source";
 
 /** "just now", "5 minutes ago", "2 hours ago", "3 days ago". */
 export function ago(at: number, now: number): string {
@@ -42,8 +44,13 @@ export function statusLine(state: UpdateState, quietMinutes: number): StatusLine
 export function historyLine(entry: UpdateHistoryEntry, now: number): { title: string; sub: string } {
   const what = entry.outcome === "applied" ? "installed" : entry.outcome === "rolled-back" ? "undone" : "did not finish";
   const when = ago(entry.at, now);
-  const base = `from ${entry.from} · ${when}`;
+  const base = entry.from ? `from ${entry.from} · ${when}` : when;
   return { title: `${entry.version} ${what}`, sub: entry.reason ? `${base}\n${entry.reason}` : base };
+}
+
+/** What a roll back costs, in the sentence the confirmation shows (D295): everything saved since the copy of the database was taken. */
+export function lostSince(version: string, since: number, now: number): string {
+  return `Everything saved since ${version} was installed ${ago(since, now)} is lost: new keys, shares, devices and settings changes. Terminal sessions stay open.`;
 }
 
 /** The confirmation before Roll back: what comes back, and what is lost (D295). */
@@ -59,15 +66,24 @@ export function inboxBody(version: string, quietMinutes: number): string {
   return `${version} is downloaded and checked. It installs by itself once nobody has typed for ${quietMinutes} min. Installing restarts the server, keeps your sessions open and reloads this page when you are idle.`;
 }
 
-/** The toast after an update (D155 U5). */
-export const updatedToast = (version: string): string => `Updated to ${version}. This page reloads when you stop typing.`;
+/** The question before the channel moves to Edge: names the risk (D185 labels edge as may break) and what stays safe. */
+export function edgeConfirm(): { title: string; effect: string; confirmLabel: string; cancelLabel: string } {
+  return {
+    title: "Switch to Edge?",
+    effect: "Edge gets every build first and may break. If a new build fails to start, the previous version comes back by itself.",
+    confirmLabel: "Use Edge",
+    cancelLabel: "Stay on Stable",
+  };
+}
 
-/** The toast when the update was undone. */
-export const undoneToast = (version: string): string => `${version} was undone. The previous version is running again.`;
+/** Whether a roll back is still offered at `now`: only for `ROLLBACK_HOURS` after the update (owner, 2026-11-22). */
+export function rollbackOffered(rollback: UpdateFacts["rollback"], now: number): boolean {
+  return rollback.available && now - rollback.since < ROLLBACK_HOURS * 3_600_000;
+}
 
-/** Which buttons the window offers now: the verb for each, and whether it can be pressed. */
-export function buttons(facts: Pick<UpdateFacts, "state" | "rollback">): { check: boolean; apply: boolean; rollback: boolean } {
+/** Which buttons the window offers now: the verb for each, and whether it can be pressed. Roll back also needs the update to be under a day old. */
+export function buttons(facts: Pick<UpdateFacts, "state" | "rollback">, now: number): { check: boolean; apply: boolean; rollback: boolean } {
   const { kind } = facts.state;
   const busy = kind === "checking" || kind === "downloading" || kind === "applying";
-  return { check: !busy && kind !== "off", apply: kind === "ready", rollback: !busy && kind !== "off" && facts.rollback.available };
+  return { check: !busy && kind !== "off", apply: kind === "ready", rollback: !busy && kind !== "off" && rollbackOffered(facts.rollback, now) };
 }

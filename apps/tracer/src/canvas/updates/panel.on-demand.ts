@@ -12,8 +12,9 @@
  *   Quiet window  5 min
  *   History      0.5.0 installed · from 0.4.2 · 2 hours ago
  *
- * Roll back asks first and says what is lost (D295). Every call needs the owner and a fresh sign-in; the server says no in a
- * sentence and the window shows it as a toast, never a second place of its own. On demand (D188): Settings loads this with the window.
+ * Roll back is offered for 24 hours after an install, asks first and says what is lost (D295). Switching to Edge asks first too and
+ * names the risk. Every call needs the owner and a fresh sign-in; the server says no in a sentence and the window shows it under the
+ * buttons: an update never raises a toast (owner, 2026-11-22). On demand (D188): Settings loads this with the window.
  */
 import { createKeyValueList, type KeyValueRow } from "../../../../../packages/ui/src/kv-list";
 import { createSettingRow } from "../../../../../packages/ui/src/setting-row";
@@ -23,7 +24,7 @@ import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import { el } from "../dom";
 import type { Ctx } from "../context";
 import type { Channel, UpdatesSource } from "./source";
-import { ago, buttons, historyLine, rollbackConfirm, statusLine } from "./words";
+import { ago, buttons, edgeConfirm, historyLine, rollbackConfirm, rollbackOffered, statusLine } from "./words";
 
 /** The channel: stable by default, edge opt-in and "may break" (D185, D186). */
 const CHANNEL: ValueSpec = { kind: "choice", default: "stable", options: [{ id: "stable", label: "Stable" }, { id: "edge", label: "Edge" }] };
@@ -47,6 +48,10 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   const root = el("div", "ui-sp cl-up");
   const status = createKeyValueList("Updates");
   const detail = el("p", "cl-up-detail");
+  /** The sentence of the last refusal, until the next press or change of state. */
+  const refusal = el("p", "cl-up-detail cl-up-refusal");
+  refusal.setAttribute("role", "status");
+  refusal.hidden = true;
   const actions = el("div", "cl-up-actions");
   const apply = button("Update now", "primary");
   const check = button("Check now", "secondary");
@@ -56,9 +61,17 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   const settings = el("div", "ui-setting-list");
   const refuse = (error: unknown): string => (error instanceof Error ? error.message : "That did not work. Try again.");
   const channel = createSettingRow({
-    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel,
+    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel, caption: false,
     explain: "Stable is the tested release. Edge gets every build first and may break.",
-    onSave: (v: SettingValue) => source.setChannel(v as Channel).then(() => undefined, refuse),
+    onSave: (v: SettingValue) => {
+      if (v !== "edge") return source.setChannel(v as Channel).then(() => undefined, refuse);
+      // Edge asks first, naming the risk (owner, 2026-11-22). Staying on Stable puts the switch back; nothing was sent.
+      return new Promise<string | void>((resolve) => {
+        let answered = false;
+        const settle = (work?: Promise<string | void>): void => { if (answered) return; answered = true; if (work) void work.then(resolve); else { channel.set("stable"); resolve(); } };
+        mountConfirmTip(channel.root, { ...edgeConfirm(), named: true, onConfirm: () => settle(source.setChannel("edge").then(() => undefined, refuse)), onCancel: () => settle() });
+      });
+    },
   });
   const quiet = createSettingRow({
     id: "update-quiet", title: "Quiet Window", spec: QUIET, value: source.facts().quietMinutes,
@@ -70,17 +83,20 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   const historyHead = heading("History");
   const history = createKeyValueList("Update history");
   const older = el("p", "cl-settings-later");
-  root.append(status.root, detail, actions, settings, historyHead, history.root, older);
+  root.append(status.root, detail, actions, refusal, settings, historyHead, history.root, older);
   pane.append(root);
 
-  /** Runs one owner action; a refusal (not the owner, no fresh sign-in, nothing to do) is said once as a toast. */
-  const run = (work: () => Promise<void>): void => { void work().catch((error: unknown) => cx.toast.show({ message: refuse(error), tone: "error" })); };
+  /** Runs one owner action; a refusal (not the owner, no fresh sign-in, nothing to do) is said under the buttons, in the server's sentence. */
+  const run = (work: () => Promise<void>): void => {
+    refusal.hidden = true;
+    void work().catch((error: unknown) => { refusal.textContent = refuse(error); refusal.hidden = false; });
+  };
 
   apply.addEventListener("click", () => run(() => source.apply()));
   check.addEventListener("click", () => run(() => source.check()));
   back.addEventListener("click", () => {
     const { rollback } = source.facts();
-    if (!rollback.available) return;
+    if (!rollback.available || !rollbackOffered(rollback, Date.now())) return;
     mountConfirmTip(back, { ...rollbackConfirm(rollback.to, rollback.lost), named: true, onConfirm: () => run(() => source.rollback()) });
   });
 
@@ -88,7 +104,7 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
     const facts = source.facts();
     const now = Date.now();
     const line = statusLine(facts.state, facts.quietMinutes);
-    const can = buttons(facts);
+    const can = buttons(facts, now);
     const rows: KeyValueRow[] = [
       { key: "Status", value: line.value, ...(line.mark ? { mark: line.mark } : {}), ...(line.meter !== undefined ? { meter: line.meter } : {}),
         ...(can.check ? { press: { tip: "Check for updates now", run: () => run(() => source.check()) } } : {}) },
@@ -102,13 +118,13 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
     apply.disabled = !can.apply;
     check.disabled = !can.check;
     back.disabled = !can.rollback;
-    back.dataset.tip = facts.rollback.available ? `Go back to ${facts.rollback.to}` : "No earlier version is kept yet";
+    back.dataset.tip = rollbackOffered(facts.rollback, now) && facts.rollback.available ? `Go back to ${facts.rollback.to}` : "Roll back is offered for 24 hours after an update";
     // A value the owner is typing is left alone: only a different stored value is put on screen.
     if (channel.value() !== facts.channel) channel.set(facts.channel);
     if (quiet.value() !== facts.quietMinutes) quiet.set(facts.quietMinutes);
     history.set(facts.history.slice(0, HISTORY_SHOWN).map((entry): KeyValueRow => {
       const text = historyLine(entry, now);
-      return { key: text.title, value: ago(entry.at, now), hint: text.sub.split("\n").slice(1).join(" ") || `from ${entry.from}` };
+      return { key: text.title, value: ago(entry.at, now), hint: text.sub.split("\n").slice(1).join(" ") || (entry.from ? `from ${entry.from}` : "") };
     }));
     historyHead.hidden = history.root.hidden = facts.history.length === 0;
     older.textContent = facts.history.length > HISTORY_SHOWN ? `${facts.history.length - HISTORY_SHOWN} older updates are kept.` : "";

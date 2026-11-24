@@ -42,10 +42,8 @@ export async function mountVersionArea(core: CoreScreen, source: VersionSource):
   const style = await linkStyle("./version.css");
   if (!foot.isConnected) { style.remove(); return undefined; }
 
-  const fleet = createFleetController({
-    source,
-    say: (message) => core.toast.show({ message, tone: "error" }),
-  });
+  // No `say`: an update never raises a toast (owner, 2026-11-22). A failed check or update shows in the panel and in the Updates window.
+  const fleet = createFleetController({ source });
   const pill = mountVersionPill(foot, pillState(source.facts(), fleet.settled()));
   const panel = createVersionPanel({ parent: foot.parentElement ?? core.stage, before: foot, anchor: pill.root, source, fleet });
   const paint = (): void => pill.set(pillState(source.facts(), fleet.settled()));
@@ -96,6 +94,6 @@ export async function mountVersionArea(core: CoreScreen, source: VersionSource):
   };
 }
 
-/** The product's mount: the facts the build itself has (see `createProductVersionSource` for what is stubbed until #211). */
+/** The product's mount: the facts the build itself has (plus this server's update state once the live Updates source is registered). */
 export const mountProductVersionArea = (core: CoreScreen, input: ProductSourceInput): Promise<VersionArea | undefined> =>
   mountVersionArea(core, createProductVersionSource(input));

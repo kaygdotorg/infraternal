@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createUpdatesDouble, UPDATE_SCENARIOS } from "../mock/updates/double";
-import { ago, buttons, historyLine, inboxTitle, rollbackConfirm, statusLine } from "./words";
+import { ago, buttons, edgeConfirm, historyLine, inboxTitle, rollbackConfirm, statusLine } from "./words";
 
 const NOW = Date.UTC(2026, 10, 21, 12, 0, 0);
 
@@ -44,13 +44,26 @@ describe("Updates words", () => {
   });
 
   test("buttons: nothing is pressable while work runs or updates are off; Update now only when one is staged", () => {
-    const rollback = { available: true as const, to: "0.4.1", lost: "x" };
-    expect(buttons({ state: { kind: "current" }, rollback })).toEqual({ check: true, apply: false, rollback: true });
-    expect(buttons({ state: { kind: "ready", version: "1" }, rollback })).toEqual({ check: true, apply: true, rollback: true });
-    expect(buttons({ state: { kind: "checking" }, rollback })).toEqual({ check: false, apply: false, rollback: false });
-    expect(buttons({ state: { kind: "applying", version: "1", phase: "checking" }, rollback })).toEqual({ check: false, apply: false, rollback: false });
-    expect(buttons({ state: { kind: "off", reason: "x" }, rollback })).toEqual({ check: false, apply: false, rollback: false });
-    expect(buttons({ state: { kind: "current" }, rollback: { available: false } }).rollback).toBe(false);
+    const rollback = { available: true as const, to: "0.4.1", lost: "x", since: NOW - 3_600_000 };
+    expect(buttons({ state: { kind: "current" }, rollback }, NOW)).toEqual({ check: true, apply: false, rollback: true });
+    expect(buttons({ state: { kind: "ready", version: "1" }, rollback }, NOW)).toEqual({ check: true, apply: true, rollback: true });
+    expect(buttons({ state: { kind: "checking" }, rollback }, NOW)).toEqual({ check: false, apply: false, rollback: false });
+    expect(buttons({ state: { kind: "applying", version: "1", phase: "checking" }, rollback }, NOW)).toEqual({ check: false, apply: false, rollback: false });
+    expect(buttons({ state: { kind: "off", reason: "x" }, rollback }, NOW)).toEqual({ check: false, apply: false, rollback: false });
+    expect(buttons({ state: { kind: "current" }, rollback: { available: false } }, NOW).rollback).toBe(false);
+  });
+
+  test("Roll back is offered for 24 hours after the install and not a minute longer", () => {
+    const at = (hoursAgo: number, extra = 0) => ({ available: true as const, to: "0.4.1", lost: "x", since: NOW - hoursAgo * 3_600_000 - extra });
+    expect(buttons({ state: { kind: "current" }, rollback: at(23.9) }, NOW).rollback).toBe(true);
+    expect(buttons({ state: { kind: "current" }, rollback: at(24, 1) }, NOW).rollback).toBe(false);
+    expect(buttons({ state: { kind: "current" }, rollback: at(30) }, NOW).rollback).toBe(false);
+  });
+
+  test("switching to Edge asks first and names the risk", () => {
+    const ask = edgeConfirm();
+    expect(ask.effect).toContain("may break");
+    expect([ask.confirmLabel, ask.cancelLabel]).toEqual(["Use Edge", "Stay on Stable"]);
   });
 });
 

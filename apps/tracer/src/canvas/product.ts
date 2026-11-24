@@ -307,22 +307,24 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     void loadAccount().catch(() => { /* the rows stay hidden; opening Settings again retries */ });
     return [shellRow(0, "passkeys", "Passkeys"), shellRow(1, "recovery", "Recovery key")];
   } : undefined;
+  /** Signs in with a passkey (the server wants a recent one for an owner change) and waits until the reconnected socket carries it. */
+  const confirmAndReconnect = async (): Promise<void> => {
+    const [{ loginWithPasskey }, { deviceName }] = await Promise.all([onDemand(() => import("../auth")), onDemand(() => import("../onboarding"))]);
+    await loginWithPasskey(deviceName());
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => { off(); reject(new Error("no reconnect")); }, 8000);
+      let off = (): void => undefined;
+      let dropped = false;
+      off = connection.onWelcome(() => { if (!dropped) return; window.clearTimeout(timer); off(); resolve(); });
+      dropped = true;
+      connection.forceDrop();
+    });
+  };
   // App Windows is the server's `desktop` feature switch (#146): a refusal asks for the passkey once, then reconnects so
   // the socket carries the fresh sign-in the server wants for an owner switch.
   const productRows = createProductRows(() => true, {
     call: (actionId, input) => connection.call(actionId, input),
-    confirmAndReconnect: async () => {
-      const [{ loginWithPasskey }, { deviceName }] = await Promise.all([onDemand(() => import("../auth")), onDemand(() => import("../onboarding"))]);
-      await loginWithPasskey(deviceName());
-      await new Promise<void>((resolve, reject) => {
-        const timer = window.setTimeout(() => { off(); reject(new Error("no reconnect")); }, 8000);
-        let off = (): void => undefined;
-        let dropped = false;
-        off = connection.onWelcome(() => { if (!dropped) return; window.clearTimeout(timer); off(); resolve(); });
-        dropped = true;
-        connection.forceDrop();
-      });
-    },
+    confirmAndReconnect: () => confirmAndReconnect(),
   });
   // Desktop streams and their icon calls have their own lazy socket. A video
   // frame already queued in TCP cannot hold a terminal reply behind it.
@@ -432,6 +434,22 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     .then((m) => m.mountProductVersionArea(core, { version: build.short, commit: build.full, hosts: () => sessions.hosts().map((host) => host.name) }))
     .then((area) => { if (disposed) area?.dispose(); else versionArea = area; })
     .catch(() => { /* the pill is news, not a dependency */ });
+  // The owner's Updates controls (#211 S5): the live source over the same connection, once the page is idle. The passkey ask is the
+  // one App Windows uses (a sign-in older than 15 minutes is refused by the server), so both share it.
+  let stopUpdates: (() => void) | undefined;
+  whenIdle(() => {
+    void onDemand(() => import("./updates/mount.on-demand")).then((m) => {
+      if (disposed) return;
+      stopUpdates = m.mountProductUpdates(core, {
+        onWelcome: (run) => connection.onWelcome(run),
+        link: {
+          call: (actionId, input) => connection.call(actionId, input),
+          subscribe: (filter, onEvent, onOpen) => connection.subscribe(filter, onEvent, onOpen),
+          confirmAndReconnect: () => confirmAndReconnect(),
+        },
+      });
+    }).catch(() => undefined);
+  }, 1500);
   // The person's card (D283) hangs on the sidebar's person pill. Its code is its own chunk, fetched once the canvas is up.
   let account: import("./account/mount.on-demand").AccountMount | undefined;
   if (person) {
@@ -465,6 +483,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     canvas, sessions, connection,
     dispose() {
       versionArea?.dispose();
+      stopUpdates?.();
       account?.dispose();
       canvas.flush();
       offLook(); offLayout(); offPending?.(); pendingWatch.dispose(); pendingNotice.dispose(); disposeTakeover();

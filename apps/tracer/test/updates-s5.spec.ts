@@ -1,7 +1,7 @@
 /**
  * The owner's Updates controls (#211, S5; mockup, D162) on the preview build, against the scripted double
  * (`?mock=1&proto=clusters&scene=3&updates=1`): the Settings › Machines › Updates window in every state, the Inbox item
- * "Update ready · <version>", the toasts, and what Update now and Roll back do. Alignment is measured (±0.5 px, the owner's rule):
+ * "Update ready · <version>" (and no toast at all), and what Update now and Roll back do. Alignment is measured (±0.5 px, the owner's rule):
  * the window's rows, buttons and history share one left edge.
  *
  * Captures: with `INFRATERNAL_EVIDENCE_DIR` set, each state is written at 1440x900 (DPR 2) and 393x852 (DPR 3) in ink and paper.
@@ -16,7 +16,7 @@ const SIZES = [
   ["desktop", { width: 1440, height: 900 }, 2],
   ["phone", { width: 393, height: 852 }, 3],
 ] as const;
-const STATES = ["current", "checking", "downloading", "ready", "switching", "trial", "undone-health", "undone-owner", "failed", "offline", "no-release", "never", "edge", "off", "long"] as const;
+const STATES = ["current", "checking", "downloading", "ready", "switching", "trial", "undone-health", "undone-owner", "failed", "offline", "no-release", "never", "edge", "aged", "off", "long"] as const;
 const WINDOW = '[data-window-id="s-machines-updates"]';
 
 async function open(context: BrowserContext, theme: string, phone: boolean): Promise<Page> {
@@ -76,11 +76,16 @@ test.describe("behaviour", () => {
     // The buttons are a grid of equal cells, so a wrapped row starts on the same edge as the first.
     const buttonLefts = await win.locator(".cl-up-button").evaluateAll((bs) => bs.map((b) => b.getBoundingClientRect().left));
     expect(buttonLefts[0]).toBeGreaterThan(0);
-    // The staged version raised the Inbox item and a toast.
-    await expect(page.locator(".ui-toast, [role=status]").filter({ hasText: "Update ready · 0.5.0" }).first()).toBeVisible();
+    // The staged version raises the Inbox item and no toast: an update never raises one (owner, 2026-11-22).
+    await expect(page.locator(".ui-toast")).toHaveCount(0);
     await expect(win.getByRole("button", { name: "Update now" })).toBeEnabled();
     await expect(win.getByRole("button", { name: "Roll back" })).toBeEnabled();
+    // The status marks are as tall as the text beside them.
+    const mark = await win.locator(".ui-kv-mark").first().boundingBox();
+    const text = await win.locator(".ui-kv-value").first().evaluate((n) => parseFloat(getComputedStyle(n).fontSize));
+    expect(Math.abs(mark!.height - text)).toBeLessThanOrEqual(0.5);
     await win.getByRole("button", { name: "Update now" }).click();
+    await expect(page.locator(".ui-toast")).toHaveCount(0);
     await expect(win.locator(".ui-kv-value", { hasText: "Installing 0.5.0…" })).toBeVisible();
     await expect(win.locator(".ui-kv-value", { hasText: "Up to date" })).toBeVisible({ timeout: 10_000 });
     await expect(win.locator(".ui-kv-value", { hasText: "0.5.0 · stable" })).toBeVisible();
@@ -95,13 +100,45 @@ test.describe("behaviour", () => {
     await context.close();
   });
 
-  test("a refusal is said as a toast and changes nothing", async ({ browser }) => {
+  test("the channel row has no Default line, and switching to Edge asks first, naming the risk", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await open(context, "ink", false);
+    await scenario(page, "current");
+    const win = page.locator(WINDOW);
+    const channel = win.locator("[data-setting=update-channel]");
+    await expect(channel.locator(".ui-setting-caption")).toHaveCount(0);
+    await expect(win.locator("[data-setting=update-quiet]").locator(".ui-setting-caption")).toHaveCount(1);
+    const chosen = () => page.evaluate(() => (window as unknown as { __updatesDouble: { facts(): { channel: string } } }).__updatesDouble.facts().channel);
+    await channel.getByRole("tab", { name: "Edge" }).click();
+    const ask = page.locator(".ui-confirm-tip").filter({ hasText: "Switch to Edge?" });
+    await expect(ask).toContainText("may break");
+    await ask.getByRole("button", { name: "Stay on Stable" }).click();
+    await expect(channel.getByRole("tab", { name: "Stable" })).toHaveAttribute("aria-selected", "true");
+    expect(await chosen()).toBe("stable");
+    await channel.getByRole("tab", { name: "Edge" }).click();
+    await page.locator(".ui-confirm-tip").getByRole("button", { name: "Use Edge" }).click();
+    await expect.poll(chosen).toBe("edge");
+    await context.close();
+  });
+
+  test("Roll back is offered for a day after the install and not after", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await open(context, "ink", false);
+    await scenario(page, "current");
+    await expect(page.locator(WINDOW).getByRole("button", { name: "Roll back" })).toBeEnabled();
+    await scenario(page, "aged");
+    await expect(page.locator(WINDOW).getByRole("button", { name: "Roll back" })).toBeDisabled();
+    await context.close();
+  });
+
+  test("a refusal is said under the buttons, never as a toast, and changes nothing", async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await open(context, "ink", false);
     await scenario(page, "current");
     await page.evaluate(() => (window as unknown as { __updatesDouble: { refuseNext(s: string): void } }).__updatesDouble.refuseNext("Confirm with your passkey first."));
     await page.locator(WINDOW).getByRole("button", { name: "Check now" }).click();
-    await expect(page.locator("[role=status]").filter({ hasText: "Confirm with your passkey first." }).first()).toBeVisible();
+    await expect(page.locator(`${WINDOW} .cl-up-refusal`)).toHaveText("Confirm with your passkey first.");
+    await expect(page.locator(".ui-toast")).toHaveCount(0);
     await context.close();
   });
 });

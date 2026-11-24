@@ -1,6 +1,6 @@
 /**
  * The test double's Updates controls (#211, S5; `?mock=1&proto=clusters&updates=1`): the Settings › Machines › Updates window,
- * the Inbox item and the toasts, on a source that holds one scripted state (double.ts). The palette has a "Mockup: updates – …"
+ * the Inbox item, on a source that holds one scripted state (double.ts). The palette has a "Mockup: updates – …"
  * row for each state, so every message can be reached and photographed. Nothing here is real and nothing is saved. The page
  * does not reload after an install; it counts the reloads it would have done in `window.__updatesReloads` for the specs.
  */
@@ -23,8 +23,8 @@ export function createUpdatesMock(core: CoreScreen): UpdatesMock {
   w.__updatesReloads = 0;
   w.__updatesDouble = double;
   setUpdatesSource(double);
-  const notices = (announceReady: boolean): (() => void) => mountUpdateNotices(core, double, { announceReady, idle: () => true, reload: () => { w.__updatesReloads = (w.__updatesReloads ?? 0) + 1; } });
-  let stopNotices = notices(false);
+  const notices = (): (() => void) => mountUpdateNotices(core, double, { idle: () => true, reload: () => { w.__updatesReloads = (w.__updatesReloads ?? 0) + 1; } });
+  let stopNotices = notices();
   return {
     double,
     entries: () => [
@@ -32,10 +32,10 @@ export function createUpdatesMock(core: CoreScreen): UpdatesMock {
       ...UPDATE_SCENARIOS.map((s): PaletteEntry => ({ group: "Mockup", glyph: "◇", label: `Mockup: updates – ${s.label}`, hint: s.hint, action: `proto:upd:${s.id}` })),
     ],
     run(id) {
-      // The notices start again on the new state, so a scenario shows its own toast and Inbox item and not a change from the last one.
+      // The notices start again on the new state, so a scenario shows its own Inbox item and not a change from the last one.
       stopNotices();
       double.setScenario(id);
-      stopNotices = notices(true);
+      stopNotices = notices();
       window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:machines.updates", source: "keyboard" } }));
     },
     dispose() { stopNotices(); setUpdatesSource(undefined); delete w.__updatesDouble; },

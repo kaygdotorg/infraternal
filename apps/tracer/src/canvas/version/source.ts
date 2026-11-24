@@ -7,6 +7,7 @@
  * "Infraternal agent" always means the host daemon. A host's version is `undefined` when it is not known (the host has not
  * reported one); an unknown version is never shown as a number and never counts as behind.
  */
+import { onUpdatesSource, updatesSource } from "../updates/source";
 
 export type Tier = "community" | "homelab" | "team" | "enterprise";
 
@@ -80,14 +81,26 @@ export interface ProductSourceInput {
 }
 
 /**
- * The product's source today.
- *
- * TODO(#211): automatic updates (D251) are backend only so far: no update check, no per-host agent version and no
- * licence reach the web app. Until its state and events exist, this source answers from what the build itself knows: the
- * build's id, the hosts by name (their versions unknown), and the Community edition (the build has no `ee/` code). `check`
- * says it cannot, which the panel tells in plain words ("Couldn't check"), and there is no `proceed`. When #211 lands,
- * only this function changes: `check` calls the server (which asks every host together), `proceed` starts the update, and
- * `facts` reads the retained update state; the pill, the panel and the palette stay as they are.
+ * What the pill and the panel know about this server's own update, taken from the owner's Updates source (#211 S5, `canvas/updates`): a staged
+ * version is "available", a clean check is "current", a failed or unreachable check says why, and anything else (not asked yet, work in
+ * progress, off) is unknown. The infraternal agents on hosts are not reported to the web app yet (S7), so only the server is ever a target.
+ */
+function serverUpdate(): VersionFacts["updates"] {
+  const facts = updatesSource()?.facts();
+  if (!facts) return { kind: "unknown" };
+  const { state } = facts;
+  switch (state.kind) {
+    case "ready": return { kind: "available", targets: [{ name: "This server", server: true, from: facts.running, to: state.version }] };
+    case "current": return { kind: "current" };
+    case "failed": case "offline": return { kind: "failed", reason: state.reason };
+    default: return { kind: "unknown" };
+  }
+}
+
+/**
+ * The product's source: the build's own id, the hosts by name (their versions unknown), the Community edition (the build has no `ee/` code),
+ * and, once the live Updates source is registered (`canvas/updates/live.ts`), this server's update state. Until then `check` says it cannot,
+ * which the panel tells in plain words ("Couldn't check"), and there is no `proceed`. The host agents' update (S7) is not here yet.
  */
 export function createProductVersionSource(input: ProductSourceInput): VersionSource {
   return {
@@ -96,9 +109,24 @@ export function createProductVersionSource(input: ProductSourceInput): VersionSo
       copy: input.commit,
       hosts: input.hosts().map((name) => ({ name, version: undefined })),
       licence: { tier: "community" },
-      updates: { kind: "unknown" },
+      updates: serverUpdate(),
     }),
-    check: () => Promise.reject(new UpdatesUnavailable()),
-    onChange: () => () => undefined,
+    async check() {
+      const source = updatesSource();
+      if (!source) throw new UpdatesUnavailable();
+      await source.check();
+      const answer = serverUpdate();
+      return answer.kind === "unknown" ? { kind: "current" } : answer;
+    },
+    async proceed() {
+      const source = updatesSource();
+      if (!source) throw new UpdatesUnavailable();
+      await source.apply();
+    },
+    onChange(run) {
+      let stop = updatesSource()?.onChange(run);
+      const stopWatching = onUpdatesSource(() => { stop?.(); stop = updatesSource()?.onChange(run); run(); });
+      return () => { stop?.(); stopWatching(); };
+    },
   };
 }
