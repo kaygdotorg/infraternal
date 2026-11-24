@@ -341,7 +341,7 @@ fn a_peer_reaches_a_lan_behind_a_router_only_through_an_approved_route() {
     // A new namespace may inherit the host's IPv4 forwarding (`devconf_inherit_init_net`); start
     // the router with it off, so the test proves it is turned on and back off again.
     in_ns(NS_B, || {
-        fs::write("/proc/sys/net/ipv4/ip_forward", "0").unwrap()
+        fs::write("/proc/sys/net/ipv4/ip_forward", "0").unwrap();
     });
     assert_eq!(
         ip_forward(NS_B),
