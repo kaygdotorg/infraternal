@@ -4,14 +4,19 @@ set -euo pipefail
 
 readonly upstream_url="https://github.com/coder/ghostty-web.git"
 readonly upstream_commit="835eb2749f640a139693bb64fd67de3c1b50a598"
-# The Ghostty core is NOT the submodule upstream records (5714ed07, 2025-12-01). It
-# is the newest core that upstream's WASM API still fits (wasm-api.patch): the
-# commit before Ghostty added its own, incompatible terminal C API (2026-03-13).
-readonly ghostty_url="https://github.com/ghostty-org/ghostty.git"
-readonly ghostty_commit="e75f8956c576ea8acf6ee4e70d45f918738e7512"
-readonly required_bun="1.4.2"
-readonly required_zig="0.15.2"
+# The Ghostty core is NOT the submodule upstream records (5714ed07, 2025-12-01). It is
+# the signed libghostty-vt release that the native engine uses too: the same source
+# and dependency archives, the same pinned SHA-256 values (scripts/libghostty-vt.sha256)
+# and the same minisign key as scripts/build-vt, so both engines move together.
+readonly vt_version="1.0.2"
+readonly minisign_public_key="RWQlAjJC23149WL2sEpT/l0QKy7hMIFhYdQOFy0Z7z7PbneUgvlsnYcV"
+# The libghostty-vt features the page needs: key encoding only. Everything else is
+# compiled out (about 250 KB of WebAssembly); the page never calls it.
+readonly vt_features="-all,+input_encode"
+readonly required_bun="1.4.4"
+readonly required_zig="0.17.1"
 readonly vendor_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly repo_root="$(cd -- "${vendor_dir}/../../../.." && pwd)"
 
 mode="check"
 if [[ $# -gt 1 ]]; then
@@ -30,13 +35,19 @@ if [[ $# -eq 1 ]]; then
 fi
 
 bun_bin="${BUN:-bun}"
+# The development shell (nix develop) exports the pinned Zig as a folder, not on PATH.
 zig_bin="${ZIG:-zig}"
+if [[ -z "${ZIG:-}" && -n "${INFRATERNAL_ZIG:-}" ]]; then zig_bin="${INFRATERNAL_ZIG}/zig"; fi
 if ! command -v "$bun_bin" >/dev/null 2>&1; then
     printf 'required build tool is missing: bun %s\n' "$required_bun" >&2
     exit 1
 fi
 if ! command -v "$zig_bin" >/dev/null 2>&1; then
     printf 'required build tool is missing: zig %s\n' "$required_zig" >&2
+    exit 1
+fi
+if ! command -v minisign >/dev/null 2>&1; then
+    printf 'required build tool is missing: minisign (it verifies the libghostty-vt release)\n' >&2
     exit 1
 fi
 
@@ -63,9 +74,7 @@ if [[ "$(git -C "$source_dir" rev-parse HEAD)" != "$upstream_commit" ]]; then
     exit 1
 fi
 
-# Upstream's WASM API patch (with our theme API folded in), rebased onto the newer
-# Ghostty core, replaces the file that upstream's build-wasm.sh applies to the core.
-cp -- "$vendor_dir/wasm-api.patch" "$source_dir/patches/ghostty-wasm-api.patch"
+# TypeScript patches apply to the ghostty-web checkout, in this order.
 # This local bridge patch (TypeScript side) sets theme colors directly in the terminal.
 git -C "$source_dir" apply "$vendor_dir/local-theme-api.patch"
 # Apply font geometry after the theme renderer changes so both fixes build together.
@@ -76,33 +85,54 @@ git -C "$source_dir" apply "$vendor_dir/link-underline.patch"
 git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
 # Control boundaries share one scoped input copy and one set of write effects.
 git -C "$source_dir" apply "$vendor_dir/buffered-writes.patch"
+# The engine calls the page makes are named ghostty_web_*; last, so the patches above still read as upstream.
+git -C "$source_dir" apply "$vendor_dir/web-api-names.patch"
 
-# Fetch the Ghostty core by its immutable commit instead of the recorded submodule.
-# build-wasm.sh sees ghostty/.git and skips its own submodule initialisation.
-git init --quiet "$source_dir/ghostty"
-git -C "$source_dir/ghostty" remote add origin "$ghostty_url"
-git -C "$source_dir/ghostty" fetch --quiet --depth=1 origin "$ghostty_commit"
-git -C "$source_dir/ghostty" checkout --quiet --detach FETCH_HEAD
-if [[ "$(git -C "$source_dir/ghostty" rev-parse HEAD)" != "$ghostty_commit" ]]; then
-    printf 'Ghostty core does not match its pinned commit\n' >&2
-    exit 1
-fi
-
-# Ghostty zeroes page memory only in safe builds and trusts the OS otherwise. The
-# browser build is freestanding and pools pages inside one shared WebAssembly
-# instance, so a new terminal would inherit an earlier terminal's screen. This
-# patch is inside the Ghostty core, so it applies after the core is checked out.
-git -C "$source_dir/ghostty" apply "$vendor_dir/zero-pages.patch"
+# The core: the signed libghostty-vt release, checked against the same pinned hashes and
+# key as scripts/build-vt, then built offline from its own dependency archive.
+fetch_release() {
+    local name="$1" expected actual
+    expected="$(awk -v file="$name" '$2 == file { print $1 }' "$repo_root/scripts/libghostty-vt.sha256")"
+    [[ -n "$expected" ]] || { printf 'no pinned checksum for %s\n' "$name" >&2; exit 1; }
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+        "https://release.files.ghostty.org/libghostty-vt/${vt_version}/${name}" -o "${build_dir}/${name}"
+    actual="$(sha256sum "${build_dir}/${name}")"
+    [[ "${actual%% *}" == "$expected" ]] || { printf '%s does not match its pinned SHA-256\n' "$name" >&2; exit 1; }
+}
+core_source="libghostty-vt-${vt_version}.tar.gz"
+core_deps="libghostty-vt-${vt_version}-deps.tar.gz"
+for asset in "$core_source" "$core_source.minisig" "$core_deps" "$core_deps.minisig"; do fetch_release "$asset"; done
+minisign -V -P "$minisign_public_key" -m "${build_dir}/${core_source}" -x "${build_dir}/${core_source}.minisig" >/dev/null
+minisign -V -P "$minisign_public_key" -m "${build_dir}/${core_deps}" -x "${build_dir}/${core_deps}.minisig" >/dev/null
+core_dir="${source_dir}/ghostty"
+deps_dir="${build_dir}/deps"
+mkdir -p "$core_dir" "$deps_dir"
+tar -xzf "${build_dir}/${core_source}" --strip-components=1 -C "$core_dir"
+tar -xzf "${build_dir}/${core_deps}" --strip-components=1 -C "$deps_dir"
+# Our engine entry points are one added file plus one line in the library root.
+cp -- "$vendor_dir/web-engine.zig" "$core_dir/src/terminal/c/web.zig"
+# A repository of its own, so git apply resolves paths from the core's root, not ghostty-web's.
+git init --quiet "$core_dir"
+git -C "$core_dir" apply "$vendor_dir/wasm-core.patch"
 
 zig_path="$(command -v "$zig_bin")"
 export PATH="$(dirname -- "$zig_path"):$PATH"
 (
     cd -- "$source_dir"
     "$bun_bin" install --frozen-lockfile
-    # The upstream aggregate build invokes its mutable prebuild installer. Run
-    # its locked constituent build steps so this exact source lock drives Vite.
+    # The upstream aggregate build invokes its mutable prebuild installer, and its
+    # build-wasm.sh patches a git submodule. Run the locked constituent steps and our
+    # own offline Zig build instead (--system keeps it to the signed dependency archive).
     "$bun_bin" run clean
-    "$bun_bin" run build:wasm
+    (
+        cd -- "$core_dir"
+        ZIG_GLOBAL_CACHE_DIR="${build_dir}/zig-global-cache" "$zig_bin" build \
+            -Demit-lib-vt=true -Demit-xcframework=false \
+            -Dtarget=wasm32-freestanding -Doptimize=ReleaseSmall \
+            -Dvt-features="$vt_features" \
+            --system "$deps_dir" --cache-dir "${build_dir}/zig-cache"
+        cp -- zig-out/bin/ghostty-vt.wasm "${source_dir}/ghostty-vt.wasm"
+    )
     "$bun_bin" run build:lib
     "$bun_bin" run build:wasm-copy
 )
@@ -132,6 +162,6 @@ fi
 
 action="reproduced"
 if [[ "$mode" == "update" ]]; then action="updated"; fi
-printf '%s ghostty-web %s with Ghostty %s (Bun %s, Zig %s)\n' \
+printf '%s ghostty-web %s with libghostty-vt %s (Bun %s, Zig %s)\n' \
     "$action" \
-    "${upstream_commit:0:7}" "${ghostty_commit:0:7}" "$actual_bun" "$actual_zig"
+    "${upstream_commit:0:7}" "$vt_version" "$actual_bun" "$actual_zig"

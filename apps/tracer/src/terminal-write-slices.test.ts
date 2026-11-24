@@ -94,7 +94,7 @@ test("allocation refusal never writes or frees unowned memory", () => {
     Reflect.set(terminal, "exports", {
       ...native,
       ghostty_wasm_alloc_u8_array: () => 0,
-      ghostty_terminal_write: () => { writes++; },
+      ghostty_web_terminal_write: () => { writes++; },
       ghostty_wasm_free_u8_array: () => { frees++; },
     });
     expect(() => terminal.writeSlices(encoder.encode("abc"), (write) => write(3))).toThrow("allocation failed");
