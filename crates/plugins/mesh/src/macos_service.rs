@@ -585,11 +585,13 @@ fn launchctl(arguments: &[String]) -> io::Result<Output> {
     Command::new(LAUNCHCTL).args(arguments).output()
 }
 
+/// Runs `launchctl` and turns a non-zero exit status into an I/O error.
 fn launchctl_checked(arguments: &[String]) -> io::Result<()> {
-    checked_launchctl(launchctl(arguments)?)
+    checked_launchctl(&launchctl(arguments)?)
 }
 
-fn checked_launchctl(output: Output) -> io::Result<()> {
+/// Converts a `launchctl` command result into `Ok(())` when it succeeded.
+fn checked_launchctl(output: &Output) -> io::Result<()> {
     if output.status.success() {
         Ok(())
     } else {
@@ -723,7 +725,11 @@ fn xml_escape(value: &str) -> String {
 /// Exercise launchd arguments, privileged checks and installation receipts.
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "launchd unit tests panic on unexpected plist or command failures."
+    )]
     use super::{
         CURRENT, DATA_DIRECTORY, LABEL, LEGACY, MACHINE_BINARY, STATE_DIRECTORY, checked_launchctl,
         join_state_to_forget, render_plist, render_plist_for, trusted_binary_metadata,
@@ -800,6 +806,7 @@ mod tests {
     }
     use std::{os::unix::process::ExitStatusExt, process::Output};
 
+    /// A non-zero `launchctl` exit status must be reported as an I/O error.
     #[test]
     fn launchctl_nonzero_exit_is_not_reported_as_success() {
         let output = Output {
@@ -808,7 +815,7 @@ mod tests {
             stderr: b"launchctl refused the operation".to_vec(),
         };
         assert_eq!(
-            checked_launchctl(output)
+            checked_launchctl(&output)
                 .expect_err("failed launchctl mutation must fail")
                 .kind(),
             std::io::ErrorKind::Other

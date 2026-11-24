@@ -77,7 +77,7 @@ fn read_macos_boot_session_uuid() -> io::Result<String> {
         libc::sysctlbyname(
             name.as_ptr(),
             std::ptr::null_mut(),
-            &mut size,
+            &raw mut size,
             std::ptr::null_mut(),
             0,
         )
@@ -97,7 +97,7 @@ fn read_macos_boot_session_uuid() -> io::Result<String> {
         libc::sysctlbyname(
             name.as_ptr(),
             bytes.as_mut_ptr().cast(),
-            &mut read_size,
+            &raw mut read_size,
             std::ptr::null_mut(),
             0,
         )
