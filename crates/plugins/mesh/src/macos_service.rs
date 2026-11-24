@@ -9,8 +9,33 @@ use std::{
     process::{Child, Command, Output, Stdio},
 };
 
-const LABEL: &str = "org.infraternal.mesh";
-const PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
+use crate::macos_user_mode::{self as names, legacy};
+
+/// The system service's launchd label.
+pub const LABEL: &str = names::DAEMON_LABEL;
+/// The system service's property list.
+pub const PLIST: &str = names::DAEMON_PLIST;
+
+/// One launchd job and property list a root-mode install can have: the current names, or the
+/// ones a build before the move to `kayg.infraternal` wrote (#580).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Daemon {
+    /// The launchd label.
+    label: &'static str,
+    /// The property list path.
+    plist: &'static str,
+}
+
+/// The names this build writes.
+const CURRENT: Daemon = Daemon {
+    label: LABEL,
+    plist: PLIST,
+};
+/// The names older builds wrote. They are only ever stopped and removed, never written.
+const LEGACY: Daemon = Daemon {
+    label: legacy::DAEMON_LABEL,
+    plist: legacy::DAEMON_PLIST,
+};
 const PLIST_DIRECTORY: &str = "/Library/LaunchDaemons";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SUDO: &str = "/usr/bin/sudo";
@@ -116,7 +141,7 @@ pub fn validate_installation(host: &str) -> io::Result<bool> {
     if binary != Path::new(MACHINE_BINARY) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    if !owned_machine_plist()? {
+    if owned_machine_plist()?.is_none() {
         return Err(io::ErrorKind::NotFound.into());
     }
     Ok(alias_created)
@@ -140,24 +165,30 @@ fn installed_identity(host: &str) -> io::Result<((u64, u64), bool)> {
     Ok(((metadata.dev(), metadata.ino()), alias))
 }
 
-/// Check the exact plist if it remains. A missing plist is an already retired step.
-fn owned_machine_plist() -> io::Result<bool> {
+/// Find the install's property list, under the current or the old name, and check it.
+///
+/// `None` is an already retired step. A plist that is not exactly what this code renders for
+/// the machine binary under that name is refused, so a foreign file is never adopted.
+fn owned_machine_plist() -> io::Result<Option<Daemon>> {
     ensure_plist_directory()?;
-    let plist = Path::new(PLIST);
-    match fs::symlink_metadata(plist) {
-        Ok(metadata) => require_owned_plist(&metadata)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+    for daemon in [CURRENT, LEGACY] {
+        let plist = Path::new(daemon.plist);
+        match fs::symlink_metadata(plist) {
+            Ok(metadata) => require_owned_plist(&metadata)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+        let expected = render_plist_for(daemon.label, Path::new(MACHINE_BINARY))?;
+        let mut actual = String::new();
+        File::open(plist)?
+            .take(expected.len() as u64 + 1)
+            .read_to_string(&mut actual)?;
+        if actual != expected {
+            return Err(io::ErrorKind::PermissionDenied.into());
+        }
+        return Ok(Some(daemon));
     }
-    let expected = render_plist(Path::new(MACHINE_BINARY))?;
-    let mut actual = String::new();
-    File::open(plist)?
-        .take(expected.len() as u64 + 1)
-        .read_to_string(&mut actual)?;
-    if actual != expected {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    Ok(true)
+    Ok(None)
 }
 
 /// Read alias ownership only from a receipt for the exact enrolled host.
@@ -261,7 +292,10 @@ fn remove_installation(host: &str) -> io::Result<()> {
         }
     };
     let binary = Path::new(MACHINE_BINARY);
-    if trusted_executable(binary)? != binary || (!owned_machine_plist()? && status()?.loaded) {
+    let owned = owned_machine_plist()?;
+    if trusted_executable(binary)? != binary
+        || (owned.is_none() && (status_of(CURRENT)?.loaded || status_of(LEGACY)?.loaded))
+    {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     verify()?;
@@ -269,8 +303,8 @@ fn remove_installation(host: &str) -> io::Result<()> {
     verify()?;
     remove_command_links(identity.1)?;
     verify()?;
-    if owned_machine_plist()? {
-        fs::remove_file(PLIST)?;
+    if let Some(daemon) = owned_machine_plist()? {
+        fs::remove_file(daemon.plist)?;
         File::open(PLIST_DIRECTORY)?.sync_all()?;
     }
     verify()?;
@@ -493,21 +527,38 @@ fn install(executable: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Stops the system Mesh service and removes its managed DNS resolver files.
+/// Stops the system Mesh service, under either name, and removes its managed DNS resolver files.
 fn stop() -> io::Result<()> {
     require_root()?;
     #[cfg(feature = "mesh-dns")]
     crate::dns_integration::DnsIntegration::default().remove()?;
-    let target = format!("system/{LABEL}");
+    stop_job(CURRENT)?;
+    // A job of an older build is stopped only when it is there; nothing is disabled for a
+    // label that was never installed.
+    if status_of(LEGACY)?.loaded {
+        stop_job(LEGACY)?;
+    }
+    Ok(())
+}
+
+/// Disable and unload one launchd job.
+fn stop_job(daemon: Daemon) -> io::Result<()> {
+    let target = format!("system/{}", daemon.label);
     launchctl_checked(&["disable".into(), target.clone()])?;
-    if status()?.loaded {
+    if status_of(daemon)?.loaded {
         launchctl_checked(&["bootout".into(), target])?;
     }
     Ok(())
 }
 
+/// What launchd reports for the current service name.
 fn status() -> io::Result<Status> {
-    let target = format!("system/{LABEL}");
+    status_of(CURRENT)
+}
+
+/// What launchd reports for one job.
+fn status_of(daemon: Daemon) -> io::Result<Status> {
+    let target = format!("system/{}", daemon.label);
     let output = launchctl(&["print".into(), target])?;
     if !output.status.success() {
         let reason = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
@@ -574,6 +625,7 @@ fn ensure_plist_directory() -> io::Result<()> {
     Ok(())
 }
 
+/// Write the current service's property list atomically; an identical one already there is fine.
 fn write_plist(contents: &str) -> io::Result<()> {
     let path = Path::new(PLIST);
     match fs::symlink_metadata(path) {
@@ -587,7 +639,7 @@ fn write_plist(contents: &str) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let temporary = path.with_file_name(format!("org.infraternal.mesh.{}.tmp", std::process::id()));
+    let temporary = path.with_file_name(format!("{LABEL}.{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -629,6 +681,11 @@ fn service_paths(executable: &Path) -> (&'static str, &'static str) {
 /// other class, so an 8.33 ms pacing timer fired at 34-41 ms (and 91 ms under `Background`)
 /// on a real M1, which stretched pacing, deadlines and keepalives. `Interactive` measured 10.5 ms.
 fn render_plist(executable: &Path) -> io::Result<String> {
+    render_plist_for(LABEL, executable)
+}
+
+/// [`render_plist`] under `label`, so a root-mode install of an older build can be recognised.
+fn render_plist_for(label: &str, executable: &Path) -> io::Result<String> {
     if !executable.is_absolute() {
         return Err(io::ErrorKind::InvalidInput.into());
     }
@@ -638,7 +695,7 @@ fn render_plist(executable: &Path) -> io::Result<String> {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\"><dict>\n\
-         <key>Label</key><string>{LABEL}</string>\n\
+         <key>Label</key><string>{label}</string>\n\
          <key>ProgramArguments</key><array>\n\
          <string>{executable}</string><string>agent</string><string>run</string>\n\
          <string>--data</string><string>{data}</string>\n\
@@ -668,8 +725,8 @@ fn xml_escape(value: &str) -> String {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::{
-        DATA_DIRECTORY, STATE_DIRECTORY, checked_launchctl, join_state_to_forget, render_plist,
-        trusted_binary_metadata,
+        CURRENT, DATA_DIRECTORY, LABEL, LEGACY, MACHINE_BINARY, STATE_DIRECTORY, checked_launchctl,
+        join_state_to_forget, render_plist, render_plist_for, trusted_binary_metadata,
     };
     use std::path::Path;
 
@@ -758,12 +815,13 @@ mod tests {
         );
     }
 
+    /// The property list runs the fixed root agent command line, under the current label.
     #[test]
     fn launch_daemon_uses_fixed_root_agent_arguments() {
         let plist = render_plist(Path::new("/var/lib/infraternal/bin/infraternal"))
             .expect("render launch daemon plist");
         for value in [
-            "org.infraternal.mesh",
+            "kayg.infraternal.mesh",
             "/var/lib/infraternal/bin/infraternal",
             "agent",
             "run",
@@ -776,6 +834,19 @@ mod tests {
             assert!(plist.contains(value), "missing {value:?} in {plist}");
         }
         assert!(!plist.contains("--fd"));
+    }
+
+    /// A root-mode install of a build before #580 differs from a new one only in its label, so
+    /// it is recognised (and removed) under its own name, never adopted under the new one.
+    #[test]
+    fn an_old_root_install_differs_only_in_its_label() {
+        let binary = Path::new(MACHINE_BINARY);
+        let old = render_plist_for(LEGACY.label, binary).expect("render old plist");
+        let new = render_plist(binary).expect("render new plist");
+        assert_ne!(old, new);
+        assert_eq!(old.replace(LEGACY.label, LABEL), new);
+        assert_ne!(CURRENT, LEGACY);
+        assert!(CURRENT.plist.contains(CURRENT.label) && LEGACY.plist.contains(LEGACY.label));
     }
 
     #[test]

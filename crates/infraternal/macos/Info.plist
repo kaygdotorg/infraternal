@@ -10,7 +10,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>org.infraternal.infraternal</string>
+	<string>kayg.infraternal</string>
 	<key>CFBundleName</key>
 	<string>infraternal</string>
 	<key>CFBundleDisplayName</key>

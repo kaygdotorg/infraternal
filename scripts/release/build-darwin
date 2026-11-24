@@ -55,7 +55,7 @@ staging="$(mktemp -d "$(dirname -- "$output")/.build-darwin.XXXXXX")"
 trap 'rm -rf -- "$staging"' EXIT
 install -m 755 "$binary" "$staging/infraternal-aarch64-darwin"
 # Hardened runtime with no entitlements, as scripts/macos-release signs (D321).
-/usr/bin/codesign --force --sign - --identifier org.infraternal.cli --options runtime \
+/usr/bin/codesign --force --sign - --identifier kayg.infraternal --options runtime \
     "$staging/infraternal-aarch64-darwin"
 /usr/bin/codesign --verify --strict "$staging/infraternal-aarch64-darwin"
 printf '%s\n' "$version" > "$staging/VERSION"
