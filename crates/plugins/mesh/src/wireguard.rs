@@ -491,6 +491,101 @@ impl Device {
         }
         Ok(())
     }
+    /// Make the subnet routes on the mesh link exactly the reachable `networks` this machine can take
+    /// (D197 M3), and say what happened to each.
+    ///
+    /// The routes are ordinary main-table IPv4 routes on the marked mesh link, with this node's mesh
+    /// address as preferred source and the mesh route protocol, so they are told apart from the peer
+    /// host routes by their prefix (shorter than /32) and need no journal: whatever such route sits on
+    /// our link and is no longer wanted is removed, and the kernel drops them all with the link.
+    ///
+    /// A network that overlaps any other main-table route (except the default route) is left out and
+    /// reported as [`RouteState::Overlaps`]: a more specific mesh route would take over traffic this
+    /// machine already sends elsewhere, such as its own LAN. Per-network install errors are reported,
+    /// not returned, so one bad network does not hold up the others. `previous` are the networks the
+    /// last call installed: a /32 network cannot be told from a peer host route by its prefix, so it
+    /// is removed by name.
+    ///
+    /// [`RouteState::Overlaps`]: crate::subnet_routes::RouteState::Overlaps
+    /// # Errors
+    /// A missing mesh link or a failed route dump.
+    pub(crate) fn sync_network_routes(
+        networks: &[crate::policy::networks::Network],
+        previous: &[crate::policy::networks::Network],
+        source: std::net::Ipv4Addr,
+    ) -> io::Result<BTreeMap<crate::policy::networks::Network, crate::subnet_routes::RouteState>>
+    {
+        use crate::{policy::networks::Network, subnet_routes::RouteState};
+        let index = Self::active_link()?
+            .ok_or(io::ErrorKind::NotConnected)?
+            .ifindex;
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        let mut ours: BTreeSet<Network> = previous.iter().copied().collect();
+        let mut foreign = Vec::new();
+        let dump = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        for reply in socket.request(26, 0x300, &dump)? {
+            let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+            if header[0] != 2 {
+                continue;
+            }
+            let mut destination = std::net::Ipv4Addr::UNSPECIFIED;
+            let mut interface = None;
+            let mut table = u32::from(header[4]);
+            for field in netlink::attributes(&reply[12..])? {
+                match field.kind {
+                    1 if field.payload.len() == 4 => {
+                        destination = std::net::Ipv4Addr::new(
+                            field.payload[0],
+                            field.payload[1],
+                            field.payload[2],
+                            field.payload[3],
+                        );
+                    }
+                    4 => interface = Some(netlink::u32_at(field.payload, 0)?),
+                    15 => table = netlink::u32_at(field.payload, 0)?,
+                    _ => {}
+                }
+            }
+            if table != 254 || header[1] == 0 {
+                continue;
+            }
+            let Ok(network) = Network::new(destination.into(), header[1]) else {
+                continue;
+            };
+            if interface == Some(index) {
+                if header[5] == RTPROT_INFRATERNAL && header[1] < 32 {
+                    ours.insert(network);
+                }
+            } else {
+                foreign.push(network);
+            }
+        }
+        let mut states = BTreeMap::new();
+        for network in networks {
+            if let Some(other) = foreign.iter().find(|other| other.overlaps(*network)) {
+                states.insert(*network, RouteState::Overlaps(*other));
+                continue;
+            }
+            let payload = network_route_payload(*network, index, source)?;
+            let state = match socket.request(24, 4 | 0x100 | 0x400, &payload) {
+                Ok(_) => RouteState::Installed,
+                Err(error) => RouteState::Failed(error.to_string()),
+            };
+            states.insert(*network, state);
+        }
+        for network in ours {
+            if matches!(states.get(&network), Some(RouteState::Installed)) {
+                continue;
+            }
+            let payload = network_route_payload(network, index, source)?;
+            if let Err(error) = socket.request(25, 4, &payload)
+                && !matches!(error.raw_os_error(), Some(2 | 3))
+            {
+                return Err(error);
+            }
+        }
+        Ok(states)
+    }
     /// Refuse host-route overlap on another interface before touching addresses or packet policy [165].
     /// # Errors
     /// Reports malformed route dumps or an existing route covering a proposed address.
@@ -1985,6 +2080,39 @@ fn interface_ip(family: u8, bytes: &[u8]) -> Option<IpAddr> {
         10 => <[u8; 16]>::try_from(bytes).ok().map(IpAddr::from),
         _ => None,
     }
+}
+
+/// Builds the payload of one subnet route (D197 M3): `network` through the mesh link `interface_index`
+/// in the main table, link scope, the mesh route protocol, and `source` (this node's mesh IPv4) as the
+/// preferred source, so connections to the network leave with the address the router's peers know.
+/// # Errors
+/// Only attribute encoding errors; IPv6 networks are never routed in this slice.
+fn network_route_payload(
+    network: crate::policy::networks::Network,
+    interface_index: u32,
+    source: std::net::Ipv4Addr,
+) -> io::Result<Vec<u8>> {
+    let std::net::IpAddr::V4(destination) = network.address() else {
+        return Err(io::ErrorKind::InvalidInput.into());
+    };
+    let mut payload = vec![
+        2,
+        network.prefix(),
+        0,
+        0,
+        254,
+        RTPROT_INFRATERNAL,
+        253,
+        1,
+        0,
+        0,
+        0,
+        0,
+    ];
+    attribute(&mut payload, 1, &destination.octets())?;
+    attribute(&mut payload, 4, &interface_index.to_ne_bytes())?;
+    attribute(&mut payload, 7, &source.octets())?;
+    Ok(payload)
 }
 
 /// Builds the exact host-route payload used for installing, removing, or repairing a peer route.

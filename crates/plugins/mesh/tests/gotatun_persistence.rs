@@ -128,6 +128,7 @@ fn snapshot_with_endpoint(
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         merged: BTreeMap::new(),

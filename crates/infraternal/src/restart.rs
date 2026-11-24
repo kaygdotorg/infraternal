@@ -138,8 +138,11 @@ impl Control {
             if matches!(request, ControlRequest::Release) {
                 record_request("update", peer.as_ref(), None, "accepted");
                 let service = infraternal_server::release_control::registered(&self.data);
+                let data = self.data.clone();
                 tokio::spawn(async move {
-                    let _ = infraternal_server::release_control::answer(&mut socket, service).await;
+                    let _ =
+                        infraternal_server::release_control::answer(&mut socket, service, &data)
+                            .await;
                 });
                 continue;
             }

@@ -72,6 +72,7 @@ fn config() -> Config {
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         peer_names: BTreeMap::from([(peer, "build-01".to_owned())]),

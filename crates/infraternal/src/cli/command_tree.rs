@@ -199,6 +199,10 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
                 .position(|field| field == name)
             {
                 argument = argument.long(None::<&str>).index(index + 1);
+                // A positional list takes every remaining value: `routes advertise A B C`.
+                if schema.schema_type == JsonSchemaType::Array {
+                    argument = argument.num_args(1..);
+                }
             } else if !node.children.is_empty() && !action.input_schema.required.contains(name) {
                 // Inherited server/node coordinates work before or after an operator subcommand.
                 let mut heading = node.name.clone();

@@ -9,6 +9,7 @@ use crate::{
     address::{AddressAllocator, Route},
     model::{MeshError, MeshSettings, Node, NodeId},
     names::NameTable,
+    networks::ApprovedNetwork,
     rules::Arrow,
     view::PeerKeys,
 };
@@ -39,6 +40,11 @@ pub struct CoordinatorCheckpoint {
     pub desired_versions: BTreeMap<NodeId, u64>,
     /// The coordinator-wide policy version counter. It only grows.
     pub generation: u64,
+    /// Approved subnet routes (D197 M3). Restored after the members and before the rules, and
+    /// checked again on restore: a saved approval that now overlaps another or names a missing
+    /// router refuses the whole checkpoint. Absent in checkpoints written before subnet routes.
+    #[serde(default)]
+    pub networks: Vec<ApprovedNetwork>,
 }
 
 /// One member in a [`CoordinatorCheckpoint`], with its key rotation state.
@@ -80,6 +86,7 @@ impl Coordinator {
                 .map(|(id, view)| (*id, view.rule_version))
                 .collect(),
             generation: self.generation,
+            networks: self.networks.values().copied().collect(),
         }
     }
     /// Rebuilds a coordinator from a saved checkpoint.
@@ -131,6 +138,7 @@ impl Coordinator {
             keys: BTreeMap::new(),
             acknowledged: BTreeMap::new(),
             generation: 0,
+            networks: BTreeMap::new(),
         };
         let mut rotations = Vec::new();
         // Server first ensures automatic server reachability when replaying other memberships.
@@ -156,6 +164,11 @@ impl Coordinator {
                 member.keys = keys;
                 member.retire_after = deadline;
             }
+        }
+        for network in checkpoint.networks {
+            state
+                .approve_network(network)
+                .map_err(|_| MeshError::InvalidCheckpoint)?;
         }
         for arrow in checkpoint.rules {
             arrow.validate()?;

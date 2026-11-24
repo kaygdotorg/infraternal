@@ -236,6 +236,24 @@ pub enum MeshError {
     /// should ask for a fresh snapshot.
     #[error("diff version does not match the local view; request a snapshot")]
     StaleDiff,
+    /// A subnet route is not a canonical network (see [`crate::networks::Network`]).
+    #[error("invalid or noncanonical network")]
+    InvalidNetwork,
+    /// A subnet route may not be routed at all, or overlaps the mesh range or an approved
+    /// network. [`crate::networks::check_routable`] and
+    /// [`crate::coordinator::Coordinator::network_refusal`] give the sentence to show.
+    #[error("network cannot be routed")]
+    UnroutableNetwork,
+    /// No approved network has that identity.
+    #[error("unknown network")]
+    UnknownNetwork,
+    /// An approved network with that identity already exists.
+    #[error("network identity already exists")]
+    DuplicateNetwork,
+    /// A rule starts at a network, or lets a network start connections back (`both_ways`).
+    /// Hosts on a routed network are not mesh members, so they can only be a target (D197 M3).
+    #[error("a network can only be the target of a one-way rule")]
+    NetworkEndpoint,
 }
 
 /// Checks a mesh host name (`host` is `true`) or DNS suffix (`host` is `false`).

@@ -76,6 +76,42 @@ pub const ACTIONS: &[ActionDef] = &[
         ],
     ),
     action(
+        "mesh.routes",
+        "Show the networks this machine routes for the mesh and the ones it reaches through it.",
+        "Empty",
+        "MeshRoutes",
+        Effect::Read,
+        &[
+            "Read the networks this machine advertises, and which ones the server approved and routes.",
+            "Read the networks behind other machines that this machine may reach, and whether each route is installed.",
+            "A network is routed only after an administrator approves it on the server.",
+        ],
+    ),
+    action(
+        "mesh.routes.advertise",
+        "Offer networks this machine can reach to the mesh, such as its LAN.",
+        r#"{"type":"object","properties":{"networks":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":64}},"required":["networks"],"additionalProperties":false}"#,
+        "MeshRoutes",
+        Effect::Write,
+        &[
+            "Run as root on the machine that can reach the network, for example infraternal mesh routes advertise 192.168.1.0/24.",
+            "Nothing is routed yet: an administrator approves each network on the server first.",
+            "Approved networks are masqueraded by default, so hosts there need no route back to the mesh.",
+            "The list is kept across restarts; run the command again to add more networks.",
+        ],
+    ),
+    action(
+        "mesh.routes.withdraw",
+        "Stop offering networks to the mesh.",
+        r#"{"type":"object","properties":{"networks":{"type":"array","items":{"type":"string"},"maxItems":64}},"additionalProperties":false}"#,
+        "MeshRoutes",
+        Effect::Write,
+        &[
+            "Name the networks to withdraw, or none to withdraw every network.",
+            "The server keeps the approval, but the network is not routed until it is advertised again.",
+        ],
+    ),
+    action(
         "mesh.down",
         "Turn the mesh off for this machine.",
         "Empty",
@@ -489,6 +525,18 @@ struct IdentityProbe {
     /// IPv4-only (#578, J1142). Asked on its own so a strict older node refuses only this probe.
     #[serde(default)]
     ipv6_state: bool,
+    /// The coordinator understands subnet routes (D197 M3) and wants the networks this node
+    /// advertises. Asked on its own so a strict older node refuses only this probe.
+    #[serde(default)]
+    routes: bool,
+}
+/// The networks named on a `mesh routes advertise` or `withdraw` command line.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RouteList {
+    /// Each network as text, such as `192.168.1.0/24`; parsed and checked by [`parse_networks`].
+    #[serde(default)]
+    networks: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -545,7 +593,15 @@ pub enum Request {
         candidates: bool,
         /// Whether the caller wants this node's IPv6 state and sends `Peer::ipv4_only`.
         ipv6_state: bool,
+        /// Whether the caller wants the advertised networks and sends `PeerPolicy::networks`.
+        routes: bool,
     },
+    /// Show advertised, served and reachable networks (D197 M3).
+    Routes,
+    /// Add networks to the advertised list (still unparsed text; see [`parse_networks`]).
+    RoutesAdvertise(Vec<String>),
+    /// Remove networks from the advertised list; empty removes them all.
+    RoutesWithdraw(Vec<String>),
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
     RotationFinish(RotationOperation),
@@ -571,7 +627,23 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 rotation_continuity: probe.rotation_continuity,
                 candidates: probe.candidates,
                 ipv6_state: probe.ipv6_state,
+                routes: probe.routes,
             })
+        }
+        "mesh.routes" => {
+            let _: Empty = parse(input)?;
+            Ok(Request::Routes)
+        }
+        "mesh.routes.advertise" => {
+            let list: RouteList = parse(input)?;
+            if list.networks.is_empty() {
+                return Err(PluginError::Rejected);
+            }
+            Ok(Request::RoutesAdvertise(list.networks))
+        }
+        "mesh.routes.withdraw" => {
+            let list: RouteList = parse(input)?;
+            Ok(Request::RoutesWithdraw(list.networks))
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
         "mesh.rotation.commit" => Ok(Request::RotationCommit(parse(input)?)),
@@ -588,6 +660,60 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
         "mesh.peers" => Ok(Request::Peers(parse(input)?)),
         _ => Err(PluginError::UnknownAction),
     }
+}
+/// Parse the networks of a `mesh routes` command, refusing anything this machine must never
+/// offer: malformed or non-canonical text, the default route, loopback and the other blocks in
+/// [`crate::policy::networks::check_routable`], IPv6 for now, more than
+/// [`MAX_ADVERTISED_NETWORKS`] networks, and two networks that
+/// overlap each other. The server checks the mesh range and other routers again on approval.
+///
+/// # Errors
+/// The plain sentence for the person at the command line, naming the first network that is
+/// refused and why.
+pub fn parse_networks(texts: &[String]) -> Result<Vec<crate::policy::networks::Network>, String> {
+    use crate::policy::networks::{Network, NetworkRefusal};
+    if texts.len() > MAX_ADVERTISED_NETWORKS {
+        return Err(format!(
+            "A machine advertises at most {MAX_ADVERTISED_NETWORKS} networks."
+        ));
+    }
+    // Only the address-block rules apply here; the mesh range is the server's to check, so a
+    // range that can never overlap a routable IPv4 network stands in for it.
+    let mut settings = crate::policy::model::MeshSettings::new([0; 5]);
+    settings.ipv4 = crate::policy::model::Ipv4Range {
+        network: std::net::Ipv4Addr::new(127, 0, 0, 0),
+        prefix: 8,
+    };
+    let mut networks: Vec<Network> = Vec::new();
+    for text in texts {
+        let network: Network = text
+            .trim()
+            .parse()
+            .map_err(|error: crate::policy::networks::ParseNetworkError| format!("{error}."))?;
+        match crate::policy::networks::check_routable(network, &settings) {
+            Ok(()) | Err(NetworkRefusal::MeshRange(..)) => {}
+            Err(refusal) => return Err(format!("{refusal}.")),
+        }
+        if let Some(other) = networks
+            .iter()
+            .find(|other| other.overlaps(network) && **other != network)
+        {
+            return Err(format!(
+                "{network} overlaps {other}; advertise one network for each address block."
+            ));
+        }
+        if !networks.contains(&network) {
+            networks.push(network);
+        }
+    }
+    Ok(networks)
+}
+/// The most networks one machine advertises; the coordinator refuses longer lists the same way.
+pub const MAX_ADVERTISED_NETWORKS: usize = 64;
+
+/// A refusal reply the local CLI shows as a failed command with `message` (D303 error codes).
+fn refusal(code: &str, message: &str) -> serde_json::Value {
+    json!({"error": {"code": code}, "message": message})
 }
 // Advertise extensions only after an explicit probe; ordinary callers receive the legacy shape.
 /// One key rotation step on this node's own interface key (#285, D166), and whether the step changed the key this
@@ -647,6 +773,8 @@ fn identity_response(
         } else {
             Vec::new()
         },
+        routes: false,
+        advertised: Vec::new(),
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
@@ -671,6 +799,13 @@ struct IdentityResponse {
     /// This node accepts `Peer::candidates` and walks them in order (#515).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     candidates: bool,
+    /// This node understands subnet routes in its snapshots and reports what it advertises
+    /// (D197 M3). Present only when the coordinator asked with `{"routes":true}`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    routes: bool,
+    /// The networks this node advertises; present only with `routes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    advertised: Vec<crate::policy::networks::Network>,
     /// This node's LAN candidates, for peers behind the same public address (#515).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lan: Vec<std::net::SocketAddr>,
@@ -747,6 +882,7 @@ impl AgentPlugin for MeshNodePlugin {
                     rotation_continuity,
                     candidates,
                     ipv6_state,
+                    routes,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -758,6 +894,8 @@ impl AgentPlugin for MeshNodePlugin {
                         // Offered only by an engine that walks the list it would receive.
                         candidates: candidates && walks_candidates(node),
                         ipv6_state,
+                        // Answered only by an engine that installs the networks it would receive.
+                        routes: routes && understands_routes(node),
                     };
                     let candidates = requested.candidates;
                     let identity =
@@ -775,8 +913,39 @@ impl AgentPlugin for MeshNodePlugin {
                         }
                         _ => Vec::new(),
                     };
-                    json!(identity_response(identity, requested, lan, ipv4_only(node)))
+                    let answer_routes = requested.routes;
+                    let mut response = identity_response(identity, requested, lan, ipv4_only(node));
+                    if answer_routes && let Some(response) = response.as_mut() {
+                        response.routes = true;
+                        response.advertised = advertised_routes(node);
+                    }
+                    json!(response)
                 }
+                Request::Routes => routes_view(node),
+                Request::RoutesAdvertise(texts) => match parse_networks(&texts) {
+                    Err(message) => refusal("usage", &message),
+                    Ok(networks) => match change_advertised(node, networks, true) {
+                        Ok(changed) => {
+                            if changed {
+                                self.changed.store(true, Ordering::Release);
+                            }
+                            routes_view(node)
+                        }
+                        Err(message) => refusal("failed", message),
+                    },
+                },
+                Request::RoutesWithdraw(texts) => match parse_networks(&texts) {
+                    Err(message) => refusal("usage", &message),
+                    Ok(networks) => match change_advertised(node, networks, false) {
+                        Ok(changed) => {
+                            if changed {
+                                self.changed.store(true, Ordering::Release);
+                            }
+                            routes_view(node)
+                        }
+                        Err(message) => refusal("failed", message),
+                    },
+                },
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|error| node_action_error(&error))?),
@@ -898,6 +1067,165 @@ impl AgentPlugin for MeshNodePlugin {
         }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
+}
+
+/// Whether this node installs and enforces the subnet routes it receives (D197 M3), so the coordinator may
+/// send them and accept its advertisements: a Linux node on the default `GotaTun` engine, whose packet filter
+/// polices routed and forwarded flows at the TUN edge (D164, D384). The kernel `WireGuard` fallback (D346)
+/// answers like an older node: it gets no networks, and its kernel table keeps refusing all forwarding.
+#[cfg(target_os = "linux")]
+fn understands_routes(node: &Node) -> bool {
+    node.engine_selection().engine == crate::node::EngineKind::GotaTun
+}
+
+/// The Mac does not install subnet routes yet; it answers like an older node and gets none.
+#[cfg(target_os = "macos")]
+const fn understands_routes(_node: &Node) -> bool {
+    false
+}
+
+/// The networks this node advertises, as the coordinator's probe reads them. A node that cannot read its
+/// list answers with none rather than an old one: nothing is routed without the node's current word.
+#[cfg(target_os = "linux")]
+fn advertised_routes(node: &Node) -> Vec<crate::policy::networks::Network> {
+    node.advertised_routes()
+        .map(|networks| networks.into_iter().collect())
+        .unwrap_or_default()
+}
+
+/// A Mac is a client of subnet routes only; it advertises none.
+#[cfg(target_os = "macos")]
+fn advertised_routes(_node: &Node) -> Vec<crate::policy::networks::Network> {
+    Vec::new()
+}
+
+/// Add (`add`) or remove networks from the advertised list; removing none removes all. Returns whether the
+/// list changed, so the coordinator is told (`mesh.changed`) only when there is news.
+#[cfg(target_os = "linux")]
+fn change_advertised(
+    node: &mut Node,
+    networks: Vec<crate::policy::networks::Network>,
+    add: bool,
+) -> Result<bool, &'static str> {
+    if add && !understands_routes(node) {
+        return Err(
+            "Subnet routes need the GotaTun mesh engine, the default; this machine runs kernel WireGuard.",
+        );
+    }
+    let before = node
+        .advertised_routes()
+        .map_err(|_| "The advertised networks could not be read from this machine's mesh state.")?;
+    let mut after = before.clone();
+    if add {
+        after.extend(networks);
+    } else if networks.is_empty() {
+        after.clear();
+    } else {
+        for network in &networks {
+            after.remove(network);
+        }
+    }
+    if after.len() > MAX_ADVERTISED_NETWORKS {
+        return Err("A machine advertises at most 64 networks.");
+    }
+    if add
+        && after
+            .iter()
+            .any(|a| after.iter().any(|b| b != a && b.overlaps(*a)))
+    {
+        return Err(
+            "A new network overlaps one this machine already advertises; withdraw the old one first.",
+        );
+    }
+    if after == before {
+        return Ok(false);
+    }
+    node.set_advertised_routes(&after)
+        .map_err(|_| "The advertised networks could not be saved; run the command as root.")?;
+    Ok(true)
+}
+
+/// Subnet routers run on Linux only in this slice (D197 M3).
+#[cfg(target_os = "macos")]
+fn change_advertised(
+    _node: &mut Node,
+    _networks: Vec<crate::policy::networks::Network>,
+    _add: bool,
+) -> Result<bool, &'static str> {
+    Err("This Mac can use subnet routes but cannot offer networks to the mesh.")
+}
+
+/// Whether the route to a network behind a router peer is installed on this Linux node.
+#[cfg(target_os = "linux")]
+fn network_route_state(
+    node: &Node,
+    network: crate::policy::networks::Network,
+) -> serde_json::Value {
+    node.network_route_state(network)
+}
+
+/// A Mac installs no subnet routes yet (and is never sent any, see [`understands_routes`]).
+#[cfg(target_os = "macos")]
+fn network_route_state(
+    _node: &Node,
+    _network: crate::policy::networks::Network,
+) -> serde_json::Value {
+    json!({"state": "not installed", "reason": "this Mac does not install subnet routes yet"})
+}
+
+/// Whether this Linux node forwards for the networks it serves.
+#[cfg(target_os = "linux")]
+fn forwarding_state(node: &Node) -> serde_json::Value {
+    node.forwarding_state()
+}
+
+/// A Mac never routes for the mesh in this slice.
+#[cfg(target_os = "macos")]
+fn forwarding_state(_node: &Node) -> serde_json::Value {
+    json!({"state": "idle"})
+}
+
+/// What `mesh routes` shows: the advertised list, the approved networks this node serves (and to how many
+/// peers), and the networks it reaches through other machines, with whether each route is installed.
+fn routes_view(node: &Node) -> serde_json::Value {
+    use std::collections::BTreeMap;
+    let mut serving: BTreeMap<String, (usize, bool)> = BTreeMap::new();
+    let mut reachable = Vec::new();
+    if let Some(config) = node.config() {
+        for (peer_id, policy) in &config.peers {
+            for served in &policy.networks.served {
+                let entry = serving
+                    .entry(served.network.to_string())
+                    .or_insert((0, !served.keep_source));
+                entry.0 += 1;
+            }
+            for through in &policy.networks.through {
+                #[cfg(feature = "mesh-dns")]
+                let name = config.peer_names.get(peer_id).cloned();
+                #[cfg(not(feature = "mesh-dns"))]
+                let name: Option<String> = None;
+                reachable.push(json!({
+                    "network": through.network,
+                    "via": name,
+                    "via_node": peer_id,
+                    "access": policy_summary(&through.outbound),
+                    "installed": network_route_state(node, through.network),
+                }));
+            }
+        }
+    }
+    let serving: Vec<_> = serving
+        .into_iter()
+        .map(|(network, (peers, masquerade))| {
+            json!({"network": network, "peers": peers, "masquerade": masquerade})
+        })
+        .collect();
+    json!({
+        "advertised": advertised_routes(node),
+        "serving": serving,
+        "forwarding": forwarding_state(node),
+        "reachable": reachable,
+    })
 }
 
 /// Whether this node runs IPv4-only because IPv6 is off on its mesh link (#578, J1142).
@@ -1348,6 +1676,7 @@ mod tests {
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
                     access_ssh: None,
+                    networks: crate::dataplane::PeerNetworks::default(),
                 },
             )]),
             merged: std::collections::BTreeMap::new(),
@@ -1483,6 +1812,7 @@ mod tests {
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
                     access_ssh: None,
+                    networks: crate::dataplane::PeerNetworks::default(),
                 },
             )]),
             merged: BTreeMap::new(),
@@ -1732,6 +2062,7 @@ mod identity_upgrade_tests {
                 rotation_continuity: true,
                 candidates: false,
                 ipv6_state: false,
+                routes: false,
             },
             Vec::new(),
             false,
@@ -1908,6 +2239,7 @@ mod peer_page_tests {
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
                             access_ssh: None,
+                            networks: crate::dataplane::PeerNetworks::default(),
                         },
                     )
                 })

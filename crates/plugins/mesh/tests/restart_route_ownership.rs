@@ -272,6 +272,7 @@ fn review_j519_restart_repairs_missing_routes() {
                 inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         merged: BTreeMap::new(),
@@ -386,6 +387,7 @@ fn review_j519_networkd_reload_repairs_peer_routes() {
                 inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         merged: BTreeMap::new(),
@@ -782,6 +784,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
                 inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         );
     }
@@ -965,6 +968,7 @@ fn review_j529_repair_does_not_follow_a_reused_interface_name() {
                 inbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 outbound: infraternal_plugin_mesh::policy::rules::TrafficPolicy::All,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         merged: BTreeMap::new(),

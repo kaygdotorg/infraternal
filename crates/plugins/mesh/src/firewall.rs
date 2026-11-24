@@ -27,6 +27,7 @@ const MISSING_KERNEL_PROTECTIONS: [&str; 4] = [
 
 // These plans only remove previously validated permissions. Changed identity,
 // routes, bindings or concrete rules require the ordinary two-family preflight.
+/// Whether `next` only narrows `old`'s grants with the same identity, peers and subnet routes, so the cheaper removal-only update is enough.
 fn removes_only_permissions(old: &Config, next: &Config) -> bool {
     old.node == next.node
         && old.local_key == next.local_key
@@ -36,6 +37,8 @@ fn removes_only_permissions(old: &Config, next: &Config) -> bool {
         && old.peers.iter().all(|(id, previous)| {
             next.peers.get(id).is_some_and(|peer| {
                 peer.peer == previous.peer
+                    // Subnet routes change the guard's forward and NAT rules (D197 M3).
+                    && peer.networks == previous.networks
                     && (peer.inbound == TrafficPolicy::None || peer.inbound == previous.inbound)
                     && (peer.outbound == TrafficPolicy::None || peer.outbound == previous.outbound)
             })
@@ -237,6 +240,13 @@ impl Firewall {
     #[must_use]
     pub fn kernel_guard_status(&self) -> Option<&KernelGuardStatus> {
         self.guard_only().then_some(&self.guard_status)
+    }
+
+    /// Whether the installed `GotaTun` guard forwards and masquerades this node's served networks
+    /// (D197 M3): only the nft guard carries those rules, so the iptables fallback never forwards.
+    #[must_use]
+    pub(crate) fn forwards_served(&self) -> bool {
+        self.guard_only() && self.installed && self.backend == Some(Backend::Nft)
     }
 
     /// Whether the selected node engine moves peer access decisions into `GotaTun`.
@@ -1142,9 +1152,10 @@ fn render_guard_only(
         script,
         " chain ingress {{ type filter hook prerouting priority -310; policy accept; {own} iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; {delivery} }}"
     );
+    let served = render_served_networks(config, &mut script);
     let _ = writeln!(
         script,
-        " chain forward {{ type filter hook forward priority -10; policy accept; {delivery} iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
+        " chain forward {{ type filter hook forward priority -10; policy accept; {delivery} {served} iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
     );
     let public_gate = if proxy_ingress.public_route_active {
         String::new()
@@ -1173,6 +1184,76 @@ fn render_guard_only(
     );
     script.push_str("}\n");
     script
+}
+
+/// The networks this node serves as a subnet router (D197 M3): every IPv4 network that some peer may
+/// start into, and the ones among them whose forwarded traffic is masqueraded. Sorted and unique.
+pub(crate) fn served_networks(
+    config: &Config,
+) -> (
+    Vec<infraternal_mesh::networks::Network>,
+    Vec<infraternal_mesh::networks::Network>,
+) {
+    let mut served = std::collections::BTreeSet::new();
+    let mut masqueraded = std::collections::BTreeSet::new();
+    for policy in config.peers.values() {
+        for network in &policy.networks.served {
+            if !network.network.is_ipv4() || network.inbound == TrafficPolicy::None {
+                continue;
+            }
+            served.insert(network.network);
+            if !network.keep_source {
+                masqueraded.insert(network.network);
+            }
+        }
+    }
+    (
+        served.into_iter().collect(),
+        masqueraded.into_iter().collect(),
+    )
+}
+
+/// Add the subnet-router part of the `GotaTun` guard to `script` (D197 M3, D384) and return the
+/// rules that go in front of the forward chain's mesh drops; empty when this node serves nothing.
+///
+/// The `GotaTun` packet filter has already decided, per peer and port, which packets from the mesh
+/// interface may enter a served network, so the kernel accepts exactly two things: packets from the
+/// mesh interface to a served network, and replies on the mesh interface of connections that were
+/// opened toward a served network. Everything else through the mesh interface is still dropped, so
+/// a host on the network can never start a connection into the mesh. Masqueraded networks get a
+/// `srcnat` chain that rewrites the source of mesh traffic leaving toward them to the router's own
+/// address on that network; it lives in the same owned table, so removing the table removes it.
+fn render_served_networks(config: &Config, script: &mut String) -> String {
+    let (served, masqueraded) = served_networks(config);
+    if served.is_empty() {
+        return String::new();
+    }
+    let list = |networks: &[infraternal_mesh::networks::Network]| {
+        networks
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let _ = writeln!(
+        script,
+        " set served4 {{ type ipv4_addr; flags interval; elements = {{ {} }}; }}",
+        list(&served)
+    );
+    if !masqueraded.is_empty() {
+        let _ = writeln!(
+            script,
+            " set masquerade4 {{ type ipv4_addr; flags interval; elements = {{ {} }}; }}",
+            list(&masqueraded)
+        );
+        let _ = writeln!(
+            script,
+            " chain served_nat {{ type nat hook postrouting priority srcnat; policy accept; iifname \"{INTERFACE}\" oifname != \"{INTERFACE}\" ip daddr @masquerade4 masquerade; }}"
+        );
+    }
+    format!(
+        "iifname \"{INTERFACE}\" oifname != \"{INTERFACE}\" ip daddr @served4 accept; oifname \"{INTERFACE}\" iifname != \"{INTERFACE}\" ct state established,related ct original ip daddr @served4 accept;"
+    )
 }
 
 // Both packet directions consult the initiating tuple. A reply's ephemeral
@@ -1298,6 +1379,7 @@ mod tests {
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,
                             access_ssh: None,
+                            networks: crate::dataplane::PeerNetworks::default(),
                         },
                     )
                 })

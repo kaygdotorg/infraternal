@@ -79,6 +79,7 @@ fn public_state(peers: u16) -> State {
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::None,
                 access_ssh: None,
+                networks: crate::dataplane::PeerNetworks::default(),
             },
         );
     }
