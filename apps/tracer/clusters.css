@@ -407,12 +407,19 @@
 .cl-crumb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .cl-crumb-sep { display: grid; flex: none; place-items: center; width: 1rem; color: var(--fg-3); }
 .cl-crumb-sep svg { width: var(--ui-icon); height: var(--ui-icon); fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-/* On a phone the first pill is its icon (it has its tooltip and its label); the names get the room. */
+/* On a phone the trail becomes an iOS-style header (toolbar/crumbs.on-demand.ts): a back pill "‹ Machines" and the window's own name as the
+   heading. The Settings pill and the separators go; ☰ and + keep the bar's edges because the bar's grid does not change. */
+.cl-crumb-back, .cl-crumb-back-label { display: none; }
 @media (max-width: 720px) {
-  .cl-crumb[data-level="view"] { width: var(--pill-h); padding: 0; }
-  .cl-crumb[data-level="view"] .cl-crumb-name { display: none; }
+  .cl-crumb[data-level="view"], .cl-crumb-sep { display: none; }
+  .cl-crumb-back { display: grid; width: var(--ui-icon-sm); margin-right: -0.25rem; }
+  .cl-crumb-back svg { transform: scaleX(-1); }
+  .cl-crumb[data-level="row"] .cl-crumb-name { display: none; }
+  .cl-crumb-back-label { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .cl-crumb[data-level="row"], .cl-crumb[data-level="group"] { padding: 0 0.75rem; }
-  .cl-crumb-sep, .cl-crumb-sep svg { width: var(--ui-icon-sm); }
+  .cl-crumb[data-level="row"] { padding-left: 0.5rem; }
+  .cl-crumb[data-level="group"] { font-weight: var(--fw-title); }
+  .cl-crumbs { gap: 0.375rem; }
 }
 .cl-crumb-menu { position: absolute; z-index: calc(var(--z-overlay) + 2); display: grid; align-content: start; gap: 2px; padding: 0.375rem; border-radius: var(--r-md); overflow: auto; max-width: min(22rem, calc(100% - 1rem)); }
 .cl-crumb-item { white-space: nowrap; }
@@ -420,6 +427,26 @@
 /* A panel that already existed, reused in a window: it brings its own pane, which must not pad and scroll a second time. */
 .cl-settings-nest > .ui-settings-pane { padding: 0; overflow: visible; }
 .cl-settings-later { margin: 0; padding: 0.5rem 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; }
+/* Settings > Machines > Updates (#211, S5): the sentence under the status, and the buttons. A window is a fifth of the screen wide, so the buttons wrap rather than shrink. */
+.cl-up { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0.875rem; }
+.cl-up-detail, .cl-up-refusal { margin: 0; color: var(--ui-text-secondary); font-size: var(--text-secondary); line-height: 1.4; overflow-wrap: anywhere; }
+.cl-up-detail[hidden], .cl-up-refusal[hidden] { display: none; }
+/* On a phone a little more air, and no more than that (owner, 2026-11-22): between a heading and its paragraph, and between a paragraph and the buttons. */
+@media (max-width: 720px) {
+  .cl-up { gap: 1rem; }
+  .cl-up-detail, .cl-up-refusal { margin-top: 0.25rem; }
+  .cl-up-actions { margin-top: 0.375rem; }
+  .cl-up > .ui-ts-title { margin-bottom: 0.25rem; }
+}
+.cl-up-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr)); gap: 0.5rem; }
+.cl-up-button {
+  --ui-button-min-width: 0;
+  --ui-button-height: var(--ui-control-h, 2rem);
+  --ui-button-padding: 0 1rem;
+  --ui-button-radius: 999px;
+  --ui-button-font: var(--fw-title) var(--ui-size-button)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-letter-spacing: var(--ui-tracking);
+}
 
 /* A Settings window has no input lock, so its title pill does not leave room for one: it may use the header up to its own action group (the
    product's cap is half of it, for the lock, and cut "Published Services" to "Published Serv…"). The room left is the group's: 28 px per button and the gap. */

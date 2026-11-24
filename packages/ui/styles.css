@@ -753,7 +753,8 @@
 /* A value that is its row's action (kv-list `press`) reads as one: it keeps the pointer and takes the press scale. */
 .ui-kv-press { cursor: pointer; }
 /* A mark before a value (kv-list `mark`), from the shared mark vocabulary: a tick, an exclamation, a quiet cross, a turning arc. */
-.ui-kv-mark { display: inline-block; margin-right: 0.375rem; vertical-align: -1px; }
+/* A mark is as tall as the text beside it (a spinner in "Installing 0.5.0…" read smaller than its words, owner 2026-11-22). */
+.ui-mark.ui-kv-mark { display: inline-block; width: 1em; height: 1em; margin-right: 0.375rem; vertical-align: -0.125em; }
 .ui-mark[data-mark="off"], .ui-mark[data-mark="warn"] { background: currentColor; -webkit-mask: var(--ui-mark-icon) center / contain no-repeat; mask: var(--ui-mark-icon) center / contain no-repeat; }
 .ui-mark[data-mark="off"] { color: var(--fg-3); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round'%3E%3Cpath d='M6.5 6.5l11 11M17.5 6.5l-11 11'/%3E%3C/svg%3E"); }
 .ui-mark[data-mark="warn"] { color: var(--warn); --ui-mark-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3.2' stroke-linecap='round'%3E%3Cpath d='M12 5.5v8.5M12 18.5h.01'/%3E%3C/svg%3E"); }
