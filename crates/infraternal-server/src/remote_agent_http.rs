@@ -1,4 +1,11 @@
 //! Admits D168 host links over an app-listener WebSocket proof [168,196], #291.
+//!
+//! Two proof versions are accepted (see `infraternal_plugin_remote::agent_link`).
+//! v1 is kept for infraternal agents built before #559. For v2 the server
+//! also checks the agent's TLS channel binding against the session it
+//! terminated itself (refusing a proof relayed from another TLS session), and
+//! answers with its current leg-B leaf and a signature by that leaf's key, so
+//! the agent can hold this path to the same leaf floor as its direct dials.
 
 use crate::{
     enrollment::EnrollmentStore, remote_guard::AuthorityGuard, remote_runtime::RemoteHosts,
@@ -15,9 +22,10 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use infraternal_plugin_remote::agent_link::{
-    AgentLinkChallenge, AgentLinkProof, AgentLinkReady, proof_bytes,
+    self, AgentLinkChallenge, AgentLinkProof, AgentLinkProofV2, AgentLinkReady, AgentLinkReadyV2,
+    NONCE_LEN, PROOF_V2, READY_V2, agent_proof_bytes_v2, proof_bytes, server_proof_bytes_v2,
 };
-use openssl::{hash::MessageDigest, pkey::Id, rand::rand_bytes, sign::Verifier, x509::X509};
+use openssl::{hash::MessageDigest, rand::rand_bytes, ssl::SslAcceptor, x509::X509};
 use std::{
     io,
     net::IpAddr,
@@ -191,6 +199,11 @@ async fn upgrade(State(api): State<Api>, mut request: Request) -> Response {
                 .map(|address| address.0.ip())
         })
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    // Present only when this process terminated the request's TLS session.
+    let binding = request
+        .extensions()
+        .get::<crate::server_tls::TlsChannelBinding>()
+        .copied();
     let Some(accept) = websocket_accept(request.headers()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -220,7 +233,7 @@ async fn upgrade(State(api): State<Api>, mut request: Request) -> Response {
             Some(config),
         )
         .await;
-        if let Err(error) = admit(socket, api, address, source, permit).await {
+        if let Err(error) = admit(socket, api, address, binding, source, permit).await {
             eprintln!("Infraternal agent HTTPS link ended ({:?})", error.kind());
         }
     });
@@ -258,14 +271,19 @@ fn websocket_accept(headers: &HeaderMap) -> Option<HeaderValue> {
 
 /// Authenticate the host proof and protocol Hello before returning handshake
 /// capacity. The bounded per-host cleanup lane owns durable delivery from here.
+///
+/// `binding` is the connection's [`crate::server_tls::TlsChannelBinding`]
+/// when this process terminated its TLS session, `None` behind a reverse
+/// proxy.
 async fn admit(
     mut socket: AgentSocket,
     api: Api,
     address: IpAddr,
+    binding: Option<crate::server_tls::TlsChannelBinding>,
     source: OwnedSemaphorePermit,
     permit: OwnedSemaphorePermit,
 ) -> io::Result<()> {
-    let mut nonce = [0; 32];
+    let mut nonce = [0; NONCE_LEN];
     rand_bytes(&mut nonce).map_err(io::Error::other)?;
     let challenge = AgentLinkChallenge {
         message_type: "challenge".to_owned(),
@@ -286,23 +304,38 @@ async fn admit(
     if proof.len() > MAX_PROOF_MESSAGE {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let proof: AgentLinkProof = serde_json::from_str(proof.as_str())
-        .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
-    let authority = trace_test_phase(
-        "proof-authenticate",
-        authenticate(api.store.clone(), &proof, &nonce).await,
-    )?;
+    let (authority, ready) = match agent_link::message_type(proof.as_str()).as_deref() {
+        Some("proof") => {
+            let proof: AgentLinkProof = serde_json::from_str(proof.as_str())
+                .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
+            let authority = trace_test_phase(
+                "proof-authenticate",
+                authenticate(api.store.clone(), &proof, &nonce).await,
+            )?;
+            let ready = serde_json::to_string(&AgentLinkReady {
+                message_type: "ready".to_owned(),
+            })
+            .map_err(io::Error::other)?;
+            (authority, ready)
+        }
+        Some(PROOF_V2) => {
+            let proof: AgentLinkProofV2 = serde_json::from_str(proof.as_str())
+                .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
+            trace_test_phase(
+                "proof-v2-authenticate",
+                authenticate_v2(&api, &proof, &nonce, binding).await,
+            )?
+        }
+        _ => return Err(io::ErrorKind::PermissionDenied.into()),
+    };
     // The peer holds an enrolled host key: from here it may send full frames.
     socket.get_mut().lift();
     trace_test_phase(
         "ready-send",
-        send_text(
-            &mut socket,
-            &AgentLinkReady {
-                message_type: "ready".to_owned(),
-            },
-        )
-        .await,
+        tokio::time::timeout(HANDSHAKE, socket.send(Message::Text(ready.into())))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+            .map_err(io::Error::other),
     )?;
     let link = trace_test_phase(
         "protocol-greeting",
@@ -317,6 +350,99 @@ async fn admit(
             .admit_observed(authority, link, Some(address))
             .await,
     )
+}
+
+/// Authenticate a v2 proof and build the server's `ready-v2` answer.
+///
+/// Order: the agent's signature first (cheap, and it makes a binding
+/// mismatch below evidence of a real relay rather than noise), then the
+/// TLS binding, then the durable authority, and only then the server's own
+/// signature, so the leaf key never signs for an unauthenticated peer.
+async fn authenticate_v2(
+    api: &Api,
+    proof: &AgentLinkProofV2,
+    nonce: &[u8; NONCE_LEN],
+    binding: Option<crate::server_tls::TlsChannelBinding>,
+) -> io::Result<(AuthorityGuard, String)> {
+    let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+    let client_nonce: [u8; NONCE_LEN] = canonical_base64(&proof.client_nonce)?
+        .try_into()
+        .map_err(|_| denied())?;
+    let agent_binding: Option<[u8; agent_link::BINDING_LEN]> = proof
+        .channel_binding
+        .as_deref()
+        .map(|value| canonical_base64(value)?.try_into().map_err(|_| denied()))
+        .transpose()?;
+    let message = agent_proof_bytes_v2(proof.host_id, nonce, &client_nonce, agent_binding.as_ref());
+    let (certificate_der, fingerprint) =
+        verified_certificate(&proof.certificate_der, &proof.signature, &message)?;
+    let checked = match binding {
+        // This process terminated the TLS session: the proof must have been
+        // made over this very session.
+        Some(crate::server_tls::TlsChannelBinding(Some(own))) => {
+            if !agent_binding.is_some_and(|theirs| openssl::memcmp::eq(&theirs, &own)) {
+                eprintln!(
+                    "Infraternal agent HTTPS link refused: the host's proof was made over a different TLS session (something between the host and this server terminates TLS)"
+                );
+                return Err(denied());
+            }
+            Some(own)
+        }
+        // Terminated here but no binding could be taken: fail closed rather
+        // than sign "unbound" for a session that should have been bound.
+        Some(crate::server_tls::TlsChannelBinding(None)) => return Err(denied()),
+        // A reverse proxy terminated TLS; nothing to compare against.
+        None => None,
+    };
+    let authority = admit_authority(api.store.clone(), fingerprint, proof.host_id).await?;
+    let Some(leaf) = api.hosts.current_leaf() else {
+        return Err(denied());
+    };
+    let ready = ready_v2(
+        &leaf,
+        proof.host_id,
+        nonce,
+        &client_nonce,
+        &certificate_der,
+        checked,
+    )?;
+    Ok((
+        authority,
+        serde_json::to_string(&ready).map_err(io::Error::other)?,
+    ))
+}
+
+/// The server's `ready-v2`: the leaf of the current leg-B acceptor and its
+/// key's signature over the transcript (see
+/// `agent_link::server_proof_bytes_v2`). Reading both from one acceptor keeps
+/// the certificate and key a matching pair during a rotation.
+fn ready_v2(
+    leaf: &SslAcceptor,
+    host_id: Uuid,
+    nonce: &[u8; NONCE_LEN],
+    client_nonce: &[u8; NONCE_LEN],
+    agent_certificate_der: &[u8],
+    checked: Option<[u8; agent_link::BINDING_LEN]>,
+) -> io::Result<AgentLinkReadyV2> {
+    let context = leaf.context();
+    let (Some(certificate), Some(key)) = (context.certificate(), context.private_key()) else {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    };
+    let leaf_der = certificate.to_der().map_err(io::Error::other)?;
+    let message = server_proof_bytes_v2(
+        host_id,
+        nonce,
+        client_nonce,
+        &agent_link::sha256(agent_certificate_der)?,
+        &agent_link::sha256(&leaf_der)?,
+        checked.as_ref(),
+    );
+    Ok(AgentLinkReadyV2 {
+        message_type: READY_V2.to_owned(),
+        server_certificate_der: B64.encode(&leaf_der),
+        channel_bound: checked.is_some(),
+        signature: B64.encode(agent_link::sign(key, &message)?),
+    })
 }
 
 /// Send one handshake message as JSON text, within the handshake deadline.
@@ -338,39 +464,23 @@ fn canonical_base64(value: &str) -> io::Result<Vec<u8>> {
     Ok(decoded)
 }
 
-fn verify_signature(certificate: &X509, host_id: Uuid, nonce: &[u8], signature: &[u8]) -> bool {
-    let Ok(key) = certificate.public_key() else {
-        return false;
-    };
-    let verifier = match key.id() {
-        Id::ED25519 => Verifier::new_without_digest(&key),
-        Id::EC
-            if key.ec_key().is_ok_and(|key| {
-                key.group().curve_name() == Some(openssl::nid::Nid::X9_62_PRIME256V1)
-            }) =>
-        {
-            Verifier::new(MessageDigest::sha256(), &key)
-        }
-        _ => return false,
-    };
-    verifier.is_ok_and(|mut verifier| {
-        verifier
-            .verify_oneshot(signature, &proof_bytes(host_id, nonce))
-            .unwrap_or(false)
-    })
+/// Whether `signature` is the certificate key's signature of `message`
+/// (Ed25519 or P-256, the key types infraternal agents use).
+fn verify_signature(certificate: &X509, message: &[u8], signature: &[u8]) -> bool {
+    certificate
+        .public_key()
+        .is_ok_and(|key| agent_link::verify(&key, message, signature))
 }
 
-/// Verify the exact certificate's challenge proof and admit either live authority
-/// or a delivery capability for its server-retained refusal, never both.
-async fn authenticate(
-    store: EnrollmentStore,
-    proof: &AgentLinkProof,
-    nonce: &[u8],
-) -> io::Result<AuthorityGuard> {
-    if proof.message_type != "proof" || nonce.len() != 32 {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    let der = canonical_base64(&proof.certificate_der)?;
+/// Decode the proof's certificate and check its signature of `message`.
+/// Returns the certificate DER and its SHA-256 fingerprint; whether the
+/// certificate is enrolled is [`admit_authority`]'s job.
+fn verified_certificate(
+    certificate_der: &str,
+    signature: &str,
+    message: &[u8],
+) -> io::Result<(Vec<u8>, [u8; 32])> {
+    let der = canonical_base64(certificate_der)?;
     if der.len() > 4096 {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
@@ -378,8 +488,8 @@ async fn authenticate(
     if certificate.to_der().map_err(io::Error::other)? != der {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let signature = canonical_base64(&proof.signature)?;
-    if signature.len() > 512 || !verify_signature(&certificate, proof.host_id, nonce, &signature) {
+    let signature = canonical_base64(signature)?;
+    if signature.len() > 512 || !verify_signature(&certificate, message, &signature) {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     let digest = certificate
@@ -389,16 +499,45 @@ async fn authenticate(
         .as_ref()
         .try_into()
         .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
+    Ok((der, fingerprint))
+}
+
+/// Admit either live authority or a delivery capability for its
+/// server-retained refusal, never both, for the certificate `fingerprint`,
+/// which must belong to `host_id`.
+async fn admit_authority(
+    store: EnrollmentStore,
+    fingerprint: [u8; 32],
+    host_id: Uuid,
+) -> io::Result<AuthorityGuard> {
     let authority = tokio::time::timeout(
         HANDSHAKE,
         AuthorityGuard::admit_transport(store, fingerprint),
     )
     .await
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
-    if authority.identity.host != proof.host_id {
+    if authority.identity.host != host_id {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     Ok(authority)
+}
+
+/// Verify a v1 proof (the exact certificate's signature of the challenge)
+/// and admit its authority, see [`admit_authority`].
+async fn authenticate(
+    store: EnrollmentStore,
+    proof: &AgentLinkProof,
+    nonce: &[u8],
+) -> io::Result<AuthorityGuard> {
+    if proof.message_type != "proof" || nonce.len() != 32 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    let (_, fingerprint) = verified_certificate(
+        &proof.certificate_der,
+        &proof.signature,
+        &proof_bytes(proof.host_id, nonce),
+    )?;
+    admit_authority(store, fingerprint, proof.host_id).await
 }
 
 #[cfg(test)]
@@ -434,6 +573,7 @@ mod tests {
         (certificate.build(), key)
     }
 
+    /// A v1 proof verifies only for the key, host and nonce it was made for.
     #[test]
     fn challenge_signature_requires_the_d168_key_host_and_nonce() {
         let (certificate, key) = signing_certificate();
@@ -443,17 +583,19 @@ mod tests {
         let signature = signer
             .sign_oneshot_to_vec(&proof_bytes(host_id, &nonce))
             .unwrap();
-        assert!(verify_signature(&certificate, host_id, &nonce, &signature));
-        assert!(!verify_signature(
+        assert!(verify_signature(
             &certificate,
-            Uuid::from_u128(2),
-            &nonce,
+            &proof_bytes(host_id, &nonce),
             &signature
         ));
         assert!(!verify_signature(
             &certificate,
-            host_id,
-            &[8; 32],
+            &proof_bytes(Uuid::from_u128(2), &nonce),
+            &signature
+        ));
+        assert!(!verify_signature(
+            &certificate,
+            &proof_bytes(host_id, &[8; 32]),
             &signature
         ));
     }
