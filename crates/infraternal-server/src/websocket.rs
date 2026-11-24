@@ -3193,7 +3193,7 @@ async fn startup_call(
         let value: serde_json::Value = serde_json::from_slice(&output).map_err(|_| invalid())?;
         if value.get("multiplexer").is_none()
             || !startup_session_untyped(&state.pool, user, session.as_bytes()).await?
-            || !terminal_startup::claim(&state.pool, user, &host_key)
+            || !terminal_startup::claim(&state.auth, &state.pool, user, &host_key)
                 .await
                 .map_err(|()| invalid())?
         {

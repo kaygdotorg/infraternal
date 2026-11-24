@@ -876,3 +876,38 @@ async fn census_close_with_nothing_missing_takes_no_write_lock() {
     assert!(closed_at(&pool, listed[0]).await.is_some());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The startup-notice claim on the D379 writer keeps the sqlx rules: hints
+/// that are off consume nothing; of many concurrent claims for one host
+/// exactly one wins; a claimed host stays claimed; another host, or a host
+/// whose own switch is on while the account's is off, still gets its one
+/// notice (#562, D315).
+#[tokio::test]
+async fn startup_claim_on_the_d379_writer_keeps_the_sqlx_rules() {
+    use crate::terminal_startup::{claim, pending, save};
+    let (pool, user, _session, auth, dir) = disk_database().await;
+    save(&pool, &user, "*", Some(false)).await.unwrap();
+    assert_eq!(claim(&auth, &pool, &user, "local").await, Ok(false));
+    save(&pool, &user, "*", Some(true)).await.unwrap();
+    assert_eq!(
+        pending(&pool, &user, "local").await,
+        Ok(true),
+        "a refused claim consumed the notice"
+    );
+    let claims =
+        futures_util::future::join_all((0..16).map(|_| claim(&auth, &pool, &user, "local"))).await;
+    assert_eq!(
+        claims.iter().filter(|won| **won == Ok(true)).count(),
+        1,
+        "exactly one concurrent claim wins: {claims:?}"
+    );
+    assert!(claims.iter().all(Result::is_ok));
+    assert_eq!(pending(&pool, &user, "local").await, Ok(false));
+    assert_eq!(claim(&auth, &pool, &user, "local").await, Ok(false));
+    assert_eq!(claim(&auth, &pool, &user, "other").await, Ok(true));
+    save(&pool, &user, "*", Some(false)).await.unwrap();
+    save(&pool, &user, "on-host", Some(true)).await.unwrap();
+    assert_eq!(claim(&auth, &pool, &user, "off-host").await, Ok(false));
+    assert_eq!(claim(&auth, &pool, &user, "on-host").await, Ok(true));
+    let _ = std::fs::remove_dir_all(dir);
+}
