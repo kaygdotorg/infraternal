@@ -34,11 +34,13 @@
           # Channel, components and musl targets come from rust-toolchain.toml.
           # The shell adds the arm64 macOS standard library on top, so the "macOS
           # compile" row in scripts/verify can type-check macOS code from Linux
-          # (#260). It stays out of rust-toolchain.toml: nix/package.nix builds the
-          # Linux release from that file, and its inputs should not grow.
+          # (#260). The two iPhone targets (device and Simulator) come the same
+          # way, for the "iOS compile" row (#580). They stay out of
+          # rust-toolchain.toml: nix/package.nix builds the Linux release from
+          # that file, and its inputs should not grow.
           pinned = builtins.fromTOML (builtins.readFile ./rust-toolchain.toml);
           rust = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
-            targets = pinned.toolchain.targets ++ [ "aarch64-apple-darwin" ];
+            targets = pinned.toolchain.targets ++ [ "aarch64-apple-darwin" "aarch64-apple-ios" "aarch64-apple-ios-sim" ];
           };
           # .cargo/rustc.sh asks `rustup which rustc` for the compiler. The
           # toolchain is already pinned by nix, so answer that one query and
