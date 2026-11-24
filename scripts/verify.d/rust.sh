@@ -310,6 +310,37 @@ rust_check_macos_compile() {
     return "$failed"
 }
 
+# The iOS client crates (#580). The two FFI crates arrive with step F1 of
+# docs/design/client-core-split.md; until they exist, the crates that already
+# build for iOS stand in, so the guard has something to check (the iOS compile row uses the same list).
+rust_ios_client_crates() {
+    local crate
+    IOS_CLIENT_CRATES=()
+    for crate in infraternal-tunnel-ffi infraternal-client-ffi; do
+        [[ -d "crates/$crate" ]] && IOS_CLIENT_CRATES+=("$crate")
+    done
+    if ((${#IOS_CLIENT_CRATES[@]} == 0)); then
+        printf 'NOTE: the iOS FFI crates (infraternal-tunnel-ffi, infraternal-client-ffi) do not exist yet (plan step F1); checking infraternal-protocol and infraternal-mesh, the crates that already build for iOS\n'
+        IOS_CLIENT_CRATES=(infraternal-protocol infraternal-mesh)
+    fi
+}
+
+# The "iOS dependency guard" row (#580, T3). `cargo tree` for aarch64-apple-ios
+# resolves the iOS dependency graph without building anything, so it needs no
+# SDK and no linker. scripts/verify.d/ios-dependency-guard.py fails the row when
+# openssl, sqlx, libsqlite3-sys, aws-lc or tokio's rt-multi-thread are in it.
+# Its own tests run first, so a broken checker cannot pass the row.
+rust_check_ios_dependency_guard() {
+    local failed=0 crate tree
+    python3 scripts/test-ios-dependency-guard.py || return 1
+    rust_ios_client_crates
+    for crate in "${IOS_CLIENT_CRATES[@]}"; do
+        tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package "$crate")" || return 1
+        printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
+    done
+    return "$failed"
+}
+
 # The shim's library tests under each shim feature set the product ships (#555).
 # Feature-only tests are compiled out of other builds, so a feature set that no
 # row runs can ship broken tests, and its `cfg(not(...))` tests never run at all.
@@ -444,6 +475,8 @@ rust_verify_fast() {
     rust_run_gate "release feature sets" rust_check_release_feature_sets
     # cfg(target_os = "macos") code, type-checked from Linux; SKIP on a Mac (#260).
     rust_run_gate_skippable "macOS compile" rust_check_macos_compile
+    # What must stay out of the iPhone dependency graph (#580).
+    rust_run_gate "iOS dependency guard" rust_check_ios_dependency_guard
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     rust_run_gate "latency report (D375)" python3 scripts/test-latency-report.py
