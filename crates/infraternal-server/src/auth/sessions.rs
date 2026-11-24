@@ -25,18 +25,60 @@
 //!   keeps a 100 MB log).
 //! - The two reads run on the pool's read-only reader threads.
 //!
-//! The SQL text is unchanged. When `Auth` has no pool (in-memory test
-//! databases, see `open_session_database`), the same statements run on sqlx.
+//! When `Auth` has no pool (in-memory test databases, see
+//! `open_session_database`), the same statements run on sqlx.
+//!
+//! # Read first, slide only when due (#559, J1151)
+//!
+//! Every authenticated HTTP route calls [`Auth::session`]. It used to run the
+//! slide on every call, so each request queued on the pool's single writer
+//! even when the deadline had moved a moment ago, and an unknown cookie cost
+//! a write too (the slide that matched nothing, then the pending cleanup).
+//! Now the session is first read on a reader thread, with the same columns
+//! and the same liveness rule; the writer is taken only when
+//!
+//! - the session is live and unlocked and its slide is due: its deadline is
+//!   more than a minute behind `now + SESSION` (the same rule a socket's
+//!   renewal uses, [`Auth::renewal_due`]), or ahead of it after the clock
+//!   stepped back. The slide is the same `UPDATE … RETURNING`, which checks
+//!   liveness again under the writer, so a session revoked or expired between
+//!   the read and the write is refused and never revived; or
+//! - the token's pending login has expired, which is still deleted.
+//!
+//! What stays the same: a row past its deadline, a deleted (revoked) row and
+//! a pending login on a full-session route are refused; the read starts a
+//! fresh snapshot per call, so a revocation committed before the request is
+//! seen at once; `fresh` (the admin window) is never written here. The only
+//! change is that the idle deadline can be up to a minute earlier than with a
+//! write per request, never later.
 //! Everything else in this file, and every transaction that takes a sqlx
 //! `Transaction` (`require_live_session_tx`, `insert_session`), stays on sqlx
 //! until its callers move.
 use super::{Auth, Error, Result, Row, SESSION, Serialize, hash};
 use infraternal_db::rusqlite::{OptionalExtension, Transaction, params};
 
+/// The columns a `Session` is built from, shared by the read and the slide so
+/// both return exactly the same row. A macro, so `concat!` can splice it into
+/// each statement at compile time.
+macro_rules! session_columns {
+    () => {
+        "user_id,device,fresh,expires,unlocked,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing,(SELECT owner FROM users WHERE id=sessions.user_id) AS owner"
+    };
+}
+/// The read that comes first: the token's row, live or not, with its
+/// deadline and lock state so `next_step` can judge it. Binds: token hash.
+const SQL_READ: &str = concat!(
+    "SELECT ",
+    session_columns!(),
+    " FROM sessions WHERE token_hash=?"
+);
 /// The session slide: extend a live, unlocked session by `SESSION` (or only
 /// confirm a pending one) and return what the `Session` needs, in one
 /// statement. Binds: new expiry, token hash, now, whether pending is allowed.
-const SQL_SLIDE: &str = "UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING user_id,device,fresh,(SELECT username FROM users WHERE id=sessions.user_id) AS username,(SELECT display_name FROM users WHERE id=sessions.user_id) AS display_name,(SELECT aaguid FROM passkeys WHERE id=sessions.passkey_id AND user_id=sessions.user_id) AS aaguid,(SELECT ready FROM recovery WHERE user_id=sessions.user_id) AS recovery_ready,(SELECT recovery_version=1 OR recovery_wrap_version=1 FROM users WHERE id=sessions.user_id) AS recovery_words_need_replacing,(SELECT owner FROM users WHERE id=sessions.user_id) AS owner";
+const SQL_SLIDE: &str = concat!(
+    "UPDATE sessions SET expires=CASE WHEN unlocked=1 THEN ? ELSE expires END WHERE token_hash=? AND expires>? AND (unlocked=1 OR ?) RETURNING ",
+    session_columns!()
+);
 /// Cleanup after a refused slide: drop the token's expired pending login.
 /// Binds: token hash, now.
 const SQL_DROP_EXPIRED_PENDING: &str =
@@ -51,11 +93,16 @@ const SQL_COOKIE_STATE: &str =
 const SQL_LIVE_EXPIRY: &str =
     "SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?";
 
-/// The row `SQL_SLIDE` returns, read the same way from either driver.
+/// The row `SQL_READ` and `SQL_SLIDE` return, read the same way from either
+/// driver.
 struct Slid {
     user_id: String,
     device: String,
     fresh: i64,
+    /// The committed deadline, in Unix seconds.
+    expires: i64,
+    /// `false` for a login still waiting for the browser's local unlock.
+    unlocked: bool,
     username: String,
     display_name: String,
     aaguid: Option<String>,
@@ -79,25 +126,97 @@ fn slide_on_pool(
 ) -> std::result::Result<Option<Slid>, infraternal_db::Error> {
     let row = tx
         .prepare_cached(SQL_SLIDE)?
-        .query_row(params![now + SESSION, token_hash, now, pending], |row| {
-            Ok(Slid {
-                user_id: row.get("user_id")?,
-                device: row.get("device")?,
-                fresh: row.get("fresh")?,
-                username: row.get("username")?,
-                display_name: row.get("display_name")?,
-                aaguid: row.get("aaguid")?,
-                recovery_ready: row.get("recovery_ready")?,
-                recovery_words_need_replacing: row.get("recovery_words_need_replacing")?,
-                owner: row.get("owner")?,
-            })
-        })
+        .query_row(params![now + SESSION, token_hash, now, pending], slid_row)
         .optional()?;
     if row.is_none() {
         tx.prepare_cached(SQL_DROP_EXPIRED_PENDING)?
             .execute(params![token_hash, now])?;
     }
     Ok(row)
+}
+
+/// Map one `session_columns!` row from the pool into a `Slid`.
+fn slid_row(row: &infraternal_db::rusqlite::Row<'_>) -> infraternal_db::rusqlite::Result<Slid> {
+    Ok(Slid {
+        user_id: row.get("user_id")?,
+        device: row.get("device")?,
+        fresh: row.get("fresh")?,
+        expires: row.get("expires")?,
+        unlocked: row.get("unlocked")?,
+        username: row.get("username")?,
+        display_name: row.get("display_name")?,
+        aaguid: row.get("aaguid")?,
+        recovery_ready: row.get("recovery_ready")?,
+        recovery_words_need_replacing: row.get("recovery_words_need_replacing")?,
+        owner: row.get("owner")?,
+    })
+}
+
+/// Map one `session_columns!` row from sqlx into a `Slid`.
+fn slid_sqlx(row: &sqlx::sqlite::SqliteRow) -> Slid {
+    Slid {
+        user_id: row.get("user_id"),
+        device: row.get("device"),
+        fresh: row.get("fresh"),
+        expires: row.get("expires"),
+        unlocked: row.get("unlocked"),
+        username: row.get("username"),
+        display_name: row.get("display_name"),
+        aaguid: row.get("aaguid"),
+        recovery_ready: row.get("recovery_ready"),
+        recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
+        owner: row.get("owner"),
+    }
+}
+
+/// What `read_session` does after its first read of a token's row.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum NextStep {
+    /// The row read is live and needs no write: answer from it.
+    Answer,
+    /// Live and unlocked, with the slide due: run the slide on the writer,
+    /// which checks liveness again and answers from its own row.
+    Slide,
+    /// The token's pending login has expired: delete it, then refuse.
+    DropExpiredPending,
+    /// Nothing to answer and nothing to clean up (no such row, an expired
+    /// unlocked row, or a pending login on a full-session route): refuse.
+    Refuse,
+}
+
+/// Judge a session row read at `now` (`expires`, `unlocked`), for a route
+/// that accepts a pending login when `pending` is set.
+///
+/// The liveness rule is the slide's own `WHERE` clause (`expires>now AND
+/// (unlocked=1 OR pending)`), and the cleanup rule is
+/// `SQL_DROP_EXPIRED_PENDING`'s, so the read refuses and cleans up exactly
+/// what the write-always path did. A pending login is never extended, so it
+/// never needs the writer while it is live.
+pub(super) fn next_step(expires: i64, unlocked: bool, now: i64, pending: bool) -> NextStep {
+    if expires > now && (unlocked || pending) {
+        if unlocked && slide_due(expires, now) {
+            NextStep::Slide
+        } else {
+            NextStep::Answer
+        }
+    } else if !unlocked && expires <= now {
+        NextStep::DropExpiredPending
+    } else {
+        NextStep::Refuse
+    }
+}
+
+/// Whether a live, unlocked session's deadline needs the slide at `now`.
+///
+/// Due when the deadline is more than a minute behind a full session from
+/// now (the socket renewal's rule, [`Auth::renewal_due`]), so a busy session
+/// writes at most about once a minute instead of on every request. Also due
+/// when it is ahead of a full session from now, which only happens after the
+/// clock stepped back: the slide then pulls it back, as the write on every
+/// request did, so a session read never leaves a deadline later than
+/// `now + SESSION`.
+fn slide_due(expires: i64, now: i64) -> bool {
+    Auth::renewal_due(expires, now) || expires > now + SESSION
 }
 
 /// Authenticated browser device, including the last successful passkey verification.
@@ -155,7 +274,10 @@ impl Auth {
         }))
     }
 
-    /// Slide a live session by 30 days, never resurrecting an expired or revoked record.
+    /// Authenticate a live, unlocked session and keep it sliding: its deadline
+    /// moves to 30 days from now when the slide is due (at most about once a
+    /// minute, see the module docs), never resurrecting an expired or revoked
+    /// record. A request that needs no slide takes no write.
     pub async fn session(&self, token: &str, now: i64) -> Result<Session> {
         self.read_session(token, now, false).await
     }
@@ -166,23 +288,31 @@ impl Auth {
         self.read_session(token, now, true).await
     }
 
-    /// The shared body of `session` and `unlock_session`: slide the session
-    /// (or, with `pending`, only confirm a still-live pending login), then
-    /// build the `Session` from the row the slide returned. A refused slide
-    /// deletes the token's expired pending login and returns `Denied`. Runs on
-    /// the D379 pool when `Auth` has one, else on sqlx (see the module docs).
+    /// The shared body of `session` and `unlock_session`: read the token's
+    /// row, then slide it only when the slide is due (or, with `pending`,
+    /// also accept a still-live pending login, which is never extended), and
+    /// build the `Session`. A refused read deletes the token's expired
+    /// pending login and returns `Denied`. Runs on the D379 pool when `Auth`
+    /// has one, else on sqlx (see the module docs, "Read first").
     async fn read_session(&self, token: &str, now: i64, pending: bool) -> Result<Session> {
-        // Keep the diagnostic lookup in the existing write/returning query. The
-        // indexed credential ID and user binding identify this session's passkey.
         let token_hash = hash(token);
-        let slid = match &self.db {
-            Some(db) => {
-                db.write(move |tx| slide_on_pool(tx, &token_hash, now, pending))
-                    .await?
+        let read = self.read_session_row(&token_hash).await?;
+        let step = read.as_ref().map_or(NextStep::Refuse, |row| {
+            next_step(row.expires, row.unlocked, now, pending)
+        });
+        let row = match step {
+            NextStep::Answer => read,
+            // The slide repeats the liveness check under the writer and runs
+            // the pending cleanup itself when it matches nothing, so a row
+            // revoked since the read is refused here and never revived.
+            NextStep::Slide => self.slide(token_hash, now, pending).await?,
+            NextStep::DropExpiredPending => {
+                self.drop_expired_pending(token_hash, now).await?;
+                None
             }
-            None => self.slide_on_sqlx(&token_hash, now, pending).await?,
+            NextStep::Refuse => None,
         };
-        let Some(row) = slid else {
+        let Some(row) = row else {
             return Err(Error::Denied);
         };
         let recovery_pending = if row.recovery_ready.is_some() {
@@ -204,6 +334,62 @@ impl Auth {
             passkey_provider: provider_name(row.aaguid.as_deref()),
             owner: row.owner,
         })
+    }
+
+    /// The first, write-free step of `read_session`: the token's row, live
+    /// or not, on a pool reader (a fresh snapshot per call) or on sqlx.
+    async fn read_session_row(&self, token_hash: &str) -> Result<Option<Slid>> {
+        if let Some(db) = &self.db {
+            let token_hash = token_hash.to_owned();
+            return Ok(db
+                .read(move |tx| {
+                    tx.prepare_cached(SQL_READ)?
+                        .query_row(params![token_hash], slid_row)
+                        .optional()
+                        .map_err(infraternal_db::Error::from)
+                })
+                .await?);
+        }
+        let row = sqlx::query(SQL_READ)
+            .bind(token_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.as_ref().map(slid_sqlx))
+    }
+
+    /// Run the slide (`SQL_SLIDE`, plus the pending cleanup when it matches
+    /// nothing) on the pool's writer, or on sqlx without a pool.
+    async fn slide(&self, token_hash: String, now: i64, pending: bool) -> Result<Option<Slid>> {
+        #[cfg(test)]
+        self.count_session_write();
+        match &self.db {
+            Some(db) => Ok(db
+                .write(move |tx| slide_on_pool(tx, &token_hash, now, pending))
+                .await?),
+            None => self.slide_on_sqlx(&token_hash, now, pending).await,
+        }
+    }
+
+    /// Delete the token's expired pending login (`SQL_DROP_EXPIRED_PENDING`,
+    /// which checks the expiry again itself) on the writer or on sqlx.
+    async fn drop_expired_pending(&self, token_hash: String, now: i64) -> Result<()> {
+        #[cfg(test)]
+        self.count_session_write();
+        if let Some(db) = &self.db {
+            return Ok(db
+                .write(move |tx| {
+                    tx.prepare_cached(SQL_DROP_EXPIRED_PENDING)?
+                        .execute(params![token_hash, now])?;
+                    Ok::<_, infraternal_db::Error>(())
+                })
+                .await?);
+        }
+        sqlx::query(SQL_DROP_EXPIRED_PENDING)
+            .bind(token_hash)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
 
     /// `slide_on_pool` on sqlx, for an `Auth` without the pool (in-memory
@@ -230,17 +416,7 @@ impl Auth {
                 .await?;
             return Ok(None);
         };
-        Ok(Some(Slid {
-            user_id: row.get("user_id"),
-            device: row.get("device"),
-            fresh: row.get("fresh"),
-            username: row.get("username"),
-            display_name: row.get("display_name"),
-            aaguid: row.get("aaguid"),
-            recovery_ready: row.get("recovery_ready"),
-            recovery_words_need_replacing: row.get("recovery_words_need_replacing"),
-            owner: row.get("owner"),
-        }))
+        Ok(Some(slid_sqlx(&row)))
     }
 
     /// Read the live row's cookie deadline after an authenticated action has succeeded.
@@ -403,6 +579,8 @@ impl Auth {
 
     /// Whether a live session read at `now` with this `expiry` is due for its
     /// at-most-once-a-minute slide. Only ever asked after a read proved it live.
+    /// Sockets (`websocket.rs`) and HTTP session reads (`slide_due`) share it,
+    /// so both kinds of activity keep a session alive the same way.
     pub(crate) fn renewal_due(expiry: i64, now: i64) -> bool {
         expiry < now + SESSION - 60
     }

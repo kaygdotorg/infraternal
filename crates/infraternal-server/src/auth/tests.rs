@@ -3895,6 +3895,13 @@ mod device_pending;
 #[path = "ceremony_pool_tests.rs"]
 mod ceremony_pool;
 
+/// `Auth::session` reads first and slides only when due (#559).
+#[path = "session_read_tests.rs"]
+mod session_read;
+/// Measurement only: the session step under concurrent load (#559).
+#[path = "session_read_bench_tests.rs"]
+mod session_read_bench;
+
 /// A fresh on-disk database shaped like `runtime.rs::open_database` (WAL,
 /// `synchronous=NORMAL`), under a new private directory. Returns the pool and
 /// the database path; callers remove the path's directory when done.
