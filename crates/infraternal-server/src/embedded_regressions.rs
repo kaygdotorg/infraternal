@@ -2513,6 +2513,99 @@ async fn recovered_route_ignores_stale_browser_rebind() {
     );
 }
 
+/// A normal `terminal.exited` notice disarms route liveness probing so the server
+/// never sends unanswered pings or logs `terminal_route_unresponsive` after a
+/// clean shell exit (#571, #579).
+#[tokio::test(start_paused = true)]
+async fn exited_terminal_disarms_route_liveness_probing() {
+    let (mut link, mut peer) = connection();
+    let (output, mut reader) = mpsc::channel(4);
+    let session_id = [0x42_u8; 16];
+    let mut attachments = HashMap::from([(
+        1,
+        AttachmentState {
+            session_id,
+            stream_id: 2,
+            route: Some(Liveness::new()),
+            ..attachment(output)
+        },
+    )]);
+    let mut routes = HashMap::from([(2, 1)]);
+    let mut pending = HashMap::new();
+    let event_json = serde_json::to_vec(&serde_json::json!({
+        "type": "terminal.exited",
+        "session_id": uuid::Uuid::from_bytes(session_id).to_string(),
+        "status": 0,
+        "final_seq": 0,
+    }))
+    .unwrap();
+    assert!(
+        process_incoming(
+            Incoming::Event {
+                stream_id: 2,
+                event_json: event_json.into(),
+            },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending,
+        )
+        .await
+    );
+    assert!(matches!(
+        reader.try_recv(),
+        Ok(TerminalOutput::Event { .. })
+    ));
+    assert!(
+        attachments[&1].route.is_none(),
+        "terminal.exited must disarm route liveness probing"
+    );
+
+    // Advance paused time well past any route liveness deadline and tick route proofs.
+    tokio::time::advance(Duration::from_secs(60)).await;
+    let mut queued = std::collections::VecDeque::new();
+    assert!(
+        route_proofs::tick(
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending,
+            true,
+            &mut queued,
+        )
+        .await
+    );
+    assert!(
+        reader.try_recv().is_err(),
+        "an exited terminal must not emit RouteExpired"
+    );
+    let mut wire = [0; 256];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), peer.read(&mut wire))
+            .await
+            .is_err(),
+        "an exited terminal must not receive further route pings"
+    );
+
+    // A racing Command::Reconnect arriving after terminal.exited is also a no-op.
+    assert!(
+        process_command(
+            Command::Reconnect { attachment_id: 1 },
+            &mut link,
+            &mut attachments,
+            &mut routes,
+            &mut pending,
+        )
+        .await
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), peer.read(&mut wire))
+            .await
+            .is_err(),
+        "a stale Reconnect after terminal.exited must not write Close 1013"
+    );
+}
+
 /// Control replies may be skipped when the bounded FIFO is full; the peer's
 /// correlated reply deadline, rather than local admission, decides liveness.
 #[cfg(feature = "remote")]
