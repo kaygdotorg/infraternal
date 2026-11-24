@@ -14,7 +14,7 @@ unchanged; an additive recovery capability is documented below.
 ## Build and production dependencies
 
 `scripts/build-vt` builds the MIT-licensed, minisign-verified libghostty-vt
-1.0.1 source and dependency archives. `scripts/libghostty-vt.sha256` pins both
+1.0.2 source and dependency archives. `scripts/libghostty-vt.sha256` pins both
 archives and their signatures; `nix/package.nix` consumes the same inputs.
 Zig is exactly 0.17.1, supplied by the development shell or the existing
 architecture-specific checksum-verified `scripts/auth-toolchain` download.
