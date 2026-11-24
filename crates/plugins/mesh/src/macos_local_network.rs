@@ -9,25 +9,30 @@
 //! while peers across the internet keep working (measured on the M1, J1108). That is a silent
 //! black hole for exactly the peers that should be fastest, so this module:
 //!
-//! 1. **raises the system alert** as soon as the agent starts, while `infraternal up` is still in
-//!    front of the person: it connects a UDP socket to each local network's broadcast address.
-//!    Connecting is a local network operation (TN3179's table), so the alert appears, and it sends
-//!    nothing;
-//! 2. **learns the answer** by sending one empty datagram to the discard port (9) of that
-//!    broadcast address. macOS has no call that reports the grant (TN3179, FB8711182), so the
-//!    result of a real local operation is the only signal: success means allowed, `EHOSTUNREACH`
-//!    or `EPIPE` means not (yet) allowed;
-//! 3. **keeps trying and never exits** on a refusal: macOS may refuse the first operation before
+//! 1. **raises the system alert and learns the answer** with one operation, as soon as the
+//!    agent starts and while `infraternal up` is still in front of the person: it connects a UDP
+//!    socket to the IPv4 all-hosts group `224.0.0.1`, port 9 (discard), and sends one empty
+//!    datagram. macOS has no call that reports the grant (TN3179, FB8711182), so the result of a
+//!    real local operation is the only signal;
+//! 2. **keeps trying and never exits** on a refusal: macOS may refuse the first operation before
 //!    the person answers, and it shows no alert at all to a process that exits right after a
 //!    refusal (TN3179, FB16131937). It checks every 15 s while not allowed, so an Allow takes
 //!    effect without a restart, and every 10 minutes once allowed, so a later switch-off shows up;
-//! 4. **writes the state** to [`STATE_FILE`] in the mesh state folder, one word from
+//! 3. **writes the state** to [`STATE_FILE`] in the mesh state folder, one word from
 //!    [`LocalNetwork::word`], so `infraternal up` can tell the person what to click and wait for
 //!    it, and logs each change to the agent log.
 //!
-//! The empty datagram goes only to broadcast addresses of the Mac's own broadcast-capable
-//! interfaces, at most once per check, to the discard port; there is no unicast probing of other
-//! hosts. The interface choice is pure code ([`broadcast_targets`]) so the Linux gate tests it.
+//! **Why that probe** (measured on the M1, macOS 27.2.1, as a launchd agent with no grant, then
+//! with a grant; J1157 on #576). Not allowed: an empty send to `224.0.0.1` or to a LAN host fails
+//! with `EPIPE` (`sendto` with `EHOSTUNREACH`), and so does IPv6 `ff02::1`. Allowed: the same
+//! sends succeed. Two operations that look like local ones are *not* usable: a send to the
+//! subnet's broadcast address succeeded without a grant and raised no alert, and the default
+//! gateway is always allowed. A plain `connect` is never refused. Link-local multicast names no
+//! host, never leaves the link (TTL 1), and reaches only the discard port, so it is the gentlest
+//! operation that answers the question; it runs once per check.
+//!
+//! Whether the Mac has a local network at all is decided from its interfaces: a broadcast-capable
+//! interface with a routable IPv4 network ([`broadcast_targets`], pure code the Linux gate tests).
 // The watcher is Mac-only, so the Linux test build sees the pure part unused.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
@@ -45,6 +50,8 @@ const RECHECK_ALLOWED: Duration = Duration::from_secs(600);
 const RECHECK_NONE: Duration = Duration::from_secs(60);
 /// The discard port: an empty datagram there asks nothing of any host.
 const DISCARD_PORT: u16 = 9;
+/// The IPv4 link-local all-hosts group the probe sends to (see the module notes).
+const ALL_HOSTS: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 1);
 
 /// What the agent knows about its Local Network access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,8 +128,9 @@ pub struct InterfaceAddress {
     pub netmask: Ipv4Addr,
 }
 
-/// The broadcast addresses to check: one per local IPv4 network, in interface order.
+/// The Mac's local IPv4 networks, each named by its broadcast address, in interface order.
 ///
+/// An empty list means the Mac has no local network right now, so there is nothing to ask for.
 /// Only broadcast-capable interfaces count, which is also how TN3179 defines a local network,
 /// so tunnels (utun, including the mesh's own), loopback and cellular are left out. Self-assigned
 /// `169.254/16` addresses and point-to-point `/31` and `/32` networks have no LAN behind them.
@@ -201,25 +209,16 @@ fn write_state(file: &Path, state: LocalNetwork) -> std::io::Result<()> {
     std::fs::rename(&temporary, file)
 }
 
-/// One check over every local network: allowed if any allows, denied if any refuses.
+/// One check: no local network, or the answer of one multicast probe.
 #[cfg(target_os = "macos")]
 fn check() -> LocalNetwork {
     let Some(addresses) = interface_addresses() else {
         return LocalNetwork::Unknown;
     };
-    let targets = broadcast_targets(&addresses);
-    if targets.is_empty() {
+    if broadcast_targets(&addresses).is_empty() {
         return LocalNetwork::NoLocalNetwork;
     }
-    let mut result = LocalNetwork::Unknown;
-    for target in targets {
-        match probe(target) {
-            LocalNetwork::Allowed => return LocalNetwork::Allowed,
-            LocalNetwork::Denied => result = LocalNetwork::Denied,
-            _ => {}
-        }
-    }
-    result
+    probe()
 }
 
 /// This Mac's IPv4 interface addresses with whether each interface is broadcast-capable;
@@ -247,23 +246,22 @@ fn interface_addresses() -> Option<Vec<InterfaceAddress>> {
     )
 }
 
-/// Connect a UDP socket to `broadcast`:9 (which raises the alert) and send one empty datagram.
+/// Connect a UDP socket to `224.0.0.1`:9 and send one empty datagram (see the module notes).
 #[cfg(target_os = "macos")]
-fn probe(broadcast: Ipv4Addr) -> LocalNetwork {
-    match probe_errors(broadcast) {
+fn probe() -> LocalNetwork {
+    match probe_errors() {
         Some((Some(errno), _) | (None, Some(errno))) => classify(Some(errno)),
         Some((None, None)) => LocalNetwork::Allowed,
         None => LocalNetwork::Unknown,
     }
 }
 
-/// The raw `errno` of the connect and of the empty send to `broadcast`:9; `None` when no
-/// socket could be set up. The send is skipped when the connect already failed.
+/// The raw `errno` of the connect and of the empty send to `224.0.0.1`:9; `None` when no
+/// socket could be made. The send is skipped when the connect already failed.
 #[cfg(target_os = "macos")]
-fn probe_errors(broadcast: Ipv4Addr) -> Option<(Option<i32>, Option<i32>)> {
+fn probe_errors() -> Option<(Option<i32>, Option<i32>)> {
     use nix::sys::socket::{
-        AddressFamily, MsgFlags, SockFlag, SockType, SockaddrIn, connect, send, setsockopt, socket,
-        sockopt::Broadcast,
+        AddressFamily, MsgFlags, SockFlag, SockType, SockaddrIn, connect, send, socket,
     };
     use std::os::fd::AsRawFd;
     let socket = socket(
@@ -273,8 +271,7 @@ fn probe_errors(broadcast: Ipv4Addr) -> Option<(Option<i32>, Option<i32>)> {
         None,
     )
     .ok()?;
-    setsockopt(&socket, Broadcast, &true).ok()?;
-    let [a, b, c, d] = broadcast.octets();
+    let [a, b, c, d] = ALL_HOSTS.octets();
     if let Err(errno) = connect(
         socket.as_raw_fd(),
         &SockaddrIn::new(a, b, c, d, DISCARD_PORT),
@@ -345,14 +342,12 @@ mod tests {
         while start.elapsed().as_secs() < seconds {
             let addresses = interface_addresses().unwrap_or_default();
             let state = check();
-            let detail: Vec<String> = broadcast_targets(&addresses)
-                .into_iter()
-                .map(|target| format!("{target}:{:?}", probe_errors(target)))
-                .collect();
+            let networks = broadcast_targets(&addresses);
             println!(
-                "t={:>4}s state={} probes={detail:?} interfaces={:?}",
+                "t={:>4}s state={} probe={:?} networks={networks:?} interfaces={:?}",
                 start.elapsed().as_secs(),
                 state.word(),
+                probe_errors(),
                 addresses
                     .iter()
                     .map(|entry| format!("{}={}", entry.name, entry.address))
