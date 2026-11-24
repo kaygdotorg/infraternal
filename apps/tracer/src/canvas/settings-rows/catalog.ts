@@ -52,6 +52,8 @@ export interface GroupDef {
   only?: string[];
   /** The Appearance Themes window (D322, #323): the strip of theme cards and the controls that edit the selected theme (`canvas/themes/editor.on-demand.ts`). */
   themes?: boolean;
+  /** The Machines Updates window (#211, S5): the owner's controls over this server's automatic update (`updates/panel.on-demand.ts`), drawn only when a source is registered (`updates/source.ts`). */
+  updates?: boolean;
   docs?: DocsLink;
 }
 
@@ -87,7 +89,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
   ] },
   { id: "machines", title: "Machines", icon: "machines", admin: true, groups: [
     { id: "new-machines", title: "New Machines", docs: { page: "reference/keys", heading: "add-link-lasts" }, settings: ["add-link", "join-code", "install-mode", "sign-in-account", "join-mesh"] },
-    { id: "updates", title: "Updates" },
+    { id: "updates", title: "Updates", updates: true },
     { id: "app-windows", title: "App Windows", settings: ["app-windows"] },
   ] },
   { id: "mesh", title: "Mesh", icon: "mesh", admin: true, groups: [
