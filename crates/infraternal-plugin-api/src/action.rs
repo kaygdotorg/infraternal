@@ -409,6 +409,8 @@ pub enum CliHandler {
     ServerRestart,
     /// Read the running server's public Mesh identity through its owner-only control socket.
     ServerMeshStatus,
+    /// List, approve or revoke subnet routes on the running server through its control socket (D400).
+    ServerMeshRoutes,
     /// Remove a host using fresh administrator proof.
     RemoveHost,
     /// Answer a private SSH authentication prompt.

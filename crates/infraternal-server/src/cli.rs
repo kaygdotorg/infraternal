@@ -55,7 +55,108 @@ pub fn plugin() -> PluginDefinition {
             .push(infraternal_plugin_remote::cli::restart_action());
         plugin.actions.push(server_mesh_status_action());
     }
+    #[cfg(all(feature = "release", feature = "mesh"))]
+    {
+        plugin.actions.extend(server_mesh_routes_actions());
+        plugin = plugin.with_group(
+            "server mesh routes",
+            "Approve and revoke the networks machines advertise, from the server machine.",
+        );
+    }
     plugin
+}
+
+/// What every `infraternal server mesh routes` command says about who may run it (D400).
+#[cfg(all(feature = "cli-plugin", feature = "release", feature = "mesh"))]
+const ROUTES_WHO: &str = "Run it on the server machine as root or as the account that runs the server; it needs no passkey there. From any other device, the owner approves with a fresh passkey.";
+
+/// The `infraternal server mesh routes …` commands (D197 M3, #580): list, approve and revoke the
+/// networks machines advertise, through the running server's private control socket (D400).
+#[cfg(all(feature = "cli-plugin", feature = "release", feature = "mesh"))]
+fn server_mesh_routes_actions() -> [ActionDefinition; 3] {
+    let contract = |id: &str, effect| {
+        ActionContract::new(ActionTarget::Global, effect, id, DryRun::Unsupported)
+    };
+    [
+        ActionDefinition::new(
+            ["server", "mesh", "routes"],
+            "List the networks machines advertise and whether each is approved.",
+            "Use this command on the server machine before approving or revoking a subnet route.",
+            [
+                ROUTES_WHO,
+                "A waiting network shows why its approval would be refused, such as an overlap.",
+            ],
+            JsonSchema::empty_object(),
+            JsonSchema::command_result(),
+            contract("mesh.route.list", ActionEffect::Read),
+        )
+        .with_cli_handler(CliHandler::ServerMeshRoutes)
+        .with_example(
+            "server mesh routes",
+            "List advertised and approved networks.",
+        ),
+        ActionDefinition::new(
+            ["server", "mesh", "routes", "approve"],
+            "Approve a network a machine advertises, so the mesh routes it.",
+            "Use this command after `server mesh routes` shows the network waiting for approval.",
+            [
+                ROUTES_WHO,
+                "Name the machine by its mesh name or node number, then the network.",
+                "Forwarded traffic is masqueraded unless --keep-source is given.",
+                "Who may reach the network follows Access: the mesh default, or arrows to it.",
+            ],
+            JsonSchema::object(
+                [
+                    (
+                        "node".to_owned(),
+                        JsonSchema::string(
+                            "The machine that advertises the network: its name or node number.",
+                        ),
+                    ),
+                    (
+                        "network".to_owned(),
+                        JsonSchema::string("The advertised network, such as 192.168.1.0/24."),
+                    ),
+                    (
+                        "keep_source".to_owned(),
+                        JsonSchema::boolean(
+                            "Keep the peers' mesh addresses instead of masquerading.",
+                        ),
+                    ),
+                ],
+                ["node".to_owned(), "network".to_owned()],
+            ),
+            JsonSchema::command_result(),
+            contract("mesh.route.approve", ActionEffect::Write),
+        )
+        .with_cli_handler(CliHandler::ServerMeshRoutes)
+        .with_cli_positionals(["node", "network"])
+        .with_example(
+            "server mesh routes approve nas 192.168.1.0/24",
+            "Route the LAN behind the machine named nas.",
+        ),
+        ActionDefinition::new(
+            ["server", "mesh", "routes", "revoke"],
+            "Stop routing an approved network.",
+            "Use this command to take a network out of the mesh; the arrows to it are removed.",
+            [
+                ROUTES_WHO,
+                "Name the route by the number `server mesh routes` shows.",
+            ],
+            JsonSchema::object(
+                [(
+                    "route".to_owned(),
+                    JsonSchema::integer("The route number from `server mesh routes`."),
+                )],
+                ["route".to_owned()],
+            ),
+            JsonSchema::command_result(),
+            contract("mesh.route.revoke", ActionEffect::Write),
+        )
+        .with_cli_handler(CliHandler::ServerMeshRoutes)
+        .with_cli_positionals(["route"])
+        .with_example("server mesh routes revoke 3", "Stop routing route 3."),
+    ]
 }
 
 /// Define the command that reads the running server's public Mesh fingerprint.

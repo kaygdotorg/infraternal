@@ -1361,6 +1361,7 @@ fn control_plane(
     })
 }
 
+/// Build every compiled server plugin on `pool`, wired to the remote host table, and register the mesh service for `infraternal server mesh routes` on the control socket (D400).
 pub(crate) async fn compiled_with_hosts(
     pool: &sqlx::SqlitePool,
     public_origin: Option<&str>,
@@ -1371,6 +1372,9 @@ pub(crate) async fn compiled_with_hosts(
         || infraternal_plugin_mesh::MeshPlugin::new(pool.clone()),
         |origin| infraternal_plugin_mesh::MeshPlugin::with_public_origin(pool.clone(), origin),
     ));
+    // `infraternal server mesh routes` runs on this same service over the control socket (D400).
+    #[cfg(all(feature = "mesh", feature = "release"))]
+    crate::release_control::register_mesh(pool, mesh_plugin.service()).await;
     #[cfg(all(feature = "mesh", feature = "remote"))]
     let mesh_service = mesh_plugin.service();
     // The server's own node admits every member only to the infraternal

@@ -1110,7 +1110,12 @@ fn serve_control(
             assert_eq!(header, crate::release_control::RELEASE_REQUEST);
             let service = service.clone();
             tokio::spawn(async move {
-                let _ = crate::release_control::answer(&mut stream, Some(service)).await;
+                let _ = crate::release_control::answer(
+                    &mut stream,
+                    Some(service),
+                    std::path::Path::new("/nonexistent"),
+                )
+                .await;
             });
         }
     })
