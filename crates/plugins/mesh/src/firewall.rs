@@ -1338,9 +1338,12 @@ mod tests {
         // node's own addresses, never a peer's.
         let accept = rules
             .find("iifname \"lo\" ip saddr { 10.254.0.1 } accept;")
-            .unwrap();
+            .expect("loopback exemption rendered");
         assert!(
-            accept < rules.find("ip saddr @mesh4 drop").unwrap(),
+            accept
+                < rules
+                    .find("ip saddr @mesh4 drop")
+                    .expect("loopback exemption rendered"),
             "{rules}"
         );
         assert!(
