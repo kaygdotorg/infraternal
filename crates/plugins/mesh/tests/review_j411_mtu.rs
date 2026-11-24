@@ -55,6 +55,7 @@ fn captured_peer(key: PublicKey, endpoint: &str) -> Peer {
         },
         endpoint: Some(endpoint.parse().unwrap()),
         candidates: Vec::new(),
+        ipv4_only: false,
     }
 }
 

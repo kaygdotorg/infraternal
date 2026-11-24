@@ -123,6 +123,7 @@ fn snapshot_with_endpoint(
                     addresses: addresses(peer.0),
                     endpoint,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

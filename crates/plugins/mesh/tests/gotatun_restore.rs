@@ -357,6 +357,7 @@ fn failed_gotatun_replay_keeps_the_accepted_coordinator_config() {
                         },
                         endpoint: Some("192.0.2.1:44000".parse().unwrap()),
                         candidates: Vec::new(),
+                        ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

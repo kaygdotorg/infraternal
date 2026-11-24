@@ -38,6 +38,8 @@ pub struct MeshChange {
 }
 
 /// A node combines mesh-core identity with control-plane liveness observations.
+// The flags are independent facts that older viewers already read by name.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MeshNode {
     /// Policy and key identity shared with mesh-core.
@@ -56,6 +58,11 @@ pub struct MeshNode {
     /// How packets reach the node from the server while it is online, when the server's device shows it (#236).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<crate::presence::NodePath>,
+    /// IPv6 is off on the node's mesh link, so it runs IPv4-only (#578, J1142): the mesh publishes no
+    /// AAAA name for it and its peers install no IPv6 route to it. Absent while IPv6 works, and for a node
+    /// that does not report its IPv6 state.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub ipv4_only: bool,
 }
 
 /// A tag and its stable node membership.
@@ -1927,7 +1934,7 @@ async fn read_snapshot(
     invalid_hosts: &crate::diagnostics::InvalidHosts,
 ) -> Result<MeshSnapshot, MeshApiError> {
     let node_rows = sqlx::query(
-        "SELECT id,name,name_source,public_key,key_rotation_supported,authority_epoch_supported,last_seen,last_rtt_us FROM mesh_nodes ORDER BY id",
+        "SELECT id,name,name_source,public_key,key_rotation_supported,authority_epoch_supported,last_seen,last_rtt_us,ipv6_supported,ipv4_only FROM mesh_nodes ORDER BY id",
     )
     .fetch_all(&mut **tx)
     .await
@@ -2057,6 +2064,8 @@ fn decode_host(
     let authority_epoch_supported: Option<bool> = row.try_get("authority_epoch_supported").ok()?;
     let last_seen: Option<i64> = row.try_get("last_seen").ok()?;
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
+    let ipv6_supported: bool = row.try_get("ipv6_supported").ok()?;
+    let ipv4_only: bool = row.try_get("ipv4_only").ok()?;
     Some(MeshNode {
         node: Node {
             // Browser IDs must remain exact JSON integers.
@@ -2076,6 +2085,7 @@ fn decode_host(
         last_seen,
         last_rtt_us: last_rtt.map(u64::try_from).transpose().ok()?,
         path: None,
+        ipv4_only: ipv6_supported && ipv4_only,
     })
 }
 

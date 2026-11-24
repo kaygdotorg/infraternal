@@ -80,6 +80,7 @@ fn orphan_route_retirement_preserves_foreign_routes() {
         },
         endpoint: None,
         candidates: Vec::new(),
+        ipv4_only: false,
     };
     // Model a stop after peers/routes reached the kernel, before public-state
     // fsync. Node deliberately has no Drop cleanup so existing sessions survive.
@@ -241,6 +242,7 @@ fn review_j519_restart_repairs_missing_routes() {
         },
         endpoint: None,
         candidates: Vec::new(),
+        ipv4_only: false,
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),
@@ -354,6 +356,7 @@ fn review_j519_networkd_reload_repairs_peer_routes() {
         },
         endpoint: None,
         candidates: Vec::new(),
+        ipv4_only: false,
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),
@@ -770,6 +773,7 @@ fn review_j529_networkd_reload_recovers_all_peers() {
             },
             endpoint: None,
             candidates: Vec::new(),
+            ipv4_only: false,
         };
         peers.insert(
             NodeId(u64::from(id)),
@@ -931,6 +935,7 @@ fn review_j529_repair_does_not_follow_a_reused_interface_name() {
         },
         endpoint: None,
         candidates: Vec::new(),
+        ipv4_only: false,
     };
     node.chunk(Chunk {
         access_updates: Vec::new(),

@@ -36,7 +36,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -1865,12 +1865,13 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 /// Rejects invalid host routes before they reach the userspace device.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = vec![
-        IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
-            .map_err(|_| io::ErrorKind::InvalidData)?,
-        IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
-            .map_err(|_| io::ErrorKind::InvalidData)?,
-    ];
+    let addresses = peer
+        .routed_addresses()
+        .map(|address| {
+            IpNetwork::new(address, if address.is_ipv4() { 32 } else { 128 })
+                .map_err(|_| io::ErrorKind::InvalidData.into())
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
@@ -1973,6 +1974,7 @@ mod keep_tests {
             },
             endpoint: Some(at(first)),
             candidates: rest.iter().map(|address| at(address)).collect(),
+            ipv4_only: false,
         }
     }
 
@@ -2738,6 +2740,7 @@ mod tests {
                         },
                         endpoint,
                         candidates: Vec::new(),
+                        ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

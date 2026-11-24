@@ -84,6 +84,33 @@ async fn read_candidates(channel: &dyn NodeChannel) -> Option<Vec<std::net::Sock
     parse_candidates(&reply)
 }
 
+/// Asks a node whether it reports its IPv6 state (#578, J1142), on its own like the other probes so a strict
+/// older node refuses only this one and keeps its identity. `Some(ipv4_only)` when the node understands
+/// `Peer::ipv4_only` and says whether IPv6 is off on its mesh link; `None` for an older node or no answer.
+async fn read_ipv6_state(channel: &dyn NodeChannel) -> Option<bool> {
+    let reply = channel
+        .call("mesh.identity", br#"{"ipv6_state":true}"#.to_vec())
+        .await
+        .ok()?;
+    parse_ipv6_state(&reply)
+}
+
+/// Reads the IPv6 fields of a `mesh.identity` reply to an `{"ipv6_state":true}` probe. The node's reply
+/// carries `ipv6_state` when it understands the probe and `ipv4_only` only while IPv6 is off.
+#[must_use]
+pub fn parse_ipv6_state(reply: &[u8]) -> Option<bool> {
+    /// The two fields this probe adds to the identity reply.
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        ipv6_state: bool,
+        #[serde(default)]
+        ipv4_only: bool,
+    }
+    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    reply.ipv6_state.then_some(reply.ipv4_only)
+}
+
 /// Reads the candidate fields of a `mesh.identity` reply to a `{"candidates":true}` probe; the identity fields
 /// it also carries are read elsewhere. The store keeps at most two private, sendable LAN addresses of what this
 /// returns ([`crate::candidates::valid_lan`]).
@@ -230,6 +257,10 @@ pub async fn run(
     #[cfg(feature = "mesh-dns")]
     let mut dns_names = false;
     let mut ack_retry: Option<(infraternal_mesh::model::NodeId, u64)> = None;
+    // Whether this node reports its IPv6 state (#578, J1142), and what it last said. A node's state
+    // changes when it applies a snapshot, so each configure reply is read for it below.
+    let mut ipv6_reporting = false;
+    let mut known_ipv4_only = false;
     let mut presence_updates = service.subscribe_presence();
     let mut rotation_updates = service.subscribe_rotation_progress();
     let mut listener: ServerListener = None;
@@ -303,6 +334,9 @@ pub async fn run(
                     binding = Some(node);
                     // Ask before the first snapshot, so a new node's first peers already carry candidates.
                     let reported = read_candidates(channel.as_ref()).await;
+                    let ipv6 = read_ipv6_state(channel.as_ref()).await;
+                    ipv6_reporting = ipv6.is_some();
+                    known_ipv4_only = ipv6 == Some(true);
                     let Ok(_permit) = work.acquire().await else {
                         return;
                     };
@@ -310,7 +344,10 @@ pub async fn run(
                         store.record_candidates(node, reported.as_deref()).await,
                         Ok(true)
                     );
-                    if updated || recorded {
+                    // A node that is IPv4-only must be marked before its peers' first snapshots too.
+                    let recorded_ipv6 =
+                        matches!(store.record_ipv6_state(node, ipv6).await, Ok(true));
+                    if updated || recorded || recorded_ipv6 {
                         service.invalidate_dataplane().await;
                     }
                 } else {
@@ -318,6 +355,7 @@ pub async fn run(
                     installed = None;
                     current_identity = None;
                     authority_epoch_supported = None;
+                    ipv6_reporting = false;
                 }
             } else {
                 binding = None;
@@ -444,6 +482,8 @@ pub async fn run(
                     }
                 };
                 let mut failed = false;
+                // The node's IPv6 state as of the snapshot it just applied, from the final reply.
+                let mut reported_ipv4_only = None;
                 for mut chunk in chunks {
                     if !current_identity
                         .as_ref()
@@ -475,12 +515,33 @@ pub async fn run(
                         .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok());
                     #[cfg(feature = "cutoff-measure")]
                     drop(ack);
-                    if !reply.is_some_and(|reply| {
+                    if !reply.as_ref().is_some_and(|reply| {
                         !chunk.last
                             || reply["applied"] == true && reply["version"] == config.version
                     }) {
                         failed = true;
                         break;
+                    }
+                    if chunk.last && ipv6_reporting {
+                        reported_ipv4_only = reply.map(|reply| reply["ipv4_only"] == true);
+                    }
+                }
+                // Applying a snapshot is when a node reads its link, so this is where IPv6 going away
+                // or coming back shows. Record it: peers' snapshots then gain or lose the IPv4-only mark
+                // (no AAAA name, no IPv6 route) on the next revision (#578, J1142).
+                if !failed
+                    && let Some(ipv4_only) = reported_ipv4_only
+                    && ipv4_only != known_ipv4_only
+                {
+                    known_ipv4_only = ipv4_only;
+                    let Ok(_permit) = work.acquire().await else {
+                        return;
+                    };
+                    if matches!(
+                        store.record_ipv6_state(config.node, Some(ipv4_only)).await,
+                        Ok(true)
+                    ) {
+                        service.invalidate_dataplane().await;
                     }
                 }
                 if !failed && snapshot.acknowledgments_required() {
@@ -672,6 +733,9 @@ mod tests {
         identity_probed: tokio::sync::Notify,
         /// The legacy `{}` reply hides rotation support, as a real node does when the request does not ask.
         legacy_hides_rotation: AtomicBool,
+        /// The node's IPv6 report (#578, J1142): `None` is an older node that does not report, `Some(true)`
+        /// a node whose mesh link has IPv6 off. Shared by the identity probe and the configure reply.
+        ipv4_only: Mutex<Option<bool>>,
     }
     impl Channel {
         fn new() -> Arc<Self> {
@@ -711,6 +775,7 @@ mod tests {
                 identity_requests: Mutex::new(Vec::new()),
                 identity_probed: tokio::sync::Notify::new(),
                 legacy_hides_rotation: AtomicBool::new(false),
+                ipv4_only: Mutex::new(None),
             })
         }
         /// A test channel that presents the candidate key and advertises rotation support.
@@ -867,8 +932,10 @@ mod tests {
                     let authority_epoch = self.probe_answers.load(Ordering::Acquire)
                         && probe["authority_epoch"] == true;
                     self.queried.notify_one();
-                    return serde_json::to_vec(&self.enabled.load(Ordering::Acquire).then_some(
-                        Identity {
+                    let reported = *self.ipv4_only.lock().unwrap();
+                    let report = (probe["ipv6_state"] == true).then_some(reported).flatten();
+                    let identity = serde_json::to_value(
+                        self.enabled.load(Ordering::Acquire).then_some(Identity {
                             compact_access: false,
                             #[cfg(feature = "mesh-dns")]
                             dns_names: false,
@@ -881,9 +948,17 @@ mod tests {
                                 self.identity_key
                             },
                             port: 44000,
-                        },
-                    ))
-                    .map_err(|_| "encoding failed");
+                        }),
+                    )
+                    .map_err(|_| "encoding failed")?;
+                    let mut identity = identity;
+                    if let (Some(ipv4_only), Some(fields)) = (report, identity.as_object_mut()) {
+                        fields.insert("ipv6_state".to_owned(), true.into());
+                        if ipv4_only {
+                            fields.insert("ipv4_only".to_owned(), true.into());
+                        }
+                    }
+                    return serde_json::to_vec(&identity).map_err(|_| "encoding failed");
                 }
                 if action == "mesh.status" {
                     return Ok(br#"{"server_link":{"source_port":43210}}"#.to_vec());
@@ -946,10 +1021,11 @@ mod tests {
                 if chunk.last {
                     self.applied.add_permits(1);
                 }
-                Ok(serde_json::to_vec(
-                    &serde_json::json!({"applied":chunk.last,"version":chunk.version}),
-                )
-                .unwrap())
+                let mut reply = serde_json::json!({"applied":chunk.last,"version":chunk.version});
+                if *self.ipv4_only.lock().unwrap() == Some(true) {
+                    reply["ipv4_only"] = true.into();
+                }
+                Ok(serde_json::to_vec(&reply).unwrap())
             })
         }
     }
@@ -1148,6 +1224,95 @@ mod tests {
         attach_once(&service, Channel::named(false, Some("minipc01"))).await;
         assert_eq!(names(&service).await, ["server", "lab"]);
     }
+    /// What the store says about `node`'s IPv4-only mark in the snapshot the server's node receives.
+    async fn marked_for_server(service: &MeshService, node: NodeId) -> bool {
+        let store = service.dataplane();
+        let server = store.config(NodeId(1)).await.unwrap();
+        server.peers[&node].peer.ipv4_only
+    }
+
+    /// Wait until `marked_for_server` says `want`, failing the test after five seconds.
+    async fn wait_for_mark(service: &MeshService, node: NodeId, want: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while marked_for_server(service, node).await != want {
+                // sleep: polls the store the worker writes after each applied snapshot; no event to await.
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the IPv4-only mark never became {want}"));
+    }
+
+    /// The coordinator learns a node's IPv6 state when it attaches and again from each configure reply, so
+    /// peers' snapshots gain the IPv4-only mark when IPv6 goes away and lose it when IPv6 is back (#578,
+    /// J1142). A node that does not report is never marked.
+    #[tokio::test]
+    async fn a_nodes_ipv6_report_marks_and_unmarks_it_for_its_peers() {
+        let service = service().await;
+        let store = service.dataplane();
+        // The server's own node understands the mark, so its snapshots can carry it.
+        assert!(
+            store
+                .record_ipv6_state(NodeId(1), Some(false))
+                .await
+                .unwrap()
+        );
+        let channel = Channel::new();
+        *channel.ipv4_only.lock().unwrap() = Some(true);
+        let worker = tokio::spawn(run(
+            service.dataplane(),
+            service.clone(),
+            channel.clone(),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        ));
+        channel.wait().await;
+        let node = NodeId(2);
+        // Attach probe: IPv6 off is known before the node's first snapshot reaches anyone.
+        wait_for_mark(&service, node, true).await;
+
+        // IPv6 comes back. The node says so in its reply to the next snapshot it applies; a rename of
+        // another node is such a snapshot.
+        *channel.ipv4_only.lock().unwrap() = Some(false);
+        let rename = |name: &'static str| {
+            let service = service.clone();
+            async move {
+                service
+                    .execute(
+                        "owner",
+                        "mesh.node.rename",
+                        &serde_json::to_vec(&serde_json::json!({"node_id":1,"name":name})).unwrap(),
+                        1,
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        rename("lab-one").await;
+        wait_for_mark(&service, node, false).await;
+
+        // And IPv6 goes away again.
+        *channel.ipv4_only.lock().unwrap() = Some(true);
+        rename("lab-two").await;
+        wait_for_mark(&service, node, true).await;
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    /// A node that never reports its IPv6 state keeps today's behaviour: no mark, whatever it says.
+    #[tokio::test]
+    async fn a_node_that_does_not_report_ipv6_is_never_marked() {
+        let service = service().await;
+        let store = service.dataplane();
+        assert!(
+            store
+                .record_ipv6_state(NodeId(1), Some(false))
+                .await
+                .unwrap()
+        );
+        attach_once(&service, Channel::new()).await;
+        assert!(!marked_for_server(&service, NodeId(2)).await);
+    }
+
     #[tokio::test]
     async fn peer_route_precedes_configuration_and_retires_with_the_node() {
         let service = service().await;

@@ -374,6 +374,7 @@ mod tests {
                 },
                 endpoint: Some(at("198.51.100.4:30254")),
                 candidates: vec![at("198.51.100.4:10254")],
+                ipv4_only: false,
             },
             inbound: TrafficPolicy::All,
             outbound: TrafficPolicy::All,

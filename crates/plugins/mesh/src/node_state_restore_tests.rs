@@ -74,6 +74,7 @@ fn public_state(peers: u16) -> State {
                     },
                     endpoint: Some(([10, 220, a, b], 7443).into()),
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::None,
