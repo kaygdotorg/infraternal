@@ -168,7 +168,10 @@ async fn waiting_viewer_reports_pressure_at_most_every_250_ms() {
     viewer.report_pressure(lag).unwrap();
     assert_eq!(
         commands.try_recv(),
-        Ok(HostCommand::Pressure { waited_ms: 60 })
+        Ok(HostCommand::Pressure {
+            waited_ms: 60,
+            kbit_s: 0
+        })
     );
     assert!(commands.try_recv().is_err(), "merged within 250 ms");
     tokio::time::advance(Duration::from_millis(250)).await;

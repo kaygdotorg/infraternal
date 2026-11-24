@@ -667,7 +667,7 @@ Neither delivery mode has a default: opening selects it explicitly for measureme
 | 0x43 | VideoInput | u8 input kind, binary fields below |
 | 0x44 | VideoRepair | u64 last_sequence |
 | 0x45 | VideoFragment | 16-byte session UUID, u64 sequence, u64 capture_ns, u8 keyframe, u32 total, u32 offset, fragment bytes |
-| 0x46 | VideoPressure | u16 waited_ms (leg B only, server to host) |
+| 0x46 | VideoPressure | u16 waited_ms, u32 kbit_s (leg B only, server to host; a 2-byte body from an older server decodes with kbit_s 0) |
 
 Video sequence starts at 1 and never decreases within a session. `capture_ns`
 is the Mac host's monotonic capture-request clock, converted to nanoseconds;
@@ -733,7 +733,10 @@ long at the server, or its last video write took that long. `waited_ms` is that
 lag, saturating at 65535, and is informational. The host's encoder lowers its
 bit rate as for its own congestion signal. The server sends at most one per
 250 ms per session and never fills the last two slots of its bounded host
-command queue with one. Browsers neither send nor receive it.
+command queue with one. `kbit_s` is the rate in kilobits per second at which the server
+measured that viewer's connection draining while backed up (0: no measurement); the host's
+encoder cuts straight to a rate under it instead of in fixed steps. Browsers neither send
+nor receive it.
 
 Path selection consumes the same measured relay/direct observations as terminals.
 The server session and grant authority remain stable across path changes.
