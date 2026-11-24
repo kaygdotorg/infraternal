@@ -308,6 +308,8 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     );
 }
 
+/// Accepts one QUIC connection and verifies the supervisor sends `Hello`.
+#[cfg(target_os = "linux")]
 async fn native_greeting(server: &quinn::Endpoint) -> &'static str {
     let connection = server.accept().await.unwrap().await.unwrap();
     let (send, receive) = connection.accept_bi().await.unwrap();
@@ -320,6 +322,8 @@ async fn native_greeting(server: &quinn::Endpoint) -> &'static str {
     connection.close(0u32.into(), b"");
     "quic"
 }
+/// Accepts one TLS-over-TCP connection and verifies the supervisor sends `Hello`.
+#[cfg(target_os = "linux")]
 async fn tcp_greeting(
     listener: &tokio::net::TcpListener,
     tls: &openssl::ssl::SslAcceptor,

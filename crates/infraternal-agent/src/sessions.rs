@@ -1313,7 +1313,7 @@ async fn launch_configured(
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
-        return session;
+        session
     }
     #[cfg(target_os = "linux")]
     {
@@ -1586,6 +1586,13 @@ pub(crate) fn cleanups_pending() -> bool {
 /// `Abandoned::drop`.
 #[cold]
 #[inline(never)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        clippy::unused_async,
+        reason = "Keep the async shutdown signature identical on targets without Linux launch cleanups."
+    )
+)]
 pub(crate) async fn drain_cleanups() {
     #[cfg(target_os = "linux")]
     {
