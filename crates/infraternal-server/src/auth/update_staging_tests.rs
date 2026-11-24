@@ -1512,29 +1512,9 @@ async fn auto_update_after_reboot() {
         "the boot pointer resolves to the good release"
     );
     assert!(!data.join("updates/pending.json").exists());
-    // The restarted server adopts the live sessions again before they can be attached; each attempt that
-    // arrives too early fails alone and is counted, so a session that never comes back still fails the proof.
-    let mut echoed = 0;
-    let mut attempts = 0;
-    while echoed == 0 {
-        attempts += 1;
-        assert!(
-            attempts <= 8,
-            "no session echoed after the roll back in {} attempts",
-            attempts - 1
-        );
-        if let Ok(count) = std::panic::AssertUnwindSafe(server.echo("after-rollback"))
-            .catch_unwind()
-            .await
-        {
-            echoed = count;
-        } else {
-            println!("UPDATE step=echo_retry attempt={attempts}");
-            // sleep: the restarted server re-adopts the live sessions before they can be attached.
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    }
-    println!("UPDATE step=echo_after_rollback attempts={attempts}");
+    // The first attach and echo after a manual roll back must succeed on the first try:
+    // the writer clock is preserved across the D295 database restore (#211, J1148).
+    let echoed = server.echo("after-rollback").await;
     // sleep: a full quiet window plus checks pass; the paused version must not come back by itself.
     tokio::time::sleep(Duration::from_secs(STEP * 4)).await;
     assert_eq!(
@@ -1736,8 +1716,11 @@ async fn cli_root(server: &mut Server, bucket: &Bucket, root: &Path) {
     );
     assert_eq!(server.pointer(), Path::new("releases").join(&versions.cli));
     assert_eq!(read_marker(&server.database).await, 41);
+    // Type on the new release before cli_rollback so the CLI roll-back path also proves
+    // writer-clock preservation across D295 database restores (#211, J1148).
+    let cli_echoed = server.echo("after-cli-apply").await;
     println!(
-        "UPDATE case=cli_apply bucket=warm outcome=applied as=root passkey=none stale_session=true nobody_refused=true same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} pointer=releases/{} cli_seconds={apply_seconds:.1} max_healthz_gap_ms={apply_gap:.1}",
+        "UPDATE case=cli_apply bucket=warm outcome=applied as=root passkey=none stale_session=true nobody_refused=true same_pid=true ca_unlocked=true unlocks=0 shims_unchanged={} echoed_browsers={cli_echoed} pointer=releases/{} cli_seconds={apply_seconds:.1} max_healthz_gap_ms={apply_gap:.1}",
         server.shims.len(),
         versions.cli
     );

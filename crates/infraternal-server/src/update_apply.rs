@@ -380,6 +380,13 @@ pub fn startup(data: &Path) -> Result<(), &'static str> {
     if update::availability(crate::release_latest::release_build()).is_err() {
         return Ok(());
     }
+    // Capture the highest allocated wire writer ID before a D295 restore overwrites the
+    // database: live shims keep the rolled-back release's writer cursors, so fresh
+    // attachments after a roll back must never reuse those writer IDs (#211).
+    let database = data.join(apply::DATABASE);
+    let writer_floor = std::fs::symlink_metadata(data.join("updates").join(apply::PENDING))
+        .ok()
+        .and_then(|_| crate::update_writer_clock::read_high_water(&database));
     let resumed = apply::resume(data, infraternal_plugin_api::VERSION, || {
         std::fs::File::open("/proc/self/exe")
             .map_err(|_| "the running image could not be read")
@@ -398,7 +405,24 @@ pub fn startup(data: &Path) -> Result<(), &'static str> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pending);
             TRIAL_OPEN.send_replace(true);
         }
-        Ok(Resume::Finished(outcome)) => tracing::warn!(outcome, "update_switch_finished"),
+        Ok(Resume::Finished(outcome)) => {
+            if outcome == update::UNDONE
+                && let Some(floor) = writer_floor
+            {
+                match crate::update_writer_clock::advance_to_at_least(&database, floor) {
+                    Ok(()) => tracing::info!(
+                        writer_floor = floor,
+                        "update_rollback_writer_clock_preserved"
+                    ),
+                    Err(reason) => tracing::warn!(
+                        reason,
+                        writer_floor = floor,
+                        "update_rollback_writer_clock_failed"
+                    ),
+                }
+            }
+            tracing::warn!(outcome, "update_switch_finished");
+        }
         Err(apply::TRIAL_NOT_RECORDED) => {
             tracing::error!(
                 reason = apply::TRIAL_NOT_RECORDED,
