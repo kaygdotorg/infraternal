@@ -817,6 +817,7 @@ impl AgentPlugin for MeshNodePlugin {
                         "peer_count": node.config().map_or(0, |config| config.peers.len()),
                         "default_policy": node.config().map(|config| config.default_policy),
                         "udp_port": node.listen_port(),
+                        "dns": node.dns_state(),
                         "ipv6": !ipv4_only(node),
                         "server_link": self.server_link,
                         "engine": engine_health(node),

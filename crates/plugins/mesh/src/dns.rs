@@ -142,6 +142,19 @@ impl Records {
         self.local_address
     }
 
+    /// Every name as `(host label, IPv4 address, IPv6 address)`, in label order.
+    ///
+    /// The hosts-file fallback uses it to publish the same names the resolver answers when the
+    /// host has no resolver that can route one suffix. The IPv6 address is `None` for an
+    /// IPv4-only node (#578), so no line is written for an address nothing answers on.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn host_entries(&self) -> Vec<(&str, Ipv4Addr, Option<std::net::Ipv6Addr>)> {
+        self.names
+            .iter()
+            .map(|(label, addresses)| (label.as_str(), addresses.ipv4, addresses.ipv6))
+            .collect()
+    }
+
     /// The default and custom DNS zones this snapshot answers.
     pub(crate) fn suffixes(&self) -> &[String] {
         &self.suffixes

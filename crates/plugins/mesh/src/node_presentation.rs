@@ -73,6 +73,18 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
             .ok_or(PluginError::Rejected)?;
         rows.push(("UDP listen port", port.to_string()));
     }
+    if let Some(dns) = value.get("dns").filter(|dns| !dns.is_null()) {
+        let detail = dns["detail"].as_str().ok_or(PluginError::Rejected)?;
+        let label = match dns["mode"].as_str() {
+            Some("resolved" | "networkmanager" | "resolver-files") => "on",
+            Some("hosts") => "limited",
+            Some("unprivileged") => "not installed",
+            Some("unavailable") => "failed",
+            Some("off") => "off",
+            _ => return Err(PluginError::Rejected),
+        };
+        rows.push(("Host DNS", format!("{label}: {detail}")));
+    }
     if let Some(policy) = value["default_policy"].as_str() {
         rows.push((
             "Access",
@@ -586,6 +598,23 @@ mod tests {
         .expect("dual-stack status");
         assert!(on.body.contains("fd01::1"), "{}", on.body);
         assert!(!on.body.contains("IPv4-only"), "{}", on.body);
+    }
+
+    /// Status says how mesh names reach the host resolver, and why when they do not.
+    #[test]
+    fn status_reports_the_host_dns_state() {
+        let shown = status(
+            serde_json::json!({"state":"On","peer_count":0,
+                "dns":{"mode":"unavailable","detail":"no resolver tool","suffixes":[],"search":false}}),
+            100,
+        )
+        .expect("dns status");
+        assert!(shown.body.contains("Host DNS"), "{}", shown.body);
+        assert!(
+            shown.body.contains("failed: no resolver tool"),
+            "{}",
+            shown.body
+        );
     }
 
     /// Human status includes the listener selected after a default-port collision.

@@ -4011,6 +4011,18 @@ impl Node {
             .collect()
     }
 
+    /// What the host resolver integration did, for `mesh status`.
+    pub fn dns_state(&self) -> serde_json::Value {
+        #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
+        {
+            serde_json::json!(self.dns_integration.state())
+        }
+        #[cfg(not(all(feature = "mesh-dns", target_os = "linux")))]
+        {
+            serde_json::Value::Null
+        }
+    }
+
     #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
     /// Binds the DNS sockets after the mesh address exists and before names are published.
     fn ensure_dns_resolver(&mut self, address: std::net::Ipv4Addr) -> io::Result<()> {
