@@ -116,13 +116,15 @@ async fn copied_older_leaf_is_refused_once_the_agent_has_seen_its_successor() {
 
     let floor = ServerLeafFloor::default();
     floor
-        .admit(&tcp_leaf(impostor_address, &node, &root).await)
+        .admit(&der(&tcp_leaf(impostor_address, &node, &root).await))
         .expect("chain and name checks alone accept the copied leaf");
     floor
-        .admit(&tcp_leaf(server.local_addr().unwrap(), &node, &root).await)
+        .admit(&der(
+            &tcp_leaf(server.local_addr().unwrap(), &node, &root).await
+        ))
         .unwrap();
     let refused = floor
-        .admit(&tcp_leaf(impostor_address, &node, &root).await)
+        .admit(&der(&tcp_leaf(impostor_address, &node, &root).await))
         .unwrap_err();
     assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
     let (_endpoint, connection, _) = quic_leaf(impostor_address, &node, &root).await;

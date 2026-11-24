@@ -40,9 +40,14 @@ pub mod remote_recovery;
 pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;
-/// Agent-side refusal of server leaves older than the newest one accepted (#559).
+/// Agent-side refusal of server leaves older than the newest one accepted
+/// (#559); it lives in `infraternal-link` and reads the leaf's DER (#580).
 #[cfg(feature = "transport")]
-pub mod server_leaf_floor;
+pub use infraternal_link::server_leaf_floor;
+/// The floor's tests with real OpenSSL-built certificates.
+#[cfg(all(test, feature = "transport"))]
+#[path = "server_leaf_floor_tests.rs"]
+mod server_leaf_floor_tests;
 /// QUIC datagram lanes for plugin media; they live in `infraternal-link` (#580).
 #[cfg(feature = "native-streams")]
 pub use infraternal_link::wire_datagrams;

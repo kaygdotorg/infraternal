@@ -411,12 +411,14 @@ async fn dial_preferred(
         tokio::time::sleep(Duration::from_millis(100)).await;
         let connection = remote_tls::dial(address, &identity.server_name, tls).await?;
         // Dropping a refused connection closes it before any frame is sent.
-        identity.server_leaf.admit(
-            connection
-                .peer_leaf
-                .as_ref()
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
-        )?;
+        // The floor reads the leaf's DER (#580); a leaf that cannot be
+        // encoded is refused like a missing one.
+        let leaf = connection
+            .peer_leaf
+            .as_ref()
+            .and_then(|leaf| leaf.to_der().ok())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        identity.server_leaf.admit(&leaf)?;
         Ok(connection)
     };
     tokio::pin!(quic, fallback);

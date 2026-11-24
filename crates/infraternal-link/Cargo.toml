@@ -9,9 +9,10 @@ license.workspace = true
 
 [features]
 default = []
-# The QUIC dial runtime (and, with native-streams, the datagram lanes). Hosts
-# that never dial the server, such as a terminal-only agent, leave QUIC out.
-quic = ["dep:quinn"]
+# The QUIC dial runtime, client TLS config and identity signer (and, with
+# native-streams, the datagram lanes). Hosts that never dial the server, such
+# as a terminal-only agent, leave QUIC out.
+quic = ["dep:quinn", "dep:rustls", "dep:ring"]
 # Owned frame reads, plus QUIC datagram lanes for plugin media with `quic` (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "dep:bytes"]
 # Test hooks (the offline-limit override, receiver inspection); dev-dependencies only.
@@ -22,6 +23,9 @@ bytes = { workspace = true, optional = true }
 infraternal-plugin-api = { workspace = true }
 infraternal-protocol.workspace = true
 quinn = { workspace = true, optional = true }
+# TLS 1.3 with ring, the stack QUIC already uses; also the Ed25519 signer (D289).
+ring = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 # The handshake reads a message's `type` before its strict struct (agent_link).
 serde_json.workspace = true
