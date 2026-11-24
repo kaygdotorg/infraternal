@@ -57,6 +57,9 @@ mod update_activity;
 /// The quiet-window apply, the new release's trial and the D295 undo (#211 S4).
 #[cfg(feature = "release")]
 pub mod update_apply;
+/// Preserves the wire writer-ID clock across D295 database restores (#211).
+#[cfg(feature = "release")]
+mod update_writer_clock;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]
