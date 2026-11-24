@@ -318,7 +318,8 @@ must answer 200 on its own listener, a write transaction must commit, and the CA
 must be unlocked if it was before. On a pass, `updates/current` (a symlink, the
 boot pointer) moves to `releases/<new>`. Other installed releases are removed,
 and `previous/` is kept until the next update, so S5's manual roll back can use
-it.
+it. Once committed, the root server also updates the world-executable CLI copy at
+`/usr/local/lib/infraternal/infraternal` (see "CLI command on `PATH`" below).
 
 **The undo (D295).** If the check fails or times out, or the new release cannot
 start serving at all (a failed database migration, for example), the new release
@@ -435,30 +436,61 @@ does not have. `updates/previous/` keeps the running release's `web/` too, so a 
 roll back serves its own. Anything else (a fixed install path, a release without a web
 build) serves `--web-root` as before.
 
+**CLI command on `PATH` (#211).** `<data>/updates/current/infraternal` lives inside
+the `0700` root-only data folder, so non-root users cannot exec through it. To keep
+`infraternal` on `PATH` aligned with the running server across automatic quiet-window
+updates, Web UI updates, `server update apply`, `server update adopt`, and manual
+rollbacks, the root server (and `adopt`) maintains a world-executable copy outside
+`<data>`:
+
+- `/usr/local/lib/infraternal/infraternal` (`0755`, root-owned, atomically replaced
+  via `rename`, and labeled `bin_t` on `SELinux` hosts before rename);
+- `/usr/local/lib/infraternal/infraternal.previous` (`0755`, kept until the next
+  switch so a manual rollback restores the previous CLI copy atomically);
+- `/usr/local/bin/infraternal` -> `/usr/local/lib/infraternal/infraternal`.
+
+`/usr/local/bin/infraternal` is created or re-pointed only when it is missing or
+already a symlink to an infraternal release (for example an earlier `/opt/infraternal/...`
+or `/var/lib/infraternal/...` link). A foreign regular file, directory, or symlink to
+another program is refused loudly and never overwritten (`adopt` refuses in preflight;
+the running server logs an error without rolling back a healthy committed release).
+
 **`server init --system`** writes `ExecStart=<data>/updates/current/infraternal server …`
 once the data folder has a boot pointer, keeping every other flag, and leaves out
 `--web-root` when that release has its own web build. A fresh install has no pointer
-yet and starts the installed binary, as before.
+yet and starts the installed binary, as before. On SELinux hosts (where
+`/sys/fs/selinux/enforce` exists or `getenforce` is not `Disabled`), `server init
+--system` also adds the persistent file-context rule `semanage fcontext -a -t bin_t
+"<data>/updates(/.*)?"` (skipped if that exact rule already exists) and runs
+`restorecon -R <data>/updates`, so systemd can execute the boot pointer and later
+staged releases instead of failing with `203/EXEC` on `var_lib_t`. If `semanage` is
+missing on an SELinux host, `server init --system` refuses and asks for
+`policycoreutils-python-utils` instead of writing a unit that cannot start; `--dry-run`
+prints the commands it would run. Non-SELinux hosts run no extra commands.
 
 **`infraternal server update adopt <release folder>`** moves an existing server, once,
 from a fixed path onto the boot pointer. It runs as root on the server machine. It
 first checks everything and refuses with the reason if anything does not match: the
 unit systemd loaded (`FragmentPath`) is a plain file with one `ExecStart` that runs an
 infraternal server for this `--data`, no drop-in overrides `ExecStart`, the server runs
-as root and is active, the running server says its version on its control socket, and
+as root and is active, the running server says its version on its control socket,
 the release folder is signed (verified like `restart --binary`), for this machine, and
-not older than the running version. Then it:
+not older than the running version, and on SELinux hosts `semanage`
+(`policycoreutils-python-utils`) and `restorecon` are installed. Then it:
 
 1. copies the release into `<data>/updates/releases/<version>/`, verifies the copies
    (image and web build), unpacks `web/`, and points `current` at it;
-2. backs the unit up to `<data>/unit-backups/<unit>.<UTC stamp>` and rewrites only
+2. on SELinux hosts, adds `semanage fcontext -a -t bin_t "<data>/updates(/.*)?"` (if
+   not already present) and runs `restorecon -R <data>/updates`, so the boot pointer
+   and future staged releases carry `bin_t` and survive cold starts;
+3. backs the unit up to `<data>/unit-backups/<unit>.<UTC stamp>` and rewrites only
    its `ExecStart` line: the program becomes the boot pointer, every flag stays, and
    `--web-root` goes when the release has its own web build; then `systemctl
    daemon-reload`;
-3. restarts the running server warm into `releases/<version>/infraternal`, the same
+4. restarts the running server warm into `releases/<version>/infraternal`, the same
    request as `infraternal server restart --binary`: same PID, the terminal sessions
    keep running, and the unlocked CA is handed over (D217);
-4. waits up to a minute for the server to answer with the release's version. If it
+5. waits up to a minute for the server to answer with the release's version. If it
    does not, the old unit is put back, and the command says how to start the
    previous build.
 
@@ -493,13 +525,20 @@ Production today: root, data `/var/lib/infraternal`, unit
    sudo ./infraternal server --help >/dev/null && echo "server image ok"
    ```
 5. **Dry run, with the release's own binary** (the installed `infraternal` predates
-   the command):
+   the command). On SELinux hosts (such as EL-family servers), make sure
+   `policycoreutils-python-utils` (`semanage`) is installed first; otherwise `adopt`
+   refuses before changing anything:
    ```sh
    sudo /root/releases/$v/infraternal server update adopt /root/releases/$v --data /var/lib/infraternal --dry-run
    ```
    Read the `- ExecStart=` and `+ ExecStart=` lines: the program becomes
    `/var/lib/infraternal/updates/current/infraternal`, `--web-root` goes,
-   everything else stays.
+   everything else stays. On SELinux hosts, the dry run also lists the
+   `semanage fcontext -a -t bin_t "/var/lib/infraternal/updates(/.*)?"` (if not
+   already defined) and `restorecon -R /var/lib/infraternal/updates` commands that
+   keep the boot pointer and future staged releases executable by systemd (`bin_t`,
+   avoiding `203/EXEC` on `var_lib_t`). Never start a systemd unit directly from
+   `/root` (`admin_home_t`) on an enforcing host.
 6. **Move:** the same command without `--dry-run`. It answers "Moved the server from
    <old> onto <version> and the boot pointer, warm".
 7. **Turn automatic apply off, right away** (production moves only when the owner or
@@ -513,9 +552,9 @@ Production today: root, data `/var/lib/infraternal`, unit
    `systemctl cat infraternal-server` shows the new `ExecStart`; the web app loads
    with the new build; the CA is still unlocked; terminals kept running.
 9. **From now on** updates are `sudo infraternal server update check` and `sudo
-   infraternal server update apply` after each publication (D400). Until the
-   `infraternal` on `PATH` is a build with these commands, call the boot pointer's
-   image, `/var/lib/infraternal/updates/current/infraternal`, instead.
+   infraternal server update apply` after each publication (D400). `adopt`, committed
+   switches, and manual rollbacks keep `/usr/local/lib/infraternal/infraternal` and
+   `/usr/local/bin/infraternal` in sync automatically.
    `deploy.sh` must not be used any more: it replaces the `/opt` build and
    cold-restarts the unit, which now starts the boot pointer, so it would lock the CA
    and change nothing that runs.

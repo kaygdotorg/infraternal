@@ -67,6 +67,7 @@ fn config() -> Config {
                     },
                     endpoint: None,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
@@ -91,6 +92,7 @@ fn response_without_question(wire: &[u8]) -> Vec<u8> {
     message.to_vec().unwrap()
 }
 
+/// Names of the local node and of a peer answer both `A` and `AAAA` with the positive TTL.
 #[test]
 fn peer_and_local_names_answer_a_and_aaaa_with_positive_ttl() {
     let a_wire = response_wire("BUILD-01.INTERNAL", 1);
@@ -140,6 +142,52 @@ fn peer_and_local_names_answer_a_and_aaaa_with_positive_ttl() {
         }
         other => panic!("unexpected peer AAAA response: {other:?}"),
     }
+}
+
+/// A peer that runs IPv4-only (#578, J1142) keeps its `A` record, but its `AAAA` is an empty answer
+/// (NODATA, name exists, short negative TTL), so a client that tries IPv6 first falls back at once.
+/// Other names keep their `AAAA`, and the answer changes back when the mark is removed.
+#[test]
+fn an_ipv4_only_peer_answers_a_but_no_aaaa() {
+    let mut config = config();
+    config.peers.get_mut(&NodeId(1)).unwrap().peer.ipv4_only = true;
+    let ask = |name: &str, qtype: u16, config: &Config| {
+        Message::from_vec(
+            &dns::response(&query(name, qtype), config)
+                .unwrap()
+                .expect("mesh suffix is authoritative"),
+        )
+        .unwrap()
+    };
+    let a = ask("build-01.internal", 1, &config);
+    assert_eq!(a.metadata.response_code, ResponseCode::NoError);
+    assert!(
+        matches!(&a.answers[0].data, RData::A(address) if address.0 == Ipv4Addr::new(10, 254, 0, 1))
+    );
+
+    let aaaa = ask("build-01.internal", 28, &config);
+    assert_eq!(
+        aaaa.metadata.response_code,
+        ResponseCode::NoError,
+        "the name exists"
+    );
+    assert!(
+        aaaa.answers.is_empty(),
+        "no AAAA for an IPv4-only peer: {:?}",
+        aaaa.answers
+    );
+    assert_eq!(aaaa.authorities.len(), 1, "NODATA carries the negative SOA");
+
+    let local = ask("laptop.internal", 28, &config);
+    assert_eq!(local.answers.len(), 1, "a dual-stack name keeps its AAAA");
+
+    config.peers.get_mut(&NodeId(1)).unwrap().peer.ipv4_only = false;
+    let back = ask("build-01.internal", 28, &config);
+    assert_eq!(
+        back.answers.len(),
+        1,
+        "IPv6 reported on again restores the AAAA"
+    );
 }
 
 #[test]

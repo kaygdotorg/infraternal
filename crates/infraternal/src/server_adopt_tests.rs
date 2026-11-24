@@ -107,3 +107,66 @@ fn every_server_image_name_is_the_one_the_updater_stages() {
     );
     std::fs::remove_dir_all(&data).unwrap();
 }
+
+/// `server update adopt --dry-run` prints the `SELinux` commands only on `SELinux` hosts (#211).
+#[test]
+fn adopt_plan_lines_include_selinux_commands_only_when_planned() {
+    let data = Path::new("/var/lib/infraternal");
+    let exec = single_exec(OPERATOR_UNIT).unwrap();
+    let unit = UnitFile {
+        path: PathBuf::from("/etc/systemd/system/infraternal-server.service"),
+        text: OPERATOR_UNIT.to_owned(),
+        exec_start: exec.clone(),
+        words: words(&exec),
+    };
+    let pointer = data.join("updates/current/infraternal");
+    let target_exec = rewrite_exec(&unit.words, &pointer, true).unwrap();
+    let plan = adopt::Plan {
+        version: "edge-20261124T000000Z".to_owned(),
+        web: true,
+        installed: false,
+        current: None,
+    };
+    let image = data.join("updates/releases/edge-20261124T000000Z/infraternal");
+    let backup = data.join("unit-backups/infraternal-server.service.20261124-000000");
+    let places = Places {
+        data,
+        release: Path::new("/root/releases/edge-20261124T000000Z"),
+        backup: &backup,
+        image: &image,
+    };
+
+    let without_selinux = plan_lines(&plan, &unit, &target_exec, &places, 42, None);
+    assert!(
+        !without_selinux
+            .iter()
+            .any(|line| line.contains("semanage") || line.contains("restorecon"))
+    );
+
+    let add_plan = crate::selinux::plan_for_tests(data, true);
+    let with_add = plan_lines(&plan, &unit, &target_exec, &places, 42, Some(&add_plan));
+    assert!(with_add.iter().any(|line| {
+        line == "Would run semanage fcontext -a -t bin_t \"/var/lib/infraternal/updates(/.*)?\""
+    }));
+    assert!(
+        with_add
+            .iter()
+            .any(|line| line == "Would run restorecon -R /var/lib/infraternal/updates")
+    );
+
+    let existing_plan = crate::selinux::plan_for_tests(data, false);
+    let with_existing = plan_lines(
+        &plan,
+        &unit,
+        &target_exec,
+        &places,
+        42,
+        Some(&existing_plan),
+    );
+    assert!(!with_existing.iter().any(|line| line.contains("semanage")));
+    assert!(
+        with_existing
+            .iter()
+            .any(|line| line == "Would run restorecon -R /var/lib/infraternal/updates")
+    );
+}

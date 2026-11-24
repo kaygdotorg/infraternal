@@ -1,0 +1,10 @@
+70296 bin/bench-baseline-dev.stripped
+54440 bin/bench-baseline-sim.stripped
+612680 bin/bench-bridge-dev.stripped
+601048 bin/bench-bridge-sim.stripped
+457832 bin/bench-cabi-dev.stripped
+444984 bin/bench-cabi-sim.stripped
+570712 bin/bench-uniffi-dev.stripped
+558760 bin/bench-uniffi-sim.stripped
+1616768 bin/ne-memory-dev.stripped
+1579992 bin/ne-memory-sim.stripped

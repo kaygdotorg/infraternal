@@ -1,0 +1,18 @@
+[package]
+name = "ne-memory"
+description = "Measures the memory footprint of a GotaTun device on Apple platforms, idle and under load (J1158)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The static library is linked into an iOS Simulator executable by Xcode's
+# toolchain (see link-sim.sh); the binary is the macOS build.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# The same fork, revision and features the product's mesh plugin uses.
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "e6efb96b25fdff1ac959a20063bbb752acd0a6e2", default-features = false, features = ["device", "ring"] }
+ipnetwork = "0.21.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync", "macros"] }

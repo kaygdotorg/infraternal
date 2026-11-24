@@ -217,6 +217,7 @@ async fn main() {
         },
         endpoint: None,
         candidates: Vec::new(),
+        ipv4_only: false,
     };
     let shim = paths
         .relay_with_endpoint(&mut NoEngine, peer, &kernel)

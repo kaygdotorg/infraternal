@@ -21,6 +21,9 @@ pub mod adopt;
 /// The applier trait the owner controls call for apply and rollback; the server implements it with S4 (#211 S5).
 #[cfg(feature = "server")]
 pub mod applier;
+/// World-executable CLI copy and `/usr/local/bin/infraternal` link that follow server updates (#211).
+#[cfg(feature = "server")]
+pub mod cli_link;
 /// The bounded update history shown in the Updates row (#211 S5).
 #[cfg(feature = "server")]
 pub mod history;

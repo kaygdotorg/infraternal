@@ -36,6 +36,7 @@
 //! path without publishing anything.
 use infraternal_plugin_release::{
     apply::{self, Pending, Phase, Resume, Switch, Undo},
+    cli_link,
     update::{self, Updater},
 };
 use std::{
@@ -269,7 +270,14 @@ impl infraternal_plugin_release::applier::UpdateApplier for ServerApplier {
                 let running = std::fs::File::open("/proc/self/exe")
                     .map_err(|_| "the running image could not be read")?;
                 let own = apply::digest(&running)?;
-                apply::begin_manual_rollback(&data, artifact, infraternal_plugin_api::VERSION, &own)
+                let undo = apply::begin_manual_rollback(
+                    &data,
+                    artifact,
+                    infraternal_plugin_api::VERSION,
+                    &own,
+                )?;
+                restore_cli_link(&data, artifact);
+                Ok::<_, &'static str>(undo)
             })
             .await
             .map_err(|_| "the roll back could not be prepared")??;
@@ -277,12 +285,9 @@ impl infraternal_plugin_release::applier::UpdateApplier for ServerApplier {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
-            let refused = |data: &Path| {
-                let _ = apply::cancel_manual_rollback(data, infraternal_plugin_api::VERSION);
-                Err("the restart control refused the roll back")
-            };
             let Some(sender) = sender else {
-                return refused(&self.data);
+                cancel_manual_rollback_with_cli(self.data.clone(), self.artifact).await;
+                return Err("the restart control refused the roll back");
             };
             // Nothing new may be acknowledged to a shim between the copy and the exec (J1085).
             crate::update_activity::freeze(true);
@@ -294,7 +299,8 @@ impl infraternal_plugin_release::applier::UpdateApplier for ServerApplier {
                 || !matches!(answer.await, Ok(Ok(())))
             {
                 crate::update_activity::freeze(false);
-                return refused(&self.data);
+                cancel_manual_rollback_with_cli(self.data.clone(), self.artifact).await;
+                return Err("the restart control refused the roll back");
             }
             Ok(infraternal_plugin_release::applier::Started {
                 to: plan.to_version,
@@ -862,7 +868,12 @@ async fn run_trial(
         Ok(()) => {
             let committed = {
                 let (data, trial) = (data.clone(), trial.clone());
-                tokio::task::spawn_blocking(move || apply::commit(&data, &trial)).await
+                tokio::task::spawn_blocking(move || {
+                    apply::commit(&data, &trial)?;
+                    publish_cli_link(&data, &trial.to_version, artifact);
+                    Ok::<_, &'static str>(())
+                })
+                .await
             };
             match committed {
                 Ok(Ok(())) => {
@@ -1067,6 +1078,70 @@ fn running_path() -> PathBuf {
             path
         }
         _ => configured().unwrap_or_default(),
+    }
+}
+
+/// Undo a manual rollback whose exec was refused, moving both the boot pointer and the
+/// world-executable CLI copy back to the still-running release off the async runtime (P2, #211).
+async fn cancel_manual_rollback_with_cli(data: PathBuf, artifact: &'static str) {
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = apply::cancel_manual_rollback(&data, infraternal_plugin_api::VERSION);
+        publish_cli_link(&data, infraternal_plugin_api::VERSION, artifact);
+    })
+    .await;
+}
+
+/// Publish the committed release's world-executable CLI copy and `/usr/local/bin/infraternal` link (#211).
+///
+/// Runs inside the root server process right after `apply::commit` (or when a manual rollback is
+/// cancelled) so automatic quiet-window updates, Web UI updates and `--no-wait` CLI updates all
+/// keep the CLI on `PATH` in sync. A foreign `/usr/local/bin/infraternal` is refused loudly in the
+/// server log and never overwritten; it does not roll back a healthy committed server.
+fn publish_cli_link(data: &Path, version: &str, artifact: &str) {
+    let source = data.join("updates/releases").join(version).join(artifact);
+    let paths = cli_link::CliPaths::system();
+    match cli_link::publish(
+        &source,
+        &paths,
+        infraternal_agent::exec_label::executable_label,
+    ) {
+        Ok(outcome) => tracing::info!(
+            version,
+            path = %paths.active().display(),
+            link = %paths.path_link.display(),
+            ?outcome,
+            "update_cli_link_published"
+        ),
+        Err(error) => tracing::error!(
+            version,
+            error = %error,
+            "update_cli_link_refused"
+        ),
+    }
+}
+
+/// Restore the previous release's world-executable CLI copy during a manual rollback (#211).
+///
+/// Falls back to `<data>/updates/previous/<artifact>` when `infraternal.previous` has not been
+/// populated yet (such as rolling back the first update after upgrading from a pre-J1147 server).
+fn restore_cli_link(data: &Path, artifact: &str) {
+    let fallback = data.join("updates/previous").join(artifact);
+    let paths = cli_link::CliPaths::system();
+    match cli_link::restore(
+        &paths,
+        Some(&fallback),
+        infraternal_agent::exec_label::executable_label,
+    ) {
+        Ok(outcome) => tracing::info!(
+            path = %paths.active().display(),
+            link = %paths.path_link.display(),
+            ?outcome,
+            "update_cli_link_restored"
+        ),
+        Err(error) => tracing::error!(
+            error = %error,
+            "update_cli_link_restore_refused"
+        ),
     }
 }
 

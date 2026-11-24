@@ -80,7 +80,11 @@ url = { workspace = true, optional = true }
 # UDP GRO datagrams are cut into packets in place, without a copy, and the TUN
 # sender merges runs already queued into one write run. With the adapter's
 # gather writes that is +10-21% Gbit/s at 9-14% less CPU per Gbit (#260, J1129).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "e6efb96b25fdff1ac959a20063bbb752acd0a6e2", default-features = false, features = ["device", "ring"], optional = true }
+# Pure TCP ACKs, small packets and small encrypted datagrams go ahead of bulk data
+# in the send path by default. Loaded median: -0.05..-0.39 ms for pings and
+# -0.03..-0.24 ms for keystroke-sized TCP round trips, with Gbit/s within 0.3%.
+# GOTATUN_REPLIES_FIRST=off turns it off (#260, J1143).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "841ef3e61300639984027029473fa99ea5a905b3", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -199,6 +199,7 @@ fn compile_inner(
                         .ok_or(MeshError::InvalidAllocation)?,
                     endpoint,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound,
                 outbound,

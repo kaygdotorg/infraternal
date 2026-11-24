@@ -1047,6 +1047,7 @@ mod tests {
                                 addresses: address(*id),
                                 endpoint: None,
                                 candidates: Vec::new(),
+                                ipv4_only: false,
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,

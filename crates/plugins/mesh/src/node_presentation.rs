@@ -55,7 +55,13 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         let address: std::net::Ipv4Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         rows.push(("Address", address.to_string()));
     }
-    if let Some(address) = value["addresses"]["ipv6"].as_str() {
+    if value["ipv6"] == false {
+        // The mesh link has IPv6 off (#578): no IPv6 address was installed, so do not list one.
+        rows.push((
+            "IPv6",
+            "off on this machine (net.ipv6.conf disable_ipv6); the mesh runs IPv4-only".to_owned(),
+        ));
+    } else if let Some(address) = value["addresses"]["ipv6"].as_str() {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         rows.push(("Address", address.to_string()));
     }
@@ -339,6 +345,8 @@ fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
     // then a peer is known by its mesh address.
     let name = row["peer"]["name"].as_str().map(str::to_owned);
     let label = name.clone().unwrap_or_else(|| address.to_string());
+    // A peer that runs IPv4-only has no IPv6 route here and no AAAA name (#578, J1142).
+    let ipv4_only = row["peer"]["ipv4_only"] == true;
     let mut record = serde_json::json!({
         "node": node,
         "address": address.to_string(),
@@ -347,6 +355,9 @@ fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
         "received_bytes": received,
         "sent_bytes": sent,
     });
+    if ipv4_only {
+        record["ipv6"] = "off".into();
+    }
     if let Some(name) = name {
         record["name"] = name.into();
     }
@@ -358,7 +369,11 @@ fn peer_view(row: &Value, now: u64) -> Result<PeerView, PluginError> {
     }
     Ok(PeerView {
         cells: vec![
-            label.clone(),
+            if ipv4_only {
+                format!("{label} (IPv4 only)")
+            } else {
+                label.clone()
+            },
             if direct { "direct" } else { "none yet" }.to_owned(),
             bytes(received),
             bytes(sent),
@@ -552,6 +567,27 @@ mod tests {
         );
     }
 
+    /// An IPv6-off node says so instead of listing an IPv6 address it never installed (#578, J1142).
+    #[test]
+    fn status_says_when_the_mesh_runs_ipv4_only() {
+        let off = status(
+            serde_json::json!({"state":"On","peer_count":0,"ipv6":false,
+                "addresses":{"ipv4":"10.254.0.1","ipv6":"fd01::1"}}),
+            100,
+        )
+        .expect("ipv4-only status");
+        assert!(off.body.contains("IPv4-only"), "{}", off.body);
+        assert!(!off.body.contains("fd01::1"), "{}", off.body);
+        let on = status(
+            serde_json::json!({"state":"On","peer_count":0,"ipv6":true,
+                "addresses":{"ipv4":"10.254.0.1","ipv6":"fd01::1"}}),
+            100,
+        )
+        .expect("dual-stack status");
+        assert!(on.body.contains("fd01::1"), "{}", on.body);
+        assert!(!on.body.contains("IPv4-only"), "{}", on.body);
+    }
+
     /// Human status includes the listener selected after a default-port collision.
     #[test]
     fn status_reports_the_udp_listener_port() {
@@ -655,6 +691,28 @@ mod tests {
         assert_eq!(record["last_handshake_secs_ago"], 12);
         assert_eq!(record["received_bytes"], 18_056_740_u64);
         assert!(record.get("counters").is_none());
+    }
+
+    /// A peer that runs IPv4-only is marked in the table and in the JSON record (#578, J1142).
+    #[test]
+    fn an_ipv4_only_peer_is_marked() {
+        let mut row = peer(3, "10.254.0.3", 988);
+        row["peer"]["ipv4_only"] = true.into();
+        let page =
+            serde_json::json!({"peers": [row, peer(4, "10.254.0.4", 988)], "next_cursor": null});
+        let shown = peers_at(&page, 120, 1000).expect("present peers");
+        assert!(
+            shown.body.contains("10.254.0.3 (IPv4 only)"),
+            "{}",
+            shown.body
+        );
+        assert!(
+            !shown.body.contains("10.254.0.4 (IPv4 only)"),
+            "{}",
+            shown.body
+        );
+        assert_eq!(shown.data["peers"][0]["ipv6"], "off");
+        assert!(shown.data["peers"][1].get("ipv6").is_none());
     }
 
     #[test]

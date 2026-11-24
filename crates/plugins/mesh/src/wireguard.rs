@@ -745,7 +745,8 @@ impl Device {
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
-                if family == 10 && !ipv6 {
+                // An IPv4-only peer (#578, J1142) gets no IPv6 route either.
+                if family == 10 && (!ipv6 || peer.ipv4_only) {
                     continue;
                 }
                 let mut payload = peer_route_payload(family, prefix, &address, index, mtu)?;
@@ -805,7 +806,8 @@ impl Device {
                 (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
                 (10, 128, peer.addresses.ipv6.octets().to_vec()),
             ] {
-                if family == 10 && !ipv6 {
+                // An IPv4-only peer (#578, J1142) gets no IPv6 route either.
+                if family == 10 && (!ipv6 || peer.ipv4_only) {
                     continue;
                 }
                 let payload =
@@ -841,7 +843,7 @@ impl Device {
             IpAddr::V4(address) if address == peer.addresses.ipv4 => {
                 (2, 32, address.octets().to_vec())
             }
-            IpAddr::V6(address) if address == peer.addresses.ipv6 => {
+            IpAddr::V6(address) if address == peer.addresses.ipv6 && !peer.ipv4_only => {
                 (10, 128, address.octets().to_vec())
             }
             _ => return Err(io::ErrorKind::InvalidInput.into()),
@@ -987,23 +989,27 @@ impl Device {
     /// # Errors
     /// Reports malformed route dumps or kernel deletion errors.
     pub fn retain_routes(addresses: &[Addresses]) -> io::Result<()> {
-        Self::retain_recorded_routes(&Self::peer_routes()?, addresses)
+        let retained: Vec<IpAddr> = addresses
+            .iter()
+            .flat_map(|address| [IpAddr::V4(address.ipv4), IpAddr::V6(address.ipv6)])
+            .collect();
+        Self::retain_recorded_routes(&Self::peer_routes()?, &retained)
     }
     /// Retire only journaled peer host routes with the exact shape we install.
     /// # Errors
     /// Reports checked dump or deletion failures, preserving foreign route shapes.
+    ///
+    /// `retained` lists the destinations that stay. It is a list of addresses, not of
+    /// [`Addresses`] pairs, because an IPv4-only peer keeps only its IPv4 route (#578, J1142).
     pub fn retain_recorded_routes(
         inventory: &BTreeSet<IpAddr>,
-        addresses: &[Addresses],
+        retained: &[IpAddr],
     ) -> io::Result<()> {
-        Self::retire_routes(inventory, addresses)
+        Self::retire_routes(inventory, retained)
     }
     /// Remove stale peer routes owned by this mesh while preserving foreign routes.
-    fn retire_routes(inventory: &BTreeSet<IpAddr>, addresses: &[Addresses]) -> io::Result<()> {
-        let desired: BTreeSet<IpAddr> = addresses
-            .iter()
-            .flat_map(|address| [IpAddr::V4(address.ipv4), IpAddr::V6(address.ipv6)])
-            .collect();
+    fn retire_routes(inventory: &BTreeSet<IpAddr>, retained: &[IpAddr]) -> io::Result<()> {
+        let desired: BTreeSet<IpAddr> = retained.iter().copied().collect();
         let owned = index()?;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         for reply in socket.request(26, 0x300, &[0; 12])? {
@@ -2741,6 +2747,10 @@ impl Client {
                         (2_u16, 32, peer.addresses.ipv4.octets().to_vec()),
                         (10, 128, peer.addresses.ipv6.octets().to_vec()),
                     ] {
+                        // An IPv4-only peer (#578, J1142) owns no IPv6 allowed IP.
+                        if family == 10 && peer.ipv4_only {
+                            continue;
+                        }
                         let mut ip = Vec::new();
                         attribute(&mut ip, 1, &family.to_ne_bytes())?;
                         attribute(&mut ip, 2, &address)?;

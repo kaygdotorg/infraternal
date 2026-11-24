@@ -37,6 +37,10 @@ struct Loaded {
     candidates: std::sync::Arc<BTreeMap<NodeId, crate::candidates::NodeCandidates>>,
     /// Nodes that walk an ordered candidate list; the rest get `endpoints` alone.
     accepts_candidates: std::sync::Arc<BTreeSet<NodeId>>,
+    /// Nodes that understand `Peer::ipv4_only` and report their IPv6 state (#578, J1142).
+    reports_ipv6: std::sync::Arc<BTreeSet<NodeId>>,
+    /// Nodes whose last report said IPv6 is off on their mesh link; only nodes in `reports_ipv6` appear.
+    ipv4_only: std::sync::Arc<BTreeSet<NodeId>>,
     /// The reflexive addresses published for each node before its current one, oldest first (J585 F3).
     reflexive_history: std::sync::Arc<BTreeMap<NodeId, Vec<SocketAddr>>>,
     default: DefaultPolicy,
@@ -134,6 +138,20 @@ impl Snapshot {
             }
         }
     }
+    /// Mark each peer that runs IPv4-only, for a node that understands the mark (#578, J1142).
+    ///
+    /// The receiver then installs no IPv6 route or allowed IP for that peer and its mesh DNS
+    /// answers no `AAAA` for the name. An older receiver gets no mark, because its decoder refuses
+    /// unknown fields; it keeps today's behaviour. Marks follow the peers' latest reports, so a
+    /// peer whose IPv6 comes back is unmarked by the next snapshot.
+    fn mark_ipv4_only(&self, node: NodeId, config: &mut Config) {
+        if !self.loaded.reports_ipv6.contains(&node) {
+            return;
+        }
+        for (peer, policy) in &mut config.peers {
+            policy.peer.ipv4_only = self.loaded.ipv4_only.contains(peer);
+        }
+    }
     /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
     pub(crate) fn acknowledgments_required(&self) -> bool {
         self.loaded
@@ -172,6 +190,7 @@ impl Snapshot {
                     sequence: rotation.sequence,
                 });
         self.order_candidates(node, &mut config);
+        self.mark_ipv4_only(node, &mut config);
         #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
@@ -1756,6 +1775,40 @@ impl Store {
         self.commit_candidate_change(tx, updated.rows_affected() > 0)
             .await
     }
+    /// Record what a node said about its IPv6 state (#578, J1142): `Some(ipv4_only)` from a node that
+    /// reports it, `None` from an older node, which is never treated as IPv4-only and gets no mark.
+    ///
+    /// Writes, and advances the revision, only when something changed, so peers' snapshots are
+    /// recompiled (adding or dropping the mark) exactly when a node's IPv6 state flips. Returns
+    /// whether it did.
+    /// # Errors
+    /// Returns fixed public errors, not database input.
+    pub async fn record_ipv6_state(
+        &self,
+        node: NodeId,
+        reported: Option<bool>,
+    ) -> Result<bool, &'static str> {
+        let supported = reported.is_some();
+        let ipv4_only = reported.unwrap_or(false);
+        let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let updated = sqlx::query(
+            "UPDATE mesh_nodes SET ipv6_supported=?,ipv4_only=? \
+             WHERE id=? AND (ipv6_supported IS NOT ? OR ipv4_only IS NOT ?)",
+        )
+        .bind(supported)
+        .bind(ipv4_only)
+        .bind(id)
+        .bind(supported)
+        .bind(ipv4_only)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
+        self.commit_candidate_change(tx, updated.rows_affected() > 0)
+            .await
+    }
     /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs). Private
     /// addresses ([`crate::candidates::is_private_scope`]) are never recorded.
     ///
@@ -2131,11 +2184,11 @@ impl Store {
         .flatten();
         #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
-            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
-            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         let rows = nodes_query
             .fetch_all(&mut *tx)
@@ -2145,6 +2198,8 @@ impl Store {
         let mut endpoints = BTreeMap::new();
         let mut candidates = BTreeMap::new();
         let mut accepts_candidates = BTreeSet::new();
+        let mut reports_ipv6 = BTreeSet::new();
+        let mut ipv4_only = BTreeSet::new();
         let mut reflexive_history = BTreeMap::new();
         #[cfg(feature = "mesh-dns")]
         let mut dns_placeholders = BTreeSet::new();
@@ -2202,6 +2257,18 @@ impl Store {
                 accepts_candidates.insert(id);
             }
             candidates.insert(id, known);
+            if row
+                .try_get::<bool, _>("ipv6_supported")
+                .map_err(|error| storage_sql_error(error))?
+            {
+                reports_ipv6.insert(id);
+                if row
+                    .try_get::<bool, _>("ipv4_only")
+                    .map_err(|error| storage_sql_error(error))?
+                {
+                    ipv4_only.insert(id);
+                }
+            }
             let history = stored_addresses(&row, "reflexive_history")?;
             if !history.is_empty() {
                 reflexive_history.insert(id, history);
@@ -2500,6 +2567,8 @@ impl Store {
             endpoints: std::sync::Arc::new(endpoints),
             candidates: std::sync::Arc::new(candidates),
             accepts_candidates: std::sync::Arc::new(accepts_candidates),
+            reports_ipv6: std::sync::Arc::new(reports_ipv6),
+            ipv4_only: std::sync::Arc::new(ipv4_only),
             reflexive_history: std::sync::Arc::new(reflexive_history),
             default,
             revision: u64::try_from(revision)
@@ -2974,6 +3043,65 @@ mod candidate_tests {
             tries(&store.config(b).await.unwrap(), a),
             [at("10.9.0.2:10254"), at("198.51.100.21:10254")],
             "one LAN address per family"
+        );
+    }
+
+    /// The IPv4-only mark follows what each node reported (#578, J1142): only nodes that report their IPv6
+    /// state get marks, only for peers that said IPv6 is off, and the mark leaves when IPv6 is back. A node
+    /// that does not report is never marked, and never receives a mark, because it could not decode one.
+    #[tokio::test]
+    async fn peers_that_report_ipv6_off_are_marked_only_for_nodes_that_understand_it() {
+        let (store, [server, a, b, c]) = mesh().await;
+        // `a` and the server report; `b` reports IPv6 off; `c` is an older node that never reports.
+        assert!(store.record_ipv6_state(server, Some(false)).await.unwrap());
+        assert!(store.record_ipv6_state(a, Some(false)).await.unwrap());
+        assert!(store.record_ipv6_state(b, Some(true)).await.unwrap());
+        assert!(
+            !store.record_ipv6_state(c, None).await.unwrap(),
+            "an older node changes nothing"
+        );
+        assert!(
+            !store.record_ipv6_state(b, Some(true)).await.unwrap(),
+            "the same report writes nothing and publishes no revision"
+        );
+
+        let marked = |config: &Config| -> Vec<NodeId> {
+            config
+                .peers
+                .iter()
+                .filter(|(_, policy)| policy.peer.ipv4_only)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        assert_eq!(marked(&store.config(a).await.unwrap()), [b]);
+        assert_eq!(marked(&store.config(server).await.unwrap()), [b]);
+        assert_eq!(
+            marked(&store.config(c).await.unwrap()),
+            Vec::<NodeId>::new(),
+            "an older node's snapshot never carries the field"
+        );
+        let listed = store.config(b).await.unwrap();
+        assert_eq!(
+            marked(&listed),
+            Vec::<NodeId>::new(),
+            "no dual-stack peer is marked"
+        );
+
+        // IPv6 comes back on `b`: the next snapshot of every node drops the mark.
+        let before = store.load().await.unwrap().revision;
+        assert!(store.record_ipv6_state(b, Some(false)).await.unwrap());
+        assert_eq!(store.load().await.unwrap().revision, before + 1);
+        assert_eq!(
+            marked(&store.config(a).await.unwrap()),
+            Vec::<NodeId>::new()
+        );
+
+        // A node that downgrades to not reporting (an older build reinstalled) is never marked.
+        assert!(store.record_ipv6_state(b, Some(true)).await.unwrap());
+        assert!(store.record_ipv6_state(b, None).await.unwrap());
+        assert_eq!(
+            marked(&store.config(a).await.unwrap()),
+            Vec::<NodeId>::new()
         );
     }
 }

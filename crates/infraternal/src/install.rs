@@ -54,6 +54,9 @@ pub enum InstallError {
     /// A server host-firewall setting is malformed or unsafe to apply.
     #[error("host firewall configuration is invalid: {0}")]
     HostFirewall(String),
+    /// `SELinux` labeling for `<data>/updates` could not be planned or applied (#211).
+    #[error("SELinux setup failed: {0}")]
+    Selinux(String),
 }
 
 /// Install the unit and enable it, or print the exact operations in dry-run mode.
@@ -98,9 +101,10 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
         );
         #[cfg(target_os = "linux")]
         if options.system {
+            let selinux_lines = selinux_dry_run_lines(&absolute(&args.data)?)?;
             if args.host_firewall_off {
                 return Ok(format!(
-                    "{folders}Would clear the server host policy, remove only marked infraternal host table and loader state when no agent policy remains, and write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable --now {}.service\n",
+                    "{folders}Would clear the server host policy, remove only marked infraternal host table and loader state when no agent policy remains, and write {}:\n{}\nWould run:\n{selinux_lines}  systemctl daemon-reload\n  systemctl enable --now {}.service\n",
                     path.display(),
                     unit,
                     options.name,
@@ -108,7 +112,7 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
             }
             let firewall = make_firewall_install(args)?;
             return Ok(format!(
-                "{folders}Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
+                "{folders}Would replace the hand-installed {FIREWALL_SERVICE} and take over inet infraternal_host.\nWould write {}:\n{}\nWould write {}:\n{}\nWould write {}:\n{}\nWould run:\n{selinux_lines}  systemctl daemon-reload\n  systemctl enable {FIREWALL_SERVICE}\n  systemctl restart {FIREWALL_SERVICE}\n  {}\n",
                 host_firewall::SERVER_POLICY_PATH,
                 firewall.policy_json,
                 FIREWALL_UNIT_PATH,
@@ -128,13 +132,22 @@ pub fn install(args: &ServerArgs, options: &InstallArgs) -> Result<String, Insta
     }
 
     let systemctl = systemctl_program()?;
-    let (firewall, removal_report) = install_in_order(
+    let data_dir = absolute(&args.data)?;
+    let ((firewall, _selinux), removal_report) = install_in_order(
         &path,
         unit.as_bytes(),
-        &absolute(&args.data)?,
+        &data_dir,
         options.force,
-        || plan_firewall(args, options),
-        |plan| publish_planned_firewall(plan, &systemctl),
+        || {
+            let firewall = plan_firewall(args, options)?;
+            let selinux = plan_selinux(&data_dir, options)?;
+            Ok((firewall, selinux))
+        },
+        |(firewall, selinux)| {
+            let report = publish_planned_firewall(firewall, &systemctl)?;
+            apply_planned_selinux(selinux.as_ref())?;
+            Ok(report)
+        },
     )?;
 
     if !systemctl_command(&systemctl)
@@ -259,6 +272,74 @@ fn plan_firewall(args: &ServerArgs, options: &InstallArgs) -> Result<FirewallPla
     }
     let _ = (args, options);
     Ok(FirewallPlan::Untouched)
+}
+
+/// Indented dry-run lines for `SELinux` boot-pointer labeling on Linux system installs (#211).
+///
+/// Returns an empty string on non-SELinux hosts so their dry-run output is unchanged.
+#[cfg(target_os = "linux")]
+fn selinux_dry_run_lines(data: &Path) -> Result<String, InstallError> {
+    let plan = crate::selinux::plan_for_host(data, true)
+        .map_err(|error| InstallError::Selinux(error.to_string()))?;
+    Ok(format_selinux_dry_run_lines(plan.as_ref()))
+}
+
+/// Format planned `SELinux` commands as indented `Would run:` lines.
+#[cfg(target_os = "linux")]
+fn format_selinux_dry_run_lines(plan: Option<&crate::selinux::LabelPlan>) -> String {
+    let Some(plan) = plan else {
+        return String::new();
+    };
+    let mut lines = String::new();
+    for command in plan.dry_run_commands() {
+        lines.push_str("  ");
+        lines.push_str(&command);
+        lines.push('\n');
+    }
+    lines
+}
+
+/// Plan `SELinux` labeling for `<data>/updates` on Linux system installs without side effects (#211).
+#[cfg(target_os = "linux")]
+fn plan_selinux(
+    data: &Path,
+    options: &InstallArgs,
+) -> Result<Option<crate::selinux::LabelPlan>, InstallError> {
+    if !options.system {
+        return Ok(None);
+    }
+    crate::selinux::plan_for_host(data, false)
+        .map_err(|error| InstallError::Selinux(error.to_string()))
+}
+
+/// Non-Linux hosts have no `SELinux` policy to configure.
+#[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the Linux signature used by install_in_order"
+)]
+fn plan_selinux(_data: &Path, _options: &InstallArgs) -> Result<Option<()>, InstallError> {
+    Ok(None)
+}
+
+/// Apply the planned `SELinux` labeling before the systemd unit is written (#211).
+#[cfg(target_os = "linux")]
+fn apply_planned_selinux(plan: Option<&crate::selinux::LabelPlan>) -> Result<(), InstallError> {
+    if let Some(plan) = plan {
+        crate::selinux::apply_on_host(plan)
+            .map_err(|error| InstallError::Selinux(error.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Non-Linux no-op counterpart of [`apply_planned_selinux`].
+#[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the Linux signature used by install_in_order"
+)]
+fn apply_planned_selinux(_plan: Option<&()>) -> Result<(), InstallError> {
+    Ok(())
 }
 
 /// Carry out a [`FirewallPlan`]; returns the removal report when the server role was cleared.
@@ -1930,5 +2011,25 @@ mod tests {
         assert!(refusal.contains(&named.display().to_string()), "{refusal}");
         let refusal = check_root_web_folder(&fixture.0.join("absent"), me()).unwrap_err();
         assert!(refusal.contains("is not there"), "{refusal}");
+    }
+
+    /// `server init --system --dry-run` formats `SELinux` commands only when `SELinux` is active (#211).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn selinux_dry_run_lines_reflect_host_state_and_rule_presence() {
+        assert_eq!(format_selinux_dry_run_lines(None), "");
+
+        let add_plan = crate::selinux::plan_for_tests(Path::new("/var/lib/infraternal"), true);
+        assert_eq!(
+            format_selinux_dry_run_lines(Some(&add_plan)),
+            "  semanage fcontext -a -t bin_t \"/var/lib/infraternal/updates(/.*)?\"\n  restorecon -R /var/lib/infraternal/updates\n"
+        );
+
+        let existing_plan =
+            crate::selinux::plan_for_tests(Path::new("/var/lib/infraternal"), false);
+        assert_eq!(
+            format_selinux_dry_run_lines(Some(&existing_plan)),
+            "  restorecon -R /var/lib/infraternal/updates\n"
+        );
     }
 }

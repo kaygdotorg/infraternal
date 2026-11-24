@@ -738,6 +738,13 @@ async fn build_router_core(
             config.listen,
         ));
     }
+    // Periodic batched pruning of closed terminal_sessions rows older than 30 days (#571, #579).
+    if owns_node_workers {
+        drop(crate::terminal_session_prune::start(
+            auth.clone(),
+            pool.clone(),
+        ));
+    }
     #[cfg(feature = "remote")]
     let observed_server_ip = remote
         .as_ref()

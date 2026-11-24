@@ -542,7 +542,9 @@ class Builds(unittest.TestCase):
         self.assertEqual(result[0], (['--workspace'], None))
         provided = [provides for _, provides in result]
         self.assertIn('infraternal-plugin-mesh', provided)
-        self.assertEqual(provided[-1], ('infraternal-plugin-mesh', 'test:dns'))
+        # Single-target builds come last, in name order.
+        self.assertEqual(provided[-2:], [('infraternal-plugin-mesh', 'test:dns'),
+                                         ('infraternal-plugin-mesh', 'test:ipv6_disabled')])
         self.assertNotIn('infraternal-plugin-remote', provided)
 
     def test_examples_never_replace_the_lib_test(self):
@@ -598,6 +600,7 @@ class Builds(unittest.TestCase):
             '\n'.join([artifact('crates/plugins/mesh', 'test', 'kernel', '/m/kernel'),
                        artifact('crates/plugins/proxy', 'lib', 'proxy', '/m/not-mesh')]),
             artifact('crates/plugins/mesh', 'test', 'dns', '/d/dns'),
+            artifact('crates/plugins/mesh', 'test', 'ipv6_disabled', '/i/ipv6'),
         ])
         calls = []
 
@@ -616,6 +619,7 @@ class Builds(unittest.TestCase):
         self.assertNotIn('--tests', uplift[0])
         self.assertEqual(found, {('crates/plugins/mesh', 'test:kernel'): '/m/kernel',
                                  ('crates/plugins/mesh', 'test:dns'): '/d/dns',
+                                 ('crates/plugins/mesh', 'test:ipv6_disabled'): '/i/ipv6',
                                  ('crates/plugins/proxy', 'lib'): '/w/proxy'})
 
 

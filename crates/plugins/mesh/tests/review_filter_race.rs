@@ -91,6 +91,7 @@ fn install_deny_policy(node: &mut Node, local_key: PublicKey) {
                     addresses: addresses(1),
                     endpoint: None,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

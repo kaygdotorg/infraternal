@@ -32,7 +32,7 @@
 //! the old and new `ExecStart` lines, the commands), changing nothing. A second run on an
 //! adopted server changes nothing.
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
-use infraternal_plugin_release::{adopt, update};
+use infraternal_plugin_release::{adopt, cli_link, update};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -249,6 +249,15 @@ async fn adopt_server(
             ));
         }
     }
+    let selinux = crate::selinux::plan_for_host(&data, dry_run)
+        .map_err(|error| Refusal::refused(error.to_string(), error.next_step()))?;
+    let cli_paths = cli_link::CliPaths::system();
+    cli_link::check_link(&cli_paths).map_err(|error| {
+        Refusal::refused(
+            format!("The CLI command on PATH cannot be updated: {error}."),
+            "Move or remove the foreign /usr/local/bin/infraternal, then run it again.",
+        )
+    })?;
     let image = data
         .join("updates/releases")
         .join(&plan.version)
@@ -262,7 +271,7 @@ async fn adopt_server(
         backup: &backup,
         image: &image,
     };
-    let lines = plan_lines(&plan, &unit, &target_exec, &places, pid);
+    let lines = plan_lines(&plan, &unit, &target_exec, &places, pid, selinux.as_ref());
     let details = json!({
         "version": plan.version,
         "previous_version": running,
@@ -293,6 +302,11 @@ async fn adopt_server(
             "Fix the cause and run it again; nothing else changed.",
         )
     })?;
+    // Step 2b: on SELinux hosts, label `<data>/updates(/.*)?` executable before rewriting the unit (#211).
+    if let Some(selinux_plan) = selinux.as_ref() {
+        crate::selinux::apply_on_host(selinux_plan)
+            .map_err(|error| Refusal::failed(error.to_string(), error.next_step()))?;
+    }
     // Step 3: the unit (skipped when an interrupted run already rewrote it).
     let ca_before = crate::restart::query_ca_status(&data)
         .ok()
@@ -352,6 +366,20 @@ async fn adopt_server(
             ),
         ));
     }
+    cli_link::publish(
+        &installed.image,
+        &cli_paths,
+        infraternal_agent::exec_label::executable_label,
+    )
+    .map_err(|error| {
+        Refusal::failed(
+            format!(
+                "The server moved onto {}, but the CLI command on PATH could not be updated: {error}.",
+                installed.version
+            ),
+            "Fix the cause (for example move any foreign /usr/local/bin/infraternal aside) and run the command again.",
+        )
+    })?;
     let ca_after = crate::restart::query_ca_status(&data)
         .ok()
         .and_then(|status| status.locked);
@@ -400,6 +428,7 @@ fn plan_lines(
     target_exec: &str,
     places: &Places<'_>,
     pid: u32,
+    selinux: Option<&crate::selinux::LabelPlan>,
 ) -> Vec<String> {
     let Places {
         data,
@@ -434,6 +463,11 @@ fn plan_lines(
             |current| current.display().to_string()
         )
     ));
+    if let Some(selinux_plan) = selinux {
+        for command in selinux_plan.dry_run_commands() {
+            lines.push(format!("Would run {command}"));
+        }
+    }
     if unit.exec_start == target_exec {
         lines.push(format!(
             "Would leave {} as it is (it already starts the boot pointer)",
@@ -456,6 +490,12 @@ fn plan_lines(
     lines.push(format!(
         "Would restart the running server (PID {pid}) warm into {} (as infraternal server restart --binary does)",
         image.display()
+    ));
+    let cli_paths = cli_link::CliPaths::system();
+    lines.push(format!(
+        "Would publish a world-executable CLI copy at {} (0755) and point {} at it",
+        cli_paths.active().display(),
+        cli_paths.path_link.display()
     ));
     lines
 }

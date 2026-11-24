@@ -485,6 +485,10 @@ struct IdentityProbe {
     /// addresses (#515). Asked on its own, so a strict older node refuses only this probe.
     #[serde(default)]
     candidates: bool,
+    /// The coordinator understands `Peer::ipv4_only` and wants to know whether this node runs
+    /// IPv4-only (#578, J1142). Asked on its own so a strict older node refuses only this probe.
+    #[serde(default)]
+    ipv6_state: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -539,6 +543,8 @@ pub enum Request {
         rotation_continuity: bool,
         /// Whether the caller accepts direct-path candidates and requests LAN addresses.
         candidates: bool,
+        /// Whether the caller wants this node's IPv6 state and sends `Peer::ipv4_only`.
+        ipv6_state: bool,
     },
     RotationPrepare(RotationOperation),
     RotationCommit(RotationOperation),
@@ -564,6 +570,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 authority_epoch: probe.authority_epoch,
                 rotation_continuity: probe.rotation_continuity,
                 candidates: probe.candidates,
+                ipv6_state: probe.ipv6_state,
             })
         }
         "mesh.rotation.prepare" => Ok(Request::RotationPrepare(parse(input)?)),
@@ -615,11 +622,13 @@ fn rotation_response(
 /// The identity reply, offering each optional capability only when both the node and the requester support it.
 ///
 /// `lan` is this node's LAN candidates ([`crate::candidates::lan_addresses`]); it is sent only to a
-/// coordinator that asked for candidates.
+/// coordinator that asked for candidates. `ipv4_only` is whether IPv6 is off on the mesh link (#578); it is
+/// reported only to a coordinator that asked, because a strict older one would not know the field.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested: IdentityProbe,
     lan: Vec<std::net::SocketAddr>,
+    ipv4_only: bool,
 ) -> Option<IdentityResponse> {
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
@@ -631,6 +640,8 @@ fn identity_response(
         #[cfg(feature = "mesh-dns")]
         dns_names: identity.dns_names && requested.dns_names,
         candidates: requested.candidates,
+        ipv6_state: requested.ipv6_state,
+        ipv4_only: requested.ipv6_state && ipv4_only,
         lan: if requested.candidates {
             lan
         } else {
@@ -663,6 +674,12 @@ struct IdentityResponse {
     /// This node's LAN candidates, for peers behind the same public address (#515).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lan: Vec<std::net::SocketAddr>,
+    /// This node understands `Peer::ipv4_only` and reports its own IPv6 state (#578, J1142).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ipv6_state: bool,
+    /// IPv6 is off on the mesh link, so the node runs IPv4-only. Present only with `ipv6_state`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    ipv4_only: bool,
 }
 
 impl AgentPlugin for MeshNodePlugin {
@@ -729,6 +746,7 @@ impl AgentPlugin for MeshNodePlugin {
                     authority_epoch,
                     rotation_continuity,
                     candidates,
+                    ipv6_state,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -739,6 +757,7 @@ impl AgentPlugin for MeshNodePlugin {
                         rotation_continuity,
                         // Offered only by an engine that walks the list it would receive.
                         candidates: candidates && walks_candidates(node),
+                        ipv6_state,
                     };
                     let candidates = requested.candidates;
                     let identity =
@@ -756,13 +775,14 @@ impl AgentPlugin for MeshNodePlugin {
                         }
                         _ => Vec::new(),
                     };
-                    json!(identity_response(identity, requested, lan))
+                    json!(identity_response(identity, requested, lan, ipv4_only(node)))
                 }
                 Request::Up => {
                     json!(identity_response(
                         Some(node.up().map_err(|error| node_action_error(&error))?),
                         IdentityProbe::default(),
                         Vec::new(),
+                        false,
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -797,6 +817,7 @@ impl AgentPlugin for MeshNodePlugin {
                         "peer_count": node.config().map_or(0, |config| config.peers.len()),
                         "default_policy": node.config().map(|config| config.default_policy),
                         "udp_port": node.listen_port(),
+                        "ipv6": !ipv4_only(node),
                         "server_link": self.server_link,
                         "engine": engine_health(node),
                         "engine_selection": engine_selection(node),
@@ -815,7 +836,15 @@ impl AgentPlugin for MeshNodePlugin {
                 }
                 Request::Configure(chunk) => {
                     let applied = configure_result(node.chunk(*chunk), &mut self.configure_failed)?;
-                    json!({"applied":applied,"version":node.config().map(|c|c.version)})
+                    let mut reply =
+                        json!({"applied":applied,"version":node.config().map(|c|c.version)});
+                    // Told after every snapshot, because applying one is when the node reads its link:
+                    // the coordinator learns IPv6 went away or came back from this reply (#578, J1142).
+                    // Absent means dual-stack, so a reply without IPv4-only nodes keeps its old shape.
+                    if ipv4_only(node) {
+                        reply["ipv4_only"] = json!(true);
+                    }
+                    reply
                 }
                 Request::Peers(page) => {
                     if page.cursor.as_ref().is_some_and(|cursor| {
@@ -868,6 +897,18 @@ impl AgentPlugin for MeshNodePlugin {
         }
         serde_json::to_vec(&result).map_err(|_| PluginError::Rejected)
     }
+}
+
+/// Whether this node runs IPv4-only because IPv6 is off on its mesh link (#578, J1142).
+#[cfg(target_os = "linux")]
+fn ipv4_only(node: &Node) -> bool {
+    node.ipv4_only()
+}
+
+/// The Mac node installs the mesh's IPv6 address on its own interface, which has no IPv6-off switch.
+#[cfg(target_os = "macos")]
+fn ipv4_only(_node: &Node) -> bool {
+    false
 }
 
 /// The Linux `GotaTun` engine's health for the status; null under kernel `WireGuard`.
@@ -1301,6 +1342,7 @@ mod tests {
                         },
                         endpoint: None,
                         candidates: Vec::new(),
+                        ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1435,6 +1477,7 @@ mod tests {
                         },
                         endpoint: None,
                         candidates: Vec::new(),
+                        ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1672,6 +1715,7 @@ mod identity_upgrade_tests {
             Some(identity.clone()),
             super::IdentityProbe::default(),
             vec!["10.1.0.2:44000".parse().expect("LAN fixture")],
+            false,
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
@@ -1686,8 +1730,10 @@ mod identity_upgrade_tests {
                 authority_epoch: true,
                 rotation_continuity: true,
                 candidates: false,
+                ipv6_state: false,
             },
             Vec::new(),
+            false,
         ));
         assert_eq!(negotiated["compact_access"], true);
         assert_eq!(negotiated["key_rotation"], true);
@@ -1702,6 +1748,7 @@ mod identity_upgrade_tests {
                 ..super::IdentityProbe::default()
             },
             Vec::new(),
+            false,
         ));
         assert_eq!(compact_only["compact_access"], true);
         assert!(compact_only.get("key_rotation").is_none());
@@ -1733,6 +1780,7 @@ mod identity_upgrade_tests {
                 ..super::IdentityProbe::default()
             },
             lan.clone(),
+            false,
         ));
         assert_eq!(asked["candidates"], true);
         assert_eq!(asked["lan"], serde_json::json!(["10.9.0.3:10254"]));
@@ -1743,9 +1791,63 @@ mod identity_upgrade_tests {
             Some(identity),
             super::IdentityProbe::default(),
             lan,
+            true,
         ));
         assert!(plain.get("candidates").is_none());
         assert!(plain.get("lan").is_none());
+        assert!(
+            plain.get("ipv4_only").is_none() && plain.get("ipv6_state").is_none(),
+            "a caller that did not ask never sees the IPv6 fields: {plain}"
+        );
+    }
+
+    /// A coordinator that asks learns that this node reports its IPv6 state, and whether IPv6 is off
+    /// (#578, J1142); a dual-stack node says only that it reports.
+    #[test]
+    fn the_ipv6_state_is_sent_only_when_asked() {
+        let identity = crate::dataplane::Identity {
+            public_key: crate::policy::model::PublicKey([1; 32]),
+            port: 10254,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+            rotation_continuity: false,
+        };
+        let probe: super::IdentityProbe =
+            super::parse(br#"{"ipv6_state":true}"#).expect("IPv6 state probe");
+        assert!(probe.ipv6_state);
+        let reply = |ipv4_only| {
+            serde_json::json!(super::identity_response(
+                Some(identity.clone()),
+                super::IdentityProbe {
+                    ipv6_state: true,
+                    ..super::IdentityProbe::default()
+                },
+                Vec::new(),
+                ipv4_only,
+            ))
+        };
+        let off = reply(true);
+        assert_eq!(off["ipv6_state"], true);
+        assert_eq!(off["ipv4_only"], true);
+        assert_eq!(
+            crate::node_coordination::parse_ipv6_state(off.to_string().as_bytes()),
+            Some(true)
+        );
+        let on = reply(false);
+        assert_eq!(on["ipv6_state"], true);
+        assert!(on.get("ipv4_only").is_none());
+        assert_eq!(
+            crate::node_coordination::parse_ipv6_state(on.to_string().as_bytes()),
+            Some(false)
+        );
+        // An older node's reply has neither field: it does not report.
+        assert_eq!(
+            crate::node_coordination::parse_ipv6_state(br#"{"public_key":[1],"port":1}"#),
+            None
+        );
     }
 }
 
@@ -1800,6 +1902,7 @@ mod peer_page_tests {
                                     40_000,
                                 ))),
                                 candidates: Vec::new(),
+                                ipv4_only: false,
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,

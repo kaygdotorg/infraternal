@@ -472,6 +472,8 @@ enum AuthorityResetState {
     AwaitingFullSnapshot,
 }
 
+/// The peer routes a restart may have to retire: the recorded inventory plus every route the saved
+/// snapshot would install. An IPv4-only peer (#578, J1142) contributes only its IPv4 route.
 fn restore_routes(
     store: &crate::node_state::Store,
     state: &crate::node_state::State,
@@ -480,12 +482,12 @@ fn restore_routes(
     // A crash may leave the accepted snapshot older than a pruned journal.
     // Union its peer addresses before replay; never claim arbitrary routes.
     if let Some(config) = &state.config {
-        routes.extend(config.peers.values().flat_map(|peer| {
-            [
-                IpAddr::V4(peer.peer.addresses.ipv4),
-                IpAddr::V6(peer.peer.addresses.ipv6),
-            ]
-        }));
+        routes.extend(
+            config
+                .peers
+                .values()
+                .flat_map(|peer| peer.peer.routed_addresses()),
+        );
     }
     Ok(routes)
 }
@@ -2029,6 +2031,16 @@ impl Node {
         self.rotation_link()
     }
 
+    /// Whether the node runs IPv4-only because the mesh link has IPv6 off (#578, J1142).
+    ///
+    /// This is what the last accepted snapshot installed, not a live reading: peers are told
+    /// only about state the node has actually applied, so a node never advertises an IPv6 address
+    /// it has not yet put on its link. `false` before the first install.
+    #[must_use]
+    pub const fn ipv4_only(&self) -> bool {
+        matches!(self.mesh_ipv6, Some(false))
+    }
+
     /// Record whether the mesh link took its IPv6 address, and say so once when that changes.
     ///
     /// An IPv6-off host (`net.ipv6.conf.*.disable_ipv6=1`) joins the mesh IPv4-only instead of
@@ -3465,6 +3477,7 @@ impl Node {
                             && old.outbound == peer.outbound
                             && old.peer.key == peer.peer.key
                             && old.peer.addresses == peer.peer.addresses
+                            && old.peer.ipv4_only == peer.peer.ipv4_only
                             && old.peer.previous_key == peer.peer.previous_key
                             && old.peer.previous_active == peer.peer.previous_active
                     })
@@ -3732,12 +3745,7 @@ impl Node {
         let desired_routes: BTreeSet<IpAddr> = config
             .peers
             .values()
-            .flat_map(|peer| {
-                [
-                    IpAddr::V4(peer.peer.addresses.ipv4),
-                    IpAddr::V6(peer.peer.addresses.ipv6),
-                ]
-            })
+            .flat_map(|peer| peer.peer.routed_addresses())
             .collect();
         let mut recorded = self.routes.clone();
         if self.config.is_none() && self.engine_kind == EngineKind::Kernel {
@@ -3812,7 +3820,15 @@ impl Node {
                     .iter()
                     .any(|route| !desired_routes.contains(route))
             {
-                Device::retain_recorded_routes(&self.routes, &proposed)?;
+                // An IPv4-only peer's IPv6 route is not retained: it is retired when the peer turns IPv4-only.
+                let retained: Vec<IpAddr> = [
+                    IpAddr::V4(config.addresses.ipv4),
+                    IpAddr::V6(config.addresses.ipv6),
+                ]
+                .into_iter()
+                .chain(desired_routes.iter().copied())
+                .collect();
+                Device::retain_recorded_routes(&self.routes, &retained)?;
             }
             self.set_mesh_mtu(ifindex, requested_mtu)?;
             self.firewall.install_pending(&config)?;
@@ -3887,9 +3903,17 @@ impl Node {
                     mesh_mtu.1.max(crate::mesh_mtu::IPV6_MINIMUM_MTU),
                 )?;
                 self.install_peer_routes(&restore, false)?;
-                let retained: Vec<_> = std::iter::once(old.addresses)
-                    .chain(restore.iter().map(|peer| peer.addresses))
-                    .collect();
+                let retained: Vec<IpAddr> = [
+                    IpAddr::V4(old.addresses.ipv4),
+                    IpAddr::V6(old.addresses.ipv6),
+                ]
+                .into_iter()
+                .chain(
+                    restore
+                        .iter()
+                        .flat_map(crate::dataplane::Peer::routed_addresses),
+                )
+                .collect();
                 Device::retain_recorded_routes(&self.routes, &retained)?;
                 self.set_mesh_mtu(
                     mesh_mtu.0,

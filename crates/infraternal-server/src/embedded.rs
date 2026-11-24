@@ -2623,10 +2623,10 @@ async fn process_command(
             let Some(attachment) = attachments.get_mut(&attachment_id) else {
                 return true;
             };
-            // A shared-link replacement already replays this attachment once.
-            if attachment.awaiting_ack
-                || (attachment.route.is_some() && !attachment.proof_rebind_pending)
-            {
+            // A shared-link replacement already replays this attachment once, and
+            // a stream whose exit notice already disarmed route probing must not
+            // be torn down or reattached as an unresponsive route (#579).
+            if attachment.awaiting_ack || !attachment.proof_rebind_pending {
                 return true;
             }
             if !write_frame(
@@ -3216,7 +3216,7 @@ async fn process_incoming(
             let Some(attachment_id) = routes.get(&stream_id).copied() else {
                 return true;
             };
-            let Some(attachment) = attachments.get(&attachment_id) else {
+            let Some(attachment) = attachments.get_mut(&attachment_id) else {
                 return false;
             };
             let Ok(notice) = serde_json::from_slice::<TerminalNotice>(&event_json) else {
@@ -3224,6 +3224,15 @@ async fn process_incoming(
             };
             if decode_session_id(notice.session_id()) != Some(attachment.session_id) {
                 return false;
+            }
+            if matches!(notice, TerminalNotice::Exited { .. }) {
+                // Once the host emits an ordered exit notice, the infraternal
+                // agent's relay task has finished and dropped this stream, so it
+                // will not answer further route pings. Disarm route liveness
+                // probing so a normal exit is never logged as
+                // `terminal_route_unresponsive` or retried as a dead route (#579).
+                attachment.route = None;
+                attachment.proof_rebind_pending = false;
             }
             // The same queue preserves notice/repaint ordering and retires a slow viewer only.
             if attachment
