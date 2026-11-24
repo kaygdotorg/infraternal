@@ -2117,6 +2117,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-canvas-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "infraternal-db"
 version = "0.1.0"
 dependencies = [
@@ -2190,13 +2199,13 @@ name = "infraternal-plugin-canvas"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "infraternal-canvas-model",
  "infraternal-plugin-api",
  "infraternal-protocol",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
