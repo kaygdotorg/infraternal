@@ -415,7 +415,10 @@ pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
 
 /// Like [`response`], but with names that are already built. The query counts as the node's
 /// own, as [`crate::tunnel_dns`] needs for queries the host wrote into its tunnel.
-pub(crate) fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<Vec<u8>>> {
+pub(crate) fn response_for_records(
+    packet: &[u8],
+    records: &Records,
+) -> io::Result<Option<Vec<u8>>> {
     response_for_source(packet, records, IpAddr::V4(records.local_address))
 }
 

@@ -195,10 +195,18 @@ pub fn watch(state: &Path) {
 /// The agent-log line for a new state.
 fn sentence(state: LocalNetwork) -> &'static str {
     match state {
-        LocalNetwork::Allowed => "infraternal: Local Network access is allowed; mesh peers on this network are reachable directly",
-        LocalNetwork::Denied => "infraternal: Local Network access is not allowed, so mesh peers on this network cannot be reached directly. Allow infraternal under System Settings > Privacy & Security > Local Network",
-        LocalNetwork::NoLocalNetwork => "infraternal: no local network right now; Local Network access is checked again when one appears",
-        LocalNetwork::Unknown => "infraternal: Local Network access could not be checked; trying again",
+        LocalNetwork::Allowed => {
+            "infraternal: Local Network access is allowed; mesh peers on this network are reachable directly"
+        }
+        LocalNetwork::Denied => {
+            "infraternal: Local Network access is not allowed, so mesh peers on this network cannot be reached directly. Allow infraternal under System Settings > Privacy & Security > Local Network"
+        }
+        LocalNetwork::NoLocalNetwork => {
+            "infraternal: no local network right now; Local Network access is checked again when one appears"
+        }
+        LocalNetwork::Unknown => {
+            "infraternal: Local Network access could not be checked; trying again"
+        }
     }
 }
 
@@ -288,7 +296,12 @@ mod tests {
     use super::*;
 
     /// One interface address.
-    fn entry(name: &str, broadcast_capable: bool, address: [u8; 4], prefix: u32) -> InterfaceAddress {
+    fn entry(
+        name: &str,
+        broadcast_capable: bool,
+        address: [u8; 4],
+        prefix: u32,
+    ) -> InterfaceAddress {
         let mask = u32::MAX.checked_shl(32 - prefix).unwrap_or(0);
         InterfaceAddress {
             name: name.to_owned(),
@@ -313,7 +326,10 @@ mod tests {
         ];
         assert_eq!(
             broadcast_targets(&addresses),
-            [Ipv4Addr::new(192, 168, 1, 255), Ipv4Addr::new(10, 69, 3, 255)]
+            [
+                Ipv4Addr::new(192, 168, 1, 255),
+                Ipv4Addr::new(10, 69, 3, 255)
+            ]
         );
         assert_eq!(broadcast_targets(&[]), Vec::<Ipv4Addr>::new());
     }
@@ -322,7 +338,10 @@ mod tests {
     #[test]
     fn errors_are_classified() {
         assert_eq!(classify(None), LocalNetwork::Allowed);
-        assert_eq!(classify(Some(nix::libc::EHOSTUNREACH)), LocalNetwork::Denied);
+        assert_eq!(
+            classify(Some(nix::libc::EHOSTUNREACH)),
+            LocalNetwork::Denied
+        );
         assert_eq!(classify(Some(nix::libc::EPIPE)), LocalNetwork::Denied);
         assert_eq!(classify(Some(nix::libc::ENOBUFS)), LocalNetwork::Unknown);
     }
@@ -367,7 +386,10 @@ mod tests {
             LocalNetwork::NoLocalNetwork,
             LocalNetwork::Unknown,
         ] {
-            assert_eq!(LocalNetwork::from_word(&format!("{}\n", state.word())), Some(state));
+            assert_eq!(
+                LocalNetwork::from_word(&format!("{}\n", state.word())),
+                Some(state)
+            );
         }
         assert_eq!(LocalNetwork::from_word("maybe"), None);
         assert!(LocalNetwork::Denied.next_check() < LocalNetwork::Allowed.next_check());

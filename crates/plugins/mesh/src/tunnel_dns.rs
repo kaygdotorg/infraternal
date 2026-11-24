@@ -246,12 +246,22 @@ mod tests {
         let at = outside.len() - 14;
         outside[at..at + 9].copy_from_slice(b"\x08external");
         assert_eq!(
-            answer(&packet(resolver(), PORT, &outside), resolver(), &records, 1280),
+            answer(
+                &packet(resolver(), PORT, &outside),
+                resolver(),
+                &records,
+                1280
+            ),
             None
         );
         // A reply that would not fit the utun MTU is dropped rather than truncated.
         assert_eq!(
-            answer(&packet(resolver(), PORT, &query("web")), resolver(), &records, 60),
+            answer(
+                &packet(resolver(), PORT, &query("web")),
+                resolver(),
+                &records,
+                60
+            ),
             None
         );
     }

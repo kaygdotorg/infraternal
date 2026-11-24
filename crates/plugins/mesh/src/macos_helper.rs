@@ -977,10 +977,8 @@ mod mac_proofs {
     fn serve(utun: Arc<OwnedFd>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<usize> {
         std::thread::spawn(move || {
             use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
-            let records = crate::dns::Records::for_tests(
-                OWN_V4,
-                &[("web", Ipv4Addr::new(10, 254, 77, 9))],
-            );
+            let records =
+                crate::dns::Records::for_tests(OWN_V4, &[("web", Ipv4Addr::new(10, 254, 77, 9))]);
             let resolver = infraternal_mesh::address::resolver_address(own_v6());
             let mut answered = 0;
             let mut frame = vec![0_u8; 2048];
@@ -1021,11 +1019,17 @@ mod mac_proofs {
         .expect("the helper writes the resolver files");
         let file = fs::read_to_string("/etc/resolver/internal").unwrap();
         println!("utun {name}; /etc/resolver/internal:\n{file}");
-        assert!(file.contains("nameserver fd12:3456:789a:ffff::53\nport 53\n"), "{file}");
+        assert!(
+            file.contains("nameserver fd12:3456:789a:ffff::53\nport 53\n"),
+            "{file}"
+        );
         let resolver = infraternal_mesh::address::resolver_address(own_v6());
         let squat = std::net::UdpSocket::bind((resolver, 53));
         println!("binding [{resolver}]:53 as this account: {squat:?}");
-        assert!(squat.is_err(), "no local program can hold the resolver address");
+        assert!(
+            squat.is_err(),
+            "no local program can hold the resolver address"
+        );
 
         let utun = Arc::new(utun);
         let stop = Arc::new(AtomicBool::new(false));
@@ -1037,7 +1041,11 @@ mod mac_proofs {
             .collect();
         let first = started.elapsed();
         println!("web.internal -> {found:?} in {first:?}");
-        assert!(found.iter().any(|a| a.ip() == std::net::IpAddr::V4(Ipv4Addr::new(10, 254, 77, 9))));
+        assert!(
+            found
+                .iter()
+                .any(|a| a.ip() == std::net::IpAddr::V4(Ipv4Addr::new(10, 254, 77, 9)))
+        );
         // Distinct absent names, so each lookup is a real round trip through the tunnel (the
         // NXDOMAIN path) rather than an answer from the system's cache.
         let mut times = Vec::new();
@@ -1060,7 +1068,11 @@ mod mac_proofs {
         drop(utun);
         let started = Instant::now();
         let gone = ("other.internal", 0).to_socket_addrs();
-        println!("after the utun closed: {:?} in {:?}", gone.as_ref().map(|a| a.clone().count()), started.elapsed());
+        println!(
+            "after the utun closed: {:?} in {:?}",
+            gone.as_ref().map(|a| a.clone().count()),
+            started.elapsed()
+        );
         assert!(gone.is_err() || gone.unwrap().count() == 0);
         request(&Request::ClearResolver, None).expect("clear the resolver files");
         assert!(!Path::new("/etc/resolver/internal").exists());
@@ -1073,7 +1085,9 @@ mod mac_proofs {
     #[test]
     #[ignore = "Run on a Mac as the account the helper is registered for, from two paths."]
     fn only_the_installed_binary_takes_its_own_route_over() {
-        let user = nix::unistd::User::from_uid(nix::unistd::Uid::current()).unwrap().unwrap();
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+            .unwrap()
+            .unwrap();
         let installed = fs::canonicalize(rules::user_install_binary(&user.dir)).ok();
         let me = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
         let ours = installed.as_deref() == Some(me.as_path());
@@ -1098,7 +1112,10 @@ mod mac_proofs {
         println!(
             "running from the installed binary: {ours}; first {first_name}, second {second_name}; \
              reply {:?} in {took:?}; 10.254/16 is on {holder:?}",
-            takeover.as_ref().map(|(reply, _)| reply.ok).map_err(ToString::to_string)
+            takeover
+                .as_ref()
+                .map(|(reply, _)| reply.ok)
+                .map_err(ToString::to_string)
         );
         if ours {
             assert!(takeover.is_ok());

@@ -262,7 +262,10 @@ mod resolver_tests {
     fn the_resolver_is_shared_inside_the_48_and_never_a_node() {
         let global = [0x12, 0x34, 0x56, 0x78, 0x9a];
         let resolver = resolver_address(ula(global, 1));
-        assert_eq!(resolver, "fd12:3456:789a:ffff::53".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            resolver,
+            "fd12:3456:789a:ffff::53".parse::<Ipv6Addr>().unwrap()
+        );
         for offset in [1, 2, 0x53, u64::from(u32::MAX), u64::MAX] {
             let node = ula(global, offset);
             assert_eq!(resolver_address(node), resolver);

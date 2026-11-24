@@ -212,7 +212,9 @@ fn path(pid: i32) -> Option<std::path::PathBuf> {
 /// The socket descriptors `pid` holds; empty if it exited or cannot be read.
 #[cfg(target_os = "macos")]
 fn socket_descriptors(pid: i32) -> Vec<i32> {
-    use nix::libc::{PROC_PIDLISTFDS, PROX_FDTYPE_SOCKET, c_int, c_void, proc_fdinfo, proc_pidinfo};
+    use nix::libc::{
+        PROC_PIDLISTFDS, PROX_FDTYPE_SOCKET, c_int, c_void, proc_fdinfo, proc_pidinfo,
+    };
     // A first call with no buffer returns the room the current table needs.
     // SAFETY: a null buffer with size 0 only asks for the size; nothing is written.
     let needed = unsafe { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
@@ -308,14 +310,27 @@ mod tests {
         for info in [
             reply(2, SYSPROTO_CONTROL, UTUN_CONTROL, 5),
             reply(AF_SYSTEM, 1, UTUN_CONTROL, 5),
-            reply(AF_SYSTEM, SYSPROTO_CONTROL, b"com.apple.net.ipsec_control", 5),
-            reply(AF_SYSTEM, SYSPROTO_CONTROL, b"com.apple.net.utun_controlx", 5),
+            reply(
+                AF_SYSTEM,
+                SYSPROTO_CONTROL,
+                b"com.apple.net.ipsec_control",
+                5,
+            ),
+            reply(
+                AF_SYSTEM,
+                SYSPROTO_CONTROL,
+                b"com.apple.net.utun_controlx",
+                5,
+            ),
             reply(AF_SYSTEM, SYSPROTO_CONTROL, UTUN_CONTROL, 0),
         ] {
             assert_eq!(utun_unit_from_socket_info(&info), None);
         }
         let short = reply(AF_SYSTEM, SYSPROTO_CONTROL, UTUN_CONTROL, 5);
-        assert_eq!(utun_unit_from_socket_info(&short[..PARSED_LENGTH - 1]), None);
+        assert_eq!(
+            utun_unit_from_socket_info(&short[..PARSED_LENGTH - 1]),
+            None
+        );
         // A name that fills all 96 bytes has no terminator and is refused.
         assert_eq!(
             utun_unit_from_socket_info(&reply(AF_SYSTEM, SYSPROTO_CONTROL, &[b'a'; 96], 5)),

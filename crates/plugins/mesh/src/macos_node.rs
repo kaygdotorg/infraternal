@@ -55,10 +55,10 @@ mod user_mode;
 /// The worker loop, session-keeping peer updates and candidate walks (#515).
 mod walks;
 #[cfg(feature = "mesh-dns")]
+use user_mode::TunnelDns;
+#[cfg(feature = "mesh-dns")]
 use user_mode::configure_host_dns;
 use user_mode::{HelperApplied, configure_through_helper, user_mode_interface_mtu};
-#[cfg(feature = "mesh-dns")]
-use user_mode::TunnelDns;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -1334,8 +1334,7 @@ impl PendingWorker {
                             &utun,
                             &records,
                             config.addresses.ipv6,
-                        )
-                        {
+                        ) {
                             tracing::warn!(
                                 "mesh DNS host resolver integration could not be updated: {error}"
                             );

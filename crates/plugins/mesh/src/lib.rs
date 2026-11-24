@@ -132,7 +132,10 @@ mod dns_integration;
 /// Pure packet work, so its tests also run in the Linux gate.
 #[cfg(all(
     feature = "mesh-dns",
-    any(all(feature = "agent", target_os = "macos"), all(test, feature = "agent"))
+    any(
+        all(feature = "agent", target_os = "macos"),
+        all(test, feature = "agent")
+    )
 ))]
 mod tunnel_dns;
 

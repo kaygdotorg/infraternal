@@ -835,7 +835,10 @@ mod tests {
             decode_request(br#"{"version":1,"request":"clear-resolver"}"#),
             Err(Refusal::Version)
         );
-        assert_eq!(decode_request(br#"{"request":"open"}"#), Err(Refusal::Malformed));
+        assert_eq!(
+            decode_request(br#"{"request":"open"}"#),
+            Err(Refusal::Malformed)
+        );
         assert_eq!(frame_length([0, 0]), Err(Refusal::Malformed));
         assert_eq!(frame_length([0x10, 0x01]), Err(Refusal::Malformed));
         assert!(frame(&[0; MAX_MESSAGE_BYTES + 1]).is_err());

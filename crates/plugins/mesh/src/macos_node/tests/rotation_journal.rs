@@ -23,9 +23,7 @@ fn write_rotation_temporary(directory: &TestDirectory) -> PathBuf {
 #[test]
 fn macos_store_open_sweeps_rotation_journal_temporaries() {
     let directory = test_directory();
-    drop(
-        crate::node_state::Store::open_for_macos(&directory.0).expect("open initial Mac store"),
-    );
+    drop(crate::node_state::Store::open_for_macos(&directory.0).expect("open initial Mac store"));
     let temporary = write_rotation_temporary(&directory);
 
     drop(
