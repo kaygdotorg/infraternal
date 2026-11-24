@@ -10,7 +10,10 @@
 //! - a snapshot without the route (revoked) removes A's route and allowed IPs, refuses the
 //!   flow, stops B forwarding and turns IPv4 forwarding back off, as it was before;
 //! - a grant to the LAN never reaches the router's own address on it: the router's own services
-//!   are reached only at its mesh address, under the node grant (#580, J1179).
+//!   are reached only at its mesh address, under the node grant (#580, J1179);
+//! - a subnet route left on the mesh link by an earlier run (a crash between saving a revoking
+//!   snapshot and removing its routes) is removed at the next start, a /32 as well as a wider one,
+//!   while the peer host routes stay (#580, J1179).
 //!
 //! Run as root, alone, in a disposable mount and network namespace (`unshare -m -n`), with `ip`
 //! and `nft`. Each node runs on a thread that entered its namespace. The documentation addresses
@@ -586,5 +589,103 @@ fn a_network_grant_never_reaches_the_routers_own_address_on_that_network() {
     in_ns(NS_B, || node_b.down().unwrap());
     let _ = fs::remove_dir_all(&state_a);
     let _ = fs::remove_dir_all(&state_b);
+    cleanup();
+}
+
+/// The subnet routes on the mesh link of namespace `ns`, as `ip` lists them (one per line).
+fn mesh_routes(ns: &str) -> Vec<String> {
+    run(
+        "ip",
+        &[
+            "-n",
+            ns,
+            "-4",
+            "route",
+            "show",
+            "dev",
+            "infraternal0",
+            "proto",
+            "250",
+        ],
+    )
+    .lines()
+    .map(|line| {
+        line.split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    })
+    .collect()
+}
+
+/// Subnet routes an earlier run left on the mesh link go at the next start, /32 included, and
+/// the peer host routes stay (#580, J1179).
+///
+/// A node saves a snapshot before it reconciles that snapshot's routes, so a crash in between
+/// leaves a revoked route installed while the saved snapshot no longer names it; the restarted
+/// node then has no record of it. The test puts two routes of exactly the node's shape (main
+/// table, protocol 250, link scope, the mesh address as preferred source) on the retained link
+/// while the node is stopped, standing in for that crash, then starts the node again.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft, issue #580."]
+fn subnet_routes_left_by_an_earlier_run_are_removed_at_the_next_start() {
+    cleanup();
+    topology();
+    let state_a = state("j1179-f4-a");
+    let (mut node_a, id_a) = start(NS_A, &state_a);
+    // The peer never answers; only its host route matters here.
+    let peer = (3, PublicKey([7; 32]));
+    let plain = |version| {
+        snapshot(
+            (2, id_a.public_key),
+            peer,
+            SocketAddr::from(([192, 0, 2, 2], 51_821)),
+            version,
+            PeerNetworks::default(),
+        )
+    };
+    assert!(in_ns(NS_A, || node_a.chunk(plain(1))).is_ok_and(|applied| applied));
+    let peer_route = format!("{}", addresses(3).ipv4);
+    assert_eq!(
+        mesh_routes(NS_A),
+        std::slice::from_ref(&peer_route),
+        "only the peer route"
+    );
+
+    // The agent stops (the link stays, D332) with two subnet routes nobody wants any more.
+    drop(node_a);
+    let source = addresses(2).ipv4.to_string();
+    for network in ["198.51.100.0/25", "198.51.100.200/32"] {
+        run(
+            "ip",
+            &[
+                "-n",
+                NS_A,
+                "route",
+                "add",
+                network,
+                "dev",
+                "infraternal0",
+                "proto",
+                "250",
+                "scope",
+                "link",
+                "src",
+                &source,
+            ],
+        );
+    }
+    assert_eq!(mesh_routes(NS_A).len(), 3, "{:?}", mesh_routes(NS_A));
+
+    let (mut node_a, _) = start(NS_A, &state_a);
+    assert!(in_ns(NS_A, || node_a.chunk(plain(2))).is_ok_and(|applied| applied));
+    assert_eq!(
+        mesh_routes(NS_A),
+        [peer_route],
+        "a stale subnet route survived the restart, or the peer route went"
+    );
+
+    in_ns(NS_A, || node_a.down().unwrap());
+    let _ = fs::remove_dir_all(&state_a);
     cleanup();
 }
