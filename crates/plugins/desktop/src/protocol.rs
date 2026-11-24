@@ -185,6 +185,19 @@ pub enum Target {
     Screen { display_id: u32 },
 }
 
+/// The body of a `Congested` command: the viewer's connection is backed up.
+///
+/// `kbit_s` is the rate the server measured that connection carrying, in kilobits per second,
+/// when it has a measurement. The encoder cuts to a rate just under it; without one it takes its
+/// usual smaller step down. A pressure signal made at the source itself has no field.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Congested {
+    /// Measured link rate in kilobits per second; at least 1 when present.
+    #[serde(default)]
+    pub kbit_s: Option<u32>,
+}
+
 /// The output size of a capture.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -424,7 +437,13 @@ pub fn validate_command(kind: Kind, payload: &[u8]) -> io::Result<()> {
         Kind::List => serde_json::from_slice::<List>(payload)
             .map_err(|_| invalid())?
             .validate()?,
-        Kind::Stop | Kind::Status | Kind::Keyframe | Kind::ReleaseInput | Kind::Congested => {
+        Kind::Congested => {
+            let congested: Congested = serde_json::from_slice(payload).map_err(|_| invalid())?;
+            if congested.kbit_s == Some(0) {
+                return Err(invalid());
+            }
+        }
+        Kind::Stop | Kind::Status | Kind::Keyframe | Kind::ReleaseInput => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Empty {}

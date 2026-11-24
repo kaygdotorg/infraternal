@@ -343,6 +343,12 @@ enum EncoderRateMode: String {
 /// Congestion cuts the rate to 70 percent (at most every 0.5 s, never below 500 kbit/s). Eight
 /// healthy frames in a row raise it by 5 percent or 50 kbit/s, whichever is more (at most every
 /// second, never above `maximum`).
+///
+/// When the server has measured the viewer's link (`linkRate`), a congestion report cuts straight
+/// to 85 percent of that rate instead, which a 70 percent step may overshoot several times over,
+/// each overshoot costing a keyframe repair on a slow link. The rate then stays at or under
+/// that figure for 60 s, so the controller does not climb back into the same queue every few
+/// seconds; after that it probes upward again and the next report corrects it.
 struct AdaptiveBitrate {
     /// Highest allowed bit rate; at least 500 000.
     let maximum: Int
@@ -352,6 +358,12 @@ struct AdaptiveBitrate {
     private var lastAdjustment = -Double.infinity
     /// Consecutive uncongested frames, capped at 8.
     private var healthy = 0
+    /// The highest rate the last measured link allows, and the time that limit ends.
+    private var linkLimit: (rate: Int, until: Double)?
+    /// Share of a measured link rate the encoder aims for, in percent.
+    static let linkShare = 85
+    /// How long a measured link rate limits probing upward, in seconds.
+    static let linkHold = 60.0
     /// Starts at `maximum`, which is raised to the 500 kbit/s floor if lower.
     init(maximum: Int) { self.maximum = max(500_000, maximum); current = self.maximum }
     // Feedback is per delivered/dropped frame; there is no timer on an idle desktop.
@@ -360,17 +372,27 @@ struct AdaptiveBitrate {
     /// - Parameters:
     ///   - now: Monotonic seconds; non-finite values change nothing.
     ///   - congested: `true` if the frame was delayed or dropped.
-    mutating func feedback(at now: Double, congested: Bool) -> Int {
+    ///   - linkRate: With `congested`, the viewer's measured link rate in bits per second, if known.
+    mutating func feedback(at now: Double, congested: Bool, linkRate: Int? = nil) -> Int {
         guard now.isFinite else { return current }
         if congested {
             healthy = 0
+            var target = max(500_000, current * 7 / 10)
+            if let linkRate, linkRate > 0 {
+                let aim = max(500_000, Int(clamping: Int64(linkRate) * Int64(Self.linkShare) / 100))
+                linkLimit = (aim, now + Self.linkHold)
+                // A measured rate above the current one means the link is not the limit: take the usual step.
+                if aim < current { target = aim }
+            }
             if now - lastAdjustment >= 0.5 {
-                current = max(500_000, current * 7 / 10); lastAdjustment = now
+                current = min(current, target); lastAdjustment = now
             }
         } else {
             healthy = min(healthy + 1, 8)
             if healthy == 8 && now - lastAdjustment >= 1 {
-                current = min(maximum, current + max(50_000, current / 20)); lastAdjustment = now; healthy = 0
+                var ceiling = maximum
+                if let linkLimit, now < linkLimit.until { ceiling = min(ceiling, linkLimit.rate) }
+                current = min(ceiling, current + max(50_000, current / 20)); lastAdjustment = now; healthy = 0
             }
         }
         return current
