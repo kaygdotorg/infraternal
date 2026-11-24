@@ -318,7 +318,8 @@ must answer 200 on its own listener, a write transaction must commit, and the CA
 must be unlocked if it was before. On a pass, `updates/current` (a symlink, the
 boot pointer) moves to `releases/<new>`. Other installed releases are removed,
 and `previous/` is kept until the next update, so S5's manual roll back can use
-it.
+it. Once committed, the root server also updates the world-executable CLI copy at
+`/usr/local/lib/infraternal/infraternal` (see "CLI command on `PATH`" below).
 
 **The undo (D295).** If the check fails or times out, or the new release cannot
 start serving at all (a failed database migration, for example), the new release
@@ -435,6 +436,25 @@ does not have. `updates/previous/` keeps the running release's `web/` too, so a 
 roll back serves its own. Anything else (a fixed install path, a release without a web
 build) serves `--web-root` as before.
 
+**CLI command on `PATH` (#211).** `<data>/updates/current/infraternal` lives inside
+the `0700` root-only data folder, so non-root users cannot exec through it. To keep
+`infraternal` on `PATH` aligned with the running server across automatic quiet-window
+updates, Web UI updates, `server update apply`, `server update adopt`, and manual
+rollbacks, the root server (and `adopt`) maintains a world-executable copy outside
+`<data>`:
+
+- `/usr/local/lib/infraternal/infraternal` (`0755`, root-owned, atomically replaced
+  via `rename`, and labeled `bin_t` on `SELinux` hosts before rename);
+- `/usr/local/lib/infraternal/infraternal.previous` (`0755`, kept until the next
+  switch so a manual rollback restores the previous CLI copy atomically);
+- `/usr/local/bin/infraternal` -> `/usr/local/lib/infraternal/infraternal`.
+
+`/usr/local/bin/infraternal` is created or re-pointed only when it is missing or
+already a symlink to an infraternal release (for example an earlier `/opt/infraternal/...`
+or `/var/lib/infraternal/...` link). A foreign regular file, directory, or symlink to
+another program is refused loudly and never overwritten (`adopt` refuses in preflight;
+the running server logs an error without rolling back a healthy committed release).
+
 **`server init --system`** writes `ExecStart=<data>/updates/current/infraternal server …`
 once the data folder has a boot pointer, keeping every other flag, and leaves out
 `--web-root` when that release has its own web build. A fresh install has no pointer
@@ -532,9 +552,9 @@ Production today: root, data `/var/lib/infraternal`, unit
    `systemctl cat infraternal-server` shows the new `ExecStart`; the web app loads
    with the new build; the CA is still unlocked; terminals kept running.
 9. **From now on** updates are `sudo infraternal server update check` and `sudo
-   infraternal server update apply` after each publication (D400). Until the
-   `infraternal` on `PATH` is a build with these commands, call the boot pointer's
-   image, `/var/lib/infraternal/updates/current/infraternal`, instead.
+   infraternal server update apply` after each publication (D400). `adopt`, committed
+   switches, and manual rollbacks keep `/usr/local/lib/infraternal/infraternal` and
+   `/usr/local/bin/infraternal` in sync automatically.
    `deploy.sh` must not be used any more: it replaces the `/opt` build and
    cold-restarts the unit, which now starts the boot pointer, so it would lock the CA
    and change nothing that runs.
