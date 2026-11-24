@@ -47,7 +47,7 @@ Monotonic timestamps mark the owned-pixel capture request in the native host clo
 | 7 | daemon → helper | Keyframe: `{}`; request a fresh IDR only for an existing active capture |
 | 8 | daemon → helper | ReleaseInput: `{}`; release held remote input without stopping capture, including during local-input pause |
 | 10 | daemon → helper | Control: `{active:bool}`; server lease starts/stops the existing Mac indicator and clears held input |
-| 9 | daemon → helper | Congested: `{}`; bounded source-generated network pressure feedback, lowers bitrate without lowering capture rate |
+| 9 | daemon → helper | Congested: `{}` or `{kbit_s:u32}`; bounded network pressure feedback, lowers bitrate without lowering capture rate. `kbit_s` (at least 1) is the server's measurement of the viewer's link in kilobits per second: the encoder cuts straight to 85 percent of it and probes no higher for 60 s. Without it the encoder takes its fixed 70 percent step |
 | 65 | helper → daemon | Window inventory JSON |
 | 66 | helper → daemon | Geometry JSON: original/actual point frame, output pixel size, content rectangle, follow/letterbox reason |
 | 67 | helper → daemon | Input result JSON: accepted or local-input pause |

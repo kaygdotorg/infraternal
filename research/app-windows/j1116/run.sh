@@ -2,7 +2,9 @@
 # J1116 acceptance run (#146): the probe binary and its reader in two disposable network namespaces joined by a
 # shaped veth pair. Usage (as root, e.g. through `perf-run --root`):
 #   run.sh <probe-test-binary> <label> [seconds=60] [netem-limit-packets=50] [notsent-lowat-bytes=0] [NAME=value...]
-# Extra NAME=value words are passed to the probe (experiment knobs: PROBE_AIMD_SPLIT=1, PROBE_PRESSURE_MS=n, PROBE_TRACE=1).
+# Extra NAME=value words are passed to the probe (experiment knobs: PROBE_AIMD_SPLIT=1, PROBE_PRESSURE_MS=n, PROBE_TRACE=1,
+# and since J1167 PROBE_LOWAT=<bytes> (the socket option on the probe's own socket) and PROBE_IGNORE_RATE=1).
+# The link rate defaults to 3mbit; set RATE=20mbit in the environment for another one (J1167).
 # A nonzero lowat sets net.ipv4.tcp_notsent_lowat inside the sender's namespace only: it stands in for a server
 # socket that keeps at most that many unsent bytes in the kernel. Both namespaces, the veth pair and the reader are
 # removed on every exit (trap); nothing outside them is changed.
@@ -27,7 +29,7 @@ ip netns exec "$NS_R" ip addr add 10.211.16.2/30 dev "$B"
 for ns in "$NS_S" "$NS_R"; do ip netns exec "$ns" ip link set lo up; done
 ip netns exec "$NS_S" ip link set "$A" up; ip netns exec "$NS_R" ip link set "$B" up
 # Server-to-viewer direction only: 3 Mbit/s, 20 ms one way, a bounded bottleneck queue.
-ip netns exec "$NS_S" tc qdisc add dev "$A" root netem rate 3mbit delay 20ms limit "$LIMIT"
+ip netns exec "$NS_S" tc qdisc add dev "$A" root netem rate "${RATE:-3mbit}" delay 20ms limit "$LIMIT"
 [ "$LOWAT" != 0 ] && ip netns exec "$NS_S" sysctl -qw net.ipv4.tcp_notsent_lowat="$LOWAT"
 OUT=$(mktemp)
 ip netns exec "$NS_R" python3 -I "$HERE/reader.py" 10.211.16.2 "$PORT" > "$OUT" 2>&1 & READER=$!

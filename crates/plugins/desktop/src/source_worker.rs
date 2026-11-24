@@ -467,7 +467,13 @@ fn command(packet: &[u8], metadata: &Metadata) -> Result<(Kind, Vec<u8>), Plugin
     let (kind, body) = match message {
         Message::Repair { .. } => (Kind::Keyframe, b"{}".to_vec()),
         // A viewer's connection is backed up: the encoder lowers its bit rate.
-        Message::Pressure { .. } => (Kind::Congested, b"{}".to_vec()),
+        // The server's measurement of the viewer's link rides along when it has one.
+        Message::Pressure { kbit_s: 0, .. } => (Kind::Congested, b"{}".to_vec()),
+        Message::Pressure { kbit_s, .. } => (
+            Kind::Congested,
+            serde_json::to_vec(&serde_json::json!({"kbit_s":kbit_s}))
+                .map_err(|_| PluginError::Rejected)?,
+        ),
         Message::Input(WireInput::Control { active }) => (
             Kind::Control,
             serde_json::to_vec(&serde_json::json!({"active":active}))

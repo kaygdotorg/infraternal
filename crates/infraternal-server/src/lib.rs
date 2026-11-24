@@ -154,6 +154,8 @@ mod remote_startup;
 #[cfg(feature = "remote")]
 mod remote_successor;
 mod runtime;
+/// Bounds the unsent data in each browser socket's kernel buffer (`TCP_NOTSENT_LOWAT`, #146).
+mod send_queue;
 /// The server's short-lived, rotating leg-B TLS leaf (#559).
 #[cfg(feature = "remote")]
 mod server_leaf;

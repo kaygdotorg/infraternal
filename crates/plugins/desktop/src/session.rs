@@ -80,8 +80,10 @@ pub enum HostCommand {
     /// Ask for a new keyframe.
     Keyframe,
     /// A viewer's connection is backed up: the encoder should lower its bit rate.
-    /// `waited_ms` is how long video waited for that viewer (informational).
-    Pressure { waited_ms: u16 },
+    /// `waited_ms` is how long video waited for that viewer (informational); `kbit_s` is the
+    /// rate that viewer's connection was measured to carry (0 when unknown), which the encoder
+    /// uses as its new rate.
+    Pressure { waited_ms: u16, kbit_s: u32 },
     /// Resize the captured output. `density_milli` is pixels per point times 1000.
     Size {
         viewer: u64,
@@ -311,6 +313,7 @@ impl Session {
             lag: Duration::ZERO,
             keyframe_taken: false,
             aged_from: None,
+            link: crate::link_rate::LinkRate::default(),
         })
     }
     /// The command that re-announces the current controller to a reconnected
@@ -623,6 +626,8 @@ pub struct Viewer {
     /// Frames count their age for the bound from this moment, if it is later
     /// than their publication: when the caller came back from a keyframe.
     aged_from: Option<Instant>,
+    /// The connection's measured drain rate while backed up, reported with pressure.
+    link: crate::link_rate::LinkRate,
 }
 impl Viewer {
     /// Retain identity, never the Viewer itself, across a bounded transport queue.
@@ -739,15 +744,25 @@ impl Viewer {
     pub fn take_lag(&mut self) -> Duration {
         std::mem::take(&mut self.lag)
     }
+    /// Records one finished video write (`bytes` handed to the socket between `began` and
+    /// `ended`), for the link-rate measurement that [`Viewer::report_pressure`] reports.
+    pub fn record_write(&mut self, bytes: usize, began: Instant, ended: Instant) {
+        self.link.record(bytes, began, ended);
+    }
     /// Tells the host that this viewer's connection is backed up by `lag`
-    /// (informational), so the shared encoder lowers its bit rate. One encode serves every viewer, so
-    /// the slowest viewer sets the rate: the alternative, skipping and repairing
+    /// (informational) and, when measured, carries the rate in
+    /// [`Viewer::record_write`]'s timings, so the shared encoder lowers its bit rate. One
+    /// encode serves every viewer, so the slowest viewer sets the rate: the alternative, skipping and repairing
     /// with keyframes, costs every viewer far more bytes. Reports are merged to
     /// at most one per 250 ms per session, and a full host queue drops one
     /// rather than waiting (it is only a hint).
     /// # Errors
     /// Refuses withdrawn access.
     pub fn report_pressure(&self, lag: Duration) -> Result<(), Error> {
+        let kbit_s = self
+            .link
+            .estimate(tokio::time::Instant::now().into_std())
+            .unwrap_or(0);
         self.allowed(false)?;
         let mut state = self.session.state.lock().map_err(|_| Error::Unavailable)?;
         if state.closed {
@@ -768,6 +783,7 @@ impl Viewer {
                 .commands
                 .try_send(HostCommand::Pressure {
                     waited_ms: u16::try_from(lag.as_millis()).unwrap_or(u16::MAX),
+                    kbit_s,
                 })
                 .is_ok()
         {

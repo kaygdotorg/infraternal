@@ -68,8 +68,8 @@ fn fields(frame: &Frame<'_>) -> Value {
                 Message::Repair { last_sequence } => {
                     json!({"kind":"repair","lastSequence":last_sequence.to_string()})
                 }
-                Message::Pressure { waited_ms } => {
-                    json!({"kind":"pressure","waitedMs":waited_ms})
+                Message::Pressure { waited_ms, kbit_s } => {
+                    json!({"kind":"pressure","waitedMs":waited_ms,"kbitS":kbit_s})
                 }
                 Message::Fragment {
                     session_id,

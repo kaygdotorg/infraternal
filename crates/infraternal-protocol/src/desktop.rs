@@ -207,13 +207,17 @@ pub enum Message<'a> {
         offset: u32,
         bytes: &'a [u8],
     },
-    /// Server to host, tag `0x46`, 2 bytes: a viewer's connection is backed up, so the host's
-    /// encoder should lower its bit rate. `waited_ms` is how long video waited for that viewer
-    /// at the server, in milliseconds (saturating at 65 535); it is informational, any value is
-    /// valid, and the host may treat every report the same. The server sends at most a few per
-    /// second (#146).
+    /// Server to host, tag `0x46`, 6 bytes (a 2-byte body from an older server also decodes,
+    /// with `kbit_s` 0): a viewer's connection is backed up, so the host's encoder should lower
+    /// its bit rate. `waited_ms` is how long video waited for that viewer at the server, in
+    /// milliseconds (saturating at 65 535); it is informational, any value is valid. `kbit_s` is
+    /// the rate in kilobits per second at which the server measured the viewer's connection
+    /// draining while it was backed up, or 0 when it has no measurement; a host that gets one
+    /// should cut its bit rate straight to it (with some headroom) instead of in fixed steps.
+    /// The server sends at most a few per second (#146).
     Pressure {
         waited_ms: u16,
+        kbit_s: u32,
     },
 }
 impl Message<'_> {
@@ -240,7 +244,8 @@ impl Message<'_> {
         Ok(match self {
             Self::Attach { .. } => 17,
             Self::Video { bytes, .. } => 17 + bytes.len(),
-            Self::Size { .. } => 6,
+            // Size is a u16 width, height and density; Pressure a u16 wait and a u32 rate.
+            Self::Size { .. } | Self::Pressure { .. } => 6,
             Self::Input(input) => match input {
                 Input::Release => 1,
                 Input::Control { .. } => 2,
@@ -250,7 +255,6 @@ impl Message<'_> {
             },
             Self::Repair { .. } => 8,
             Self::Fragment { bytes, .. } => 41 + bytes.len(),
-            Self::Pressure { .. } => 2,
         })
     }
     /// Rejects invalid dimensions, coordinates, flags and fragment arithmetic before any
@@ -415,7 +419,10 @@ impl Message<'_> {
                 output.extend_from_slice(&offset.to_le_bytes());
                 output.extend_from_slice(bytes);
             }
-            Self::Pressure { waited_ms } => output.extend_from_slice(&waited_ms.to_le_bytes()),
+            Self::Pressure { waited_ms, kbit_s } => {
+                output.extend_from_slice(&waited_ms.to_le_bytes());
+                output.extend_from_slice(&kbit_s.to_le_bytes());
+            }
         }
     }
 }
@@ -528,9 +535,16 @@ pub(crate) fn decode(tag: u8, body: &[u8]) -> Result<Message<'_>, DecodeError> {
                 .ok_or_else(|| invalid_body(tag, "missing fragment"))?,
         },
         0x46 => {
-            ensure_end(tag, body, 2)?;
+            // The 2-byte form is what a server without the throughput field sends.
+            let kbit_s = if body.len() == 2 {
+                0
+            } else {
+                ensure_end(tag, body, 6)?;
+                body_u32(tag, body, 2)?
+            };
             Message::Pressure {
                 waited_ms: body_u16(tag, body, 0)?,
+                kbit_s,
             }
         }
         _ => return Err(DecodeError::UnknownType(tag)),
