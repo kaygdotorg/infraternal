@@ -85,6 +85,7 @@ fn config(inbound: TrafficPolicy, outbound: TrafficPolicy) -> Config {
                 inbound,
                 outbound,
                 access_ssh: None,
+                networks: crate::dataplane::PeerNetworks::default(),
             },
         )]),
         #[cfg(feature = "mesh-dns")]
@@ -347,6 +348,7 @@ fn flow_state_is_bounded_per_peer() {
             inbound: TrafficPolicy::All,
             outbound: TrafficPolicy::All,
             access_ssh: None,
+            networks: crate::dataplane::PeerNetworks::default(),
         },
     );
     let filter =
@@ -411,6 +413,7 @@ fn colliding_peers_keep_independent_flow_quotas() {
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,
                 access_ssh: None,
+                networks: crate::dataplane::PeerNetworks::default(),
             },
         );
         addresses.push((*node, address));
@@ -2452,3 +2455,7 @@ fn ipv6_later_fragments_cannot_overlap_headers_behind_destination_options() {
         "a later fragment past the judged headers was refused"
     );
 }
+
+/// Subnet route cases of the packet filter (D197 M3).
+#[path = "packet_filter_route_tests.rs"]
+mod routes;

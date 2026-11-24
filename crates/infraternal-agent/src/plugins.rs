@@ -581,6 +581,7 @@ mod proxy_mesh_context_tests {
             inbound,
             outbound,
             access_ssh: None,
+            networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
         }
     }
 

@@ -81,6 +81,10 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
+/// Subnet routes on a Linux node: routes to networks behind routers, and forwarding (D197 M3).
+#[cfg(all(feature = "agent", target_os = "linux"))]
+mod subnet_routes;
+
 /// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.
 #[cfg(any(
     all(feature = "agent", target_os = "macos"),
@@ -153,6 +157,10 @@ mod macos_utun_ioctl;
 
 #[cfg(feature = "server")]
 pub mod settings;
+
+/// Administrator actions for subnet routes: list, approve, revoke (D197 M3).
+#[cfg(feature = "server")]
+pub mod route_api;
 
 #[cfg(feature = "server")]
 pub mod node_coordination;

@@ -119,6 +119,60 @@ pub struct PeerPolicy {
     /// infraternal agent, the same binary, receives a server-node snapshot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_ssh: Option<bool>,
+    /// Subnet routes between this node and the peer (D197 M3). Sent only to a node that said it
+    /// understands them (the `{"routes":true}` identity probe), because this struct refuses
+    /// unknown fields; omitted while empty, so a mesh without routes keeps its wire shape.
+    #[serde(default, skip_serializing_if = "PeerNetworks::is_empty")]
+    pub networks: PeerNetworks,
+}
+
+/// The approved networks that involve one peer, from the receiving node's side (D197 M3).
+///
+/// Both lists hold only networks an administrator approved and that the Access policy lets
+/// someone reach; an entry's policy is never `None`. A network is in `through` when the peer is
+/// its router, and in `served` when this node is the router and the peer may start into it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerNetworks {
+    /// Networks behind this peer that this node may start connections into: the node routes
+    /// them to the peer and adds them to the peer's allowed IPs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub through: Vec<ReachableNetwork>,
+    /// This node's own routed networks that the peer may start connections into: the node
+    /// forwards the peer's packets there and, unless told to keep the source, masquerades them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub served: Vec<ServedNetwork>,
+}
+impl PeerNetworks {
+    /// Whether neither list has an entry, which is how the field is left off the wire.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.through.is_empty() && self.served.is_empty()
+    }
+}
+
+/// A network behind a peer, and what this node may start into it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReachableNetwork {
+    /// The approved network.
+    pub network: infraternal_mesh::networks::Network,
+    /// The new connections this node may start into it, from arrows or the mesh default.
+    pub outbound: TrafficPolicy,
+}
+
+/// One of this node's routed networks, and what a peer may start into it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServedNetwork {
+    /// The approved network this node routes.
+    pub network: infraternal_mesh::networks::Network,
+    /// The new connections the peer may start into it.
+    pub inbound: TrafficPolicy,
+    /// The administrator chose to keep the peer's real mesh address instead of masquerading
+    /// (D197 M3: masquerade is the default). Omitted while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_source: bool,
 }
 /// Coordinator-owned DNS identity used by mesh-only listeners and names [#266, #281].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +240,20 @@ pub struct Config {
     pub peer_names: BTreeMap<NodeId, String>,
 }
 impl PeerPolicy {
+    /// Whether `self`, a port continuation from a later chunk, may be merged into `base`, the
+    /// peer staged by an earlier chunk of the same snapshot.
+    ///
+    /// A continuation only adds ports: it names the same peer identity, never grants `All` (that
+    /// fits in the base part), and never carries subnet routes, which always travel in the base
+    /// part (D197 M3). Linux and Mac staging both refuse a chunk that breaks this.
+    #[must_use]
+    pub fn continues(&self, base: &Self) -> bool {
+        self.peer == base.peer
+            && self.networks.is_empty()
+            && !matches!(self.inbound, TrafficPolicy::All)
+            && !matches!(self.outbound, TrafficPolicy::All)
+    }
+
     /// Whether this peer's grants allow at least one network packet in either direction.
     ///
     /// The `GotaTun` node workers (Linux and macOS) install, and let through the handshake
@@ -206,7 +274,18 @@ impl PeerPolicy {
                 TrafficPolicy::None => false,
             }
         }
-        allows_any(&self.inbound) || allows_any(&self.outbound)
+        allows_any(&self.inbound)
+            || allows_any(&self.outbound)
+            || self
+                .networks
+                .through
+                .iter()
+                .any(|network| allows_any(&network.outbound))
+            || self
+                .networks
+                .served
+                .iter()
+                .any(|network| allows_any(&network.inbound))
     }
 }
 

@@ -1087,10 +1087,7 @@ fn stage_chunk(
             .peers
             .get_mut(&node)
             .ok_or(io::ErrorKind::InvalidData)?;
-        if peer.peer != partial.peer
-            || matches!(partial.inbound, crate::policy::rules::TrafficPolicy::All)
-            || matches!(partial.outbound, crate::policy::rules::TrafficPolicy::All)
-        {
+        if !partial.continues(peer) {
             return Err(io::ErrorKind::InvalidData.into());
         }
         peer.inbound.union(&partial.inbound);
@@ -3294,6 +3291,7 @@ mod tests {
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
                     access_ssh: None,
+                    networks: crate::dataplane::PeerNetworks::default(),
                 },
             )]),
             #[cfg(feature = "mesh-dns")]
@@ -3369,6 +3367,7 @@ mod tests {
             inbound,
             outbound: TrafficPolicy::All,
             access_ssh: None,
+            networks: crate::dataplane::PeerNetworks::default(),
         }
     }
 

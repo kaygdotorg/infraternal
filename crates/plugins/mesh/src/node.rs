@@ -905,6 +905,8 @@ pub struct Node {
     dns_integration: crate::dns_integration::DnsIntegration,
     #[cfg(feature = "cutoff-measure")]
     refusing_at_ns: Option<u64>,
+    /// Subnet routes this node installs and forwards, rebuilt from the applied snapshot (D197 M3).
+    subnet: crate::subnet_routes::SubnetState,
 }
 impl Default for Node {
     fn default() -> Self {
@@ -935,6 +937,7 @@ impl Default for Node {
             dns_integration: crate::dns_integration::DnsIntegration::default(),
             #[cfg(feature = "cutoff-measure")]
             refusing_at_ns: None,
+            subnet: crate::subnet_routes::SubnetState::default(),
         }
     }
 }
@@ -1778,6 +1781,17 @@ impl Node {
     /// # Errors
     /// Refuses missing privilege or any kernel error; never returns private material.
     pub fn up(&mut self) -> io::Result<Identity> {
+        let starting = self.identity.is_none();
+        let identity = self.up_inner();
+        // A start reinstalls the saved snapshot; bring its subnet routes back with it (D197 M3).
+        if starting && identity.is_ok() {
+            self.reconcile_subnet_routes();
+        }
+        identity
+    }
+
+    /// Start the data plane; [`Self::up`] adds the subnet-route reconcile after a start.
+    fn up_inner(&mut self) -> io::Result<Identity> {
         // A failed down may have published disabled intent while retaining only
         // part of the old kernel state. Finish cleanup before returning/recreating identity.
         if !self.enabled {
@@ -2507,6 +2521,8 @@ impl Node {
     /// # Errors
     /// Reports failed kernel cleanup rather than claiming the component is disabled.
     pub fn down(&mut self) -> io::Result<()> {
+        // Forwarding stops before the filter and link go, so no packet is forwarded unpoliced.
+        self.stop_subnet_routes();
         // This durable intent precedes every kernel operation. A process stop
         // between the independent kernel transactions must reconcile as Off.
         let reset_state = self.authority_reset;
@@ -2629,6 +2645,179 @@ impl Node {
     /// # Errors
     /// Refuses stale/out-of-order/wrong-node chunks before changing installed state.
     pub fn chunk(&mut self, chunk: Chunk) -> io::Result<bool> {
+        let applied = self.chunk_inner(chunk);
+        // A completed snapshot can add, change or withdraw subnet routes (D197 M3).
+        if matches!(applied, Ok(true)) {
+            self.reconcile_subnet_routes();
+        }
+        applied
+    }
+
+    /// The networks this node advertises as subnet routes (D197 M3), as saved by `mesh routes`.
+    /// # Errors
+    /// No state directory (an in-memory node) or an unreadable list.
+    pub fn advertised_routes(&self) -> io::Result<BTreeSet<crate::policy::networks::Network>> {
+        self.store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .advertised_routes()
+    }
+
+    /// Replace the advertised networks; the caller tells the coordinator (`mesh.changed`).
+    /// # Errors
+    /// No state directory or a failed save.
+    pub fn set_advertised_routes(
+        &mut self,
+        networks: &BTreeSet<crate::policy::networks::Network>,
+    ) -> io::Result<()> {
+        self.store
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .record_advertised_routes(networks)
+    }
+
+    /// Whether the route to `network`, reachable through a router peer, is installed, for `mesh routes`.
+    #[must_use]
+    pub fn network_route_state(
+        &self,
+        network: crate::policy::networks::Network,
+    ) -> serde_json::Value {
+        self.subnet.route_json(network)
+    }
+
+    /// Whether this node forwards for the networks it serves, for `mesh routes`.
+    #[must_use]
+    pub fn forwarding_state(&self) -> serde_json::Value {
+        self.subnet.forwarding_json()
+    }
+
+    /// Bring routes and forwarding in line with the applied snapshot (D197 M3).
+    ///
+    /// Idempotent, and never fails the snapshot: problems are kept for `mesh routes`. Only the
+    /// `GotaTun` engine takes subnet routes; any other state (kernel engine, no snapshot, mesh
+    /// off) stops serving and leaves no route behind.
+    fn reconcile_subnet_routes(&mut self) {
+        let config = match &self.config {
+            Some(config)
+                if self.enabled
+                    && self.gotatun.is_some()
+                    && self.engine_kind == EngineKind::GotaTun =>
+            {
+                config.clone()
+            }
+            _ => {
+                self.stop_subnet_routes();
+                return;
+            }
+        };
+        let wanted = crate::subnet_routes::reachable_networks(&config);
+        let previous: Vec<_> = self
+            .subnet
+            .routes
+            .iter()
+            .filter(|(_, state)| **state == crate::subnet_routes::RouteState::Installed)
+            .map(|(network, _)| *network)
+            .collect();
+        self.subnet.routes =
+            match Device::sync_network_routes(&wanted, &previous, config.addresses.ipv4) {
+                Ok(states) => states,
+                Err(error) => {
+                    tracing::warn!(error = %error, "mesh subnet routes could not be installed");
+                    wanted
+                        .iter()
+                        .map(|network| {
+                            (
+                                *network,
+                                crate::subnet_routes::RouteState::Failed(error.to_string()),
+                            )
+                        })
+                        .collect()
+                }
+            };
+        let (served, _) = crate::firewall::served_networks(&config);
+        if served.is_empty() {
+            self.stop_forwarding();
+            return;
+        }
+        if !self.firewall.forwards_served() {
+            self.stop_forwarding();
+            self.subnet.forwarding = crate::subnet_routes::Forwarding::Unavailable(
+                "forwarding needs the kernel guard installed with nft; see mesh status".to_owned(),
+            );
+            return;
+        }
+        let owed = self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.ip_forward_owed().unwrap_or(false));
+        let forwarding = match crate::subnet_routes::ip_forward() {
+            Ok(true) => Ok(owed),
+            Ok(false) => self
+                .store
+                .as_ref()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotConnected))
+                // Record the debt before the change, so a crash in between still turns it off.
+                .and_then(|store| store.record_ip_forward_owed(true))
+                .and_then(|()| crate::subnet_routes::set_ip_forward(true))
+                .map(|()| true),
+            Err(error) => Err(error),
+        };
+        match forwarding {
+            Ok(turned_on) => {
+                if let Some(engine) = &self.gotatun {
+                    engine.set_forwarding(true);
+                }
+                self.subnet.forwarding = crate::subnet_routes::Forwarding::On { turned_on };
+            }
+            Err(error) => {
+                self.stop_forwarding();
+                self.subnet.forwarding = crate::subnet_routes::Forwarding::Unavailable(format!(
+                    "IPv4 forwarding could not be turned on: {error}"
+                ));
+            }
+        }
+    }
+
+    /// Stop forwarding for served networks: the packet filter first, then IPv4 forwarding, if this
+    /// node turned it on. The nft rules go with the snapshot or the table.
+    fn stop_forwarding(&mut self) {
+        if let Some(engine) = &self.gotatun {
+            engine.set_forwarding(false);
+        }
+        if let Some(store) = &self.store
+            && store.ip_forward_owed().unwrap_or(false)
+        {
+            match crate::subnet_routes::set_ip_forward(false)
+                .and_then(|()| store.record_ip_forward_owed(false))
+            {
+                Ok(()) => tracing::info!("mesh turned IPv4 forwarding off again"),
+                Err(error) => {
+                    tracing::warn!(error = %error, "mesh could not turn IPv4 forwarding off again");
+                }
+            }
+        }
+        self.subnet.forwarding = crate::subnet_routes::Forwarding::Idle;
+    }
+
+    /// Stop every subnet-route effect: forwarding, and the routes this node installed.
+    fn stop_subnet_routes(&mut self) {
+        self.stop_forwarding();
+        let previous: Vec<_> = std::mem::take(&mut self.subnet.routes)
+            .into_iter()
+            .filter(|(_, state)| *state == crate::subnet_routes::RouteState::Installed)
+            .map(|(network, _)| network)
+            .collect();
+        if !previous.is_empty()
+            && let Some(config) = &self.config
+            && let Err(error) = Device::sync_network_routes(&[], &previous, config.addresses.ipv4)
+            && error.kind() != io::ErrorKind::NotConnected
+        {
+            tracing::warn!(error = %error, "mesh subnet routes could not be removed");
+        }
+    }
+
+    /// Apply one configuration chunk; [`Self::chunk`] adds the subnet-route reconcile.
+    fn chunk_inner(&mut self, chunk: Chunk) -> io::Result<bool> {
         #[cfg(feature = "cutoff-measure")]
         {
             self.refusing_at_ns = None;
@@ -3187,13 +3376,8 @@ impl Node {
                 .peers
                 .get_mut(&id)
                 .ok_or(io::ErrorKind::InvalidData)?;
-            if peer.peer != partial.peer {
+            if !partial.continues(peer) {
                 return Err(io::ErrorKind::InvalidData.into());
-            }
-            for policy in [&partial.inbound, &partial.outbound] {
-                if matches!(policy, crate::policy::rules::TrafficPolicy::All) {
-                    return Err(io::ErrorKind::InvalidData.into());
-                }
             }
             peer.inbound.union(&partial.inbound);
             peer.outbound.union(&partial.outbound);
@@ -3475,6 +3659,9 @@ impl Node {
                     old.peers.get(id).is_some_and(|old| {
                         old.inbound == peer.inbound
                             && old.outbound == peer.outbound
+                            // Subnet routes change allowed IPs, the packet filter and the
+                            // guard's forward and NAT rules (D197 M3): never an endpoint update.
+                            && old.networks == peer.networks
                             && old.peer.key == peer.peer.key
                             && old.peer.addresses == peer.peer.addresses
                             && old.peer.ipv4_only == peer.peer.ipv4_only
@@ -3674,10 +3861,14 @@ impl Node {
             // `GotaTun` installs only peers with network access (gotatun_node.rs), so a grant or
             // a revocation adds or removes engine peers although no peer field changed. Kernel
             // `WireGuard` keeps every peer and needs only the firewall (#515).
+            // Networks behind a router peer are part of its allowed IPs (D197 M3), so a change
+            // there reconfigures the engine as well.
             let engine_peers_changed = self.engine_kind == EngineKind::GotaTun
                 && self.config.as_ref().is_none_or(|old| {
                     crate::gotatun_node::peer_keys_with_network_access(old)
                         != crate::gotatun_node::peer_keys_with_network_access(&config)
+                        || crate::gotatun_node::networks_behind_peers(old)
+                            != crate::gotatun_node::networks_behind_peers(&config)
                 });
             // Undo this transaction's packet-path changes: the old grants, and the old engine
             // peers when this change added or removed some.

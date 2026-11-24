@@ -124,6 +124,8 @@ pub struct MeshFilter {
 pub enum MeshRequest {
     /// Owner-only edition fallback and reach-loss preview.
     Default(crate::settings::Request),
+    /// Owner-only subnet route list, approval and revocation (D197 M3).
+    Route(crate::route_api::Request),
     /// List the caller's permitted Mesh inventory.
     List(MeshFilter),
     /// Enroll a host using its public key.
@@ -346,6 +348,9 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
         | "mesh.rotation.interval.set" => {
             MeshRequest::Default(crate::settings::parse_action(action, input)?)
         }
+        crate::route_api::LIST | crate::route_api::APPROVE | crate::route_api::REVOKE => {
+            MeshRequest::Route(crate::route_api::parse_action(action, input)?)
+        }
         "mesh.list" => MeshRequest::List(parse(input)?),
         "mesh.node.enroll" => MeshRequest::EnrollNode(parse(input)?),
         "mesh.node.observe" => MeshRequest::ObserveNode(parse(input)?),
@@ -365,7 +370,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
         _ => return Err(MeshApiError::InvalidInput),
     };
     match &request {
-        MeshRequest::Default(_) => {}
+        MeshRequest::Default(_) | MeshRequest::Route(_) => {}
         MeshRequest::List(filter) => {
             if filter
                 .cursor
@@ -470,6 +475,7 @@ fn parse<T: for<'de> Deserialize<'de>>(input: &[u8]) -> Result<T, MeshApiError> 
     serde_json::from_slice(input).map_err(|_| MeshApiError::InvalidInput)
 }
 
+/// Refuse an endpoint that cannot be stored: a node or network id that is not a positive database id, an invalid tag name, or a user (stage 2).
 fn validate_endpoint_shape(endpoint: &Endpoint) -> Result<(), MeshApiError> {
     match endpoint {
         Endpoint::Node(id) => i64::try_from(id.0)
@@ -478,6 +484,11 @@ fn validate_endpoint_shape(endpoint: &Endpoint) -> Result<(), MeshApiError> {
             .map(|_| ())
             .ok_or(MeshApiError::InvalidInput),
         Endpoint::Tag(name) => validate_name(name),
+        Endpoint::Network(id) => i64::try_from(id.0)
+            .ok()
+            .filter(|id| *id > 0)
+            .map(|_| ())
+            .ok_or(MeshApiError::InvalidInput),
         Endpoint::User(_) => Err(MeshApiError::InvalidInput),
     }
 }
@@ -584,6 +595,33 @@ impl MeshService {
     }
 
     /// Publish an authenticated binding change after its writer transaction commits.
+    /// Run a subnet-route action for root or the server's account on the server machine (D400):
+    /// owner authority without a passkey, for `infraternal server mesh routes`. Every other caller
+    /// goes through [`Self::execute`] with a signed-in owner and a fresh passkey.
+    /// # Errors
+    /// The same sanitized errors as [`Self::execute`].
+    pub async fn execute_local_route(
+        &self,
+        action: &str,
+        input: &[u8],
+        now: i64,
+    ) -> Result<Value, MeshApiError> {
+        let request = crate::route_api::parse_action(action, input)?;
+        let settings = self.store.mesh_settings().await?;
+        let value = crate::route_api::execute(
+            &self.pool,
+            &settings,
+            crate::route_api::Actor::Local,
+            request,
+            now,
+        )
+        .await?;
+        if value.get("revision").is_some() {
+            self.invalidate_dataplane().await;
+        }
+        Ok(value)
+    }
+
     pub async fn invalidate_dataplane(&self) {
         if let Ok(revision) =
             sqlx::query_scalar::<_, i64>("SELECT revision FROM mesh_state WHERE singleton=1")
@@ -835,6 +873,24 @@ impl MeshService {
         request: MeshRequest,
     ) -> Result<Value, MeshApiError> {
         match request {
+            MeshRequest::Route(request) => {
+                let settings = self.store.mesh_settings().await?;
+                let value = crate::route_api::execute(
+                    &self.pool,
+                    &settings,
+                    crate::route_api::Actor::User {
+                        id: actor,
+                        fresh: self.fresh_authority.as_deref(),
+                    },
+                    request,
+                    now,
+                )
+                .await?;
+                if value.get("revision").is_some() {
+                    self.invalidate_dataplane().await;
+                }
+                Ok(value)
+            }
             MeshRequest::Default(_) => {
                 let value = crate::settings::execute(
                     &self.pool,
@@ -1878,6 +1934,7 @@ async fn tag_member_scopes(
     Ok(tags.into_iter().collect())
 }
 
+/// The management scopes (tags) an endpoint falls under, refusing an endpoint that does not exist: a node's tags, the tag itself, or an approved network's router's tags.
 async fn endpoint_scopes(
     tx: &mut Transaction<'_, Sqlite>,
     endpoint: &Endpoint,
@@ -1911,6 +1968,26 @@ async fn endpoint_scopes(
                 "SELECT tag_name FROM mesh_tag_members WHERE node_id=? ORDER BY tag_name",
             )
             .bind(id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| map_sql_error(error))
+        }
+        // An arrow may only target an approved network (D197 M3). Managing it needs the same
+        // scope as managing its router: the router's tags.
+        Endpoint::Network(id) => {
+            let id = i64::try_from(id.0).map_err(|_| MeshApiError::InvalidInput)?;
+            let router: Option<i64> = sqlx::query_scalar(
+                "SELECT node_id FROM mesh_routes WHERE id=? AND approved_at IS NOT NULL",
+            )
+            .bind(id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|error| map_sql_error(error))?;
+            let router = router.ok_or(MeshApiError::NotFound)?;
+            sqlx::query_scalar(
+                "SELECT tag_name FROM mesh_tag_members WHERE node_id=? ORDER BY tag_name",
+            )
+            .bind(router)
             .fetch_all(&mut **tx)
             .await
             .map_err(|error| map_sql_error(error))
@@ -2211,6 +2288,7 @@ fn filter_snapshot(
     snapshot
 }
 
+/// Whether a scoped viewer may see a grant endpoint: nodes it sees and tags in its scope; users and networks stay hidden from scoped viewers.
 fn endpoint_visible(
     endpoint: &Endpoint,
     nodes: &BTreeSet<NodeId>,
@@ -2219,10 +2297,12 @@ fn endpoint_visible(
     match endpoint {
         Endpoint::Node(id) => nodes.contains(id),
         Endpoint::Tag(name) => scopes.contains(name),
-        Endpoint::User(_) => false,
+        // A scoped viewer sees no subnet-route arrows yet; owners and global readers see all.
+        Endpoint::User(_) | Endpoint::Network(_) => false,
     }
 }
 
+/// Decode a stored grant endpoint of kind `node`, `tag` or `network`.
 fn parse_endpoint(kind: &str, value: &str) -> Result<Endpoint, MeshApiError> {
     match kind {
         "node" => value
@@ -2231,14 +2311,21 @@ fn parse_endpoint(kind: &str, value: &str) -> Result<Endpoint, MeshApiError> {
             .map(Endpoint::Node)
             .map_err(|_| storage_error("stored endpoint id invalid")),
         "tag" => Ok(Endpoint::Tag(value.to_owned())),
+        "network" => value
+            .parse::<u64>()
+            .map(crate::policy::networks::NetworkId)
+            .map(Endpoint::Network)
+            .map_err(|_| storage_error("stored endpoint id invalid")),
         _ => Err(storage_error("stored endpoint kind invalid")),
     }
 }
 
+/// Encode an endpoint as its stored kind and value; a user cannot be stored.
 fn endpoint_fields(endpoint: &Endpoint) -> Result<(&'static str, String), MeshApiError> {
     match endpoint {
         Endpoint::Node(id) => Ok(("node", id.0.to_string())),
         Endpoint::Tag(name) => Ok(("tag", name.clone())),
+        Endpoint::Network(id) => Ok(("network", id.0.to_string())),
         Endpoint::User(_) => Err(MeshApiError::InvalidInput),
     }
 }

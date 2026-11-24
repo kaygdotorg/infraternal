@@ -1,6 +1,9 @@
 //! Compiles coordinator identity, directional Access grants and discovered endpoints into node configurations [164–166,216].
 use crate::{
-    dataplane::{Config, DefaultPolicy, ExposureIdentity, Peer, PeerPolicy},
+    dataplane::{
+        Config, DefaultPolicy, ExposureIdentity, Peer, PeerNetworks, PeerPolicy, ReachableNetwork,
+        ServedNetwork,
+    },
     policy::{
         coordinator::Coordinator,
         model::{MeshError, NodeId},
@@ -180,10 +183,12 @@ fn compile_inner(
         // could never use it, and it would learn where the node sits. A grant recompiles this
         // snapshot, so the address arrives with the access. A public address stays, so a later
         // grant still finds the peer without a fresh walk.
+        let networks = peer_networks(coordinator, node, other, &fallback);
         let endpoint = endpoints.get(&other).copied().filter(|address| {
             !crate::candidates::is_private_scope(address.ip())
                 || has_access(&inbound)
                 || has_access(&outbound)
+                || !networks.is_empty()
         });
         // Retain keys even for denied pairs: a rule change needs only policy, not a fresh tunnel setup.
         peers.insert(
@@ -204,6 +209,7 @@ fn compile_inner(
                 inbound,
                 outbound,
                 access_ssh,
+                networks,
             },
         );
     }
@@ -228,6 +234,49 @@ fn compile_inner(
         #[cfg(feature = "mesh-dns")]
         peer_names,
     })
+}
+
+/// The approved networks between `node` and peer `other` (D197 M3), from `node`'s side.
+///
+/// `through` lists `other`'s networks that `node` may start into; `served` lists `node`'s own
+/// networks that `other` may start into. Access to a network follows the same rule as access
+/// to a node (D216): explicit arrows to that network decide for the pair they cover, and the
+/// mesh default (`fallback`) decides for a pair no arrow covers. A pair whose access is `None`
+/// gets no entry, so a denied peer never learns that the network exists.
+fn peer_networks(
+    coordinator: &Coordinator,
+    node: NodeId,
+    other: NodeId,
+    fallback: &TrafficPolicy,
+) -> PeerNetworks {
+    let mut networks = PeerNetworks::default();
+    for approved in coordinator.networks().values() {
+        if approved.router == other {
+            let outbound = granted_or(
+                Some(&coordinator.network_granted(node, approved.id)),
+                fallback,
+            );
+            if outbound != TrafficPolicy::None {
+                networks.through.push(ReachableNetwork {
+                    network: approved.network,
+                    outbound,
+                });
+            }
+        } else if approved.router == node {
+            let inbound = granted_or(
+                Some(&coordinator.network_granted(other, approved.id)),
+                fallback,
+            );
+            if inbound != TrafficPolicy::None {
+                networks.served.push(ServedNetwork {
+                    network: approved.network,
+                    inbound,
+                    keep_source: !approved.masquerade,
+                });
+            }
+        }
+    }
+    networks
 }
 
 /// Whether `policy` lets any traffic through: all ports, or a non-empty port list.
@@ -513,6 +562,7 @@ impl Chunks {
         }
         Ok(())
     }
+    /// Add one port to the peer's continuation entry in this chunk, creating it with the peer's identity and no subnet routes, which travel in the base part.
     fn insert_port(
         &mut self,
         node: NodeId,
@@ -526,6 +576,7 @@ impl Chunks {
             outbound: TrafficPolicy::None,
             // Port continuations only union ports; the base part carries it.
             access_ssh: None,
+            networks: crate::dataplane::PeerNetworks::default(),
         });
         let policy = if inbound {
             &mut partial.inbound

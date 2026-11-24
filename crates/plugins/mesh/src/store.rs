@@ -39,6 +39,8 @@ struct Loaded {
     accepts_candidates: std::sync::Arc<BTreeSet<NodeId>>,
     /// Nodes that understand `Peer::ipv4_only` and report their IPv6 state (#578, J1142).
     reports_ipv6: std::sync::Arc<BTreeSet<NodeId>>,
+    /// Nodes that understand subnet routes in snapshots (`PeerPolicy::networks`, D197 M3).
+    reports_routes: std::sync::Arc<BTreeSet<NodeId>>,
     /// Nodes whose last report said IPv6 is off on their mesh link; only nodes in `reports_ipv6` appear.
     ipv4_only: std::sync::Arc<BTreeSet<NodeId>>,
     /// The reflexive addresses published for each node before its current one, oldest first (J585 F3).
@@ -144,6 +146,18 @@ impl Snapshot {
     /// answers no `AAAA` for the name. An older receiver gets no mark, because its decoder refuses
     /// unknown fields; it keeps today's behaviour. Marks follow the peers' latest reports, so a
     /// peer whose IPv6 comes back is unmarked by the next snapshot.
+    /// Drop subnet routes from the snapshot of a node that does not understand them (D197 M3).
+    ///
+    /// Its decoder refuses unknown fields, so the field would make it refuse the whole snapshot.
+    /// Without the field it simply reaches no network, which is the safe side.
+    fn gate_networks(&self, node: NodeId, config: &mut Config) {
+        if self.loaded.reports_routes.contains(&node) {
+            return;
+        }
+        for policy in config.peers.values_mut() {
+            policy.networks = crate::dataplane::PeerNetworks::default();
+        }
+    }
     fn mark_ipv4_only(&self, node: NodeId, config: &mut Config) {
         if !self.loaded.reports_ipv6.contains(&node) {
             return;
@@ -191,6 +205,7 @@ impl Snapshot {
                 });
         self.order_candidates(node, &mut config);
         self.mark_ipv4_only(node, &mut config);
+        self.gate_networks(node, &mut config);
         #[cfg(feature = "mesh-dns")]
         {
             if self.loaded.dns_placeholders.contains(&node) {
@@ -1809,6 +1824,91 @@ impl Store {
         self.commit_candidate_change(tx, updated.rows_affected() > 0)
             .await
     }
+    /// Record what a node said it advertises (D197 M3): `Some(networks)` from a node that understands
+    /// subnet routes, `None` from an older node, which advertises nothing and gets no routes.
+    ///
+    /// The list is the node's whole, current word. A network it names is marked advertised (and
+    /// added, waiting for approval, when new). A network it no longer names keeps its approval but
+    /// stops being routed, and an unapproved one is forgotten. Malformed entries were refused by
+    /// the parser; entries the model would never route are kept so `mesh.route.list` can say why.
+    /// Commits, and advances the revision, only when something changed; returns whether it did.
+    /// # Errors
+    /// Returns fixed public errors, not database input.
+    pub async fn record_routes(
+        &self,
+        node: NodeId,
+        advertised: Option<&[crate::policy::networks::Network]>,
+    ) -> Result<bool, &'static str> {
+        let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let supported = advertised.is_some();
+        let mut changed = sqlx::query(
+            "UPDATE mesh_nodes SET routes_supported=? WHERE id=? AND routes_supported IS NOT ?",
+        )
+        .bind(supported)
+        .bind(id)
+        .bind(supported)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?
+        .rows_affected()
+            > 0;
+        let wanted: BTreeSet<String> = advertised
+            .unwrap_or_default()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let rows =
+            sqlx::query("SELECT network,advertised,approved_at FROM mesh_routes WHERE node_id=?")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+        let mut known = BTreeSet::new();
+        for row in rows {
+            let network: String = row
+                .try_get("network")
+                .map_err(|_| "Mesh storage unavailable.")?;
+            let was: bool = row
+                .try_get("advertised")
+                .map_err(|_| "Mesh storage unavailable.")?;
+            let approved: Option<i64> = row
+                .try_get("approved_at")
+                .map_err(|_| "Mesh storage unavailable.")?;
+            let now = wanted.contains(&network);
+            if !now && approved.is_none() {
+                sqlx::query("DELETE FROM mesh_routes WHERE node_id=? AND network=?")
+                    .bind(id)
+                    .bind(&network)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| "Mesh storage unavailable.")?;
+                changed = true;
+            } else if now != was {
+                sqlx::query("UPDATE mesh_routes SET advertised=? WHERE node_id=? AND network=?")
+                    .bind(now)
+                    .bind(id)
+                    .bind(&network)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|_| "Mesh storage unavailable.")?;
+                changed = true;
+            }
+            known.insert(network);
+        }
+        for network in wanted.difference(&known) {
+            sqlx::query("INSERT INTO mesh_routes(node_id,network) VALUES (?,?)")
+                .bind(id)
+                .bind(network)
+                .execute(&mut *tx)
+                .await
+                .map_err(|_| "Mesh storage unavailable.")?;
+            changed = true;
+        }
+        self.commit_candidate_change(tx, changed).await
+    }
     /// Record the server-reflexive addresses the server's own device just observed (#515, presence.rs). Private
     /// addresses ([`crate::candidates::is_private_scope`]) are never recorded.
     ///
@@ -2000,6 +2100,16 @@ impl Store {
             .await
     }
     /// Retain one shared immutable inventory/policy snapshot, rather than a peer map per node.
+    /// The deployment's mesh settings (address range, suffix), from the loaded inventory. Subnet
+    /// route approval checks networks against the range (D197 M3); loading also saves the
+    /// allocation on a fresh deployment, so this works before the first snapshot was compiled.
+    /// # Errors
+    /// Sanitized storage errors.
+    pub(crate) async fn mesh_settings(
+        &self,
+    ) -> Result<crate::policy::model::MeshSettings, crate::api::MeshApiError> {
+        Ok(self.load().await?.coordinator.settings().clone())
+    }
     pub(crate) async fn snapshot(&self) -> Result<Snapshot, crate::api::MeshApiError> {
         self.load().await.map(|loaded| Snapshot {
             loaded,
@@ -2184,11 +2294,11 @@ impl Store {
         .flatten();
         #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
-            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
-            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         let rows = nodes_query
             .fetch_all(&mut *tx)
@@ -2199,6 +2309,7 @@ impl Store {
         let mut candidates = BTreeMap::new();
         let mut accepts_candidates = BTreeSet::new();
         let mut reports_ipv6 = BTreeSet::new();
+        let mut reports_routes = BTreeSet::new();
         let mut ipv4_only = BTreeSet::new();
         let mut reflexive_history = BTreeMap::new();
         #[cfg(feature = "mesh-dns")]
@@ -2268,6 +2379,12 @@ impl Store {
                 {
                     ipv4_only.insert(id);
                 }
+            }
+            if row
+                .try_get::<bool, _>("routes_supported")
+                .map_err(|error| storage_sql_error(error))?
+            {
+                reports_routes.insert(id);
             }
             let history = stored_addresses(&row, "reflexive_history")?;
             if !history.is_empty() {
@@ -2358,6 +2475,50 @@ impl Store {
                 .join(node.clone())
                 .map_err(|_| storage_error("Mesh inventory invalid."))?;
         }
+        // Approved networks the router still advertises (D197 M3). Loaded before the rules, so
+        // arrows can name them. A row the model refuses now (for example after the mesh range
+        // moved onto it) stays out instead of taking the whole mesh down; the route list shows it.
+        for row in sqlx::query(
+            "SELECT id,node_id,network,masquerade FROM mesh_routes \
+             WHERE approved_at IS NOT NULL AND advertised=1 ORDER BY id",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| storage_sql_error(error))?
+        {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|error| storage_sql_error(error))?;
+            let router: i64 = row
+                .try_get("node_id")
+                .map_err(|error| storage_sql_error(error))?;
+            let network: String = row
+                .try_get("network")
+                .map_err(|error| storage_sql_error(error))?;
+            let (Ok(id), Ok(router), Ok(network)) = (
+                u64::try_from(id),
+                u64::try_from(router),
+                network.parse::<crate::policy::networks::Network>(),
+            ) else {
+                return Err(storage_error("Mesh route invalid."));
+            };
+            let approved = crate::policy::networks::ApprovedNetwork {
+                id: crate::policy::networks::NetworkId(id),
+                router: NodeId(router),
+                network,
+                masquerade: row
+                    .try_get("masquerade")
+                    .map_err(|error| storage_sql_error(error))?,
+            };
+            if membership.contains(&approved.router)
+                && coordinator.approve_network(approved).is_err()
+            {
+                tracing::warn!(
+                    route = id,
+                    "approved mesh route is not routable now; skipped"
+                );
+            }
+        }
         for row in sqlx::query(
             "SELECT id,from_kind,from_value,to_kind,to_value,both_ways,ports_json FROM mesh_grants",
         )
@@ -2395,10 +2556,12 @@ impl Store {
                 .map_err(|_| storage_error("Mesh rule invalid."))?,
             };
             // Deleted node endpoints remain dormant in the Access table; no other identity inherits them.
-            if [&arrow.from, &arrow.to]
-                .iter()
-                .any(|ep| matches!(ep,Endpoint::Node(id) if !membership.contains(id)))
-            {
+            // So do arrows to a network that is not approved and advertised right now.
+            if [&arrow.from, &arrow.to].iter().any(|ep| match ep {
+                Endpoint::Node(id) => !membership.contains(id),
+                Endpoint::Network(id) => !coordinator.networks().contains_key(id),
+                Endpoint::Tag(_) | Endpoint::User(_) => false,
+            }) {
                 continue;
             }
             coordinator
@@ -2568,6 +2731,7 @@ impl Store {
             candidates: std::sync::Arc::new(candidates),
             accepts_candidates: std::sync::Arc::new(accepts_candidates),
             reports_ipv6: std::sync::Arc::new(reports_ipv6),
+            reports_routes: std::sync::Arc::new(reports_routes),
             ipv4_only: std::sync::Arc::new(ipv4_only),
             reflexive_history: std::sync::Arc::new(reflexive_history),
             default,
@@ -2614,6 +2778,7 @@ fn stored_addresses(
 /// How many earlier reflexive addresses a node's history keeps (J585 F3). A device holds an older one only until
 /// the next snapshot lands, so a few cover every snapshot that can still be in flight.
 const REFLEXIVE_HISTORY: usize = 8;
+/// Decode a stored grant endpoint for the coordinator; a `network` endpoint names an approved route's identity.
 fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiError> {
     match kind {
         "node" => Ok(Endpoint::Node(NodeId(
@@ -2622,6 +2787,11 @@ fn endpoint(kind: &str, value: &str) -> Result<Endpoint, crate::api::MeshApiErro
                 .map_err(|_| storage_error("Mesh rule invalid."))?,
         ))),
         "tag" => Ok(Endpoint::Tag(value.to_owned())),
+        "network" => Ok(Endpoint::Network(crate::policy::networks::NetworkId(
+            value
+                .parse()
+                .map_err(|_| storage_error("Mesh rule invalid."))?,
+        ))),
         _ => Err(storage_error("Mesh rule invalid.")),
     }
 }
