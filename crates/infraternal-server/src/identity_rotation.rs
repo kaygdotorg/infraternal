@@ -4,16 +4,12 @@ use crate::{
     ca::{CaKeySource, CertificateAuthority},
     csr::ValidatedCsr,
     enrollment::EnrollmentStore,
+    identity_key::{IdentityKey, KeyAlgorithm},
 };
 use infraternal_plugin_remote::identity_rotation::{
     Acknowledgment, CandidateCertificate, Challenge, Proof,
 };
-use openssl::{
-    hash::MessageDigest,
-    pkey::{Id, PKey},
-    rand::rand_bytes,
-    sign::Verifier,
-};
+use openssl::{hash::MessageDigest, rand::rand_bytes};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::{io, sync::Arc, time::Duration};
@@ -23,7 +19,7 @@ use uuid::Uuid;
 const ROTATION_PERIOD_SECS: i64 = 604_800;
 /// An issued candidate certificate is sent again at most once an hour while the predecessor keeps reconnecting.
 const CANDIDATE_REDELIVERY_SECS: i64 = 3_600;
-/// Upper bound on a stored or delivered candidate certificate, well above a real Ed25519 leaf.
+/// Upper bound on a stored or delivered candidate certificate, well above a real Ed25519 or P-256 leaf.
 const MAX_CANDIDATE_CERTIFICATE_DER: usize = 8192;
 /// Caps concurrent candidate verification and signing. A proof over the cap is refused, not queued.
 static SIGNING: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(8);
@@ -71,14 +67,15 @@ struct CandidateProof {
     csr_der: Vec<u8>,
     old_signature: Vec<u8>,
     challenge: Challenge,
-    predecessor: [u8; 32],
+    /// The current key; the candidate must use the same algorithm (#580).
+    predecessor: IdentityKey,
     host: Uuid,
     now: i64,
 }
 
 /// The verified key and certificate returned by the bounded signing worker.
 struct VerifiedCandidate {
-    public_key: [u8; 32],
+    public_key: IdentityKey,
     signed: crate::ca::SignedCertificate,
 }
 
@@ -86,10 +83,10 @@ struct VerifiedCandidate {
 struct IssuedCertificate<'a> {
     host: Uuid,
     current_fingerprint: &'a [u8; 32],
-    predecessor: &'a [u8; 32],
+    predecessor: &'a IdentityKey,
     challenge: &'a Challenge,
     csr_digest: [u8; 32],
-    public_key: [u8; 32],
+    public_key: IdentityKey,
     der: &'a [u8],
     record: &'a crate::enrollment::CertificateRecord,
     now: i64,
@@ -130,7 +127,7 @@ impl Service {
                 Ok(Some(Action::Challenge(challenge)))
             }
             "challenged" => {
-                if operation.predecessor_public_key.as_deref() != Some(current_key.as_slice())
+                if operation.predecessor_public_key.as_deref() != Some(current_key.as_bytes())
                     || self.source.load().is_err()
                 {
                     return Ok(None);
@@ -138,13 +135,13 @@ impl Service {
                 Ok(Some(Action::Challenge(operation.challenge()?)))
             }
             "issued" => {
-                if operation.candidate_public_key.as_deref() == Some(current_key.as_slice()) {
+                if operation.candidate_public_key.as_deref() == Some(current_key.as_bytes()) {
                     let acknowledgment = self
                         .commit_candidate(host, &current_fingerprint, &current_key, now, &operation)
                         .await?;
                     return Ok(Some(Action::Acknowledgment(acknowledgment)));
                 }
-                if operation.predecessor_public_key.as_deref() != Some(current_key.as_slice()) {
+                if operation.predecessor_public_key.as_deref() != Some(current_key.as_bytes()) {
                     return Ok(None);
                 }
                 let candidate_not_after = self
@@ -174,7 +171,7 @@ impl Service {
                 }
             }
             "committed" => {
-                if operation.candidate_public_key.as_deref() != Some(current_key.as_slice()) {
+                if operation.candidate_public_key.as_deref() != Some(current_key.as_bytes()) {
                     return Ok(None);
                 }
                 Ok(Some(Action::Acknowledgment(operation.acknowledgment()?)))
@@ -234,7 +231,10 @@ impl Service {
         current_fingerprint: [u8; 32],
         proof: Proof,
     ) -> io::Result<Vec<u8>> {
-        if proof.csr_der.is_empty() || proof.csr_der.len() > 4096 || proof.old_signature.len() != 64
+        // Either algorithm's longest signature; the key's own bound is checked below.
+        if proof.csr_der.is_empty()
+            || proof.csr_der.len() > 4096
+            || proof.old_signature.len() > KeyAlgorithm::P256.max_signature_bytes()
         {
             return Err(denied());
         }
@@ -249,10 +249,15 @@ impl Service {
             .predecessor_public_key
             .as_deref()
             .ok_or_else(denied)?;
-        let predecessor: [u8; 32] = predecessor.try_into().map_err(|_| denied())?;
-        if self.current_key(host, &current_fingerprint, now).await? != predecessor {
+        let current = self.current_key(host, &current_fingerprint, now).await?;
+        // Stored keys carry no algorithm here, but each algorithm has its own
+        // length, so equal bytes are the same key of the same algorithm.
+        if current.as_bytes() != predecessor
+            || proof.old_signature.len() > current.algorithm().max_signature_bytes()
+        {
             return Err(denied());
         }
+        let predecessor = current;
         let digest: [u8; 32] = Sha256::digest(&proof.csr_der).into();
         if operation.phase == "issued" {
             if operation.csr_digest.as_deref() != Some(digest.as_slice()) {
@@ -272,7 +277,7 @@ impl Service {
             csr_der: proof.csr_der,
             old_signature: proof.old_signature,
             challenge: challenge.clone(),
-            predecessor,
+            predecessor: predecessor.clone(),
             host,
             now,
         };
@@ -282,8 +287,9 @@ impl Service {
                 .map_err(|_| denied())??;
         let candidate_public_key = signed.public_key;
         let signed = signed.signed;
+        // `IdentityKey` equality compares the algorithm too.
         if signed.record.issuer_fingerprint != challenge.issuer_fingerprint
-            || signed.record.public_key.as_bytes() != candidate_public_key.as_slice()
+            || signed.record.public_key != candidate_public_key
             || signed.der.len() > MAX_CANDIDATE_CERTIFICATE_DER
         {
             return Err(denied());
@@ -363,7 +369,7 @@ impl Service {
         &self,
         host: Uuid,
         current_fingerprint: &[u8; 32],
-        current_key: &[u8; 32],
+        current_key: &IdentityKey,
         now: i64,
         operation: &Operation,
     ) -> io::Result<Option<Challenge>> {
@@ -408,7 +414,7 @@ impl Service {
         .bind(operation_id.as_bytes().as_slice())
         .bind(nonce.as_slice())
         .bind(current_fingerprint.as_slice())
-        .bind(current_key.as_slice())
+        .bind(current_key.as_bytes())
         .bind(issuer_fingerprint.as_slice())
         .bind(i64::try_from(issuer_generation).map_err(|_| denied())?)
         .bind(now)
@@ -416,7 +422,7 @@ impl Service {
         .bind(operation.sequence)
         .bind(now.checked_sub(ROTATION_PERIOD_SECS).ok_or_else(denied)?)
         .bind(current_fingerprint.as_slice())
-        .bind(current_key.as_slice())
+        .bind(current_key.as_bytes())
         .bind(now)
         .bind(now)
         .execute(&mut *tx)
@@ -463,7 +469,7 @@ impl Service {
         )
         .bind(current_fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
-        .bind(predecessor.as_slice())
+        .bind(predecessor.as_bytes())
         .bind(now)
         .bind(now)
         .fetch_one(&mut *tx)
@@ -477,7 +483,7 @@ impl Service {
                 .candidate_public_key
                 .as_deref()
                 .ok_or_else(denied)?;
-            if stored_candidate != candidate {
+            if stored_candidate != candidate.as_bytes() {
                 return Err(denied());
             }
             let fingerprint = operation
@@ -496,7 +502,7 @@ impl Service {
             )
             .bind(host.as_bytes().as_slice())
             .bind(fingerprint)
-            .bind(candidate.as_slice())
+            .bind(candidate.as_bytes())
             .bind(now)
             .bind(now)
             .fetch_one(&mut *tx)
@@ -513,7 +519,7 @@ impl Service {
         )
         .bind(now)
         .bind(host.as_bytes().as_slice())
-        .bind(candidate.as_slice())
+        .bind(candidate.as_bytes())
         .bind(record.fingerprint.as_slice())
         .execute(&mut *tx)
         .await
@@ -541,7 +547,7 @@ impl Service {
              AND EXISTS(SELECT 1 FROM remote_hosts h WHERE h.id=remote_identity_rotation.host_id AND h.revoked_at IS NULL)",
         )
         .bind(csr_digest.as_slice())
-        .bind(candidate.as_slice())
+        .bind(candidate.as_bytes())
         .bind(record.fingerprint.as_slice())
         .bind(der)
         .bind(now)
@@ -565,7 +571,7 @@ impl Service {
         &self,
         host: Uuid,
         current_fingerprint: &[u8; 32],
-        candidate: &[u8; 32],
+        candidate: &IdentityKey,
         now: i64,
         operation: &Operation,
     ) -> io::Result<Acknowledgment> {
@@ -581,7 +587,7 @@ impl Service {
         )
         .bind(current_fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
-        .bind(candidate.as_slice())
+        .bind(candidate.as_bytes())
         .bind(now)
         .bind(now)
         .fetch_one(&mut *tx)
@@ -608,7 +614,7 @@ impl Service {
         .bind(host.as_bytes().as_slice())
         .bind(operation.id.as_deref().ok_or_else(denied)?)
         .bind(operation.sequence)
-        .bind(candidate.as_slice())
+        .bind(candidate.as_bytes())
         .execute(&mut *tx)
         .await
         .map_err(|_| denied())?
@@ -620,15 +626,15 @@ impl Service {
         operation.acknowledgment()
     }
 
-    /// The public key of the host's live, unrevoked certificate with this fingerprint.
+    /// The public key, in its own algorithm, of the host's live, unrevoked certificate with this fingerprint.
     async fn current_key(
         &self,
         host: Uuid,
         fingerprint: &[u8; 32],
         now: i64,
-    ) -> io::Result<[u8; 32]> {
-        let public: Vec<u8> = sqlx::query_scalar(
-            "SELECT c.public_key FROM remote_certificates c JOIN remote_hosts h ON h.id=c.host_id \
+    ) -> io::Result<IdentityKey> {
+        let (algorithm, public): (String, Vec<u8>) = sqlx::query_as(
+            "SELECT c.key_algorithm, c.public_key FROM remote_certificates c JOIN remote_hosts h ON h.id=c.host_id \
              WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? AND c.not_after>? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
         )
@@ -640,7 +646,7 @@ impl Service {
         .await
         .map_err(|_| denied())?
         .ok_or_else(denied)?;
-        public.try_into().map_err(|_| denied())
+        IdentityKey::from_stored(&algorithm, &public).ok_or_else(denied)
     }
 
     /// When the issued candidate certificate expires, if one was issued.
@@ -725,26 +731,21 @@ impl Service {
 
 /// Check that the CSR's key is new and that the predecessor key signed the challenge and CSR, then sign the leaf.
 /// Runs on the bounded blocking worker because both steps are CPU-bound.
+///
+/// The candidate uses the predecessor's algorithm (#580): a host rotates
+/// Ed25519 to Ed25519, an iPhone one Secure Enclave P-256 key to a new one.
+/// The new key signs the CSR, the old key signs the handover, and nothing is
+/// exported (owner question Q6). No rotation changes an identity's algorithm.
 fn verify_and_sign_candidate(proof: &CandidateProof) -> io::Result<VerifiedCandidate> {
-    let csr = ValidatedCsr::parse(&proof.csr_der).map_err(|_| denied())?;
-    let public_key: [u8; 32] = csr
-        .key()
-        .raw_public_key()
-        .map_err(|_| denied())?
-        .try_into()
+    let csr = ValidatedCsr::parse_as(&proof.csr_der, proof.predecessor.algorithm())
         .map_err(|_| denied())?;
+    let public_key = csr.identity_key().map_err(|_| denied())?;
     if public_key == proof.predecessor {
         return Err(denied());
     }
-    let predecessor =
-        PKey::public_key_from_raw_bytes(&proof.predecessor, Id::ED25519).map_err(|_| denied())?;
     let transcript =
         infraternal_plugin_remote::identity_rotation::transcript(&proof.challenge, &proof.csr_der)?;
-    let mut verifier = Verifier::new_without_digest(&predecessor).map_err(|_| denied())?;
-    if !verifier
-        .verify_oneshot(&proof.old_signature, &transcript)
-        .map_err(|_| denied())?
-    {
+    if !proof.predecessor.verify(&transcript, &proof.old_signature) {
         return Err(denied());
     }
     let material = proof.source.load().map_err(|_| denied())?;
@@ -878,7 +879,7 @@ mod tests {
             .await
             .unwrap();
         let old_fingerprint = [1_u8; 32];
-        let old_public_key = [3_u8; 32];
+        let old_public_key = IdentityKey::Ed25519([3_u8; 32]);
         sqlx::query("UPDATE remote_hosts SET created_at=? WHERE id=?")
             .bind(now - ROTATION_PERIOD_SECS - 1)
             .bind(host.as_bytes().as_slice())
@@ -911,7 +912,8 @@ mod tests {
         request.sign(&candidate_key, MessageDigest::null()).unwrap();
         let csr_der = request.build().to_der().unwrap();
         let csr = ValidatedCsr::parse(&csr_der).unwrap();
-        let candidate_public_key = candidate_key.raw_public_key().unwrap().try_into().unwrap();
+        let candidate_public_key =
+            IdentityKey::Ed25519(candidate_key.raw_public_key().unwrap().try_into().unwrap());
         let authority = CertificateAuthority::from_source(source.as_ref()).unwrap();
         let first = authority.sign_host(host, &csr, now).unwrap();
         service
@@ -921,7 +923,7 @@ mod tests {
                 predecessor: &old_public_key,
                 challenge: &challenge,
                 csr_digest: Sha256::digest(&csr_der).into(),
-                public_key: candidate_public_key,
+                public_key: candidate_public_key.clone(),
                 der: &first.der,
                 record: &first.record,
                 now,
@@ -973,7 +975,7 @@ mod tests {
                 predecessor: &old_public_key,
                 challenge: &challenge,
                 csr_digest: Sha256::digest(&csr_der).into(),
-                public_key: candidate_public_key,
+                public_key: candidate_public_key.clone(),
                 der: &retry.der,
                 record: &retry.record,
                 now,
@@ -992,5 +994,226 @@ mod tests {
             persisted, first.der,
             "retry must return the exact leaf committed by the first accepted proof"
         );
+    }
+
+    /// A software P-256 key: the stand-in for an iPhone's Secure Enclave key (#580).
+    fn p256_key() -> PKey<openssl::pkey::Private> {
+        let group =
+            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+        PKey::from_ec_key(openssl::ec::EcKey::generate(&group).unwrap()).unwrap()
+    }
+
+    /// A CSR for `key`, signed the way its owner signs: Ed25519 directly, P-256 over SHA-256.
+    fn csr_for(key: &PKey<openssl::pkey::Private>) -> Vec<u8> {
+        let mut request = X509Req::builder().unwrap();
+        request
+            .set_subject_name(&X509NameBuilder::new().unwrap().build())
+            .unwrap();
+        request.set_pubkey(key).unwrap();
+        let digest = if key.id() == openssl::pkey::Id::ED25519 {
+            MessageDigest::null()
+        } else {
+            MessageDigest::sha256()
+        };
+        request.sign(key, digest).unwrap();
+        request.build().to_der().unwrap()
+    }
+
+    /// The handover signature by `key` over `message`, in `key`'s own algorithm.
+    fn sign_with(key: &PKey<openssl::pkey::Private>, message: &[u8]) -> Vec<u8> {
+        let mut signer = if key.id() == openssl::pkey::Id::ED25519 {
+            openssl::sign::Signer::new_without_digest(key).unwrap()
+        } else {
+            openssl::sign::Signer::new(MessageDigest::sha256(), key).unwrap()
+        };
+        signer.sign_oneshot_to_vec(message).unwrap()
+    }
+
+    /// An enrolled host whose only live certificate holds `key`, recorded in its
+    /// own algorithm, with its rotation due. Returns the service, pool, host,
+    /// current certificate fingerprint and the database time.
+    async fn rotating_identity(
+        key: &PKey<openssl::pkey::Private>,
+    ) -> (Service, sqlx::SqlitePool, Uuid, [u8; 32], i64) {
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE remote_hosts SET created_at=? WHERE id=?")
+            .bind(now - ROTATION_PERIOD_SECS - 1)
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let source = Arc::new(crate::ca::tests::source(true));
+        let algorithm = if key.id() == openssl::pkey::Id::ED25519 {
+            KeyAlgorithm::Ed25519
+        } else {
+            KeyAlgorithm::P256
+        };
+        let csr = ValidatedCsr::parse_as(&csr_for(key), algorithm).unwrap();
+        let signed = CertificateAuthority::from_source(source.as_ref())
+            .unwrap()
+            .sign_host(host, &csr, now)
+            .unwrap();
+        sqlx::query("UPDATE remote_certificates SET revoked_at=? WHERE host_id=?")
+            .bind(now)
+            .bind(host.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,key_algorithm,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,?7,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
+            .bind(signed.record.fingerprint.as_slice())
+            .bind(host.as_bytes().as_slice())
+            .bind(signed.record.issuer_fingerprint.as_slice())
+            .bind(signed.record.public_key.as_bytes())
+            .bind(algorithm.as_str())
+            .bind(signed.record.not_before)
+            .bind(signed.record.not_after)
+            .execute(&pool)
+            .await
+            .unwrap();
+        (
+            Service::new(store, source),
+            pool,
+            host,
+            signed.record.fingerprint,
+            now,
+        )
+    }
+
+    /// The challenge a due rotation starts for the current certificate.
+    async fn due_challenge(service: &Service, host: Uuid, current: [u8; 32]) -> Challenge {
+        let Some(Action::Challenge(challenge)) = service.next_action(host, current).await.unwrap()
+        else {
+            panic!("a due rotation did not start");
+        };
+        challenge
+    }
+
+    /// #580 P4, Q6: an iPhone rotates one P-256 key to a new P-256 key. The new
+    /// key signs the CSR, the old key signs the handover as DER ECDSA, the
+    /// candidate certificate records `p256`, and once the candidate connects
+    /// the predecessor's certificates are revoked.
+    #[tokio::test]
+    async fn a_p256_identity_rotates_to_a_new_p256_key() {
+        let old_key = p256_key();
+        let (service, pool, host, old_fingerprint, _) = rotating_identity(&old_key).await;
+        let challenge = due_challenge(&service, host, old_fingerprint).await;
+        let candidate_key = p256_key();
+        let csr_der = csr_for(&candidate_key);
+        let handover =
+            infraternal_plugin_remote::identity_rotation::transcript(&challenge, &csr_der).unwrap();
+        let certificate_der = service
+            .accept_proof(
+                host,
+                old_fingerprint,
+                Proof {
+                    operation_id: challenge.operation_id,
+                    sequence: challenge.sequence,
+                    csr_der,
+                    old_signature: sign_with(&old_key, &handover),
+                },
+            )
+            .await
+            .unwrap();
+        let leaf = openssl::x509::X509::from_der(&certificate_der).unwrap();
+        assert!(leaf.public_key().unwrap().public_eq(&candidate_key));
+        let candidate_fingerprint: [u8; 32] = Sha256::digest(&certificate_der).into();
+        let stored: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT key_algorithm, public_key FROM remote_certificates WHERE fingerprint=?",
+        )
+        .bind(candidate_fingerprint.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((stored.0.as_str(), stored.1.len()), ("p256", 65));
+        let Some(Action::Acknowledgment(_)) = service
+            .next_action(host, candidate_fingerprint)
+            .await
+            .unwrap()
+        else {
+            panic!("the admitted candidate was not acknowledged");
+        };
+        let predecessor_live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM remote_certificates WHERE fingerprint=? AND revoked_at IS NULL",
+        )
+        .bind(old_fingerprint.as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            predecessor_live, 0,
+            "the predecessor is revoked after the handover"
+        );
+    }
+
+    /// A rotation never changes an identity's algorithm, and the handover must be
+    /// the predecessor's own canonical signature: an Ed25519 candidate for a
+    /// P-256 identity (and the reverse), a raw `r || s` handover and a handover
+    /// signed by the candidate are all refused, and nothing is issued.
+    #[tokio::test]
+    async fn rotation_refuses_algorithm_changes_and_foreign_handovers() {
+        /// A fresh candidate key of one algorithm.
+        type Candidate = fn() -> PKey<openssl::pkey::Private>;
+        let cases: [(&str, bool, Candidate, u8); 4] = [
+            (
+                "P-256 to Ed25519",
+                true,
+                || PKey::generate_ed25519().unwrap(),
+                0,
+            ),
+            ("Ed25519 to P-256", false, p256_key, 0),
+            ("raw r||s handover", true, p256_key, 1),
+            ("handover signed by the candidate", true, p256_key, 2),
+        ];
+        for (name, p256_identity, candidate, handover_kind) in cases {
+            let old_key = if p256_identity {
+                p256_key()
+            } else {
+                PKey::generate_ed25519().unwrap()
+            };
+            let (service, pool, host, old_fingerprint, _) = rotating_identity(&old_key).await;
+            let challenge = due_challenge(&service, host, old_fingerprint).await;
+            let candidate_key = candidate();
+            let csr_der = csr_for(&candidate_key);
+            let handover =
+                infraternal_plugin_remote::identity_rotation::transcript(&challenge, &csr_der)
+                    .unwrap();
+            let old_signature = match handover_kind {
+                0 => sign_with(&old_key, &handover),
+                1 => {
+                    let der = sign_with(&old_key, &handover);
+                    let parsed = openssl::ecdsa::EcdsaSig::from_der(&der).unwrap();
+                    [
+                        parsed.r().to_vec_padded(32).unwrap(),
+                        parsed.s().to_vec_padded(32).unwrap(),
+                    ]
+                    .concat()
+                }
+                _ => sign_with(&candidate_key, &handover),
+            };
+            let result = service
+                .accept_proof(
+                    host,
+                    old_fingerprint,
+                    Proof {
+                        operation_id: challenge.operation_id,
+                        sequence: challenge.sequence,
+                        csr_der,
+                        old_signature,
+                    },
+                )
+                .await;
+            assert!(result.is_err(), "{name} was accepted");
+            let phase: String =
+                sqlx::query_scalar("SELECT phase FROM remote_identity_rotation WHERE host_id=?")
+                    .bind(host.as_bytes().as_slice())
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(phase, "challenged", "{name} issued a candidate");
+        }
     }
 }

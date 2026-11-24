@@ -29,6 +29,17 @@ impl KeyAlgorithm {
         }
     }
 
+    /// The longest signature this algorithm produces: 64 bytes for Ed25519,
+    /// 72 for a DER ECDSA P-256 signature (two 33-byte INTEGERs and their headers).
+    /// Callers refuse longer input before any storage is read.
+    #[must_use]
+    pub const fn max_signature_bytes(self) -> usize {
+        match self {
+            Self::Ed25519 => 64,
+            Self::P256 => 72,
+        }
+    }
+
     /// Reads a stored spelling back. Anything but the two canonical spellings
     /// is `None`, so a corrupted row fails closed instead of picking a default.
     #[must_use]
@@ -154,6 +165,35 @@ impl IdentityKey {
         }
     }
 
+    /// Whether `signature` is this key's signature over `message`.
+    ///
+    /// Ed25519 takes exactly 64 bytes and signs the whole message (RFC 8032).
+    /// P-256 takes one strict DER `ECDSA-Sig-Value` of at most 72 bytes over
+    /// SHA-256 of the message, the form a Secure Enclave and ring produce; the
+    /// fixed-width `r || s` form is refused. Any other input is `false`, never an error.
+    #[must_use]
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        use openssl::{hash::MessageDigest, sign::Verifier};
+        let shape = match self {
+            Self::Ed25519(_) => signature.len() == 64,
+            Self::P256(_) => crate::csr::ecdsa_signature_is_der(signature),
+        };
+        if !shape {
+            return false;
+        }
+        let Some(key) = self.to_public_key() else {
+            return false;
+        };
+        let verifier = match self {
+            // Ed25519 verifies the complete message in one operation.
+            Self::Ed25519(_) => Verifier::new_without_digest(&key),
+            Self::P256(_) => Verifier::new(MessageDigest::sha256(), &key),
+        };
+        verifier
+            .and_then(|mut verifier| verifier.verify_oneshot(signature, message))
+            .unwrap_or(false)
+    }
+
     /// The OpenSSL public key for verifying signatures, or `None` if the bytes
     /// are not a valid key (for P-256: not a point on the curve).
     #[must_use]
@@ -256,5 +296,48 @@ mod tests {
         assert!(IdentityKey::from_public_key(&p384).is_none());
         let x25519 = openssl::pkey::PKey::generate_x25519().unwrap();
         assert!(IdentityKey::from_public_key(&x25519).is_none());
+    }
+
+    /// Signatures verify only under their own key and algorithm, in their
+    /// canonical shape: a ring P-256 signature verifies, a raw `r || s` one,
+    /// a flipped bit and an Ed25519 signature on a P-256 key do not.
+    #[test]
+    fn signatures_verify_only_in_their_own_shape() {
+        use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair, KeyPair};
+        let random = ring::rand::SystemRandom::new();
+        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random).unwrap();
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &random)
+                .unwrap();
+        let key = IdentityKey::from_raw(KeyAlgorithm::P256, pair.public_key().as_ref()).unwrap();
+        let message = b"infraternal recovery transcript";
+        let signature = pair.sign(&random, message).unwrap().as_ref().to_vec();
+        assert!(signature.len() <= KeyAlgorithm::P256.max_signature_bytes());
+        assert!(key.verify(message, &signature));
+        assert!(!key.verify(b"another transcript", &signature));
+        let mut flipped = signature.clone();
+        *flipped.last_mut().unwrap() ^= 1;
+        assert!(!key.verify(message, &flipped));
+        let parsed = openssl::ecdsa::EcdsaSig::from_der(&signature).unwrap();
+        let raw = [
+            parsed.r().to_vec_padded(32).unwrap(),
+            parsed.s().to_vec_padded(32).unwrap(),
+        ]
+        .concat();
+        assert!(!key.verify(message, &raw));
+        assert!(!key.verify(message, &[signature.as_slice(), &[0]].concat()));
+
+        let ed25519 = openssl::pkey::PKey::generate_ed25519().unwrap();
+        let ed_signature = openssl::sign::Signer::new_without_digest(&ed25519)
+            .unwrap()
+            .sign_oneshot_to_vec(message)
+            .unwrap();
+        let ed_key =
+            IdentityKey::from_raw(KeyAlgorithm::Ed25519, &ed25519.raw_public_key().unwrap())
+                .unwrap();
+        assert!(ed_key.verify(message, &ed_signature));
+        assert!(!key.verify(message, &ed_signature));
+        assert!(!ed_key.verify(message, &signature));
+        assert!(!ed_key.verify(message, &ed_signature[..63]));
     }
 }

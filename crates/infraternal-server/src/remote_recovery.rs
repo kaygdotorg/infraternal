@@ -5,17 +5,14 @@ use crate::{
     clock_health::ClockHealth,
     csr::ValidatedCsr,
     enrollment::EnrollmentStore,
+    identity_key::{IdentityKey, KeyAlgorithm},
 };
 use infraternal_agent::{channel::Channel, remote_tls::TcpTls};
 use infraternal_plugin_remote::remote_recovery::{
     RecoveryRequest, RecoveryResponse, RecoveryTranscript, challenge_message, csr_digest,
     request_id, transcript,
 };
-use openssl::{
-    hash::MessageDigest,
-    pkey::{Id, PKey},
-    sign::Verifier,
-};
+use openssl::hash::MessageDigest;
 use std::{
     collections::HashMap,
     io,
@@ -42,8 +39,10 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SOURCE_BUCKETS: usize = 4096;
 /// Most hosts tracked at once, with the same rule.
 const MAX_HOST_BUCKETS: usize = 10_000;
-/// An Ed25519 signature is exactly 64 bytes.
-const MAX_SIGNATURE_BYTES: usize = 64;
+/// The longest predecessor signature either identity algorithm produces: an
+/// Ed25519 signature is 64 bytes, a DER P-256 one at most 72 (#580). Longer
+/// input is refused before storage is read; each key then checks its own shape.
+const MAX_SIGNATURE_BYTES: usize = KeyAlgorithm::P256.max_signature_bytes();
 
 /// Bound recovery traffic in two stages.
 ///
@@ -393,11 +392,11 @@ impl Service {
     /// source, cannot serialize writers. The transactional lookup in `challenge_at`
     /// still rechecks revocation and the validity window before it records anything.
     async fn authenticate_challenge(&self, input: &ChallengeInput) -> Result<(), Denied> {
-        if input.signature.len() != 64 {
+        if input.signature.len() > MAX_SIGNATURE_BYTES {
             return Err(Denied);
         }
-        let public_key: Vec<u8> = sqlx::query_scalar(
-            "SELECT c.public_key FROM remote_certificates c \
+        let (algorithm, public_key): (String, Vec<u8>) = sqlx::query_as(
+            "SELECT c.key_algorithm, c.public_key FROM remote_certificates c \
              JOIN remote_hosts h ON h.id=c.host_id \
              WHERE c.fingerprint=? AND c.host_id=? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
@@ -408,20 +407,16 @@ impl Service {
         .await
         .map_err(|_| Denied)?
         .ok_or(Denied)?;
-        let public_key =
-            PKey::public_key_from_raw_bytes(&public_key, Id::ED25519).map_err(|_| Denied)?;
+        // The predecessor signs in its own algorithm (#580): Ed25519 for hosts,
+        // P-256 for devices.
+        let public_key = IdentityKey::from_stored(&algorithm, &public_key).ok_or(Denied)?;
         let message = challenge_message(
             input.host,
             &input.predecessor,
             &input.request,
             &input.digest,
         );
-        let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
-        // Ed25519 verifies the complete message in one operation; streaming updates are unsupported.
-        if verifier
-            .verify_oneshot(&input.signature, &message)
-            .map_err(|_| Denied)?
-        {
+        if public_key.verify(&message, &input.signature) {
             Ok(())
         } else {
             Err(Denied)
@@ -576,7 +571,7 @@ impl Service {
         &self,
         request: &ProofRequest,
         operation: &ProofOperationRow,
-        public_key: &[u8; 32],
+        public_key: &IdentityKey,
         now: i64,
     ) -> Result<VerifiedProof, Denied> {
         let actual_digest = csr_digest(&request.csr_der);
@@ -587,7 +582,7 @@ impl Service {
         {
             return Err(Denied);
         }
-        let key_fingerprint = openssl::sha::sha256(public_key);
+        let key_fingerprint = public_key.digest();
         if operation.public_key_fingerprint.as_slice() != key_fingerprint.as_slice() {
             return Err(Denied);
         }
@@ -615,14 +610,7 @@ impl Service {
             issuer_generation,
             not_after: operation.predecessor_not_after,
         });
-        let public_key =
-            PKey::public_key_from_raw_bytes(public_key, Id::ED25519).map_err(|_| Denied)?;
-        let mut verifier = Verifier::new_without_digest(&public_key).map_err(|_| Denied)?;
-        // Ed25519 verifies the complete transcript in one operation; streaming updates are unsupported.
-        if !verifier
-            .verify_oneshot(&request.signature, &transcript)
-            .map_err(|_| Denied)?
-        {
+        if !public_key.verify(&transcript, &request.signature) {
             return Err(Denied);
         }
         Ok(VerifiedProof {
@@ -633,15 +621,17 @@ impl Service {
     }
 
     /// The proof's key must still be the registered key of the named predecessor certificate, with the same notAfter.
+    /// Key and algorithm are compared together, so a proof can only continue an
+    /// identity of its own algorithm (#580).
     async fn require_registered_identity(
         &self,
         request: &ProofRequest,
-        public_key: &[u8; 32],
+        public_key: &IdentityKey,
         not_after: i64,
         now: i64,
     ) -> Result<(), Denied> {
-        let registered: Option<(Vec<u8>, i64)> = sqlx::query_as(
-            "SELECT c.public_key,c.not_after FROM remote_certificates c \
+        let registered: Option<(String, Vec<u8>, i64)> = sqlx::query_as(
+            "SELECT c.key_algorithm,c.public_key,c.not_after FROM remote_certificates c \
              JOIN remote_hosts h ON h.id=c.host_id \
              WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
@@ -652,8 +642,9 @@ impl Service {
         .fetch_optional(&self.store.0)
         .await
         .map_err(|_| Denied)?;
-        let (registered_key, registered_not_after) = registered.ok_or(Denied)?;
-        if registered_key.as_slice() == public_key.as_slice() && registered_not_after == not_after {
+        let (algorithm, registered_key, registered_not_after) = registered.ok_or(Denied)?;
+        let registered_key = IdentityKey::from_stored(&algorithm, &registered_key).ok_or(Denied)?;
+        if registered_key == *public_key && registered_not_after == not_after {
             Ok(())
         } else {
             Err(Denied)
@@ -713,8 +704,8 @@ impl Service {
         if operation.expires_at <= now {
             return Err(Denied);
         }
-        let old: Option<(Vec<u8>, i64)> = sqlx::query_as(
-            "SELECT c.public_key,c.not_after FROM remote_certificates c \
+        let old: Option<(String, Vec<u8>, i64)> = sqlx::query_as(
+            "SELECT c.key_algorithm,c.public_key,c.not_after FROM remote_certificates c \
              JOIN remote_hosts h ON h.id=c.host_id \
              WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
@@ -725,7 +716,8 @@ impl Service {
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|_| Denied)?;
-        let (old_key, not_after) = old.ok_or(Denied)?;
+        let (algorithm, old_key, not_after) = old.ok_or(Denied)?;
+        let old_key = IdentityKey::from_stored(&algorithm, &old_key).ok_or(Denied)?;
         validate_signed_leaf(&old_key, not_after, signed, now)?;
         let encoded = sqlx::query(
             "UPDATE remote_certificate_recovery SET certificate_fingerprint=?,certificate_der=?,completed_at=? \
@@ -788,7 +780,13 @@ impl Service {
 }
 
 /// Parse a proof's CSR and key and check the request ID, sizes and key type before any storage is read.
-fn validate_proof_request(request: &ProofRequest) -> Result<(ValidatedCsr, [u8; 32]), Denied> {
+///
+/// Recovery keeps the predecessor's key, and storage is not read yet, so the
+/// CSR is admitted in whichever of the two identity shapes it has (#580).
+/// That choice grants nothing by itself: every later step compares this key,
+/// algorithm included, with the registered predecessor's, and verifies the
+/// signature in that algorithm.
+fn validate_proof_request(request: &ProofRequest) -> Result<(ValidatedCsr, IdentityKey), Denied> {
     if request.request
         != request_id(
             request.host,
@@ -796,17 +794,16 @@ fn validate_proof_request(request: &ProofRequest) -> Result<(ValidatedCsr, [u8; 
             &csr_digest(&request.csr_der),
         )
         || request.csr_der.len() > 4096
-        || request.signature.len() != MAX_SIGNATURE_BYTES
     {
         return Err(Denied);
     }
-    let csr = ValidatedCsr::parse(&request.csr_der).map_err(|_| Denied)?;
-    let public_key = csr
-        .key()
-        .raw_public_key()
-        .map_err(|_| Denied)?
-        .try_into()
+    let csr = ValidatedCsr::parse(&request.csr_der)
+        .or_else(|_| ValidatedCsr::parse_as(&request.csr_der, KeyAlgorithm::P256))
         .map_err(|_| Denied)?;
+    if request.signature.len() > csr.algorithm().max_signature_bytes() {
+        return Err(Denied);
+    }
+    let public_key = csr.identity_key().map_err(|_| Denied)?;
     Ok((csr, public_key))
 }
 
@@ -831,15 +828,15 @@ async fn require_recorded_certificate(
     available.then_some(()).ok_or(Denied)
 }
 
-/// The leaf must carry the predecessor's key, be valid now and last exactly 7 days, inside the recovery window.
+/// The leaf must carry the predecessor's key (and algorithm), be valid now and last exactly 7 days, inside the recovery window.
 fn validate_signed_leaf(
-    old_key: &[u8],
+    old_key: &IdentityKey,
     not_after: i64,
     signed: &crate::ca::SignedCertificate,
     now: i64,
 ) -> Result<(), Denied> {
     if !eligible(now, not_after)
-        || old_key != signed.record.public_key.as_bytes()
+        || *old_key != signed.record.public_key
         || signed.record.not_before > now
         || signed.record.not_after <= now
         || signed.record.not_after - signed.record.not_before != 604_800
@@ -863,8 +860,8 @@ async fn registered_identity(
     connection: &mut sqlx::SqliteConnection,
     input: &ChallengeInput,
 ) -> Result<RegisteredIdentity, Denied> {
-    let (public_key, not_after): (Vec<u8>, i64) = sqlx::query_as(
-        "SELECT c.public_key,c.not_after FROM remote_certificates c \
+    let (algorithm, public_key, not_after): (String, Vec<u8>, i64) = sqlx::query_as(
+        "SELECT c.key_algorithm,c.public_key,c.not_after FROM remote_certificates c \
          JOIN remote_hosts h ON h.id=c.host_id \
          WHERE c.fingerprint=? AND c.host_id=? AND c.not_before<=? \
          AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
@@ -876,12 +873,13 @@ async fn registered_identity(
     .await
     .map_err(|_| Denied)?
     .ok_or(Denied)?;
-    let public_key: [u8; 32] = public_key.try_into().map_err(|_| Denied)?;
+    let public_key = IdentityKey::from_stored(&algorithm, &public_key).ok_or(Denied)?;
     if !eligible(input.now, not_after) {
         return Err(Denied);
     }
     Ok(RegisteredIdentity {
-        fingerprint: openssl::sha::sha256(&public_key),
+        // The key's digest in its own algorithm, as the client's transcript names it.
+        fingerprint: public_key.digest(),
         not_after,
     })
 }
@@ -988,7 +986,7 @@ pub fn eligible(now: i64, not_after: i64) -> bool {
 mod tests {
     use super::*;
     use openssl::{
-        pkey::Private,
+        pkey::{PKey, Private},
         sign::Signer,
         x509::{X509NameBuilder, X509Req},
     };
@@ -1019,6 +1017,35 @@ mod tests {
 
     /// Build the fixture: enroll a host, expire its certificate and start the clock monitor.
     async fn recovery_fixture() -> RecoveryFixture {
+        recovery_fixture_with(PKey::generate_ed25519().unwrap()).await
+    }
+
+    /// A software P-256 key: the stand-in for an iPhone's Secure Enclave identity key (#580).
+    fn p256_key() -> PKey<Private> {
+        let group =
+            openssl::ec::EcGroup::from_curve_name(openssl::nid::Nid::X9_62_PRIME256V1).unwrap();
+        PKey::from_ec_key(openssl::ec::EcKey::generate(&group).unwrap()).unwrap()
+    }
+
+    /// Sign `message` the way the key's owner does: Ed25519 over the whole
+    /// message, P-256 as DER ECDSA over its SHA-256.
+    fn sign_with(key: &PKey<Private>, message: &[u8]) -> Vec<u8> {
+        let mut signer = if key.id() == openssl::pkey::Id::ED25519 {
+            Signer::new_without_digest(key).unwrap()
+        } else {
+            Signer::new(MessageDigest::sha256(), key).unwrap()
+        };
+        signer.sign_oneshot_to_vec(message).unwrap()
+    }
+
+    /// The digest the recovery transcript names for `key`, in its own algorithm.
+    fn key_fingerprint(key: &PKey<Private>) -> [u8; 32] {
+        let public = PKey::public_key_from_der(&key.public_key_to_der().unwrap()).unwrap();
+        IdentityKey::from_public_key(&public).unwrap().digest()
+    }
+
+    /// The fixture for an identity held by `identity_key`, Ed25519 or P-256.
+    async fn recovery_fixture_with(identity_key: PKey<Private>) -> RecoveryFixture {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
         let clock = Arc::new(ClockHealth::default());
         clock.start_monitor();
@@ -1035,15 +1062,25 @@ mod tests {
         ));
         source.unlock_from(&Unlocked(material.clone())).unwrap();
 
-        let identity_key = PKey::generate_ed25519().unwrap();
+        let ed25519 = identity_key.id() == openssl::pkey::Id::ED25519;
         let mut request = X509Req::builder().unwrap();
         request
             .set_subject_name(&X509NameBuilder::new().unwrap().build())
             .unwrap();
         request.set_pubkey(&identity_key).unwrap();
-        request.sign(&identity_key, MessageDigest::null()).unwrap();
+        let digest = if ed25519 {
+            MessageDigest::null()
+        } else {
+            MessageDigest::sha256()
+        };
+        request.sign(&identity_key, digest).unwrap();
         let csr_der = request.build().to_der().unwrap();
-        let csr = ValidatedCsr::parse(&csr_der).unwrap();
+        let algorithm = if ed25519 {
+            KeyAlgorithm::Ed25519
+        } else {
+            KeyAlgorithm::P256
+        };
+        let csr = ValidatedCsr::parse_as(&csr_der, algorithm).unwrap();
         let signed = CertificateAuthority::from_material(material.clone())
             .unwrap()
             .sign_host(host, &csr, now - 604_800)
@@ -1053,13 +1090,14 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2))")
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) VALUES(?1,?2,?3,?4,?5,?6,(SELECT execution_uid FROM remote_hosts WHERE id=?2),?7)")
             .bind(signed.record.fingerprint.as_slice())
             .bind(host.as_bytes().as_slice())
             .bind(signed.record.issuer_fingerprint.as_slice())
             .bind(signed.record.public_key.as_bytes())
             .bind(signed.record.not_before)
             .bind(signed.record.not_after)
+            .bind(algorithm.as_str())
             .execute(&pool)
             .await
             .unwrap();
@@ -1092,10 +1130,7 @@ mod tests {
     ) -> ChallengeInput {
         let request = request_id(fixture.host, &fixture.predecessor, &digest);
         let message = challenge_message(fixture.host, &fixture.predecessor, &request, &digest);
-        let signature = Signer::new_without_digest(key)
-            .unwrap()
-            .sign_oneshot_to_vec(&message)
-            .unwrap();
+        let signature = sign_with(key, &message);
         ChallengeInput {
             host: fixture.host,
             predecessor: fixture.predecessor,
@@ -1581,5 +1616,161 @@ mod tests {
             .await;
         assert!(matches!(response, RecoveryResponse::Denied));
         assert_eq!(source.0.load(Ordering::Relaxed), 0);
+    }
+
+    /// Run a full recovery (challenge, then proof) for the fixture's own key,
+    /// with `proof_signature` rewriting the proof's signature, and return the result.
+    async fn recover(
+        fixture: &RecoveryFixture,
+        proof_signature: fn(Vec<u8>) -> Vec<u8>,
+    ) -> Result<RecoveryResponse, Denied> {
+        let digest = csr_digest(&fixture.csr_der);
+        let input = challenge_input(fixture, digest);
+        let response = accepted_challenge(&fixture.service, input.clone()).await;
+        let (challenge, issuer_fingerprint, issuer_generation, not_after) =
+            challenge_receipt(&response);
+        let public_key_fingerprint = key_fingerprint(&fixture.identity_key);
+        let proof_transcript = transcript(RecoveryTranscript {
+            host_id: fixture.host,
+            predecessor_fingerprint: &fixture.predecessor,
+            request_id: &input.request,
+            csr_digest: &digest,
+            challenge: &challenge,
+            public_key_fingerprint: &public_key_fingerprint,
+            issuer_fingerprint: &issuer_fingerprint,
+            issuer_generation,
+            not_after,
+        });
+        let signature = proof_signature(sign_with(&fixture.identity_key, &proof_transcript));
+        fixture
+            .service
+            .prove_at(
+                ProofRequest {
+                    host: fixture.host,
+                    predecessor: fixture.predecessor,
+                    request: input.request,
+                    challenge,
+                    csr_der: fixture.csr_der.clone(),
+                    signature,
+                },
+                fixture.now,
+            )
+            .await
+    }
+
+    /// #580 P4: an expired P-256 device identity recovers with its own key,
+    /// proved by DER ECDSA signatures, and the new leaf keeps the key as `p256`.
+    #[tokio::test]
+    async fn an_expired_p256_identity_recovers_with_its_own_key() {
+        let fixture = recovery_fixture_with(p256_key()).await;
+        let Ok(RecoveryResponse::Certificate { certificate_der }) =
+            recover(&fixture, |signature| signature).await
+        else {
+            panic!("a P-256 identity did not recover");
+        };
+        let leaf = openssl::x509::X509::from_der(&certificate_der).unwrap();
+        assert!(leaf.public_key().unwrap().public_eq(&fixture.identity_key));
+        let fingerprint = leaf.digest(MessageDigest::sha256()).unwrap();
+        let stored: (String, Vec<u8>) = sqlx::query_as(
+            "SELECT key_algorithm, public_key FROM remote_certificates WHERE fingerprint=?",
+        )
+        .bind(fingerprint.as_ref())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.0, "p256");
+        assert_eq!(stored.1.len(), 65);
+    }
+
+    /// A P-256 identity's challenge and proof are refused in any other shape:
+    /// an Ed25519 signature, a raw `r || s` signature, or one over 72 bytes.
+    #[tokio::test]
+    async fn p256_recovery_refuses_foreign_and_noncanonical_signatures() {
+        let fixture = recovery_fixture_with(p256_key()).await;
+        let digest = csr_digest(&fixture.csr_der);
+        let stranger = PKey::generate_ed25519().unwrap();
+        assert!(
+            fixture
+                .service
+                .challenge_at(challenge_signed_by(&fixture, &stranger, digest))
+                .await
+                .is_err(),
+            "an Ed25519 signature authenticated a P-256 identity"
+        );
+        let mut raw = challenge_input(&fixture, digest);
+        let parsed = openssl::ecdsa::EcdsaSig::from_der(&raw.signature).unwrap();
+        raw.signature = [
+            parsed.r().to_vec_padded(32).unwrap(),
+            parsed.s().to_vec_padded(32).unwrap(),
+        ]
+        .concat();
+        assert!(fixture.service.challenge_at(raw).await.is_err());
+        let mut long = challenge_input(&fixture, digest);
+        long.signature.resize(73, 0);
+        assert!(fixture.service.challenge_at(long).await.is_err());
+        assert_eq!(pending_count(&fixture).await, 0);
+        let raw_proof = recover(&fixture, |signature| {
+            let parsed = openssl::ecdsa::EcdsaSig::from_der(&signature).unwrap();
+            [
+                parsed.r().to_vec_padded(32).unwrap(),
+                parsed.s().to_vec_padded(32).unwrap(),
+            ]
+            .concat()
+        })
+        .await;
+        assert!(raw_proof.is_err(), "a raw r||s proof signature recovered");
+    }
+
+    /// A proof can only continue the predecessor's own algorithm: a P-256 CSR
+    /// cannot recover an Ed25519 identity, even signed by a key the host holds.
+    #[tokio::test]
+    async fn a_p256_csr_cannot_recover_an_ed25519_identity() {
+        let mut fixture = recovery_fixture().await;
+        let device_key = p256_key();
+        let mut request = X509Req::builder().unwrap();
+        request
+            .set_subject_name(&X509NameBuilder::new().unwrap().build())
+            .unwrap();
+        request.set_pubkey(&device_key).unwrap();
+        request.sign(&device_key, MessageDigest::sha256()).unwrap();
+        fixture.csr_der = request.build().to_der().unwrap();
+        // The challenge is signed by the real Ed25519 predecessor; only the proof's key differs.
+        let digest = csr_digest(&fixture.csr_der);
+        let input = challenge_input(&fixture, digest);
+        let response = accepted_challenge(&fixture.service, input.clone()).await;
+        let (challenge, issuer_fingerprint, issuer_generation, not_after) =
+            challenge_receipt(&response);
+        let public_key_fingerprint = key_fingerprint(&device_key);
+        let proof_transcript = transcript(RecoveryTranscript {
+            host_id: fixture.host,
+            predecessor_fingerprint: &fixture.predecessor,
+            request_id: &input.request,
+            csr_digest: &digest,
+            challenge: &challenge,
+            public_key_fingerprint: &public_key_fingerprint,
+            issuer_fingerprint: &issuer_fingerprint,
+            issuer_generation,
+            not_after,
+        });
+        let response = fixture
+            .service
+            .prove_at(
+                ProofRequest {
+                    host: fixture.host,
+                    predecessor: fixture.predecessor,
+                    request: input.request,
+                    challenge,
+                    csr_der: fixture.csr_der.clone(),
+                    signature: sign_with(&device_key, &proof_transcript),
+                },
+                fixture.now,
+            )
+            .await;
+        assert!(response.is_err());
+        let issued: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+        assert_eq!(issued, 1, "no certificate was issued");
     }
 }

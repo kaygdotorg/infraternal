@@ -151,10 +151,19 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         if csr_der.len() > 4096 {
             return Err(RemoteEnrollmentError);
         }
+        // A renewal keeps the predecessor's key, so its CSR is parsed in that
+        // key's algorithm (#580); the atomic write then requires the same key.
+        let algorithm = self
+            .store
+            .certificate_key(predecessor)
+            .await
+            .map_err(|_| RemoteEnrollmentError)?
+            .algorithm();
         let source = self.source.clone();
         let csr_der = csr_der.to_vec();
         let certificate = tokio::task::spawn_blocking(move || {
-            let csr = ValidatedCsr::parse(&csr_der).map_err(|_| RemoteEnrollmentError)?;
+            let csr =
+                ValidatedCsr::parse_as(&csr_der, algorithm).map_err(|_| RemoteEnrollmentError)?;
             CertificateAuthority::from_source(source.as_ref())
                 .map_err(|_| RemoteEnrollmentError)?
                 .sign_host(identity.host, &csr, now)

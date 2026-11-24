@@ -248,6 +248,24 @@ impl EnrollmentStore {
             .await
     }
 
+    /// The public key, in its own algorithm, of the certificate with `fingerprint` (#580).
+    /// This read grants nothing; callers use it to parse a CSR that must keep the key.
+    /// # Errors
+    /// `Denied` for an unknown certificate or a stored key that is not canonical.
+    pub(crate) async fn certificate_key(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<IdentityKey, EnrollmentError> {
+        let stored: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT key_algorithm, public_key FROM remote_certificates WHERE fingerprint=?",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        let (algorithm, key) = stored.ok_or(EnrollmentError::Denied)?;
+        IdentityKey::from_stored(&algorithm, &key).ok_or(EnrollmentError::Denied)
+    }
+
     /// Return the invitation's bound key, falling back to a legacy certificate key.
     /// A missing value covers pending and pre-upgrade invitations, both of which must fail closed.
     pub(crate) async fn host_key_digest(
