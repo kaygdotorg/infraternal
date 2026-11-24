@@ -57,6 +57,8 @@ mod walks;
 #[cfg(feature = "mesh-dns")]
 use user_mode::configure_host_dns;
 use user_mode::{HelperApplied, configure_through_helper, user_mode_interface_mtu};
+#[cfg(feature = "mesh-dns")]
+use user_mode::TunnelDns;
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -276,11 +278,6 @@ struct MacUtun {
     tunnel_dns: TunnelDns,
 }
 
-/// What the receive path needs to answer queries to the mesh resolver address: the address
-/// and the current name snapshot, replaced as a whole on every accepted snapshot.
-#[cfg(feature = "mesh-dns")]
-type TunnelDns = Arc<std::sync::RwLock<Option<(std::net::Ipv6Addr, crate::dns::Records)>>>;
-
 impl MacUtun {
     /// Register one previously opened utun descriptor with this daemon's tokio runtime.
     /// # Errors
@@ -371,42 +368,9 @@ struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
     filter: Arc<PacketFilter>,
-    /// Shared with [`MacUtun`]; see [`MacUtunRx::answer_resolver_query`].
+    /// Shared with [`MacUtun`]; see [`user_mode::answer_resolver_query`].
     #[cfg(feature = "mesh-dns")]
     tunnel_dns: TunnelDns,
-}
-
-impl MacUtunRx {
-    /// Answer `packet` here when it is a query to the mesh resolver address (#146, J1027 F2).
-    ///
-    /// Returns whether the packet was consumed. The reply goes straight back into the utun, so
-    /// the query never reaches the packet filter or a peer. A reply that cannot be written at
-    /// once is dropped like any lost datagram; the system resolver asks again. Root mode, and
-    /// user mode before the first DNS snapshot, consume nothing.
-    #[cfg(feature = "mesh-dns")]
-    fn answer_resolver_query(&mut self, packet: &[u8]) -> bool {
-        if !crate::tunnel_dns::looks_like_resolver_query(packet) {
-            return false;
-        }
-        let guard = self
-            .tunnel_dns
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some((resolver, records)) = guard.as_ref() else {
-            return false;
-        };
-        let mtu = usize::from(self.mtu.get());
-        let Some(reply) = crate::tunnel_dns::answer(packet, *resolver, records, mtu) else {
-            // A packet to the resolver address is never for a peer; drop it either way.
-            return packet[24..40] == resolver.octets();
-        };
-        drop(guard);
-        let mut frame = Vec::with_capacity(reply.len() + 4);
-        frame.extend_from_slice(&UTUN_AF_INET6.to_be_bytes());
-        frame.extend_from_slice(&reply);
-        let _ = write(self.fd.get_ref(), &frame);
-        true
-    }
 }
 
 impl IpRecv for MacUtunRx {
@@ -428,7 +392,7 @@ impl IpRecv for MacUtunRx {
                     parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
                     #[cfg(feature = "mesh-dns")]
-                    if self.answer_resolver_query(packet.as_ref()) {
+                    if user_mode::answer_resolver_query(self, packet.as_ref()) {
                         continue;
                     }
                     if !self.filter.check(packet.buf_mut(), Direction::HostToMesh) {
@@ -3280,6 +3244,10 @@ mod tests {
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
     mod roamed_peer;
+    /// Startup and journal writes sweep crash-left rotation journal temporaries.
+    mod rotation_journal;
+    /// Root mode's utun MTU and up state through ioctls, checked on a real Mac (#221).
+    mod utun_ioctl;
     /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
     mod walks;
 
@@ -4220,54 +4188,6 @@ mod tests {
         );
     }
 
-    /// A fresh utun comes up at the requested MTU through ioctls alone, and a later MTU change
-    /// keeps it up (#221). `ifconfig` is used only to read the result back.
-    #[test]
-    #[ignore = "Run on the macOS VM with system service privileges."]
-    fn utun_ioctls_set_mtu_and_bring_the_interface_up() {
-        let open = super::OpenUtun::open().expect("open a utun (needs root)");
-        // A new utun is already up at MTU 1500 on current macOS, so take it down first: that is
-        // the state in which setting IFF_UP has to work.
-        let down = std::process::Command::new("/sbin/ifconfig")
-            .args([open.name.as_str(), "down"])
-            .status()
-            .expect("run ifconfig down");
-        assert!(down.success(), "ifconfig down failed");
-        let before = ifconfig_text(&open.name);
-        assert!(
-            !before.contains("<UP,"),
-            "the utun is down before: {before}"
-        );
-        assert!(
-            !before.contains("mtu 1280"),
-            "MTU is not 1280 before: {before}"
-        );
-        super::configure_owned_interface(&open.name, None, 1280).expect("mtu and up by ioctl");
-        let after = ifconfig_text(&open.name);
-        assert!(after.contains("mtu 1280"), "MTU 1280 expected: {after}");
-        assert!(after.contains("<UP,"), "interface up expected: {after}");
-        crate::macos_utun_ioctl::set_mtu(&open.name, 1400).expect("mtu change by ioctl");
-        let changed = ifconfig_text(&open.name);
-        assert!(changed.contains("mtu 1400"), "MTU 1400 expected: {changed}");
-        assert!(
-            changed.contains("<UP,"),
-            "still up after the change: {changed}"
-        );
-        assert!(
-            crate::macos_utun_ioctl::set_mtu("utun999999", 1280).is_err(),
-            "no such interface"
-        );
-    }
-
-    /// `ifconfig <name>` output, for reading a result back.
-    fn ifconfig_text(name: &str) -> String {
-        let output = std::process::Command::new("/sbin/ifconfig")
-            .arg(name)
-            .output()
-            .expect("run ifconfig");
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
@@ -4315,66 +4235,6 @@ mod tests {
         node.finish_rotation(operation, 1)
             .expect("retry finish rotation");
         node.down().expect("stop GotaTun");
-    }
-
-    /// Create the file shape left by a SIGKILL while the private journal was being replaced.
-    fn write_rotation_temporary(directory: &TestDirectory) -> PathBuf {
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
-
-        let path = directory.join("mesh-key-rotation.4242.1762500000000000000.49.new");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .expect("create journal temporary");
-        file.write_all(&[0x5a; 117])
-            .expect("write journal-shaped bytes");
-        path
-    }
-
-    /// Mac startup removes a journal temporary left by a stop before rename.
-    #[test]
-    fn macos_store_open_sweeps_rotation_journal_temporaries() {
-        let directory = test_directory();
-        drop(
-            crate::node_state::Store::open_for_macos(&directory.0).expect("open initial Mac store"),
-        );
-        let temporary = write_rotation_temporary(&directory);
-
-        drop(
-            crate::node_state::Store::open_for_macos(&directory.0)
-                .expect("reopen after interrupted journal write"),
-        );
-
-        assert!(
-            !temporary.exists(),
-            "Mac journal temporary survives restart"
-        );
-    }
-
-    /// Mac journal writes remove earlier crash-left temporaries before replacing the record.
-    #[test]
-    fn macos_save_rotation_secret_sweeps_old_journal_temporaries() {
-        let directory = test_directory();
-        let store = crate::node_state::Store::open_for_macos(&directory.0).expect("open Mac store");
-        let temporary = write_rotation_temporary(&directory);
-
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 1,
-                previous: [0x11; 32],
-                candidate: [0x22; 32],
-                commit_requested: false,
-                completed: false,
-            })
-            .expect("write prepared Mac journal");
-
-        assert!(
-            !temporary.exists(),
-            "Mac journal write leaves no older temporary"
-        );
     }
 
     /// Preparing the same Mac rotation twice returns its original journaled candidate.
