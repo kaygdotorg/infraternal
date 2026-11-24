@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Embedded in the macOS infraternal binary as its __TEXT,__info_plist section (build.rs, #576).
+     It gives the user-mode infraternal agent a stable identity for Local Network privacy, which
+     tracks a program by its code signature (TN3179): codesign takes the signing identifier from
+     CFBundleIdentifier. Measured on macOS 27.2.1 (J1157): the alert and the Privacy & Security
+     entry show the executable's file name ("infraternal") and Apple's generic text, not
+     CFBundleName or NSLocalNetworkUsageDescription. Keep CFBundleIdentifier equal to
+     macos_user_mode::BUNDLE_IDENTIFIER. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>org.infraternal.infraternal</string>
+	<key>CFBundleName</key>
+	<string>infraternal</string>
+	<key>CFBundleDisplayName</key>
+	<string>infraternal</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>infraternal connects directly to your other devices on this network.</string>
+</dict>
+</plist>

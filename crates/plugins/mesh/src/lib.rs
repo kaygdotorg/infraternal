@@ -128,6 +128,17 @@ pub mod dns;
 /// Routes mesh DNS suffixes through the host's per-link resolver configuration.
 mod dns_integration;
 
+/// Answers queries to the mesh resolver address from the tunnel's read path (#146, J1027 F2).
+/// Pure packet work, so its tests also run in the Linux gate.
+#[cfg(all(
+    feature = "mesh-dns",
+    any(
+        all(feature = "agent", target_os = "macos"),
+        all(test, feature = "agent")
+    )
+))]
+mod tunnel_dns;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_actions;
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
@@ -142,14 +153,36 @@ pub mod macos_key;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_node;
 
+/// Pure rules for macOS user mode: the helper's wire format, request checks, routing-table
+/// reading and launchd property lists (#146). Free of side effects, so its tests also run in
+/// the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+pub mod macos_user_mode;
+
+/// Raises and watches macOS Local Network access for the user-mode infraternal agent (#576).
+/// Interface selection is pure code, so its tests also run in the Linux gate.
+#[cfg(all(feature = "agent", any(target_os = "macos", test)))]
+pub mod macos_local_network;
+
+/// The on-demand root helper for macOS user mode and the agent's client for it (#146).
+#[cfg(all(feature = "agent", target_os = "macos"))]
+pub mod macos_helper;
+
 // Pure byte parsing, so its tests also run in the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 pub mod macos_image;
 
-/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind the crate's one scoped `allow(unsafe_code)`
-/// (#221). Request building is safe code, so its tests also run in the Linux gate.
+/// The two utun ioctls (`SIOCSIFMTU`, `IFF_UP`) behind one of the crate's two scoped
+/// `allow(unsafe_code)` modules (#221). Request building is safe code, so its tests also run in
+/// the Linux gate.
 #[cfg(any(all(feature = "agent", target_os = "macos"), test))]
 mod macos_utun_ioctl;
+
+/// Which utuns one person's infraternal agent holds, read by the root helper through `libproc`
+/// (#146, J1027 F1); the crate's other scoped `allow(unsafe_code)`. The reply parser is safe
+/// code, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+mod macos_utun_holder;
 
 #[cfg(feature = "server")]
 pub mod settings;

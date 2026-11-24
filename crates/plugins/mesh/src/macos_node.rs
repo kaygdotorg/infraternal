@@ -50,8 +50,15 @@ use tokio::{
 };
 use zeroize::Zeroizing;
 
+/// User-mode helper requests for the utun, its routes and the resolver (#146).
+mod user_mode;
 /// The worker loop, session-keeping peer updates and candidate walks (#515).
 mod walks;
+#[cfg(feature = "mesh-dns")]
+use user_mode::TunnelDns;
+#[cfg(feature = "mesh-dns")]
+use user_mode::configure_host_dns;
+use user_mode::{HelperApplied, configure_through_helper, user_mode_interface_mtu};
 
 const UTUN_AF_INET: u32 = 2;
 const UTUN_AF_INET6: u32 = 30;
@@ -187,16 +194,32 @@ pub struct Counters {
 
 type CounterMap = BTreeMap<crate::policy::model::PublicKey, Counters>;
 
-struct OpenUtun {
-    fd: OwnedFd,
-    name: String,
+/// One utun control socket and the interface name the kernel gave it.
+pub(crate) struct OpenUtun {
+    /// The non-blocking, close-on-exec utun control socket; closing it destroys the interface.
+    pub(crate) fd: OwnedFd,
+    /// The interface name, such as `utun7`.
+    pub(crate) name: String,
 }
 
 impl OpenUtun {
+    /// Get one fresh utun: from the kernel when root, from the helper in user mode (#146).
+    /// # Errors
+    /// Returns socket-control, interface lookup or helper failures.
+    fn open() -> io::Result<Self> {
+        if crate::macos_helper::user_mode() {
+            let (fd, name) = crate::macos_helper::open_utun()?;
+            return Ok(Self { fd, name });
+        }
+        Self::open_kernel()
+    }
+
     /// Ask the kernel for one fresh utun and read back the assigned interface unit.
+    ///
+    /// Needs root. The user-mode helper calls this on the agent's behalf.
     /// # Errors
     /// Returns socket-control or interface lookup failures.
-    fn open() -> io::Result<Self> {
+    pub(crate) fn open_kernel() -> io::Result<Self> {
         let fd = socket(
             AddressFamily::System,
             SockType::Datagram,
@@ -243,6 +266,16 @@ struct MacUtun {
     name: Arc<str>,
     mtu: watch::Sender<u16>,
     filter: Arc<PacketFilter>,
+    /// The last address and resolver requests the user-mode helper carried out for this utun.
+    ///
+    /// Every accepted snapshot reapplies the interface and resolver, but each helper request
+    /// costs a launchd start and several system tools, so an identical request is skipped
+    /// (#146). Root mode leaves this empty.
+    helper_applied: Arc<std::sync::Mutex<HelperApplied>>,
+    /// The mesh resolver address and the names to answer there from the tunnel (user mode,
+    /// #146, J1027 F2); empty until the first snapshot with DNS, and always empty in root mode.
+    #[cfg(feature = "mesh-dns")]
+    tunnel_dns: TunnelDns,
 }
 
 impl MacUtun {
@@ -260,6 +293,9 @@ impl MacUtun {
             name: Arc::from(open.name),
             mtu,
             filter,
+            helper_applied: Arc::default(),
+            #[cfg(feature = "mesh-dns")]
+            tunnel_dns: Arc::default(),
         })
     }
 
@@ -283,6 +319,8 @@ impl MacUtun {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
             filter: Arc::clone(&self.filter),
+            #[cfg(feature = "mesh-dns")]
+            tunnel_dns: Arc::clone(&self.tunnel_dns),
         }
     }
 
@@ -330,6 +368,9 @@ struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
     filter: Arc<PacketFilter>,
+    /// Shared with [`MacUtun`]; see [`user_mode::answer_resolver_query`].
+    #[cfg(feature = "mesh-dns")]
+    tunnel_dns: TunnelDns,
 }
 
 impl IpRecv for MacUtunRx {
@@ -350,6 +391,10 @@ impl IpRecv for MacUtunRx {
                     packet.truncate(length);
                     parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
+                    #[cfg(feature = "mesh-dns")]
+                    if user_mode::answer_resolver_query(self, packet.as_ref()) {
+                        continue;
+                    }
                     if !self.filter.check(packet.buf_mut(), Direction::HostToMesh) {
                         continue;
                     }
@@ -401,7 +446,8 @@ fn route(interface: &str, address: IpAddr, operation: &str, mtu: Option<u16>) ->
     }
 }
 
-fn valid_utun_name(name: &str) -> bool {
+/// Whether `name` is a utun interface name (`utun` and decimal digits).
+pub(crate) fn valid_utun_name(name: &str) -> bool {
     name.strip_prefix("utun")
         .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit()))
 }
@@ -422,8 +468,20 @@ fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
 /// Configure this owned utun at an IPv6-safe MTU and install its local addresses.
 ///
 /// Callers pass a staging MTU no smaller than either the old or new peer budget until route
-/// metrics have been updated. No other tunnel or resolver is changed.
-fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
+/// metrics have been updated. No other tunnel or resolver is changed. In user mode the helper
+/// does it, given the utun itself, and also routes the mesh prefixes there (#146).
+fn configure_interface(utun: &MacUtun, config: Option<&Config>, mtu: u16) -> io::Result<()> {
+    if crate::macos_helper::user_mode() {
+        return configure_through_helper(utun, config, mtu);
+    }
+    configure_owned_interface(utun.name(), config, mtu)
+}
+
+/// Root mode's half of [`configure_interface`]: set the MTU, bring the named utun up and add
+/// the mesh addresses, all from this (root) process.
+/// # Errors
+/// Reports a rejected kernel request or `ifconfig` run.
+fn configure_owned_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io::Result<()> {
     // Kernel ioctls, not an `ifconfig` process: the spawn cost about 3.5 ms per start (#221).
     crate::macos_utun_ioctl::set_mtu_and_up(interface, mtu)?;
     if let Some(config) = config {
@@ -447,11 +505,14 @@ fn configure_interface(interface: &str, config: Option<&Config>, mtu: u16) -> io
     Ok(())
 }
 
-/// Change the packet size on the already-owned utun interface.
+/// Change the packet size on the already-owned utun interface (through the helper in user mode).
 /// # Errors
-/// Reports a rejected kernel request (`SIOCSIFMTU`).
-fn set_interface_mtu(interface: &str, mtu: u16) -> io::Result<()> {
-    crate::macos_utun_ioctl::set_mtu(interface, mtu)
+/// Reports a rejected kernel request (`SIOCSIFMTU`) or helper request.
+fn set_interface_mtu(utun: &MacUtun, mtu: u16) -> io::Result<()> {
+    if crate::macos_helper::user_mode() {
+        return configure_through_helper(utun, None, mtu);
+    }
+    crate::macos_utun_ioctl::set_mtu(utun.name(), mtu)
 }
 
 fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<()> {
@@ -557,7 +618,13 @@ impl Default for SavedState {
 pub const ENFORCEMENT: &str = "userspace";
 
 /// Return every configured peer address for the utun; the packet filter applies its grants.
+///
+/// User mode adds no per-peer host routes: the helper routes the whole mesh prefix to the
+/// utun once (#146), so the set is empty and every per-peer route step is skipped.
 fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
+    if crate::macos_helper::user_mode() {
+        return BTreeSet::new();
+    }
     config
         .peers
         .values()
@@ -600,9 +667,14 @@ impl PathBudgets {
                     .map(|policy| probe.mesh_mtu(policy.peer.endpoint)),
             );
         }
+        let interface_mtu = if crate::macos_helper::user_mode() {
+            user_mode_interface_mtu(&peer_mtus)
+        } else {
+            crate::mesh_mtu::interface_mtu(&peer_mtus)
+        };
         Self {
             route_mtus,
-            interface_mtu: crate::mesh_mtu::interface_mtu(&peer_mtus),
+            interface_mtu,
         }
     }
 }
@@ -1247,7 +1319,7 @@ impl PendingWorker {
                 }
                 let device = runtime.block_on(async {
                     let mtu = interface_mtu;
-                    configure_interface(&info.interface, config.as_ref(), mtu)?;
+                    configure_interface(&utun, config.as_ref(), mtu)?;
                     utun.set_mtu(mtu);
                     #[cfg(feature = "mesh-dns")]
                     let mut dns_integration = crate::dns_integration::DnsIntegration::default();
@@ -1257,10 +1329,11 @@ impl PendingWorker {
                     if let Some(config) = config.as_ref() {
                         let records = crate::dns::Records::from_config(config)?;
                         let resolver = crate::dns::Resolver::bind(config)?;
-                        if let Err(error) = dns_integration.configure(
-                            &info.interface,
+                        if let Err(error) = configure_host_dns(
+                            &mut dns_integration,
+                            &utun,
                             &records,
-                            nix::unistd::Uid::effective().as_raw(),
+                            config.addresses.ipv6,
                         ) {
                             tracing::warn!(
                                 "mesh DNS host resolver integration could not be updated: {error}"
@@ -1686,8 +1759,9 @@ impl RuntimeState {
         // The watcher accepts both budgets throughout the host update. Outbound packets are
         // still bounded by the kernel's interface and route MTUs until each utility completes.
         utun.set_mtu(staging);
+        let host_utun = utun.clone();
         let budgets = tokio::task::spawn_blocking(move || {
-            set_interface_mtu(&interface, staging)?;
+            set_interface_mtu(&host_utun, staging)?;
             for address in changed {
                 let mtu = budgets
                     .route_mtus
@@ -1696,7 +1770,7 @@ impl RuntimeState {
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
                 route(&interface, address, "change", Some(mtu))?;
             }
-            set_interface_mtu(&interface, budgets.interface_mtu)?;
+            set_interface_mtu(&host_utun, budgets.interface_mtu)?;
             Ok::<_, io::Error>(budgets)
         })
         .await
@@ -1740,9 +1814,9 @@ impl RuntimeState {
         let old_route_mtus = self.route_mtus.clone();
         let old_mtu = self.interface_mtu;
         let staging_mtu = old_mtu.max(new_mtu).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
-        if let Err(error) = configure_interface(&interface, Some(&config), staging_mtu) {
+        if let Err(error) = configure_interface(utun, Some(&config), staging_mtu) {
             if rollback_on_failure {
-                rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
+                rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             }
             return Err(error);
         }
@@ -1753,8 +1827,7 @@ impl RuntimeState {
                 Ok(resolver) => Some(resolver),
                 Err(error) => {
                     if rollback_on_failure {
-                        rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun)
-                            .await;
+                        rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
                     }
                     return Err(error);
                 }
@@ -1771,7 +1844,7 @@ impl RuntimeState {
         };
         if let Err(error) = peers_applied {
             if rollback_on_failure {
-                rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
+                rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             }
             return Err(error);
         }
@@ -1801,7 +1874,7 @@ impl RuntimeState {
                 route(&interface, *address, "delete", None)?;
                 removed.insert(*address);
             }
-            set_interface_mtu(&interface, new_mtu)?;
+            set_interface_mtu(utun, new_mtu)?;
             utun.set_mtu(new_mtu);
             Ok(())
         })();
@@ -1826,7 +1899,7 @@ impl RuntimeState {
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
                 let _ = route(&interface, *address, "add", Some(mtu));
             }
-            rollback_device(device, &interface, old_config.as_ref(), old_mtu, utun).await;
+            rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);
         }
         self.routes.clone_from(&new_routes);
@@ -1839,10 +1912,11 @@ impl RuntimeState {
                 .as_ref()
                 .or(pending_dns_resolver.as_ref())
                 .ok_or(io::ErrorKind::NotConnected)?;
-            if let Err(error) = self.dns_integration.configure(
-                &interface,
+            if let Err(error) = configure_host_dns(
+                &mut self.dns_integration,
+                utun,
                 &dns_records,
-                nix::unistd::Uid::effective().as_raw(),
+                config.addresses.ipv6,
             ) {
                 tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
             }
@@ -1873,6 +1947,14 @@ impl RuntimeState {
     /// Removes the host resolver route and listener before the Mac mesh device stops.
     #[cfg(feature = "mesh-dns")]
     fn stop_dns(&mut self) -> io::Result<()> {
+        if crate::macos_helper::user_mode() {
+            self.dns_resolver = None;
+            return crate::macos_helper::request(
+                &crate::macos_user_mode::Request::ClearResolver,
+                None,
+            )
+            .map(|_| ());
+        }
         self.dns_integration.remove()?;
         self.dns_resolver = None;
         Ok(())
@@ -1943,20 +2025,14 @@ async fn replace_peers(device: &GotaDevice, peers: Vec<WireGuardPeer>) -> io::Re
 ///
 /// `mtu` is the MTU recorded for `config` when it was applied, so rollback starts no probes
 /// on the packet runtime.
-async fn rollback_device(
-    device: &GotaDevice,
-    interface: &str,
-    config: Option<&Config>,
-    mtu: u16,
-    utun: &MacUtun,
-) {
+async fn rollback_device(device: &GotaDevice, config: Option<&Config>, mtu: u16, utun: &MacUtun) {
     if let Some(config) = config {
-        let _ = configure_interface(interface, Some(config), mtu);
+        let _ = configure_interface(utun, Some(config), mtu);
         if let Ok(peers) = peers_for_config(config) {
             let _ = replace_peers(device, peers).await;
         }
     } else {
-        let _ = set_interface_mtu(interface, mtu);
+        let _ = set_interface_mtu(utun, mtu);
     }
     utun.set_mtu(mtu);
 }
@@ -3167,6 +3243,10 @@ mod tests {
     mod retirement;
     /// Real-Mac proof that a roamed peer's confirmed endpoint reaches the admission guard.
     mod roamed_peer;
+    /// Startup and journal writes sweep crash-left rotation journal temporaries.
+    mod rotation_journal;
+    /// Root mode's utun MTU and up state through ioctls, checked on a real Mac (#221).
+    mod utun_ioctl;
     /// Idle sessions across snapshots, re-addressed handshakes and candidate walks (#515).
     mod walks;
 
@@ -4107,54 +4187,6 @@ mod tests {
         );
     }
 
-    /// A fresh utun comes up at the requested MTU through ioctls alone, and a later MTU change
-    /// keeps it up (#221). `ifconfig` is used only to read the result back.
-    #[test]
-    #[ignore = "Run on the macOS VM with system service privileges."]
-    fn utun_ioctls_set_mtu_and_bring_the_interface_up() {
-        let open = super::OpenUtun::open().expect("open a utun (needs root)");
-        // A new utun is already up at MTU 1500 on current macOS, so take it down first: that is
-        // the state in which setting IFF_UP has to work.
-        let down = std::process::Command::new("/sbin/ifconfig")
-            .args([open.name.as_str(), "down"])
-            .status()
-            .expect("run ifconfig down");
-        assert!(down.success(), "ifconfig down failed");
-        let before = ifconfig_text(&open.name);
-        assert!(
-            !before.contains("<UP,"),
-            "the utun is down before: {before}"
-        );
-        assert!(
-            !before.contains("mtu 1280"),
-            "MTU is not 1280 before: {before}"
-        );
-        super::configure_interface(&open.name, None, 1280).expect("mtu and up by ioctl");
-        let after = ifconfig_text(&open.name);
-        assert!(after.contains("mtu 1280"), "MTU 1280 expected: {after}");
-        assert!(after.contains("<UP,"), "interface up expected: {after}");
-        super::set_interface_mtu(&open.name, 1400).expect("mtu change by ioctl");
-        let changed = ifconfig_text(&open.name);
-        assert!(changed.contains("mtu 1400"), "MTU 1400 expected: {changed}");
-        assert!(
-            changed.contains("<UP,"),
-            "still up after the change: {changed}"
-        );
-        assert!(
-            super::set_interface_mtu("utun999999", 1280).is_err(),
-            "no such interface"
-        );
-    }
-
-    /// `ifconfig <name>` output, for reading a result back.
-    fn ifconfig_text(name: &str) -> String {
-        let output = std::process::Command::new("/sbin/ifconfig")
-            .arg(name)
-            .output()
-            .expect("run ifconfig");
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
     /// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
     #[test]
     #[ignore = "Run on the macOS VM with system service privileges."]
@@ -4202,66 +4234,6 @@ mod tests {
         node.finish_rotation(operation, 1)
             .expect("retry finish rotation");
         node.down().expect("stop GotaTun");
-    }
-
-    /// Create the file shape left by a SIGKILL while the private journal was being replaced.
-    fn write_rotation_temporary(directory: &TestDirectory) -> PathBuf {
-        use std::{io::Write, os::unix::fs::OpenOptionsExt};
-
-        let path = directory.join("mesh-key-rotation.4242.1762500000000000000.49.new");
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .expect("create journal temporary");
-        file.write_all(&[0x5a; 117])
-            .expect("write journal-shaped bytes");
-        path
-    }
-
-    /// Mac startup removes a journal temporary left by a stop before rename.
-    #[test]
-    fn macos_store_open_sweeps_rotation_journal_temporaries() {
-        let directory = test_directory();
-        drop(
-            crate::node_state::Store::open_for_macos(&directory.0).expect("open initial Mac store"),
-        );
-        let temporary = write_rotation_temporary(&directory);
-
-        drop(
-            crate::node_state::Store::open_for_macos(&directory.0)
-                .expect("reopen after interrupted journal write"),
-        );
-
-        assert!(
-            !temporary.exists(),
-            "Mac journal temporary survives restart"
-        );
-    }
-
-    /// Mac journal writes remove earlier crash-left temporaries before replacing the record.
-    #[test]
-    fn macos_save_rotation_secret_sweeps_old_journal_temporaries() {
-        let directory = test_directory();
-        let store = crate::node_state::Store::open_for_macos(&directory.0).expect("open Mac store");
-        let temporary = write_rotation_temporary(&directory);
-
-        store
-            .save_rotation_secret(&crate::node_state::RotationSecret {
-                operation_id: "00000000-0000-4000-8000-000000000367".to_owned(),
-                sequence: 1,
-                previous: [0x11; 32],
-                candidate: [0x22; 32],
-                commit_requested: false,
-                completed: false,
-            })
-            .expect("write prepared Mac journal");
-
-        assert!(
-            !temporary.exists(),
-            "Mac journal write leaves no older temporary"
-        );
     }
 
     /// Preparing the same Mac rotation twice returns its original journaled candidate.

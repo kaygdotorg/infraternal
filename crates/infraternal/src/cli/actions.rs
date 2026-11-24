@@ -509,6 +509,13 @@ fn up_action() -> ActionDefinition {
             "Administrator input rules saved for a host policy that drops by default. A joined machine only opens mesh input, so these take effect only if a server policy is added; `up` records the current SSH port automatically.",
         ),
     ));
+    #[cfg(target_os = "macos")]
+    inputs.push((
+        "system".to_owned(),
+        JsonSchema::boolean(
+            "Install root mode: a system service that runs before anyone logs in. Without it a Mac joins in user mode, as the person running the command.",
+        ),
+    ));
     let action = ActionDefinition::new(
         ["up"],
         "Add this machine to a server.",
@@ -541,6 +548,11 @@ fn up_action() -> ActionDefinition {
     let action = action.with_example(
         "up https://infra.example.org --host-firewall-allow wt0,10.69.69.0/24,tcp,22",
         "Keep another SSH path after the host firewall is installed.",
+    );
+    #[cfg(target_os = "macos")]
+    let action = action.with_example(
+        "up https://infra.example.org --system",
+        "Add a Mac that has no logged-in user, as a root system service.",
     );
     #[cfg(not(machine_up))]
     let action = action.not_available_yet();

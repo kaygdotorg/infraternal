@@ -191,6 +191,17 @@ pub(crate) fn registry_at_with_mesh_state(
     {
         registry.register(Box::new(plugin))?;
     }
+    // A user-mode Mac (#146) is removed from the server the same way, by the person's own
+    // agent, which checks it runs its install's binary and that the receipt names this host
+    // (J1087). Before this the server's uninstall reached no plugin on such a Mac.
+    #[cfg(all(feature = "remote", feature = "mesh", target_os = "macos"))]
+    if mode == ExecutionMode::Remote
+        && !nix::unistd::Uid::effective().is_root()
+        && let Some(enrolment) = installation
+        && let Some(plugin) = macos_uninstall::Uninstall::for_user_mode(enrolment)
+    {
+        registry.register(Box::new(plugin))?;
+    }
     #[cfg(all(feature = "desktop", target_os = "macos"))]
     {
         let executable = std::env::current_exe().map_err(|_| PluginError::Rejected)?;
@@ -237,10 +248,13 @@ pub(crate) fn registry_at_with_mesh_state(
     let _ = installation;
     #[cfg(all(feature = "mesh", target_os = "linux"))]
     registry.register(Box::new(mesh_plugin))?;
-    // The Darwin mesh node owns a utun device and a system-keychain key, so it
-    // only runs in the root system service. A rootless agent (the one in a
-    // person's login session that shows app windows) still links to the
-    // server; it just leaves the mesh node out instead of failing to start.
+    // The Darwin mesh node owns a utun device. Root mode creates it itself. In
+    // user mode (#146, D203 C2 as amended 2026-11-20) the agent runs as the
+    // logged-in person and the root helper registered for that person's uid
+    // creates the utun, routes and resolver entry on request. Any other rootless
+    // agent (the one in a login session beside a root-mode daemon, which shows
+    // app windows) still links to the server; it just leaves the mesh node out
+    // instead of failing to start.
     #[cfg(all(feature = "mesh", target_os = "macos"))]
     if nix::unistd::Uid::effective().is_root() {
         registry.register(Box::new(darwin_mesh_plugin(
@@ -248,9 +262,31 @@ pub(crate) fn registry_at_with_mesh_state(
             installation,
         )?))?;
     } else {
-        eprintln!(
-            "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
-        );
+        match infraternal_plugin_mesh::macos_helper::registration_for_current_user() {
+            Ok(true) => {
+                infraternal_plugin_mesh::macos_helper::enter_user_mode();
+                eprintln!("Infraternal Mesh node running in user mode through the mesh helper");
+                // A launchd agent needs the person's Local Network permission to reach LAN
+                // peers; root mode is exempt (#576). Ask now, while `up` is in front of them.
+                if let Some(folder) = mesh_state.or(state) {
+                    infraternal_plugin_mesh::macos_local_network::watch(folder);
+                }
+                registry.register(Box::new(darwin_mesh_plugin(
+                    mesh_state.or(state),
+                    installation,
+                )?))?;
+            }
+            // A helper is installed but its registration cannot be checked: say so, instead
+            // of the root-mode sentence, so the person knows which repair to run (J1087).
+            Err(error) => eprintln!(
+                "Infraternal Mesh node skipped: the mesh helper registration could not be read ({error}). Run sudo {} {} and then infraternal up again.",
+                infraternal_plugin_mesh::macos_user_mode::HELPER_BINARY,
+                infraternal_plugin_mesh::macos_helper::REMOVE_ENTRY
+            ),
+            Ok(false) => eprintln!(
+                "Infraternal Mesh node skipped: this infraternal agent is not running as root, and the mesh node needs the system service"
+            ),
+        }
     }
     #[cfg(not(all(feature = "mesh", any(target_os = "linux", target_os = "macos"))))]
     let _ = state;

@@ -146,6 +146,30 @@ impl Records {
     pub(crate) fn suffixes(&self) -> &[String] {
         &self.suffixes
     }
+
+    /// A snapshot for tests: this node at `local_address` under the default suffix, plus
+    /// `names` as IPv4-only hosts.
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(crate) fn for_tests(local_address: Ipv4Addr, names: &[(&str, Ipv4Addr)]) -> Self {
+        let mut records = Self {
+            local_address,
+            suffixes: vec![crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned()],
+            names: BTreeMap::new(),
+        };
+        for (label, ipv4) in names {
+            records
+                .insert(
+                    label,
+                    Addresses {
+                        ipv4: *ipv4,
+                        ipv6: None,
+                    },
+                )
+                .expect("valid test name");
+        }
+        records
+    }
 }
 
 /// The error for a configuration with an unusable or duplicate name.
@@ -389,8 +413,12 @@ pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
     response_for_records(packet, &records)
 }
 
-/// Like [`response`], but with names that are already built.
-fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<Vec<u8>>> {
+/// Like [`response`], but with names that are already built. The query counts as the node's
+/// own, as [`crate::tunnel_dns`] needs for queries the host wrote into its tunnel.
+pub(crate) fn response_for_records(
+    packet: &[u8],
+    records: &Records,
+) -> io::Result<Option<Vec<u8>>> {
     response_for_source(packet, records, IpAddr::V4(records.local_address))
 }
 
@@ -879,5 +907,52 @@ impl Drop for Resolver {
         if let Some(worker) = self.tcp_worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Source rules for answers, checked without sockets.
+#[cfg(test)]
+mod source_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// One plain `A` query for `web.internal`, built by hand.
+    fn query() -> Vec<u8> {
+        let mut packet = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in ["web", "internal"] {
+            packet.push(u8::try_from(label.len()).unwrap());
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+        packet
+    }
+
+    /// The node's own address gets the answer; a peer asking directly, or a loopback source,
+    /// sees the name as absent (#146: user mode answers from the tunnel, never on loopback).
+    #[test]
+    fn only_the_node_itself_is_answered() {
+        let own = Ipv4Addr::new(10, 254, 0, 7);
+        let mut names = BTreeMap::new();
+        names.insert(
+            "web".to_owned(),
+            Addresses {
+                ipv4: Ipv4Addr::new(10, 254, 0, 9),
+                ipv6: Some("fd00::9".parse().unwrap()),
+            },
+        );
+        let records = Records {
+            local_address: own,
+            suffixes: vec!["internal".to_owned()],
+            names,
+        };
+        let answers = |source: IpAddr| {
+            let reply = response_for_source(&query(), &records, source)
+                .unwrap()
+                .unwrap();
+            Message::from_vec(&reply).unwrap().answers.len()
+        };
+        assert_eq!(answers(IpAddr::V4(own)), 1);
+        assert_eq!(answers(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0);
+        assert_eq!(answers(IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9))), 0);
     }
 }

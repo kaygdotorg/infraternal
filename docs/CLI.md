@@ -190,6 +190,34 @@ and never moves the folder. On macOS, `server init` does not install a
 launchd service yet, so there is no macOS server install to move; the move
 itself works there the same way.
 
+## Adding a Mac: user mode and root mode (#146, D203 C2 as amended 2026-11-20)
+
+`infraternal up https://infra.example.org` on a Mac joins in **user mode** by
+default. Run it as the person who uses the Mac, without `sudo`:
+
+- It asks for your administrator password once, before the approval code, to
+  install a small mesh helper (`org.infraternal.mesh-helper`). The helper runs
+  only when the infraternal agent asks it for something, then exits. It creates
+  the mesh network interface, routes the mesh's addresses to it (it refuses if a
+  network the Mac already uses overlaps them), and points `/etc/resolver` at the
+  agent for `internal` names. Nothing asks for the password again, after a
+  reboot or a new login either.
+- The infraternal agent runs as you, from
+  `~/Library/LaunchAgents/org.infraternal.agent.plist`, with its files in
+  `~/Library/Application Support/infraternal` and its log in
+  `~/Library/Logs/infraternal/agent.log` (D395). `up` prints the `PATH` line
+  to add.
+- Only one account per Mac can use user mode, and not beside root mode.
+- To remove it, run
+  `~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>`
+  as the same person. It stops the agent, which drops the mesh interface and
+  its routes, removes the helper's resolver file and the helper itself, and
+  deletes the files above. It needs no password.
+
+`infraternal up --system https://infra.example.org` keeps **root mode**: a
+LaunchDaemon that runs before anyone logs in, for a Mac without a regular
+user.
+
 ## Generated skills
 
 `infraternal skill` lists the public, working actions registered in this build.

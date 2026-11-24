@@ -232,8 +232,20 @@ fn run_invocation() -> ExitCode {
     if let Some(result) = remote::uninstall_if_requested() {
         return result;
     }
+    // A person removing their own macOS user-mode install (#146); root mode is handled below.
+    #[cfg(all(machine_up, target_os = "macos"))]
+    if let Some(result) = up::macos_user::uninstall_if_requested() {
+        return result;
+    }
+    // Root mode's removal.
     #[cfg(all(machine_up, target_os = "macos"))]
     if let Some(result) = infraternal_plugin_mesh::macos_service::remove_if_requested() {
+        return result;
+    }
+    // The user-mode mesh helper's root entries (#146): one launchd connection, or its
+    // install and removal through sudo. Each refuses to run without root.
+    #[cfg(all(machine_up, target_os = "macos"))]
+    if let Some(result) = infraternal_plugin_mesh::macos_helper::run_if_requested() {
         return result;
     }
     // The root agent retiring the rootless install it replaced (D376, #399).
@@ -733,6 +745,11 @@ fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
         any(feature = "plugin-server", feature = "plugin-mesh")
     )))]
     let host_firewall_allow = Vec::new();
+    // User mode is the Mac default (#146, owner 2026-11-20); --system keeps root mode.
+    #[cfg(target_os = "macos")]
+    if !matches.get_flag("system") {
+        return up::macos_user::run(server, json_output);
+    }
     up::run(server, &host_firewall_allow, json_output)
 }
 

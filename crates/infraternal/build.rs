@@ -7,6 +7,7 @@ mod relocations;
 /// binary and, on Linux builds that include the stdin import adapter, the handoff note.
 fn main() {
     handoff_note();
+    macos_info_plist();
     machine_up_cfg();
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=relocations.rs");
@@ -30,6 +31,26 @@ fn handoff_note() {
             "-Wl,-T,"
         };
         println!("cargo:rustc-link-arg={flag}{directory}/handoff-note.ld");
+    }
+}
+
+/// Embeds `macos/Info.plist` in the macOS binary as its `__TEXT,__info_plist` section (#576).
+///
+/// A plain executable has no bundle, so this section is where macOS finds its bundle identifier
+/// and `NSLocalNetworkUsageDescription` (Apple's TN3179). The user-mode infraternal agent is a
+/// launchd agent and needs the person's Local Network permission, which macOS tracks by code
+/// signature; `codesign` takes the signing identifier from this bundle identifier, so the
+/// identity stays the same across builds. macOS 27.2.1 still names the alert and the System
+/// Settings entry after the executable file (measured on the M1, J1157). Only macOS targets
+/// are changed.
+fn macos_info_plist() {
+    println!("cargo:rerun-if-changed=macos/Info.plist");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && let Ok(directory) = std::env::var("CARGO_MANIFEST_DIR")
+    {
+        println!(
+            "cargo:rustc-link-arg-bins=-Wl,-sectcreate,__TEXT,__info_plist,{directory}/macos/Info.plist"
+        );
     }
 }
 
