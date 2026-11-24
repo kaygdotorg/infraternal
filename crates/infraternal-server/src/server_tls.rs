@@ -1,15 +1,14 @@
 //! Configures standalone HTTPS socket admission for interactive terminal traffic [41][130], #78.
 
-use axum_server::{
-    accept::NoDelayAcceptor,
-    tls_openssl::{OpenSSLAcceptor, OpenSSLConfig},
-};
+use crate::send_queue::SocketAdmission;
+use axum_server::tls_openssl::{OpenSSLAcceptor, OpenSSLConfig};
 
 /// Keep the standalone listener and memory-only integration fixtures on the same acceptor.
-pub(crate) fn acceptor(config: OpenSSLConfig) -> OpenSSLAcceptor<NoDelayAcceptor> {
+pub(crate) fn acceptor(config: OpenSSLConfig) -> OpenSSLAcceptor<SocketAdmission> {
     // Ack and Output are separate small writes. Nagle would couple a glyph
-    // to the browser TCP delayed-Ack timer even on a local connection.
-    OpenSSLAcceptor::new(config).acceptor(NoDelayAcceptor::new())
+    // to the browser TCP delayed-Ack timer even on a local connection. The
+    // unsent-data bound keeps video and floods out of the kernel's buffer.
+    OpenSSLAcceptor::new(config).acceptor(SocketAdmission)
 }
 
 #[cfg(test)]
