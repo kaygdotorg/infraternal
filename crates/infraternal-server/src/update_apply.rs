@@ -380,18 +380,36 @@ pub fn startup(data: &Path) -> Result<(), &'static str> {
     if update::availability(crate::release_latest::release_build()).is_err() {
         return Ok(());
     }
-    // Capture the highest allocated wire writer ID before a D295 restore overwrites the
-    // database: live shims keep the rolled-back release's writer cursors, so fresh
-    // attachments after a roll back must never reuse those writer IDs (#211).
-    let database = data.join(apply::DATABASE);
-    let writer_floor = std::fs::symlink_metadata(data.join("updates").join(apply::PENDING))
-        .ok()
-        .and_then(|_| crate::update_writer_clock::read_high_water(&database));
-    let resumed = apply::resume(data, infraternal_plugin_api::VERSION, || {
-        std::fs::File::open("/proc/self/exe")
-            .map_err(|_| "the running image could not be read")
-            .and_then(|file| apply::digest(&file))
-    });
+    // Live shims keep the rolled-back release's writer cursors, so fresh attachments after
+    // a roll back must never reuse writer IDs the rolled-back release allocated (#211).
+    // The floor is read from the live database and written into the restored copy inside
+    // the restore itself, before the copy is renamed over it (J1180 F5): only an undo that
+    // restores opens the database, and a crash cannot lose the floor between the two steps.
+    let resumed = apply::resume_with(
+        data,
+        infraternal_plugin_api::VERSION,
+        || {
+            std::fs::File::open("/proc/self/exe")
+                .map_err(|_| "the running image could not be read")
+                .and_then(|file| apply::digest(&file))
+        },
+        |live, restored| {
+            let Some(floor) = crate::update_writer_clock::read_high_water(live) else {
+                return;
+            };
+            match crate::update_writer_clock::advance_to_at_least(restored, floor) {
+                Ok(()) => tracing::info!(
+                    writer_floor = floor,
+                    "update_rollback_writer_clock_preserved"
+                ),
+                Err(reason) => tracing::warn!(
+                    reason,
+                    writer_floor = floor,
+                    "update_rollback_writer_clock_failed"
+                ),
+            }
+        },
+    );
     match resumed {
         Ok(Resume::Idle) => {}
         Ok(Resume::Trial(pending)) => {
@@ -406,21 +424,6 @@ pub fn startup(data: &Path) -> Result<(), &'static str> {
             TRIAL_OPEN.send_replace(true);
         }
         Ok(Resume::Finished(outcome)) => {
-            if outcome == update::UNDONE
-                && let Some(floor) = writer_floor
-            {
-                match crate::update_writer_clock::advance_to_at_least(&database, floor) {
-                    Ok(()) => tracing::info!(
-                        writer_floor = floor,
-                        "update_rollback_writer_clock_preserved"
-                    ),
-                    Err(reason) => tracing::warn!(
-                        reason,
-                        writer_floor = floor,
-                        "update_rollback_writer_clock_failed"
-                    ),
-                }
-            }
             tracing::warn!(outcome, "update_switch_finished");
         }
         Err(apply::TRIAL_NOT_RECORDED) => {
