@@ -1623,6 +1623,23 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
             }
             eprintln!("warning: {problem}; a real install refuses this binary");
         }
+        // The same for the web folder the unit will serve: whoever can change
+        // it can serve their own script to a signed-in administrator (#146,
+        // J1151). Checked here, before any data move rewrites the path, so
+        // it judges the folder as it is now.
+        if let Some(web) = &args.web_root
+            && let Err(problem) = install::check_root_web_folder(web, 0)
+        {
+            if !dry_run {
+                return report_failure(
+                    "server init",
+                    "The web folder is not safe for a service that root runs.",
+                    problem,
+                    json_output,
+                );
+            }
+            eprintln!("warning: {problem}; a real install refuses this web folder");
+        }
     }
     // An existing unit's non-standard folder moves to the D395 one (owner,
     // 2026-11-15: "change for existing installs too"); `--data` keeps any folder.
