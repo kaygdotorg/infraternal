@@ -7,7 +7,7 @@
 Usage: summarize.py OUTDIR
 
 Per cell (congestion control x flow count) and per arm it prints the median over
-holds of throughput, loaded ping latency, CPU per Gbit, memory and idle wakeups,
+holds of throughput, loaded TCP round-trip latency, CPU per Gbit, memory and idle wakeups,
 and the paired difference to the first arm (each hold compared with itself, then
 the median of those). A difference that is no larger than the A/A noise floor
 of the same cell is marked "=": the harness cannot tell it from no difference.
@@ -16,22 +16,12 @@ Standard library only.
 
 import csv
 import json
-import re
 import statistics as st
 import sys
 from collections import defaultdict
 from pathlib import Path
 
 METRICS = ("gbit", "p50", "p99", "lost", "cpu", "rss", "wake")
-
-
-def percentile(xs, p):
-    """Linear-interpolated percentile of a non-empty list, p in 0..100."""
-    xs = sorted(xs)
-    k = (len(xs) - 1) * p / 100
-    lo = int(k)
-    hi = min(lo + 1, len(xs) - 1)
-    return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
 def read_run(raw, row):
@@ -44,15 +34,15 @@ def read_run(raw, row):
         print(f"skipping {row['id']}: no iperf3 result", file=sys.stderr)
         return None
     gbit, bits = end["bits_per_second"] / 1e9, end["bytes"] * 8 / 1e9
-    ping = (raw / f"{row['id']}.ping").read_text()
-    rtts = [float(x) for x in re.findall(r"time=([\d.]+) ms", ping)]
-    sent = re.search(r"(\d+) packets transmitted", ping)
-    sent = int(sent.group(1)) if sent else len(rtts)
+    try:
+        rr = json.loads((raw / f"{row['id']}.rr.json").read_text())
+    except (OSError, ValueError):
+        rr = None  # the probe wrote nothing: latency columns say n/a
     m = {
         "gbit": gbit,
-        "p50": percentile(rtts, 50) if rtts else None,
-        "p99": percentile(rtts, 99) if rtts else None,
-        "lost": 100 * (sent - len(rtts)) / sent if sent else None,
+        "p50": rr["p50_ms"] if rr else None,
+        "p99": rr["p99_ms"] if rr else None,
+        "lost": 100 * rr["lost"] / rr["sent"] if rr and rr["sent"] else None,
         "cpu": None,
         "rss": None,
         "wake": None,
