@@ -418,7 +418,11 @@ fn resolver(
     let interface = utun_name(utun)?;
     let own = nix::ifaddrs::getifaddrs()?
         .filter(|entry| entry.interface_name == interface)
-        .filter_map(|entry| entry.address.and_then(|a| a.as_sockaddr_in6().map(|v6| v6.ip())))
+        .filter_map(|entry| {
+            entry
+                .address
+                .and_then(|a| a.as_sockaddr_in6().map(nix::sys::socket::SockaddrIn6::ip))
+        })
         .find(|address| address.octets()[0] == 0xfd)
         .ok_or_else(|| {
             io::Error::new(
@@ -945,7 +949,7 @@ mod mac_proofs {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// The test deployment: a node at 10.254.77.7 / fd12:3456:789a::7 with peer `web` at .9.
+    /// The test deployment: a node at `10.254.77.7` / `fd12:3456:789a::7`, peer `web` at `.9`.
     const OWN_V4: Ipv4Addr = Ipv4Addr::new(10, 254, 77, 7);
     /// The node's IPv6 address in the test `/48`.
     fn own_v6() -> Ipv6Addr {
