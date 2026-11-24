@@ -66,6 +66,9 @@ mod install_move;
 /// OS-standard default folders for `server init` [D395].
 #[cfg(feature = "plugin-server")]
 mod install_paths;
+/// `SELinux` file-context labeling so systemd can start `<data>/updates/current/infraternal` (#211).
+#[cfg(all(feature = "plugin-server", target_os = "linux"))]
+mod selinux;
 
 use std::{
     io::{self, IsTerminal, Write},
