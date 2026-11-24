@@ -1,0 +1,11 @@
+{"binding":"cabi","op":"noop","median_ns":0.6,"min_ns":0.5}
+{"binding":"cabi","op":"add","median_ns":5.0,"min_ns":4.9}
+{"binding":"cabi","op":"frame_in_64","median_ns":3.1,"min_ns":3.1}
+{"binding":"cabi","op":"frame_out_64","median_ns":4.4,"min_ns":4.3}
+{"binding":"cabi","op":"frame_in_4096","median_ns":3.1,"min_ns":3.1}
+{"binding":"cabi","op":"frame_out_4096","median_ns":32.5,"min_ns":32.0}
+{"binding":"cabi","op":"frame_in_65536","median_ns":3.1,"min_ns":3.0}
+{"binding":"cabi","op":"frame_out_65536","median_ns":647.2,"min_ns":643.7}
+{"binding":"cabi","op":"parse_ok","median_ns":9.1,"min_ns":8.1}
+{"binding":"cabi","op":"parse_err","median_ns":25.1,"min_ns":24.9}
+{"binding":"cabi","op":"async_spawned_echo","median_us":23.09,"min_us":22.16}

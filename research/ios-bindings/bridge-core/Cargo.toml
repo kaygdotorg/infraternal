@@ -1,0 +1,18 @@
+[package]
+name = "bridge-core"
+description = "Benchmark surface exported to Swift through swift-bridge (J1158)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[lib]
+crate-type = ["staticlib", "lib"]
+
+[build-dependencies]
+swift-bridge-build = "0.1.59"
+
+[dependencies]
+swift-bridge = { version = "0.1.59", features = ["async"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }

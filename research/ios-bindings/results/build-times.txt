@@ -1,0 +1,3 @@
+darwin build: 50 s
+aarch64-apple-ios build: 9 s
+aarch64-apple-ios-sim build: 8 s

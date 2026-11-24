@@ -1,0 +1,11 @@
+{"binding":"swift-bridge","op":"noop","median_ns":0.7,"min_ns":0.7}
+{"binding":"swift-bridge","op":"add","median_ns":7.7,"min_ns":7.1}
+{"binding":"swift-bridge","op":"frame_in_64","median_ns":4.5,"min_ns":4.4}
+{"binding":"swift-bridge","op":"frame_out_64","median_ns":62.3,"min_ns":61.2}
+{"binding":"swift-bridge","op":"frame_in_4096","median_ns":5.4,"min_ns":4.5}
+{"binding":"swift-bridge","op":"frame_out_4096","median_ns":107.1,"min_ns":87.3}
+{"binding":"swift-bridge","op":"frame_in_65536","median_ns":4.0,"min_ns":3.8}
+{"binding":"swift-bridge","op":"frame_out_65536","median_ns":3917.0,"min_ns":3855.9}
+{"binding":"swift-bridge","op":"parse_ok","median_ns":94.1,"min_ns":92.2}
+{"binding":"swift-bridge","op":"parse_err","median_ns":189.4,"min_ns":183.4}
+{"binding":"swift-bridge","op":"async_spawned_echo","median_us":38.12,"min_us":33.02}
