@@ -84,7 +84,9 @@ pub(crate) enum FolderError {
 ///
 /// Every folder above it, along the path as given and along its canonical
 /// form, follows [`trusted_program`]'s folder rule, so nobody else can swap
-/// the folder. Inside it, every folder follows that rule too, and every
+/// the folder. The folder itself and every folder inside it may not be
+/// group- or world-writable at all (a sticky bit does not excuse them: any
+/// account could add a file that gets served), and every
 /// file is owned by root (or `owner`) and not writable by group or others,
 /// so nobody else can change what is served. A link inside the tree is
 /// refused, whatever it points to: the server would follow it to a file
@@ -98,9 +100,15 @@ pub(crate) fn trusted_folder(folder: &Path, owner: u32) -> Result<PathBuf, Folde
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(FolderError::Missing),
         Err(_) => return Err(FolderError::Untrusted(folder.to_owned())),
     };
+    // The folder itself is served from, so it is held to the strict rule;
+    // only the folders strictly above it may be sticky (such as `/tmp`).
+    if !strict_directory(&canonical, owner) {
+        return Err(FolderError::Untrusted(canonical));
+    }
     if let Some(above) = folder
         .ancestors()
-        .chain(canonical.ancestors())
+        .skip(1)
+        .chain(canonical.ancestors().skip(1))
         .find(|directory| !protected_directory(directory, owner))
     {
         return Err(FolderError::Untrusted(above.to_owned()));
@@ -117,7 +125,7 @@ pub(crate) fn trusted_folder(folder: &Path, owner: u32) -> Result<PathBuf, Folde
                 fs::symlink_metadata(&path).map_err(|_| FolderError::Untrusted(path.clone()))?;
             let file_type = metadata.file_type();
             if file_type.is_dir() {
-                if !protected_directory(&path, owner) {
+                if !strict_directory(&path, owner) {
                     return Err(FolderError::Untrusted(path));
                 }
                 pending.push(path);
@@ -140,6 +148,19 @@ fn regular_executable_of(path: &Path, owner: u32) -> bool {
             && (metadata.uid() == 0 || metadata.uid() == owner)
             && mode & 0o022 == 0
             && mode & 0o111 != 0
+    })
+}
+
+/// A directory only root (or `owner`) can add to or rename in, with no
+/// sticky exception: for the served folder and everything under it, where
+/// even a sticky, group- or world-writable folder lets any account add a file
+/// that gets served.
+#[cfg(feature = "plugin-server")]
+fn strict_directory(directory: &Path, owner: u32) -> bool {
+    fs::metadata(directory).is_ok_and(|metadata| {
+        metadata.is_dir()
+            && (metadata.uid() == 0 || metadata.uid() == owner)
+            && metadata.permissions().mode() & 0o022 == 0
     })
 }
 
@@ -376,6 +397,40 @@ mod tests {
         if me() != 0 {
             assert!(trusted_folder(&web, me().wrapping_add(1)).is_err());
         }
+    }
+
+    #[cfg(feature = "plugin-server")]
+    /// A sticky bit excuses only the folders above the served folder: the
+    /// folder itself and any folder inside it that group or others can add to
+    /// is refused even when sticky (J1180, F2), because anyone could add a
+    /// file there that gets served.
+    #[test]
+    fn a_sticky_writable_served_folder_or_subfolder_is_refused() {
+        for (relative, mode) in [
+            ("", 0o1777),
+            ("", 0o1775),
+            ("assets", 0o1777),
+            ("assets", 0o1775),
+        ] {
+            let temporary = TemporaryDirectory::new();
+            let web = folder_in(&temporary);
+            let changed = if relative.is_empty() {
+                web.clone()
+            } else {
+                web.join(relative)
+            };
+            fs::set_permissions(&changed, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                trusted_folder(&web, me()),
+                Err(FolderError::Untrusted(changed)),
+                "{relative:?} at {mode:o}"
+            );
+        }
+        // A sticky folder above it is still fine.
+        let temporary = TemporaryDirectory::new();
+        let web = folder_in(&temporary);
+        fs::set_permissions(&temporary.0, fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(trusted_folder(&web, me()).is_ok());
     }
 
     #[cfg(feature = "plugin-server")]
