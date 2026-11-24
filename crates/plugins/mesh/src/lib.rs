@@ -168,6 +168,11 @@ pub mod macos_user_mode;
 #[cfg(all(feature = "agent", any(target_os = "macos", test)))]
 pub mod macos_local_network;
 
+/// Which subnet routes a Mac client puts on its mesh utun, and why it leaves one out (D197 M3,
+/// #580). Pure rules shared by root and user mode, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+pub mod macos_subnet_routes;
+
 /// The on-demand root helper for macOS user mode and the agent's client for it (#146).
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub mod macos_helper;

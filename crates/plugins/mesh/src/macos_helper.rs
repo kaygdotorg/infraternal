@@ -15,7 +15,8 @@
 //! **What it can do, as root:** create one utun and hand its descriptor to the caller; set a
 //! utun's mesh addresses and MTU; add one IPv4 route (a private prefix that holds the node's
 //! address) and one IPv6 `/48` (unique-local) to that utun; write and remove marked
-//! `/etc/resolver` files for reserved private-use suffixes; remove its own registration. It
+//! `/etc/resolver` files for reserved private-use suffixes; route up to 64 private IPv4 networks
+//! (approved subnet routes, D197 M3) to that utun; remove its own registration. It
 //! runs no shell, resolves no program through `PATH` (only fixed system tools, with an empty
 //! environment), reads no file the caller names, and keeps no state between requests.
 //!
@@ -27,7 +28,7 @@
 //! already read the agent's mesh key and identity in that person's home. A code-signature
 //! check of the caller can be added once the desktop helper's signing check exists (J992).
 //!
-//! **How input is checked:** one frame of at most 4 KiB of JSON, unknown fields refused, a
+//! **How input is checked:** one frame of at most 16 KiB of JSON, unknown fields refused, a
 //! fixed protocol version, a 5 s read and write timeout, and every value checked by
 //! [`crate::macos_user_mode::validate`] before anything runs. Requests that change a utun
 //! must carry that utun's descriptor, and the helper reads the interface name from it, so a
@@ -47,6 +48,17 @@
 //! agent's place, before, during or after the agent runs. While no agent runs, the files stay
 //! but the route is gone: the system then sends those queries to its default IPv6 route, if it
 //! has one, where a unique-local address goes unanswered.
+//!
+//! **Subnet routes (#580):** a `networks` request routes approved networks behind router peers
+//! into the caller's utun. The helper cannot check the server's approval itself (the server signs
+//! nothing a root process could verify), so it holds the same line as for the mesh route: only
+//! on the caller's own utun, and only while that utun already holds its mesh address and mesh
+//! route; only private IPv4 networks (RFC 1918 and shared CGNAT), never the mesh's own range;
+//! never a network that overlaps any route or interface network elsewhere on the Mac
+//! ([`crate::macos_subnet_routes::plan_networks`]), so no other account loses a network it uses;
+//! and it removes only routes on the caller's utun. A person's process could already route any
+//! unused private range to a utun of its own through `open` and `address`; this request adds no
+//! reach beyond that. The agent's packet filter still decides which flows may start.
 //!
 //! **What it cannot do:** it cannot reach another person's utun, choose a public route, or
 //! replace a resolver file it did not write (the existing marker check). It never writes to
@@ -346,6 +358,7 @@ fn handle(
             Ok((ok, None))
         }
         Request::Resolver { suffixes } => resolver(utun, suffixes),
+        Request::Networks { networks } => route_networks(utun, networks, uid),
         Request::ClearResolver => {
             clear_resolver()?;
             Ok((ok, None))
@@ -471,6 +484,117 @@ fn resolver(
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// Make the subnet routes on the caller's utun exactly the requested networks, minus those the
+/// plan leaves out (see the threat notes and [`crate::macos_subnet_routes`]).
+///
+/// The utun must already hold its mesh IPv4 address and a mesh prefix route holding it, so only
+/// a configured mesh utun takes networks. A network on an earlier utun of this person's agent is
+/// moved over; anything else that overlaps is left out and named in the reply. Removals run
+/// before additions, so a network that moved between requests is never routed twice.
+fn route_networks(
+    utun: Option<BorrowedFd<'_>>,
+    networks: &[infraternal_mesh::networks::Network],
+    uid: u32,
+) -> io::Result<(Reply, Option<OwnedFd>)> {
+    use crate::macos_subnet_routes::{plan_networks, table_network};
+    use rules::NetworkOutcome;
+    let interface = utun_name(utun)?;
+    let own = nix::ifaddrs::getifaddrs()?
+        .filter(|entry| entry.interface_name == interface)
+        .find_map(|entry| {
+            entry
+                .address
+                .and_then(|a| a.as_sockaddr_in().map(nix::sys::socket::SockaddrIn::ip))
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the caller's utun has no mesh address yet",
+            )
+        })?;
+    let table = routing_table(true)?;
+    let meshed = table.iter().any(|row| {
+        row.interface == interface
+            && row.network.prefix < 32
+            && row.network.contains(std::net::IpAddr::V4(own))
+    });
+    if !meshed {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the mesh route does not lead to the caller's utun",
+        ));
+    }
+    let local = local_networks(true)?;
+    let others: Vec<String> = table
+        .iter()
+        .filter(|row| row.interface != interface && row.interface.starts_with("utun"))
+        .map(|row| row.interface.clone())
+        .collect();
+    let ours = if others.is_empty() {
+        Vec::new()
+    } else {
+        agent_utuns(uid)
+    };
+    let installed = crate::macos_subnet_routes::routes_on(&interface, own, &table);
+    let plan = plan_networks(
+        networks,
+        &interface,
+        Some(own),
+        &installed,
+        &table,
+        &local,
+        &ours,
+        &[],
+        true,
+    );
+    for network in &plan.remove {
+        route("delete", table_network(*network), &interface)?;
+    }
+    let mut outcomes: Vec<NetworkOutcome> = plan
+        .skipped
+        .iter()
+        .map(|(network, skip)| NetworkOutcome {
+            network: *network,
+            installed: false,
+            reason: Some(skip.sentence()),
+        })
+        .collect();
+    for (network, earlier) in &plan.replace {
+        route("delete", table_network(*network), earlier)?;
+    }
+    for network in &plan.keep {
+        outcomes.push(NetworkOutcome {
+            network: *network,
+            installed: true,
+            reason: None,
+        });
+    }
+    for network in &plan.add {
+        let outcome = match route("add", table_network(*network), &interface) {
+            Ok(()) => NetworkOutcome {
+                network: *network,
+                installed: true,
+                reason: None,
+            },
+            Err(error) => NetworkOutcome {
+                network: *network,
+                installed: false,
+                reason: Some(error.to_string()),
+            },
+        };
+        outcomes.push(outcome);
+    }
+    outcomes.sort_by_key(|outcome| outcome.network);
+    Ok((
+        Reply {
+            ok: true,
+            networks: outcomes,
+            ..Reply::default()
+        },
+        None,
+    ))
+}
+
 /// Remove every resolver file carrying the infraternal marker.
 fn clear_resolver() -> io::Result<()> {
     #[cfg(feature = "mesh-dns")]
@@ -532,8 +656,9 @@ fn route(operation: &str, network: Network, interface: &str) -> io::Result<()> {
     }
 }
 
-/// Read the routing table for one family through `netstat -rn`.
-fn routing_table(ipv4: bool) -> io::Result<Vec<Route>> {
+/// Read the routing table for one family through `netstat -rn`. Root mode's subnet routes read it
+/// too ([`crate::macos_node`]).
+pub(crate) fn routing_table(ipv4: bool) -> io::Result<Vec<Route>> {
     let output = system_tool(
         "/usr/sbin/netstat",
         &["-rn", "-f", if ipv4 { "inet" } else { "inet6" }],
@@ -545,7 +670,7 @@ fn routing_table(ipv4: bool) -> io::Result<Vec<Route>> {
 }
 
 /// Every interface address of one family as a network, with its interface name.
-fn local_networks(ipv4: bool) -> io::Result<Vec<Route>> {
+pub(crate) fn local_networks(ipv4: bool) -> io::Result<Vec<Route>> {
     let mut networks = Vec::new();
     for entry in nix::ifaddrs::getifaddrs()? {
         let (Some(address), Some(netmask)) = (entry.address.as_ref(), entry.netmask.as_ref())
@@ -603,7 +728,7 @@ fn send_frame(
     if sent == framed.len() {
         return Ok(());
     }
-    // A local stream socket takes a 4 KiB frame at once; finish any short write plainly.
+    // A local stream socket usually takes a whole frame at once; finish any short write plainly.
     let mut rest = &framed[sent..];
     while !rest.is_empty() {
         let written = nix::unistd::write(socket, rest)?;
@@ -1127,5 +1252,122 @@ mod mac_proofs {
         }
         drop(second);
         drop(first);
+    }
+}
+
+/// Real-Mac proof of the `networks` request (#580), carried out by the helper's own handler in
+/// this process. It needs root and a utun, not a registered helper, so it runs on the Mac VM as
+/// root under the Mac lock.
+#[cfg(test)]
+mod network_proofs {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use infraternal_mesh::networks::Network as MeshNetwork;
+    use std::net::Ipv4Addr;
+
+    /// The test node's mesh address; its `/16` is routed to the utun by `address`.
+    const OWN_V4: Ipv4Addr = Ipv4Addr::new(10, 252, 78, 7);
+    /// The approved network the proof routes.
+    const ROUTED: &str = "10.78.0.0/24";
+
+    /// The `networks` rows of `netstat -rn` that sit on `interface`.
+    fn rows_on(interface: &str) -> Vec<String> {
+        let output = system_tool("/usr/sbin/netstat", &["-rn", "-f", "inet"]).unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.split_whitespace().nth(3) == Some(interface))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The helper routes an approved private network onto the caller's utun only after that utun
+    /// holds its mesh route, leaves out the Mac's own LAN with the reason, refuses public space
+    /// before anything runs, and removes what the next request no longer names.
+    #[test]
+    #[ignore = "Run on the macOS VM with system service privileges under the Mac lock: it routes 10.78.0.0/24 into a utun."]
+    fn the_helper_routes_networks_only_onto_the_callers_configured_utun() {
+        let open = crate::macos_node::OpenUtun::open_kernel().expect("open a utun as root");
+        ifconfig(&[&open.name, "mtu", "1280", "up"]).unwrap();
+        let utun = Some(open.fd.as_fd());
+        let routed: MeshNetwork = ROUTED.parse().unwrap();
+        let lan = local_networks(true)
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.interface.starts_with("en") && row.network.prefix < 32)
+            .find_map(|row| MeshNetwork::new(row.network.address, row.network.prefix).ok());
+
+        let early = handle(
+            &Request::Networks {
+                networks: vec![routed],
+            },
+            utun,
+            0,
+        );
+        eprintln!(
+            "J1169 before address: {:?}",
+            early.as_ref().map(|reply| &reply.0)
+        );
+        assert!(
+            early.is_err(),
+            "a utun without its mesh route takes no networks"
+        );
+
+        handle(
+            &Request::Address {
+                ipv4: OWN_V4,
+                ipv4_prefix: 16,
+                ipv6: "fd78:1:2::7".parse().unwrap(),
+                mtu: 1280,
+            },
+            utun,
+            0,
+        )
+        .expect("the helper addresses the utun");
+        let mut asked = vec![routed];
+        asked.extend(lan);
+        let request = Request::Networks { networks: asked };
+        rules::validate(&request).expect("private networks pass the request check");
+        let (reply, _) = handle(&request, utun, 0).expect("the helper plans the networks");
+        eprintln!("J1169 helper reply: {:?}", reply.networks);
+        let installed = reply
+            .networks
+            .iter()
+            .find(|outcome| outcome.network == routed)
+            .unwrap();
+        assert!(installed.installed, "{installed:?}");
+        if let Some(lan) = lan {
+            let skipped = reply
+                .networks
+                .iter()
+                .find(|outcome| outcome.network == lan)
+                .unwrap();
+            assert!(!skipped.installed);
+            assert!(
+                skipped.reason.as_deref().unwrap().contains("through en"),
+                "{skipped:?}"
+            );
+        }
+        let rows = rows_on(&open.name);
+        eprintln!("J1169 rows on {}: {rows:#?}", open.name);
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("10.78.0/24") || row.starts_with("10.78/24"))
+        );
+
+        // Public space is refused by the request check, before the handler runs.
+        assert!(
+            rules::validate(&Request::Networks {
+                networks: vec!["8.8.8.0/24".parse().unwrap()],
+            })
+            .is_err()
+        );
+
+        // The next request names nothing: the helper takes its network off the utun again.
+        let (reply, _) = handle(&Request::Networks { networks: vec![] }, utun, 0).unwrap();
+        assert!(reply.networks.is_empty());
+        let rows = rows_on(&open.name);
+        eprintln!("J1169 rows after the empty request: {rows:#?}");
+        assert!(!rows.iter().any(|row| row.starts_with("10.78")));
+        drop(open);
     }
 }

@@ -88,7 +88,11 @@ pub fn receipt_names_host(contents: &str, host: &str) -> bool {
 /// The version both sides must speak; a mismatch is refused, never guessed.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Largest request or reply body accepted, in bytes.
-pub const MAX_MESSAGE_BYTES: usize = 4096;
+///
+/// 16 KiB: a [`Request::Networks`] reply names up to 64 networks, each left-out one with its
+/// reason (about 175 bytes), which no longer fits the earlier 4 KiB. Every other message is far
+/// smaller, and an older peer never sends or receives one this large.
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// Smallest MTU the helper sets: IPv6's link minimum, so the interface keeps its IPv6 address.
 pub const MIN_MTU: u16 = 1280;
 /// Largest MTU the helper sets: an Ethernet underlay's packet size.
@@ -138,6 +142,16 @@ pub enum Request {
         /// DNS suffixes; only those [`allowed_suffix`] accepts are written.
         suffixes: Vec<String>,
     },
+    /// Make the approved networks routed into the attached utun exactly `networks` (D197 M3,
+    /// #580). Declarative, so a lost reply is repaired by the next request. Each network is
+    /// checked by [`crate::macos_subnet_routes::check_requested`] (private IPv4 only, at most 64,
+    /// none overlapping another) and planned by [`crate::macos_subnet_routes::plan_networks`]
+    /// against the Mac's routes and interfaces before anything changes; the reply says what
+    /// happened to each one.
+    Networks {
+        /// The networks to route, from the agent's applied snapshot.
+        networks: Vec<infraternal_mesh::networks::Network>,
+    },
     /// Remove every resolver file the helper wrote.
     ClearResolver,
     /// Uninstall: remove resolver files and the helper's own registration and binary.
@@ -150,7 +164,7 @@ impl Request {
     pub const fn needs_utun(&self) -> bool {
         matches!(
             self,
-            Self::Address { .. } | Self::Mtu { .. } | Self::Resolver { .. }
+            Self::Address { .. } | Self::Mtu { .. } | Self::Resolver { .. } | Self::Networks { .. }
         )
     }
 }
@@ -177,9 +191,25 @@ pub struct Reply {
     /// Suffixes the helper refused to point at the agent (see [`allowed_suffix`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_suffixes: Vec<String>,
+    /// What happened to each network of a [`Request::Networks`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<NetworkOutcome>,
     /// Why the request failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// One network of a [`Request::Networks`] reply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkOutcome {
+    /// The network, as asked.
+    pub network: infraternal_mesh::networks::Network,
+    /// Whether it is now routed into the caller's utun.
+    pub installed: bool,
+    /// Why not, as a sentence for `mesh routes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Reply {
@@ -314,6 +344,7 @@ pub fn validate(request: &Request) -> Result<(), Refusal> {
             }
             Ok(())
         }
+        Request::Networks { networks } => crate::macos_subnet_routes::check_requested(networks),
     }
 }
 
@@ -337,7 +368,7 @@ const PRIVATE_IPV4: [(Ipv4Addr, u8); 4] = [
 ];
 
 /// The private block that holds `address`, if any.
-fn private_ipv4_block(address: Ipv4Addr) -> Option<Network> {
+pub(crate) fn private_ipv4_block(address: Ipv4Addr) -> Option<Network> {
     PRIVATE_IPV4
         .iter()
         .map(|&(network, prefix)| Network::v4(network, prefix))
@@ -840,8 +871,8 @@ mod tests {
             Err(Refusal::Malformed)
         );
         assert_eq!(frame_length([0, 0]), Err(Refusal::Malformed));
-        assert_eq!(frame_length([0x10, 0x01]), Err(Refusal::Malformed));
-        assert!(frame(&[0; MAX_MESSAGE_BYTES + 1]).is_err());
+        assert_eq!(frame_length([0x40, 0x01]), Err(Refusal::Malformed));
+        assert!(frame(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
     }
 
     /// Only requests that change a held utun must carry it.
