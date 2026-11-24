@@ -2402,6 +2402,7 @@ dependencies = [
  "openssl",
  "quinn",
  "rand 0.10.4",
+ "ring",
  "serde",
  "serde_cbor_2",
  "serde_json",

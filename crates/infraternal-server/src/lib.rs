@@ -104,6 +104,9 @@ mod host_privilege_http;
 /// Drives one root upgrade from begin to handover (D376, #399).
 #[cfg(all(feature = "ssh", feature = "remote"))]
 mod host_promotion;
+#[cfg(feature = "remote")]
+/// The identity key algorithms (Ed25519 for hosts, P-256 for devices) and their stored form (#580).
+pub mod identity_key;
 /// Server-scheduled host identity key rotation (#285).
 #[cfg(feature = "remote")]
 mod identity_rotation;
