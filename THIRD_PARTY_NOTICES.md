@@ -9,7 +9,10 @@ below; the fonts keep their upstream licence files beside the bundled faces.
 - `apps/tracer/vendor/ghostty-web/`: ghostty-web source build and its embedded
   Ghostty VT WebAssembly use MIT; see the included `LICENSE` and
   `GHOSTTY-LICENSE` texts. Source and toolchain pins are recorded in the
-  vendored package README.
+  vendored package README. The WebAssembly is built from the signed
+  libghostty-vt release (MIT) with its terminal's character tables, which
+  uucode (MIT) generates from Unicode data under the Unicode-3.0 terms
+  shipped at `/licenses/Unicode-3.0.txt`.
 
 ## Colour schemes (`packages/ui/src/themes.ts`)
 
