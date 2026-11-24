@@ -1059,6 +1059,26 @@ fn delivery_fence(config: &Config, aliases: &[crate::policy::model::Addresses]) 
     delivery
 }
 
+/// Rules that let this node talk to itself from its own mesh addresses (#578, J1154).
+///
+/// A packet a local process sends from the node's own mesh address to a local address (the
+/// system resolver asking the node's mesh DNS, a health check on a mesh-bound service) re-enters
+/// through `lo`. Without this rule the anti-spoofing drops below take it for a spoofed mesh
+/// source and the query never gets an answer. Only `lo` is trusted, and only for the node's own
+/// addresses: a packet cannot arrive on `lo` from outside the host, while a peer's address on `lo`
+/// or any mesh address on another interface stays dropped. The rule ends the chain with
+/// `accept`; the delivery fence that follows already lets `lo` through, so it skips nothing.
+fn own_loopback_sources(config: &Config, aliases: &[crate::policy::model::Addresses]) -> String {
+    let own = std::iter::once(&config.addresses).chain(aliases);
+    let ipv4 = own.clone().map(|a| a.ipv4.to_string()).collect::<Vec<_>>();
+    let ipv6 = own.map(|a| a.ipv6.to_string()).collect::<Vec<_>>();
+    format!(
+        "iifname \"lo\" ip saddr {{ {} }} accept; iifname \"lo\" ip6 saddr {{ {} }} accept;",
+        ipv4.join(", "),
+        ipv6.join(", ")
+    )
+}
+
 /// Render only the protections the `GotaTun` packet filter cannot see.
 ///
 /// Access grants stay in userspace. This table rejects mesh-address spoofing on other
@@ -1117,9 +1137,10 @@ fn render_guard_only(
     // mesh-bound services without passing the `GotaTun` filter. Only the node's own addresses are
     // fenced, so LAN-to-LAN traffic is untouched (J592 P1, the full policy's [231] fence).
     let delivery = delivery_fence(config, aliases);
+    let own = own_loopback_sources(config, aliases);
     let _ = writeln!(
         script,
-        " chain ingress {{ type filter hook prerouting priority -310; policy accept; iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; {delivery} }}"
+        " chain ingress {{ type filter hook prerouting priority -310; policy accept; {own} iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; {delivery} }}"
     );
     let _ = writeln!(
         script,
@@ -1304,12 +1325,31 @@ mod tests {
         for rule in [
             "ip saddr @mesh4 drop",
             "ip6 saddr @mesh6 drop",
+            // The node's own addresses may arrive on loopback (#578), nothing else may.
+            "iifname \"lo\" ip saddr { 10.254.0.1 } accept;",
+            "iifname \"lo\" ip6 saddr { fd01::1 } accept;",
             "iifname \"infraternal0\" drop",
             "oifname \"infraternal0\" drop",
             "tcp dport { 80, 443 } drop",
         ] {
             assert!(rules.contains(rule), "missing {rule}: {rules}");
         }
+        // The loopback exemption must come before the drop it exempts from, and name only this
+        // node's own addresses, never a peer's.
+        let accept = rules
+            .find("iifname \"lo\" ip saddr { 10.254.0.1 } accept;")
+            .expect("loopback exemption rendered");
+        assert!(
+            accept
+                < rules
+                    .find("ip saddr @mesh4 drop")
+                    .expect("loopback exemption rendered"),
+            "{rules}"
+        );
+        assert!(
+            !rules.contains("iifname \"lo\" ip saddr { 10.254.0.1, "),
+            "{rules}"
+        );
         // The underlay delivery fence covers this node's own addresses in prerouting, input and
         // forward, and never a peer's (J592 P1): LAN traffic to other addresses is untouched.
         for fence in [

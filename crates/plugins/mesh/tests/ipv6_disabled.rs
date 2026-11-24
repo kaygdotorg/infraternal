@@ -397,26 +397,18 @@ fn dns_answers(reply: &[u8]) -> (hickory_proto::op::ResponseCode, Vec<std::net::
 
 /// One question asked of node A's mesh DNS, answered as `A`'s resolver answers it.
 ///
-/// The kernel engine is asked over the real socket, from A's mesh address as a local client would.
-/// For `GotaTun` the same answer function runs on the configuration the node accepted: its
-/// anti-spoofing rule in the `prerouting` hook drops a query that arrives on loopback from the
-/// node's own mesh address, so a live query from the node itself never reaches the resolver there
-/// (reported on #578). What this test proves, which names get which records, is the same function.
+/// Both engines are asked over a real UDP socket, from A's own mesh address as a local client
+/// (the system resolver) would. `GotaTun` used to drop such a query in its `prerouting` anti-spoofing
+/// rule, so the node could not resolve through its own mesh resolver (#578, J1154); the live query
+/// is the regression check, and the dedicated rows below keep the spoofing protection honest.
 #[cfg(feature = "mesh-dns")]
 fn ask_dns(
-    engine: EngineKind,
-    node: &Node,
+    _engine: EngineKind,
+    _node: &Node,
     name: &str,
     record_type: u16,
 ) -> (hickory_proto::op::ResponseCode, Vec<std::net::IpAddr>) {
     let wire = dns_question(name, record_type);
-    if engine == EngineKind::GotaTun {
-        let config = node.config().expect("node A has an accepted configuration");
-        let reply = infraternal_plugin_mesh::dns::response(&wire, config)
-            .unwrap()
-            .expect("the mesh suffix is authoritative");
-        return dns_answers(&reply);
-    }
     in_ns(NS_A, || {
         let socket = std::net::UdpSocket::bind((Ipv4Addr::new(10, 254, 0, 1), 0)).unwrap();
         socket
