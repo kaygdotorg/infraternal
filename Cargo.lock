@@ -2408,6 +2408,7 @@ dependencies = [
  "infraternal-plugin-ssh",
  "infraternal-protocol",
  "infraternal-shim",
+ "infraternal-sign-in",
  "nix 0.32.0",
  "openssl",
  "quinn",
