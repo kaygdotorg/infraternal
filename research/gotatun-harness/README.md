@@ -62,8 +62,7 @@ only). An arm is any program that accepts `-f INTERFACE` and serves the WireGuar
 Output directory: `machine.txt` (CPU, kernel, governor, buffer sysctls, offloads, tool versions, binary hashes, CPU layout),
 `runs.csv` (one row per run, with load average at start and end), `raw/` (iperf3 JSON, ping output and engine logs per run).
 
-A full run with 2 arms, 2 flow counts, 2 congestion controls, 3 holds of 20 s each takes about 40 minutes; each run is about
-30 s (20 s load, 5 s idle, a few seconds of setup). Use `--secs 10 --holds 1` for a smoke test.
+A full run with 3 arms, 2 flow counts, 2 congestion controls and 3 holds of 20 s takes about 42 minutes (96 runs; the A/A series is 24 of them); each run is about 30 s (20 s load, 5 s idle, a few seconds of setup). Use `--secs 10 --holds 1` for a smoke test.
 
 ## What it does not do
 
@@ -72,3 +71,5 @@ other work yourself, and read `machine.txt` and the load columns before you trus
 internal kit; this harness exists so that anyone can reproduce a claim in an afternoon.
 
 GotaTun's CLI needs `WG_SUDO=1` when run as root without a login session (it looks up the sudo user); `run.sh` sets it.
+
+Worked example (stock 0.10.3 vs a patched fork vs kernel, on a busy shared VM, so noisy): `results/`.
