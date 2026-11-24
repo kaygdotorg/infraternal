@@ -6,9 +6,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [lints]

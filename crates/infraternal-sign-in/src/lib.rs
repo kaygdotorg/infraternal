@@ -13,7 +13,9 @@
 //! - the shape checks on a server-made capability
 //!   ([`server_capability_has_shape`], [`parse_start_response`],
 //!   [`parse_redemption_response`]),
-//! - the redeem status mapping ([`interpret_redemption`]).
+//! - the redeem status mapping ([`interpret_redemption`]),
+//! - the machine-join start body ([`machine_start_body`]) and its approval
+//!   link ([`join_approval_link`]).
 //!
 //! **It never touches the network or the disk.** The caller moves the bytes:
 //! the CLI with its own HTTPS client, the app with `URLSession`. Credential
@@ -21,8 +23,10 @@
 
 use std::time::Duration;
 
+use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 /// The scopes every sign-in asks for.
@@ -36,6 +40,9 @@ pub const POLL_TOKEN_LENGTH: usize = 43;
 /// Length of a server-made user code (16 base64url characters).
 pub const USER_CODE_LENGTH: usize = 16;
 
+/// The longest host name a machine join may carry.
+pub const MAX_HOSTNAME_LENGTH: usize = 128;
+
 /// Why a pure check refused its input. Callers map this to their own error and exit codes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CheckFailure {
@@ -47,6 +54,8 @@ pub enum CheckFailure {
     BadResponse,
     /// A successful redeem reply could not be used; the key may already be spent.
     RedemptionUncertain,
+    /// A machine-join field is empty, too long, has control characters, or is not a key fingerprint.
+    InvalidMachine,
 }
 
 /// The body of `POST /auth/device-start` for a sign-in: who is asking and for which scopes.
@@ -88,6 +97,32 @@ pub struct DeviceRedeemResponse {
     pub api_key: Zeroizing<String>,
 }
 
+/// The body of `POST /auth/device-start` for a machine join, which asks for an invitation instead of an API key.
+#[derive(Serialize)]
+pub struct MachineStartRequest<'a> {
+    /// The host name again, as the device label.
+    pub device: &'a str,
+    /// Always `join_machine`.
+    pub kind: &'static str,
+    /// The machine facts the owner inspects before approving.
+    pub request: MachineRequest<'a>,
+}
+
+/// The facts the owner reads before a passkey approves one machine.
+#[derive(Serialize)]
+pub struct MachineRequest<'a> {
+    /// The fresh id of the machine's host record.
+    pub host_id: Uuid,
+    /// The host name the owner reads.
+    pub hostname: &'a str,
+    /// The join mode, `system` or `user`.
+    pub mode: &'static str,
+    /// The uid the joined agent runs as (0 for a system join).
+    pub execution_uid: u32,
+    /// The `SHA256:` fingerprint of the machine's new key; the approval binds to it.
+    pub key_fingerprint: &'a str,
+}
+
 /// A start reply that passed the shape checks, ready for polling.
 pub struct DeviceApproval {
     /// The secret to poll with.
@@ -110,10 +145,72 @@ pub enum Redemption {
     Other(u16),
 }
 
+/// The device-approval request body for one fresh machine: its new host id, the host name
+/// the owner reads before approving, the join mode with its execution uid, and the exact key
+/// fingerprint the approval binds to.
+///
+/// Refuses an empty or over-long host name, one with control characters, and
+/// anything that is not a canonical `SHA256:` fingerprint of a 32-byte digest.
+///
+/// # Errors
+///
+/// [`CheckFailure::InvalidMachine`] when the host name or fingerprint is unusable.
+pub fn machine_start_body(
+    host_id: Uuid,
+    hostname: &str,
+    key_fingerprint: &str,
+    mode: &'static str,
+    execution_uid: u32,
+) -> Result<Vec<u8>, CheckFailure> {
+    if hostname.is_empty()
+        || hostname.len() > MAX_HOSTNAME_LENGTH
+        || hostname.chars().any(char::is_control)
+        || !valid_fingerprint(key_fingerprint)
+    {
+        return Err(CheckFailure::InvalidMachine);
+    }
+    serde_json::to_vec(&MachineStartRequest {
+        device: hostname,
+        kind: "join_machine",
+        request: MachineRequest {
+            host_id,
+            hostname,
+            mode,
+            execution_uid,
+            key_fingerprint,
+        },
+    })
+    .map_err(|_| CheckFailure::InvalidMachine)
+}
+
+/// Whether `value` is `SHA256:` plus the canonical unpadded base64 of exactly 32 bytes.
+fn valid_fingerprint(value: &str) -> bool {
+    let Some(encoded) = value.strip_prefix("SHA256:") else {
+        return false;
+    };
+    let Ok(decoded) = STANDARD_NO_PAD.decode(encoded) else {
+        return false;
+    };
+    decoded.len() == 32 && STANDARD_NO_PAD.encode(decoded) == encoded
+}
+
+/// The link the owner opens to approve a machine join; the code travels in the fragment, never to the server log.
+#[must_use]
+pub fn join_approval_link(server: &Url, user_code: &str) -> String {
+    format!(
+        "{}/#join={user_code}",
+        server.origin().ascii_serialization()
+    )
+}
+
 /// The default scopes plus the extra ones asked for, each only once; unknown scopes are refused.
 ///
 /// A scope that no action declares is not grantable: a later action that
 /// declared it would otherwise become callable by keys already issued.
+///
+/// # Errors
+///
+/// [`CheckFailure::InvalidScope`] for a scope no action declares.
 pub fn requested_scopes(requested: &[&str]) -> Result<Vec<String>, CheckFailure> {
     let mut scopes = SCOPES
         .iter()
@@ -131,6 +228,10 @@ pub fn requested_scopes(requested: &[&str]) -> Result<Vec<String>, CheckFailure>
 }
 
 /// Parses a server address, accepting only a bare HTTPS origin: no path, credentials, query or fragment.
+///
+/// # Errors
+///
+/// [`CheckFailure::InvalidServer`] when the input is not a bare HTTPS origin.
 pub fn server_url(input: &str) -> Result<Url, CheckFailure> {
     let server = Url::parse(input).map_err(|_| CheckFailure::InvalidServer)?;
     if server.scheme() != "https"
@@ -147,6 +248,7 @@ pub fn server_url(input: &str) -> Result<Url, CheckFailure> {
 }
 
 /// The link the owner opens to approve a sign-in; it carries only the user code.
+#[must_use]
 pub fn approval_link(server: &Url, user_code: &str) -> String {
     let mut link = server.clone();
     link.query_pairs_mut().append_pair("device_code", user_code);
@@ -154,6 +256,7 @@ pub fn approval_link(server: &Url, user_code: &str) -> String {
 }
 
 /// Whether `value` is exactly `expected_length` base64url characters, the shape of every server-made capability.
+#[must_use]
 pub fn server_capability_has_shape(value: &str, expected_length: usize) -> bool {
     value.len() == expected_length
         && value
@@ -162,6 +265,10 @@ pub fn server_capability_has_shape(value: &str, expected_length: usize) -> bool 
 }
 
 /// Parses and checks a `200` start reply: the token and code shapes and the exact approval lifetime.
+///
+/// # Errors
+///
+/// [`CheckFailure::BadResponse`] for malformed JSON, extra fields, wrong shapes or a wrong lifetime.
 pub fn parse_start_response(body: &[u8]) -> Result<DeviceApproval, CheckFailure> {
     let started: DeviceStartResponse =
         serde_json::from_slice(body).map_err(|_| CheckFailure::BadResponse)?;
@@ -182,6 +289,10 @@ pub fn parse_start_response(body: &[u8]) -> Result<DeviceApproval, CheckFailure>
 ///
 /// A bad body is [`CheckFailure::RedemptionUncertain`], not a plain bad reply:
 /// the server may already have spent the approval.
+///
+/// # Errors
+///
+/// [`CheckFailure::RedemptionUncertain`] for any body that is not a well-formed key.
 pub fn parse_redemption_response(body: &[u8]) -> Result<Zeroizing<String>, CheckFailure> {
     let redeemed: DeviceRedeemResponse =
         serde_json::from_slice(body).map_err(|_| CheckFailure::RedemptionUncertain)?;
@@ -194,6 +305,10 @@ pub fn parse_redemption_response(body: &[u8]) -> Result<Zeroizing<String>, Check
 /// Maps one redeem answer: `200` is the credential, `401` still pending, `429` retry later.
 ///
 /// `retry_after` is the parsed `Retry-After` header, if there was one.
+///
+/// # Errors
+///
+/// [`CheckFailure::RedemptionUncertain`] when a `200` body cannot be used.
 pub fn interpret_redemption(
     status: u16,
     body: &[u8],
@@ -207,5 +322,6 @@ pub fn interpret_redemption(
     }
 }
 
+/// Unit tests for the pure checks and wire types.
 #[cfg(test)]
 mod tests;

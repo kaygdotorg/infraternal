@@ -15,6 +15,7 @@ fn scopes_without_an_action_are_refused() {
     assert!(requested_scopes(&["hosts:write"]).is_ok());
 }
 
+/// The default scopes are read-only, and asking for one again does not repeat it.
 #[test]
 fn default_scopes_are_read_only_and_not_repeated() {
     assert_eq!(SCOPES, ["hosts:read", "sessions:read", "status:read"]);
@@ -24,6 +25,7 @@ fn default_scopes_are_read_only_and_not_repeated() {
     );
 }
 
+/// Only a bare HTTPS origin is a server address; paths, credentials, queries and fragments are not.
 #[test]
 fn server_input_accepts_only_a_bare_https_origin() {
     let parsed = server_url("https://Mesh.Example.org:8443/").unwrap();
@@ -46,6 +48,7 @@ fn server_input_accepts_only_a_bare_https_origin() {
     }
 }
 
+/// The approval link carries the user code and never the poll token.
 #[test]
 fn approval_link_carries_only_the_browser_user_code() {
     let server = server_url("https://mesh.example.org").unwrap();
@@ -55,6 +58,7 @@ fn approval_link_carries_only_the_browser_user_code() {
     assert!(!link.contains("poll_token"));
 }
 
+/// A capability must be exactly the expected length of base64url characters.
 #[test]
 fn server_generated_capabilities_have_exact_base64url_shapes() {
     assert!(server_capability_has_shape(&"A".repeat(43), 43));
@@ -65,6 +69,7 @@ fn server_generated_capabilities_have_exact_base64url_shapes() {
     assert!(!server_capability_has_shape(&("A".repeat(42) + "="), 43));
 }
 
+/// A `200` redeem reply that cannot be used is "uncertain": the key may be spent.
 #[test]
 fn unusable_successful_redemption_bodies_are_uncertain() {
     for response in [
@@ -79,6 +84,7 @@ fn unusable_successful_redemption_bodies_are_uncertain() {
     }
 }
 
+/// A start reply needs exact token and code shapes, the full lifetime and no extra fields.
 #[test]
 fn a_start_reply_needs_exact_shapes_and_the_full_lifetime() {
     let good = format!(
@@ -101,6 +107,7 @@ fn a_start_reply_needs_exact_shapes_and_the_full_lifetime() {
     }
 }
 
+/// Redeem statuses map to pending, retry-after, credential or "other".
 #[test]
 fn redeem_statuses_map_to_pending_retry_credential_or_other() {
     let key = format!(r#"{{"api_key":"{}"}}"#, "K".repeat(43));
@@ -124,4 +131,63 @@ fn redeem_statuses_map_to_pending_retry_credential_or_other() {
         interpret_redemption(200, b"{}", None),
         Err(CheckFailure::RedemptionUncertain)
     ));
+}
+
+/// The join link puts only the user code in the fragment.
+#[test]
+fn join_approval_link_places_only_the_user_code_in_the_fragment() {
+    let server = Url::parse("https://mesh.example.org:8443/").unwrap();
+    assert_eq!(
+        join_approval_link(&server, "AbCdEfGhIjKlMnOp"),
+        "https://mesh.example.org:8443/#join=AbCdEfGhIjKlMnOp"
+    );
+}
+
+/// A system join asks for root mode with execution uid 0 and the exact key fingerprint.
+#[test]
+fn machine_start_body_binds_the_requested_mode_and_key() {
+    let body = machine_start_body(
+        Uuid::from_u128(1),
+        "workstation",
+        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "system",
+        0,
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "kind": "join_machine",
+            "device": "workstation",
+            "request": {
+                "host_id": "00000000-0000-0000-0000-000000000001",
+                "hostname": "workstation",
+                "mode": "system",
+                "execution_uid": 0,
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+        })
+    );
+}
+
+/// Bad host names and non-canonical fingerprints are refused before any request is built.
+#[test]
+fn machine_start_body_refuses_bad_names_and_fingerprints() {
+    let good = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    for (name, fingerprint) in [
+        ("", good),
+        ("bad\nname", good),
+        (&"h".repeat(129), good),
+        ("host", "SHA256:short"),
+        ("host", "MD5:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        // Non-canonical trailing bits decode but do not round-trip.
+        ("host", "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB"),
+    ] {
+        assert_eq!(
+            machine_start_body(Uuid::nil(), name, fingerprint, "system", 0).err(),
+            Some(CheckFailure::InvalidMachine),
+            "{name:?} {fingerprint}"
+        );
+    }
 }
