@@ -233,7 +233,7 @@ pub(super) fn repair_accepted_routes(
         let addresses: Vec<_> = lock_route_state(state)
             .peers
             .values()
-            .flat_map(|peer| route_addresses(peer.addresses))
+            .flat_map(crate::dataplane::Peer::routed_addresses)
             .collect();
         Device::missing_peer_routes(link, addresses.into_iter().collect())?
     };
@@ -247,9 +247,8 @@ pub(super) fn repair_accepted_routes(
             .peers
             .values()
             .filter(|peer| {
-                route_addresses(peer.addresses)
-                    .iter()
-                    .any(|address| missing.contains(address))
+                peer.routed_addresses()
+                    .any(|address| missing.contains(&address))
             })
             .map(|peer| RepairTarget {
                 key: peer.key,
@@ -267,11 +266,6 @@ pub(super) fn repair_accepted_routes(
         }
     }
     first_error.map_or(Ok(()), Err)
-}
-
-/// Convert the peer's addresses into the destinations this worker can repair.
-fn route_addresses(addresses: Addresses) -> [IpAddr; 2] {
-    [IpAddr::V4(addresses.ipv4), IpAddr::V6(addresses.ipv6)]
 }
 
 /// Derive a missing peer's budget without blocking a refresh, then check the latest accepted
@@ -310,7 +304,7 @@ fn repair_target(
         });
     let mut first_error = None;
     let mut changed = false;
-    for address in route_addresses(peer.addresses) {
+    for address in peer.routed_addresses() {
         if !missing.contains(&address) {
             continue;
         }

@@ -561,12 +561,7 @@ fn route_addresses(config: &Config) -> BTreeSet<IpAddr> {
     config
         .peers
         .values()
-        .flat_map(|policy| {
-            [
-                IpAddr::V4(policy.peer.addresses.ipv4),
-                IpAddr::V6(policy.peer.addresses.ipv6),
-            ]
-        })
+        .flat_map(|policy| policy.peer.routed_addresses())
         .collect()
 }
 
@@ -594,8 +589,9 @@ impl PathBudgets {
         if let Some(config) = config {
             for policy in config.peers.values() {
                 let mtu = probe.mesh_mtu(policy.peer.endpoint);
-                route_mtus.insert(IpAddr::V4(policy.peer.addresses.ipv4), mtu);
-                route_mtus.insert(IpAddr::V6(policy.peer.addresses.ipv6), mtu);
+                for address in policy.peer.routed_addresses() {
+                    route_mtus.insert(address, mtu);
+                }
             }
             peer_mtus.extend(
                 config
@@ -898,12 +894,13 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 /// Rejects invalid host routes before they reach GotaTun.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = vec![
-        IpNetwork::new(IpAddr::V4(peer.addresses.ipv4), 32)
-            .map_err(|_| io::ErrorKind::InvalidData)?,
-        IpNetwork::new(IpAddr::V6(peer.addresses.ipv6), 128)
-            .map_err(|_| io::ErrorKind::InvalidData)?,
-    ];
+    let addresses = peer
+        .routed_addresses()
+        .map(|address| {
+            IpNetwork::new(address, if address.is_ipv4() { 32 } else { 128 })
+                .map_err(|_| io::ErrorKind::InvalidData.into())
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
@@ -3292,6 +3289,7 @@ mod tests {
                         },
                         endpoint: Some("192.0.2.4:51820".parse::<SocketAddr>().expect("endpoint")),
                         candidates: Vec::new(),
+                        ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -3366,6 +3364,7 @@ mod tests {
                 },
                 endpoint: None,
                 candidates: Vec::new(),
+                ipv4_only: false,
             },
             inbound,
             outbound: TrafficPolicy::All,

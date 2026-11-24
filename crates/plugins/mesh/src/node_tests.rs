@@ -300,6 +300,7 @@ fn chunked_snapshot_is_atomic_and_applies_1000_kernel_peers() {
                             addresses: addresses(id),
                             endpoint: Some("192.0.2.1:44000".parse().expect("public endpoint")),
                             candidates: Vec::new(),
+                            ipv4_only: false,
                         },
                         inbound: TrafficPolicy::All,
                         outbound: TrafficPolicy::All,

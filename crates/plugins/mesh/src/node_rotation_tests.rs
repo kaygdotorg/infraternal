@@ -1039,6 +1039,7 @@ fn j363_config(key: crate::policy::model::PublicKey) -> Config {
                     },
                     endpoint: None,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: crate::policy::rules::TrafficPolicy::All,
                 outbound: crate::policy::rules::TrafficPolicy::All,

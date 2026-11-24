@@ -118,6 +118,9 @@ PACKAGE_NO_DEFAULT_FEATURES = {'infraternal-plugin-mesh'}
 # resolver has feature-specific config fields that other fixtures do not set.
 TARGET_FEATURES = {
     ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns',
+    # Its IPv4-only DNS rows resolve a peer's name through the mesh resolver (#578, J1142). Its kernel
+    # rows also need nft, which only test-support builds trust inside the sandbox.
+    ('infraternal-plugin-mesh', 'test:ipv6_disabled'): 'agent,server,test-support,mesh-dns',
 }
 
 # Root-only behaviour this row deliberately does not exercise, and why. Kept

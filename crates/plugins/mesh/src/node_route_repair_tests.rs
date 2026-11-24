@@ -37,6 +37,7 @@ fn fixture(peers: u32) -> (Node, std::path::PathBuf) {
             },
             endpoint: None,
             candidates: Vec::new(),
+            ipv4_only: false,
         })
         .collect::<Vec<_>>();
     Device::routes(&inventory, false).expect("accepted routes");

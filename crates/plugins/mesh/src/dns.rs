@@ -44,10 +44,14 @@ const TCP_MALFORMED_FRAME_LIMIT: usize = 16;
 const TCP_ACCEPT_BUDGET: usize = 64;
 
 /// The addresses one name resolves to.
+///
+/// `ipv6` is `None` for a node that runs IPv4-only (#578, J1142): its name then has an `A`
+/// record and an empty `AAAA` answer, so a client that tries IPv6 first learns at once that
+/// there is nothing to try instead of timing out on an address nothing answers.
 #[derive(Clone, Copy)]
 struct Addresses {
     ipv4: Ipv4Addr,
-    ipv6: std::net::Ipv6Addr,
+    ipv6: Option<std::net::Ipv6Addr>,
 }
 
 /// All names the resolver can answer, taken from one accepted policy revision.
@@ -99,7 +103,7 @@ impl Records {
                 name,
                 Addresses {
                     ipv4: config.addresses.ipv4,
-                    ipv6: config.addresses.ipv6,
+                    ipv6: Some(config.addresses.ipv6),
                 },
             )?;
         }
@@ -109,7 +113,7 @@ impl Records {
                 name,
                 Addresses {
                     ipv4: peer.peer.addresses.ipv4,
-                    ipv6: peer.peer.addresses.ipv6,
+                    ipv6: (!peer.peer.ipv4_only).then_some(peer.peer.addresses.ipv6),
                 },
             )?;
         }
@@ -400,7 +404,8 @@ fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Option<V
 /// - `NXDOMAIN` plus a short-lived SOA if `source` is not this node's own mesh
 ///   address or the host is absent (a name with multiple host labels never exists).
 /// - An `A` or `AAAA` answer for existing hosts; any other record type gets an
-///   empty answer plus the SOA (NODATA).
+///   empty answer plus the SOA (NODATA). So does `AAAA` for a host that runs IPv4-only
+///   (#578, J1142): the name exists, it just has no IPv6 address.
 fn response_for_source(
     packet: &[u8],
     records: &Records,
@@ -458,7 +463,7 @@ fn response_for_source(
     };
     let rdata = match question.query_type() {
         RecordType::A => Some(RData::A(address.ipv4.into())),
-        RecordType::AAAA => Some(RData::AAAA(address.ipv6.into())),
+        RecordType::AAAA => address.ipv6.map(|ipv6| RData::AAAA(ipv6.into())),
         _ => None,
     };
     if let Some(rdata) = rdata {

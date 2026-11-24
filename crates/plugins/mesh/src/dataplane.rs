@@ -82,6 +82,25 @@ pub struct Peer {
     /// node gets `endpoint` alone. Empty is omitted, so a snapshot without candidates is unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub candidates: Vec<SocketAddr>,
+    /// The peer runs IPv4-only because IPv6 is off on its mesh link (#578, J1142). Its IPv6 mesh
+    /// address stays reserved in `addresses`, but this node installs no IPv6 route or allowed IP
+    /// for it and mesh DNS answers no `AAAA` for its name, so a client that asks for IPv6 first
+    /// gets "no such record" at once instead of waiting out a connect timeout. The coordinator
+    /// sets it only for a peer that reported IPv6 off, and only in snapshots for nodes that said
+    /// they understand it, because this struct refuses unknown fields. Omitted while false, so a
+    /// dual-stack mesh's snapshots are unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ipv4_only: bool,
+}
+
+impl Peer {
+    /// The mesh addresses this node should route to the peer: always the IPv4 one, and the IPv6
+    /// one unless the peer is [`ipv4_only`](Self::ipv4_only). Every place that installs a peer
+    /// route or allowed IP uses this one list, so IPv4-only peers are skipped everywhere alike.
+    pub fn routed_addresses(&self) -> impl Iterator<Item = std::net::IpAddr> {
+        std::iter::once(std::net::IpAddr::V4(self.addresses.ipv4))
+            .chain((!self.ipv4_only).then_some(std::net::IpAddr::V6(self.addresses.ipv6)))
+    }
 }
 /// Directional network access for initiating tuples and their authenticated replies [242].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +438,7 @@ mod compatibility_tests {
             },
             endpoint: None,
             candidates: Vec::new(),
+            ipv4_only: false,
         };
         let encoded = serde_json::to_vec(&peer).unwrap();
         let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();

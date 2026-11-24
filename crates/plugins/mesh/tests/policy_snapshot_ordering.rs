@@ -94,6 +94,7 @@ fn install(fallback: bool) -> (Node, Config) {
                     },
                     endpoint: None,
                     candidates: Vec::new(),
+                    ipv4_only: false,
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
