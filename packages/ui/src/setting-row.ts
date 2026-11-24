@@ -39,6 +39,11 @@ export interface SettingRowOptions {
   /** The saved value to start from; the default when absent. */
   value?: SettingValue;
   /**
+   * Whether the line "Default … · allowed …" is shown under the control (default true). A choice whose default is plain from its
+   * own words (Stable or Edge) turns it off: the owner found "Default Stable" under that switch noise (#211, 2026-11-22).
+   */
+  caption?: boolean;
+  /**
    * Called with a valid new value after it is saved. A store that can say no (a server) returns a promise: when it resolves to a
    * sentence, or fails, the row puts the previous value back and shows the sentence as a refusal, so the screen never keeps a
    * value that was not stored.
@@ -85,7 +90,8 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
   const q = <T extends HTMLElement>(selector: string): T => root.querySelector<T>(selector)!;
   q(".ui-setting-title").textContent = options.title;
   q(".ui-setting-explain").textContent = options.explain;
-  q(".ui-setting-caption").textContent = captionFor(spec);
+  if (options.caption === false) q(".ui-setting-caption").remove();
+  else q(".ui-setting-caption").textContent = captionFor(spec);
   const reset = q<HTMLButtonElement>(".ui-setting-reset");
   const control = q<HTMLElement>(".ui-setting-control");
   const refusal = q<HTMLElement>(".ui-setting-refusal");
