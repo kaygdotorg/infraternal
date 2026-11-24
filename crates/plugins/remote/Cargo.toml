@@ -7,9 +7,9 @@ license.workspace = true
 
 [features]
 # Unreliable plugin media routing is opt-in; QUIC terminal streams stay in transport.
-native-streams = ["transport", "infraternal-plugin-api/native-streams"]
+native-streams = ["transport", "infraternal-plugin-api/native-streams", "infraternal-link/native-streams"]
 default = []
-transport = ["infraternal-plugin-api/native-wire", "dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol", "dep:uuid"]
+transport = ["infraternal-plugin-api/native-wire", "dep:infraternal-link", "infraternal-link/quic", "dep:ring", "dep:zeroize", "dep:bytes", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:rustls", "dep:tokio", "dep:serde", "dep:serde_json", "dep:infraternal-protocol", "dep:uuid"]
 agent = ["transport", "dep:infraternal-shim", "dep:nix", "nix/net"]
 server = ["transport", "infraternal-plugin-api/socket-host"]
 test-support = ["transport", "native-streams"]
@@ -21,6 +21,8 @@ bytes = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 nix = { workspace = true, optional = true, features = ["net"] }
 infraternal-plugin-api = { path = "../../infraternal-plugin-api", version = "0.1.0" }
+# The client side of leg B moved there; this crate re-exports it under the old paths (#580).
+infraternal-link = { workspace = true, optional = true }
 infraternal-protocol = { workspace = true, optional = true }
 openssl = { workspace = true, optional = true }
 tokio-openssl = { workspace = true, optional = true }
