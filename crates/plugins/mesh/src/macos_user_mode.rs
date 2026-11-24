@@ -3,7 +3,7 @@
 //! In user mode the infraternal agent runs as the logged-in person, from a
 //! `LaunchAgent`, with its files under `~/Library` (D395). Only three things on
 //! a Mac need root for the mesh: creating the utun, routing the mesh prefix
-//! into it, and pointing the system resolver at the agent's DNS listener. A
+//! into it, and pointing the system resolver at the mesh resolver address. A
 //! small root helper ([`crate::macos_helper`]) does exactly those, on request,
 //! and exits. Everything here is the part of that design that needs no
 //! operating system: the wire format between agent and helper, the checks the
@@ -81,7 +81,7 @@ pub fn receipt_names_host(contents: &str, host: &str) -> bool {
 }
 
 /// The version both sides must speak; a mismatch is refused, never guessed.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Largest request or reply body accepted, in bytes.
 pub const MAX_MESSAGE_BYTES: usize = 4096;
 /// Smallest MTU the helper sets: IPv6's link minimum, so the interface keeps its IPv6 address.
@@ -125,11 +125,11 @@ pub enum Request {
         /// Interface MTU, [`MIN_MTU`] to [`MAX_MTU`].
         mtu: u16,
     },
-    /// Point the system resolver for `suffixes` at the agent's loopback DNS listener.
+    /// Point the system resolver for `suffixes` at the mesh resolver address, which the agent
+    /// answers from the attached utun (#146, J1027 F2). The helper derives the address from the
+    /// utun's own mesh IPv6 address and checks the mesh route sends it into that utun, so the
+    /// request carries no address at all.
     Resolver {
-        /// The node's mesh IPv4 address; it must already be on the attached utun, which
-        /// proves the caller is the running mesh node.
-        address: Ipv4Addr,
         /// DNS suffixes; only those [`allowed_suffix`] accepts are written.
         suffixes: Vec<String>,
     },
@@ -243,16 +243,37 @@ pub fn encode_request(request: &Request) -> Result<Vec<u8>, Refusal> {
     frame(&body)
 }
 
+/// Only the version of a request body, read before its request so that a body from another
+/// version is reported as a version mismatch even when its request no longer parses.
+#[derive(Deserialize)]
+struct VersionOnly {
+    /// The sender's [`PROTOCOL_VERSION`].
+    version: u32,
+}
+
 /// Decode and check one request body (without its length header).
+///
+/// The version is checked first: a body from another version is refused with
+/// [`Refusal::Version`], whose sentence tells the person to run `infraternal up` again, which
+/// refreshes the helper. The one exception is [`Request::Remove`]: its wire form, the bare
+/// string `"remove"`, is frozen, so any version's agent can uninstall any version's helper
+/// without an administrator (J1087 on L3).
 ///
 /// # Errors
 /// Refuses malformed JSON, unknown fields, another version, and any value
 /// [`validate`] refuses.
 pub fn decode_request(body: &[u8]) -> Result<Request, Refusal> {
-    let envelope: Envelope = serde_json::from_slice(body).map_err(|_| Refusal::Malformed)?;
-    if envelope.version != PROTOCOL_VERSION {
-        return Err(Refusal::Version);
+    let VersionOnly { version } = serde_json::from_slice(body).map_err(|_| Refusal::Malformed)?;
+    if version != PROTOCOL_VERSION {
+        let removal = serde_json::from_slice::<Envelope>(body)
+            .is_ok_and(|envelope| envelope.request == Request::Remove);
+        return if removal {
+            Ok(Request::Remove)
+        } else {
+            Err(Refusal::Version)
+        };
     }
+    let envelope: Envelope = serde_json::from_slice(body).map_err(|_| Refusal::Malformed)?;
     validate(&envelope.request)?;
     Ok(envelope.request)
 }
@@ -276,10 +297,7 @@ pub fn validate(request: &Request) -> Result<(), Refusal> {
             ipv6_route(*ipv6)?;
             Ok(())
         }
-        Request::Resolver { address, suffixes } => {
-            private_ipv4_block(*address).ok_or_else(|| {
-                Refusal::Invalid(format!("{address} is not a private IPv4 address"))
-            })?;
+        Request::Resolver { suffixes } => {
             if suffixes.is_empty() || suffixes.len() > 8 {
                 return Err(Refusal::Invalid(
                     "a resolver request names one to eight DNS suffixes".to_owned(),
@@ -765,17 +783,51 @@ mod tests {
         assert_eq!(length, framed.len() - 2);
         assert_eq!(decode_request(&framed[2..]).unwrap(), request);
         assert_eq!(
-            decode_request(br#"{"version":1,"request":"open","extra":1}"#),
+            decode_request(br#"{"version":2,"request":"open","extra":1}"#),
             Err(Refusal::Malformed)
         );
         assert_eq!(
-            decode_request(br#"{"version":1,"request":{"mtu":{"mtu":1300,"x":1}}}"#),
+            decode_request(br#"{"version":2,"request":{"mtu":{"mtu":1300,"x":1}}}"#),
             Err(Refusal::Malformed)
         );
+        // Version 1 (J998) still sent an address with its resolver request; it is refused as a
+        // version mismatch, which `infraternal up` repairs by refreshing the helper.
+        for old in [
+            &br#"{"version":1,"request":"open"}"#[..],
+            br#"{"version":3,"request":"open"}"#,
+        ] {
+            assert_eq!(decode_request(old), Err(Refusal::Version));
+        }
+        let resolver = Request::Resolver {
+            suffixes: vec!["internal".to_owned()],
+        };
+        assert!(resolver.needs_utun());
+        let framed = encode_request(&resolver).unwrap();
+        assert_eq!(decode_request(&framed[2..]).unwrap(), resolver);
         assert_eq!(
-            decode_request(br#"{"version":2,"request":"open"}"#),
+            decode_request(
+                br#"{"version":2,"request":{"resolver":{"address":"10.254.0.7","suffixes":["internal"]}}}"#
+            ),
+            Err(Refusal::Malformed)
+        );
+        // J998's own resolver request is a version mismatch, not "malformed", so the agent's log
+        // says what to do.
+        assert_eq!(
+            decode_request(
+                br#"{"version":1,"request":{"resolver":{"address":"10.254.0.7","suffixes":["internal"]}}}"#
+            ),
             Err(Refusal::Version)
         );
+        // Removal works across versions; nothing else does.
+        assert_eq!(
+            decode_request(br#"{"version":1,"request":"remove"}"#),
+            Ok(Request::Remove)
+        );
+        assert_eq!(
+            decode_request(br#"{"version":1,"request":"clear-resolver"}"#),
+            Err(Refusal::Version)
+        );
+        assert_eq!(decode_request(br#"{"request":"open"}"#), Err(Refusal::Malformed));
         assert_eq!(frame_length([0, 0]), Err(Refusal::Malformed));
         assert_eq!(frame_length([0x10, 0x01]), Err(Refusal::Malformed));
         assert!(frame(&[0; MAX_MESSAGE_BYTES + 1]).is_err());

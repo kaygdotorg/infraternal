@@ -604,7 +604,7 @@ fn clear_stale_networkmanager_dns() -> io::Result<()> {
 
 /// Renders one macOS resolver file for a suffix and the node's high DNS port.
 #[cfg(target_os = "macos")]
-fn render_macos_resolver(address: Ipv4Addr, port: u16, suffix: &str) -> String {
+fn render_macos_resolver(address: std::net::IpAddr, port: u16, suffix: &str) -> String {
     format!("{MACOS_MARKER}\nnameserver {address}\nport {port}\nsearch {suffix}\n")
 }
 
@@ -845,23 +845,37 @@ fn current_process_is_root() -> bool {
 /// Writes the resolver files a user-mode agent asked the root helper for, then refreshes
 /// the system resolver (#146).
 ///
-/// The files name `127.0.0.1` and the agent's high DNS port, where a user-mode agent serves
-/// the same snapshot: macOS sends traffic for a utun's own IPv4 address into the tunnel, so
-/// the mesh address itself is unreachable from this host. The helper has already checked
-/// that the caller's mesh address is on the caller's utun and that every suffix is a
-/// reserved private-use name; the same marker and ownership rules as root mode apply, so a
-/// file infraternal did not write is never replaced.
+/// The files name the deployment's mesh resolver address and port 53, which the agent answers
+/// from the packets it reads from its utun (J1027 F2): no socket is bound, so no other account
+/// can answer in its place. The helper has already checked that the address is routed into the
+/// caller's utun and that every suffix is a reserved private-use name; the same marker and
+/// ownership rules as root mode apply, so a file infraternal did not write is never replaced.
 /// # Errors
 /// Reports an unsafe resolver directory, a foreign file, or a failed write or refresh.
 #[cfg(target_os = "macos")]
-pub(crate) fn write_user_mode_resolver(suffixes: &[String]) -> io::Result<()> {
-    write_macos_files(Ipv4Addr::LOCALHOST, suffixes)?;
+pub(crate) fn write_user_mode_resolver(
+    resolver: std::net::Ipv6Addr,
+    suffixes: &[String],
+) -> io::Result<()> {
+    write_macos_resolver_files(resolver.into(), crate::tunnel_dns::PORT, suffixes)?;
     refresh_macos_resolver()
 }
 
-/// Writes one resolver file per suffix and removes stale files carrying our marker.
+/// Writes one resolver file per suffix, naming the mesh address and [`crate::dns::DNS_PORT`],
+/// and removes stale files carrying our marker.
 #[cfg(target_os = "macos")]
 fn write_macos_files(address: Ipv4Addr, suffixes: &[String]) -> io::Result<()> {
+    write_macos_resolver_files(address.into(), crate::dns::DNS_PORT, suffixes)
+}
+
+/// Writes one resolver file per suffix for `address`:`port` and removes stale files carrying
+/// our marker.
+#[cfg(target_os = "macos")]
+fn write_macos_resolver_files(
+    address: std::net::IpAddr,
+    port: u16,
+    suffixes: &[String],
+) -> io::Result<()> {
     ensure_macos_resolver_directory()?;
     let desired = suffixes.iter().cloned().collect::<BTreeSet<_>>();
     for suffix in &desired {
@@ -871,7 +885,7 @@ fn write_macos_files(address: Ipv4Addr, suffixes: &[String]) -> io::Result<()> {
     }
     for suffix in &desired {
         let path = Path::new(MACOS_RESOLVER_DIRECTORY).join(suffix);
-        let contents = render_macos_resolver(address, crate::dns::DNS_PORT, suffix);
+        let contents = render_macos_resolver(address, port, suffix);
         write_managed_file(&path, contents.as_bytes())?;
     }
     remove_stale_macos_files(&desired)
@@ -1339,8 +1353,17 @@ mod tests {
     #[test]
     fn macos_resolver_file_uses_the_mesh_address_and_high_port() {
         assert_eq!(
-            render_macos_resolver(Ipv4Addr::new(10, 254, 0, 2), 1053, "internal"),
+            render_macos_resolver(Ipv4Addr::new(10, 254, 0, 2).into(), 1053, "internal"),
             "# Managed by infraternal agent.\nnameserver 10.254.0.2\nport 1053\nsearch internal\n"
+        );
+        // User mode names the in-tunnel mesh resolver address on port 53 (#146, J1027 F2).
+        assert_eq!(
+            render_macos_resolver(
+                "fd12:3456:789a:ffff::53".parse().expect("address"),
+                53,
+                "internal"
+            ),
+            "# Managed by infraternal agent.\nnameserver fd12:3456:789a:ffff::53\nport 53\nsearch internal\n"
         );
     }
 

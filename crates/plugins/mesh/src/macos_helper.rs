@@ -37,11 +37,16 @@
 //! from a network the Mac already uses. Another utun with exactly the mesh prefix is replaced
 //! only when the kernel shows it is held by the registered person's installed infraternal binary
 //! ([`crate::macos_utun_holder`], review J1027 F1); otherwise it is another VPN and is refused.
-//! A resolver request is honoured only when its mesh address is already on the caller's utun,
-//! and only for `internal` or `home.arpa` names, so
-//! one person cannot redirect real domains for the Mac's other accounts. The file names
-//! `127.0.0.1` and the agent's high DNS port: macOS sends traffic for a utun's own address
-//! into the tunnel, so the agent also serves its names on loopback.
+//! A resolver request is honoured only when the mesh route leads to the caller's utun, and only
+//! for `internal` or `home.arpa` names, so one person cannot redirect real domains for the
+//! Mac's other accounts. The file names the
+//! deployment's mesh resolver address (`fd<id>:ffff::53`, port 53), which sits on no interface:
+//! the mesh `/48` route sends it into the caller's utun and the agent answers it from the packets
+//! it reads there ([`crate::tunnel_dns`], J1027 F2). The helper writes it only when that route
+//! leads to the caller's utun. No socket is bound, so no other account can answer in the
+//! agent's place, before, during or after the agent runs. While no agent runs, the files stay
+//! but the route is gone: the system then sends those queries to its default IPv6 route, if it
+//! has one, where a unique-local address goes unanswered.
 //!
 //! **What it cannot do:** it cannot reach another person's utun, choose a public route, or
 //! replace a resolver file it did not write (the existing marker check). It never writes to
@@ -65,7 +70,6 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, IoSlice, IoSliceMut, Read, Write},
-    net::Ipv4Addr,
     os::{
         fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
         unix::{
@@ -341,7 +345,7 @@ fn handle(
             ifconfig(&[&interface, "mtu", &mtu.to_string()])?;
             Ok((ok, None))
         }
-        Request::Resolver { address, suffixes } => resolver(utun, *address, suffixes),
+        Request::Resolver { suffixes } => resolver(utun, suffixes),
         Request::ClearResolver => {
             clear_resolver()?;
             Ok((ok, None))
@@ -398,26 +402,38 @@ fn utun_name(utun: Option<BorrowedFd<'_>>) -> io::Result<String> {
     }
 }
 
-/// Write resolver files for the allowed suffixes, for an address already on the caller's utun.
+/// Point the resolver for the allowed suffixes at the mesh resolver address of the caller's
+/// utun (#146, J1027 F2).
+///
+/// The address is derived here, never taken from the request: the utun's own unique-local
+/// mesh address gives the deployment's `/48`, and the resolver is `fd<id>:ffff::53` in it. It
+/// is written only when the routing table sends that `/48` into this very utun, so the files
+/// can only ever point at the agent that holds it; when the utun closes, the route goes with it
+/// and nothing on the Mac answers in the agent's place.
 #[cfg(feature = "mesh-dns")]
 fn resolver(
     utun: Option<BorrowedFd<'_>>,
-    address: Ipv4Addr,
     suffixes: &[String],
 ) -> io::Result<(Reply, Option<OwnedFd>)> {
     let interface = utun_name(utun)?;
-    let on_utun = nix::ifaddrs::getifaddrs()?.any(|entry| {
-        entry.interface_name == interface
-            && entry
-                .address
-                .as_ref()
-                .and_then(|address| address.as_sockaddr_in())
-                .is_some_and(|ipv4| ipv4.ip() == address)
-    });
-    if !on_utun {
+    let own = nix::ifaddrs::getifaddrs()?
+        .filter(|entry| entry.interface_name == interface)
+        .filter_map(|entry| entry.address.and_then(|a| a.as_sockaddr_in6().map(|v6| v6.ip())))
+        .find(|address| address.octets()[0] == 0xfd)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the caller's utun has no mesh address yet",
+            )
+        })?;
+    let mesh = rules::ipv6_route(own).map_err(invalid)?;
+    let routed = routing_table(false)?
+        .iter()
+        .any(|row| row.network == mesh && row.interface == interface);
+    if !routed {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "the resolver address is not on the caller's utun",
+            "the mesh route does not lead to the caller's utun",
         ));
     }
     let (allowed, refused): (Vec<String>, Vec<String>) = suffixes
@@ -427,7 +443,10 @@ fn resolver(
     if allowed.is_empty() {
         clear_resolver()?;
     } else {
-        crate::dns_integration::write_user_mode_resolver(&allowed)?;
+        crate::dns_integration::write_user_mode_resolver(
+            infraternal_mesh::address::resolver_address(own),
+            &allowed,
+        )?;
     }
     Ok((
         Reply {
@@ -443,7 +462,6 @@ fn resolver(
 #[cfg(not(feature = "mesh-dns"))]
 fn resolver(
     _utun: Option<BorrowedFd<'_>>,
-    _address: Ipv4Addr,
     _suffixes: &[String],
 ) -> io::Result<(Reply, Option<OwnedFd>)> {
     Err(io::ErrorKind::Unsupported.into())

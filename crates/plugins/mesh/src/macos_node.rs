@@ -270,7 +270,16 @@ struct MacUtun {
     /// costs a launchd start and several system tools, so an identical request is skipped
     /// (#146). Root mode leaves this empty.
     helper_applied: Arc<std::sync::Mutex<HelperApplied>>,
+    /// The mesh resolver address and the names to answer there from the tunnel (user mode,
+    /// #146, J1027 F2); empty until the first snapshot with DNS, and always empty in root mode.
+    #[cfg(feature = "mesh-dns")]
+    tunnel_dns: TunnelDns,
 }
+
+/// What the receive path needs to answer queries to the mesh resolver address: the address
+/// and the current name snapshot, replaced as a whole on every accepted snapshot.
+#[cfg(feature = "mesh-dns")]
+type TunnelDns = Arc<std::sync::RwLock<Option<(std::net::Ipv6Addr, crate::dns::Records)>>>;
 
 impl MacUtun {
     /// Register one previously opened utun descriptor with this daemon's tokio runtime.
@@ -288,6 +297,8 @@ impl MacUtun {
             mtu,
             filter,
             helper_applied: Arc::default(),
+            #[cfg(feature = "mesh-dns")]
+            tunnel_dns: Arc::default(),
         })
     }
 
@@ -311,6 +322,8 @@ impl MacUtun {
             fd: self.fd.clone(),
             mtu: self.mtu.subscribe().into(),
             filter: Arc::clone(&self.filter),
+            #[cfg(feature = "mesh-dns")]
+            tunnel_dns: Arc::clone(&self.tunnel_dns),
         }
     }
 
@@ -358,6 +371,42 @@ struct MacUtunRx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
     filter: Arc<PacketFilter>,
+    /// Shared with [`MacUtun`]; see [`MacUtunRx::answer_resolver_query`].
+    #[cfg(feature = "mesh-dns")]
+    tunnel_dns: TunnelDns,
+}
+
+impl MacUtunRx {
+    /// Answer `packet` here when it is a query to the mesh resolver address (#146, J1027 F2).
+    ///
+    /// Returns whether the packet was consumed. The reply goes straight back into the utun, so
+    /// the query never reaches the packet filter or a peer. A reply that cannot be written at
+    /// once is dropped like any lost datagram; the system resolver asks again. Root mode, and
+    /// user mode before the first DNS snapshot, consume nothing.
+    #[cfg(feature = "mesh-dns")]
+    fn answer_resolver_query(&mut self, packet: &[u8]) -> bool {
+        if !crate::tunnel_dns::looks_like_resolver_query(packet) {
+            return false;
+        }
+        let guard = self
+            .tunnel_dns
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((resolver, records)) = guard.as_ref() else {
+            return false;
+        };
+        let mtu = usize::from(self.mtu.get());
+        let Some(reply) = crate::tunnel_dns::answer(packet, *resolver, records, mtu) else {
+            // A packet to the resolver address is never for a peer; drop it either way.
+            return packet[24..40] == resolver.octets();
+        };
+        drop(guard);
+        let mut frame = Vec::with_capacity(reply.len() + 4);
+        frame.extend_from_slice(&UTUN_AF_INET6.to_be_bytes());
+        frame.extend_from_slice(&reply);
+        let _ = write(self.fd.get_ref(), &frame);
+        true
+    }
 }
 
 impl IpRecv for MacUtunRx {
@@ -378,6 +427,10 @@ impl IpRecv for MacUtunRx {
                     packet.truncate(length);
                     parse_utun_payload(packet.as_ref(), self.mtu.get())?;
                     packet.buf_mut().advance(4);
+                    #[cfg(feature = "mesh-dns")]
+                    if self.answer_resolver_query(packet.as_ref()) {
+                        continue;
+                    }
                     if !self.filter.check(packet.buf_mut(), Direction::HostToMesh) {
                         continue;
                     }
@@ -1312,8 +1365,12 @@ impl PendingWorker {
                     if let Some(config) = config.as_ref() {
                         let records = crate::dns::Records::from_config(config)?;
                         let resolver = crate::dns::Resolver::bind(config)?;
-                        if let Err(error) =
-                            configure_host_dns(&mut dns_integration, &utun, &records)
+                        if let Err(error) = configure_host_dns(
+                            &mut dns_integration,
+                            &utun,
+                            &records,
+                            config.addresses.ipv6,
+                        )
                         {
                             tracing::warn!(
                                 "mesh DNS host resolver integration could not be updated: {error}"
@@ -1892,7 +1949,12 @@ impl RuntimeState {
                 .as_ref()
                 .or(pending_dns_resolver.as_ref())
                 .ok_or(io::ErrorKind::NotConnected)?;
-            if let Err(error) = configure_host_dns(&mut self.dns_integration, utun, &dns_records) {
+            if let Err(error) = configure_host_dns(
+                &mut self.dns_integration,
+                utun,
+                &dns_records,
+                config.addresses.ipv6,
+            ) {
                 tracing::warn!("mesh DNS host resolver integration could not be updated: {error}");
             }
             resolver.publish(dns_records);

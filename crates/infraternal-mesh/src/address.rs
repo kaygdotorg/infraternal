@@ -86,6 +86,32 @@ pub fn conflicts(settings: &MeshSettings, routes: &[Route]) -> Result<Vec<Route>
     Ok(result)
 }
 
+/// The 16-bit subnet ID of the deployment's `/48` that holds mesh-wide service addresses.
+///
+/// Node addresses always use subnet 0 (see [`ula`]), so no node is ever given an address in
+/// this subnet. Each node's `/48` route already sends it into the mesh tunnel.
+pub const SERVICE_SUBNET: u16 = 0xffff;
+
+/// The interface ID of the mesh resolver inside [`SERVICE_SUBNET`]: `::53`, after the DNS port.
+pub const RESOLVER_INTERFACE_ID: u64 = 0x53;
+
+/// The deployment's mesh resolver address, `fd<global id>:ffff::53`, from any address in its
+/// unique-local `/48` (normally the node's own IPv6 address).
+///
+/// A host's system resolver sends mesh-name queries here (#146, owner decision 2026-11-21: "a
+/// resolver address inside the mesh range, answered by the agent from the tunnel"). The address
+/// sits on no interface and is never allocated, so no local program can bind it: today the node
+/// that holds the tunnel answers it from the packets it reads there. Because every node derives
+/// the same address, a later role that marks some nodes as DNS nodes can answer for it by
+/// routing this one address to them, without changing any host's resolver setup.
+#[must_use]
+pub fn resolver_address(member: Ipv6Addr) -> Ipv6Addr {
+    let mut bytes = member.octets();
+    bytes[6..8].copy_from_slice(&SERVICE_SUBNET.to_be_bytes());
+    bytes[8..].copy_from_slice(&RESOLVER_INTERFACE_ID.to_be_bytes());
+    Ipv6Addr::from(bytes)
+}
+
 /// Builds the IPv6 address `fd<global id>:0:0:0:<offset>`: the unique-local
 /// `/48` of the deployment with the node's offset in the last 64 bits.
 fn ula(global: [u8; 5], offset: u64) -> Ipv6Addr {
@@ -221,5 +247,27 @@ impl AddressAllocator {
     #[must_use]
     pub fn assigned_count(&self) -> usize {
         self.assigned.len()
+    }
+}
+
+/// The mesh resolver address against the node addresses it must never collide with.
+#[cfg(test)]
+mod resolver_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// Every node of a deployment derives the same resolver address from its own address, it
+    /// stays inside the deployment's `/48`, and no node offset (subnet 0) can ever equal it.
+    #[test]
+    fn the_resolver_is_shared_inside_the_48_and_never_a_node() {
+        let global = [0x12, 0x34, 0x56, 0x78, 0x9a];
+        let resolver = resolver_address(ula(global, 1));
+        assert_eq!(resolver, "fd12:3456:789a:ffff::53".parse::<Ipv6Addr>().unwrap());
+        for offset in [1, 2, 0x53, u64::from(u32::MAX), u64::MAX] {
+            let node = ula(global, offset);
+            assert_eq!(resolver_address(node), resolver);
+            assert_ne!(node, resolver);
+            assert_eq!(node.octets()[..6], resolver.octets()[..6]);
+        }
     }
 }

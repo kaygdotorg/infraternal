@@ -128,6 +128,14 @@ pub mod dns;
 /// Routes mesh DNS suffixes through the host's per-link resolver configuration.
 mod dns_integration;
 
+/// Answers queries to the mesh resolver address from the tunnel's read path (#146, J1027 F2).
+/// Pure packet work, so its tests also run in the Linux gate.
+#[cfg(all(
+    feature = "mesh-dns",
+    any(all(feature = "agent", target_os = "macos"), all(test, feature = "agent"))
+))]
+mod tunnel_dns;
+
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 pub mod node_actions;
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]

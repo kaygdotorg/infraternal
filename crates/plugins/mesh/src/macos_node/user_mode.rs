@@ -99,11 +99,14 @@ pub(super) fn user_mode_interface_mtu(peer_mtus: &[u16]) -> u16 {
         )
 }
 
-/// Point the system resolver for the mesh suffixes at this node's DNS listener.
+/// Point the system resolver for the mesh suffixes at this node's DNS.
 ///
-/// Root mode writes `/etc/resolver` itself. User mode asks the helper, attaching the utun so
-/// the helper can check the listener's address is on it (#146); suffixes outside the reserved
-/// private-use names are refused there and logged here.
+/// Root mode writes `/etc/resolver` itself, naming its listener on the mesh address. User mode
+/// answers the mesh resolver address from the tunnel instead (#146, J1027 F2): this publishes
+/// that address, derived from `own_ipv6`, and `records` to the utun's receive path, then asks
+/// the helper to point the resolver files at it, attaching the utun so the helper can check the
+/// address is routed into it. Suffixes outside the reserved private-use names are refused there
+/// and logged here.
 /// # Errors
 /// Reports a failed resolver write or helper request.
 #[cfg(feature = "mesh-dns")]
@@ -111,10 +114,15 @@ pub(super) fn configure_host_dns(
     integration: &mut crate::dns_integration::DnsIntegration,
     utun: &MacUtun,
     records: &crate::dns::Records,
+    own_ipv6: std::net::Ipv6Addr,
 ) -> io::Result<()> {
     if crate::macos_helper::user_mode() {
+        let resolver = infraternal_mesh::address::resolver_address(own_ipv6);
+        *utun
+            .tunnel_dns
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((resolver, records.clone()));
         let request = crate::macos_user_mode::Request::Resolver {
-            address: records.local_address(),
             suffixes: records.suffixes().to_vec(),
         };
         let reply = helper_request_once(utun, request, |applied| &mut applied.resolver)?;
@@ -126,5 +134,6 @@ pub(super) fn configure_host_dns(
         }
         return Ok(());
     }
+    let _ = own_ipv6;
     integration.configure(utun.name(), records, nix::unistd::Uid::effective().as_raw())
 }
