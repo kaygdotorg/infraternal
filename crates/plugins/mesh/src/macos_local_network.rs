@@ -204,24 +204,9 @@ fn write_state(file: &Path, state: LocalNetwork) -> std::io::Result<()> {
 /// One check over every local network: allowed if any allows, denied if any refuses.
 #[cfg(target_os = "macos")]
 fn check() -> LocalNetwork {
-    let Ok(entries) = nix::ifaddrs::getifaddrs() else {
+    let Some(addresses) = interface_addresses() else {
         return LocalNetwork::Unknown;
     };
-    let addresses: Vec<InterfaceAddress> = entries
-        .filter_map(|entry| {
-            use nix::net::if_::InterfaceFlags as F;
-            let address = entry.address.as_ref()?.as_sockaddr_in()?.ip();
-            let netmask = entry.netmask.as_ref()?.as_sockaddr_in()?.ip();
-            let flags = entry.flags;
-            Some(InterfaceAddress {
-                name: entry.interface_name,
-                broadcast_capable: flags.contains(F::IFF_UP | F::IFF_RUNNING | F::IFF_BROADCAST)
-                    && !flags.contains(F::IFF_LOOPBACK),
-                address,
-                netmask,
-            })
-        })
-        .collect();
     let targets = broadcast_targets(&addresses);
     if targets.is_empty() {
         return LocalNetwork::NoLocalNetwork;
@@ -237,37 +222,67 @@ fn check() -> LocalNetwork {
     result
 }
 
+/// This Mac's IPv4 interface addresses with whether each interface is broadcast-capable;
+/// `None` when the list cannot be read.
+#[cfg(target_os = "macos")]
+fn interface_addresses() -> Option<Vec<InterfaceAddress>> {
+    use nix::net::if_::InterfaceFlags as F;
+    let entries = nix::ifaddrs::getifaddrs().ok()?;
+    Some(
+        entries
+            .filter_map(|entry| {
+                let address = entry.address.as_ref()?.as_sockaddr_in()?.ip();
+                let netmask = entry.netmask.as_ref()?.as_sockaddr_in()?.ip();
+                let flags = entry.flags;
+                Some(InterfaceAddress {
+                    name: entry.interface_name,
+                    broadcast_capable: flags
+                        .contains(F::IFF_UP | F::IFF_RUNNING | F::IFF_BROADCAST)
+                        && !flags.contains(F::IFF_LOOPBACK),
+                    address,
+                    netmask,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Connect a UDP socket to `broadcast`:9 (which raises the alert) and send one empty datagram.
 #[cfg(target_os = "macos")]
 fn probe(broadcast: Ipv4Addr) -> LocalNetwork {
+    match probe_errors(broadcast) {
+        Some((Some(errno), _) | (None, Some(errno))) => classify(Some(errno)),
+        Some((None, None)) => LocalNetwork::Allowed,
+        None => LocalNetwork::Unknown,
+    }
+}
+
+/// The raw `errno` of the connect and of the empty send to `broadcast`:9; `None` when no
+/// socket could be set up. The send is skipped when the connect already failed.
+#[cfg(target_os = "macos")]
+fn probe_errors(broadcast: Ipv4Addr) -> Option<(Option<i32>, Option<i32>)> {
     use nix::sys::socket::{
         AddressFamily, MsgFlags, SockFlag, SockType, SockaddrIn, connect, send, setsockopt, socket,
         sockopt::Broadcast,
     };
     use std::os::fd::AsRawFd;
-    let Ok(socket) = socket(
+    let socket = socket(
         AddressFamily::Inet,
         SockType::Datagram,
         SockFlag::empty(),
         None,
-    ) else {
-        return LocalNetwork::Unknown;
-    };
-    if setsockopt(&socket, Broadcast, &true).is_err() {
-        return LocalNetwork::Unknown;
-    }
+    )
+    .ok()?;
+    setsockopt(&socket, Broadcast, &true).ok()?;
     let [a, b, c, d] = broadcast.octets();
     if let Err(errno) = connect(
         socket.as_raw_fd(),
         &SockaddrIn::new(a, b, c, d, DISCARD_PORT),
     ) {
-        return classify(Some(errno as i32));
+        return Some((Some(errno as i32), None));
     }
-    classify(
-        send(socket.as_raw_fd(), &[], MsgFlags::empty())
-            .err()
-            .map(|errno| errno as i32),
-    )
+    let sent = send(socket.as_raw_fd(), &[], MsgFlags::empty()).err();
+    Some((None, sent.map(|errno| errno as i32)))
 }
 
 /// Interface selection, error classification and the state words, checked without a Mac.
@@ -313,6 +328,39 @@ mod tests {
         assert_eq!(classify(Some(nix::libc::EHOSTUNREACH)), LocalNetwork::Denied);
         assert_eq!(classify(Some(nix::libc::EPIPE)), LocalNetwork::Denied);
         assert_eq!(classify(Some(nix::libc::ENOBUFS)), LocalNetwork::Unknown);
+    }
+
+    /// Live measurement for a real Mac (#576): run this test binary as a launchd agent in a
+    /// person's login session and watch what each check returns while they answer the alert.
+    /// Prints one line per check for `J1157_LN_SECONDS` (default 300) seconds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Run on a real Mac as a launchd agent in a login session."]
+    fn live_local_network_checks() {
+        let seconds: u64 = std::env::var("J1157_LN_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(300);
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < seconds {
+            let addresses = interface_addresses().unwrap_or_default();
+            let state = check();
+            let detail: Vec<String> = broadcast_targets(&addresses)
+                .into_iter()
+                .map(|target| format!("{target}:{:?}", probe_errors(target)))
+                .collect();
+            println!(
+                "t={:>4}s state={} probes={detail:?} interfaces={:?}",
+                start.elapsed().as_secs(),
+                state.word(),
+                addresses
+                    .iter()
+                    .map(|entry| format!("{}={}", entry.name, entry.address))
+                    .collect::<Vec<_>>()
+            );
+            // sleep: the measurement samples the person's answer over time.
+            std::thread::sleep(Duration::from_secs(5));
+        }
     }
 
     /// Every state survives the state file, and nothing else is read as a state.
