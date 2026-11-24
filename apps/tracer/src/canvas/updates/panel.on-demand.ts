@@ -49,7 +49,7 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   const status = createKeyValueList("Updates");
   const detail = el("p", "cl-up-detail");
   /** The sentence of the last refusal, until the next press or change of state. */
-  const refusal = el("p", "cl-up-detail cl-up-refusal");
+  const refusal = el("p", "cl-up-refusal");
   refusal.setAttribute("role", "status");
   refusal.hidden = true;
   const actions = el("div", "cl-up-actions");

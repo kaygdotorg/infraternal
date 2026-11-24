@@ -116,7 +116,7 @@ test.describe("behaviour", () => {
     await expect(channel.getByRole("tab", { name: "Stable" })).toHaveAttribute("aria-selected", "true");
     expect(await chosen()).toBe("stable");
     await channel.getByRole("tab", { name: "Edge" }).click();
-    await page.locator(".ui-confirm-tip").getByRole("button", { name: "Use Edge" }).click();
+    await page.locator(".ui-confirm-tip").last().getByRole("button", { name: "Use Edge" }).click();
     await expect.poll(chosen).toBe("edge");
     await context.close();
   });

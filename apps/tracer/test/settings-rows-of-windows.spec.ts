@@ -954,13 +954,17 @@ for (const [tag, size] of [["desktop", SIZES.desktop], ["phone", SIZES.phone]] a
     const page = await context.newPage();
     await open(page, "&at=appearance.themes");
     const vw = size.viewport.width;
-    for (const [level, menu, inset] of [["view", ".cl-viewlist", 12], ["row", ".cl-crumb-menu", 8], ["group", ".cl-crumb-menu", 8]] as const) {
-      await page.locator(`.cl-crumb[data-level="${level}"]`).click();
+    // On a phone the Settings pill is hidden and the back pill (Themes is the first window of Appearance, so "‹ Settings") opens the list of views; the components menu is a
+    // desktop pill only.
+    const levels = tag === "desktop" ? [["view", ".cl-viewlist", 12], ["row", ".cl-crumb-menu", 8], ["group", ".cl-crumb-menu", 8]] as const : [["view", ".cl-viewlist", 12], ["group", ".cl-crumb-menu", 8]] as const;
+    const pillOf = (level: string): string => (tag === "phone" && level === "view" ? '.cl-crumb[data-level="row"]' : `.cl-crumb[data-level="${level}"]`);
+    for (const [level, menu, inset] of levels) {
+      await page.locator(pillOf(level)).click();
       await page.waitForTimeout(900);
       const m = await page.evaluate(([pillSel, menuSel]) => {
         const pill = document.querySelector(pillSel)!.getBoundingClientRect(), node = document.querySelector<HTMLElement>(menuSel)!, r = node.getBoundingClientRect();
         return { pill: { cx: (pill.left + pill.right) / 2, left: pill.left, w: pill.width }, menu: { cx: (r.left + r.right) / 2, w: r.width, left: r.left, top: r.top }, origin: node.style.transformOrigin };
-      }, [`.cl-crumb[data-level="${level}"]`, menu] as const);
+      }, [pillOf(level), menu] as const);
       const half = m.menu.w / 2, wanted = Math.max(inset + half, Math.min(m.pill.cx, vw - inset - half));
       near(m.menu.cx, wanted, `the ${level} menu is centred on its pill (or at the screen's inset)`);
       if (level !== "view" && Math.abs(wanted - m.pill.cx) < 0.5) near(m.menu.cx, m.pill.cx, `the ${level} menu's centre is the pill's centre`);
