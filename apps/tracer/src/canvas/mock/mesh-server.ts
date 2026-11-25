@@ -18,6 +18,7 @@
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
 import { ACTION, TOPIC, ActionRefused, type MeshTransport } from "../mesh/protocol";
+import { derivedGrantName } from "../mesh/source";
 
 export type FakeMeshState = "ready" | "loading" | "error" | "denied";
 /** A mock mesh membership row, including whether the node can fence peers after a restore. */
@@ -26,7 +27,10 @@ export interface FakeGrant { name: string; arrowId: number; from: string; to: st
 export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[] }
 
 const OS: HostPlatform[] = ["ubuntu", "debian", "nixos", "apple", "redhat", "proxmox"];
-const derive = (from: string, to: string): string => `${from.replace(/^tag:/, "")} to ${to.replace(/^tag:/, "")}`;
+/** A seeded grant's name: the one the canvas derives, so seeded and drawn grants look alike to the adapter. */
+const derive = derivedGrantName;
+/** The server's rule for a grant name (`validate_name` in the mesh plugin): lowercase letters, digits and inner hyphens, at most 63 bytes. */
+const GRANT_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** The four hosts, two tags and seven grants the mockup has always shown. */
 export function seedMesh(grants: ReadonlyArray<{ id: string; from: string; to: string; via?: string }>): FakeMeshSeed {
@@ -243,7 +247,10 @@ export class FakeMeshServer implements MeshTransport {
     for (const k of Object.keys(input)) if (!keys.includes(k)) throw new ActionRefused(undefined, "invalid input");
     for (const k of keys) if (!(k in input)) throw new ActionRefused(undefined, "invalid input");
   }
-  private name(v: unknown): string { if (typeof v !== "string" || !v || v.length > 200) throw new ActionRefused(undefined, "invalid input"); return v; }
+  /** A grant name, refused as the server refuses it: a name with a space or a capital is `invalid input` there too. */
+  private name(v: unknown): string { if (typeof v !== "string" || !GRANT_NAME.test(v)) throw new ActionRefused(undefined, "invalid input"); return v; }
+  /** A host name for a rename (the server's host rule is wider than a grant name's; this fake only bounds it). */
+  private hostName(v: unknown): string { if (typeof v !== "string" || !v || v.length > 200) throw new ActionRefused(undefined, "invalid input"); return v; }
 
   private answer(action: string, input: Record<string, unknown>): Record<string, unknown> {
     if (this.state === "error") throw new Error("connection lost");
@@ -287,7 +294,7 @@ export class FakeMeshServer implements MeshTransport {
       case ACTION.nodeRename: {
         this.strict(input, ["node_id", "name"]);
         const node = typeof input.node_id === "number" ? this.nodes.get(input.node_id) : undefined;
-        const next = this.name(input.name);
+        const next = this.hostName(input.name);
         if (!node) throw new ActionRefused(undefined, "not found");
         if ([...this.nodes.values()].some((o) => o !== node && o.name === next)) throw new ActionRefused(undefined, "conflict");
         // Grants and relays name hosts by name in this fake; the real server holds ids and needs none of this.

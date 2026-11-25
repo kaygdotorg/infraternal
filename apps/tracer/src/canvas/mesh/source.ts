@@ -79,8 +79,18 @@ export interface MeshSource {
   dispose(): void;
 }
 
-/** What a grant is called when nobody named it (the name the server keeps): who may reach what, in words. */
-export const derivedGrantName = (from: string, to: string): string => `${from.replace(/^tag:/, "")} to ${to.replace(/^tag:/, "")}`;
+/** The longest grant name the server stores (`validate_name` in the mesh plugin), leaving room for a `-NN` that makes it unique. */
+const NAME_ROOM = 60;
+/** One end as a word of a grant name: `tag:ops` is `ops`, `net:7` is `net-7`, a host is its name. */
+const endWord = (end: string): string => end.replace(/^tag:/, "").replace(/^net:/, "net-");
+/**
+ * What a grant is called when nobody named it (the name the server keeps): who may reach what, `ops-to-build-01`. The
+ * server takes lowercase letters, digits and inner hyphens only, at most 63 bytes, so anything else in a host name becomes
+ * a hyphen and a long pair is cut short. People never read this name: an unnamed arrow is shown as a sentence
+ * (`grantSentence`), so the words only need to be stable, valid and recognisable in the server's own lists.
+ */
+export const derivedGrantName = (from: string, to: string): string =>
+  `${endWord(from)}-to-${endWord(to)}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-{2,}/g, "-").slice(0, NAME_ROOM).replace(/^-+|-+$/g, "") || "access";
 /** The grant's name, or the derived one for a source without names. */
 export const grantLabel = (g: Grant): string => g.name ?? derivedGrantName(g.from, g.to);
 /** A host or tag as the person sees it on its card. */
