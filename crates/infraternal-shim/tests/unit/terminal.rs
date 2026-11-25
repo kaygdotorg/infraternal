@@ -426,3 +426,18 @@ fn carry_keeps_c0_payload_of_strings_only() {
     terminal.process(b"m\x1b_a\nb");
     assert_eq!(terminal.pending, b"\x1b_a\nb");
 }
+
+/// #561: bytes of a UTF-8 character the engine already replaced must leave
+/// the carry, or a viewer prints the replacement character a second time.
+#[test]
+fn carry_drops_utf8_bytes_the_engine_already_replaced() {
+    let mut terminal = reset_terminal(20, 3).unwrap();
+    terminal.process(&[0xeb, 0xed]);
+    assert_eq!(terminal.pending, [0xed], "EB was replaced when ED arrived");
+    terminal.process(b"\xbc");
+    assert!(terminal.pending.is_empty(), "ED then BC: both replaced");
+    terminal.process(&[0xe2, 0x82]);
+    assert_eq!(terminal.pending, [0xe2, 0x82]);
+    terminal.process(&[0xac]);
+    assert!(terminal.pending.is_empty());
+}

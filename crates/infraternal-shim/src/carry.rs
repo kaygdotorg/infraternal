@@ -135,19 +135,28 @@ impl Carry {
     }
 
     /// Follows the engine through one more output byte.
-    pub(crate) fn advance(&mut self, byte: u8) {
+    ///
+    /// Returns true when the byte cut short a half-decoded UTF-8 character
+    /// and was then read again as the start of something new. The engine has
+    /// already printed a replacement character for the abandoned bytes, so a
+    /// carry that still held them would print it a second time: the caller
+    /// must drop everything before this byte.
+    pub(crate) fn advance(&mut self, byte: u8) -> bool {
         if self.state == State::Ground {
-            self.ground(byte);
+            self.ground(byte)
         } else {
             self.state = Self::next(self.state, byte);
+            false
         }
     }
 
     /// Ground state: UTF-8 decoding, where only a decoded ESC changes state.
-    fn ground(&mut self, byte: u8) {
+    /// Returns true when an ill-formed character was replaced and `byte` read again.
+    fn ground(&mut self, byte: u8) -> bool {
         // An ill-formed sequence is replaced and the byte is looked at again,
         // which can only repeat once: the DFA is back at its start state.
-        for _ in 0..2 {
+        let mut reread = false;
+        loop {
             let class = CHAR_CLASSES[usize::from(byte)];
             let before = self.utf8;
             let next = TRANSITIONS[usize::from(before) + usize::from(class)];
@@ -155,15 +164,16 @@ impl Carry {
                 self.utf8 = ACCEPT;
                 if before == ACCEPT {
                     // The first byte of a character was bad and is consumed.
-                    return;
+                    return reread;
                 }
+                reread = true;
                 continue;
             }
             self.utf8 = next;
             if next == ACCEPT && byte == 0x1b {
                 self.state = State::Escape;
             }
-            return;
+            return reread;
         }
     }
 

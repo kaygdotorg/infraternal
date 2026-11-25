@@ -250,7 +250,13 @@ impl Terminal {
                 self.pending.clear();
                 self.carry_overflow = false;
             }
-            self.carry.advance(byte);
+            if self.carry.advance(byte) {
+                // The byte cut a UTF-8 character short and starts afresh; the
+                // engine already printed a replacement for the abandoned
+                // bytes, which the carry must not repeat.
+                self.pending.clear();
+                self.carry_overflow = false;
+            }
             if self.carry.at_ground() {
                 // The engine finished (or abandoned) everything: nothing to carry.
                 self.pending.clear();

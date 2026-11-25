@@ -5,7 +5,7 @@ use super::Carry;
 fn run(bytes: &[u8]) -> Carry {
     let mut carry = Carry::default();
     for &byte in bytes {
-        carry.advance(byte);
+        let _ = carry.advance(byte);
     }
     carry
 }
@@ -94,4 +94,23 @@ fn broken_utf8_is_replaced_the_way_the_engine_does() {
 fn escape_inside_a_sequence_restarts_it() {
     assert!(!run(b"\x1b[1\x1b").at_ground());
     assert!(run(b"\x1b[1\x1b[m").at_ground());
+}
+
+/// An ill-formed character is replaced once by the engine; the byte that cut
+/// it short is read again and the abandoned bytes must leave the carry.
+#[test]
+fn a_byte_that_cuts_a_character_short_restarts_the_carry() {
+    let mut carry = Carry::default();
+    assert!(!carry.advance(0xeb), "a lead byte opens a character");
+    assert!(carry.advance(0xed), "another lead byte abandons it");
+    assert!(carry.advance(b'a'), "ED wants 80-9F next, so 'a' abandons it too");
+    assert!(carry.at_ground());
+    assert!(!carry.advance(0xe2));
+    assert!(!carry.advance(0x82));
+    assert!(!carry.advance(0xac), "a complete character is not a restart");
+    // A stray byte at ground is replaced and consumed: nothing was abandoned.
+    assert!(!carry.advance(0x9b));
+    assert!(!carry.advance(0xe2));
+    assert!(carry.advance(0x1b), "ESC after a lead byte restarts, then opens a sequence");
+    assert!(!carry.at_ground());
 }
