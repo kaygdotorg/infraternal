@@ -112,7 +112,14 @@ impl ClientIdentity {
 /// Adapts an [`IdentitySigner`] to rustls's `SigningKey`, so a TLS client can
 /// authenticate without the private key bytes.
 #[derive(Debug)]
-struct SignerKey(Arc<dyn IdentitySigner>);
+pub(crate) struct SignerKey(Arc<dyn IdentitySigner>);
+
+/// `signer` as a rustls signing key, for checks that compare it with a
+/// certificate (the join's reply check).
+#[cfg(feature = "join")]
+pub(crate) fn signing_key(signer: &Arc<dyn IdentitySigner>) -> SignerKey {
+    SignerKey(Arc::clone(signer))
+}
 
 impl SigningKey for SignerKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {
@@ -207,6 +214,65 @@ impl IdentitySigner for Ed25519Pkcs8 {
 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignError> {
         Ok(self.pair.sign(message).as_ref().to_vec())
+    }
+}
+
+/// A P-256 identity key held in memory, for tests only: Linux test clients
+/// stand in for an iPhone with it (#580). Devices keep their key in the
+/// Secure Enclave and hosts use Ed25519, so no shipped build compiles this
+/// (it exists only under `cfg(test)` and the `test-support` feature).
+#[cfg(any(test, feature = "test-support"))]
+pub struct SoftwareP256 {
+    pair: ring::signature::EcdsaKeyPair,
+    random: ring::rand::SystemRandom,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl SoftwareP256 {
+    /// A fresh random key.
+    /// # Errors
+    /// The system random source failed.
+    pub fn generate() -> Result<Self, SignError> {
+        use ring::signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair};
+        let random = ring::rand::SystemRandom::new();
+        let document = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random)
+            .map_err(|_| SignError)?;
+        let pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, document.as_ref(), &random)
+                .map_err(|_| SignError)?;
+        Ok(Self { pair, random })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl fmt::Debug for SoftwareP256 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use ring::signature::KeyPair;
+        formatter
+            .debug_struct("SoftwareP256")
+            .field("public_key", &self.pair.public_key())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl IdentitySigner for SoftwareP256 {
+    fn algorithm(&self) -> KeyAlgorithm {
+        KeyAlgorithm::EcdsaP256Sha256
+    }
+
+    fn public_key_spki(&self) -> Vec<u8> {
+        use ring::signature::KeyPair;
+        let mut spki = crate::csr::P256_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(self.pair.public_key().as_ref());
+        spki
+    }
+
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignError> {
+        self.pair
+            .sign(&self.random, message)
+            .map(|signature| signature.as_ref().to_vec())
+            .map_err(|_| SignError)
     }
 }
 

@@ -1143,6 +1143,9 @@ pub(crate) struct RemoteListeners {
     recovery: bool,
     #[cfg(test)]
     pub(crate) diagnostic_hosts: RemoteHosts,
+    /// The device links these listeners hold (#580), for tests to inspect.
+    #[cfg(test)]
+    pub(crate) diagnostic_devices: Arc<crate::remote_device_link::DeviceLinks>,
 }
 impl Drop for RemoteListeners {
     fn drop(&mut self) {
@@ -1276,6 +1279,8 @@ impl RemoteListeners {
     ) -> io::Result<(Self, Arc<ServerTls>)> {
         #[cfg(test)]
         let diagnostic_hosts = hosts.clone();
+        #[cfg(test)]
+        let diagnostic_devices = limits.devices.clone();
         let (endpoint, tcp, bindings) = reserve_transports(
             address,
             &remote_quic::server_config(identity, roots)?,
@@ -1313,6 +1318,8 @@ impl RemoteListeners {
                 recovery: recovering,
                 #[cfg(test)]
                 diagnostic_hosts,
+                #[cfg(test)]
+                diagnostic_devices,
             },
             tls,
         ))

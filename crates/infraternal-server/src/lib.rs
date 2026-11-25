@@ -123,6 +123,9 @@ mod remote_admission;
 mod remote_agent_http;
 #[cfg(all(test, feature = "mesh-transport-proof"))]
 mod remote_autoswitch_probe;
+/// The server end of a device's held leg-B link, which serves nothing (#580).
+#[cfg(feature = "remote")]
+mod remote_device_link;
 #[cfg(feature = "remote")]
 pub mod remote_enrollment;
 #[cfg(feature = "remote")]

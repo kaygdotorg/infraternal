@@ -539,7 +539,8 @@ impl Channel for PrefixedControl {
 
 /// Dial the server over QUIC with this host's identity, and refuse a server
 /// leaf older than the newest one this enrollment has accepted (#559) before
-/// any stream is opened.
+/// any stream is opened. The dial itself is `infraternal-link`'s, shared
+/// with the iPhone's link, so both refuse the same things the same way.
 async fn quic_connect(
     endpoint: &quinn::Endpoint,
     identity: &RemoteIdentity,
@@ -547,25 +548,13 @@ async fn quic_connect(
     let address = identity
         .endpoint
         .ok_or_else(|| io::Error::from(io::ErrorKind::Unsupported))?;
-    let connection = tokio::time::timeout(
-        Duration::from_secs(5),
-        endpoint
-            .connect(address, &identity.server_name)
-            .map_err(io::Error::other)?,
+    infraternal_link::quic::connect(
+        endpoint,
+        address,
+        &identity.server_name,
+        &identity.server_leaf,
     )
     .await
-    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-    .map_err(|error| match error {
-        quinn::ConnectionError::TransportError(_) => {
-            io::Error::from(io::ErrorKind::PermissionDenied)
-        }
-        error => io::Error::other(error),
-    })?;
-    if let Err(error) = identity.server_leaf.admit_quic(&connection) {
-        connection.close(0u32.into(), b"");
-        return Err(error);
-    }
-    Ok(connection)
 }
 
 /// The Hello this agent sends, offering renewal and identity rotation when available.

@@ -13,13 +13,22 @@ default = []
 # native-streams, the datagram lanes). Hosts that never dial the server, such
 # as a terminal-only agent, leave QUIC out.
 quic = ["dep:quinn", "dep:rustls", "dep:ring"]
+# The join client (#580, L3): PKCS#10 over the signer, POST /remote/join with
+# hyper over tokio-rustls and the invitation's pinned root, and the reply's
+# chain and key checks. No OpenSSL, so it builds for iOS.
+join = ["quic", "tokio/net", "dep:base64", "dep:bytes", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:serde_json", "dep:tokio-rustls", "dep:url", "dep:zeroize"]
 # Owned frame reads, plus QUIC datagram lanes for plugin media with `quic` (#146).
 native-streams = ["infraternal-plugin-api/native-streams", "dep:bytes"]
 # Test hooks (the offline-limit override, receiver inspection); dev-dependencies only.
 test-support = ["native-streams"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+# HTTP/1.1 client for the join's one POST; the same crate the CLI uses.
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
 infraternal-plugin-api = { workspace = true }
 infraternal-protocol.workspace = true
 quinn = { workspace = true, optional = true }
@@ -27,7 +36,13 @@ quinn = { workspace = true, optional = true }
 ring = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
+# The rustls project's tokio adapter, for the join's HTTPS (owner, #580 Q2,
+# 2026-11-25), with ring only (see the workspace entry).
+tokio-rustls = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 uuid.workspace = true
+zeroize = { workspace = true, optional = true }
 # Its own feature list, not the workspace's: no process or signal support (#580).
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "macros"] }
 

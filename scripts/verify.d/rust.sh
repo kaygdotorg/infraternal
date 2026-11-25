@@ -323,6 +323,10 @@ rust_check_macos_compile() {
 # The iOS client crates (#580). The two FFI crates arrive with step F1 of
 # docs/design/client-core-split.md; until they exist, the crates that already
 # build for iOS stand in, so both rows below have something to check.
+# The iPhone's link client (infraternal-link) is checked on its own with the
+# features the packet tunnel extension uses: the QUIC link and the join (#580,
+# L3). Once the FFI crates exist they pull it in, and this stays as a direct check.
+IOS_LINK_FEATURES=quic,join
 rust_ios_client_crates() {
     local crate
     IOS_CLIENT_CRATES=()
@@ -354,6 +358,8 @@ rust_check_ios_compile() {
     rust_apple_check_env aarch64-apple-ios aarch64-apple-ios-sim || return 1
     for target in aarch64-apple-ios aarch64-apple-ios-sim; do
         env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" "${packages[@]}" || failed=1
+        # The iPhone's link client with the features the extension uses (L3).
+        env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" --package infraternal-link --features "$IOS_LINK_FEATURES" || failed=1
     done
     return "$failed"
 }
@@ -371,6 +377,8 @@ rust_check_ios_dependency_guard() {
         tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package "$crate")" || return 1
         printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
     done
+    tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package infraternal-link --features "$IOS_LINK_FEATURES")" || return 1
+    printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
     return "$failed"
 }
 

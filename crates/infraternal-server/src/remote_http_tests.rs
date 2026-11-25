@@ -1459,3 +1459,7 @@ async fn device_requests_that_do_not_fit_the_mode_are_refused() {
         .unwrap();
     assert_eq!(devices, 0, "no refusal left a device row behind");
 }
+
+/// The device's slice-1 link end to end: join over real HTTPS, held QUIC link (#580, L3).
+#[path = "remote_device_link_tests.rs"]
+mod device_link;

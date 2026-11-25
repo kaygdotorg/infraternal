@@ -160,6 +160,51 @@ pub fn client_config_with_liveness(
     Ok(config)
 }
 
+/// How long one QUIC handshake may take before the dial gives up.
+pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Dial the server at `address` as `server_name` over `endpoint` (whose
+/// default client config carries the identity and pinned roots), then hold
+/// the verified server leaf to `floor` before any stream is opened (#559).
+///
+/// Every client dials through this function, the infraternal agent and the
+/// iPhone alike, so they refuse the same things in the same way:
+/// - a handshake that does not finish within [`HANDSHAKE_DEADLINE`] is `TimedOut`;
+/// - a TLS or transport refusal (a wrong CA, a wrong name, a refused client
+///   certificate) is `PermissionDenied`, the kind that starts certificate
+///   recovery on a host;
+/// - a server leaf older than the floor is `InvalidData` and the connection
+///   is closed at once (the floor's own refusal, which deliberately does not
+///   start recovery).
+/// # Errors
+/// Those refusals, or any other connection error as `Other`.
+pub async fn connect(
+    endpoint: &quinn::Endpoint,
+    address: std::net::SocketAddr,
+    server_name: &str,
+    floor: &crate::server_leaf_floor::ServerLeafFloor,
+) -> io::Result<quinn::Connection> {
+    let connection = tokio::time::timeout(
+        HANDSHAKE_DEADLINE,
+        endpoint
+            .connect(address, server_name)
+            .map_err(io::Error::other)?,
+    )
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+    .map_err(|error| match error {
+        quinn::ConnectionError::TransportError(_) => {
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        }
+        error => io::Error::other(error),
+    })?;
+    if let Err(error) = floor.admit_quic(&connection) {
+        connection.close(0u32.into(), b"");
+        return Err(error);
+    }
+    Ok(connection)
+}
+
 /// Tests for the bounds this module enforces before any handshake.
 #[cfg(test)]
 mod tests {
