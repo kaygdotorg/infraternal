@@ -9,6 +9,7 @@ const lib = @import("terminal/lib.zig");
 const Writer = std.Io.Writer;
 const SnapshotError = Writer.Error || error{Unrepresentable};
 const unicode = @import("unicode/main.zig");
+const uucode = @import("uucode");
 
 /// Byte count on success, zero on overflow, max usize for a state requiring
 /// nonprinting upstream restoration. Serialization never mutates the source.
@@ -27,6 +28,14 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // C initialization starts at false, while RIS starts at true. Restoring
     // false through OSC 133 would itself create unimportable semantic state.
     if (t.flags.shell_redraws_prompt != .true) return error.Unrepresentable;
+    // Painting prints, and every print sets the terminal-global REP source:
+    // text cells, and also the stand-in glyph or space that rebuilds a wrapped
+    // row's edge. A state that has such cells but an empty source (rows that
+    // wrap after a reflow of a terminal that never printed, or DECALN fill)
+    // cannot be resumed faithfully: only RIS empties the source again, so a
+    // viewer would repeat a character where the original repeats nothing.
+    // Refuse it rather than resume it unfaithfully.
+    var paints_a_print = false;
     // The bounded painter cannot recreate a boundary wrap flag independently
     // of adjacent history or scrolling. Refuse these states until upstream
     // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
@@ -50,7 +59,9 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = @intCast(first_exported) } }, null);
             while (semantic_rows.next()) |semantic_row| {
                 if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
+                if (semantic_row.rowAndCell().row.wrap) paints_a_print = true;
                 for (semantic_row.cells(.all)) |value| {
+                    if (value.hasText()) paints_a_print = true;
                     if (value.semantic_content != .output or (screen.protected_mode == .off and value.protected)) return error.Unrepresentable;
                 }
             }
@@ -67,6 +78,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             }
         }
     }
+    if (paints_a_print and t.previous_char == null) return error.Unrepresentable;
     try w.writeAll("\x1bc\x1b[?6l\x1b[r\x1b[?7h\x1b[?2027l");
     // DECSM stores values independently of live modes. Seed these before
     // painting, because screen and cursor modes can have destructive effects.
@@ -653,9 +665,28 @@ fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotErro
             try cellLink(w, p, tail);
             try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (tail.protected) 1 else 0), effectiveStyle(p, tail).formatterVt() });
         }
-        try w.writeAll("\x1b[?2027h");
-        for (extra) |cp| try codepoint(w, cp);
-        try w.writeAll("\x1b[?2027l");
+        // Replay each extra under the mode that attaches it, the way the
+        // engine decided when it stored it. With clustering on, a codepoint
+        // that the boundary rules separate from its predecessor is dropped
+        // (a format control such as U+061C after a letter); with clustering
+        // off, a zero-width codepoint attaches wherever it lands. Clustering
+        // is therefore on only for extras the boundary rules join, and off for
+        // the rest. The chain of previous codepoints feeds the same break
+        // state machine the engine feeds.
+        var state: uucode.grapheme.BreakState = .default;
+        var previous = value.codepoint();
+        var clustering = false;
+        for (extra) |cp| {
+            const joins = !unicode.graphemeBreak(unicode.table.get(previous).grapheme_break, unicode.table.get(cp).grapheme_break, &state) and
+                unicode.graphemeWidthEffect(previous, cp) != .ignore;
+            if (joins != clustering) {
+                try w.writeAll(if (joins) "\x1b[?2027h" else "\x1b[?2027l");
+                clustering = joins;
+            }
+            try codepoint(w, cp);
+            previous = cp;
+        }
+        if (clustering) try w.writeAll("\x1b[?2027l");
         if (widened) {
             // Keep row()'s attribute caches consistent for the next cell.
             try cellLink(w, p, value);

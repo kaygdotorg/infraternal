@@ -401,6 +401,18 @@ impl Terminal {
         }
         b""
     }
+    /// How many bytes at the end of a snapshot are the carry (the unfinished
+    /// sequence plus its suffix); zero when the carry overflowed and no
+    /// snapshot exists. The fuzz harness cuts them off to tell a carry defect
+    /// from a defect of the repaint itself.
+    #[cfg(any(test, feature = "parser-checks"))]
+    pub(crate) fn carry_len(&self) -> usize {
+        if self.carry_overflow {
+            0
+        } else {
+            self.pending.len() + self.carry_suffix().len()
+        }
+    }
     /// Bounded visible fallback; fidelity gaps and clipping are explicitly
     /// announced by the negotiated frame, never substituted for a faithful VT.
     #[must_use]
