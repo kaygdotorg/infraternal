@@ -1,0 +1,46 @@
+diff --git a/crates/plugins/mesh/Cargo.toml b/crates/plugins/mesh/Cargo.toml
+index 188204deb..20501069d 100644
+--- a/crates/plugins/mesh/Cargo.toml
++++ b/crates/plugins/mesh/Cargo.toml
+@@ -30,6 +30,7 @@ test-support = ["agent", "infraternal-plugin-relay?/test-support"]
+ mesh-dns = ["dep:hickory-proto", "dep:url"]
+ 
+ [dependencies]
++foldhash = "0.2"
+ infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
+ infraternal-protocol.workspace = true
+ infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
+diff --git a/crates/plugins/mesh/src/packet_filter.rs b/crates/plugins/mesh/src/packet_filter.rs
+index fe0860b12..c8d5c9284 100644
+--- a/crates/plugins/mesh/src/packet_filter.rs
++++ b/crates/plugins/mesh/src/packet_filter.rs
+@@ -2115,12 +2115,24 @@ impl FlowShard {
+     }
+ }
+ 
+-/// Index a tuple inside its peer's fixed-size table in either packet direction.
++/// One process-wide seeded hasher state for the flow slot function (J1227 measurement patch,
++/// #260). The seed is drawn once at first use, so the slot of a tuple cannot be computed offline.
++fn flow_hash_state() -> &'static foldhash::fast::RandomState {
++    static STATE: std::sync::OnceLock<foldhash::fast::RandomState> = std::sync::OnceLock::new();
++    STATE.get_or_init(foldhash::fast::RandomState::default)
++}
++
++/// Index a tuple inside its peer's fixed-size table in either packet direction, with no
++/// direction-ordering step: each endpoint (address and port) is hashed on its own, the two
++/// results are added (addition commutes, so a reply hashes like its request), the protocol joins
++/// the sum, and one more seeded hash of the sum removes the additive structure of the endpoints.
+ fn flow_start(key: FlowKey) -> usize {
+-    let mut tuple_hasher = DefaultHasher::new();
+-    key.canonical().hash(&mut tuple_hasher);
+-    let tuple_hash = tuple_hasher.finish();
+-    usize::try_from(tuple_hash % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
++    use std::hash::BuildHasher;
++    let state = flow_hash_state();
++    let a = state.hash_one((key.source, key.source_port));
++    let b = state.hash_one((key.destination, key.destination_port));
++    let sum = a.wrapping_add(b).wrapping_add(u64::from(key.protocol));
++    usize::try_from(state.hash_one(sum) % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
+ }
+ 
+ /// Index one fragment identity inside its peer's fixed-size table.

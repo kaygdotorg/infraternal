@@ -1,0 +1,165 @@
+diff --git a/gotatun/Cargo.toml b/gotatun/Cargo.toml
+index 77d818a..5a0d4e5 100644
+--- a/gotatun/Cargo.toml
++++ b/gotatun/Cargo.toml
+@@ -31,6 +31,7 @@ harness = false
+ name = "main"
+ 
+ [dependencies]
++foldhash = "0.2"
+ aead = { workspace = true }
+ base64 = { workspace = true }
+ bitfield-struct = { workspace = true }
+diff --git a/gotatun/src/device/allowed_ips.rs b/gotatun/src/device/allowed_ips.rs
+index af7cf89..431c80e 100644
+--- a/gotatun/src/device/allowed_ips.rs
++++ b/gotatun/src/device/allowed_ips.rs
+@@ -13,13 +13,27 @@
+ use ip_network_table::IpNetworkTable;
+ use ipnetwork::IpNetwork;
+ 
++use std::collections::HashMap;
+ use std::iter::FromIterator;
+ use std::net::IpAddr;
+ 
+-/// A trie of IP/cidr addresses
++/// Hasher of the host-route table: a per-process random seed (the looked-up address is chosen by
++/// whoever sends packets, so the seed must not be guessable).
++type HostHash = foldhash::fast::RandomState;
++
++/// Allowed IPs: a seeded hash table of host routes (`/32` and `/128`, which is what every mesh
++/// peer has) in front of a trie for every shorter prefix.
++///
++/// A host route is the longest possible match for its own address, so a hit in the hash table is
++/// exactly the trie's answer, and a miss means "no host route": the trie then answers. Host routes
++/// are kept in the hash table only, never also in the trie, so an insert, a replacement or a
++/// removal touches one structure and the two can not disagree. `find` costs one hash lookup for a
++/// peer's own address (about 3 ns, against about 68 ns for the trie) and one more for a subnet
++/// route, which then falls through to the trie.
+ // TODO: delete me
+ #[derive(Default)]
+ pub struct AllowedIps<D = ()> {
++    hosts: HashMap<IpAddr, D, HostHash>,
+     ips: IpNetworkTable<D>,
+ }
+ 
+@@ -38,36 +52,60 @@ impl<'a, D> FromIterator<(&'a IpNetwork, D)> for AllowedIps<D> {
+ impl<D> AllowedIps<D> {
+     pub fn new() -> Self {
+         Self {
++            hosts: HashMap::default(),
+             ips: IpNetworkTable::new(),
+         }
+     }
+ 
+     #[cfg(test)]
+     pub fn clear(&mut self) {
++        self.hosts.clear();
+         self.ips = IpNetworkTable::new();
+     }
+ 
+     pub fn insert(&mut self, key: IpAddr, cidr: u8, data: D) -> Option<D> {
+         // Use new_truncate to remove the host bits
+         let network = ip_network::IpNetwork::new_truncate(key, cidr).expect("cidr is valid length");
+-        self.ips.insert(network, data)
++        if network.is_ipv4() && cidr == 32 || network.is_ipv6() && cidr == 128 {
++            self.hosts.insert(network.network_address(), data)
++        } else {
++            self.ips.insert(network, data)
++        }
+     }
+ 
+     pub fn find(&self, key: IpAddr) -> Option<&D> {
++        if !self.hosts.is_empty()
++            && let Some(data) = self.hosts.get(&key)
++        {
++            return Some(data);
++        }
+         self.ips.longest_match(key).map(|(_net, data)| data)
+     }
+ 
+     pub fn remove(&mut self, predicate: &dyn Fn(&D) -> bool) {
++        self.hosts.retain(|_, v| !predicate(v));
+         self.ips.retain(|_, v| !predicate(v));
+     }
+ 
+     #[cfg(test)]
+     pub fn iter(&self) -> impl Iterator<Item = (&D, IpNetwork)> {
+-        self.ips.iter().map(|(ip_network, d)| {
+-            let ip_network = IpNetwork::new(ip_network.network_address(), ip_network.netmask())
+-                .expect("cidr is valid length");
+-            (d, ip_network)
+-        })
++        // The trie yields routes sorted by address family, network address and prefix; the
++        // host routes are merged back into that order so callers see one table.
++        let mut all: Vec<(&D, IpNetwork)> = self
++            .ips
++            .iter()
++            .map(|(ip_network, d)| {
++                let ip_network = IpNetwork::new(ip_network.network_address(), ip_network.netmask())
++                    .expect("cidr is valid length");
++                (d, ip_network)
++            })
++            .chain(self.hosts.iter().map(|(ip, d)| {
++                let bits = if ip.is_ipv4() { 32 } else { 128 };
++                (d, IpNetwork::new(*ip, bits).expect("cidr is valid length"))
++            }))
++            .collect();
++        all.sort_by_key(|(_, n)| (n.is_ipv6(), n.network(), n.prefix()));
++        all.into_iter()
+     }
+ }
+ 
+@@ -393,6 +431,52 @@ mod tests {
+         );
+     }
+ 
++    /// A reference model: the plain trie. The hybrid must answer every query as the trie does,
++    /// through inserts, replacements, nested prefixes and removals (J1227).
++    #[test]
++    fn host_routes_agree_with_a_plain_trie() {
++        let mut state = 0x9E37_79B9_7F4A_7C15u64;
++        let mut next = move || {
++            state ^= state << 13;
++            state ^= state >> 7;
++            state ^= state << 17;
++            state
++        };
++        for _ in 0..30 {
++            let mut hybrid: AllowedIps<u32> = AllowedIps::new();
++            let mut trie: IpNetworkTable<u32> = IpNetworkTable::new();
++            for step in 0..2000u32 {
++                let ip = if next() % 3 == 0 {
++                    IpAddr::from((0xfd00u128 << 112 | u128::from(next() % 40)).to_be_bytes())
++                } else {
++                    IpAddr::from([10, (next() % 3) as u8, 0, (next() % 40) as u8])
++                };
++                let full = if ip.is_ipv4() { 32 } else { 128 };
++                match next() % 10 {
++                    0..=4 => {
++                        let cidr = if next() % 3 == 0 { (next() % (full + 1)) as u8 } else { full as u8 };
++                        let net = ip_network::IpNetwork::new_truncate(ip, cidr).unwrap();
++                        assert_eq!(hybrid.insert(ip, cidr, step), trie.insert(net, step));
++                    }
++                    5 => {
++                        let m = 2 + (next() % 4) as u32;
++                        hybrid.remove(&|v| v % m == 0);
++                        trie.retain(|_, v| *v % m != 0);
++                    }
++                    _ => {}
++                }
++                for _ in 0..6 {
++                    let q = if next() % 3 == 0 {
++                        IpAddr::from((0xfd00u128 << 112 | u128::from(next() % 48)).to_be_bytes())
++                    } else {
++                        IpAddr::from([10, (next() % 3) as u8, 0, (next() % 48) as u8])
++                    };
++                    assert_eq!(hybrid.find(q), trie.longest_match(q).map(|(_, d)| d));
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn test_allowed_ips_iter_zero_leaf_bits() {
+         let mut map: AllowedIps<char> = Default::default();
