@@ -108,6 +108,7 @@ impl EnrollmentStore {
     /// A removal keeps bootstrap coordinates for manual cleanup until this receipt.
     /// For a confirmation that carries no D356 report (the agent is gone), no
     /// report is kept (D398).
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn confirm_login_cleanup(
         &self,
         host: Uuid,

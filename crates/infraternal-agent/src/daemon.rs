@@ -501,8 +501,32 @@ fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRef
             | io::ErrorKind::InvalidData
             | io::ErrorKind::PermissionDenied,
         ) => OpenRefusal::Invalid,
-        (None, _) => OpenRefusal::ResourceUnavailable,
+        (None, _) => {
+            log_unclassified_open_failure(error);
+            OpenRefusal::ResourceUnavailable
+        }
     }
+}
+
+/// Says on stderr why an open was answered `resource_unavailable` (#562).
+///
+/// The browser only learns "try again", so this line is the only place the
+/// cause shows. It prints the `io::ErrorKind`, the raw errno when there is
+/// one and the error's own text. The text comes from the failing call
+/// (`spawn`, `openpty`, a systemd answer), never from the request, so it
+/// carries no argv, environment or secret; account names and grants are not
+/// part of it. Lines are capped so a runaway message cannot flood the log.
+fn log_unclassified_open_failure(error: &io::Error) {
+    const CAP: usize = 240;
+    let text = error.to_string();
+    let text: String = text.chars().filter(|c| !c.is_control()).take(CAP).collect();
+    eprintln!(
+        "terminal open refused as resource_unavailable: kind={:?} errno={} detail={text}",
+        error.kind(),
+        error
+            .raw_os_error()
+            .map_or_else(|| "none".to_owned(), |code| code.to_string()),
+    );
 }
 
 #[cfg(test)]

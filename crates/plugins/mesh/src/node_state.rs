@@ -18,6 +18,7 @@ use std::{
 use zeroize::{Zeroize, Zeroizing};
 
 /// Bound public snapshots consistently with the macOS node's state reader.
+#[cfg(target_os = "linux")]
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 /// Public runtime state needed to restore mesh intent without storing private key material.
 /// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
@@ -1094,6 +1095,7 @@ impl Store {
     /// revision. Ordinary saves keep the monotonic revision fence.
     /// # Errors
     /// Refuses a stale base, a changed authority, or an equal-revision conflict outside a reset.
+    #[cfg(target_os = "linux")]
     pub(crate) fn save_full_snapshot(&self, state: &State, expected: &Config) -> io::Result<()> {
         self.save_checked(state, Some(expected))
     }
@@ -1209,6 +1211,7 @@ impl Store {
     /// A torn in-place write is invalid JSON and therefore fails closed at the next restore.
     /// # Errors
     /// Refuses snapshots that still carry peers and reports when neither safe write can complete.
+    #[cfg(target_os = "linux")]
     pub(crate) fn save_retired(&self, state: &State) -> io::Result<()> {
         if state.authority_reset_pending && state.config.is_none()
             || state.config.as_ref().is_some_and(|config| {
@@ -1522,6 +1525,7 @@ pub(crate) fn write_public(path: &Path, body: &[u8]) -> io::Result<()> {
 /// write. The regular atomic writer remains the normal path.
 /// # Errors
 /// Refuses unsafe parent/file metadata, oversized state or failed durable writes.
+#[cfg(target_os = "linux")]
 fn write_public_in_place(
     path: &Path,
     body: &[u8],

@@ -83,12 +83,9 @@ impl RuntimeState {
             }
         })
         .await;
-        let (installed, states) = match outcome {
-            Ok(outcome) => outcome,
-            Err(_) => {
-                tracing::warn!("mesh subnet route update could not finish");
-                return;
-            }
+        let Ok((installed, states)) = outcome else {
+            tracing::warn!("mesh subnet route update could not finish");
+            return;
         };
         self.networks = installed;
         self.network_status.publish(states);

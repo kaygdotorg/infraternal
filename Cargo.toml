@@ -9,6 +9,7 @@ members = [
     "crates/infraternal",
     "crates/infraternal-protocol",
     "crates/infraternal-canvas-model",
+    "crates/infraternal-link",
     "crates/infraternal-plugin-api",
     "crates/infraternal-server",
     "crates/infraternal-db",
@@ -16,6 +17,7 @@ members = [
     "crates/infraternal-shim",
     "crates/infraternal-session",
     "crates/infraternal-status",
+    "crates/infraternal-sign-in",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/proxy",
@@ -35,6 +37,7 @@ license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 infraternal-canvas-model = { version = "0.1.0", path = "crates/infraternal-canvas-model" }
+infraternal-link = { version = "0.1.0", path = "crates/infraternal-link" }
 infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
 argon2 = "0.6"
 # Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
@@ -58,7 +61,7 @@ rusqlite = { version = "0.43", features = ["bundled"] }
 thiserror = "2"
 # Each role enables its required scheduler; private session images use only the current-thread runtime.
 tokio = { version = "1", features = ["rt", "macros", "sync", "net", "signal", "time", "process", "io-util"] }
-tower-http = { version = "0.7", features = ["fs"] }
+tower-http = { version = "0.7", features = ["fs", "add-extension"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-util = "0.3"
@@ -206,6 +209,13 @@ opt-level = "s"
 # The canvas model code moved out of the plugin crate; it keeps the plugin's size-optimized profile [243,248].
 [profile.release.package.infraternal-canvas-model]
 opt-level = "s"
+
+# Leg B's client code moved out of the infraternal agent, which builds at "z".
+# Measured on the perf VM (J1177, #580): at the default level the idle agent's
+# RSS rose 9.37 -> 9.70 MB; at "z" it is 9.41 MB, with every D375 latency row
+# unchanged [5,243].
+[profile.release.package.infraternal-link]
+opt-level = "z"
 
 # Keep the D289 SSH engine's transport fixes and optional algorithms reviewable.
 [patch.crates-io]

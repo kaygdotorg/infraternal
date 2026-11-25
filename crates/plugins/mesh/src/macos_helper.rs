@@ -1483,7 +1483,10 @@ mod network_proofs {
 
         // The next request names nothing: the helper takes its network off the utun again.
         let (reply, _) = handle(&Request::Networks { networks: vec![] }, utun, 0).unwrap();
-        assert!(reply.networks.is_empty());
+        assert_eq!(
+            reply.networks,
+            [] as [crate::macos_user_mode::NetworkOutcome; 0]
+        );
         let rows = rows_on(&open.name);
         eprintln!("J1169 rows after the empty request: {rows:#?}");
         assert!(!rows.iter().any(|row| row.starts_with("10.78")));

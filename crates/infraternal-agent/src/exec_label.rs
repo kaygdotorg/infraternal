@@ -88,6 +88,9 @@ pub(crate) fn label_failure(reason: &str) -> io::Error {
 }
 
 /// Other systems have no `SELinux` labels to keep.
+///
+/// # Errors
+/// Never returns an error on non-Linux targets; the fallible signature matches Linux.
 #[cfg(not(target_os = "linux"))]
 pub fn executable_label(_file: &File) -> io::Result<()> {
     Ok(())

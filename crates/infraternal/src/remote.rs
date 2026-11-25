@@ -596,17 +596,43 @@ fn enrolled_key(
     Ok(Some((key, snapshot)))
 }
 
+/// How long a name lookup may take before it is reported as a resolution failure.
+///
+/// `getaddrinfo` runs on a blocking thread and cannot be cancelled; with an unreachable
+/// resolver glibc retries per nameserver and per search domain, so a join could sit silent
+/// for far longer than the 10 s connect budget. Bounding it keeps the failure prompt and named.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The sentence shown when the server's name cannot be resolved.
+const DNS_FAILURE: &str = "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.";
+
 /// DNS is its own boundary: retain only known public resolver diagnostics.
 async fn connect_enrollment(name: &str, port: u16) -> io::Result<tokio::net::TcpStream> {
-    let addresses = tokio::net::lookup_host((name, port))
+    connect_enrollment_with(name, port, RESOLVE_TIMEOUT, |name, port| async move {
+        Ok(tokio::net::lookup_host((name, port)).await?.collect())
+    })
+    .await
+}
+
+/// [`connect_enrollment`] with the resolver and its time budget injected, so tests resolve
+/// without touching the host's DNS configuration.
+///
+/// A resolver error and a resolver that does not answer within `resolve_budget` are both
+/// the DNS failure; only a successful lookup moves on to the TCP connect.
+async fn connect_enrollment_with<R, F>(
+    name: &str,
+    port: u16,
+    resolve_budget: Duration,
+    resolve: R,
+) -> io::Result<tokio::net::TcpStream>
+where
+    R: FnOnce(String, u16) -> F,
+    F: std::future::Future<Output = io::Result<Vec<std::net::SocketAddr>>>,
+{
+    let addresses = tokio::time::timeout(resolve_budget, resolve(name.to_owned(), port))
         .await
-        .map_err(|error| {
-            Failure::Dns(
-                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
-            )
-            .error(error.kind())
-        })?
-        .collect::<Vec<_>>();
+        .map_err(|_| Failure::Dns(DNS_FAILURE).error(io::ErrorKind::TimedOut))?
+        .map_err(|error| Failure::Dns(DNS_FAILURE).error(error.kind()))?;
     tokio::time::timeout(
         Duration::from_secs(10),
         tokio::net::TcpStream::connect(addresses.as_slice()),
@@ -623,16 +649,13 @@ async fn preflight(origin: &str, root: Option<&X509>, system_roots: bool) -> io:
         .await
         .map_err(|failure| match failure {
             WebSocketFailure::InvalidOrigin => refused(),
-            WebSocketFailure::Dns => Failure::Dns(
-                "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443.",
-            )
-            .error(io::ErrorKind::AddrNotAvailable),
+            WebSocketFailure::Dns => {
+                Failure::Dns(DNS_FAILURE).error(io::ErrorKind::AddrNotAvailable)
+            }
             WebSocketFailure::Connect => Failure::Connect.error(io::ErrorKind::NotConnected),
             WebSocketFailure::Tls => Failure::Tls.error(io::ErrorKind::PermissionDenied),
             WebSocketFailure::Upgrade => Failure::Upgrade.error(io::ErrorKind::InvalidData),
-            WebSocketFailure::Challenge => {
-                Failure::Challenge.error(io::ErrorKind::InvalidData)
-            }
+            WebSocketFailure::Challenge => Failure::Challenge.error(io::ErrorKind::InvalidData),
         })
 }
 

@@ -447,6 +447,7 @@ impl ActionGuard {
     }
 
     /// Check the API key's current liveness and the scope required by one known action.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn authorize_token(
         &self,
         token: &str,
@@ -466,6 +467,7 @@ impl ActionGuard {
 
     /// Charge an already authenticated streaming caller the same per-key limit as a one-shot
     /// request, then revalidate it against this message's own action scope.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn authorize_identity(
         &self,
         identity: &AuthorizedKey,

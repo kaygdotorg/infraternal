@@ -3882,6 +3882,8 @@ mod logout_commit;
 
 #[path = "action_tap_tests.rs"]
 mod action_tap_tests;
+/// Needs the remote-host removal router, which only exists with the `remote` feature.
+#[cfg(feature = "remote")]
 #[path = "admin_window_tests.rs"]
 mod admin_window_tests;
 #[path = "api_expiry_tests.rs"]
@@ -3891,6 +3893,10 @@ mod key_lifetime_tests;
 
 #[path = "device_pending_tests.rs"]
 mod device_pending;
+
+/// The device-start and sign-in redeem replies keep their exact bytes (#580).
+#[path = "device_reply_golden_tests.rs"]
+mod device_reply_golden;
 
 #[path = "ceremony_pool_tests.rs"]
 mod ceremony_pool;

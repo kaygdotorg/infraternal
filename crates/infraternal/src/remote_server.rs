@@ -31,10 +31,11 @@ impl Options {
     }
 }
 
+/// How the remote server loop exited: cleanly stopped or replacing itself in place.
 pub(crate) enum Outcome {
     Stopped,
     #[cfg(feature = "remote")]
-    Restart(crate::restart::Replacement),
+    Restart(Box<crate::restart::Replacement>),
 }
 
 /// Serve the remote server with this configuration and options.
@@ -136,21 +137,21 @@ pub(crate) async fn serve(
                     if result.is_err()
                         && let Some(replacement) = crate::restart::failed_start(source.as_ref(), &data_dir)
                     {
-                        return Ok(Outcome::Restart(replacement));
+                        return Ok(Outcome::Restart(Box::new(replacement)));
                     }
                     return result.map(|()| Outcome::Stopped);
                 }
                 Some(request) = switch => {
                     #[cfg(feature = "release")]
                     if let Some(replacement) = crate::restart::switch(request, source.as_ref(), &data_dir) {
-                        return Ok(Outcome::Restart(replacement));
+                        return Ok(Outcome::Restart(Box::new(replacement)));
                     }
                     #[cfg(not(feature = "release"))]
                     let () = request;
                 }
                 replacement = control.requested(source.as_ref()) => {
                     match replacement {
-                        Ok(replacement) => return Ok(Outcome::Restart(replacement)),
+                        Ok(replacement) => return Ok(Outcome::Restart(Box::new(replacement))),
                         Err(error) => {
                             tracing::warn!(error_kind = ?error.kind(), "server restart control failed; continuing to serve");
                             // Keep serving; back off if accept repeatedly fails.

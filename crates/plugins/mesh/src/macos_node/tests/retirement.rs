@@ -102,7 +102,7 @@ fn failed_retirement_case(open_store: bool) {
         port: 51820,
         path: Some(state_path.clone()),
         binding: None,
-        network_status: Default::default(),
+        network_status: crate::macos_node::subnet::NetworkStatus::default(),
     };
     let result = chunks_with_epoch(None, &restored, AUTHORITY_EPOCH_B)
         .into_iter()
@@ -207,7 +207,7 @@ fn mac_retirement_persists_deny_state_before_worker_fence() {
         port: 51820,
         path: Some(state_path),
         binding: None,
-        network_status: Default::default(),
+        network_status: crate::macos_node::subnet::NetworkStatus::default(),
     };
 
     // The production replacement path: persist the reset, then hand the worker the
@@ -316,7 +316,7 @@ fn authority_rotation_receipt_case(continues: bool, incomplete: bool, rejected: 
         port: 51820,
         path: Some(state_path),
         binding: None,
-        network_status: Default::default(),
+        network_status: crate::macos_node::subnet::NetworkStatus::default(),
     };
 
     let mut replacement = current.clone();

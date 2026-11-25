@@ -1209,8 +1209,15 @@ pub(super) async fn while_authorized(
 #[cfg(feature = "ssh")]
 mod login_preparation;
 
-// Preparation belongs to the socket's JoinSet and advances during frame awaits.
-// Revocation aborts its outstanding requests; offline hosts remain cold until used.
+/// Preparation belongs to the socket's `JoinSet` and advances during frame awaits.
+/// Revocation aborts its outstanding requests; offline hosts remain cold until used.
+#[cfg_attr(
+    not(feature = "ssh"),
+    expect(
+        clippy::unused_async,
+        reason = "Keep the async signature identical when the ssh feature is compiled out."
+    )
+)]
 pub(crate) async fn prepare_preferred_login(
     state: Arc<WebSocketState>,
     user: String,

@@ -1,6 +1,8 @@
 //! Retains exact-host provisioning retirement across cancellation, writer contention and restart (#169).
 
-use crate::enrollment::{EnrollmentError, EnrollmentStore};
+#[cfg(any(feature = "ssh", test))]
+use crate::enrollment::EnrollmentError;
+use crate::enrollment::EnrollmentStore;
 use uuid::Uuid;
 
 impl EnrollmentStore {
@@ -9,6 +11,7 @@ impl EnrollmentStore {
     /// transport first, so waiting for SQLite never preserves remote access.
     /// # Errors
     /// Refuses changed ownership, invalid time or unavailable storage.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn retire_bootstrap(
         &self,
         owner: &str,
@@ -31,6 +34,7 @@ impl EnrollmentStore {
     /// One serialized intent attempt, followed by a cancellable receipt wait.
     /// Refuses a negative time or a host that exists but is not this
     /// owner's, was created later than `now`, or has no pending retirement intent.
+    #[cfg(any(feature = "ssh", test))]
     async fn retire_bootstrap_once(
         &self,
         owner: &str,
@@ -71,6 +75,7 @@ impl EnrollmentStore {
     /// # Errors
     /// Refuses a negative time, another owner's host, one created after `now` or
     /// one without an open intent, and unavailable storage.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn deny_abandoned_bootstrap(
         &self,
         owner: &str,
@@ -124,6 +129,7 @@ impl EnrollmentStore {
     /// Proven installation completion releases the restart retirement obligation.
     /// # Errors
     /// Refuses foreign/revoked hosts, missing intent or unavailable storage.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn complete_bootstrap(
         &self,
         owner: &str,
@@ -139,6 +145,7 @@ impl EnrollmentStore {
 }
 
 /// Extended SQLite result codes retain their primary code in the low byte.
+#[cfg(any(feature = "ssh", test))]
 fn writer_contention(error: &sqlx::Error) -> bool {
     match error {
         sqlx::Error::PoolTimedOut => true,

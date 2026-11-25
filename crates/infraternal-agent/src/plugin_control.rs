@@ -389,6 +389,11 @@ impl Registry {
         }
         Ok(())
     }
+    /// Asks the plugins whether a terminal open may go ahead (`action` names it, `context` is the host's load).
+    ///
+    /// The plugin worker answers one job at a time from a queue of eight. A
+    /// burst of opens waits its turn for room there, up to `ADMIT_WAIT`, rather
+    /// than being refused (#562). Every refusal this returns says why on stderr.
     #[cfg(any(test, target_os = "linux", target_os = "macos"))]
     pub(crate) async fn admit(
         &self,
@@ -400,18 +405,43 @@ impl Registry {
             // Equivalent to admission through an empty PluginRegistry.
             return Ok(());
         }
-        self.start().map_err(|_| OpenRefusal::ResourceUnavailable)?;
+        self.start().map_err(|error| {
+            eprintln!("terminal open refused as resource_unavailable: plugin worker did not start ({error:?})");
+            OpenRefusal::ResourceUnavailable
+        })?;
         let (result, receive) = tokio::sync::oneshot::channel();
-        self.sender
-            .try_send(Job::Admit {
-                action: action.to_owned(),
-                context,
-                result,
-            })
-            .map_err(|_| OpenRefusal::ResourceUnavailable)?;
-        receive
-            .await
-            .map_err(|_| OpenRefusal::ResourceUnavailable)?
+        let job = Job::Admit {
+            action: action.to_owned(),
+            context,
+            result,
+        };
+        // The worker answers one job at a time, so a burst of opens (a browser
+        // restoring many tabs) finds the bounded queue full. Wait for room, in
+        // arrival order, instead of refusing a healthy host (#562). A waiting
+        // open holds only its suspended task, which the server's own call cap
+        // bounds; a worker that stays wedged ends the wait after `ADMIT_WAIT`.
+        match tokio::time::timeout(ADMIT_WAIT, self.sender.send(job)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                eprintln!(
+                    "terminal open refused as resource_unavailable: plugin worker has stopped"
+                );
+                return Err(OpenRefusal::ResourceUnavailable);
+            }
+            Err(_) => {
+                eprintln!(
+                    "terminal open refused as resource_unavailable: plugin worker queue stayed full for {}s",
+                    ADMIT_WAIT.as_secs()
+                );
+                return Err(OpenRefusal::ResourceUnavailable);
+            }
+        }
+        receive.await.map_err(|_| {
+            eprintln!(
+                "terminal open refused as resource_unavailable: plugin worker dropped the admission"
+            );
+            OpenRefusal::ResourceUnavailable
+        })?
     }
 
     /// Resolve retained component intent before dialing, without inventing a plugin action.
@@ -967,6 +997,9 @@ pub async fn call(state: &Path, action: &str, input: &[u8]) -> io::Result<Vec<u8
 }
 
 const MAX_PENDING: usize = 32;
+/// How long a terminal open waits for room in the plugin worker's queue before it is refused (#562).
+#[cfg(any(test, target_os = "linux", target_os = "macos"))]
+const ADMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 #[cfg(any(test, feature = "native-streams"))]
 pub(crate) struct Control {
     registry: Registry,
@@ -1429,6 +1462,29 @@ mod tests {
                 session_count: 200
             })
         );
+    }
+
+    /// A burst of terminal opens wider than the worker's eight-job queue is
+    /// admitted in turn, never refused as `resource_unavailable` (#562).
+    #[tokio::test]
+    async fn a_burst_of_admissions_waits_for_the_worker_instead_of_failing() {
+        use infraternal_plugin_api::admission::NodeContext;
+        let mut plugins = PluginRegistry::default();
+        plugins.register(Box::new(Admission(false))).unwrap();
+        let registry = std::sync::Arc::new(Registry::new(plugins));
+        let burst: Vec<_> = (0..64)
+            .map(|_| {
+                let registry = registry.clone();
+                tokio::spawn(async move {
+                    registry
+                        .admit("terminal.open", NodeContext::default())
+                        .await
+                })
+            })
+            .collect();
+        for admission in burst {
+            assert_eq!(admission.await.unwrap(), Ok(()));
+        }
     }
 
     struct ProposedPath {

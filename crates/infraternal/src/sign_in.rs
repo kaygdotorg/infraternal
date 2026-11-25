@@ -10,11 +10,11 @@ pub(crate) fn invalid_api_key_diagnostic() -> (&'static str, crate::cli::output:
     )
 }
 
+/// Tests for credential storage, exit codes and the failure mapping.
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiCredentialError, Failure, SCOPES, StoredCredential, approval_link,
-        read_api_credential_from, server_url, store_credential,
+        ApiCredentialError, Failure, StoredCredential, read_api_credential_from, store_credential,
     };
     use serde_json::Value;
     use std::{
@@ -29,22 +29,6 @@ mod tests {
     use zeroize::Zeroizing;
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
-
-    #[test]
-    fn default_sign_in_scopes_are_read_only() {
-        assert_eq!(SCOPES, ["hosts:read", "sessions:read", "status:read"]);
-    }
-
-    /// J137 P3-6: a scope no action declares is not grantable; a later action that declared
-    /// it would otherwise become callable by keys already issued, without a new approval.
-    #[test]
-    fn scopes_without_an_action_are_refused() {
-        assert!(matches!(
-            super::requested_scopes(&["sessions:write"]),
-            Err(Failure::InvalidScope)
-        ));
-        assert!(super::requested_scopes(&["hosts:write"]).is_ok());
-    }
 
     #[test]
     fn stored_key_selection_requires_one_server_or_an_explicit_origin() {
@@ -259,36 +243,6 @@ mod tests {
     }
 
     #[test]
-    fn server_input_accepts_only_a_bare_https_origin() {
-        let parsed = server_url("https://Mesh.Example.org:8443/").unwrap();
-        assert_eq!(
-            parsed.origin().ascii_serialization(),
-            "https://mesh.example.org:8443"
-        );
-        for invalid in [
-            "http://mesh.example.org",
-            "https://mesh.example.org/prefix",
-            "https://mesh.example.org/?debug=1",
-            "https://person:password@mesh.example.org",
-            "https://mesh.example.org/#fragment",
-        ] {
-            assert!(
-                matches!(server_url(invalid), Err(Failure::InvalidServer)),
-                "{invalid}"
-            );
-        }
-    }
-
-    #[test]
-    fn approval_link_carries_only_the_browser_user_code() {
-        let server = server_url("https://mesh.example.org").unwrap();
-        let link = approval_link(&server, "A_b-c123");
-
-        assert_eq!(link, "https://mesh.example.org/?device_code=A_b-c123");
-        assert!(!link.contains("poll_token"));
-    }
-
-    #[test]
     fn invalid_api_key_diagnostic_names_fix_and_exits_not_allowed() {
         let (message, exit) = super::invalid_api_key_diagnostic();
         assert_eq!(
@@ -330,26 +284,13 @@ mod tests {
         }
     }
 
+    /// An uncertain redemption exits with the partial code (6).
     #[test]
     fn uncertain_device_redemption_uses_the_partial_exit_code() {
         assert_eq!(
             super::exit_for_failure(Failure::RedemptionUncertain).code(),
             6
         );
-    }
-
-    #[test]
-    fn unusable_successful_redemption_bodies_are_partial() {
-        for response in [
-            b"not json".as_slice(),
-            br#"{"unexpected":"field"}"#.as_slice(),
-            br#"{"api_key":"not-a-capability"}"#.as_slice(),
-        ] {
-            assert!(matches!(
-                super::parse_redemption_response(response),
-                Err(Failure::RedemptionUncertain)
-            ));
-        }
     }
 
     #[test]
@@ -406,22 +347,6 @@ mod tests {
             1
         );
     }
-
-    #[test]
-    fn server_generated_capabilities_have_exact_base64url_shapes() {
-        assert!(super::server_capability_has_shape(&"A".repeat(43), 43));
-        assert!(super::server_capability_has_shape(&"_".repeat(16), 16));
-        assert!(!super::server_capability_has_shape(&"A".repeat(42), 43));
-        assert!(!super::server_capability_has_shape(&"A".repeat(44), 43));
-        assert!(!super::server_capability_has_shape(
-            &("A".repeat(42) + "+"),
-            43
-        ));
-        assert!(!super::server_capability_has_shape(
-            &("A".repeat(42) + "="),
-            43
-        ));
-    }
 }
 
 use std::{
@@ -435,6 +360,10 @@ use std::{
 };
 
 use hyper::StatusCode;
+use infraternal_sign_in::{
+    CheckFailure, DeviceApproval, DeviceRedeemRequest, DeviceStartRequest, Redemption,
+    approval_link, interpret_redemption, parse_start_response, requested_scopes, server_url,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::Instant;
@@ -443,11 +372,8 @@ use zeroize::Zeroizing;
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit, print_progress};
 
-const SCOPES: [&str; 3] = ["hosts:read", "sessions:read", "status:read"];
-const ADDITIONAL_SCOPES: [&str; 3] = ["hosts:write", "terminal:connect", "actions:dry-run"];
 const MAX_RESPONSE_BYTES: usize = 8 * 1024;
 const MAX_CREDENTIAL_FILE_BYTES: usize = 64 * 1024;
-const MAX_DEVICE_LIFETIME_SECONDS: u64 = 10 * 60;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const CREDENTIAL_FILE_NAME: &str = "credentials.json";
@@ -556,37 +482,6 @@ fn read_api_credential_from(
     })
 }
 
-#[derive(Serialize)]
-struct DeviceStartRequest<'a> {
-    device: &'a str,
-    scopes: &'a [String],
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceStartResponse {
-    poll_token: Zeroizing<String>,
-    user_code: String,
-    expires_in: u64,
-}
-
-#[derive(Serialize)]
-struct DeviceRedeemRequest<'a> {
-    token: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceRedeemResponse {
-    api_key: Zeroizing<String>,
-}
-
-struct DeviceApproval {
-    poll_token: Zeroizing<String>,
-    user_code: String,
-    lifetime: Duration,
-}
-
 #[derive(Clone, Copy)]
 enum NetworkFailure {
     Dns,
@@ -634,21 +529,27 @@ enum Failure {
     RedemptionUncertain,
 }
 
-enum Redemption {
-    Pending,
-    RetryAfter(Duration),
-    Credential(Zeroizing<String>),
+impl From<CheckFailure> for Failure {
+    fn from(failure: CheckFailure) -> Self {
+        match failure {
+            CheckFailure::InvalidServer => Self::InvalidServer,
+            CheckFailure::InvalidScope => Self::InvalidScope,
+            // A machine-join refusal cannot come out of a sign-in; if it ever did, it is a reply we cannot use.
+            CheckFailure::BadResponse | CheckFailure::InvalidMachine => Self::BadResponse,
+            CheckFailure::RedemptionUncertain => Self::RedemptionUncertain,
+        }
+    }
 }
 
 /// Starts one CLI device approval and saves the redeemed key only after private storage is ready.
 pub(crate) fn run(server_input: &str, requested: &[&str], json_output: bool) -> ExitCode {
     let scopes = match requested_scopes(requested) {
         Ok(scopes) => scopes,
-        Err(failure) => return fail(json_output, failure),
+        Err(failure) => return fail(json_output, failure.into()),
     };
     let server = match server_url(server_input) {
         Ok(server) => server,
-        Err(failure) => return fail(json_output, failure),
+        Err(failure) => return fail(json_output, failure.into()),
     };
     let Ok(directory) = credential_directory() else {
         return fail(json_output, Failure::InsecureStorage);
@@ -687,6 +588,7 @@ pub(crate) fn run(server_input: &str, requested: &[&str], json_output: bool) -> 
     }
 }
 
+/// Starts the approval, shows the link, waits for the tap and stores the redeemed key.
 async fn run_flow(
     server: &Url,
     directory: &Path,
@@ -729,50 +631,6 @@ async fn run_flow(
     store_credential(directory, credential)
         .map(|_| ())
         .map_err(|error| storage_failure(error.kind(), true))
-}
-
-fn requested_scopes(requested: &[&str]) -> Result<Vec<String>, Failure> {
-    let mut scopes = SCOPES
-        .iter()
-        .map(|scope| (*scope).to_owned())
-        .collect::<Vec<_>>();
-    for scope in requested {
-        if !ADDITIONAL_SCOPES.contains(scope) && !SCOPES.contains(scope) {
-            return Err(Failure::InvalidScope);
-        }
-        if !scopes.iter().any(|existing| existing == scope) {
-            scopes.push((*scope).to_owned());
-        }
-    }
-    Ok(scopes)
-}
-
-fn server_url(input: &str) -> Result<Url, Failure> {
-    let server = Url::parse(input).map_err(|_| Failure::InvalidServer)?;
-    if server.scheme() != "https"
-        || server.host_str().is_none()
-        || !server.username().is_empty()
-        || server.password().is_some()
-        || server.query().is_some()
-        || server.fragment().is_some()
-        || server.path() != "/"
-    {
-        return Err(Failure::InvalidServer);
-    }
-    Ok(server)
-}
-
-fn approval_link(server: &Url, user_code: &str) -> String {
-    let mut link = server.clone();
-    link.query_pairs_mut().append_pair("device_code", user_code);
-    link.to_string()
-}
-
-fn server_capability_has_shape(value: &str, expected_length: usize) -> bool {
-    value.len() == expected_length
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn local_device_name() -> String {
@@ -1060,6 +918,7 @@ fn storage_failure(kind: io::ErrorKind, after_approval: bool) -> Failure {
     }
 }
 
+/// Asks the server to start an approval and checks the reply with the shared crate.
 async fn start_approval(
     server: &Url,
     device: &str,
@@ -1075,21 +934,10 @@ async fn start_approval(
     if response.status != StatusCode::OK {
         return Err(map_http_failure(response.status));
     }
-    let started: DeviceStartResponse =
-        serde_json::from_slice(&response.body).map_err(|_| Failure::BadResponse)?;
-    if !server_capability_has_shape(started.poll_token.as_str(), 43)
-        || !server_capability_has_shape(&started.user_code, 16)
-        || started.expires_in != MAX_DEVICE_LIFETIME_SECONDS
-    {
-        return Err(Failure::BadResponse);
-    }
-    Ok(DeviceApproval {
-        poll_token: started.poll_token,
-        user_code: started.user_code,
-        lifetime: Duration::from_secs(started.expires_in),
-    })
+    parse_start_response(&response.body).map_err(Failure::from)
 }
 
+/// Polls until the owner approves, the approval expires or the server refuses.
 async fn redeem_after_approval(
     server: &Url,
     approval: &DeviceApproval,
@@ -1108,13 +956,22 @@ async fn redeem_after_approval(
         match redeem_once(server, &approval.poll_token).await? {
             Redemption::Pending => delay = POLL_INTERVAL,
             Redemption::RetryAfter(retry_after) => {
-                delay = retry_after.max(Duration::from_secs(1));
+                delay = retry_after
+                    .unwrap_or(POLL_INTERVAL)
+                    .max(Duration::from_secs(1));
             }
             Redemption::Credential(api_key) => return Ok(api_key),
+            // The code came from a `StatusCode`, so it always converts back.
+            Redemption::Other(code) => {
+                return Err(map_redemption_http_failure(
+                    StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_GATEWAY),
+                ));
+            }
         }
     }
 }
 
+/// One redeem poll: the shared crate reads the reply, and other statuses become failures here.
 async fn redeem_once(server: &Url, poll_token: &str) -> Result<Redemption, Failure> {
     let encoded = Zeroizing::new(
         serde_json::to_vec(&DeviceRedeemRequest { token: poll_token })
@@ -1123,23 +980,11 @@ async fn redeem_once(server: &Url, poll_token: &str) -> Result<Redemption, Failu
     let response = post_json_with_timeout(server, "/auth/device-redeem", &encoded)
         .await
         .map_err(map_redemption_network_failure)?;
-    match response.status {
-        StatusCode::OK => parse_redemption_response(&response.body).map(Redemption::Credential),
-        StatusCode::UNAUTHORIZED => Ok(Redemption::Pending),
-        StatusCode::TOO_MANY_REQUESTS => Ok(Redemption::RetryAfter(
-            response.retry_after.unwrap_or(POLL_INTERVAL),
-        )),
-        status => Err(map_redemption_http_failure(status)),
-    }
-}
-
-fn parse_redemption_response(body: &[u8]) -> Result<Zeroizing<String>, Failure> {
-    let redeemed: DeviceRedeemResponse =
-        serde_json::from_slice(body).map_err(|_| Failure::RedemptionUncertain)?;
-    if !server_capability_has_shape(redeemed.api_key.as_str(), 43) {
-        return Err(Failure::RedemptionUncertain);
-    }
-    Ok(redeemed.api_key)
+    Ok(interpret_redemption(
+        response.status.as_u16(),
+        &response.body,
+        response.retry_after,
+    )?)
 }
 
 fn map_redemption_network_failure(failure: NetworkFailure) -> Failure {

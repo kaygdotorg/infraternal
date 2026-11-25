@@ -16,13 +16,12 @@
 //! It also holds the one socket option the userspace mesh engine needs and no safe crate
 //! offers on Linux: [`allow_ipv4_fragmentation`] for the encrypted underlay socket (#483).
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 use std::{
     fs::{File, OpenOptions},
     io,
-    os::{
-        fd::{AsFd, AsRawFd},
-        unix::fs::OpenOptionsExt,
-    },
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
 };
 
 const IFNAMSIZ: usize = 16;

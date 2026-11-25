@@ -454,9 +454,15 @@ impl Auth {
         for (network, _) in SOURCE_CAPS.networks(source) {
             sources.0.entry(network).or_default().push(expires);
         }
-        Ok(
-            json!({"poll_token":approval.token,"user_code":approval.code,"expires_in":APPROVAL_LIFETIME}),
-        )
+        // The same type the clients parse, so the two sides cannot drift.
+        Ok(serde_json::to_value(
+            infraternal_sign_in::DeviceStartResponse {
+                poll_token: zeroize::Zeroizing::new(approval.token.to_owned()),
+                user_code: approval.code.to_owned(),
+                // Clients reject any other lifetime; the golden reply test keeps this equal to `APPROVAL_LIFETIME`.
+                expires_in: infraternal_sign_in::APPROVAL_LIFETIME_SECONDS,
+            },
+        )?)
     }
 
     /// Start the passkey ceremony that approves exactly one pending request

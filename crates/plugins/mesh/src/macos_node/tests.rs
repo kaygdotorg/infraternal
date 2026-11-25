@@ -1,5 +1,9 @@
 //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
-#![allow(clippy::expect_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "Mac node unit tests panic on unexpected setup or assertion failures."
+)]
 
 /// Real-Mac authority refresh proofs with encrypted traffic and kernel MTU checks.
 mod authority_mtu;
@@ -90,6 +94,85 @@ async fn worker_send_handle_releases_the_port_on_drop() {
         .await
         .expect("rebind the released mesh port");
     assert_eq!(rebound_port, port);
+}
+
+/// The Mac mesh port answers a direct-path probe from a known peer endpoint (#220, J1206): the
+/// pong leaves the mesh port with the ping's token, and a ping from an unknown source gets
+/// silence. This is what a Linux peer needs to measure its direct path to a Mac.
+#[tokio::test]
+async fn the_mesh_port_answers_a_ping_from_a_known_endpoint_only() {
+    use crate::direct_probe::{PING, PONG, frame, parse};
+    use gotatun::udp::{UdpRecv, UdpTransportFactory, UdpTransportFactoryParams};
+    let (mut factory, port) = super::bind_udp(
+        crate::listen_port::Request {
+            port: 0,
+            allow_fallback: false,
+        },
+        super::StaticSecret::from([7; 32]),
+    )
+    .await
+    .expect("bind a mesh port");
+    let known = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("known");
+    let stranger = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("stranger");
+    factory
+        .admission
+        .write()
+        .await
+        .set_configured_endpoints([known.local_addr().expect("address")]);
+    let (_send, mut receiver) = factory
+        .bind(&UdpTransportFactoryParams { addr: None, port })
+        .await
+        .expect("device sockets");
+    // The device's receive loop: it must see no probe, only the guard answers.
+    let forwarded = std::sync::Arc::new(AtomicU64::new(0));
+    let counter = std::sync::Arc::clone(&forwarded);
+    let task = tokio::spawn(async move {
+        let mut buffer =
+            <crate::handshake_admission::PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf::default(
+            );
+        let mut pool = gotatun::packet::PacketBufPool::new(8);
+        let mut packets = Vec::new();
+        while receiver
+            .recv_many_from(&mut buffer, &mut pool, &mut packets)
+            .await
+            .is_ok()
+        {
+            counter.fetch_add(packets.len() as u64, Ordering::Relaxed);
+            packets.clear();
+        }
+    });
+    let target = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    known
+        .send_to(&frame(PING, 0xABCD), target)
+        .await
+        .expect("ping");
+    let mut reply = [0_u8; 64];
+    let (length, from) = tokio::time::timeout(Duration::from_secs(2), known.recv_from(&mut reply))
+        .await
+        .expect("a pong arrives")
+        .expect("receive");
+    assert_eq!(from.port(), port, "the pong leaves the mesh port");
+    assert_eq!(parse(&reply[..length]), Some((PONG, 0xABCD)));
+    stranger
+        .send_to(&frame(PING, 1), target)
+        .await
+        .expect("ping");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), stranger.recv_from(&mut reply))
+            .await
+            .is_err(),
+        "a stranger gets silence"
+    );
+    assert_eq!(
+        forwarded.load(Ordering::Relaxed),
+        0,
+        "no probe reaches GotaTun"
+    );
+    task.abort();
 }
 
 /// Encode a complete snapshot with one epoch repeated across every chunk.
@@ -291,7 +374,7 @@ fn recording_worker_with_replace_hook(
     }
 }
 
-/// GotaTun installs granted peers even when the grant is one-way or port-narrowed.
+/// `GotaTun` installs granted peers even when the grant is one-way or port-narrowed.
 #[test]
 fn peers_with_one_way_and_port_narrowed_access_are_installed() {
     let mut config = config();
@@ -413,7 +496,7 @@ fn restored_snapshot_replaces_stale_peers() {
         port: 51820,
         path: Some(state_path),
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("initial epoch snapshot");
@@ -467,7 +550,7 @@ fn same_authority_equal_revision_conflict_is_refused() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let result = chunks_with_epoch(None, &conflicting, AUTHORITY_EPOCH_A)
         .into_iter()
@@ -519,7 +602,7 @@ fn equal_revision_restore_retires_stale_peers() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("current epoch snapshot");
@@ -575,7 +658,7 @@ fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement()
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let mut complete = chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_B)
         .pop()
@@ -966,7 +1049,7 @@ fn macos_completed_snapshot_binding_rejects_an_unrelated_key() {
     );
 }
 
-/// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
+/// The macOS `GotaTun` node advertises and completes the durable key-rotation protocol.
 #[test]
 #[ignore = "Run on the macOS VM with system service privileges."]
 fn macos_gotatun_node_supports_key_rotation() {
@@ -1155,12 +1238,10 @@ fn macos_rotation_recovers_after_sigkill_at_each_durable_step() {
         let completed = stage == "rotation_finished";
         assert_eq!(
             journal[8],
-            if completed {
-                2
-            } else if stage == "rotation_prepared" {
-                0
-            } else {
-                1
+            match stage {
+                "rotation_finished" => 2,
+                "rotation_prepared" => 0,
+                _ => 1,
             }
         );
         if completed {

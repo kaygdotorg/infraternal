@@ -9,7 +9,10 @@ below; the fonts keep their upstream licence files beside the bundled faces.
 - `apps/tracer/vendor/ghostty-web/`: ghostty-web source build and its embedded
   Ghostty VT WebAssembly use MIT; see the included `LICENSE` and
   `GHOSTTY-LICENSE` texts. Source and toolchain pins are recorded in the
-  vendored package README.
+  vendored package README. The WebAssembly is built from the signed
+  libghostty-vt release (MIT) with its terminal's character tables, which
+  uucode (MIT) generates from Unicode data under the Unicode-3.0 terms
+  shipped at `/licenses/Unicode-3.0.txt`.
 
 ## Colour schemes (`packages/ui/src/themes.ts`)
 
@@ -115,7 +118,7 @@ Attribution and complete licence texts ship with the production build.
   - Licence: MPL-2.0. infraternal builds it, unchanged, from our fork. Under MPL-2.0
     §3.2, its Source Code Form is available from
     <https://github.com/kaygdotorg/gotatun> at commit
-    `9fb980df8d2e0744928b8c16ca08e14a5da23acd`, the commit pinned in
+    `e87fef91fcab0dd338c5ecfcdd1afaa516bebf17`, the commit pinned in
     `crates/plugins/mesh/Cargo.toml`. The licence text is the file `LICENSE`
     there, and at <https://www.mozilla.org/MPL/2.0/>.
   - Code contributed before 5 March 2026 is also under the BSD 3-Clause licence

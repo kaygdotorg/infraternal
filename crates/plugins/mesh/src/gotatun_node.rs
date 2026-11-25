@@ -55,7 +55,6 @@ use tokio::{
     time::Instant,
 };
 
-use crate::handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver};
 use crate::listen_port::Request as ListenPortRequest;
 /// The node's route listener and the worker share this; see [`crate::underlay_announce`].
 pub(crate) use crate::underlay_announce::UnderlayAnnounce;
@@ -69,6 +68,10 @@ use crate::{
     gotatun_tun::LinuxTun,
     packet_filter::{Direction, PacketFilter, PreparedPolicy},
     policy::model::PublicKey,
+};
+use crate::{
+    direct_probe::DirectProbes,
+    handshake_admission::{ConfirmedEndpointFeed, PeerAdmission, PeerAdmissionUdpReceiver},
 };
 use infraternal_mesh::proxy_ports::MeshProxyIngress;
 
@@ -196,6 +199,36 @@ struct BoundUdpFactory {
     receive: GotaUdpSocket,
     port: u16,
     admission: Arc<RwLock<PeerAdmission>>,
+    /// Round-trip probes that leave from, and are answered on, this same bound port. The admission
+    /// guard holds a clone and consumes probe-shaped datagrams before `GotaTun` sees them.
+    probes: DirectProbes,
+    /// The finished probes, until the path owner takes them (see [`Engine::direct_probes`]).
+    probe_answers:
+        Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::direct_probe::Answer>>>>,
+}
+
+impl BoundUdpFactory {
+    /// Bind the node's direct-path probes to this factory's send socket and give the admission
+    /// guard its half. The factory starts the probes before the device receives anything, so the
+    /// guard's receive task finds them on its first datagram.
+    async fn with_probes(
+        send: GotaUdpSocket,
+        receive: GotaUdpSocket,
+        port: u16,
+        admission: Arc<RwLock<PeerAdmission>>,
+    ) -> Self {
+        let token_seed = crate::direct_probe::token_seed();
+        let (probes, answers) = DirectProbes::new(send.clone(), token_seed);
+        admission.write().await.set_probes(probes.clone());
+        Self {
+            send,
+            receive,
+            port,
+            admission,
+            probes,
+            probe_answers: Arc::new(std::sync::Mutex::new(Some(answers))),
+        }
+    }
 }
 
 impl UdpTransportFactory for BoundUdpFactory {
@@ -217,13 +250,26 @@ impl UdpTransportFactory for BoundUdpFactory {
     }
 }
 
+/// What the worker thread reports about its running engine: the TUN, the bound port, the
+/// offload state and the direct-path probes of that port.
 #[derive(Clone)]
 pub(crate) struct RuntimeInfo {
     interface: String,
     port: u16,
     thp_disabled: bool,
     offloads_enabled: bool,
+    /// The direct-path probes of the bound port and where their finished answers wait for the
+    /// path owner (see [`Engine::direct_probes`]). `None` in the tests that build no socket.
+    #[cfg_attr(
+        not(feature = "relay"),
+        expect(dead_code, reason = "only the relay path owner reads the probes")
+    )]
+    probes: Option<(DirectProbes, ProbeAnswers)>,
 }
+
+/// The finished direct-path probes, held until the path owner takes them once.
+pub(crate) type ProbeAnswers =
+    Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Receiver<crate::direct_probe::Answer>>>>;
 
 /// Commands serialized by the Linux `GotaTun` worker; each request has a synchronous result channel.
 enum WorkerCommand {
@@ -450,6 +496,27 @@ impl Engine {
             self.info.thp_disabled,
             self.info.offloads_enabled,
         )
+    }
+
+    /// The direct-path probes of this engine's `WireGuard` port, and the receiver of their finished
+    /// answers. The receiver can be taken once; a second call returns the probes only.
+    #[cfg_attr(
+        not(feature = "relay"),
+        expect(dead_code, reason = "only the relay path owner asks for the probes")
+    )]
+    #[must_use]
+    pub(crate) fn direct_probes(
+        &self,
+    ) -> Option<(
+        DirectProbes,
+        Option<tokio::sync::mpsc::Receiver<crate::direct_probe::Answer>>,
+    )> {
+        let (probes, answers) = self.info.probes.as_ref()?;
+        let taken = answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Some((probes.clone(), taken))
     }
 
     /// Apply a complete coordinator snapshot while retaining established peer sessions.
@@ -718,6 +785,7 @@ async fn initialize(
             .await?,
         ))
     };
+    let probes = Some((factory.probes.clone(), Arc::clone(&factory.probe_answers)));
     let pending = Some(PendingDevice {
         factory,
         private_key,
@@ -727,6 +795,7 @@ async fn initialize(
         port,
         thp_disabled,
         offloads_enabled,
+        probes,
     };
     // Marked and running: from here the interface outlives this process (D332).
     tun.tun.persist()?;
@@ -1719,12 +1788,7 @@ async fn bind_udp(
                     return Err(io::ErrorKind::AddrInUse.into());
                 }
                 return Ok((
-                    BoundUdpFactory {
-                        send,
-                        receive,
-                        port,
-                        admission: Arc::clone(&admission),
-                    },
+                    BoundUdpFactory::with_probes(send, receive, port, Arc::clone(&admission)).await,
                     port,
                 ));
             }
@@ -1745,12 +1809,7 @@ async fn bind_udp(
         let port = send.local_addr()?.port();
         if port != 0 && port != 51820 {
             return Ok((
-                BoundUdpFactory {
-                    send,
-                    receive,
-                    port,
-                    admission: Arc::clone(&admission),
-                },
+                BoundUdpFactory::with_probes(send, receive, port, Arc::clone(&admission)).await,
                 port,
             ));
         }
@@ -2341,6 +2400,7 @@ mod tests {
                 port,
                 thp_disabled: true,
                 offloads_enabled: true,
+                probes: None,
             },
             health: Arc::clone(&health),
             restart_at: None,
@@ -2492,6 +2552,7 @@ mod tests {
                 port,
                 thp_disabled: true,
                 offloads_enabled: true,
+                probes: None,
             },
             health,
             restart_at: None,
@@ -2700,6 +2761,7 @@ mod tests {
                 port,
                 thp_disabled: true,
                 offloads_enabled: true,
+                probes: None,
             },
             health: Arc::clone(&health),
             restart_at: None,

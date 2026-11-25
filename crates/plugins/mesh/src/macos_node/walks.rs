@@ -60,7 +60,7 @@ pub(super) async fn run_worker(
     mut state: RuntimeState,
 ) {
     let mut announcer = start_underlay_listener(
-        state.utun.as_ref().map(|utun| utun.name()),
+        state.utun.as_ref().map(super::MacUtun::name),
         mac_connected_sends_enabled(),
     );
     let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
@@ -137,14 +137,14 @@ pub(super) async fn run_worker(
                 state.admit_confirmed_endpoints().await;
             }
             () = announcement_due(announcer.as_mut()) => {
-                if let Some(device) = &state.device {
-                    if let Some(sessions) = announce_underlay_on_route_event(
+                if let Some(device) = &state.device
+                    && let Some(sessions) = announce_underlay_on_route_event(
                         announcer.as_mut(),
                         || state.udp.underlay_changed(),
                         async || device.request_keepalives().await,
-                    ).await {
-                        tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
-                    }
+                    ).await
+                {
+                    tracing::debug!(sessions, "underlay changed; live sessions announce our endpoint");
                 }
             }
             () = crate::candidate_walks::walk_due(next_walk), if next_walk.is_some() => {
@@ -514,7 +514,7 @@ impl RuntimeState {
 
 #[cfg(test)]
 mod tests {
-    //! Order of route-change recovery, independent of sockets or eligible WireGuard sessions.
+    //! Order of route-change recovery, independent of sockets or eligible `WireGuard` sessions.
 
     use super::{
         announce_underlay, announce_underlay_on_route_event, connected_sends_switch_is_on,
@@ -558,7 +558,7 @@ mod tests {
         let mut listener = start_underlay_listener(Some("lo0"), enabled);
         let listening = listener
             .as_ref()
-            .is_some_and(|listener| listener.is_listening());
+            .is_some_and(super::super::underlay::UnderlayAnnouncer::is_listening);
         let invalidations = AtomicUsize::new(0);
         let requests = AtomicUsize::new(0);
         let result = announce_underlay_on_route_event(

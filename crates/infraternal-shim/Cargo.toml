@@ -21,7 +21,6 @@ expect_used = "deny"
 [dependencies]
 clap = { workspace = true, optional = true }
 alacritty_terminal = { workspace = true, optional = true }
-vte.workspace = true
 # Reuse the server's pinned OpenSSL at the audited secure-allocation FFI boundary.
 openssl = { workspace = true, optional = true }
 nix.workspace = true
@@ -68,6 +67,11 @@ core-foundation = { version = "0.10.1", optional = true }
 [dependencies.libghostty-vt]
 workspace = true
 optional = true
+
+# The carry parser follows the engine itself (src/carry.rs); this generic parser is
+# only the independent oracle that tests compare against.
+[dev-dependencies]
+vte.workspace = true
 
 # The old engines are retained only for reproducible comparison measurements.
 [[example]]

@@ -14,6 +14,7 @@ tracing = { workspace = true, optional = true }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", optional = true, default-features = false }
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-status = { path = "../infraternal-status", version = "0.1.0" }
+infraternal-sign-in = { path = "../infraternal-sign-in", version = "0.1.0", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 infraternal-server = { path = "../infraternal-server", version = "0.1.0", default-features = false, optional = true }
@@ -69,7 +70,7 @@ staging-trust = ["plugin-server", "infraternal-server/staging-trust"]
 # gate refuses an image holding the variable name.
 test-trust-anchor = ["remote"]
 release = ["plugin-server", "infraternal-server/release", "dep:infraternal-plugin-release", "dep:sqlx"]
-remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-api/tls-roots", "dep:base64", "dep:futures-util", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:qrcodegen", "dep:tokio-openssl", "dep:tokio-tungstenite", "dep:url", "dep:zeroize"]
+remote = ["infraternal-shim/ca-handoff", "plugin-agent", "dep:tokio","dep:tracing", "infraternal-agent/remote", "infraternal-server?/remote", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-plugin-api/tls-roots", "dep:base64", "dep:futures-util", "dep:http-body-util", "dep:hyper", "dep:hyper-util", "dep:openssl", "dep:qrcodegen", "dep:tokio-openssl", "dep:tokio-tungstenite", "dep:url", "dep:infraternal-sign-in", "dep:zeroize"]
 # Private SSH session routes need the host runtime even when its operator role is absent.
 ssh = ["plugin-ssh", "dep:infraternal-agent", "dep:tokio", "infraternal-server?/ssh"]
 # Private release profile for the early shim/SSH startup image.

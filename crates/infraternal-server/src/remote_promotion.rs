@@ -36,22 +36,28 @@
 //!
 //! Nothing here holds a secret: tokens are stored as SHA-256 digests, and the
 //! password never reaches the server at all (it is sealed in the browser).
-use super::{CertificateRecord, EnrollmentError, EnrollmentStore, JoinToken};
+#[cfg(any(feature = "ssh", test))]
+use super::JoinToken;
+use super::{CertificateRecord, EnrollmentError, EnrollmentStore};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// How long a promotion may take from begin to handover, in seconds. The
 /// sweeper abandons a row still live after it.
+#[cfg(any(feature = "ssh", test))]
 pub(crate) const LIFETIME: i64 = 15 * 60;
 /// Wrong passwords allowed before the wait (D376: under the common 3-try lockout).
+#[cfg(any(feature = "ssh", test))]
 pub(crate) const TRIES: i64 = 2;
 /// How long the wait lasts after the second wrong password, in seconds:
 /// `pam_faillock`'s default `fail_interval`, so the host's own count has
 /// forgotten both failures by then.
+#[cfg(any(feature = "ssh", test))]
 pub(crate) const WAIT: i64 = 15 * 60;
 
 /// How the rootless account becomes root (D274's order).
+#[cfg(any(feature = "ssh", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
     /// sudo without a password: consent only, nothing is typed.
@@ -64,6 +70,7 @@ pub(crate) enum Method {
     Su,
 }
 
+#[cfg(any(feature = "ssh", test))]
 impl Method {
     /// The stored and wire word.
     pub(crate) const fn word(self) -> &'static str {
@@ -86,6 +93,7 @@ impl Method {
 }
 
 /// The rootless identity a promotion is bound to, seen at begin (R7).
+#[cfg(any(feature = "ssh", test))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Bound {
     /// The uid the rootless infraternal agent runs as.
@@ -103,9 +111,11 @@ pub(crate) enum PromotionError {
     #[error("promotion refused")]
     Denied,
     /// Another promotion of this host is live.
+    #[cfg(any(feature = "ssh", test))]
     #[error("promotion busy")]
     Busy,
     /// Two wrong passwords: wait this many seconds (D376).
+    #[cfg(any(feature = "ssh", test))]
     #[error("promotion waits")]
     Locked {
         /// Seconds until the next try is accepted.
@@ -126,6 +136,7 @@ impl From<EnrollmentError> for PromotionError {
 }
 
 /// How a reserved try ended.
+#[cfg(any(feature = "ssh", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Settled {
     /// The password was refused.
@@ -180,6 +191,7 @@ pub(crate) struct SuccessorAuthority {
 type SuccessorRow = (Vec<u8>, Vec<u8>, String, i64, i64);
 
 /// What the handover changed, for the caller's in-memory follow-up.
+#[cfg(any(feature = "ssh", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HandedOver {
     /// The host, now rootful.
@@ -193,6 +205,7 @@ pub(crate) struct HandedOver {
 /// Counted: tries whose password reached PAM and never reached root, since
 /// the last try that did. Locked while there are at least [`TRIES`] of them
 /// and the newest is less than [`WAIT`] old.
+#[cfg(any(feature = "ssh", test))]
 const LOCKED: &str = "EXISTS(SELECT 1 FROM (SELECT count(*) AS n, MAX(COALESCE(f.ended_at, f.started_at)) AS last \
     FROM remote_host_promotions f WHERE f.host_id = ?h AND f.account = ?a AND f.tried = 1 AND f.rooted = 0 \
     AND f.started_at >= COALESCE((SELECT MAX(o.started_at) FROM remote_host_promotions o \
@@ -205,6 +218,7 @@ const LOCKED: &str = "EXISTS(SELECT 1 FROM (SELECT count(*) AS n, MAX(COALESCE(f
 /// rootless host) and what it binds to (an admissible active certificate of
 /// that host and uid). Parameters: `?4` rootless certificate, `?6` now,
 /// `?8` host, `?9` uid, `?10` session hash, `?11` admin window.
+#[cfg(any(feature = "ssh", test))]
 const BEGIN_ALLOWED: &str = "FROM remote_hosts h JOIN sessions s ON s.user_id = h.owner_id \
      JOIN users u ON u.id = s.user_id \
      JOIN remote_certificates c ON c.host_id = h.id AND c.fingerprint = ?4 \
@@ -219,6 +233,7 @@ const BEGIN_ALLOWED: &str = "FROM remote_hosts h JOIN sessions s ON s.user_id = 
 /// the host: its successor's uninstall is pending and that successor can
 /// still be admitted to run it (J569 P2-2). Once its certificate expires it
 /// can never uninstall through infraternal, so it stops barring the host.
+#[cfg(any(feature = "ssh", test))]
 const UNINSTALL_PENDING: &str = "EXISTS(SELECT 1 FROM remote_host_promotions p \
      JOIN remote_certificates sc ON sc.fingerprint = p.successor_fingerprint \
      WHERE p.host_id = h.id AND p.cleanup = 'uninstall' \
@@ -226,6 +241,7 @@ const UNINSTALL_PENDING: &str = "EXISTS(SELECT 1 FROM remote_host_promotions p \
 
 /// The 2-try wait clause ([`LOCKED`]) for the given host, account and time
 /// expressions, spliced into a statement's WHERE.
+#[cfg(any(feature = "ssh", test))]
 fn locked(host: &str, account: &str, now: &str) -> String {
     LOCKED
         .replace("?h", host)
@@ -248,6 +264,7 @@ fn canonical(secret: &str) -> Result<(), PromotionError> {
 }
 
 /// Whether `error` is a UNIQUE constraint failure (another live promotion).
+#[cfg(any(feature = "ssh", test))]
 fn unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db) if db.is_unique_violation())
 }
@@ -268,6 +285,7 @@ impl EnrollmentStore {
     /// or an earlier one's uninstall is pending, [`PromotionError::Locked`]
     /// during the 2-try wait (told only to a caller who may begin),
     /// otherwise `Denied`.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn begin_promotion(
         &self,
         session_hash: &str,
@@ -322,6 +340,7 @@ impl EnrollmentStore {
     ///   then never be delivered;
     /// - the 2-try wait is `Locked`;
     /// - anything else (a stale binding) is `Denied`.
+    #[cfg(any(feature = "ssh", test))]
     async fn refused_begin(
         &self,
         session_hash: &str,
@@ -363,6 +382,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// The database could not be read; callers refuse the try.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn retry_after(
         &self,
         host: Uuid,
@@ -398,6 +418,7 @@ impl EnrollmentStore {
     /// # Errors
     /// `Locked` during the wait; `Denied` for a foreign session, an expired
     /// row, or one that isn't `open` (already used).
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn reserve_try(
         &self,
         session_hash: &str,
@@ -450,6 +471,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// `Denied` when the row isn't `elevating` (it was abandoned meanwhile).
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn settle_try(
         &self,
         attempt: Uuid,
@@ -492,6 +514,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// `Denied` otherwise.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn issue_successor_token(
         &self,
         attempt: Uuid,
@@ -681,6 +704,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// `Denied` when any check fails; nothing has changed then.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn handover(
         &self,
         attempt: Uuid,
@@ -765,6 +789,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// Storage failure only.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn abandon_promotion(
         &self,
         attempt: Uuid,
@@ -791,6 +816,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// `Denied` when the row is neither `installing` nor `enrolled`.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn rolled_back(&self, attempt: Uuid, now: i64) -> Result<(), PromotionError> {
         let mut transaction = self.0.begin().await?;
         let successor: Option<Option<Vec<u8>>> = sqlx::query_scalar(
@@ -904,6 +930,7 @@ impl EnrollmentStore {
     ///
     /// # Errors
     /// `Denied` when the row isn't live or already has another transaction.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn record_install_transaction(
         &self,
         attempt: Uuid,
@@ -961,6 +988,7 @@ impl EnrollmentStore {
 
 /// Abandon one live promotion (see [`EnrollmentStore::abandon_promotion`]).
 /// Shared with host removal, which abandons in its own transaction.
+#[cfg(any(feature = "ssh", test))]
 pub(crate) const ABANDON_WHERE_ATTEMPT: &str = "UPDATE remote_host_promotions SET state = 'abandoned', ended_at = ?, \
      cleanup = CASE WHEN successor_fingerprint IS NOT NULL THEN 'uninstall' ELSE cleanup END \
      WHERE attempt = ? AND state IN ('open', 'elevating', 'installing', 'enrolled')";
@@ -971,6 +999,7 @@ pub(crate) const ABANDON_WHERE_HOST: &str = "UPDATE remote_host_promotions SET s
      WHERE host_id = ? AND state IN ('open', 'elevating', 'installing', 'enrolled')";
 
 /// The method for a stored word.
+#[cfg(any(feature = "ssh", test))]
 fn parse_method(word: &str) -> Result<Method, PromotionError> {
     [
         Method::SudoNoPassword,

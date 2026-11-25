@@ -367,6 +367,9 @@ pub fn begin_final_output() {
 pub fn finish_final_output() {
     pty::finish_final_output();
 }
+/// Shadow of the terminal engine's parser that finds the snapshot carry (#561).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod carry;
 #[cfg(all(test, feature = "process-per-user"))]
 #[path = "../tests/unit/heap_accounting.rs"]
 mod heap_accounting;

@@ -229,6 +229,16 @@ enum Command {
     Relay {
         host: String,
     },
+    /// Keep the peer on its direct endpoint and watch it with direct-path probes; a relay link
+    /// is requested only when a relay could win.
+    Watch {
+        host: String,
+    },
+    /// Report the peer's direct-path state: median round trip, which path carries it, and the
+    /// probe counters of this node.
+    DirectState {
+        host: String,
+    },
     /// Probe relay `index` from the mesh UDP port; record it in the book.
     Observe {
         relay: usize,
@@ -279,6 +289,20 @@ async fn node() {
         events,
     )
     .unwrap();
+    // `RELAY_FIXTURE_NO_DIRECT_PROBES=1` runs the node as before this feature: the idle
+    // comparison in the proof uses it. The node still answers pings (the guard does that).
+    let (paths, probes) = match node.direct_probes() {
+        Some((probes, Some(answers)))
+            if std::env::var_os("RELAY_FIXTURE_NO_DIRECT_PROBES").is_none() =>
+        {
+            (
+                paths.with_direct_probes(probes.clone(), answers),
+                Some(probes),
+            )
+        }
+        Some((probes, _)) => (paths, Some(probes)),
+        None => (paths, None),
+    };
     let names: Arc<std::sync::Mutex<HashMap<HostId, String>>> = Arc::default();
     let printer = tokio::spawn({
         let names = names.clone();
@@ -433,6 +457,30 @@ async fn node() {
                     .await
                     .unwrap();
                 say(json!({"event": "relayed", "peer": name, "shim": shim}));
+            }
+            Command::Watch { host: name } => {
+                let (kernel, _) = peers[&name].clone();
+                let shim = paths
+                    .watch_direct(&mut node, host(&name), &kernel)
+                    .await
+                    .unwrap();
+                say(json!({"event": "watching", "peer": name, "shim": shim}));
+            }
+            Command::DirectState { host: name } => {
+                let direct = paths.direct(host(&name));
+                let counts = probes.as_ref().map(|probes| probes.counts());
+                say(json!({
+                    "event": "direct_state",
+                    "peer": name,
+                    "rtt_us": direct.map(|(rtt, _)| rtt.as_micros()),
+                    "on_direct": direct.map(|(_, on)| on),
+                    "active_relay": paths.active(host(&name)),
+                    "probes_sent": counts.map(|c| c.sent),
+                    "probes_matched": counts.map(|c| c.matched),
+                    "probes_lost": counts.map(|c| c.lost),
+                    "probes_answered": counts.map(|c| c.ponged),
+                    "switches": paths.stats().switches,
+                }));
             }
             Command::Observe {
                 relay,

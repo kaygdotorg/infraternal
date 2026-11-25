@@ -235,6 +235,7 @@ pub(crate) struct TerminalOpenGuard {
 }
 
 /// Keeps a host's terminal-open admission closed for one complete promotion.
+#[cfg(any(feature = "ssh", test))]
 pub(crate) struct TerminalPromotionGuard {
     /// Dropping the guard reopens this host without holding a lock across awaits.
     admission: Arc<TerminalAdmission>,
@@ -277,6 +278,7 @@ impl TerminalAdmission {
     }
 
     /// Close admission, then wait until every already-admitted open has finished.
+    #[cfg(any(feature = "ssh", test))]
     async fn block(self: &Arc<Self>) -> Result<TerminalPromotionGuard, ()> {
         let mut current = self.state.load(AtomicOrdering::Acquire);
         loop {
@@ -320,6 +322,7 @@ impl Drop for TerminalOpenGuard {
     }
 }
 
+#[cfg(any(feature = "ssh", test))]
 impl Drop for TerminalPromotionGuard {
     /// Reopen this host when promotion commits, rolls back or is cancelled.
     fn drop(&mut self) {
@@ -442,6 +445,16 @@ impl RemoteHosts {
     pub(crate) fn listener_port(&self) -> Option<u16> {
         let factory = self.3.lock().ok()?;
         factory.as_ref().map(|factory| factory.address.port())
+    }
+
+    /// The TCP/TLS acceptor the listeners use for a handshake starting now.
+    /// Its certificate and key are the server's current leg-B leaf, so
+    /// `/remote/agent` signs its v2 answer with exactly the leaf QUIC and
+    /// TCP/TLS serve, rotation included (#559). `None` before the listeners
+    /// start; the route then refuses v2 proofs.
+    pub(crate) fn current_leaf(&self) -> Option<Arc<openssl::ssl::SslAcceptor>> {
+        let factory = self.3.lock().ok()?;
+        factory.as_ref().map(|factory| factory.tls.current())
     }
 
     #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
@@ -568,6 +581,7 @@ impl RemoteHosts {
     }
 
     /// Acquire terminal-open exclusion for the duration of a promotion.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn block_terminal_opens(
         &self,
         id: Uuid,
@@ -576,6 +590,7 @@ impl RemoteHosts {
     }
 
     /// The CA key source the enrollment issuer uses; mesh SSH signs with it too (#221).
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn ca_source(&self) -> Option<Arc<dyn crate::ca::CaKeySource>> {
         self.1.clone()
     }
@@ -583,6 +598,7 @@ impl RemoteHosts {
     /// (D376, J415 R7): its actor, its uid, the exact certificate it was
     /// admitted with, and its generation (which changes when another link
     /// replaces it). `None` when the host has no live link.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn binding(&self, id: Uuid) -> Option<(EmbeddedAgent, u32, [u8; 32], Uuid)> {
         let hosts = self.0.lock().await;
         let host = hosts.get(&id)?;
@@ -597,6 +613,7 @@ impl RemoteHosts {
     }
 
     /// The current link generation of host `id`, if it has a live link.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn generation(&self, id: Uuid) -> Option<Uuid> {
         let hosts = self.0.lock().await;
         hosts
@@ -606,6 +623,7 @@ impl RemoteHosts {
     }
 
     /// Root upgrades' successors waiting for their driver.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn successors(&self) -> &crate::remote_successor::Successors {
         &self.7
     }

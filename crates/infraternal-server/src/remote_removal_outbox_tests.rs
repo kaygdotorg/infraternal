@@ -8,14 +8,11 @@
 //! (D352) first, then the uninstall request, then one transaction that records
 //! the answer and retires the entry. An answer that never arrives retires
 //! nothing, so the next reconnect asks again.
-use super::tests::signing_certificate;
+use super::tests::{prove_v2, serve_leaf, signing_certificate};
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use infraternal_protocol::{Frame, encode_muxed_frame_into};
-use openssl::{
-    pkey::{PKey, Private},
-    sign::Signer,
-};
+use openssl::pkey::{PKey, Private};
 use tokio_tungstenite::tungstenite::Message as ClientMessage;
 
 /// The host side of one agent WebSocket link.
@@ -42,6 +39,8 @@ struct Removed {
     endpoint: std::net::SocketAddr,
     /// The server task, aborted when a test ends.
     server: tokio::task::JoinHandle<()>,
+    /// The leg-B listeners whose leaf the route signs `ready-v2` with.
+    _leaf: crate::remote_runtime::RemoteListeners,
 }
 
 /// Enrol a host, then record its removal the way `publish` commits it for a
@@ -112,6 +111,7 @@ async fn removed() -> Removed {
         .unwrap();
     let waiter = store.clone();
     let hosts = RemoteHosts::default();
+    let leaf = serve_leaf(&hosts, &waiter).await;
     let api = Api {
         hosts: hosts.clone(),
         store,
@@ -140,6 +140,7 @@ async fn removed() -> Removed {
         key,
         endpoint,
         server,
+        _leaf: leaf,
     }
 }
 
@@ -150,36 +151,8 @@ impl Removed {
             tokio_tungstenite::connect_async(format!("ws://{}/remote/agent", self.endpoint))
                 .await
                 .unwrap();
-        let challenge = socket.next().await.unwrap().unwrap();
-        let challenge: AgentLinkChallenge =
-            serde_json::from_str(challenge.to_text().unwrap()).unwrap();
-        let nonce = B64.decode(challenge.nonce).unwrap();
-        let signature = Signer::new_without_digest(&self.key)
-            .unwrap()
-            .sign_oneshot_to_vec(&proof_bytes(self.host, &nonce))
-            .unwrap();
-        let proof = AgentLinkProof {
-            message_type: "proof".to_owned(),
-            host_id: self.host,
-            certificate_der: B64.encode(self.certificate.to_der().unwrap()),
-            signature: B64.encode(signature),
-        };
-        socket
-            .send(ClientMessage::Text(
-                serde_json::to_string(&proof).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        assert!(
-            socket
-                .next()
-                .await
-                .unwrap()
-                .unwrap()
-                .to_text()
-                .unwrap()
-                .contains("ready")
-        );
+        let ready = prove_v2(&mut socket, self.host, &self.certificate, &self.key).await;
+        assert!(ready.contains("ready-v2"));
         send(
             &mut socket,
             &Frame::Hello {

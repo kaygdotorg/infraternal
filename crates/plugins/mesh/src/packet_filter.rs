@@ -280,6 +280,11 @@ impl PreparedPolicy {
     /// nothing; see [`PacketFilter::withdraw_peers`]. Publishing the result also retires their
     /// open flows, because [`CompiledPolicy::allows_flow`] resolves a flow's peer by address.
     #[must_use]
+    /// Drop these peers' addresses from this prepared snapshot before publishing it.
+    ///
+    /// Used when an earlier transaction fails mid-apply so the filter stops admitting removed or
+    /// moved peers' packets while the previous snapshot is restored.
+    #[cfg(target_os = "linux")]
     pub(crate) fn without_peers(mut self, withdrawn: &std::collections::BTreeSet<NodeId>) -> Self {
         self.0.withdraw(withdrawn);
         self
@@ -342,12 +347,14 @@ impl PacketFilter {
     /// only after the kernel table that forwards and masquerades them is installed, and off before
     /// that table goes; until then a packet for a served network is refused like any packet that
     /// is not for this node.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn set_forwarding(&self, on: bool) {
         self.forwarding.store(on, Ordering::Release);
     }
 
     /// A prepared deny-all snapshot, published when a failed transaction cannot rebuild the
     /// previous one, so the packet path fails closed.
+    #[cfg(target_os = "linux")]
     pub(crate) fn deny_all_policy() -> PreparedPolicy {
         PreparedPolicy(CompiledPolicy::empty())
     }
@@ -365,6 +372,7 @@ impl PacketFilter {
     /// The snapshot is edited in place under the write lock. Packets borrow it through the
     /// read lock without holding a second reference, so the edit allocates nothing. Only a
     /// sweep running at that moment holds one, and `writer` rules that out.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn withdraw_peers(&self, withdrawn: &std::collections::BTreeSet<NodeId>) {
         if withdrawn.is_empty() {
             return;
@@ -1030,6 +1038,7 @@ impl CompiledPolicy {
 
     /// Drop these peers' addresses from the index, so packets from or to them match no peer.
     /// Only removes entries, so it never allocates and cannot fail.
+    #[cfg(any(target_os = "linux", test))]
     fn withdraw(&mut self, withdrawn: &std::collections::BTreeSet<NodeId>) {
         if withdrawn.is_empty() {
             return;

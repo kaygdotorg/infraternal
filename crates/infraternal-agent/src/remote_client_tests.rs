@@ -308,6 +308,8 @@ async fn winning_quic_drops_the_unfinished_tls_dial_before_control_dispatch() {
     );
 }
 
+/// Accepts one QUIC connection and verifies the supervisor sends `Hello`.
+#[cfg(target_os = "linux")]
 async fn native_greeting(server: &quinn::Endpoint) -> &'static str {
     let connection = server.accept().await.unwrap().await.unwrap();
     let (send, receive) = connection.accept_bi().await.unwrap();
@@ -320,6 +322,8 @@ async fn native_greeting(server: &quinn::Endpoint) -> &'static str {
     connection.close(0u32.into(), b"");
     "quic"
 }
+/// Accepts one TLS-over-TCP connection and verifies the supervisor sends `Hello`.
+#[cfg(target_os = "linux")]
 async fn tcp_greeting(
     listener: &tokio::net::TcpListener,
     tls: &openssl::ssl::SslAcceptor,
@@ -1069,7 +1073,10 @@ async fn quic_dial_refuses_a_server_leaf_older_than_one_already_accepted() {
     accepted.expect("no history: the older leaf still passes chain and name checks");
     drop(admitted);
 
-    identity.server_leaf.admit(&newer.certificate).unwrap();
+    identity
+        .server_leaf
+        .admit(&newer.certificate.to_der().unwrap())
+        .unwrap();
     let (refused, admitted) = tokio::join!(quic_connect(&endpoint, &identity), async {
         server.accept().await.unwrap().await
     });
@@ -1125,7 +1132,10 @@ async fn tcp_fallback_refuses_a_server_leaf_older_than_one_already_accepted() {
     assert!(matches!(accepted, Connected::Tcp(_)));
     drop(accepted);
 
-    identity.server_leaf.admit(&newer.certificate).unwrap();
+    identity
+        .server_leaf
+        .admit(&newer.certificate.to_der().unwrap())
+        .unwrap();
     assert!(dial_preferred(&endpoint, &identity, &tls).await.is_err());
     assert_eq!(
         server.await.unwrap(),

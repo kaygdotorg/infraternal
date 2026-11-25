@@ -560,7 +560,9 @@ async fn execute(
             if auth.device_join_approved(&b.token, now).await? {
                 return redeem_machine_join(auth, invitation_issuer, &b.token, now).await;
             }
-            json!({"api_key":auth.device_redeem(&b.token, now).await?})
+            serde_json::to_value(infraternal_sign_in::DeviceRedeemResponse {
+                api_key: zeroize::Zeroizing::new(auth.device_redeem(&b.token, now).await?),
+            })?
         }
         "security-settings" => {
             let _: Empty = body(value)?;

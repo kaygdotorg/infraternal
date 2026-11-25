@@ -25,8 +25,10 @@ use base64::{
 };
 use hyper::StatusCode;
 use infraternal_plugin_remote::enrollment::{JoinInvitation, Mode};
+use infraternal_sign_in::{
+    DeviceApproval, DeviceRedeemRequest, join_approval_link, parse_start_response,
+};
 use qrcodegen::{QrCode, QrCodeEcc};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     env, fs,
@@ -262,41 +264,6 @@ impl JoinMode {
     }
 }
 
-#[derive(Serialize)]
-struct MachineStartRequest<'a> {
-    device: &'a str,
-    kind: &'static str,
-    request: MachineRequest<'a>,
-}
-
-#[derive(Serialize)]
-struct MachineRequest<'a> {
-    host_id: uuid::Uuid,
-    hostname: &'a str,
-    mode: &'static str,
-    execution_uid: u32,
-    key_fingerprint: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DeviceStartResponse {
-    poll_token: Zeroizing<String>,
-    user_code: String,
-    expires_in: u64,
-}
-
-#[derive(Serialize)]
-struct DeviceRedeemRequest<'a> {
-    token: &'a str,
-}
-
-struct Approval {
-    poll_token: Zeroizing<String>,
-    user_code: String,
-    lifetime: Duration,
-}
-
 /// Carry the approved invitation, private key and host rules to the root installer over stdin.
 struct Handoff {
     invitation: Zeroizing<Vec<u8>>,
@@ -307,8 +274,14 @@ struct Handoff {
     /// The handoff format is the same in every build, so the rules are always
     /// carried and validated; only builds with the host firewall apply them.
     #[cfg_attr(
-        not(any(feature = "plugin-mesh", feature = "plugin-server")),
-        allow(dead_code)
+        not(all(
+            target_os = "linux",
+            any(feature = "plugin-mesh", feature = "plugin-server")
+        )),
+        allow(
+            dead_code,
+            reason = "The handoff format always carries admin_rules; only Linux builds with the host firewall read it."
+        )
     )]
     admin_rules: Vec<String>,
 }
@@ -686,9 +659,11 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         let activation = install.activate(&image);
         #[cfg(target_os = "macos")]
         let activation = install.activate(&image, host);
-        activation.map_err(|_error| {
+        activation.map_err(|error| {
             #[cfg(target_os = "macos")]
-            eprintln!("{_error}");
+            eprintln!("{error}");
+            #[cfg(not(target_os = "macos"))]
+            let _ = error;
             Failure::Partial
         })
     })
@@ -750,46 +725,25 @@ fn shown_hostname(name: &str) -> String {
     }
 }
 
-/// The device-approval request body for one fresh machine: its new host id, the host name
-/// the owner reads before approving, the join mode with its execution uid, and the exact key
-/// fingerprint the approval binds to.
+/// The device-approval request body for one fresh machine, built by the shared sign-in crate
+/// from this join mode's wire text and execution uid.
 fn machine_start_body(
     host_id: uuid::Uuid,
     hostname: &str,
     key_fingerprint: &str,
     join: JoinMode,
 ) -> Result<Vec<u8>, Failure> {
-    if hostname.is_empty()
-        || hostname.len() > 128
-        || hostname.chars().any(char::is_control)
-        || !valid_fingerprint(key_fingerprint)
-    {
-        return Err(Failure::Failed);
-    }
-    serde_json::to_vec(&MachineStartRequest {
-        device: hostname,
-        kind: "join_machine",
-        request: MachineRequest {
-            host_id,
-            hostname,
-            mode: join.wire_mode(),
-            execution_uid: join.invitation().1,
-            key_fingerprint,
-        },
-    })
+    infraternal_sign_in::machine_start_body(
+        host_id,
+        hostname,
+        key_fingerprint,
+        join.wire_mode(),
+        join.invitation().1,
+    )
     .map_err(|_| Failure::Failed)
 }
 
-fn valid_fingerprint(value: &str) -> bool {
-    let Some(encoded) = value.strip_prefix("SHA256:") else {
-        return false;
-    };
-    let Ok(decoded) = STANDARD_NO_PAD.decode(encoded) else {
-        return false;
-    };
-    decoded.len() == 32 && STANDARD_NO_PAD.encode(decoded) == encoded
-}
-
+/// The first sixteen fingerprint characters in groups of four, as the browser shows them.
 fn machine_key_short(fingerprint: &str) -> Option<String> {
     let encoded = fingerprint.strip_prefix("SHA256:")?;
     if encoded.len() < 16 || !encoded.is_ascii() {
@@ -803,13 +757,6 @@ fn machine_key_short(fingerprint: &str) -> Option<String> {
             .map(|chunk| std::str::from_utf8(chunk).ok())
             .collect::<Option<Vec<_>>>()?
             .join(" "),
-    )
-}
-
-fn join_approval_link(server: &Url, user_code: &str) -> String {
-    format!(
-        "{}/#join={user_code}",
-        server.origin().ascii_serialization()
     )
 }
 
@@ -879,30 +826,26 @@ fn print_approval(
 }
 
 /// Start machine approval and check the server returned the expected capability shapes.
-async fn start_approval(server: &Url, body: &[u8]) -> Result<Approval, Failure> {
+async fn start_approval(server: &Url, body: &[u8]) -> Result<DeviceApproval, Failure> {
     let response = post_json(server, "/auth/device-start", body, None, REQUEST_TIMEOUT).await?;
     if response.status != StatusCode::OK {
         return Err(map_http_status(response.status));
     }
-    let started: DeviceStartResponse =
-        serde_json::from_slice(&response.body).map_err(|_| Failure::Failed)?;
-    if !capability_has_shape(&started.poll_token, 43)
-        || !capability_has_shape(&started.user_code, 16)
-        || started.expires_in != 600
+    let approval = parse_start_response(&response.body).map_err(|_| Failure::Failed)?;
+    // This command also insists the capabilities are canonical base64url, which is
+    // stricter than the shared character-set check; keep that behaviour.
+    if !capability_has_shape(&approval.poll_token, 43)
+        || !capability_has_shape(&approval.user_code, 16)
     {
         return Err(Failure::Failed);
     }
-    Ok(Approval {
-        poll_token: started.poll_token,
-        user_code: started.user_code,
-        lifetime: Duration::from_secs(started.expires_in),
-    })
+    Ok(approval)
 }
 
 /// Redeem as soon as approval arrives and retain the old cadence on polling-only servers.
 async fn wait_for_approval(
     server: &Url,
-    approval: &Approval,
+    approval: &DeviceApproval,
     host_id: uuid::Uuid,
     origin: &str,
     join: JoinMode,
@@ -1356,19 +1299,17 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        Failure, JoinInvitation, JoinMode, Mode, SUDO_CANDIDATES, ToolError, approval_qr,
-        encode_handoff, install_system_service, invoke_sudo, join_approval_link, machine_key_short,
-        machine_start_body, map_remote_failure, read_handoff, sudo_command, trusted_program,
+        Failure, JoinInvitation, Mode, SUDO_CANDIDATES, ToolError, approval_qr, encode_handoff,
+        install_system_service, invoke_sudo, machine_key_short, map_remote_failure, read_handoff,
+        sudo_command, trusted_program,
     };
     use crate::cli::output::Exit;
-    use serde_json::json;
     use std::{
         fs,
         os::unix::fs::{DirBuilderExt, PermissionsExt},
         path::Path,
         sync::atomic::{AtomicU64, Ordering},
     };
-    use url::Url;
 
     /// Child half of `the_machine_name_comes_from_the_kernel_not_the_environment`.
     #[test]
@@ -1432,15 +1373,6 @@ mod tests {
     }
 
     #[test]
-    fn join_approval_link_places_only_the_user_code_in_the_fragment() {
-        let server = Url::parse("https://mesh.example.org:8443/").unwrap();
-        assert_eq!(
-            join_approval_link(&server, "AbCdEfGhIjKlMnOp"),
-            "https://mesh.example.org:8443/#join=AbCdEfGhIjKlMnOp"
-        );
-    }
-
-    #[test]
     fn approval_qr_renders_a_square_matrix_with_a_four_module_quiet_zone() {
         let link = "https://mesh.example.org/#join=AbCdEfGhIjKlMnOp";
         let rendered = approval_qr(link).unwrap();
@@ -1457,38 +1389,12 @@ mod tests {
         );
     }
 
+    /// The browser key label groups the first sixteen fingerprint characters.
     #[test]
     fn browser_key_label_groups_the_first_sixteen_fingerprint_characters() {
         assert_eq!(
             machine_key_short("SHA256:AbCdEfGhIjKlMnOpQrStUvWxYz0123456789+/AbCde"),
             Some("AbCd EfGh IjKl MnOp".to_owned())
-        );
-    }
-
-    /// A system join asks for root mode with execution uid 0 and the exact key fingerprint.
-    #[test]
-    fn machine_start_body_binds_the_requested_system_mode_and_key() {
-        let body = machine_start_body(
-            uuid::Uuid::from_u128(1),
-            "workstation",
-            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            JoinMode::System,
-        )
-        .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            value,
-            json!({
-                "kind": "join_machine",
-                "device": "workstation",
-                "request": {
-                    "host_id": "00000000-0000-0000-0000-000000000001",
-                    "hostname": "workstation",
-                    "mode": "system",
-                    "execution_uid": 0,
-                    "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                }
-            })
         );
     }
 

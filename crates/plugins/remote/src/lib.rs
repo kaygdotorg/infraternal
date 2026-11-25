@@ -13,8 +13,9 @@ use infraternal_plugin_api::{
 };
 #[cfg(feature = "transport")]
 pub mod agent_link;
+/// The join's wire models; they live in `infraternal-link` (#580).
 #[cfg(feature = "transport")]
-pub mod enrollment;
+pub use infraternal_link::enrollment;
 /// Server-challenged host identity-key rotation proof and bounded wire types [285].
 #[cfg(feature = "transport")]
 pub mod identity_rotation;
@@ -39,11 +40,22 @@ pub mod remote_recovery;
 pub mod remote_renewal;
 #[cfg(feature = "transport")]
 pub mod remote_tls;
-/// Agent-side refusal of server leaves older than the newest one accepted (#559).
+/// Agent-side refusal of server leaves older than the newest one accepted
+/// (#559); it lives in `infraternal-link` and reads the leaf's DER (#580).
 #[cfg(feature = "transport")]
-pub mod server_leaf_floor;
+pub use infraternal_link::server_leaf_floor;
+/// The floor's tests with real OpenSSL-built certificates.
+#[cfg(all(test, feature = "transport"))]
+#[path = "server_leaf_floor_tests.rs"]
+mod server_leaf_floor_tests;
+/// QUIC datagram lanes for plugin media; they live in `infraternal-link` (#580).
 #[cfg(feature = "native-streams")]
-pub mod wire_datagrams;
+pub use infraternal_link::wire_datagrams;
+/// Real-QUIC tests of the datagram lanes. They stay here because they need
+/// this crate's OpenSSL test identities and server configuration.
+#[cfg(all(test, feature = "native-streams"))]
+#[path = "wire_datagrams_tests.rs"]
+mod wire_datagrams_tests;
 
 /// Remove one enrolled host: inside the browser's admin window (D339), or with a
 /// `hosts:write` API key inside its scope and no further tap (D333). Always dry-run first.

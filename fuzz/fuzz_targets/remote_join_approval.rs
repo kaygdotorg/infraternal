@@ -17,5 +17,5 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(serde_json::to_vec(&again).unwrap(), once);
     }
     let _ = serde_json::from_slice::<agent_link::AgentLinkChallenge>(data);
-    let _ = serde_json::from_slice::<agent_link::AgentLinkProof>(data);
+    let _ = serde_json::from_slice::<agent_link::AgentLinkProofV2>(data);
 });
