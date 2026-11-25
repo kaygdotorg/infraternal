@@ -1,0 +1,6 @@
+hold,row,setup_first_s,setup_second_s,pre_machine_ctxt_s_a,pre_rss_mib_a,pre_machine_ctxt_s_b,pre_rss_mib_b,pre_wakeups_s,pre_procs,post_machine_ctxt_s_a,post_rss_mib_a,post_machine_ctxt_s_b,post_rss_mib_b,post_wakeups_s,post_procs
+m1b,H.1,6.947,4.694,459.2,32.6,471.8,20.7,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.9w b:infraternal=20MiB/1.0w,438.8,42.7,462.0,42.4,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=35MiB/0.5w b:infraternal=42MiB/0.4w
+m1b,H.2,7.027,4.762,449.1,32.4,445.5,20.9,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/1.0w b:infraternal=20MiB/0.9w,473.4,40.0,472.5,45.5,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.5w b:infraternal=45MiB/0.7w
+m1b,I.1,6.975,4.734,473.8,30.2,483.5,21.0,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=22MiB/0.9w b:infraternal=20MiB/1.0w,445.0,38.9,469.4,41.5,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=31MiB/0.6w b:infraternal=41MiB/0.5w
+m1b,I.2,6.963,4.662,454.9,32.2,460.4,21.2,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.9w b:infraternal=21MiB/1.0w,445.1,40.7,479.8,42.0,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=33MiB/0.5w b:infraternal=41MiB/0.4w
+m1b,X,,,462.5,0.0,537.0,0.0,0,,,,,,0,

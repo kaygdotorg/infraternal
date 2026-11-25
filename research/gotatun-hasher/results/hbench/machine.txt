@@ -1,0 +1,5 @@
+00bd439159c8878540d4091b2e9d2122560c4c1d928da6098addd58e1cbc44f9  mesh-tests-base
+1240a071e4f5f2a1211772b2c08d69db9b36bc55da7b7d3aa028a7ed27e2f729  mesh-tests-h1
+6.12.113+deb13-amd64
+ 09:58:17 up 2 days,  4:25,  0 users,  load average: 0.27, 0.92, 1.16
+ 09:58:36 up 2 days,  4:25,  0 users,  load average: 0.19, 0.85, 1.13

@@ -1,0 +1,15 @@
+crafting 256 tuples that all start at slot 0 of 512, against each known function
+
+attack tuples found against sip13_fixed (today): 119959 candidates tried
+  placed with sip13_fixed (today)                mean probe  127.50  max 255
+  placed with sip13 with a random key (RandomState) mean probe    0.50  max 8
+  placed with foldhash fast (random seed)        mean probe    0.62  max 12
+  placed with ahash (seeded 1,2,3,4)             mean probe    0.59  max 16
+  placed with fxhash (unkeyed)                   mean probe    0.55  max 9
+
+attack tuples found against fxhash (unkeyed): 133686 candidates tried
+  placed with sip13_fixed (today)                mean probe    0.40  max 9
+  placed with sip13 with a random key (RandomState) mean probe    0.59  max 15
+  placed with foldhash fast (random seed)        mean probe    0.49  max 9
+  placed with ahash (seeded 1,2,3,4)             mean probe    0.38  max 9
+  placed with fxhash (unkeyed)                   mean probe  127.50  max 255
