@@ -1,0 +1,7 @@
+table inet j94guard {
+	chain post {
+		type filter hook postrouting priority filter; policy accept;
+		oifname "j94v" ip daddr != 10.70.3.0/24 counter packets 0 bytes 0 drop comment "J1227: only the VM LAN"
+		oifname "j94v" meta nfproto ipv6 counter packets 0 bytes 0 drop
+	}
+}
