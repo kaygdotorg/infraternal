@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Run `up` with the public HTTPS listener available and legacy 7443 traffic blocked (#263, #291).
+#
+# Host: run it as real root on a build host (compute01 is the proven one), with INFRATERNAL_BIN, TRACER_DIST and
+# CARGO_TARGET_DIR set. The embedded infraternal agent starts terminals through systemd units, so an unprivileged
+# UP_E2E_SKIP_NONROOT=1 run passes on compute01 but dev-02 cannot start the page's terminal shell inside the user
+# namespace (the spec then stops in enrolOwner); use compute01 there too (#580, J1200).
 set -euo pipefail
 : "${INFRATERNAL_BIN:?set the compiled CLI/server binary}"
 : "${TRACER_DIST:?set the production tracer build of this checkout, apps/tracer/dist}"
@@ -132,6 +137,12 @@ mount --bind "$bash_path" "$control/root/bin/sh"
 mount --bind "$INFRATERNAL_BIN" "$control/root/infraternal"
 # Command::output redirects child stdin from /dev/null inside the chroot.
 mount --bind /dev/null "$control/root/dev/null"
+# The mount point must exist. Hosts without the real service (dev-02) have no /run/infraternal, and creating it
+# would change the host, so cover /run with a tmpfs that lives and dies with this mount namespace.
+if [[ ! -d /run/infraternal ]]; then
+    mount -t tmpfs -o mode=755 tmpfs /run
+    mkdir -m 700 /run/infraternal
+fi
 mount --bind "$control/root/run/infraternal" /run/infraternal
 run_state="$(stat -c '%u:%a' /run/infraternal)"
 if [[ "$run_state" != "0:700" ]]; then
