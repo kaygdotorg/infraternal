@@ -442,3 +442,48 @@ fn carry_drops_utf8_bytes_the_engine_already_replaced() {
     terminal.process(&[0xac]);
     assert_eq!(terminal.pending, [] as [u8; 0]);
 }
+
+/// #575 with #561: under libghostty-vt 1.0.2 the painter keeps a soft wrap into
+/// a dropped row by scrolling a one-line region (delete-line would now end the
+/// wrap). The carry is appended after that repaint, so a viewer must replay the
+/// region scroll and then resume each kind of unfinished sequence exactly where
+/// the original stands: the same cells, wrap flags and spacer head, and the
+/// same parser state for the rest of the stream.
+#[test]
+fn carry_resumes_after_a_region_scroll_repaint_of_a_kept_wrap() {
+    // A wide glyph at the last column wraps row 1 into row 2 (row 1 keeps a
+    // spacer head); scrolling region 2-4 then drops row 2 but not the wrap.
+    let setup = "\x1b[1;12H界\x1b[2;4r\x1b[4;1H\n".as_bytes();
+    for (pending, rest) in [
+        (&b"\x1b]0;tit"[..], &b"le\x07after"[..]),
+        (b"\x1b[3", b"1mred"),
+        (b"\x1bP1$", b"r\x1b\\x"),
+        (&[0xe2, 0x82][..], &[0xac, b'!'][..]),
+    ] {
+        let mut original = reset_terminal(12, 5).unwrap();
+        original.process(setup);
+        original.process(pending);
+        assert_eq!(original.pending, pending, "carried as written");
+        let snapshot = original.snapshot().unwrap();
+        // CSI 2;5 r is the painter's region scroll for the row after row 1.
+        assert!(
+            snapshot.windows(6).any(|w| w == b"\x1b[2;5r"),
+            "the repaint kept the wrap with a region scroll"
+        );
+        assert!(snapshot.ends_with(pending), "the carry follows the repaint");
+        let mut viewer = Terminal::new(12, 5).unwrap();
+        viewer.process(&snapshot);
+        assert_eq!(
+            viewer.pending, pending,
+            "{pending:?}: the viewer resumes the carry"
+        );
+        original.process(rest);
+        viewer.process(rest);
+        assert_eq!(
+            original.engine.difference(&viewer.engine),
+            0,
+            "{pending:?}: the viewer diverged after the carry finished"
+        );
+        assert_eq!(original.snapshot().unwrap(), viewer.snapshot().unwrap());
+    }
+}

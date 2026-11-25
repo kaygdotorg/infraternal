@@ -30,6 +30,20 @@
 //! The UTF-8 tables are Bjoern Hoehrmann's DFA decoder (MIT licensed,
 //! <http://bjoern.hoehrmann.de/utf-8/decoder/dfa>), the same tables the engine
 //! uses, so the two cannot drift apart on ill-formed input.
+//!
+//! The mirror is kept by hand, so it names the engine release it was checked
+//! against in `MIRRORED_ENGINE`. A unit check fails when `scripts/build-vt`
+//! pins a different release: whoever moves the engine diffs its
+//! `src/terminal/Parser.zig`, `parse_table.zig`, `UTF8Decoder.zig`,
+//! `stream.zig` and `src/simd/vt.*` against the previous release, updates
+//! this module to match, and only then moves the constant. For 1.0.1 to
+//! 1.0.2 (#575, J1197) all of those files are byte-identical, so the tables
+//! and rules below did not change.
+
+/// The libghostty-vt release whose parser this module mirrors; see the module
+/// docs for what to re-check before changing it. Only the unit checks read it.
+#[cfg(test)]
+pub(crate) const MIRRORED_ENGINE: &str = "1.0.2";
 
 /// Parser states of the engine's VT500-style machine, one per table state.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
