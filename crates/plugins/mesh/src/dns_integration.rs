@@ -137,6 +137,10 @@ struct LinuxInstall {
     valid: bool,
     /// The mesh interface used by the per-link systemd-resolved route.
     interface: String,
+    /// The index of the owned mesh link that systemd-resolved was told about; `None` outside
+    /// `LinuxMode::Resolved`. Cleanup reverts exactly this index, and only while it still holds
+    /// the owned mesh link (#584).
+    ifindex: Option<u32>,
     /// The split-DNS mechanism installed successfully for this node.
     mode: LinuxMode,
     /// The local mesh DNS server used by the route.
@@ -205,11 +209,12 @@ impl DnsIntegration {
                 LinuxMode::Resolved => (
                     "resolved",
                     format!(
-                        "systemd-resolved routes {} to {}:{} on {}",
+                        "systemd-resolved routes {} to {}:{} on {} (link {})",
                         install.suffixes.join(", "),
                         install.address,
                         crate::dns::DNS_PORT,
-                        install.interface
+                        install.interface,
+                        install.ifindex.unwrap_or_default()
                     ),
                 ),
                 LinuxMode::NetworkManager => (
@@ -335,8 +340,13 @@ impl DnsIntegration {
                 remove_linux_install(install)?;
                 self.linux = None;
             }
-            clear_stale_networkmanager_dns()?;
-            clear_stale_hosts_block()?;
+            // The stale cleanups edit host-wide files that a node in another network namespace
+            // (a test fixture, a container sharing /etc) never wrote, so they run only from the
+            // host's own namespace (#584).
+            if in_host_network_namespace().is_ok() {
+                clear_stale_networkmanager_dns()?;
+                clear_stale_hosts_block()?;
+            }
         }
         #[cfg(target_os = "macos")]
         if current_process_is_root() {
@@ -352,6 +362,10 @@ impl DnsIntegration {
     /// Only a successful install is retained, so the next snapshot retries after a failed attempt.
     #[cfg(target_os = "linux")]
     fn configure_linux(&mut self, interface: &str, records: &Records) -> io::Result<()> {
+        // Every Linux mechanism below changes host-wide state (resolved's links, NetworkManager's
+        // drop-ins, /etc/hosts). A node whose thread runs in another network namespace shares
+        // none of that host's links, so it must leave the host resolver alone (#584).
+        in_host_network_namespace()?;
         let address = records.local_address();
         let suffixes = records.suffixes();
         let search = search_domain_requested();
@@ -468,6 +482,7 @@ impl DnsIntegration {
                     self.linux = Some(LinuxInstall {
                         valid: true,
                         interface: interface.to_owned(),
+                        ifindex: None,
                         mode: LinuxMode::Hosts,
                         address,
                         suffixes: suffixes.to_vec(),
@@ -490,12 +505,17 @@ impl DnsIntegration {
         if mode == Some(LinuxMode::Resolved)
             && let Ok(resolvectl) = &resolvectl
         {
-            let commands = resolved_route_commands(interface, address, suffixes, search);
+            // systemd-resolved is running, so it owns this host's DNS. When the mesh link cannot
+            // be proven to be ours and visible to it, refuse outright: falling back to
+            // NetworkManager or /etc/hosts would change the host's DNS from the wrong place.
+            let ifindex = resolved_link(interface)?;
+            let commands = resolved_route_commands(ifindex, address, suffixes, search);
             match run_commands(resolvectl, &commands) {
                 Ok(()) => {
                     self.linux = Some(LinuxInstall {
                         valid: true,
                         interface: interface.to_owned(),
+                        ifindex: Some(ifindex),
                         mode: LinuxMode::Resolved,
                         address,
                         suffixes: suffixes.to_vec(),
@@ -512,7 +532,7 @@ impl DnsIntegration {
                     ));
                     if let Err(revert_error) = run_commands(
                         resolvectl,
-                        &[vec!["revert".to_owned(), interface.to_owned()]],
+                        &[vec!["revert".to_owned(), ifindex.to_string()]],
                     ) {
                         failures.push(format!(
                             "resolvectl at {} could not revert the partial mesh DNS update: {revert_error}",
@@ -533,6 +553,7 @@ impl DnsIntegration {
                     self.linux = Some(LinuxInstall {
                         valid: true,
                         interface: interface.to_owned(),
+                        ifindex: None,
                         mode: LinuxMode::NetworkManager,
                         address,
                         suffixes: suffixes.to_vec(),
@@ -592,14 +613,19 @@ impl Drop for DnsIntegration {
 /// Suffixes become routing-only domains (`~internal`): queries under them go to the mesh
 /// resolver and no bare name is ever completed with them. With `search` they are also plain
 /// search domains, so `ssh compute01` finds `compute01.internal`.
+///
+/// The link is named by the index [`resolved_link`] proved, never by name: `resolvectl` would
+/// look a name up in its own network namespace and then hand systemd-resolved a bare index,
+/// which resolved applies to whichever of its links has that number (#584).
 #[cfg(target_os = "linux")]
 fn resolved_route_commands(
-    interface: &str,
+    ifindex: u32,
     address: Ipv4Addr,
     suffixes: &[String],
     search: bool,
 ) -> Vec<Vec<String>> {
-    let mut domains = vec!["domain".to_owned(), interface.to_owned()];
+    let link = ifindex.to_string();
+    let mut domains = vec!["domain".to_owned(), link.clone()];
     for suffix in suffixes {
         domains.push(format!("~{suffix}"));
         if search {
@@ -607,14 +633,10 @@ fn resolved_route_commands(
         }
     }
     vec![
-        vec![
-            "default-route".to_owned(),
-            interface.to_owned(),
-            "no".to_owned(),
-        ],
+        vec!["default-route".to_owned(), link.clone(), "no".to_owned()],
         vec![
             "dns".to_owned(),
-            interface.to_owned(),
+            link,
             format!("{address}:{}", crate::dns::DNS_PORT),
         ],
         domains,
@@ -960,6 +982,141 @@ fn clear_stale_hosts_block() -> io::Result<()> {
     }
 }
 
+/// The command name (`/proc/<pid>/comm`, cut to 15 bytes by the kernel) of systemd-resolved.
+#[cfg(target_os = "linux")]
+const RESOLVED_COMM: &str = "systemd-resolve";
+
+/// Identifies one network namespace by the device and inode of its `nsfs` file.
+#[cfg(target_os = "linux")]
+fn network_namespace_of(path: &Path) -> io::Result<(u64, u64)> {
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+/// The network namespace of the calling thread.
+///
+/// `thread-self`, not `self`: a node may run on a thread that entered its own namespace while the
+/// process's main thread stays elsewhere, and every resolver command is spawned from this thread.
+#[cfg(target_os = "linux")]
+fn own_network_namespace() -> io::Result<(u64, u64)> {
+    network_namespace_of(Path::new("/proc/thread-self/ns/net"))
+}
+
+/// Explains a refused host-resolver change in words a person can act on.
+#[cfg(target_os = "linux")]
+fn foreign_namespace_error(detail: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("mesh DNS left the host resolver alone: {detail}"),
+    )
+}
+
+/// Succeeds only when the calling thread shares the network namespace of PID 1, the host's.
+///
+/// Host resolver state (systemd-resolved's links, `NetworkManager`'s drop-ins, `/etc/hosts`)
+/// belongs to the init namespace. A node inside `unshare -n` or `ip netns exec` must not edit it:
+/// its links are not the host's links (#584). An unreadable PID 1 namespace counts as foreign.
+/// # Errors
+/// Reports a foreign or unreadable namespace.
+#[cfg(target_os = "linux")]
+fn in_host_network_namespace() -> io::Result<()> {
+    let own = own_network_namespace().map_err(|error| {
+        foreign_namespace_error(&format!(
+            "cannot read this thread's network namespace: {error}"
+        ))
+    })?;
+    match network_namespace_of(Path::new("/proc/1/ns/net")) {
+        Ok(host) if host == own => Ok(()),
+        Ok(_) => Err(foreign_namespace_error(
+            "this node runs in a network namespace other than the host's",
+        )),
+        Err(error) => Err(foreign_namespace_error(&format!(
+            "cannot read the host's network namespace: {error}"
+        ))),
+    }
+}
+
+/// Succeeds when a visible systemd-resolved process shares the calling thread's network namespace.
+///
+/// `resolvectl` reaches resolved over the system D-Bus, which a mount namespace may still expose
+/// from another network namespace. resolved then reads every link index we send as one of its
+/// own links. Only a resolved that sees our namespace may be told about our link.
+/// # Errors
+/// Reports when no resolved process is visible, or none shares this namespace.
+#[cfg(target_os = "linux")]
+fn resolved_shares_network_namespace() -> io::Result<()> {
+    let own = own_network_namespace().map_err(|error| {
+        foreign_namespace_error(&format!(
+            "cannot read this thread's network namespace: {error}"
+        ))
+    })?;
+    let mut seen = false;
+    for entry in fs::read_dir("/proc")? {
+        let name = entry?.file_name();
+        let Some(pid) = name
+            .to_str()
+            .filter(|pid| pid.bytes().all(|byte| byte.is_ascii_digit()))
+        else {
+            continue;
+        };
+        let Ok(comm) = fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        if comm.trim_end() != RESOLVED_COMM {
+            continue;
+        }
+        seen = true;
+        if network_namespace_of(Path::new(&format!("/proc/{pid}/ns/net")))
+            .is_ok_and(|namespace| namespace == own)
+        {
+            return Ok(());
+        }
+    }
+    Err(foreign_namespace_error(if seen {
+        "systemd-resolved runs in another network namespace, so it cannot see the mesh link"
+    } else {
+        "no systemd-resolved process is visible from here, so its network namespace is unknown"
+    }))
+}
+
+/// Proves that `interface` is the mesh link this infraternal agent created, and returns its index.
+///
+/// The link must carry the mesh name, a kernel `WireGuard` or TUN kind and the infraternal agent's
+/// marker, all read in one netlink reply in the calling thread's namespace.
+/// # Errors
+/// Refuses another name, a missing link, or a link with the mesh name that we did not create.
+#[cfg(target_os = "linux")]
+fn owned_mesh_link(interface: &str) -> io::Result<u32> {
+    if interface != crate::wireguard::INTERFACE {
+        return Err(foreign_namespace_error(&format!(
+            "{interface} is not the mesh link {}",
+            crate::wireguard::INTERFACE
+        )));
+    }
+    match crate::wireguard::Device::active_link() {
+        Ok(Some(link)) => Ok(link.ifindex),
+        Ok(None) => Err(foreign_namespace_error(&format!(
+            "the mesh link {interface} does not exist in this network namespace"
+        ))),
+        Err(error) => Err(foreign_namespace_error(&format!(
+            "{interface} is not a mesh link this infraternal agent created ({error})"
+        ))),
+    }
+}
+
+/// Returns the index systemd-resolved may be told about for the mesh link, after every proof.
+///
+/// The host namespace, resolved's namespace and the link's ownership are all checked, so the
+/// index means the same link to resolved as it does to us (#584).
+/// # Errors
+/// Reports the first proof that failed; the caller then leaves resolved untouched.
+#[cfg(target_os = "linux")]
+fn resolved_link(interface: &str) -> io::Result<u32> {
+    in_host_network_namespace()?;
+    resolved_shares_network_namespace()?;
+    owned_mesh_link(interface)
+}
+
 /// Chooses a split-DNS mechanism without ever replacing the host's default resolver.
 #[cfg(target_os = "linux")]
 fn select_linux_mode(
@@ -994,7 +1151,9 @@ fn resolver_setup_error(failures: &[String]) -> io::Error {
 #[cfg(target_os = "linux")]
 fn linux_install_is_intact(install: &LinuxInstall) -> io::Result<bool> {
     if install.mode == LinuxMode::Resolved {
-        return Ok(true);
+        // A recreated mesh link has a new index that resolved knows nothing about yet. Only the
+        // cheap link proof runs here; resolved's namespace was checked when it was installed.
+        return Ok(owned_mesh_link(&install.interface).ok() == install.ifindex);
     }
     if install.mode == LinuxMode::Hosts {
         return Ok(
@@ -1014,10 +1173,19 @@ fn linux_install_is_intact(install: &LinuxInstall) -> io::Result<bool> {
 fn remove_linux_install(install: &LinuxInstall) -> io::Result<()> {
     match install.mode {
         LinuxMode::Resolved => {
+            // Revert only the index we configured, and only while it still holds our link. A
+            // vanished link needs nothing (resolved forgets a link's settings when it goes), and
+            // any other link at that index is not ours to reset (#584).
+            let Some(ifindex) = install.ifindex else {
+                return Ok(());
+            };
+            if resolved_link(&install.interface).ok() != Some(ifindex) {
+                return Ok(());
+            }
             let resolvectl = trusted_program("resolvectl", RESOLVECTL_PATHS)?;
             run_commands(
                 &resolvectl,
-                &[vec!["revert".to_owned(), install.interface.clone()]],
+                &[vec!["revert".to_owned(), ifindex.to_string()]],
             )?;
         }
         LinuxMode::NetworkManager => {
@@ -1572,18 +1740,19 @@ mod tests {
     #[test]
     fn resolved_route_is_per_link_and_covers_default_and_custom_suffixes() {
         let commands = resolved_route_commands(
-            "infraternal0",
+            7,
             Ipv4Addr::new(10, 254, 0, 2),
             &["internal".to_owned(), "mesh.kayg.org".to_owned()],
             false,
         );
 
+        // The link is the proven index, never the name `resolvectl` would look up (#584).
         assert_eq!(
             commands,
             vec![
-                vec!["default-route", "infraternal0", "no"],
-                vec!["dns", "infraternal0", "10.254.0.2:1053"],
-                vec!["domain", "infraternal0", "~internal", "~mesh.kayg.org"],
+                vec!["default-route", "7", "no"],
+                vec!["dns", "7", "10.254.0.2:1053"],
+                vec!["domain", "7", "~internal", "~mesh.kayg.org"],
             ]
             .into_iter()
             .map(|arguments| arguments.into_iter().map(str::to_owned).collect())
@@ -1867,15 +2036,12 @@ mod tests {
     #[test]
     fn resolved_search_domain_is_opt_in() {
         let commands = resolved_route_commands(
-            "infraternal0",
+            7,
             Ipv4Addr::new(10, 254, 0, 2),
             &["internal".to_owned()],
             true,
         );
-        assert_eq!(
-            commands[2],
-            ["domain", "infraternal0", "~internal", "internal"]
-        );
+        assert_eq!(commands[2], ["domain", "7", "~internal", "internal"]);
     }
 
     /// The hosts block lists every suffix per name, writes IPv6 only when the node has one, and
