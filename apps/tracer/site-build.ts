@@ -17,10 +17,11 @@
  * The one screenshot of the landing page comes from the docs' figure pipeline (`figures/capture.ts`). Point `SITE_FIGURES` at the folder
  * the capture wrote (with its `manifest.json`); without it the slot shows "Figure pending", as every figure does until a capture exists.
  */
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { buildDocs, INDEX_SLUG, readUserDocs, redirectPage, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 import { figures, type FigureManifest } from "./docs-figure";
+import { DEFAULT_RELEASE_ORIGIN, installCommandFor, SERVER_IMAGE_NAME } from "./install-release";
 import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
@@ -91,22 +92,31 @@ ${command("curl -fsSL https://builds.infraternal.com/install.sh | sh")}
  * Only the server image is offered. The `infraternal-<arch>-musl` files in a release are the add-host payloads: they have no
  * `server` command, and the server installs them on each machine you add, so nobody downloads or runs them by hand.
  * The server image is built for x86-64 Linux only (docs/operations/release.md).
+ *
+ * Links are populated at runtime by `install-links.ts` only after fetching the channel pointer (`stable` by default; `edge`
+ * only when `?channel=edge` is explicitly requested) and verifying `SHA256SUMS.sig` and `VERSION` against `release/allowed_signers`.
  */
 function downloads(): string {
-  const base = "https://builds.infraternal.com/releases/latest";
-  return `<ul class="downloads"><li><span><strong>Server, Linux x86-64</strong><br><span>infraternal</span></span><span><a href="${base}/infraternal">Download</a> · <a href="${base}/SHA256SUMS">Checksums</a> · <a href="${base}/SHA256SUMS.sig">Signature</a></span></li></ul>`;
+  return `<ul class="downloads" data-install-downloads><li><span><strong>Server, Linux x86-64</strong><br><span data-install-version>${SERVER_IMAGE_NAME}</span></span><span data-install-links>Checking signed release\u2026</span></li></ul>`;
 }
 
-/** The install page. The links are placeholders for the first published release; the note says so on the page. */
+/**
+ * The install page. Resolves the current release through the signed channel pointer (`stable` by default;
+ * `edge` only when `?channel=edge` is explicitly requested) and never hard-codes a version or pushes edge builds.
+ */
 function install(): string {
-  return `<div class="plain">
+  return `<div class="plain" data-install-page data-origin="${DEFAULT_RELEASE_ORIGIN}" data-install-script="/docs/install-links.js">
 <h1>Install Infraternal</h1>
 <p class="lede">One static program is the server. It runs on a Linux x86-64 machine. When you add a machine, the server installs the infraternal agent there for you, so you never download that part.</p>
-<div class="note"><p><strong>Placeholder links.</strong> No release is published yet. These addresses are where the first one will be (D223).</p></div>
+<div class="note" data-install-notice hidden></div>
 <h2>1. Download</h2>
+<p>The installer reads the current signed release, verifies its signature and checksum, and saves <code>${SERVER_IMAGE_NAME}</code>.</p>
+<div class="doc"><div class="doc-code"><pre tabindex="0"><code data-install-cmd>${escapeHtml(installCommandFor(DEFAULT_RELEASE_ORIGIN, "stable"))}</code></pre></div></div>
+<p>Or download the files by hand:</p>
 ${downloads()}
+<p class="install-status" data-install-status aria-live="polite"></p>
 <p>Every file has a checksum and a signature next to it. Check them before you run anything.</p>
-${command("sha256sum --check --ignore-missing SHA256SUMS")}
+${command("ssh-keygen -Y verify -f allowed_signers -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS\nsha256sum --check --ignore-missing SHA256SUMS")}
 <h2>2. Run the server</h2>
 <p>Set it up as a service on the machine that will be your server. <code>--dry-run</code> prints the plan first. The server then prints a one-time setup code you use to create the first account.</p>
 ${command("chmod +x infraternal\n./infraternal server init --dry-run")}
@@ -181,6 +191,20 @@ export async function buildSite(options: SiteOptions): Promise<void> {
     await mkdir(resolve(docs, "figures"), { recursive: true });
     await Promise.all(shot.files.map((file) => cp(resolve(options.figures!, file), resolve(docs, "figures", file))));
   }
+
+  // Bundle the install-page pointer resolver with the canonical trust anchors from release/allowed_signers (D184, D224).
+  const allowedSigners = await readFile(resolve(root, "release/allowed_signers"), "utf8");
+  const installScript = await Bun.build({
+    entrypoints: [resolve(import.meta.dirname, "install-links.ts")],
+    target: "browser",
+    format: "esm",
+    minify: true,
+    outdir: docs,
+    naming: { entry: "install-links.js" },
+    define: { __INFRATERNAL_ALLOWED_SIGNERS__: JSON.stringify(allowedSigners) },
+  });
+  if (!installScript.success) throw new Error(`install script: ${installScript.logs.map(String).join("; ")}`);
+  await cp(resolve(root, "scripts/release/install.sh"), resolve(out, "install.sh"));
 
   const chrome = (title: string, body: string, area: "home" | "docs" | "install" | "releases" | "changelog", main: "docs" | "site" = "site", here?: string): string => sitePage({ title, body, area, main, ...(here ? { here } : {}) });
   await put(out, "", chrome("Infrastructure you fully own", landing(shot.html), "home", "site", "Infraternal"));

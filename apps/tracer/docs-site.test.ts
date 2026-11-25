@@ -76,3 +76,22 @@ test("every docs tree writes search.json, and every page of the site has the sea
     expect(await readFile(join(site, "404.html"), "utf8")).toContain("data-search=");
   } finally { await rm(out, { recursive: true, force: true }); }
 });
+
+test("the install page resolves releases dynamically without hardcoded versions, placeholder links, or pushing edge", async () => {
+  const out = await mkdtemp(join(tmpdir(), "site-"));
+  try {
+    const site = join(out, "site");
+    await buildSite({ out: site });
+    const html = await readFile(join(site, "install", "index.html"), "utf8");
+    expect(html).toContain('data-install-page data-origin="https://builds.infraternal.com"');
+    expect(html).toContain("curl -fsSL https://builds.infraternal.com/install.sh | sh");
+    expect(html).not.toContain("/releases/latest");
+    expect(html).not.toContain("Placeholder links");
+    expect(html).not.toContain("edge-");
+    expect(html).not.toContain("--channel edge");
+    const bundle = await readFile(join(site, "docs", "install-links.js"), "utf8");
+    expect(bundle).toContain("infraternal-release");
+    const installer = await readFile(join(site, "install.sh"), "utf8");
+    expect(installer).toContain("ssh-keygen -Y verify");
+  } finally { await rm(out, { recursive: true, force: true }); }
+});
