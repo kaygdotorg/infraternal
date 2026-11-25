@@ -9,6 +9,7 @@ const lib = @import("terminal/lib.zig");
 const Writer = std.Io.Writer;
 const SnapshotError = Writer.Error || error{Unrepresentable};
 const unicode = @import("unicode/main.zig");
+const uucode = @import("uucode");
 
 /// Byte count on success, zero on overflow, max usize for a state requiring
 /// nonprinting upstream restoration. Serialization never mutates the source.
@@ -639,9 +640,28 @@ fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotErro
             try cellLink(w, p, tail);
             try w.print("\x1b[{d}\"q{f}", .{ @as(u8, if (tail.protected) 1 else 0), effectiveStyle(p, tail).formatterVt() });
         }
-        try w.writeAll("\x1b[?2027h");
-        for (extra) |cp| try codepoint(w, cp);
-        try w.writeAll("\x1b[?2027l");
+        // Replay each extra under the mode that attaches it, the way the
+        // engine decided when it stored it. With clustering on, a codepoint
+        // that the boundary rules separate from its predecessor is dropped
+        // (a format control such as U+061C after a letter); with clustering
+        // off, a zero-width codepoint attaches wherever it lands. Clustering
+        // is therefore on only for extras the boundary rules join, and off for
+        // the rest. The chain of previous codepoints feeds the same break
+        // state machine the engine feeds.
+        var state: uucode.grapheme.BreakState = .default;
+        var previous = value.codepoint();
+        var clustering = false;
+        for (extra) |cp| {
+            const joins = !unicode.graphemeBreak(unicode.table.get(previous).grapheme_break, unicode.table.get(cp).grapheme_break, &state) and
+                unicode.graphemeWidthEffect(previous, cp) != .ignore;
+            if (joins != clustering) {
+                try w.writeAll(if (joins) "\x1b[?2027h" else "\x1b[?2027l");
+                clustering = joins;
+            }
+            try codepoint(w, cp);
+            previous = cp;
+        }
+        if (clustering) try w.writeAll("\x1b[?2027l");
         if (widened) {
             // Keep row()'s attribute caches consistent for the next cell.
             try cellLink(w, p, value);
