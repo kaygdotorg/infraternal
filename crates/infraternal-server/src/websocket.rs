@@ -1671,6 +1671,17 @@ where
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
             if gone {
+                // A remote row whose shell the host lost is closed once, so the
+                // retention prune can remove it (#588). The browser's Close below
+                // is the same either way; a failed write only leaves the row open.
+                let _ = crate::terminal_remote_gone::record_on_writer(
+                    &state.auth,
+                    &state.pool,
+                    user_id,
+                    session_token,
+                    &attachment.session_id,
+                )
+                .await;
                 state
                     .queries
                     .lock()
