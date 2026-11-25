@@ -14,7 +14,11 @@
 //! - **a snapshot continues the stream** (when the input's flag bit asks):
 //!   a fresh terminal of the same size fed the snapshot, then the same
 //!   further output as the original, ends with the same snapshot as the
-//!   original.
+//!   original. A failure is told apart by cutting the carry off the snapshot
+//!   and replaying again: when that makes the two agree, the carry is at
+//!   fault (`CARRY-CLASS`); otherwise the repaint is (`REPAINT-CLASS`). The
+//!   two classes have different owners, and a known gap in one must not hide
+//!   a regression in the other.
 //!
 //! The native engine's own code is not coverage-instrumented; the carry
 //! parser and the snapshot framing around it are.
@@ -93,19 +97,36 @@ pub fn verify_vt_stream_sample(data: &[u8]) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let Ok(mut viewer) = Terminal::new(size_now.0, size_now.1) else {
+    let carry_len = whole.carry_len();
+    whole.process(last);
+    let Ok(original) = whole.snapshot() else {
         return;
     };
-    viewer.process(&snapshot);
-    whole.process(last);
-    viewer.process(last);
-    if let (Ok(original), Ok(rebuilt)) = (whole.snapshot(), viewer.snapshot()) {
-        assert!(
-            original == rebuilt,
-            "a snapshot did not continue the stream: {}",
+    let Some(rebuilt) = replay(&snapshot, size_now, last) else {
+        return;
+    };
+    if original != rebuilt {
+        let repaint = &snapshot[..snapshot.len() - carry_len];
+        let carry_at_fault = replay(repaint, size_now, last).as_deref() == Some(&original[..]);
+        let class = if carry_at_fault {
+            "CARRY-CLASS"
+        } else {
+            "REPAINT-CLASS"
+        };
+        panic!(
+            "{class}: a snapshot did not continue the stream: {}",
             first_difference(&original, &rebuilt)
         );
     }
+}
+
+/// The snapshot a fresh terminal of `size` ends with after `replayed` and then
+/// `last` (none when the terminal cannot be made or refuses to snapshot).
+fn replay(replayed: &[u8], size: (u16, u16), last: &[u8]) -> Option<Vec<u8>> {
+    let mut viewer = Terminal::new(size.0, size.1).ok()?;
+    viewer.process(replayed);
+    viewer.process(last);
+    viewer.snapshot().ok()
 }
 
 /// Feed `bytes` to `terminal` in pieces whose sizes come from `schedule`.
@@ -223,5 +244,24 @@ mod found {
         ] {
             super::verify_vt_stream_sample(input);
         }
+    }
+}
+
+/// The classifier's cut point must be exactly the carry.
+#[cfg(test)]
+mod classifier {
+    use crate::terminal::Terminal;
+
+    /// With an unfinished CSI on the terminal, the snapshot ends in exactly
+    /// the `carry_len` bytes of it, and with nothing pending there are none.
+    #[test]
+    fn carry_len_is_the_unfinished_sequence_at_the_end_of_a_snapshot() {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.process(b"\x1bchello");
+        assert_eq!(terminal.carry_len(), 0);
+        terminal.process(b"\x1b[1;");
+        let snapshot = terminal.snapshot().unwrap();
+        assert_eq!(terminal.carry_len(), 4);
+        assert!(snapshot.ends_with(b"\x1b[1;"));
     }
 }
