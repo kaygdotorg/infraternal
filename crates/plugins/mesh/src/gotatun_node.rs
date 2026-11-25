@@ -217,11 +217,7 @@ impl BoundUdpFactory {
         port: u16,
         admission: Arc<RwLock<PeerAdmission>>,
     ) -> Self {
-        let token_seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |since| {
-                since.as_secs().rotate_left(32) ^ u64::from(since.subsec_nanos())
-            });
+        let token_seed = crate::direct_probe::token_seed();
         let (probes, answers) = DirectProbes::new(send.clone(), token_seed);
         admission.write().await.set_probes(probes.clone());
         Self {
