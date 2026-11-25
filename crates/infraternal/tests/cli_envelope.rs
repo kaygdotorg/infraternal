@@ -245,7 +245,10 @@ fn status_in(home: &std::path::Path, args: &[&str]) -> Output {
             home.join("system"),
         )
         // The machine's system data folder is a fixture too, so the status probe never reads the host's.
-        .env("INFRATERNAL_TEST_LINUX_SYSTEM_BASE", home.join("system-base"))
+        .env(
+            "INFRATERNAL_TEST_LINUX_SYSTEM_BASE",
+            home.join("system-base"),
+        )
         .env(
             "PATH",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -283,6 +286,10 @@ fn status_exits_5_when_something_that_should_run_is_down() {
     std::fs::remove_dir_all(&home).unwrap();
 }
 
+/// `status` on a machine with nothing installed exits 0 and reports role `none`.
+///
+/// Every probe path (system units, data folder, user units) points into a fixture
+/// under the test's own home, so the result does not depend on what the host runs.
 #[test]
 fn status_exits_0_on_a_machine_with_nothing_installed() {
     let home = std::env::temp_dir().join(format!("cli-status-none-{}", std::process::id()));
