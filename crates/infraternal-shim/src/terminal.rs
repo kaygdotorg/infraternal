@@ -493,6 +493,12 @@ mod fidelity;
 #[path = "../tests/unit/approximate_modes.rs"]
 mod approximate_modes;
 
+/// Recorded bash, zsh and fish sessions get exact Snapshots at every point
+/// (#521, #583).
+#[cfg(test)]
+#[path = "../tests/unit/shell_snapshot_corpus.rs"]
+mod shell_snapshot_corpus;
+
 #[cfg(test)]
 #[path = "../tests/unit/resize_recovery.rs"]
 mod resize_recovery;

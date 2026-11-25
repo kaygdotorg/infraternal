@@ -1,0 +1,465 @@
+R 40 12
+O 64
+[1m[7m%[27m[1m[0m                                        O 66
+[0m[27m[24m[J[34muser@host[39m ~ % [K[22C[0][25D[?2004hO 1
+eO 3
+ecO 1
+hO 1
+oO 1
+ O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 4
+w[KO 1
+rO 1
+aO 1
+pO 6
+p [KO 1
+eO 3
+edO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 6
+p [KO 1
+eO 3
+edO 1
+-O 1
+wO 1
+rO 1
+aO 1
+pO 1
+pO 1
+eO 1
+dO 1
+-O 1
+eO 1
+nO 1
+dO 11
+[?2004l
+O 77
+wrapped-wrapped-wrapped-wrapped-wrapped-wrapped-wrapped-wrapped-wrapped-end
+O 64
+[1m[7m%[27m[1m[0m                                        O 66
+[0m[27m[24m[J[34muser@host[39m ~ % [K[22C[0][25D[?2004hO 1
+sO 3
+seO 1
+qO 1
+ O 1
+1O 1
+ O 1
+1O 1
+2O 1
+0O 11
+[?2004l
+O 472
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+29
+30
+31
+32
+33
+34
+35
+36
+37
+38
+39
+40
+41
+42
+43
+44
+45
+46
+47
+48
+49
+50
+51
+52
+53
+54
+55
+56
+57
+58
+59
+60
+61
+62
+63
+64
+65
+66
+67
+68
+69
+70
+71
+72
+73
+74
+75
+76
+77
+78
+79
+80
+81
+82
+83
+84
+85
+86
+87
+88
+89
+90
+91
+92
+93
+94
+95
+96
+97
+98
+99
+100
+101
+102
+103
+104
+105
+106
+107
+108
+109
+110
+111
+112
+113
+114
+115
+116
+O 20
+117
+118
+119
+120
+O 64
+[1m[7m%[27m[1m[0m                                        O 66
+[0m[27m[24m[J[34muser@host[39m ~ % [K[22C[0][25D[?2004hO 1
+eO 3
+ecO 1
+hO 1
+oO 1
+ O 1
+rO 1
+eO 1
+sO 1
+iO 1
+zO 1
+eO 1
+-O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 4
+9[KO 1
+0O 1
+1O 1
+2O 6
+3 [KO 1
+4O 3
+45O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9R 30 12
+O 101
+[A[0m[27m[24m[J[34muser@host[39m ~ % echo resize-0123456789012345678901234567890123456789[KO 1
+-O 1
+nO 1
+aO 1
+rO 1
+rO 1
+oO 1
+wR 70 14
+O 121
+[A[A[0m[27m[24m[J[34muser@host[39m ~ % echo resize-0123456789012345678901234567890123456789-narrow
+[K[A[3CO 1
+-O 1
+wO 1
+iO 1
+dO 1
+eO 11
+[?2004l
+O 155
+resize-0123456789012345678901234567890123456789-narrow-wide
+[1m[7m%[27m[1m[0m                                                                      O 66
+[0m[27m[24m[J[34muser@host[39m ~ % [K[52C[0][55D[?2004hO 1
+fO 3
+foO 1
+rO 1
+ O 1
+iO 1
+ O 1
+iO 1
+nO 1
+ O 1
+1O 1
+ O 1
+2O 1
+;O 1
+ O 1
+dO 1
+oO 11
+[?2004l
+O 34
+[0m[27m[24m[Jfor> [K[?2004hO 1
+eO 3
+ecO 1
+hO 1
+oO 1
+ O 1
+lO 1
+oO 1
+oO 1
+pO 1
+-O 1
+$O 1
+iO 11
+[?2004l
+O 34
+[0m[27m[24m[Jfor> [K[?2004hO 1
+dO 3
+doO 1
+nO 1
+eO 11
+[?2004l
+O 110
+loop-1
+loop-2
+[1m[7m%[27m[1m[0m                                                                      O 66
+[0m[27m[24m[J[34muser@host[39m ~ % [K[52C[0][55D[?2004hO 1
+pO 3
+prO 1
+iO 1
+nO 1
+tO 1
+fO 1
+ O 1
+'O 1
+%O 1
+0O 1
+3O 1
+0O 1
+0O 1
+dO 1
+\O 1
+nO 1
+'O 1
+ O 1
+0O 11
+[?2004l
+O 462
+000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+[1m[7m%[27m[1m[0m                                                                      [0m[27m[24m[J[34muser@host[39m ~ % [K[52C[0][55D[?2004hR 52 14
+O 59
+[0m[27m[24m[J[34muser@host[39m ~ % [K[34C[0][37DO 64
+[H[2J[0m[27m[24m[J[34muser@host[39m ~ % [K[34C[0][37DO 1
+eO 3
+ecO 1
+hO 1
+oO 1
+ O 1
+aO 1
+fO 1
+tO 1
+eO 1
+rO 1
+-O 1
+cO 1
+lO 1
+eO 1
+aO 1
+rO 11
+[?2004l
+O 155
+after-clear
+[1m[7m%[27m[1m[0m                                                    [0m[27m[24m[J[34muser@host[39m ~ % [K[34C[0][37D[?2004hO 1
+eO 3
+ecO 1
+hO 1
+oO 1
+ O 1
+lO 1
+eO 1
+fO 1
+tO 1
+-O 1
+aO 1
+tO 1
+-O 1
+tO 1
+hO 1
+eO 1
+-O 1
+pO 1
+rO 1
+oO 1
+mO 1
+pO 1
+tO 1
+-O 1
+aO 1
+bO 1
+cO 1
+dO 1
+eO 1
+fO 1
+gO 1
+hO 1
+iO 4
+j[KO 1
+aO 1
+bO 1
+cO 6
+d [KO 1
+eO 3
+efO 1
+gO 1
+hO 1
+iO 1
+jO 1
+aO 1
+bO 1
+cO 1
+dO 1
+eO 1
+fO 1
+gO 1
+hO 1
+iO 1
+jO 1
+aO 1
+bO 1
+cO 1
+dO 1
+eO 1
+fO 1
+gO 1
+hO 1
+iO 1
+jO 1
+aO 1
+bO 1
+cO 1
+dO 1
+eO 1
+fO 1
+gO 1
+hO 1
+iO 1
+jR 44 13
+O 125
+[A[0m[27m[24m[J[34muser@host[39m ~ % echo left-at-the-prompt-abcdefghijabcdefghijabcdefghijabcdefghijabcdefghij [K
