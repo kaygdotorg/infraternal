@@ -8,6 +8,11 @@
  * - **retarget**: an arrow's head is grabbed and moved onto another card, the move is confirmed, and the arrow is redrawn;
  * - **delete**: an arrow's head is dropped on empty canvas and "Stop access" is confirmed; the arrow goes.
  *
+ * The edit gestures need arrows on screen whose ends a hand can reach. A phone sees one or none of the generated mesh's, so
+ * the run first adds arrows between the host cards in view, and takes the first arrow whose own line is on top at some point
+ * (a tap or a hover there finds it; the point is not under a card or a label). A finger taps an arrow to select it before it
+ * takes an end. The report counts the gestures completed and why any round was lost (`gestures.skipped`).
+ *
  * Input-to-paint is measured inside the page: a capturing listener takes each input event's own timestamp, and in the
  * frame that event lands in, a message posted from `requestAnimationFrame` runs once that frame's style, layout and paint
  * are done. The difference is the time to the frame that shows the input (the compositor's last step after it is a
@@ -63,7 +68,7 @@ const METER = `(() => {
 const frame = (page: Page): Promise<unknown> => page.evaluate("new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)))");
 
 /** Main-thread work per frame and forced layouts while `run` runs (see mesh-perf.spec.ts for the method). */
-async function traced(page: Page, run: () => Promise<void>): Promise<{ work: number[]; forced: Record<string, number>; frames: number; clicks: number[] }> {
+async function traced(page: Page, run: () => Promise<void>): Promise<{ work: number[]; forced: Record<string, number>; frames: number; clicks: number[]; clickToPaint: number[] }> {
   const cdp = await page.context().newCDPSession(page);
   const events: Ev[] = [];
   cdp.on("Tracing.dataCollected", (e) => events.push(...(e.value as unknown as Ev[])));
@@ -86,8 +91,15 @@ async function traced(page: Page, run: () => Promise<void>): Promise<{ work: num
   const forced: Record<string, number> = {};
   for (const d of dispatches) { const k = layouts.filter((l) => l.ts >= d.ts && l.ts <= d.ts + d.dur!).length; if (k) forced[d.args!.data!.type!] = (forced[d.args!.data!.type!] ?? 0) + k; }
   // The work of a click (the confirm that commits a change): it runs as a task of its own, outside the frames above.
-  const clicks = mainEvents.filter((e) => e.name === "EventDispatch" && e.args?.data?.type === "click").map((e) => cpu(e) / 1000);
-  return { work, forced, frames: frames.length, clicks };
+  // A click that did no work (a press on a handle, which has no click handler) is not a confirm and is left out: 0.5 ms.
+  const clicks = mainEvents.filter((e) => e.name === "EventDispatch" && e.args?.data?.type === "click" && cpu(e) > 500).map((e) => cpu(e) / 1000);
+  // The whole of a confirm on the main thread: the click's task and the work of the first frame that follows it (style, layout,
+  // paint), which is what stands between the press and the pixels. The click alone can look cheap when work is moved to the frame.
+  const clickToPaint = mainEvents.filter((e) => e.name === "EventDispatch" && e.args?.data?.type === "click" && cpu(e) > 500).map((c) => {
+    const next = frames.find((f) => f.ts >= c.ts);
+    return (cpu(c) + (next ? Math.max(0, cpu(next) - waits.filter((w) => w.ts >= next.ts && w.ts <= next.ts + next.dur!).reduce((t, w) => t + cpu(w), 0)) : 0)) / 1000;
+  });
+  return { work, forced, frames: frames.length, clicks, clickToPaint };
 }
 
 /** Pointer input that works for a mouse and for a finger (CDP touch events, so pointer capture and coarse hit areas are real). */
@@ -155,7 +167,8 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
     }
     await setLabel("idle");
     await hand.up(b.x + 300, b.y + 400); // a release on nothing: the live arrow goes, nothing is asked
-    await page.keyboard.press("Escape");
+    // Escape cancels a question on a desktop; on a phone it flies the camera out to the overview, which is not what a finger did.
+    if (!touch) await page.keyboard.press("Escape");
   };
   const dragTrace = await traced(page, async () => {
     await setLabel("drag");
@@ -171,8 +184,20 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
   // ---- retarget: grab a head, move it onto another card, confirm; and delete: drop on empty canvas, confirm -------------
   const grabHead = async (grant: string): Promise<{ x: number; y: number } | undefined> => {
     const hit = `.cl-arrow[data-grant="${grant}"] .cl-arrow-hit`;
-    // A point of the arrow near its head (80 % along), on screen, to hover or tap so the handles show.
-    const mid = await page.evaluate((q) => { const path = document.querySelector(q) as SVGPathElement | null; if (!path) return undefined; const pt = path.getPointAtLength(path.getTotalLength() * 0.8); const m = path.getScreenCTM()!; return { x: pt.x * m.a + pt.y * m.c + m.e, y: pt.x * m.b + pt.y * m.d + m.f }; }, hit);
+    // A point of the arrow near its head that is on screen and on the arrow's own hit line (not under a card or a label):
+    // from 80 % along back toward the middle, the first point whose topmost element is this arrow's hit line.
+    const mid = await page.evaluate(({ q, g }) => {
+      const path = document.querySelector(q) as SVGPathElement | null;
+      if (!path) return undefined;
+      const m = path.getScreenCTM()!, total = path.getTotalLength();
+      for (let t = 0.8; t >= 0.3; t -= 0.05) {
+        const pt = path.getPointAtLength(total * t), x = pt.x * m.a + pt.y * m.c + m.e, y = pt.x * m.b + pt.y * m.d + m.f;
+        if (x < 4 || y < 4 || x > innerWidth - 4 || y > innerHeight - 4) continue;
+        const top = document.elementFromPoint(x, y);
+        if (top?.closest(".cl-arrow")?.getAttribute("data-grant") === g) return { x, y };
+      }
+      return undefined;
+    }, { q: hit, g: grant });
     if (!mid) return undefined;
     // A mouse shows the handles on hover; a finger taps the arrow to select it first.
     if (touch) await hand.tap(mid.x, mid.y); else await hand.hover(mid.x, mid.y);
@@ -209,23 +234,52 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
     }
     return best;
   };
+  /**
+   * Makes sure at least `n` arrows end on a card that is on screen, adding arrows between visible hosts where there are
+   * fewer. Which arrows the generated mesh puts in view depends on the viewport (a phone sees one or none), and a gesture
+   * that finds no arrow measures nothing, so the edit steps would silently not run (the J1203 phone report had none).
+   */
+  const ensureArrows = async (n: number): Promise<void> => {
+    for (let tries = 0; tries < 12 && (await onScreenGrants()).length < n; tries++) {
+      const hostsNow = (await visibleCards(page)).filter((c) => !c.network);
+      const all = await P<Array<{ from: string; to: string }>>(page, "p => p.mesh.source().grants().map(g => ({ from: g.from, to: g.to }))");
+      let pair: [string, string] | undefined;
+      for (const a of hostsNow) for (const b of hostsNow) if (!pair && a.id !== b.id && !all.some((o) => o.from === a.id && o.to === b.id)) pair = [a.id, b.id];
+      if (!pair) return;
+      await P(page, `p => p.mesh.source().addGrant(${JSON.stringify(pair[0])}, ${JSON.stringify(pair[1])})`);
+      await frame(page); await frame(page);
+    }
+  };
+  // Enough arrows for every delete of the run (one in three gestures), added before the trace starts so their own work is not in it.
+  await ensureArrows(10);
+  await page.waitForTimeout(400); // sleep: the new arrows' landing cue plays out (no event) before the first is grabbed
   let retargets = 0, deletes = 0;
+  /** Why a round of the edit loop did not complete, so a run that measured less than it should says where it lost the gesture. */
+  const skipped = { noArrow: 0, noHandle: 0, noTarget: 0, noSpot: 0, noQuestion: 0 };
   const editTrace = await traced(page, async () => {
     for (let i = 0; i < 24; i++) {
+      await ensureArrows(1);
       const grants = await onScreenGrants();
-      const g = grants[i % Math.max(1, grants.length)];
-      if (!g) break;
-      // The head goes to a host card (a network takes only heads, and some already have this tail).
-      const head = await grabHead(g.id);
-      if (!head) continue;
+      if (!grants.length) { skipped.noArrow += 1; break; }
       const del = i % 3 === 2;
       const all = await P<Array<{ from: string; to: string }>>(page, "p => p.mesh.source().grants().map(g => ({ from: g.from, to: g.to }))");
-      const target = (await visibleCards(page)).find((c) => !c.network && c.id !== g.from && c.id !== g.to && !all.some((o) => o.from === g.from && o.to === c.id));
-      if (!del && !target) continue;
+      // The first arrow, from this round's turn on, that a hand can take now: its head can be reached (its curve is clear
+      // of cards and labels at some point, so a finger or a hover finds it), and, for a retarget, a host card is free to take it.
+      let g: (typeof grants)[number] | undefined, head: { x: number; y: number } | undefined, target: Awaited<ReturnType<typeof visibleCards>>[number] | undefined;
+      for (let k = 0; k < grants.length && !head; k++) {
+        const cand = grants[(i + k) % grants.length]!;
+        // The head goes to a host card (a network takes only heads, and some already have this tail).
+        const free = (await visibleCards(page)).find((c) => !c.network && c.id !== cand.from && c.id !== cand.to && !all.some((o) => o.from === cand.from && o.to === c.id));
+        if (!del && !free) { skipped.noTarget += 1; continue; }
+        const taken = await grabHead(cand.id);
+        if (!taken) { skipped.noHandle += 1; continue; }
+        g = cand; head = taken; target = free;
+      }
+      if (!g || !head) continue;
+      const to = del ? await emptySpot(head) : { x: target!.x, y: target!.y };
+      if (!to) { skipped.noSpot += 1; continue; }
       await setLabel(del ? "delete" : "retarget");
       await hand.down(head.x, head.y);
-      const to = del ? await emptySpot(head) : { x: target!.x, y: target!.y };
-      if (!to) continue;
       const steps = 20;
       for (let s = 1; s <= steps; s++) { await hand.move(head.x + ((to.x - head.x) * s) / steps, head.y + ((to.y - head.y) * s) / steps); await frame(page); }
       await setLabel("release");
@@ -233,7 +287,7 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
       await frame(page); await frame(page);
       await setLabel("idle");
       if (await confirm(del ? /Stop access/ : /Change access/)) { if (del) deletes += 1; else retargets += 1; }
-      else await page.keyboard.press("Escape");
+      else { skipped.noQuestion += 1; if (!touch) await page.keyboard.press("Escape"); }
       // sleep: the confirmation and the toast settle (about 260 ms, no event) before the next arrow is grabbed.
       await page.waitForTimeout(300);
     }
@@ -244,7 +298,7 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
   const handled = (list: Sample[], l: string): number[] => list.filter((r) => r.label === l).map((r) => r.handled);
   const result = {
     viewport: label,
-    gestures: { retargets, deletes },
+    gestures: { retargets, deletes, skipped },
     inputToPaint: {
       drag: summary(of(raw.moves, "drag")),
       retarget: summary(of(raw.moves, "retarget")),
@@ -261,6 +315,9 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
     mainThreadWork: { drag: summary(dragTrace.work), edit: summary(editTrace.work) },
     forcedLayoutsInPointerHandlers: { drag: dragTrace.forced, edit: editTrace.forced },
     confirmClickWork: summary(editTrace.clicks),
+    confirmClickAndFrameWork: summary(editTrace.clickToPaint),
+    // The display's own rate as the page saw it (headless Chromium paints at 60 Hz unless its vsync is off).
+    displayHz: Math.round(1000 / (summary(raw.frames).p50 || 16.7)),
     pointerCancels: raw.cancels,
     pressedOn: raw.downs,
     load: +(loadavg()[0]! / cpus().length).toFixed(2),
@@ -299,9 +356,10 @@ test.describe("Mesh arrows: input to paint (#580)", { tag: "@perf" }, () => {
     await openMesh(page, 1);
     const r = await measure(page, mouseHand(page), "desktop", false) as { gestures: { retargets: number; deletes: number }; errors: string[]; inputToPaint: Record<string, Summary> };
     expect(r.errors).toEqual([]);
-    // How many arrows a run can grab depends on which arrows the generated mesh puts on screen; one of each is the proof
-    // that the path ran, and the counts are in the report.
-    expect(r.gestures.retargets + r.gestures.deletes).toBeGreaterThan(0);
+    // The run adds arrows between the cards on screen, so the gestures do not depend on which arrows the generated mesh
+    // puts in view: a run that completes fewer than these has lost its grab (the counts and why are in the report).
+    expect(r.gestures.retargets).toBeGreaterThanOrEqual(5);
+    expect(r.gestures.deletes).toBeGreaterThanOrEqual(3);
     expect(r.inputToPaint.drag!.n).toBeGreaterThan(80);
   });
 
@@ -313,9 +371,11 @@ test.describe("Mesh arrows: input to paint (#580)", { tag: "@perf" }, () => {
     const cdp = await context.newCDPSession(page);
     const r = await measure(page, touchHand(cdp), "phone", true) as { gestures: { retargets: number; deletes: number }; errors: string[]; inputToPaint: Record<string, Summary> };
     expect(r.errors).toEqual([]);
-    // Synthetic touch reaches the arrow handles only some of the time (a tap must first select the arrow under it), so on
-    // the phone the drag is the asserted gesture and the edit counts are reported as they came out.
+    // A finger first taps the arrow to select it (its ends then show), then takes an end: the tap goes where the arrow's own
+    // line is on top, not under a card or a label. Every edit gesture runs on the phone too.
     expect(r.inputToPaint.drag!.n).toBeGreaterThan(10);
+    expect(r.gestures.retargets).toBeGreaterThanOrEqual(5);
+    expect(r.gestures.deletes).toBeGreaterThanOrEqual(3);
     await context.close();
   });
 });
