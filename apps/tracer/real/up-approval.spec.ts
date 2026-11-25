@@ -314,6 +314,11 @@ async function gotoWithNetworkRetry(target: Page, url: string): Promise<void> {
   }
 }
 
+/**
+ * Brings the freshly set-up server's host-connection authority (its CA) from locked to ready by driving the real
+ * passkey ceremony from the command palette, then waits until the server reports it initialized and unlocked.
+ * `up` needs that authority before it can enrol a machine. On failure it throws with the request log that led there.
+ */
 async function provisionRemoteAuthority(target: Page): Promise<void> {
   const requests: string[] = [];
   const responses: string[] = [];
@@ -354,6 +359,7 @@ async function provisionRemoteAuthority(target: Page): Promise<void> {
       if (await row.isVisible() || await row.waitFor({ timeout: 3_000 }).then(() => true, () => false)) break;
       if (attempt === 6) throw new Error("the palette never offered Unlock host connections");
       await target.keyboard.press("Escape");
+      // sleep: the page asks the server for the lock state at most every 5 s, so a faster retry only repeats the question
       await target.waitForTimeout(2_000);
     }
     await row.click();
