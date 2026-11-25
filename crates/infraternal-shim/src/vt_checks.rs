@@ -215,7 +215,6 @@ mod found {
     /// observer (vte) ignores C1 bytes there. The carry keeps `ESC 0x9C '`,
     /// and a viewer replaying it prints `'` a second time.
     #[test]
-    #[ignore = "known carry/engine divergence on C1 bytes inside sequences, #561"]
     fn snapshot_continues_after_esc_c1_byte_and_resize() {
         for input in [
             &b"\x50\x01\x00\x1bc\x1b\x9c'\xfe\xfe'"[..],
