@@ -132,6 +132,12 @@ mount --bind "$bash_path" "$control/root/bin/sh"
 mount --bind "$INFRATERNAL_BIN" "$control/root/infraternal"
 # Command::output redirects child stdin from /dev/null inside the chroot.
 mount --bind /dev/null "$control/root/dev/null"
+# The mount point must exist. Hosts without the real service (dev-02) have no /run/infraternal, and creating it
+# would change the host, so cover /run with a tmpfs that lives and dies with this mount namespace.
+if [[ ! -d /run/infraternal ]]; then
+    mount -t tmpfs -o mode=755 tmpfs /run
+    mkdir -m 700 /run/infraternal
+fi
 mount --bind "$control/root/run/infraternal" /run/infraternal
 run_state="$(stat -c '%u:%a' /run/infraternal)"
 if [[ "$run_state" != "0:700" ]]; then

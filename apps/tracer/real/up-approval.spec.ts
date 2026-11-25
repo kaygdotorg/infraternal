@@ -330,15 +330,12 @@ async function provisionRemoteAuthority(target: Page): Promise<void> {
   target.on("request", onRequest);
   target.on("response", onResponse);
   target.on("requestfailed", onRequestFailed);
-  const notification = target.getByRole("group", { name: "Notification" }).filter({
-    hasText: "The server restarted. Confirm your passkey once to reconnect your hosts.",
-  });
-  const unlock = notification
-    .getByRole("group", { name: "Notification actions" })
-    .getByRole("button", { name: "Unlock", exact: true });
+  // A brand-new account has no hosts, so the server-restart toast and inbox card are not shown (#512). The
+  // Hosts settings card always carries the same Unlock action, which runs the one real passkey ceremony.
+  const unlock = target.getByLabel("Hosts settings").getByRole("button", { name: "Unlock", exact: true, includeHidden: true });
   try {
     await target.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    await expect(unlock).toBeVisible({ timeout: 15_000 });
+    await expect(unlock).toHaveAttribute("data-shown", "true", { timeout: 15_000 });
     const readStatus = async (): Promise<{ status: number; body: unknown }> => target.evaluate(async () => {
       const response = await fetch("/remote/ca/status", {
         method: "POST",
