@@ -27,7 +27,10 @@ This page was written from the fork and upstream state on 2026-11-24.
 5. **Evidence gap, important:** every #260 number we have compares the fork with *an older fork pin*, with kernel
    WireGuard or with wireguard-go. We have **no head-to-head of stock upstream 0.10.3 against the fork** with the current
    kit. Upstream will ask for it first, so it is step 0 (§6). Until it exists, every "+x%" below is "against our previous pin".
-6. **Process finding:** the pin `e6efb96` contains a merge commit (`c4813b5`), and `scripts/gotatun-upstream-sync` refuses a
+6. **Fair comparison (J1199, 2026-11-25):** on the cross-VM perf pairing, like for like, GotaTun beats wireguard-go on
+   throughput and CPU per Gbit in every cell, but **has not beaten kernel WireGuard**. The kernel has lower loaded latency in every cell that resolves and is 18–23% faster
+   when the small VM receives 8 flows (§3.1). No upstream text may claim otherwise.
+7. **Process finding:** the pin `e6efb96` contains a merge commit (`c4813b5`), and `scripts/gotatun-upstream-sync` refuses a
    series with merges (exit 2). The next sync fails until the series is linearised. I tested it: flattening the 125 non-merge
    commits onto `e95ba96` gives a tree **identical** to `e6efb96`, and that linear series rebases onto upstream `main`
    with no conflicts (scratch test, nothing pushed). See §7.
@@ -117,9 +120,23 @@ The per-commit list of all 126 commits and the group each belongs to is in the a
 - The performance rows (G13, G14, G15, G16, G17) were measured by infraternal's own kit on one perf VM
   (`backup01`, CPUs 0 to 5, ECN, 83 s windows), against *our previous pin*, kernel WireGuard and wireguard-go. They are real
   and careful (paired holds, empty machine diffs), but they were never run against `e95ba96`.
-- The one table that shows what the whole stack does against competitors (J1129, CUBIC, Gbit/s at 1 / 8 flows): kernel
-  2.52 / 2.51, wireguard-go 6.72 / 6.58, GotaTun before J1129 5.46 / 5.29, **GotaTun e6efb96 6.19 / 6.14**; loaded p99 at 8 flows
-  4.42 → 4.47 ms (wireguard-go 36.5 ms, kernel 3.58 ms). Idle RSS about 11 to 18 MiB against 67 to 130 MiB for the others.
+- **We have not beaten kernel WireGuard** (owner correction, 2026-11-25). The like-for-like engine comparison (J1199,
+  [research/fair-bench/summary.md](../../research/fair-bench/summary.md)) is cross-VM on the backup01 perf pairing. It
+  runs `gotatun-cli` at pin `e87fef91`, wireguard-go and kernel WireGuard, all configured with `wg set`, MTU 1390, the
+  same nft guard table and no CPU pinning, and measures latency with a TCP round-trip probe instead of ping. Two paired
+  holds; the A/A floor is 0.2–1.3% on Gbit/s. Against kernel WireGuard, the kernel has lower loaded round-trip latency
+  in every cell that resolves (p99 −19 to −82%), and moves 18–23% more at 8 flows when the 2-core VM receives (4.15
+  against 3.50 Gbit/s). Forward at 8 flows the two are level within 1%. GotaTun is ahead only in single-flow cells
+  (forward CUBIC +23%; reverse BBR, where kernel WireGuard stays at 1.18 Gbit/s for a reason not yet investigated).
+- **Against wireguard-go, GotaTun is ahead on throughput and CPU in every cell of that pairing:** 1.4–1.8× the throughput at about half the
+  CPU per Gbit, with lower loaded latency in 14 of 16 p50/p99 cells, 0.5 against 8.7 idle wakeups/s, and 34 against 147
+  MiB RSS for both nodes. That is one pairing and one LAN hop. Upstream will want their own fixture.
+- The older single-host table (J1129, both ends in network namespaces on one 6-vCPU VM, CUBIC, Gbit/s at 1 / 8
+  flows: kernel 2.52 / 2.51, wireguard-go 6.72 / 6.58, GotaTun `e6efb96` 6.19 / 6.14) must not be quoted as a
+  comparison with kernel WireGuard. On one VM, kernel WireGuard's crypto runs in softirq on the same CPUs as both
+  endpoints and iperf3, and cannot be pinned the way the userspace engines were. Its 2.5 Gbit/s there is a fixture
+  limit, and the cross-VM rows above contradict it. In that table wireguard-go was also ahead of GotaTun. Its idle
+  RSS (11–18 MiB against 67–130 MiB) agrees with the cross-VM rows.
 - Stock GotaTun 0.10.3 on that kit is **unmeasured**. The fork's early baseline (before the TUN offload work) was far below these
   rows, so the stack as a whole is probably a large gain, but the discussion must not say a number we have not measured.
 
