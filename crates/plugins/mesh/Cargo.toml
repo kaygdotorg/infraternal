@@ -90,7 +90,13 @@ url = { workspace = true, optional = true }
 # MTU watcher, CLOCK_BOOTTIME timerfd without 1 s poll/10 s sweep, activity-armed
 # idle release), and idle release reclaims consumed receive-chunk prefixes and
 # drops retired chunks (#260, D81, D331, J1150).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "9fb980df8d2e0744928b8c16ca08e14a5da23acd", default-features = false, features = ["device", "ring"], optional = true }
+# Data packets with a small payload carry a mark in a reserved header byte when
+# they leave a peer's second (side) UDP socket; a marked packet never moves the
+# peer's endpoint, so the peer keeps sending to the main port. The sender side is
+# off unless GOTATUN_SIDE_SOCKET=1 (bench). Shipping the receive rule first lets a
+# later release turn the sender on without an older node roaming to a side port
+# (#260, J1159).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "e87fef91fcab0dd338c5ecfcdd1afaa516bebf17", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
