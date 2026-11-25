@@ -4261,6 +4261,12 @@ mod host_listener_tests;
 #[path = "node_restart_continuity_bench.rs"]
 mod restart_continuity_bench;
 
+/// Namespace proofs that incremental snapshot apply equals a full apply, also across a SIGKILL
+/// mid-apply (#260 J1240).
+#[cfg(all(test, feature = "test-support"))]
+#[path = "node_incremental_apply_tests.rs"]
+mod incremental_apply_tests;
+
 /// Namespace regressions for periodic route recovery and its idle measurement (#483).
 #[cfg(test)]
 #[path = "node_route_repair_tests.rs"]

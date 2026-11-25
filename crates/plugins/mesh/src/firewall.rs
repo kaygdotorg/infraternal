@@ -748,6 +748,13 @@ impl Firewall {
         }
         done
     }
+    /// Test seam (#260 J1240): forget the recorded guard content, so the next install replaces
+    /// the whole table the way a first install after a restart does. Only the namespace tests
+    /// that need `test-support` call it.
+    #[cfg(all(test, feature = "test-support"))]
+    pub(crate) fn forget_installed_guard(&mut self) {
+        self.guard_script = None;
+    }
     /// Remove only the owned table, leaving the host firewall intact.
     /// # Errors
     /// Returns a failed kernel deletion without claiming the component is off.
