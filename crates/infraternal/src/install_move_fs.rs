@@ -52,7 +52,19 @@ fn stat_dev(info: &FileStat) -> u64 {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        u64::from(info.st_dev)
+        info.st_dev
+    }
+}
+
+/// Converts `stat.st_mode` to `u32` across Unix targets (`u16` on macOS, `u32` on Linux).
+fn stat_mode(info: &FileStat) -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        u32::from(info.st_mode)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        info.st_mode
     }
 }
 
@@ -177,7 +189,7 @@ fn entry(dir: &File, name: &OsStr) -> io::Result<FileStat> {
     let info = fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
     if info.st_uid != Uid::effective().as_raw()
         || stat_dev(&info) != dir.metadata()?.dev()
-        || (kind(&info) != SFlag::S_IFLNK && u32::from(info.st_mode) & 0o022 != 0)
+        || (kind(&info) != SFlag::S_IFLNK && stat_mode(&info) & 0o022 != 0)
     {
         return Err(invalid(
             "entry has an unsupported owner, mode, or filesystem",
