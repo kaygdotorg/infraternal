@@ -190,6 +190,7 @@ fn search_domain_requested() -> bool {
 
 impl DnsIntegration {
     /// Reports the host resolver state for `mesh status`.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn state(&self) -> DnsState {
         let search = search_domain_requested();
         let unavailable = |error: &String| DnsState {

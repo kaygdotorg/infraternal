@@ -54,7 +54,7 @@ impl Routes {
 }
 
 /// Test helper that serves one stream with standby priming switched off.
-#[cfg(test)]
+#[cfg(all(test, feature = "remote", target_os = "linux"))]
 pub(crate) async fn serve(
     bound: BoundStream,
     providers: Arc<Routes>,

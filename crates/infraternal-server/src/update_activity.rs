@@ -14,15 +14,15 @@
 //! **Cost.** [`note`] runs on every terminal input frame. It reads the coarse monotonic
 //! clock (a vDSO read with no system call, a few nanoseconds) and does one relaxed
 //! atomic store. Nothing waits on it and nothing is allocated.
-use std::{
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::Duration,
-};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(any(feature = "release", test))]
+use std::time::Duration;
 
 /// Set while an update switch is between its database copy and its exec.
 static FROZEN: AtomicBool = AtomicBool::new(false);
 
 /// Refuse (or admit again) terminal input, attach and open for an update switch.
+#[cfg(any(feature = "release", test))]
 pub(crate) fn freeze(frozen: bool) {
     FROZEN.store(frozen, Ordering::Relaxed);
 }
@@ -56,6 +56,7 @@ pub(crate) fn note() {
 
 /// How long the server has been quiet: the time since the last [`note`], or since the
 /// process started its clock when nothing was noted yet.
+#[cfg(any(feature = "release", test))]
 #[must_use]
 pub(crate) fn idle_for() -> Duration {
     let last = LAST.load(Ordering::Relaxed);

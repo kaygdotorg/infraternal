@@ -90,6 +90,7 @@ impl InvitationIssuer {
         })
     }
     /// The setup address is committed with its new host record and invitation.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn issue_bootstrap(
         &self,
         cookie: &str,
@@ -106,6 +107,7 @@ impl InvitationIssuer {
         .await
     }
     /// Issue under an already scoped CLI action; the key is rechecked in the write transaction.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn issue_bootstrap_api_key(
         &self,
         key_hash: &str,
@@ -122,6 +124,7 @@ impl InvitationIssuer {
         .await
     }
     /// Same authority path as initial issue, retaining existing destination metadata.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn reissue(
         &self,
         cookie: &str,
@@ -136,6 +139,7 @@ impl InvitationIssuer {
         .await
     }
     /// Reissue an invitation during the same scoped CLI add-host action.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn reissue_api_key(
         &self,
         key_hash: &str,
@@ -163,6 +167,7 @@ impl InvitationIssuer {
     /// the promotion `attempt` and is bound to the staged key `key_digest`.
     /// It carries the same pins as every other invitation; redemption
     /// records a successor certificate, never the host's active one.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) async fn issue_successor(
         &self,
         attempt: Uuid,
@@ -204,12 +209,18 @@ impl InvitationIssuer {
         })
     }
 
+    /// Whether the CA key source is currently unlocked and ready to sign.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
     }
+    /// The server's public origin advertised in join invitations.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn origin(&self) -> &str {
         self.0.auth.origin()
     }
+    /// The underlying enrollment store shared with bootstrap and promotion flows.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn store(&self) -> &EnrollmentStore {
         &self.0.store
     }
@@ -221,9 +232,11 @@ struct RevocationRequest {
     host_id: Uuid,
 }
 
+/// Caller credentials accepted when issuing a remote host join invitation.
 #[derive(Clone, Copy)]
 enum IssueAuthority<'a> {
     Session(&'a str),
+    #[cfg(any(feature = "ssh", test))]
     ApiKey(&'a str),
 }
 
@@ -411,6 +424,7 @@ async fn issue_invitation(
                 .user_id,
             crate::auth::hash(cookie),
         )),
+        #[cfg(any(feature = "ssh", test))]
         IssueAuthority::ApiKey(_) => None,
     };
     // Drop rolls back every unpublished write on error or cancellation. The
@@ -426,6 +440,7 @@ async fn issue_invitation(
     let (person_id, session_hash) = match (authority, session) {
         (_, Some((person_id, session_hash))) => (person_id, Some(session_hash)),
         (IssueAuthority::Session(_), None) => return Err(StatusCode::UNAUTHORIZED),
+        #[cfg(any(feature = "ssh", test))]
         (IssueAuthority::ApiKey(key_hash), None) => {
             // J90 owns key expiry, scope and sliding renewal. This writer transaction
             // stays held through host creation and invitation issuance. The authorizer reads

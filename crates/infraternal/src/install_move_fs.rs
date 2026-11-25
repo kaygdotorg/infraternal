@@ -44,15 +44,39 @@ impl Identity {
     }
 }
 
+/// Converts `stat.st_dev` to `u64` matching `MetadataExt::dev()` across Unix targets.
+fn stat_dev(info: &FileStat) -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        u64::from(info.st_dev.cast_unsigned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        info.st_dev
+    }
+}
+
+/// Converts `stat.st_mode` to `u32` across Unix targets (`u16` on macOS, `u32` on Linux).
+fn stat_mode(info: &FileStat) -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        u32::from(info.st_mode)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        info.st_mode
+    }
+}
+
 /// Inspect a source entry without following links, pinning the name for retirement.
 #[allow(
     clippy::unnecessary_cast,
-    reason = "stat device and inode widths vary across supported Unix targets"
+    reason = "stat inode widths vary across supported Unix targets"
 )]
 pub(super) fn entry_identity(dir: &File, name: &OsStr) -> io::Result<Option<Identity>> {
     match entry(dir, name) {
         Ok(info) => Ok(Some(Identity {
-            dev: info.st_dev as u64,
+            dev: stat_dev(&info),
             ino: info.st_ino as u64,
         })),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -161,15 +185,11 @@ pub(super) fn tree(dir: &File, name: &OsStr) -> io::Result<File> {
 }
 
 /// Inspect a leaf without dereferencing it, before opening or unlinking it.
-#[allow(
-    clippy::unnecessary_cast,
-    reason = "stat device and mode widths vary across supported Unix targets"
-)]
 fn entry(dir: &File, name: &OsStr) -> io::Result<FileStat> {
     let info = fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
     if info.st_uid != Uid::effective().as_raw()
-        || info.st_dev as u64 != dir.metadata()?.dev()
-        || (kind(&info) != SFlag::S_IFLNK && info.st_mode as u32 & 0o022 != 0)
+        || stat_dev(&info) != dir.metadata()?.dev()
+        || (kind(&info) != SFlag::S_IFLNK && stat_mode(&info) & 0o022 != 0)
     {
         return Err(invalid(
             "entry has an unsupported owner, mode, or filesystem",
@@ -196,6 +216,10 @@ fn check_mount(dir: &File, name: &OsStr) -> io::Result<()> {
 
 /// On other platforms the caller compares filesystem device identifiers.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Keep the fallible signature identical to the Linux mount check."
+)]
 fn check_mount(_dir: &File, _name: &OsStr) -> io::Result<()> {
     Ok(())
 }
@@ -208,10 +232,10 @@ fn kind(stat: &FileStat) -> SFlag {
 /// Ensure an opened entry is the same safe object inspected before opening.
 #[allow(
     clippy::unnecessary_cast,
-    reason = "stat device and inode widths vary across supported Unix targets"
+    reason = "stat inode widths vary across supported Unix targets"
 )]
 fn checked(before: &FileStat, after: &Metadata) -> io::Result<()> {
-    if before.st_dev as u64 != after.dev()
+    if stat_dev(before) != after.dev()
         || before.st_ino as u64 != after.ino()
         || after.uid() != Uid::effective().as_raw()
         || after.mode() & 0o022 != 0

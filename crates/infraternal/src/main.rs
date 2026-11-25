@@ -538,17 +538,14 @@ fn run_mesh_service(
         let operation = action.command.last().map_or("", String::as_str);
         let system_service = system_service_requested(matches);
         let command = action.command.join(" ");
-        let executable = match std::env::current_exe() {
-            Ok(executable) => executable,
-            Err(_) => {
-                return report_failure_as(
-                    &command,
-                    "The Mesh system service could not be started.",
-                    "The current executable path is unavailable.".to_owned(),
-                    json_output,
-                    Exit::Failed,
-                );
-            }
+        let Ok(executable) = std::env::current_exe() else {
+            return report_failure_as(
+                &command,
+                "The Mesh system service could not be started.",
+                "The current executable path is unavailable.".to_owned(),
+                json_output,
+                Exit::Failed,
+            );
         };
         let result =
             infraternal_plugin_mesh::macos_service::control(operation, system_service, &executable);
@@ -2198,7 +2195,7 @@ fn run_server_foreground(
         #[cfg(feature = "remote")]
         Ok(remote_server::Outcome::Restart(replacement)) => {
             // Same-PID exec consumes the runtime after cancelling server tasks.
-            return restart::replace(runtime, replacement, json_output);
+            return restart::replace(runtime, *replacement, json_output);
         }
         Ok(remote_server::Outcome::Stopped) => Ok(()),
         Err(error) => Err(error),
