@@ -667,3 +667,127 @@ fn approximate_repaint_keeps_the_scroll_region_for_later_output() {
         "later output must scroll only the host's scroll region in the viewer"
     );
 }
+
+/// Exact Snapshots when the screen's top row is joined to the last history row
+/// (#521, J1238).
+///
+/// A shell command longer than the screen, or a long output line that has
+/// scrolled halfway off, leaves the top visible row continuing a history row.
+/// The history export prints the last history row and lets it wrap onto the
+/// top line, and the screen clear keeps that continuation (`paint` in
+/// `native/snapshot.zig`). Each case must export, match the source at once,
+/// and keep matching after every continuation probe and after a reflowing
+/// resize, which joins rows by their wrap flags. Most cases run at 12x5
+/// behind three short lines of history: plain text, the cursor on the crossing line
+/// (with and without a pending wrap), a wide glyph whose spacer head is on the
+/// history row (kept or narrowed), a glyph that a variation selector widened
+/// across the boundary, style, link and protection on the crossing line, a
+/// saved cursor on the top row, the alternate screen active, a one-row screen,
+/// and a history row that wraps into a top row that is not its continuation
+/// (made by a region scroll before the full-screen scroll).
+#[test]
+fn fidelity_soft_wrap_across_the_history_boundary_exports_exactly() {
+    let lines = "0\r\n1\r\n2\r\n";
+    let x30 = "x".repeat(30);
+    let wide = format!("a{}", "界".repeat(20));
+    let cases: Vec<(&str, String, u16, u16)> = vec![
+        (
+            "top row continues history",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC"),
+            12,
+            5,
+        ),
+        (
+            "two rows of the line in history",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\r\nD"),
+            12,
+            5,
+        ),
+        (
+            "cursor on the crossing line",
+            format!("{lines}{}", "x".repeat(70)),
+            12,
+            5,
+        ),
+        (
+            "pending wrap on the crossing line",
+            format!("{lines}{}", "x".repeat(72)),
+            12,
+            5,
+        ),
+        (
+            "spacer head on the history row",
+            format!("{lines}{wide}\r\nA\r\nB"),
+            12,
+            5,
+        ),
+        (
+            "narrowed spacer head on the history row",
+            format!("{lines}{wide}\x1b[3;1Hb\x1b[5;1H\r\nA\r\nB"),
+            12,
+            5,
+        ),
+        (
+            "glyph widened across the boundary",
+            format!(
+                "\x1b[?2027h{lines}{}\u{2764}\u{fe0f}rest\r\nA\r\nB\r\nC\r\nD",
+                "a".repeat(11)
+            ),
+            12,
+            5,
+        ),
+        (
+            "styled and linked crossing line",
+            format!(
+                "{lines}\x1b[41;1m\x1b]8;;http://example.invalid/\x1b\\{x30}\x1b]8;;\x1b\\\x1b[0m\r\nA\r\nB\r\nC"
+            ),
+            12,
+            5,
+        ),
+        (
+            "protected crossing line",
+            format!("{lines}\x1b[1\"q{x30}\x1b[0\"q\r\nA\r\nB\r\nC"),
+            12,
+            5,
+        ),
+        (
+            "saved cursor pending on the top row",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\x1b[1;12HZ\x1b7\x1b[5;2H"),
+            12,
+            5,
+        ),
+        (
+            "alternate screen active",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\x1b[?1049halt"),
+            12,
+            5,
+        ),
+        ("one-row screen", x30.clone(), 12, 1),
+        (
+            "history row wraps into a row that does not continue it",
+            // The line's first row stays on line 1 while a region scroll of
+            // lines 2-5 replaces its continuation; a full scroll then moves
+            // it into history.
+            format!("{}\x1b[2;5r\x1b[5;1H\n\x1b[r\x1b[5;1H\nA", "x".repeat(20)),
+            12,
+            5,
+        ),
+    ];
+    for (name, prefix, cols, rows) in cases {
+        replay(name, prefix.as_bytes(), cols, rows);
+    }
+}
+
+/// A line that crosses into the screen but started more than the 256-row
+/// history tail ago cannot be exported whole, and a shorter export would
+/// reflow differently on the viewer's next resize. It stays refused, so the
+/// reattach keeps the raw replay (#521).
+#[test]
+fn fidelity_a_crossing_line_longer_than_the_history_tail_is_refused() {
+    let mut source = corpus_terminal(12, 5).unwrap();
+    source.process("x".repeat(12 * 300).as_bytes());
+    assert_eq!(
+        source.snapshot().unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+}

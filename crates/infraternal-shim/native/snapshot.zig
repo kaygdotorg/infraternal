@@ -36,6 +36,16 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // viewer would repeat a character where the original repeats nothing.
     // Refuse it rather than resume it unfaithfully.
     var paints_a_print = false;
+    const primary = t.screens.get(.primary).?;
+    const history = primary.pages.total_rows - t.rows;
+    // The first history row the export paints. When the screen's top row is
+    // joined to the last history row, this start is never `history`: the
+    // line that crosses the boundary is exported whole, or refused.
+    const start = historyStart(primary, t.rows, tail) orelse return error.Unrepresentable;
+    // The last history row wraps into the screen's top row. The history
+    // export prints it and lets its wrap carry onto the top line (`row`), so
+    // only the top row's own continuation flag needs care (`paint`).
+    const joined = history != 0 and wraps(primary, history - 1);
     // The bounded painter cannot recreate a boundary wrap flag independently
     // of adjacent history or scrolling. Refuse these states until upstream
     // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
@@ -54,8 +64,8 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             // `seen` aggregate may differ when its marked rows fall outside
             // this range. This bounds validation to visible rows plus the tail
             // instead of scanning ~10k stored rows on every Snapshot request.
-            const history = screen.pages.total_rows - t.rows;
-            const first_exported = history - @min(history, tail);
+            const stored = screen.pages.total_rows - t.rows;
+            const first_exported = stored - @min(stored, tail);
             var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = @intCast(first_exported) } }, null);
             while (semantic_rows.next()) |semantic_row| {
                 if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
@@ -68,7 +78,10 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = t.rows - 1 } }).?;
             if (p.rowAndCell().row.wrap) return error.Unrepresentable;
             const first = screen.pages.pin(.{ .active = .{ .x = 0, .y = 0 } }).?;
-            if (first.rowAndCell().row.wrap_continuation) return error.Unrepresentable;
+            // A top row may continue a line only from exported history (#521):
+            // the alternate screen has none, and a continuation under a row
+            // that does not wrap has no print that recreates it.
+            if (first.rowAndCell().row.wrap_continuation and (key != .primary or !joined)) return error.Unrepresentable;
             var previous_wrap = first.rowAndCell().row.wrap;
             for (1..t.rows) |y| {
                 const current = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
@@ -94,18 +107,16 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try restoreColors(w, t);
-    const primary = t.screens.get(.primary).?;
     // Printing changes the terminal-global REP source. Reconstruct the
     // inactive screen first so its final character cannot win on replay.
     if (t.screens.active_key == .primary) {
         if (t.screens.get(.alternate)) |alt| {
             try w.writeAll("\x1b[?47h");
-            try paint(w, t, alt);
+            try paint(w, t, alt, false);
             try w.writeAll("\x1b[?47l");
         }
     }
-    const history = primary.pages.total_rows - t.rows;
-    const count = history - (historyStart(primary, t.rows, tail) orelse return error.Unrepresentable);
+    const count = history - start;
     if (count != 0) {
         // A truncated first row cannot inherit wrap from a discarded predecessor.
         // `historyStart` never picks one; this stays as the invariant's guard.
@@ -119,7 +130,10 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         var skip_first = false;
         for (history - count..history) |y| {
             const p = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
-            skip_first = try row(w, p, skip_first, null);
+            // The last history row wraps onto the screen's top line, which
+            // becomes the top row once the rows above have scrolled off. A
+            // glyph `row` already printed there is cleared and repainted.
+            skip_first = try row(w, p, skip_first, if (y + 1 == history) .boundary else .history);
             if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
         }
         // CRLF has already scrolled the earlier rows. Push only the remaining
@@ -128,14 +142,16 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         const remaining = @min(count, @as(usize, t.rows) - 1);
         if (remaining != 0) try w.print("\x1b[{d}S", .{remaining});
     }
-    try paint(w, t, primary);
+    // The top row keeps the continuation that the boundary wrap just made
+    // only when the source row has one; ED 2 resets it otherwise.
+    try paint(w, t, primary, joined and primary.pages.pin(.{ .active = .{} }).?.rowAndCell().row.wrap_continuation);
     if (t.screens.active_key == .alternate) {
         const alt = t.screens.get(.alternate).?;
         // 47 preserves saved cursors and content, unlike 1049 which saves and
         // clears on every set, including nested sets. Continuations retain
         // their original 47/1047/1049 behavior in the real engine.
         try w.writeAll("\x1b[?47h");
-        try paint(w, t, alt);
+        try paint(w, t, alt, false);
     }
     // Modes with screen-switching or reset side effects are represented by
     // the screen construction above, rather than dispatched a second time.
@@ -193,18 +209,23 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
 /// the history tail be shorter than asked, and the omitted rows stay in the
 /// host's scrollback (D381).
 ///
+/// The last history row is the exception: the row below it is the screen's
+/// top row, and the painter rebuilds that pair whether or not the top row is
+/// marked as its continuation (`Below.boundary`, `paint`).
+///
 /// The start must also follow a row that does not wrap. Reflow joins a row to
 /// the next one whenever the upper row's wrap flag is set, whatever the lower
 /// row says, so a start right after a wrapping row would reflow differently
-/// from the source on the viewer's next resize. When every candidate is joined
-/// to the screen's top row there is no such start, and the state is refused
-/// as before. The scan reads one row per row it may export, as painting does.
+/// from the source on the viewer's next resize. So a line that crosses into
+/// the screen is exported whole. When it starts above the tail, or right after
+/// a row that cannot be painted, there is no such start, and the state is
+/// refused. The scan reads one row per row it may export, as painting does.
 fn historyStart(screen: *const vt.Screen, rows: usize, tail: usize) ?usize {
     const history = screen.pages.total_rows - rows;
     var start = history - @min(history, tail);
     for (start..history) |y| {
         const p = screen.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
-        if (!p.rowAndCell().row.wrap) continue;
+        if (!p.rowAndCell().row.wrap or y + 1 == history) continue;
         const next = p.down(1) orelse continue;
         if (!next.rowAndCell().row.wrap_continuation) start = y + 1;
     }
@@ -330,14 +351,27 @@ fn restoreRep(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     try w.print("\x1b[{d}G\x1b[X", .{p.x + 1});
 }
 
-fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
+/// Repaints `screen`'s visible rows, its saved cursor (DECSC), Kitty keyboard
+/// stack, cursor shape, margins and cursor, on the screen the viewer has active.
+///
+/// The screen is cleared before painting, twice: once for what was left on it
+/// (the history export's last line), once for the saved cursor's temporary
+/// cells. ED 2 resets every visible row's flags. When `keep_top_continuation`
+/// is set, the clear is ED 0 from the home position instead: it erases the
+/// same cells (EL to the right on the top row, then whole rows below) but
+/// leaves the top row's continuation flag, which the history export made by
+/// wrapping the last history row onto that line (#521). Nothing else can make
+/// that flag: a wrap needs the row above, and that row is history by now.
+/// Neither clear touches history rows, and both honour the same protection.
+fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, keep_top_continuation: bool) SnapshotError!void {
+    const clear: []const u8 = if (keep_top_continuation) "\x1b[J" else "\x1b[2J";
     // Screen entry copies the inactive screen's pending single shift. The
     // destination has no reconstructed saved cursor yet, so DECRC restores
     // its default charset without printing or changing terminal-global REP.
     // Clear the inherited shift before constructing the source DECSC record;
     // charset designation alone cannot cancel it when the saved shift is null.
     try w.writeAll("\x1b8");
-    try w.writeAll("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H\x1b[2J\x1b]8;;\x1b\\");
+    try w.print("\x1b(B\x1b*B\x1b+B\x0f\x1b[?2027l\x1b[?7h\x1b[?6l\x1b[?69l\x1b[r\x1b[4l\x1b[H{s}\x1b]8;;\x1b\\", .{clear});
     if (screen.saved_cursor) |saved| {
         // A saved cursor can lie outside margins changed after DECSC. Use
         // temporary full margins so CUP cannot clamp its absolute position;
@@ -365,13 +399,13 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
     if (screen.saved_cursor) |saved| {
         if (saved.charset.single_shift != null and t.previous_char != null) try w.writeAll(" \x1b[H");
     }
-    try w.writeAll("\x1b[2J\x1b]8;;\x1b\\");
+    try w.print("{s}\x1b]8;;\x1b\\", .{clear});
     var wrap = false;
     var skip_first = false;
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
         const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        skip_first = try row(w, p, skip_first, .{ .line = y + 2, .rows = t.rows });
+        skip_first = try row(w, p, skip_first, .{ .screen = .{ .line = y + 2, .rows = t.rows } });
         wrap = p.rowAndCell().row.wrap;
     }
     try kittyKeyboard(w, screen);
@@ -547,6 +581,19 @@ fn charset(w: *Writer, state: vt.Screen.CharsetState) SnapshotError!void {
 /// `line` is that row's 1-based line number and `rows` the screen height.
 const NextRow = struct { line: usize, rows: usize };
 
+/// What follows the row being painted, which decides how `row` may finish a
+/// soft wrap into a next row that is not marked as its continuation.
+const Below = union(enum) {
+    /// Another history row. Nothing can drop it once it has scrolled off.
+    history,
+    /// The screen's top line, below the last exported history row. `paint`
+    /// clears that line before it repaints the screen, and ED 2 also resets
+    /// its continuation flag, so there is nothing to drop (#521).
+    boundary,
+    /// A visible row at a known screen position.
+    screen: NextRow,
+};
+
 /// Removes the row below the cursor and leaves the cursor at its start, WITHOUT
 /// breaking the soft wrap of the row above it.
 ///
@@ -560,14 +607,26 @@ const NextRow = struct { line: usize, rows: usize };
 /// from the next row to the bottom by one line, then restores the cursor. A next
 /// row that is the last row cannot be a region of its own (top must be above
 /// bottom), and without a screen position (history export) there is no region
-/// to scroll: both are refused instead of repainted lossily.
-fn dropNextRow(w: *Writer, next: ?NextRow) SnapshotError!void {
-    const n = next orelse return error.Unrepresentable;
+/// to scroll: both are refused instead of repainted lossily. The screen's top
+/// line below the history export needs no drop (`Below.boundary`).
+fn dropNextRow(w: *Writer, below: Below) SnapshotError!void {
+    const n = switch (below) {
+        .history => return error.Unrepresentable,
+        .boundary => return,
+        .screen => |n| n,
+    };
     if (n.line >= n.rows) return error.Unrepresentable;
     try w.print("\x1b[{d};{d}r\x1b[{d};1H\n\x1b[r\x1b[{d};1H", .{ n.line, n.rows, n.rows, n.line });
 }
 
-fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, next_row: ?NextRow) SnapshotError!bool {
+/// Paints one row at the cursor, which must be at the row's first column.
+///
+/// A row that soft-wraps ends with a real wrap onto the next line, so the next
+/// line is marked as its continuation, as in the source; `below` says how to
+/// undo that mark when the source's next row is not one. Returns true when the
+/// next row's first cell was already printed (a narrow glyph that a grapheme
+/// widened across this row's spacer head), so its repaint must skip it.
+fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, below: Below) SnapshotError!bool {
     // A narrow base widened by its grapheme may already have been emitted
     // across the preceding spacer head. Reprinting it over a wide cell would
     // narrow that head. The remaining cells start after its continuation.
@@ -650,14 +709,14 @@ fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, next_row: ?NextRow) Sna
         try w.writeAll("\x1b[2D");
         if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
         try w.writeAll("\x1b]8;;\x1b\\");
-        if (!next_continues) try dropNextRow(w, next_row);
+        if (!next_continues) try dropNextRow(w, below);
     } else {
         // Even an entirely erased next row needs a real wrap transition.
         // Its ECH/CUF controls cannot trigger the pending wrap themselves.
         // A temporary narrow space avoids clearing a previous wide head
         // when the next row starts with erased cells.
         try w.writeAll(" \x1b[1D");
-        if (!next_continues) try dropNextRow(w, next_row);
+        if (!next_continues) try dropNextRow(w, below);
     }
     return false;
 }
