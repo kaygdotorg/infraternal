@@ -73,6 +73,15 @@ impl Revocation {
     }
 }
 
+impl Revocation {
+    /// Watch this epoch's cut: the value turns `true` once the epoch or its
+    /// host is cut, and never back. A device link (#580) holds one so a
+    /// device's removal closes its link at once, without a ledger read.
+    pub(crate) fn cut_receiver(&self) -> watch::Receiver<bool> {
+        self.changed.subscribe()
+    }
+}
+
 impl Revocations {
     #[cfg(test)]
     pub(crate) async fn after_commit(&self) {

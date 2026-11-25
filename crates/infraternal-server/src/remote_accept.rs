@@ -33,6 +33,8 @@ pub(crate) struct Limits {
     reserved_sources: Arc<SourceSlots>,
     known: Arc<Mutex<HashSet<IpAddr>>>,
     standby: Arc<crate::remote_standby::Slots>,
+    /// The device links held through these listeners (#580), one per device.
+    pub(crate) devices: Arc<crate::remote_device_link::DeviceLinks>,
 }
 impl Limits {
     /// Fresh limits for one listener set: empty lanes and no known sources.
@@ -44,6 +46,7 @@ impl Limits {
             reserved_sources: Arc::new(SourceSlots::new(SOURCE_LANES)),
             known: Arc::default(),
             standby: Arc::default(),
+            devices: Arc::default(),
         })
     }
     /// The lane `address` draws from: its slots, their total, and its per-source slots.
@@ -129,6 +132,7 @@ pub(crate) async fn quic(
         let store = store.clone();
         let known = limits.known.clone();
         let standby = limits.standby.clone();
+        let devices = limits.devices.clone();
         handshakes.spawn(async move {
             let Ok(Ok(connection)) = tokio::time::timeout(Duration::from_secs(5), incoming).await
             else {
@@ -143,13 +147,37 @@ pub(crate) async fn quic(
                 connection.remote_address(),
                 0,
             );
-            let Ok(Ok(authority)) = tokio::time::timeout(
+            let authority = match tokio::time::timeout(
                 Duration::from_secs(5),
-                AuthorityGuard::admit_transport(store, fingerprint),
+                AuthorityGuard::admit_transport(store.clone(), fingerprint),
             )
             .await
-            else {
-                return;
+            {
+                Ok(Ok(authority)) => authority,
+                Ok(Err(_)) => {
+                    // Not a host. A device (#580) is admitted only by its own
+                    // guard and gets a link that serves nothing; the host
+                    // path below never sees it. The handshake lane stays
+                    // held until its Hellos are done.
+                    if let Ok(Ok(device)) = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        crate::remote_device_link::admit(&store, &fingerprint),
+                    )
+                    .await
+                    {
+                        let _ = crate::remote_device_link::serve(
+                            connection,
+                            device,
+                            fingerprint,
+                            store,
+                            devices,
+                            (source_permit, permit),
+                        )
+                        .await;
+                    }
+                    return;
+                }
+                Err(_) => return,
             };
             let mut admission =
                 crate::remote_standby::Admission::new(authority, (source_permit, permit), standby);
