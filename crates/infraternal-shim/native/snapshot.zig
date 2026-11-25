@@ -27,6 +27,14 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
     // C initialization starts at false, while RIS starts at true. Restoring
     // false through OSC 133 would itself create unimportable semantic state.
     if (t.flags.shell_redraws_prompt != .true) return error.Unrepresentable;
+    // Painting prints, and every print sets the terminal-global REP source:
+    // text cells, and also the stand-in glyph or space that rebuilds a wrapped
+    // row's edge. A state that has such cells but an empty source (rows that
+    // wrap after a reflow of a terminal that never printed, or DECALN fill)
+    // cannot be resumed faithfully: only RIS empties the source again, so a
+    // viewer would repeat a character where the original repeats nothing.
+    // Refuse it rather than resume it unfaithfully.
+    var paints_a_print = false;
     // The bounded painter cannot recreate a boundary wrap flag independently
     // of adjacent history or scrolling. Refuse these states until upstream
     // exposes nonprinting row-wrap restoration instead of emitting a lossy VT.
@@ -50,7 +58,9 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             var semantic_rows = screen.pages.rowIterator(.right_down, .{ .screen = .{ .x = 0, .y = @intCast(first_exported) } }, null);
             while (semantic_rows.next()) |semantic_row| {
                 if (semantic_row.rowAndCell().row.semantic_prompt != .none) return error.Unrepresentable;
+                if (semantic_row.rowAndCell().row.wrap) paints_a_print = true;
                 for (semantic_row.cells(.all)) |value| {
+                    if (value.hasText()) paints_a_print = true;
                     if (value.semantic_content != .output or (screen.protected_mode == .off and value.protected)) return error.Unrepresentable;
                 }
             }
@@ -67,6 +77,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             }
         }
     }
+    if (paints_a_print and t.previous_char == null) return error.Unrepresentable;
     try w.writeAll("\x1bc\x1b[?6l\x1b[r\x1b[?7h\x1b[?2027l");
     // DECSM stores values independently of live modes. Seed these before
     // painting, because screen and cursor modes can have destructive effects.
