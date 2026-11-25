@@ -845,68 +845,6 @@ fn on_path(name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-#[cfg(test)]
-mod shim_environment_tests {
-    //! The shim's environment allow-list (#328, J215 P3-1).
-    use super::*;
-    use std::ffi::OsString;
-
-    /// Hostile variables planted in the agent's environment never reach a
-    /// shim; locale does, and on Linux the user-manager variables do.
-    #[test]
-    fn only_allow_listed_variables_reach_the_shim() {
-        let planted = [
-            "DYLD_LIBRARY_PATH",
-            "DYLD_FALLBACK_LIBRARY_PATH",
-            "DYLD_INSERT_LIBRARIES",
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "BASH_ENV",
-            "ENV",
-            "PATH",
-            "HOME",
-            "J146_PLANTED",
-        ];
-        let kept = ["LANG", "LC_ALL", "LC_CTYPE"];
-        let linux_only = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "ZDOTDIR"];
-        let vars = planted
-            .iter()
-            .chain(&kept)
-            .chain(&linux_only)
-            .map(|name| (OsString::from(name), OsString::from("x")));
-        let passed: Vec<String> = shim_environment(vars)
-            .into_iter()
-            .map(|(name, _)| name.into_string().unwrap())
-            .collect();
-        for name in planted {
-            assert!(!passed.iter().any(|p| p == name), "{name} reached the shim");
-        }
-        for name in kept {
-            assert!(passed.iter().any(|p| p == name), "{name} was dropped");
-        }
-        for name in linux_only {
-            assert_eq!(
-                passed.iter().any(|p| p == name),
-                cfg!(target_os = "linux"),
-                "{name}"
-            );
-        }
-    }
-
-    /// A launcher found on the agent's `PATH` resolves to its absolute path.
-    #[test]
-    fn launchers_resolve_through_the_agents_path() {
-        assert!(
-            on_path("sh").is_absolute(),
-            "sh is on every test host's PATH"
-        );
-        assert_eq!(
-            on_path("no-such-launcher-j146"),
-            PathBuf::from("no-such-launcher-j146")
-        );
-    }
-}
-
 // Exclude the trusted leg-B descriptor at direct exec. Anonymous images need
 // /proc/self/exe to resolve before any intermediate program replaces the image.
 // CLOEXEC also preserves Command's private exec-error pipe if it occupies fd3.
@@ -1313,7 +1251,7 @@ async fn launch_configured(
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
-        return session;
+        session
     }
     #[cfg(target_os = "linux")]
     {
@@ -1586,6 +1524,13 @@ pub(crate) fn cleanups_pending() -> bool {
 /// `Abandoned::drop`.
 #[cold]
 #[inline(never)]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        clippy::unused_async,
+        reason = "Keep the async shutdown signature identical on targets without Linux launch cleanups."
+    )
+)]
 pub(crate) async fn drain_cleanups() {
     #[cfg(target_os = "linux")]
     {
@@ -1930,10 +1875,6 @@ async fn wait_for_hello(
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-#[path = "../tests/unit/sessions.rs"]
-mod tests;
-
 /// The startup pipe carries only bounded literal arguments; no shell or secret argv.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
@@ -1953,3 +1894,70 @@ fn command_input(program: &[String], readiness: bool) -> io::Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+
+/// The shim's environment allow-list (#328, J215 P3-1).
+#[cfg(test)]
+mod shim_environment_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    /// Hostile variables planted in the agent's environment never reach a
+    /// shim; locale does, and on Linux the user-manager variables do.
+    #[test]
+    fn only_allow_listed_variables_reach_the_shim() {
+        let planted = [
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "BASH_ENV",
+            "ENV",
+            "PATH",
+            "HOME",
+            "J146_PLANTED",
+        ];
+        let kept = ["LANG", "LC_ALL", "LC_CTYPE"];
+        let linux_only = ["XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "ZDOTDIR"];
+        let vars = planted
+            .iter()
+            .chain(&kept)
+            .chain(&linux_only)
+            .map(|name| (OsString::from(name), OsString::from("x")));
+        let passed: Vec<String> = shim_environment(vars)
+            .into_iter()
+            .map(|(name, _)| name.into_string().unwrap())
+            .collect();
+        for name in planted {
+            assert!(!passed.iter().any(|p| p == name), "{name} reached the shim");
+        }
+        for name in kept {
+            assert!(passed.iter().any(|p| p == name), "{name} was dropped");
+        }
+        for name in linux_only {
+            assert_eq!(
+                passed.iter().any(|p| p == name),
+                cfg!(target_os = "linux"),
+                "{name}"
+            );
+        }
+    }
+
+    /// A launcher found on the agent's `PATH` resolves to its absolute path.
+    #[test]
+    fn launchers_resolve_through_the_agents_path() {
+        assert!(
+            on_path("sh").is_absolute(),
+            "sh is on every test host's PATH"
+        );
+        assert_eq!(
+            on_path("no-such-launcher-j146"),
+            PathBuf::from("no-such-launcher-j146")
+        );
+    }
+}
+
+/// Linux session-launch, cleanup and readiness unit tests.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/unit/sessions.rs"]
+mod tests;

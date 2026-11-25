@@ -1,5 +1,9 @@
 //! Checks that the Mac adapter maps authenticated peers to `WireGuard` host routes.
-#![allow(clippy::expect_used)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "Mac node unit tests panic on unexpected setup or assertion failures."
+)]
 
 /// Real-Mac authority refresh proofs with encrypted traffic and kernel MTU checks.
 mod authority_mtu;
@@ -291,7 +295,7 @@ fn recording_worker_with_replace_hook(
     }
 }
 
-/// GotaTun installs granted peers even when the grant is one-way or port-narrowed.
+/// `GotaTun` installs granted peers even when the grant is one-way or port-narrowed.
 #[test]
 fn peers_with_one_way_and_port_narrowed_access_are_installed() {
     let mut config = config();
@@ -413,7 +417,7 @@ fn restored_snapshot_replaces_stale_peers() {
         port: 51820,
         path: Some(state_path),
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("initial epoch snapshot");
@@ -467,7 +471,7 @@ fn same_authority_equal_revision_conflict_is_refused() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let result = chunks_with_epoch(None, &conflicting, AUTHORITY_EPOCH_A)
         .into_iter()
@@ -519,7 +523,7 @@ fn equal_revision_restore_retires_stale_peers() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("current epoch snapshot");
@@ -575,7 +579,7 @@ fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement()
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let mut complete = chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_B)
         .pop()
@@ -966,7 +970,7 @@ fn macos_completed_snapshot_binding_rejects_an_unrelated_key() {
     );
 }
 
-/// The macOS GotaTun node advertises and completes the durable key-rotation protocol.
+/// The macOS `GotaTun` node advertises and completes the durable key-rotation protocol.
 #[test]
 #[ignore = "Run on the macOS VM with system service privileges."]
 fn macos_gotatun_node_supports_key_rotation() {
@@ -1155,12 +1159,10 @@ fn macos_rotation_recovers_after_sigkill_at_each_durable_step() {
         let completed = stage == "rotation_finished";
         assert_eq!(
             journal[8],
-            if completed {
-                2
-            } else if stage == "rotation_prepared" {
-                0
-            } else {
-                1
+            match stage {
+                "rotation_finished" => 2,
+                "rotation_prepared" => 0,
+                _ => 1,
             }
         );
         if completed {

@@ -116,7 +116,11 @@ use std::{
 };
 use tokio::sync::RwLock;
 
-use crate::{policy::model::PublicKey, underlay_announce::CoalescedWake};
+use crate::{
+    direct_probe::{self, DirectProbes},
+    policy::model::PublicKey,
+    underlay_announce::CoalescedWake,
+};
 
 /// Why the guard kept an initiation away from `GotaTun`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -643,6 +647,9 @@ pub(crate) struct PeerAdmission {
     /// Spent before every key agreement. A plain mutex: it is held for one map update and
     /// never across an `.await`.
     budget: Mutex<Budget>,
+    /// The node's direct-path probes, once the engine socket exists (see [`crate::direct_probe`]).
+    /// The receive task consumes probe-shaped datagrams here before `GotaTun` sees them.
+    probes: Option<DirectProbes>,
     /// Key agreements this guard has run, counted in tests only, so a test can prove that a
     /// refused initiation never reached X25519 instead of inferring it from the verdict.
     #[cfg(test)]
@@ -664,6 +671,7 @@ impl PeerAdmission {
             sources: Arc::default(),
             share: reserve_share(0),
             budget: Mutex::default(),
+            probes: None,
             #[cfg(test)]
             key_agreements: std::sync::atomic::AtomicU32::new(0),
         }
@@ -753,9 +761,16 @@ impl PeerAdmission {
         );
     }
 
-    /// Whether `source` is exactly a known peer endpoint (configured or confirmed). Tests ask
-    /// it what a guard knows, including the Mac worker's live guard (J736).
-    #[cfg(test)]
+    /// Give the guard the node's direct-path probes. Without them probe-shaped datagrams pass to
+    /// `GotaTun` unchanged (it drops them as invalid), which is how a node that does not probe
+    /// behaves.
+    pub(crate) fn set_probes(&mut self, probes: DirectProbes) {
+        self.probes = Some(probes);
+    }
+
+    /// Whether `source` is exactly a known peer endpoint (configured or confirmed). The probe
+    /// responder asks it, so only an installed peer's endpoint gets an answer; tests ask what a
+    /// guard knows, including the Mac worker's live guard (J736).
     pub(crate) fn is_known_endpoint(&self, source: SocketAddr) -> bool {
         self.known_slot(source).is_some()
     }
@@ -915,6 +930,8 @@ pub(crate) struct PeerAdmissionUdpReceiver {
     admission: Arc<RwLock<PeerAdmission>>,
     /// Set on the first datagram (the constructor is not async): see [`SourceWatch`].
     sources: Option<SourceCursor>,
+    /// The guard's probes, copied on the first datagram together with `sources`.
+    probes: Option<DirectProbes>,
 }
 
 impl PeerAdmissionUdpReceiver {
@@ -924,6 +941,7 @@ impl PeerAdmissionUdpReceiver {
             socket,
             admission,
             sources: None,
+            probes: None,
         }
     }
 
@@ -937,6 +955,14 @@ impl PeerAdmissionUdpReceiver {
     /// confirmed. Refused datagrams are not reported, so a flood of spoofed initiations cannot
     /// make the worker scan.
     async fn admits(&mut self, packet: &Packet, source: SocketAddr) -> bool {
+        // A direct-path probe is the guard's own traffic: answer or match it, never forward it.
+        if let Some(probes) = &self.probes
+            && direct_probe::is_probe(packet.as_ref())
+        {
+            let known = self.admission.read().await.is_known_endpoint(source);
+            probes.handle(packet.as_ref(), source, known).await;
+            return false;
+        }
         let admitted = !PeerAdmission::needs_admission(packet)
             || self
                 .admission
@@ -955,8 +981,9 @@ impl PeerAdmissionUdpReceiver {
         if let Some(cursor) = self.sources.as_mut() {
             cursor.sync();
         } else {
-            let watch = self.admission.read().await.sources();
-            self.sources = Some(SourceCursor::new(watch));
+            let admission = self.admission.read().await;
+            self.probes.clone_from(&admission.probes);
+            self.sources = Some(SourceCursor::new(admission.sources()));
         }
     }
 }
@@ -969,7 +996,11 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         loop {
             let packet = self.socket.recv_from(pool).await?;
             self.sync_sources().await;
+            let data = direct_probe::is_traffic(packet.0.as_ref());
             if self.admits(&packet.0, packet.1).await {
+                if let (true, Some(probes)) = (data, &self.probes) {
+                    probes.note_traffic();
+                }
                 return Ok(packet);
             }
         }
@@ -1006,8 +1037,10 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         self.sync_sources().await;
         let mut read = first_new_packet;
         let mut write = first_new_packet;
+        let mut data = false;
         while read < packets.len() {
             let (packet, source) = &packets[read];
+            data |= direct_probe::is_traffic(packet.as_ref());
             if self.admits(packet, *source).await {
                 if write != read {
                     packets.swap(write, read);
@@ -1021,6 +1054,11 @@ impl UdpRecv for PeerAdmissionUdpReceiver {
         packets.truncate(write);
         #[cfg(target_os = "linux")]
         stamps.truncate(write);
+        // Only a batch with data carries the clock for the probe owner (see `note_traffic`): an
+        // idle pair's 25 s keepalives and rekey handshakes must not start probe rounds (D81).
+        if data && let Some(probes) = &self.probes {
+            probes.note_traffic();
+        }
         Ok(())
     }
 

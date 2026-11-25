@@ -49,7 +49,7 @@ pub(crate) fn looks_like_resolver_query(packet: &[u8]) -> bool {
 }
 
 /// The reply packet for one query to `resolver`, or `None` when the packet is not a well-formed
-/// UDP query to it, the name is outside the mesh zones, or the reply would exceed `mtu`.
+/// UDP query to it or the reply would exceed `mtu`. A name outside the mesh zones gets `REFUSED`.
 ///
 /// `records` is the node's current name snapshot. The reply swaps the addresses and ports of the
 /// query and carries a correct UDP checksum, which IPv6 requires.
@@ -72,7 +72,7 @@ pub(crate) fn answer(
         return None;
     }
     let query = &packet[IPV6_HEADER + UDP_HEADER..];
-    let reply = crate::dns::response_for_records(query, records).ok()??;
+    let reply = crate::dns::response_for_records(query, records).ok()?;
     let source: [u8; 16] = packet[8..24].try_into().ok()?;
     let source_port = [packet[40], packet[41]];
     build_reply(resolver, Ipv6Addr::from(source), source_port, &reply, mtu)
@@ -214,8 +214,8 @@ mod tests {
         assert_eq!(message.answers.len(), 1, "{message:?}");
     }
 
-    /// Other ports, other addresses in the service subnet, another deployment's resolver,
-    /// truncated packets and names outside the zone get nothing.
+    /// Other ports, other addresses in the service subnet, another deployment's resolver and
+    /// truncated packets get nothing; a name outside the zone gets `REFUSED`.
     #[test]
     fn everything_else_is_left_alone() {
         let records = records();
@@ -245,14 +245,18 @@ mod tests {
         // "\x08internal", then the root label and four bytes of type and class.
         let at = outside.len() - 14;
         outside[at..at + 9].copy_from_slice(b"\x08external");
+        // A name outside the zones is refused, not ignored, so the host moves on at once (#580).
+        let refused = answer(
+            &packet(resolver(), PORT, &outside),
+            resolver(),
+            &records,
+            1280,
+        )
+        .unwrap();
+        let message = Message::from_vec(&refused[IPV6_HEADER + UDP_HEADER..]).unwrap();
         assert_eq!(
-            answer(
-                &packet(resolver(), PORT, &outside),
-                resolver(),
-                &records,
-                1280
-            ),
-            None
+            message.metadata.response_code,
+            hickory_proto::op::ResponseCode::Refused
         );
         // A reply that would not fit the utun MTU is dropped rather than truncated.
         assert_eq!(

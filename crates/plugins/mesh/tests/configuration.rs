@@ -198,6 +198,8 @@ fn compiled_chunks_identify_the_server_and_old_snapshots_have_no_proposal() {
     assert_eq!(old.server, None);
 }
 
+/// Under a deny-by-default policy a peer this node may not reach has no published name, and
+/// a lookup of it gets NXDOMAIN, the same answer as a name that never existed (D327).
 #[test]
 #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
@@ -211,9 +213,8 @@ fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
     assert_eq!(config.peers[&NodeId(3)].inbound, TrafficPolicy::None);
     assert_eq!(config.peers[&NodeId(3)].outbound, TrafficPolicy::None);
 
-    let response = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &config)
-        .unwrap()
-        .unwrap();
+    let response =
+        infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &config).unwrap();
     assert_eq!(
         hickory_proto::op::Message::from_vec(&response)
             .unwrap()
@@ -223,6 +224,8 @@ fn denied_peer_name_is_absent_and_dns_returns_nxdomain() {
     );
 }
 
+/// A one-way grant publishes the target's name only to the node allowed to reach it; the
+/// target itself does not learn the granted node's name.
 #[test]
 #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver() {
@@ -250,9 +253,8 @@ fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver()
     );
     assert!(!denied.peer_names.contains_key(&NodeId(2)));
 
-    let response = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &allowed)
-        .unwrap()
-        .unwrap();
+    let response =
+        infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &allowed).unwrap();
     let answer = hickory_proto::op::Message::from_vec(&response).unwrap();
     assert_eq!(answer.answers.len(), 1);
     assert_eq!(
@@ -261,9 +263,7 @@ fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver()
     );
 
     let reverse_response =
-        infraternal_plugin_mesh::dns::response(&query("host-2.internal"), &denied)
-            .unwrap()
-            .unwrap();
+        infraternal_plugin_mesh::dns::response(&query("host-2.internal"), &denied).unwrap();
     assert_eq!(
         hickory_proto::op::Message::from_vec(&reverse_response)
             .unwrap()
@@ -273,6 +273,7 @@ fn one_way_node_grant_publishes_the_real_hostname_only_to_the_allowed_receiver()
     );
 }
 
+/// A grant limited to one port still makes the target reachable, so its name is published.
 #[test]
 #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn a_port_limited_grant_still_publishes_the_reachable_hostname() {
@@ -301,9 +302,8 @@ fn a_port_limited_grant_still_publishes_the_reachable_hostname() {
         Some("host-3")
     );
 
-    let response = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &allowed)
-        .unwrap()
-        .unwrap();
+    let response =
+        infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &allowed).unwrap();
     assert_eq!(
         hickory_proto::op::Message::from_vec(&response)
             .unwrap()
@@ -439,6 +439,8 @@ fn default_allow_policy_also_publishes_reachable_peer_names() {
     );
 }
 
+/// A custom suffix answers peer names under it, and a name outside every mesh zone gets
+/// `REFUSED` rather than silence (#580).
 #[test]
 #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn configured_custom_suffix_is_used_for_peer_dns_answers() {
@@ -447,19 +449,22 @@ fn configured_custom_suffix_is_used_for_peer_dns_answers() {
     let config =
         configuration::compile(&coord, NodeId(2), DefaultPolicy::Allow, &BTreeMap::new()).unwrap();
 
-    let response = infraternal_plugin_mesh::dns::response(&query("host-3.mesh.kayg.org"), &config)
-        .unwrap()
-        .unwrap();
+    let response =
+        infraternal_plugin_mesh::dns::response(&query("host-3.mesh.kayg.org"), &config).unwrap();
     let answer = hickory_proto::op::Message::from_vec(&response).unwrap();
     assert_eq!(answer.answers.len(), 1);
     assert_eq!(
         answer.answers[0].name.to_string().trim_end_matches('.'),
         "host-3.mesh.kayg.org"
     );
-    assert!(
-        infraternal_plugin_mesh::dns::response(&query("host-3.external.example"), &config)
+    let external =
+        infraternal_plugin_mesh::dns::response(&query("host-3.external.example"), &config).unwrap();
+    assert_eq!(
+        hickory_proto::op::Message::from_vec(&external)
             .unwrap()
-            .is_none()
+            .metadata
+            .response_code,
+        hickory_proto::op::ResponseCode::Refused
     );
 }
 
@@ -479,6 +484,8 @@ fn user_scoped_grants_remain_unexpressible_until_user_devices_are_in_the_policy_
     );
 }
 
+/// Revoking a grant removes the target's name from the next compiled snapshot, so its lookup
+/// turns into NXDOMAIN.
 #[test]
 #[cfg(all(feature = "mesh-dns", target_os = "linux"))]
 fn revoking_a_node_grant_removes_its_name_from_the_next_snapshot_and_chunk() {
@@ -503,9 +510,7 @@ fn revoking_a_node_grant_removes_its_name_from_the_next_snapshot_and_chunk() {
         configuration::compile(&coord, NodeId(2), DefaultPolicy::Deny, &BTreeMap::new()).unwrap();
 
     assert!(!new.peer_names.contains_key(&NodeId(3)));
-    let denied = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &new)
-        .unwrap()
-        .unwrap();
+    let denied = infraternal_plugin_mesh::dns::response(&query("host-3.internal"), &new).unwrap();
     assert_eq!(
         hickory_proto::op::Message::from_vec(&denied)
             .unwrap()

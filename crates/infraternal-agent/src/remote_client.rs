@@ -411,12 +411,14 @@ async fn dial_preferred(
         tokio::time::sleep(Duration::from_millis(100)).await;
         let connection = remote_tls::dial(address, &identity.server_name, tls).await?;
         // Dropping a refused connection closes it before any frame is sent.
-        identity.server_leaf.admit(
-            connection
-                .peer_leaf
-                .as_ref()
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?,
-        )?;
+        // The floor reads the leaf's DER (#580); a leaf that cannot be
+        // encoded is refused like a missing one.
+        let leaf = connection
+            .peer_leaf
+            .as_ref()
+            .and_then(|leaf| leaf.to_der().ok())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+        identity.server_leaf.admit(&leaf)?;
         Ok(connection)
     };
     tokio::pin!(quic, fallback);
@@ -674,14 +676,20 @@ async fn quic_session_on(
 #[path = "remote_client_tests.rs"]
 mod tests;
 
-#[path = "remote_dial_runtime.rs"]
-mod dial_runtime;
+/// One dial attempt's QUIC runtime; it lives in `infraternal-link` (#580, L1).
+use infraternal_link::dial_runtime;
 
 #[path = "remote_server_path.rs"]
 mod server_path;
 
-#[path = "remote_supervisor.rs"]
-mod supervisor;
+/// The reconnect loop and its offline watchdog; they live in `infraternal-link` (#580, L1).
+use infraternal_link::supervisor;
+
+/// The supervisor's regressions that need the real enrolled infraternal agent
+/// (its plugin host and state store), so they stay in this crate.
+#[cfg(test)]
+#[path = "remote_supervisor_review_tests.rs"]
+mod supervisor_review_tests;
 
 #[path = "remote_primed_native.rs"]
 mod primed_native;

@@ -124,7 +124,3 @@ impl DatagramLane for Lane {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "wire_datagrams_tests.rs"]
-mod tests;

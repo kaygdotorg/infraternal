@@ -2,6 +2,13 @@
 //!
 //! A node's own snapshot contains only names it may reach. Queries from another source are treated
 //! as nonexistent inside the zone, so this listener never reveals names from its broader view.
+//!
+//! Every query that parses gets an answer, never silence (#580, J1183): a name outside the mesh
+//! zones gets `REFUSED`, so a client's stub resolver moves on at once instead of waiting out its
+//! timeout. A message that parses but is not one plain question gets `FORMERR` or `NOTIMP`. Only
+//! bytes that do not parse as DNS, oversized packets and response messages (which must never be
+//! answered, or two resolvers could bounce replies forever) are dropped; each drop is counted in a
+//! rate-limited log line that names no queried name (see [`DropLog`]).
 use crate::{dataplane::Config, policy::model::validate_dns};
 use hickory_proto::{
     op::{Message, MessageType, OpCode, ResponseCode},
@@ -13,7 +20,7 @@ use std::{
     io::{self, Read as _, Write as _},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::{fd::AsFd, unix::net::UnixStream},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -42,6 +49,92 @@ const TCP_MESSAGE_TIMEOUT: Duration = Duration::from_secs(2);
 const TCP_MALFORMED_FRAME_LIMIT: usize = 16;
 /// Maximum number of queued TCP accepts serviced before polling clients again.
 const TCP_ACCEPT_BUDGET: usize = 64;
+/// Shortest time between two "dropped queries" log lines. Drops in between are counted and
+/// reported by the next line, so a flood of junk costs one line a minute, not one per packet.
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Why the resolver sent nothing back for something it received.
+///
+/// The log reports only this reason and a count, never the queried name: names are private to
+/// the peers allowed to reach them (D327), and junk traffic must not be able to fill the log.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropReason {
+    /// The datagram or TCP frame was larger than [`MAX_PACKET`], or a TCP length prefix was
+    /// outside the allowed range.
+    Oversized,
+    /// The bytes do not parse as a DNS message.
+    Malformed,
+    /// The message is a response, not a query. Answering it could start a reply loop.
+    NotAQuery,
+    /// The answer would not fit in one TCP frame of at most [`MAX_PACKET`] bytes.
+    AnswerTooLarge,
+    /// The reply could not be encoded. This points at a bug or an invalid zone, not the client.
+    Unencodable,
+    /// A new TCP connection went over the global or per-source connection limit.
+    ConnectionLimit,
+}
+
+impl DropReason {
+    /// A short, stable word for the log line.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Oversized => "oversized",
+            Self::Malformed => "malformed",
+            Self::NotAQuery => "not-a-query",
+            Self::AnswerTooLarge => "answer-too-large",
+            Self::Unencodable => "unencodable",
+            Self::ConnectionLimit => "tcp-connection-limit",
+        }
+    }
+}
+
+/// Counts dropped queries and logs them at most once per [`DROP_LOG_INTERVAL`].
+///
+/// The first drop is logged at once, so an operator sees the problem while reproducing it.
+/// Later drops inside the interval are only counted; the next line after the interval reports
+/// how many there were. Both protocol workers share one log through an [`Arc`].
+#[derive(Default)]
+struct DropLog {
+    window: Mutex<DropWindow>,
+}
+
+/// The mutable part of [`DropLog`]: when it last logged and what it has counted since.
+#[derive(Default)]
+struct DropWindow {
+    logged_at: Option<Instant>,
+    unreported: u64,
+}
+
+impl DropLog {
+    /// Records one drop for `reason` and writes the log line when the interval allows it.
+    fn record(&self, reason: DropReason) {
+        if let Some(dropped) = self.note(Instant::now()) {
+            tracing::info!(
+                dropped,
+                reason = reason.as_str(),
+                "mesh DNS dropped queries it could not answer"
+            );
+        }
+    }
+
+    /// Counts one drop at `now`. Returns the number of drops to report when a line is due
+    /// (this one included), or `None` while the previous line is younger than the interval.
+    fn note(&self, now: Instant) -> Option<u64> {
+        let mut window = self
+            .window
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        window.unreported += 1;
+        if window
+            .logged_at
+            .is_some_and(|logged_at| now.saturating_duration_since(logged_at) < DROP_LOG_INTERVAL)
+        {
+            return None;
+        }
+        window.logged_at = Some(now);
+        Some(std::mem::take(&mut window.unreported))
+    }
+}
 
 /// The addresses one name resolves to.
 ///
@@ -275,7 +368,13 @@ fn tcp_poll_timeout(clients: &[TcpClient]) -> PollTimeout {
 }
 
 /// Accepts a bounded batch so a flood of TCP handshakes cannot starve UDP queries.
-fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) -> io::Result<()> {
+///
+/// A connection over the global or per-source limit is closed at once and counted in `drops`.
+fn accept_tcp_connections(
+    listener: &TcpListener,
+    clients: &mut Vec<TcpClient>,
+    drops: &DropLog,
+) -> io::Result<()> {
     for _ in 0..TCP_ACCEPT_BUDGET {
         match listener.accept() {
             Ok((stream, source)) => {
@@ -285,8 +384,11 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
                     .count();
                 if clients.len() >= TCP_CONNECTION_LIMIT
                     || source_connections >= TCP_SOURCE_CONNECTION_LIMIT
-                    || stream.set_nonblocking(true).is_err()
                 {
+                    drops.record(DropReason::ConnectionLimit);
+                    continue;
+                }
+                if stream.set_nonblocking(true).is_err() {
                     continue;
                 }
                 clients.push(TcpClient::new(stream, source));
@@ -301,7 +403,14 @@ fn accept_tcp_connections(listener: &TcpListener, clients: &mut Vec<TcpClient>) 
 }
 
 /// Reads at most one capped, length-prefixed query fragment and queues its UDP-equivalent answer.
-fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> bool {
+///
+/// Returns `false` when the connection should close. A frame that gets no answer is counted in
+/// `drops`; too many of them on one connection close it.
+fn read_tcp_request(
+    client: &mut TcpClient,
+    records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
+) -> bool {
     let mut buffer = [0_u8; MAX_PACKET + 2];
     let target_length = client
         .expected_message_length
@@ -317,6 +426,7 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                 let message_length =
                     usize::from(u16::from_be_bytes([client.input[0], client.input[1]]));
                 if !(12..=MAX_PACKET).contains(&message_length) {
+                    drops.record(DropReason::Oversized);
                     return false;
                 }
                 client.expected_message_length = Some(message_length);
@@ -337,7 +447,15 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
             };
             client.clear_request();
             match response {
-                Ok(Some(response)) if response.len() <= MAX_PACKET => {
+                Ok(response) if response.len() <= MAX_PACKET => {
+                    // FORMERR and NOTIMP are answered, but still spend the malformed-frame
+                    // budget, so a stream of junk headers is cut off as before.
+                    if is_protocol_error(&response) {
+                        client.malformed_frames += 1;
+                        if client.malformed_frames >= TCP_MALFORMED_FRAME_LIMIT {
+                            return false;
+                        }
+                    }
                     let Ok(response_length) = u16::try_from(response.len()) else {
                         return false;
                     };
@@ -350,12 +468,12 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
                     client.frame_deadline = None;
                     true
                 }
-                Ok(Some(_)) => false,
-                Ok(None) => {
-                    client.frame_deadline = Some(Instant::now() + TCP_MESSAGE_TIMEOUT);
-                    true
+                Ok(_) => {
+                    drops.record(DropReason::AnswerTooLarge);
+                    false
                 }
-                Err(_) => {
+                Err(reason) => {
+                    drops.record(reason);
                     client.malformed_frames += 1;
                     if client.malformed_frames >= TCP_MALFORMED_FRAME_LIMIT {
                         return false;
@@ -369,6 +487,15 @@ fn read_tcp_request(client: &mut TcpClient, records: &Arc<RwLock<Records>>) -> b
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
         Err(_) => false,
     }
+}
+
+/// Reports whether `reply` is a `FORMERR` or `NOTIMP` answer: the client sent a message that
+/// parsed but was not one plain query. Reads the response code from the fixed DNS header.
+fn is_protocol_error(reply: &[u8]) -> bool {
+    reply.get(3).is_some_and(|flags| {
+        let code = u16::from(flags & 0x0f);
+        code == u16::from(ResponseCode::FormErr) || code == u16::from(ResponseCode::NotImp)
+    })
 }
 
 /// Writes a queued length-prefixed response without blocking the shared DNS worker.
@@ -396,12 +523,13 @@ fn service_tcp_client(
     client: &mut TcpClient,
     ready: PollFlags,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) -> bool {
     if ready.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
         return false;
     }
     if client.output.is_empty() {
-        if ready.contains(PollFlags::POLLIN) && !read_tcp_request(client, records) {
+        if ready.contains(PollFlags::POLLIN) && !read_tcp_request(client, records, drops) {
             return false;
         }
     } else if ready.contains(PollFlags::POLLOUT) && !write_tcp_response(client) {
@@ -414,33 +542,39 @@ fn service_tcp_client(
 /// node itself. Mainly for tests and tools; the running service uses
 /// [`Resolver`].
 ///
-/// Returns the encoded reply, or `None` if the name is outside the mesh
-/// suffix. Such names are left to the operating system's other DNS routes, so
-/// the split-DNS setup must send only the mesh suffix here.
+/// Returns the encoded reply. A name outside every mesh suffix gets `REFUSED`, so a host whose
+/// split-DNS setup sends it here by mistake learns at once to ask elsewhere (#580).
 ///
 /// # Errors
-/// Rejects malformed packets, packets that are not plain single-question
-/// queries, and configurations with invalid names.
-pub fn response(packet: &[u8], config: &Config) -> io::Result<Option<Vec<u8>>> {
+/// Rejects oversized packets, bytes that do not parse as DNS, response messages, and
+/// configurations with invalid names. The running resolver sends nothing back in those cases.
+pub fn response(packet: &[u8], config: &Config) -> io::Result<Vec<u8>> {
     let records = Records::from_config(config)?;
     response_for_records(packet, &records)
 }
 
 /// Like [`response`], but with names that are already built. The query counts as the node's
 /// own, as [`crate::tunnel_dns`] needs for queries the host wrote into its tunnel.
-pub(crate) fn response_for_records(
-    packet: &[u8],
-    records: &Records,
-) -> io::Result<Option<Vec<u8>>> {
-    response_for_source(packet, records, IpAddr::V4(records.local_address))
+pub(crate) fn response_for_records(packet: &[u8], records: &Records) -> io::Result<Vec<u8>> {
+    response_for_source(packet, records, IpAddr::V4(records.local_address)).map_err(|reason| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("DNS packet not answered: {}", reason.as_str()),
+        )
+    })
 }
 
 /// Builds the reply to `packet` received from `source`.
 ///
 /// The outcomes, in order:
-/// - `Err` for an oversized or malformed packet, or one that is not a single
-///   plain query.
-/// - `Ok(None)` if the name is outside every configured suffix.
+/// - `Err` (nothing is sent) for an oversized packet, bytes that do not parse as DNS, or a
+///   response message. A response is never answered, so two resolvers cannot loop.
+/// - `NOTIMP` for an opcode other than a standard query.
+/// - `FORMERR` for a query without exactly one question, with records in the answer,
+///   authority or additional sections, or with a signature.
+/// - `REFUSED`, not authoritative, if the name is outside every configured suffix. Silence here
+///   made a mistyped zone look like a dead resolver (#580, J1183); `REFUSED` reveals nothing
+///   about mesh names (D327) and tells the client to try its other servers.
 /// - `REFUSED` for a class other than `IN`.
 /// - `NXDOMAIN` plus a short-lived SOA if `source` is not this node's own mesh
 ///   address or the host is absent (a name with multiple host labels never exists).
@@ -451,20 +585,24 @@ fn response_for_source(
     packet: &[u8],
     records: &Records,
     source: IpAddr,
-) -> io::Result<Option<Vec<u8>>> {
+) -> Result<Vec<u8>, DropReason> {
     if packet.len() > MAX_PACKET {
-        return Err(invalid_packet());
+        return Err(DropReason::Oversized);
     }
-    let request = Message::from_vec(packet).map_err(|_| invalid_packet())?;
-    if request.metadata.message_type != MessageType::Query
-        || request.metadata.op_code != OpCode::Query
-        || request.queries.len() != 1
+    let request = Message::from_vec(packet).map_err(|_| DropReason::Malformed)?;
+    if request.metadata.message_type != MessageType::Query {
+        return Err(DropReason::NotAQuery);
+    }
+    if request.metadata.op_code != OpCode::Query {
+        return error_response(&request, ResponseCode::NotImp);
+    }
+    if request.queries.len() != 1
         || !request.answers.is_empty()
         || !request.authorities.is_empty()
         || !request.additionals.is_empty()
         || request.signature.is_some()
     {
-        return Err(invalid_packet());
+        return error_response(&request, ResponseCode::FormErr);
     }
 
     let question = request.queries[0].clone();
@@ -480,18 +618,20 @@ fn response_for_source(
         .trim_end_matches('.')
         .to_ascii_lowercase();
     let Some((suffix, label)) = matching_zone(&qname, &records.suffixes) else {
-        return Ok(None);
+        // Not our zone, so not authoritative: the client should ask its other servers.
+        reply.metadata.response_code = ResponseCode::Refused;
+        return encode(&reply);
     };
     reply.metadata.authoritative = true;
 
     if question.query_class() != DNSClass::IN {
         reply.metadata.response_code = ResponseCode::Refused;
-        return encode(&reply).map(Some);
+        return encode(&reply);
     }
     if source != IpAddr::V4(records.local_address) {
         // A peer asking this node directly sees no names from its broader local view. Treat every
         // such in-zone query as missing, so the answer cannot reveal whether the name exists here.
-        return negative_response(reply, suffix).map(Some);
+        return negative_response(reply, suffix);
     }
 
     let address = if label.contains('.') {
@@ -500,7 +640,7 @@ fn response_for_source(
         records.names.get(label).copied()
     };
     let Some(address) = address else {
-        return negative_response(reply, suffix).map(Some);
+        return negative_response(reply, suffix);
     };
     let rdata = match question.query_type() {
         RecordType::A => Some(RData::A(address.ipv4.into())),
@@ -517,12 +657,26 @@ fn response_for_source(
         // NODATA is negative cache data too; advertise the same bounded TTL as NXDOMAIN.
         reply.authorities.push(negative_soa(suffix)?);
     }
-    encode(&reply).map(Some)
+    encode(&reply)
+}
+
+/// A bare error reply to a query this resolver cannot handle, with `code` and the query's id.
+///
+/// It echoes the question only when there is exactly one, and never EDNS or other sections, so
+/// the reply is never larger than a minimal query and cannot amplify traffic.
+fn error_response(request: &Message, code: ResponseCode) -> Result<Vec<u8>, DropReason> {
+    let mut reply = Message::response(request.metadata.id, request.metadata.op_code);
+    reply.metadata.recursion_desired = request.metadata.recursion_desired;
+    reply.metadata.response_code = code;
+    if let [question] = request.queries.as_slice() {
+        reply.queries.push(question.clone());
+    }
+    encode(&reply)
 }
 
 /// Builds the negative answer shared by filtered queries and missing names.
 /// Keeping one path gives both cases the same NXDOMAIN response and SOA data.
-fn negative_response(mut reply: Message, suffix: &str) -> io::Result<Vec<u8>> {
+fn negative_response(mut reply: Message, suffix: &str) -> Result<Vec<u8>, DropReason> {
     reply.metadata.response_code = ResponseCode::NXDomain;
     reply.authorities.push(negative_soa(suffix)?);
     encode(&reply)
@@ -562,21 +716,16 @@ fn matching_zone<'zone, 'query>(
     empty_label.or(zone_apex)
 }
 
-/// The error for an unusable query packet.
-fn invalid_packet() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid DNS query packet")
-}
-
-/// Serializes a reply, mapping failures to the packet error.
-fn encode(message: &Message) -> io::Result<Vec<u8>> {
-    message.to_vec().map_err(|_| invalid_packet())
+/// Serializes a reply. A failure means the reply itself is unusable, so nothing is sent.
+fn encode(message: &Message) -> Result<Vec<u8>, DropReason> {
+    message.to_vec().map_err(|_| DropReason::Unencodable)
 }
 
 /// The SOA record for `suffix`, attached to negative answers so resolvers
 /// cache them for [`NEGATIVE_TTL`] seconds.
-fn negative_soa(suffix: &str) -> io::Result<Record> {
+fn negative_soa(suffix: &str) -> Result<Record, DropReason> {
     // Records validates the configured suffix before constructing Hickory's owned DNS name.
-    let zone = Name::from_ascii(suffix).map_err(|_| invalid_config())?;
+    let zone = Name::from_ascii(suffix).map_err(|_| DropReason::Unencodable)?;
     Ok(Record::from_rdata(
         zone.clone(),
         NEGATIVE_TTL,
@@ -585,10 +734,13 @@ fn negative_soa(suffix: &str) -> io::Result<Record> {
 }
 
 /// Serves UDP on its own worker so TCP framing and clients cannot delay datagrams.
+///
+/// Every datagram that gets no reply is counted in `drops`.
 fn run_udp_worker(
     sockets: &[UdpSocket],
     shutdown_reader: &UnixStream,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) {
     let mut query = [0_u8; MAX_PACKET + 1];
     'worker: loop {
@@ -632,6 +784,7 @@ fn run_udp_worker(
                 Err(_) => break 'worker,
             };
             if length > MAX_PACKET {
+                drops.record(DropReason::Oversized);
                 continue;
             }
             let response = {
@@ -640,8 +793,11 @@ fn run_udp_worker(
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 response_for_source(&query[..length], &snapshot, source.ip())
             };
-            if let Ok(Some(reply)) = response {
-                let _ = socket.send_to(&reply, source);
+            match response {
+                Ok(reply) => {
+                    let _ = socket.send_to(&reply, source);
+                }
+                Err(reason) => drops.record(reason),
             }
         }
     }
@@ -652,6 +808,7 @@ fn run_tcp_worker(
     listeners: &[TcpListener],
     shutdown_reader: &UnixStream,
     records: &Arc<RwLock<Records>>,
+    drops: &DropLog,
 ) {
     let mut clients = Vec::<TcpClient>::new();
     'worker: loop {
@@ -692,13 +849,18 @@ fn run_tcp_worker(
         }
         // One read per ready client per poll turn bounds parser work and lets other clients run.
         for index in (0..polled_client_count).rev() {
-            if !service_tcp_client(&mut clients[index], ready[clients_start + index], records) {
+            if !service_tcp_client(
+                &mut clients[index],
+                ready[clients_start + index],
+                records,
+                drops,
+            ) {
                 clients.swap_remove(index);
             }
         }
         for (index, listener) in listeners.iter().enumerate() {
             if ready[index].contains(PollFlags::POLLIN)
-                && accept_tcp_connections(listener, &mut clients).is_err()
+                && accept_tcp_connections(listener, &mut clients, drops).is_err()
             {
                 break 'worker;
             }
@@ -713,7 +875,7 @@ fn run_tcp_worker(
 /// By default it listens on UDP and TCP port [`DNS_PORT`] of the node's mesh IPv4 address, with separate
 /// `mesh-dns-udp` and `mesh-dns-tcp` workers. TCP clients have bounded connection state and share
 /// the UDP source-privacy rules. Queries from another source receive the same NXDOMAIN as an
-/// absent name (see [`response`]). Names can be replaced while it runs; each query sees a whole
+/// absent name, and names outside the mesh zones receive `REFUSED` (see [`response`]). Names can be replaced while it runs; each query sees a whole
 /// snapshot, never a half-updated one. Dropping the resolver stops both workers and waits for them.
 pub struct Resolver {
     address: Ipv4Addr,
@@ -795,8 +957,8 @@ impl Resolver {
     ///
     /// UDP gets its own poll loop. TCP state is capped by global and per-source connection count,
     /// frame size, whole-message time and idle time; each ready client gets one bounded read per
-    /// poll turn. Packets over the size limit and queries outside the zone get no reply; malformed
-    /// TCP messages are counted and eventually close that connection.
+    /// poll turn. Packets over the size limit and bytes that do not parse get no reply and are
+    /// logged (rate-limited); malformed TCP messages also count toward closing that connection.
     fn bind_records(
         address: Ipv4Addr,
         initial: Records,
@@ -846,15 +1008,31 @@ impl Resolver {
         let (mut udp_shutdown, udp_shutdown_reader) = UnixStream::pair()?;
         let (tcp_shutdown, tcp_shutdown_reader) = UnixStream::pair()?;
         let records = Arc::new(RwLock::new(initial));
+        // One drop log for both workers, so its rate limit covers the whole resolver.
+        let drops = Arc::new(DropLog::default());
         let udp_records = Arc::clone(&records);
+        let udp_drops = Arc::clone(&drops);
         let udp_worker = thread::Builder::new()
             .name("mesh-dns-udp".to_owned())
-            .spawn(move || run_udp_worker(&worker_sockets, &udp_shutdown_reader, &udp_records))?;
+            .spawn(move || {
+                run_udp_worker(
+                    &worker_sockets,
+                    &udp_shutdown_reader,
+                    &udp_records,
+                    &udp_drops,
+                );
+            })?;
         let tcp_records = Arc::clone(&records);
         let tcp_worker = match thread::Builder::new()
             .name("mesh-dns-tcp".to_owned())
-            .spawn(move || run_tcp_worker(&worker_listeners, &tcp_shutdown_reader, &tcp_records))
-        {
+            .spawn(move || {
+                run_tcp_worker(
+                    &worker_listeners,
+                    &tcp_shutdown_reader,
+                    &tcp_records,
+                    &drops,
+                );
+            }) {
             Ok(worker) => worker,
             Err(error) => {
                 let _ = udp_shutdown.write(&[0]);
@@ -923,7 +1101,7 @@ impl Drop for Resolver {
     }
 }
 
-/// Source rules for answers, checked without sockets.
+/// Source rules and the never-silent reply rules, checked without sockets.
 #[cfg(test)]
 mod source_tests {
     #![allow(clippy::unwrap_used)]
@@ -959,13 +1137,120 @@ mod source_tests {
             names,
         };
         let answers = |source: IpAddr| {
-            let reply = response_for_source(&query(), &records, source)
-                .unwrap()
-                .unwrap();
+            let reply = response_for_source(&query(), &records, source).unwrap();
             Message::from_vec(&reply).unwrap().answers.len()
         };
         assert_eq!(answers(IpAddr::V4(own)), 1);
         assert_eq!(answers(IpAddr::V4(Ipv4Addr::LOCALHOST)), 0);
         assert_eq!(answers(IpAddr::V4(Ipv4Addr::new(10, 254, 0, 9))), 0);
+    }
+
+    /// The response code and answer count of a reply the resolver built.
+    fn outcome(reply: &[u8]) -> (ResponseCode, usize, bool) {
+        let message = Message::from_vec(reply).unwrap();
+        (
+            message.metadata.response_code,
+            message.answers.len(),
+            message.metadata.authoritative,
+        )
+    }
+
+    /// A query for `name` (dot-separated labels) with record type `A`.
+    fn query_for(name: &str) -> Vec<u8> {
+        let mut packet = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in name.split('.') {
+            packet.push(u8::try_from(label.len()).unwrap());
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.extend_from_slice(&[0, 0, 1, 0, 1]);
+        packet
+    }
+
+    /// #580 (J1183): prod's own host asked for names outside its zones and got silence, which
+    /// looked like a dead resolver. Out-of-zone names now get a non-authoritative `REFUSED` from
+    /// every source, while the node's own name still resolves for the node itself.
+    #[test]
+    fn names_outside_the_zones_are_refused_not_ignored() {
+        let own = Ipv4Addr::new(10, 254, 0, 2);
+        let records = Records::for_tests(own, &[("ssh", own)]);
+        for source in [IpAddr::V4(own), IpAddr::V4(Ipv4Addr::new(10, 254, 0, 4))] {
+            for name in ["prod.mesh", "nonexistent.invalid", "ssh.internal.example"] {
+                let reply = response_for_source(&query_for(name), &records, source).unwrap();
+                assert_eq!(
+                    outcome(&reply),
+                    (ResponseCode::Refused, 0, false),
+                    "{name} from {source}"
+                );
+                let message = Message::from_vec(&reply).unwrap();
+                assert_eq!(message.metadata.id, 0x1234);
+                assert!(message.metadata.recursion_desired);
+                assert_eq!(message.queries.len(), 1);
+            }
+        }
+        let own_name = response_for_source(&query_for("ssh.internal"), &records, IpAddr::V4(own));
+        assert_eq!(
+            outcome(&own_name.unwrap()),
+            (ResponseCode::NoError, 1, true)
+        );
+    }
+
+    /// A message that parses but is not one plain question gets an error code, not silence. A
+    /// response message is never answered, so two resolvers cannot bounce replies forever.
+    #[test]
+    fn parseable_non_queries_get_error_codes_and_responses_get_nothing() {
+        let own = Ipv4Addr::new(10, 254, 0, 2);
+        let records = Records::for_tests(own, &[]);
+        let source = IpAddr::V4(own);
+
+        let mut notify = query_for("ssh.internal");
+        notify[2] = 0x20; // opcode 4 (NOTIFY)
+        let reply = response_for_source(&notify, &records, source).unwrap();
+        assert_eq!(outcome(&reply).0, ResponseCode::NotImp);
+
+        let mut two_questions = query_for("ssh.internal");
+        two_questions[5] = 2;
+        let question = two_questions[12..].to_vec();
+        two_questions.extend_from_slice(&question);
+        let reply = response_for_source(&two_questions, &records, source).unwrap();
+        let message = Message::from_vec(&reply).unwrap();
+        assert_eq!(message.metadata.response_code, ResponseCode::FormErr);
+        assert_eq!(message.queries.len(), 0);
+        assert!(reply.len() <= two_questions.len());
+
+        let no_question = vec![0x12, 0x34, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0, 0];
+        let reply = response_for_source(&no_question, &records, source).unwrap();
+        assert_eq!(outcome(&reply).0, ResponseCode::FormErr);
+        assert!(is_protocol_error(&reply));
+        let refused = response_for_source(&query_for("prod.mesh"), &records, source).unwrap();
+        assert!(!is_protocol_error(&refused));
+
+        let mut response = query_for("ssh.internal");
+        response[2] |= 0x80;
+        assert_eq!(
+            response_for_source(&response, &records, source),
+            Err(DropReason::NotAQuery)
+        );
+        assert_eq!(
+            response_for_source(&[0xff; 5], &records, source),
+            Err(DropReason::Malformed)
+        );
+        assert_eq!(
+            response_for_source(&[0; MAX_PACKET + 1], &records, source),
+            Err(DropReason::Oversized)
+        );
+    }
+
+    /// The first drop is logged at once; drops inside the interval are counted and reported by
+    /// the first line after it, so a flood writes one line a minute.
+    #[test]
+    fn drop_log_reports_the_first_drop_then_one_count_per_interval() {
+        let log = DropLog::default();
+        let start = Instant::now();
+        assert_eq!(log.note(start), Some(1));
+        for second in 1..=59 {
+            assert_eq!(log.note(start + Duration::from_secs(second)), None);
+        }
+        assert_eq!(log.note(start + DROP_LOG_INTERVAL), Some(60));
+        assert_eq!(log.note(start + DROP_LOG_INTERVAL), None);
     }
 }

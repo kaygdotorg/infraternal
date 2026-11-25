@@ -81,9 +81,7 @@ fn config() -> Config {
 
 /// Encode the authoritative response for one name in the shared DNS fixture.
 fn response_wire(name: &str, qtype: u16) -> Vec<u8> {
-    dns::response(&query(name, qtype), &config())
-        .unwrap()
-        .expect("mesh suffix is authoritative")
+    dns::response(&query(name, qtype), &config()).unwrap()
 }
 
 /// Re-encode a response without its echoed question to compare its DNS answer sections exactly.
@@ -153,12 +151,7 @@ fn an_ipv4_only_peer_answers_a_but_no_aaaa() {
     let mut config = config();
     config.peers.get_mut(&NodeId(1)).unwrap().peer.ipv4_only = true;
     let ask = |name: &str, qtype: u16, config: &Config| {
-        Message::from_vec(
-            &dns::response(&query(name, qtype), config)
-                .unwrap()
-                .expect("mesh suffix is authoritative"),
-        )
-        .unwrap()
+        Message::from_vec(&dns::response(&query(name, qtype), config).unwrap()).unwrap()
     };
     let a = ask("build-01.internal", 1, &config);
     assert_eq!(a.metadata.response_code, ResponseCode::NoError);
@@ -205,28 +198,33 @@ fn unknown_internal_names_get_nxdomain_and_five_second_negative_ttl() {
     }
 }
 
+/// Names outside the mesh zones are not claimed: the reply is a non-authoritative `REFUSED`
+/// with no records, so a client asks its other servers instead of waiting for a timeout (#580).
 #[test]
 fn resolver_does_not_claim_external_names() {
-    assert!(
-        dns::response(&query("outside.example", 1), &config())
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        dns::response(&query("outside.internal.example", 1), &config())
-            .unwrap()
-            .is_none()
-    );
+    for name in ["outside.example", "outside.internal.example"] {
+        let reply = Message::from_vec(&dns::response(&query(name, 1), &config()).unwrap()).unwrap();
+        assert_eq!(
+            reply.metadata.response_code,
+            ResponseCode::Refused,
+            "{name}"
+        );
+        assert!(!reply.metadata.authoritative, "{name}");
+        assert!(
+            reply.answers.is_empty() && reply.authorities.is_empty(),
+            "{name}"
+        );
+    }
 }
 
+/// A custom suffix is authoritative: names under it resolve, and a missing one gets NXDOMAIN
+/// with that suffix's own SOA.
 #[test]
 fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
     let mut snapshot = config();
     snapshot.dns_suffix = "mesh.kayg.org".to_owned();
 
-    let answer_wire = dns::response(&query("build-01.mesh.kayg.org", 1), &snapshot)
-        .unwrap()
-        .expect("configured suffix is authoritative");
+    let answer_wire = dns::response(&query("build-01.mesh.kayg.org", 1), &snapshot).unwrap();
     let answer = Message::from_vec(&answer_wire).unwrap();
     assert_eq!(answer.answers.len(), 1);
     assert_eq!(
@@ -234,9 +232,7 @@ fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
         "build-01.mesh.kayg.org"
     );
 
-    let missing_wire = dns::response(&query("missing.mesh.kayg.org", 1), &snapshot)
-        .unwrap()
-        .expect("unknown names below the configured zone are authoritative");
+    let missing_wire = dns::response(&query("missing.mesh.kayg.org", 1), &snapshot).unwrap();
     let missing = Message::from_vec(&missing_wire).unwrap();
     assert_eq!(missing.metadata.response_code, ResponseCode::NXDomain);
     assert_eq!(
@@ -246,9 +242,7 @@ fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
             .trim_end_matches('.'),
         "mesh.kayg.org"
     );
-    let internal_alias = dns::response(&query("build-01.internal", 1), &snapshot)
-        .unwrap()
-        .expect(".internal remains an authoritative alias");
+    let internal_alias = dns::response(&query("build-01.internal", 1), &snapshot).unwrap();
     let internal_alias = Message::from_vec(&internal_alias).unwrap();
     assert_eq!(internal_alias.answers.len(), 1);
     assert_eq!(
@@ -260,15 +254,14 @@ fn configured_custom_suffix_is_authoritative_and_owns_its_negative_soa() {
     );
 }
 
+/// A name resolves under the origin-derived suffix and under the `internal` alias.
 #[test]
 fn origin_derived_suffix_and_internal_alias_both_resolve() {
     let mut snapshot = config();
     snapshot.dns_suffix = "ssh.kayg.org".to_owned();
 
     for name in ["build-01.ssh.kayg.org", "build-01.internal"] {
-        let wire = dns::response(&query(name, 1), &snapshot)
-            .unwrap()
-            .expect("both configured and internal mesh suffixes are authoritative");
+        let wire = dns::response(&query(name, 1), &snapshot).unwrap();
         let response = Message::from_vec(&wire).unwrap();
         assert_eq!(response.answers.len(), 1, "{name}");
         assert_eq!(
@@ -292,6 +285,8 @@ fn unsupported_record_types_return_a_five_second_negative_ttl() {
     }
 }
 
+/// A renamed, then revoked, peer: each new snapshot retires the old name in the same step that
+/// adds the new one, and a revoked name gets NXDOMAIN.
 #[test]
 fn accepted_snapshot_replacement_retires_renamed_records_together() {
     let old = config();
@@ -300,27 +295,19 @@ fn accepted_snapshot_replacement_retires_renamed_records_together() {
         .peer_names
         .insert(NodeId(1), "build-renamed".to_owned());
 
-    let old_wire = dns::response(&query("build-01.internal", 1), &old)
-        .unwrap()
-        .unwrap();
+    let old_wire = dns::response(&query("build-01.internal", 1), &old).unwrap();
     let old_record = Message::from_vec(&old_wire).unwrap();
     assert_eq!(old_record.answers.len(), 1);
-    let retired_wire = dns::response(&query("build-01.internal", 1), &renamed)
-        .unwrap()
-        .unwrap();
+    let retired_wire = dns::response(&query("build-01.internal", 1), &renamed).unwrap();
     let retired = Message::from_vec(&retired_wire).unwrap();
     assert_eq!(retired.metadata.response_code, ResponseCode::NXDomain);
-    let current_wire = dns::response(&query("build-renamed.internal", 1), &renamed)
-        .unwrap()
-        .unwrap();
+    let current_wire = dns::response(&query("build-renamed.internal", 1), &renamed).unwrap();
     let current = Message::from_vec(&current_wire).unwrap();
     assert_eq!(current.answers.len(), 1);
 
     let mut revoked = old;
     revoked.peer_names.remove(&NodeId(1));
-    let retired_wire = dns::response(&query("build-01.internal", 1), &revoked)
-        .unwrap()
-        .unwrap();
+    let retired_wire = dns::response(&query("build-01.internal", 1), &revoked).unwrap();
     assert_eq!(
         Message::from_vec(&retired_wire)
             .unwrap()
@@ -351,6 +338,8 @@ fn conflicting_or_invalid_snapshot_names_are_rejected() {
     assert!(dns::response(&query("laptop.internal", 1), &overlong).is_err());
 }
 
+/// Empty, response, oversized and other unusable packets are rejected; messages that parse but
+/// are not one plain query get NOTIMP or FORMERR, never silence (#580).
 #[test]
 fn malformed_dns_packets_are_rejected() {
     let config = config();
@@ -361,34 +350,40 @@ fn malformed_dns_packets_are_rejected() {
     response[2] |= 0x80;
     assert!(dns::response(&response, &config).is_err());
 
+    // Messages that parse but are not one plain query get an error code, never silence.
+    let rcode = |packet: &[u8]| {
+        Message::from_vec(&dns::response(packet, &config).unwrap())
+            .unwrap()
+            .metadata
+            .response_code
+    };
     let mut nonstandard_opcode = valid.clone();
     nonstandard_opcode[2] |= 0x08;
-    assert!(dns::response(&nonstandard_opcode, &config).is_err());
+    assert_eq!(rcode(&nonstandard_opcode), ResponseCode::NotImp);
 
     let mut no_question = valid.clone();
     no_question[4] = 0;
     no_question[5] = 0;
-    assert!(dns::response(&no_question, &config).is_err());
+    assert_eq!(rcode(&no_question), ResponseCode::FormErr);
 
     let mut multiple_questions = valid.clone();
     multiple_questions[5] = 2;
     multiple_questions.extend_from_slice(&valid[12..]);
-    assert!(dns::response(&multiple_questions, &config).is_err());
+    assert_eq!(rcode(&multiple_questions), ResponseCode::FormErr);
 
     let mut oversized = valid;
     oversized.resize(4097, 0);
     assert!(dns::response(&oversized, &config).is_err());
 }
 
+/// A query carrying an EDNS OPT record still gets the mesh answer, and the reply keeps EDNS.
 #[test]
 fn edns0_opt_queries_still_receive_mesh_answers() {
     let mut request = query("build-01.internal", 1);
     request[10..12].copy_from_slice(&1_u16.to_be_bytes());
     request.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 0, 0, 0, 0]);
 
-    let response = dns::response(&request, &config())
-        .unwrap()
-        .expect("EDNS does not make an internal query external");
+    let response = dns::response(&request, &config()).unwrap();
     let parsed = Message::from_vec(&response).unwrap();
     assert_eq!(parsed.answers.len(), 1);
     assert_eq!(parsed.answers[0].ttl, 30);
@@ -470,21 +465,58 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
         1
     );
 
-    client
-        .send_to(
-            &query("outside.example", 1),
-            SocketAddr::from((snapshot.addresses.ipv4, DNS_PORT)),
+    // #580 (J1183): the host's own queries for names outside the zones, on both ports and over
+    // both protocols, from a socket bound to the mesh address and from an unbound one, get a
+    // prompt REFUSED. Before the fix they got silence, which looked like a dead resolver.
+    let unbound = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+    for port in [DNS_PORT, DNS_SYSTEM_PORT] {
+        let server = SocketAddr::from((snapshot.addresses.ipv4, port));
+        for socket in [&client, &unbound] {
+            for name in ["outside.example", "prod.mesh", "nonexistent.invalid"] {
+                socket.send_to(&query(name, 1), server).await.unwrap();
+                let (len, _) = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    socket.recv_from(&mut response),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{name} on port {port} got no reply"))
+                .unwrap();
+                assert_eq!(
+                    Message::from_vec(&response[..len])
+                        .unwrap()
+                        .metadata
+                        .response_code,
+                    ResponseCode::Refused,
+                    "{name} on port {port}"
+                );
+            }
+        }
+        assert_eq!(
+            Message::from_vec(&tcp_exchange(server, &query("prod.mesh", 1)))
+                .unwrap()
+                .metadata
+                .response_code,
+            ResponseCode::Refused,
+            "TCP on port {port}"
+        );
+        // The unbound socket's source is the mesh address, so the host sees its own names.
+        unbound
+            .send_to(&query("build-renamed.internal", 1), server)
+            .await
+            .unwrap();
+        let (len, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            unbound.recv_from(&mut response),
         )
         .await
+        .unwrap()
         .unwrap();
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            client.recv_from(&mut response),
-        )
-        .await
-        .is_err()
-    );
+        assert_eq!(
+            Message::from_vec(&response[..len]).unwrap().answers.len(),
+            1,
+            "an unbound socket on the host itself resolves its mesh names on port {port}"
+        );
+    }
 
     let mut oversized = query("build-01.internal", 1);
     oversized.resize(4097, 0);
@@ -513,6 +545,27 @@ async fn udp_resolver_answers_on_the_mesh_address_inside_a_network_namespace() {
             .success()
     );
     drop(resolver);
+}
+
+/// Sends one length-prefixed DNS query over TCP to `server` and returns the reply message.
+///
+/// Blocking, with two-second timeouts, so a resolver that accepts but never answers fails the
+/// test instead of hanging it.
+fn tcp_exchange(server: SocketAddr, packet: &[u8]) -> Vec<u8> {
+    use std::io::{Read as _, Write as _};
+    let timeout = Some(std::time::Duration::from_secs(2));
+    let mut stream =
+        std::net::TcpStream::connect_timeout(&server, std::time::Duration::from_secs(2)).unwrap();
+    stream.set_read_timeout(timeout).unwrap();
+    stream.set_write_timeout(timeout).unwrap();
+    let length = u16::try_from(packet.len()).unwrap().to_be_bytes();
+    stream.write_all(&length).unwrap();
+    stream.write_all(packet).unwrap();
+    let mut prefix = [0_u8; 2];
+    stream.read_exact(&mut prefix).unwrap();
+    let mut reply = vec![0_u8; usize::from(u16::from_be_bytes(prefix))];
+    stream.read_exact(&mut reply).unwrap();
+    reply
 }
 
 async fn exchange(
@@ -591,9 +644,7 @@ fn denied_remote_names_match_the_nonexistent_name_response() {
     assert!(!asker.peer_names.contains_key(&NodeId(3)));
     assert_eq!(asker.peers[&NodeId(1)].outbound, TrafficPolicy::All);
     assert_eq!(server.peers[&NodeId(2)].inbound, TrafficPolicy::All);
-    let own_reply = dns::response(&query("host-3.internal", 1), &asker)
-        .unwrap()
-        .unwrap();
+    let own_reply = dns::response(&query("host-3.internal", 1), &asker).unwrap();
     assert_eq!(
         Message::from_vec(&own_reply)
             .unwrap()
@@ -668,12 +719,13 @@ fn denied_remote_names_match_the_nonexistent_name_response() {
     assert_eq!(local_reply.answers.len(), 1);
 }
 
+/// A configured suffix nested under `internal` keeps every `.internal` alias answering.
 #[test]
 fn review_j68b_nested_suffix_preserves_internal_hostname_alias() {
     let mut snapshot = config();
     snapshot.dns_suffix = "laptop.internal".to_owned();
     for name in ["laptop.laptop.internal", "laptop.internal"] {
-        let wire = dns::response(&query(name, 1), &snapshot).unwrap().unwrap();
+        let wire = dns::response(&query(name, 1), &snapshot).unwrap();
         let reply = Message::from_vec(&wire).unwrap();
         eprintln!(
             "{name}: {:?}, {} answers",
@@ -689,6 +741,7 @@ fn review_j68b_nested_suffix_preserves_internal_hostname_alias() {
     }
 }
 
+/// Punycode (ASCII `xn--`) labels resolve, both as a host name and inside the suffix.
 #[test]
 fn review_j78_ascii_punycode_labels_keep_resolving() {
     for (name, suffix, qname) in [
@@ -702,9 +755,7 @@ fn review_j78_ascii_punycode_labels_keep_resolving() {
         let mut snapshot = config();
         snapshot.name = Some(name.to_owned());
         snapshot.dns_suffix = suffix.to_owned();
-        let wire = dns::response(&query(qname, 1), &snapshot)
-            .unwrap()
-            .expect("a valid ASCII mesh suffix remains authoritative");
+        let wire = dns::response(&query(qname, 1), &snapshot).unwrap();
         let reply = Message::from_vec(&wire).unwrap();
         assert_eq!(
             reply.metadata.response_code,

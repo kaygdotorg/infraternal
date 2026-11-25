@@ -216,9 +216,8 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         Ok(sudo) => sudo,
         Err(failure) => return fail(json_output, failure),
     };
-    let paths = match Paths::for_uid(uid) {
-        Ok(paths) => paths,
-        Err(_) => return fail(json_output, Failure::LocalState),
+    let Ok(paths) = Paths::for_uid(uid) else {
+        return fail(json_output, Failure::LocalState);
     };
     if let Some(outcome) = refresh_existing(&paths, uid, &sudo, &executable, json_output) {
         return outcome;

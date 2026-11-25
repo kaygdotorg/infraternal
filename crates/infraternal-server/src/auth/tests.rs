@@ -3892,6 +3892,10 @@ mod key_lifetime_tests;
 #[path = "device_pending_tests.rs"]
 mod device_pending;
 
+/// The device-start and sign-in redeem replies keep their exact bytes (#580).
+#[path = "device_reply_golden_tests.rs"]
+mod device_reply_golden;
+
 #[path = "ceremony_pool_tests.rs"]
 mod ceremony_pool;
 

@@ -700,18 +700,18 @@ fn mac_underlay_announce_device() {
             walks: crate::candidate_walks::Walks::default(),
             config: Some(snapshot),
             // The harness's point-to-point address installs the route with the utun.
-            routes: Default::default(),
-            route_mtus: Default::default(),
-            networks: Default::default(),
-            network_status: Default::default(),
+            routes: std::collections::BTreeSet::default(),
+            route_mtus: std::collections::BTreeMap::default(),
+            networks: std::collections::BTreeMap::default(),
+            network_status: crate::macos_node::subnet::NetworkStatus::default(),
             interface_mtu: 1280,
             port,
             admission,
-            confirmed_feed: Default::default(),
+            confirmed_feed: crate::handshake_admission::ConfirmedEndpointFeed::default(),
             #[cfg(feature = "mesh-dns")]
             dns_resolver: None,
             #[cfg(feature = "mesh-dns")]
-            dns_integration: Default::default(),
+            dns_integration: crate::dns_integration::DnsIntegration::default(),
         };
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let worker = tokio::spawn(walks::run_worker(receiver, state));

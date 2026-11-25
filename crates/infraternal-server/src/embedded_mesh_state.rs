@@ -44,8 +44,10 @@ const MIRROR_RECORD_HEADER: &str = "J598 mesh runtime mirror v1";
 /// Durable record of the hashed machine ID the identity belongs to (J595 P2-3).
 const HOST_BINDING_RECORD: &str = ".mesh-host-binding";
 /// Versioned header of [`HOST_BINDING_RECORD`]; the second line is the hex hash.
+#[cfg(any(target_os = "linux", test))]
 const HOST_BINDING_HEADER: &str = "J598 mesh host binding v1";
 /// Domain separation so the stored hash is not a plain hash of the machine ID.
+#[cfg(any(target_os = "linux", test))]
 const HOST_BINDING_DOMAIN: &[u8] = b"infraternal mesh host binding v1\0";
 /// Longest wait for a live mesh store to release its directory before start fails.
 const LOCK_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -63,6 +65,13 @@ enum Direction {
 
 /// A bounded manifest that keeps an interrupted transfer from forgetting any planned file.
 /// Describes which files and direction an interrupted mesh-state handoff must recover.
+#[cfg_attr(
+    not(any(target_os = "linux", test)),
+    allow(
+        dead_code,
+        reason = "Non-Linux builds only test marker presence in rollback_handoff; Linux startup reads its fields."
+    )
+)]
 struct Marker {
     direction: Direction,
     /// True only for the earlier marker format, which did not record its own file list.
@@ -135,6 +144,7 @@ fn migrate(volatile: &Path, durable: &Path, owns: &dyn Fn(&[u8; 32]) -> bool) ->
 /// The receipt is retained for validation, never adopted as durable identity on this hint alone.
 /// # Errors
 /// Refuses the same unsafe or unrecoverable state as [`migrate_with_receipt_policy`].
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn migrate_preserving_rotation(
     volatile: &Path,
     durable: &Path,
@@ -193,6 +203,7 @@ fn migrate_on_host_within(
 /// Hold both directory leases while applying the database's runtime receipt retention policy.
 /// # Errors
 /// Refuses unsafe state, foreign host bindings, lock timeouts and failed durable copies.
+#[cfg(any(target_os = "linux", test))]
 fn migrate_with_receipt_policy(
     volatile: &Path,
     durable: &Path,
@@ -229,6 +240,7 @@ fn migrate_with_receipt_policy(
 /// The body of [`migrate_preserving_rotation`] once both directory locks are held and temporaries are swept.
 /// # Errors
 /// Refuses unsafe entries, an unrecoverable marker, or any failed filesystem operation.
+#[cfg(any(target_os = "linux", test))]
 fn migrate_locked(
     volatile: &Path,
     durable: &Path,
@@ -334,6 +346,7 @@ fn migrate_locked(
 }
 
 /// What a start does when the durable and runtime directories hold different keys.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Conflict {
     /// Keep the durable key and copy it over the runtime path.
@@ -360,6 +373,7 @@ enum Conflict {
 ///
 /// Every outcome keeps a copy of each key the database records, except a key that an open
 /// rotation recorded for both sides is already replacing; that case keeps J598's behaviour.
+#[cfg(any(target_os = "linux", test))]
 fn keep_on_conflict(durable_owned: bool, runtime_owned: bool, runtime_is_mirror: bool) -> Conflict {
     if runtime_owned && !durable_owned {
         Conflict::AdoptRuntime
@@ -393,6 +407,7 @@ fn log_foreign_identity(volatile: &Path, durable: &Path, public: &[u8; 32]) {
 /// moves and start fails closed (J628 P3).
 /// # Errors
 /// Returns `PermissionDenied` after logging recovery steps, or any key read error.
+#[cfg(any(target_os = "linux", test))]
 fn check_resumed_identity(
     volatile: &Path,
     durable: &Path,
@@ -446,6 +461,7 @@ fn check_resumed_identity(
 /// journal, and are removed so the durable set matches the adopted one.
 /// # Errors
 /// Leaves the marker in place when any copy, removal, or sync fails.
+#[cfg(any(target_os = "linux", test))]
 fn adopt(
     volatile: &Path,
     durable: &Path,
@@ -580,6 +596,7 @@ fn parse_hex_key(hex: &str) -> io::Result<[u8; 32]> {
 }
 
 /// What this host offers to bind a Mesh identity to (D392).
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum HostIdentity {
     /// A persistent machine ID, stored only as a domain-separated SHA-256 (never the ID itself).
@@ -589,6 +606,7 @@ enum HostIdentity {
 }
 
 /// Read this host's machine ID the way systemd and D-Bus keep it.
+#[cfg(any(target_os = "linux", test))]
 fn host_identity() -> HostIdentity {
     host_identity_in(Path::new("/etc"), Path::new("/var/lib/dbus/machine-id"))
 }
@@ -601,6 +619,7 @@ fn host_identity() -> HostIdentity {
 /// on a read-only root, mounts a transient random ID over `/etc/machine-id` from `/run` at each
 /// boot. That mount shows up as a different device than `/etc` (a symlink keeps `/etc`'s device,
 /// because its own metadata is read). Anything other than 32 hex digits is not a valid ID.
+#[cfg(any(target_os = "linux", test))]
 fn host_identity_in(etc: &Path, dbus: &Path) -> HostIdentity {
     use sha2::Digest as _;
 
@@ -640,6 +659,7 @@ fn host_identity_in(etc: &Path, dbus: &Path) -> HostIdentity {
 }
 
 /// Note the one case host binding cannot see, shared by every message about it.
+#[cfg(any(target_os = "linux", test))]
 const VM_CLONE_LIMIT: &str = "This check compares machine IDs, so a virtual machine cloned \
      together with its /etc/machine-id looks like the same host and is not detected; give every \
      clone a new machine ID.";
@@ -651,6 +671,7 @@ const VM_CLONE_LIMIT: &str = "This check compares machine IDs, so a virtual mach
 /// or a copy, and accepting it silently would let a copied data directory clone the identity.
 /// # Errors
 /// Returns `PermissionDenied` after logging the recovery commands, or a record read error.
+#[cfg(any(target_os = "linux", test))]
 fn check_unbound_host(durable: &Path, reason: &str, uid: u32) -> io::Result<()> {
     if read_private_key(durable, uid)?.is_none() {
         return Ok(());
@@ -685,6 +706,7 @@ fn check_unbound_host(durable: &Path, reason: &str, uid: u32) -> io::Result<()> 
 /// Refuse a durable identity that was recorded on another host.
 /// # Errors
 /// Returns `PermissionDenied` after logging the recovery commands, or a record read error.
+#[cfg(any(target_os = "linux", test))]
 fn check_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<()> {
     if read_private_key(durable, uid)?.is_none() {
         return Ok(());
@@ -710,6 +732,7 @@ fn check_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<(
 /// Bind the current durable identity to this host, writing only when the record changes.
 /// # Errors
 /// Reports a failed private write; a missing key records nothing.
+#[cfg(any(target_os = "linux", test))]
 fn record_host_binding(durable: &Path, host: &[u8; 32], uid: u32) -> io::Result<()> {
     if read_private_key(durable, uid)?.is_none() {
         return Ok(());
@@ -736,6 +759,7 @@ fn remove_other_files(directory: &Path, keep: &[&str], uid: u32) -> io::Result<(
 }
 
 /// Database ownership used before startup touches the shared runtime mirror.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct ServerNodeOwnership {
     /// Current and open-rotation keys belonging to the embedded server node.
     pub(crate) keys: Vec<[u8; 32]>,
@@ -750,6 +774,7 @@ pub(crate) struct ServerNodeOwnership {
 /// mid-rotation is still recognised.
 /// # Errors
 /// Returns the database error; the caller fails start closed instead of guessing.
+#[cfg(any(target_os = "linux", test))]
 pub(crate) async fn server_node_ownership(
     pool: &sqlx::SqlitePool,
 ) -> io::Result<ServerNodeOwnership> {
@@ -1061,6 +1086,7 @@ fn lock_mesh_directory_within(
 /// Write a non-secret, versioned manifest before moving files so recovery knows what must exist.
 /// # Errors
 /// Returns an error if the marker cannot be created, made private, or synced.
+#[cfg(any(target_os = "linux", test))]
 fn create_marker(
     path: &Path,
     direction: Direction,
@@ -1082,6 +1108,7 @@ fn create_marker(
 /// Replace a pending marker atomically when rollback added runtime files absent from its manifest.
 /// # Errors
 /// Refuses unsafe marker paths and reports failed private staging, rename, or sync operations.
+#[cfg(any(target_os = "linux", test))]
 fn rewrite_marker(
     path: &Path,
     direction: Direction,
@@ -1138,6 +1165,7 @@ fn replace_private_file(path: &Path, body: &[u8]) -> io::Result<()> {
 /// Encode the marker's non-secret direction, proven public key, and stable list of mesh files.
 /// # Errors
 /// Rejects empty or unknown file lists.
+#[cfg(any(target_os = "linux", test))]
 fn marker_body(
     direction: Direction,
     files: &[&str],
@@ -1230,6 +1258,7 @@ fn read_marker(path: &Path, uid: u32) -> io::Result<Option<Marker>> {
 /// Rebuild an old marker's file list from both sides while both directories are locked.
 /// # Errors
 /// Refuses unsafe entries or an empty plan, which indicates there is nothing to resume.
+#[cfg(any(target_os = "linux", test))]
 fn union_files(source: &Path, target: &Path, uid: u32) -> io::Result<Vec<&'static str>> {
     let mut files = present_files(source, uid)?;
     for name in present_files(target, uid)? {
@@ -1246,6 +1275,7 @@ fn union_files(source: &Path, target: &Path, uid: u32) -> io::Result<Vec<&'stati
 /// Confirm that a marked transfer can still recover every file before changing either side.
 /// # Errors
 /// Leaves the marker in place if any planned file has disappeared from both directories.
+#[cfg(any(target_os = "linux", test))]
 fn ensure_recoverable_plan(
     source: &Path,
     target: &Path,
@@ -1271,6 +1301,7 @@ fn ensure_recoverable_plan(
 /// is accepted when its target exists, so recovery of their markers still completes.
 /// # Errors
 /// Leaves the marker in place when any planned file is missing from both sides or a copy fails.
+#[cfg(any(target_os = "linux", test))]
 fn copy_plan(source: &Path, target: &Path, files: &[&str], uid: u32) -> io::Result<()> {
     ensure_recoverable_plan(source, target, files, uid)?;
     for name in files {
@@ -1426,6 +1457,7 @@ fn remove_files(directory: &Path, files: &[&str], uid: u32) -> io::Result<()> {
 /// Remove a completed marker only after every planned source and destination is durable.
 /// # Errors
 /// Returns validation, unlink, or sync errors without silently clearing an incomplete transfer.
+#[cfg(any(target_os = "linux", test))]
 fn finish_marker(path: &Path, uid: u32) -> io::Result<()> {
     if owned_file(path, uid, true)? {
         fs::remove_file(path)?;

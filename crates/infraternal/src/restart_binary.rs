@@ -113,6 +113,7 @@ impl Opened {
     /// whose signed metadata is checked again. The image is never reopened by path.
     /// The same checks as [`Opened::open`] apply to the open file: owner, mode, root
     /// protected parents, a signature check on the sealed copy, and the probe.
+    #[cfg(any(feature = "release", test))]
     pub(crate) fn from_verified(file: &File, path: PathBuf) -> io::Result<Self> {
         Self::from_file(file.try_clone()?, path, verify_release_fd)
     }
@@ -321,7 +322,12 @@ fn same_running_bytes(candidate: &File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Non-Linux builds do not compare against `/proc/self/exe`.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Keep the fallible signature identical to the Linux binary check."
+)]
 fn same_running_bytes(_candidate: &File) -> io::Result<bool> {
     Ok(false)
 }

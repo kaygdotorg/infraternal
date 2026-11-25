@@ -312,7 +312,7 @@ fn server_proof(
         serde_json::from_str(ready.as_str()).map_err(|_| server_unproved())?;
     let leaf_der = canonical(&ready.server_certificate_der)?;
     let signature = canonical(&ready.signature)?;
-    let leaf = verify_ready_v2(
+    verify_ready_v2(
         &ServerProofPolicy {
             roots: server.roots,
             server_name: server.server_name,
@@ -323,7 +323,9 @@ fn server_proof(
         ready.channel_bound,
         &signature,
     )?;
-    server.floor.admit(&leaf)
+    // `verify_ready_v2` checked that this DER is exactly the leaf it verified;
+    // the floor reads the DER itself (#580).
+    server.floor.admit(&leaf_der)
 }
 
 /// Decode canonical base64url from the server, or refuse it as unproved.

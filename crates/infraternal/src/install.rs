@@ -55,6 +55,7 @@ pub enum InstallError {
     #[error("host firewall configuration is invalid: {0}")]
     HostFirewall(String),
     /// `SELinux` labeling for `<data>/updates` could not be planned or applied (#211).
+    #[cfg(target_os = "linux")]
     #[error("SELinux setup failed: {0}")]
     Selinux(String),
 }

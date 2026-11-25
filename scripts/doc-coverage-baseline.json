@@ -16,6 +16,10 @@
    "documented": 41,
    "total": 82
   },
+  "rust:crates/infraternal-link": {
+   "documented": 134,
+   "total": 134
+  },
   "rust:crates/infraternal-mesh": {
    "documented": 143,
    "total": 198
@@ -43,6 +47,10 @@
   "rust:crates/infraternal-shim": {
    "documented": 563,
    "total": 1060
+  },
+  "rust:crates/infraternal-sign-in": {
+   "documented": 38,
+   "total": 38
   },
   "rust:crates/infraternal-status": {
    "documented": 50,

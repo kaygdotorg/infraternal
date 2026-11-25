@@ -210,8 +210,10 @@ async fn direct_https_link_proves_the_current_leaf() {
     assert_eq!(
         agent.floor.newest(),
         Some(
-            infraternal_plugin_remote::server_leaf_floor::not_before_seconds(&leaf.certificate)
-                .unwrap()
+            infraternal_plugin_remote::server_leaf_floor::not_before_seconds(
+                &leaf.certificate.to_der().unwrap()
+            )
+            .unwrap()
         )
     );
 }
@@ -315,8 +317,10 @@ async fn rotation_reaches_the_https_link_and_retires_the_old_leaf() {
     assert_eq!(
         agent.floor.newest(),
         Some(
-            infraternal_plugin_remote::server_leaf_floor::not_before_seconds(&second.certificate)
-                .unwrap()
+            infraternal_plugin_remote::server_leaf_floor::not_before_seconds(
+                &second.certificate.to_der().unwrap()
+            )
+            .unwrap()
         )
     );
     assert!(
