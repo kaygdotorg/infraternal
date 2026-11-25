@@ -366,6 +366,7 @@ fn polkit_route(account: &User, _jobs: &crate::access_jobs::Observation) -> bool
 /// NSS may return a successful partial list when SSSD/LDAP is unavailable.
 /// No portable health query proves a remote initgroups response complete, so
 /// any network/unknown provider stays unknown even when local lookup succeeds.
+#[cfg(any(not(target_vendor = "apple"), test))]
 fn membership_sources_complete(text: &str) -> bool {
     let mut passwd = false;
     let mut group = false;

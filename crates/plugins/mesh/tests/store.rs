@@ -175,6 +175,8 @@ async fn publication_identity_tracks_server_public_host_across_restart() {
     assert!(after.version > before.version);
 }
 
+/// A node that only has a generated fallback name is not published in mesh DNS until it gets
+/// a real name.
 #[tokio::test]
 #[cfg(all(feature = "agent", feature = "mesh-dns"))]
 async fn a_fallback_named_node_is_not_published_in_mesh_dns_until_it_has_a_real_name() {
@@ -207,9 +209,7 @@ async fn a_fallback_named_node_is_not_published_in_mesh_dns_until_it_has_a_real_
     query.push(8);
     query.extend_from_slice(b"internal");
     query.extend_from_slice(&[0, 0, 1, 0, 1]);
-    let response = infraternal_plugin_mesh::dns::response(&query, &config)
-        .unwrap()
-        .unwrap();
+    let response = infraternal_plugin_mesh::dns::response(&query, &config).unwrap();
     assert_eq!(
         hickory_proto::op::Message::from_vec(&response)
             .unwrap()

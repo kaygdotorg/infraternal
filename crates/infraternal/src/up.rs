@@ -274,8 +274,14 @@ struct Handoff {
     /// The handoff format is the same in every build, so the rules are always
     /// carried and validated; only builds with the host firewall apply them.
     #[cfg_attr(
-        not(any(feature = "plugin-mesh", feature = "plugin-server")),
-        allow(dead_code)
+        not(all(
+            target_os = "linux",
+            any(feature = "plugin-mesh", feature = "plugin-server")
+        )),
+        allow(
+            dead_code,
+            reason = "The handoff format always carries admin_rules; only Linux builds with the host firewall read it."
+        )
     )]
     admin_rules: Vec<String>,
 }
@@ -653,9 +659,11 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         let activation = install.activate(&image);
         #[cfg(target_os = "macos")]
         let activation = install.activate(&image, host);
-        activation.map_err(|_error| {
+        activation.map_err(|error| {
             #[cfg(target_os = "macos")]
-            eprintln!("{_error}");
+            eprintln!("{error}");
+            #[cfg(not(target_os = "macos"))]
+            let _ = error;
             Failure::Partial
         })
     })

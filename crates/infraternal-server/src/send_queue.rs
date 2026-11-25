@@ -24,6 +24,7 @@ use tokio::net::TcpStream;
 ///
 /// 32 KiB is about 85 ms of a 3 Mbit/s link and a few small frames of any link; the measurements
 /// behind it are on #146 (J1167).
+#[cfg(any(target_os = "linux", test))]
 pub(crate) const UNSENT_LOWAT: u32 = 32 * 1024;
 
 /// Caps the unsent data in `socket`'s kernel buffer at [`UNSENT_LOWAT`] bytes.

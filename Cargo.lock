@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.3"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=9fb980df8d2e0744928b8c16ca08e14a5da23acd#9fb980df8d2e0744928b8c16ca08e14a5da23acd"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=e87fef91fcab0dd338c5ecfcdd1afaa516bebf17#e87fef91fcab0dd338c5ecfcdd1afaa516bebf17"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "gotatun-crypto"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=9fb980df8d2e0744928b8c16ca08e14a5da23acd#9fb980df8d2e0744928b8c16ca08e14a5da23acd"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=e87fef91fcab0dd338c5ecfcdd1afaa516bebf17#e87fef91fcab0dd338c5ecfcdd1afaa516bebf17"
 dependencies = [
  "ring",
  "x25519-dalek",
@@ -1609,7 +1609,7 @@ dependencies = [
 [[package]]
 name = "gotatun-packet"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=9fb980df8d2e0744928b8c16ca08e14a5da23acd#9fb980df8d2e0744928b8c16ca08e14a5da23acd"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=e87fef91fcab0dd338c5ecfcdd1afaa516bebf17#e87fef91fcab0dd338c5ecfcdd1afaa516bebf17"
 dependencies = [
  "bitfield-struct",
  "bytes",
@@ -2091,6 +2091,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-util",
+ "infraternal-link",
  "infraternal-plugin-api",
  "infraternal-plugin-desktop",
  "infraternal-plugin-host-facts",
@@ -2156,6 +2157,22 @@ dependencies = [
  "libfuzzer-sys",
  "russh",
  "serde_json",
+]
+
+[[package]]
+name = "infraternal-link"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "infraternal-plugin-api",
+ "infraternal-protocol",
+ "quinn",
+ "ring",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2331,6 +2348,7 @@ name = "infraternal-plugin-remote"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "infraternal-link",
  "infraternal-plugin-api",
  "infraternal-protocol",
  "infraternal-shim",

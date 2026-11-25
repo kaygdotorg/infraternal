@@ -133,3 +133,21 @@ fn a_byte_that_cuts_a_character_short_restarts_the_carry() {
     );
     assert!(!carry.at_ground());
 }
+
+/// The mirror names the engine release it was checked against, and that must
+/// be the release `scripts/build-vt` builds. Moving the engine without
+/// re-checking the mirror fails here (see the module docs of `carry`).
+#[test]
+fn the_mirror_matches_the_pinned_engine_release() {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/build-vt");
+    let text = std::fs::read_to_string(script).unwrap();
+    let pinned = text
+        .lines()
+        .find_map(|line| line.strip_prefix("version="))
+        .expect("scripts/build-vt pins a version");
+    assert_eq!(
+        pinned,
+        super::MIRRORED_ENGINE,
+        "the engine moved: diff its parser and UTF-8 decoder, update carry.rs, then MIRRORED_ENGINE"
+    );
+}

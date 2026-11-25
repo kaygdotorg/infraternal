@@ -283,17 +283,17 @@ rust_apple_check_env() {
     done
 }
 
-# The "macOS compile" row (#260, #221). The "release feature sets" row checks the
-# macOS feature sets for Linux, so code under cfg(target_os = "macos") was never
-# compiled by any gate, and dev's macOS Mesh node stopped building unnoticed
-# (an unqualified `PublicKey` in macos_node.rs, J1028). This row type-checks it
-# for aarch64-apple-darwin, the only Mac target we ship (scripts/macos-release),
-# from the Linux build machines, so it needs no Mac:
+# The "macOS compile" row (#260, #221, #514). The "release feature sets" row
+# checks the macOS feature sets for Linux, so code under cfg(target_os = "macos")
+# was never compiled by any gate, and dev's macOS Mesh node stopped building
+# unnoticed (an unqualified `PublicKey` in macos_node.rs, J1028). This row runs
+# `cargo clippy -- -D warnings` for aarch64-apple-darwin, the only Mac target we
+# ship (scripts/macos-release), from the Linux build machines, so it needs no Mac:
 # - the two shipping macOS feature sets from scripts/release/feature-sets;
 # - the library and test targets of the Mesh, desktop and infraternal agent
 #   crates, with the features that switch their macOS modules on, so macOS-only
-#   tests compile too.
-# `cargo check` still runs build scripts. The C ones get the pinned Zig as their
+#   tests are linted too.
+# `cargo clippy` still runs build scripts. The C ones get the pinned Zig as their
 # macOS compiler (scripts/verify.d/apple-check-cc), and the terminal engine is
 # already built by Zig. DOCS_RS makes the Swift bridges of the capture crates and
 # of our desktop companion skip their build, as they do on docs.rs: there is no
@@ -311,12 +311,12 @@ rust_check_macos_compile() {
     source scripts/release/feature-sets || return 1
     rust_apple_check_env aarch64-apple-darwin || return 1
     local -a env=("${APPLE_CHECK_ENV[@]}")
-    local -a check=(env "${env[@]}" cargo check --locked --target aarch64-apple-darwin)
-    "${check[@]}" "${release_macos_host_cargo_args[@]}" || failed=1
-    "${check[@]}" "${release_macos_helper_cargo_args[@]}" || failed=1
-    "${check[@]}" --package infraternal-plugin-mesh --features agent --lib --tests || failed=1
-    "${check[@]}" --package infraternal-agent --features mesh,desktop --lib --tests || failed=1
-    "${check[@]}" --package infraternal-plugin-desktop --features desktop --lib --bins --tests || failed=1
+    local -a clippy=(env "${env[@]}" cargo clippy --locked --target aarch64-apple-darwin)
+    "${clippy[@]}" "${release_macos_host_cargo_args[@]}" -- -D warnings || failed=1
+    "${clippy[@]}" "${release_macos_helper_cargo_args[@]}" -- -D warnings || failed=1
+    "${clippy[@]}" --package infraternal-plugin-mesh --features agent --lib --tests -- -D warnings || failed=1
+    "${clippy[@]}" --package infraternal-agent --features mesh,desktop --lib --tests -- -D warnings || failed=1
+    "${clippy[@]}" --package infraternal-plugin-desktop --features desktop --lib --bins --tests -- -D warnings || failed=1
     return "$failed"
 }
 
@@ -502,6 +502,7 @@ rust_verify_fast() {
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "migration names" python3 scripts/verify.d/migration-names.py
     rust_run_gate "migration tooling tests" python3 scripts/test-migration-names.py
+    rust_run_gate "migration fixture" python3 scripts/build-migration-fixture.py --check
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings

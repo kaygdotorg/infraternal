@@ -314,6 +314,13 @@ pub(crate) fn parse_macos_interface_mtu(output: &str) -> io::Result<u32> {
 #[cfg(test)]
 mod tests {
     //! Checks route-to-inner-MTU conversion at overlay and normal Ethernet sizes.
+    #![cfg_attr(
+        target_os = "macos",
+        allow(
+            clippy::unwrap_used,
+            reason = "macOS route-parsing unit tests panic on unexpected parse results."
+        )
+    )]
     use super::*;
 
     /// A 1280-byte outer route leaves 1200 bytes for an inner packet.

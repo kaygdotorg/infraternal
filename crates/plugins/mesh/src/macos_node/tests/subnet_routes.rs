@@ -300,7 +300,7 @@ fn a_mac_reaches_a_network_behind_a_router_peer_only_while_approved() {
             .iter()
             .all(|source| *source == current.addresses.ipv4)
     );
-    assert!(!sources.is_empty());
+    assert_ne!(sources, [] as [std::net::Ipv4Addr; 0]);
 
     // Revoke: the next snapshot carries no networks; the route leaves the utun.
     let mut revoked = current.clone();

@@ -71,6 +71,7 @@ impl Slot {
     }
 }
 
+#[cfg(any(feature = "ssh", test))]
 impl Successors {
     /// Wait up to `bound` for `attempt`'s successor to connect, and return
     /// its private actor.

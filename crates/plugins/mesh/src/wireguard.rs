@@ -494,24 +494,26 @@ impl Device {
     /// Make the subnet routes on the mesh link exactly the reachable `networks` this machine can take
     /// (D197 M3), and say what happened to each.
     ///
-    /// The routes are ordinary main-table IPv4 routes on the marked mesh link, with this node's mesh
-    /// address as preferred source and the mesh route protocol, so they are told apart from the peer
-    /// host routes by their prefix (shorter than /32) and need no journal: whatever such route sits on
-    /// our link and is no longer wanted is removed, and the kernel drops them all with the link.
+    /// The routes are ordinary main-table IPv4 routes on the marked mesh link, with the mesh route
+    /// protocol and this node's mesh address as preferred source. The preferred source is what
+    /// tells them from the peer host routes, which share the link, table, protocol and scope but
+    /// never carry one ([`peer_route_payload`]); the prefix cannot, because an approved network may
+    /// be a single /32 host. So they need no journal: whatever such route sits on our link and is
+    /// no longer wanted is removed, including one an earlier run left behind (a crash between
+    /// saving a revoking snapshot and this call, #580 J1179), and the kernel drops them all with
+    /// the link. Any preferred source counts, so a route from before a mesh address change goes
+    /// too.
     ///
     /// A network that overlaps any other main-table route (except the default route) is left out and
     /// reported as [`RouteState::Overlaps`]: a more specific mesh route would take over traffic this
     /// machine already sends elsewhere, such as its own LAN. Per-network install errors are reported,
-    /// not returned, so one bad network does not hold up the others. `previous` are the networks the
-    /// last call installed: a /32 network cannot be told from a peer host route by its prefix, so it
-    /// is removed by name.
+    /// not returned, so one bad network does not hold up the others.
     ///
     /// [`RouteState::Overlaps`]: crate::subnet_routes::RouteState::Overlaps
     /// # Errors
     /// A missing mesh link or a failed route dump.
     pub(crate) fn sync_network_routes(
         networks: &[crate::policy::networks::Network],
-        previous: &[crate::policy::networks::Network],
         source: std::net::Ipv4Addr,
     ) -> io::Result<BTreeMap<crate::policy::networks::Network, crate::subnet_routes::RouteState>>
     {
@@ -520,7 +522,7 @@ impl Device {
             .ok_or(io::ErrorKind::NotConnected)?
             .ifindex;
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        let mut ours: BTreeSet<Network> = previous.iter().copied().collect();
+        let mut ours = BTreeSet::<Network>::new();
         let mut foreign = Vec::new();
         let dump = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         for reply in socket.request(26, 0x300, &dump)? {
@@ -531,8 +533,10 @@ impl Device {
             let mut destination = std::net::Ipv4Addr::UNSPECIFIED;
             let mut interface = None;
             let mut table = u32::from(header[4]);
+            let mut preferred_source = false;
             for field in netlink::attributes(&reply[12..])? {
                 match field.kind {
+                    RTA_PREFSRC => preferred_source = true,
                     1 if field.payload.len() == 4 => {
                         destination = std::net::Ipv4Addr::new(
                             field.payload[0],
@@ -553,7 +557,7 @@ impl Device {
                 continue;
             };
             if interface == Some(index) {
-                if header[5] == RTPROT_INFRATERNAL && header[1] < 32 {
+                if header[5] == RTPROT_INFRATERNAL && preferred_source {
                     ours.insert(network);
                 }
             } else {

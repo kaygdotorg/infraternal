@@ -1,5 +1,5 @@
 //! Real QUIC packet ownership and cancellation checks [D198,D232].
-use super::NativeDatagrams;
+use crate::wire_datagrams::NativeDatagrams;
 use crate::{
     remote_quic::{client_config, server_config},
     remote_tls::tests::{leaf, root},

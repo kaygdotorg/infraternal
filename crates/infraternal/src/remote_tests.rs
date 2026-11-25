@@ -456,19 +456,32 @@ fn ordinary_join_keeps_the_foreground_connection_default() {
     assert!(!command.matches.get_flag("enroll_only"));
 }
 
+/// A resolver that fails is reported as a resolution failure, not a generic refusal.
+/// The resolver is injected, so the host's DNS setup cannot change the outcome.
 #[tokio::test]
 async fn join_dns_failure_reports_resolution_instead_of_generic_refusal() {
-    let error = tokio::time::timeout(
+    let error = connect_enrollment_with(
+        "fixture.invalid",
+        443,
         Duration::from_secs(10),
-        connect_enrollment("infraternal-fixture-no-such-host.invalid", 443),
+        |_, _| async { Err(io::Error::other("resolver refused")) },
     )
     .await
-    .unwrap()
     .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "The infraternal agent on this host cannot resolve the server's HTTPS origin. Check DNS for the public origin and allow outbound TCP 443."
-    );
+    assert_eq!(error.to_string(), DNS_FAILURE);
+}
+
+/// A resolver that never answers (an unreachable nameserver) is cut off at its budget and
+/// reported as the same resolution failure instead of leaving the join silent.
+#[tokio::test]
+async fn join_dns_timeout_reports_resolution_failure() {
+    let error =
+        connect_enrollment_with("fixture.invalid", 443, Duration::from_millis(50), |_, _| {
+            std::future::pending()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), DNS_FAILURE);
 }
 
 fn self_signed(key: &PKey<openssl::pkey::Private>) -> X509 {

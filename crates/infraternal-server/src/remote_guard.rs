@@ -181,6 +181,7 @@ impl Revocations {
     /// upgrade's handover commits (J415 R2). The host's other epochs, the new
     /// root one included, are untouched. Release it with
     /// [`Self::tombstoned_epoch`] once the change is durable.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn cut_epoch(&self, host: Uuid, uid: u32) -> io::Result<Arc<Revocation>> {
         let signal = self.register(host, uid)?;
         let mut cuts = self
@@ -207,6 +208,7 @@ impl Revocations {
 
     /// One epoch's end is durable (its certificates are revoked): release its
     /// cut. Admission refuses that epoch's certificates from here on anyway.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn tombstoned_epoch(&self, host: Uuid, uid: u32) {
         self.cuts
             .lock()

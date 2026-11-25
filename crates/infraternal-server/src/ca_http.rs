@@ -317,6 +317,7 @@ async fn finish(
 ) -> Result<Json<Value>, StatusCode> {
     finish_request(api, incoming, false).await
 }
+/// Verifies an unlock or bootstrap-unlock finish request inside its bounded intake timeout.
 async fn finish_request(
     api: Api,
     incoming: axum::extract::Request,
@@ -336,10 +337,11 @@ async fn finish_request(
     // through reading and proof verification; cancellation or the single
     // request deadline releases it. A stalled sender cannot hold all slots.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let intake = locked_intake(body).await?;
-        // Parser errors remain static: wrapping material is never reflected.
-        let body = decode_unlock(&intake).map_err(|_| StatusCode::BAD_REQUEST)?;
-        drop(intake);
+        let body = {
+            let intake = locked_intake(body).await?;
+            // Parser errors remain static: wrapping material is never reflected.
+            decode_unlock(&intake).map_err(|_| StatusCode::BAD_REQUEST)?
+        };
         if bootstrap {
             api.administration
                 .bootstrap_finish(token, &body.ceremony, body.proof, body.scoped_key, now)

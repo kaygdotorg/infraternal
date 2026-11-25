@@ -156,7 +156,9 @@ pub async fn exchange(
     let proof = prepare_proof(identity)?;
     let config = remote_tls::recovery_client_config(roots)?;
     let connection = remote_tls::dial_recovery(address, server_name, &config).await?;
-    floor.admit(connection.server_leaf.as_ref().ok_or_else(denied)?)?;
+    // The floor reads DER; the same refusal as a missing leaf if it cannot be encoded.
+    let leaf = connection.server_leaf.as_ref().ok_or_else(denied)?;
+    floor.admit(&leaf.to_der().map_err(|_| denied())?)?;
 
     let mut signer =
         openssl::sign::Signer::new_without_digest(&identity.key).map_err(|_| denied())?;

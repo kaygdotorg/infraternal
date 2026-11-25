@@ -98,8 +98,9 @@ pub(crate) fn registry_at(
     not(any(
         feature = "plugin-host-facts",
         feature = "proxy",
-        feature = "remote",
-        all(feature = "mesh", any(target_os = "linux", target_os = "macos"))
+        all(feature = "remote", target_os = "linux"),
+        all(feature = "mesh", any(target_os = "linux", target_os = "macos")),
+        all(feature = "desktop", target_os = "macos")
     )),
     allow(
         clippy::unnecessary_wraps,
@@ -115,7 +116,7 @@ pub(crate) fn registry_at_with_mesh_state(
     #[cfg(any(
         feature = "plugin-host-facts",
         feature = "proxy",
-        feature = "remote",
+        all(feature = "remote", target_os = "linux"),
         all(feature = "mesh", any(target_os = "linux", target_os = "macos")),
         all(feature = "desktop", target_os = "macos")
     ))]
@@ -123,7 +124,7 @@ pub(crate) fn registry_at_with_mesh_state(
     #[cfg(not(any(
         feature = "plugin-host-facts",
         feature = "proxy",
-        feature = "remote",
+        all(feature = "remote", target_os = "linux"),
         all(feature = "mesh", any(target_os = "linux", target_os = "macos")),
         all(feature = "desktop", target_os = "macos")
     )))]

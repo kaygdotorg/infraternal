@@ -1034,6 +1034,7 @@ pub fn finish_final_output() {
 /// re-raise. Service managers then record a clean stop by SIGTERM rather than
 /// an exit status (#221). Exits with 143 only if the signal cannot end the
 /// process, which the default action never allows.
+#[cfg(target_os = "linux")]
 pub fn terminate_by_default() -> ! {
     use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, raise, sigaction};
     let action = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());

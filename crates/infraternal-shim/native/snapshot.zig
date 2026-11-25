@@ -106,7 +106,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         var skip_first = false;
         for (history - count..history) |y| {
             const p = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
-            skip_first = try row(w, p, skip_first);
+            skip_first = try row(w, p, skip_first, null);
             if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
         }
         // CRLF has already scrolled the earlier rows. Push only the remaining
@@ -315,7 +315,7 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotEr
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
         const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        skip_first = try row(w, p, skip_first);
+        skip_first = try row(w, p, skip_first, .{ .line = y + 2, .rows = t.rows });
         wrap = p.rowAndCell().row.wrap;
     }
     try kittyKeyboard(w, screen);
@@ -473,7 +473,32 @@ fn charset(w: *Writer, state: vt.Screen.CharsetState) SnapshotError!void {
     if (state.single_shift) |slot| try w.writeAll(if (slot == .G2) "\x1bN" else "\x1bO");
 }
 
-fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool) SnapshotError!bool {
+/// Where the row below the one being painted sits on the screen, so the painter can
+/// drop it by scrolling a region instead of deleting a line (see `dropNextRow`).
+/// `line` is that row's 1-based line number and `rows` the screen height.
+const NextRow = struct { line: usize, rows: usize };
+
+/// Removes the row below the cursor and leaves the cursor at its start, WITHOUT
+/// breaking the soft wrap of the row above it.
+///
+/// libghostty-vt 1.0.2 made delete-line (and insert-line) end a soft wrap whose
+/// neighbour it removed: the row above loses its wrap flag and a spacer head at its
+/// edge turns narrow (upstream change "clear wrap continuation on rows orphaned by
+/// IL/DL"). The painter needs the opposite here: a row that still wraps into a
+/// blank row, or a spacer head left behind with nothing after it, is a state the
+/// engine really reaches by scrolling a region whose top is the next row, and the
+/// region scroll does not touch the row above the region. So it scrolls a region
+/// from the next row to the bottom by one line, then restores the cursor. A next
+/// row that is the last row cannot be a region of its own (top must be above
+/// bottom), and without a screen position (history export) there is no region
+/// to scroll: both are refused instead of repainted lossily.
+fn dropNextRow(w: *Writer, next: ?NextRow) SnapshotError!void {
+    const n = next orelse return error.Unrepresentable;
+    if (n.line >= n.rows) return error.Unrepresentable;
+    try w.print("\x1b[{d};{d}r\x1b[{d};1H\n\x1b[r\x1b[{d};1H", .{ n.line, n.rows, n.rows, n.line });
+}
+
+fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, next_row: ?NextRow) SnapshotError!bool {
     // A narrow base widened by its grapheme may already have been emitted
     // across the preceding spacer head. Reprinting it over a wide cell would
     // narrow that head. The remaining cells start after its continuation.
@@ -556,14 +581,14 @@ fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool) SnapshotError!bool {
         try w.writeAll("\x1b[2D");
         if (edge.wide == .narrow) try w.writeAll(" \x1b[1D");
         try w.writeAll("\x1b]8;;\x1b\\");
-        if (!next_continues) try w.writeAll("\x1b[M");
+        if (!next_continues) try dropNextRow(w, next_row);
     } else {
         // Even an entirely erased next row needs a real wrap transition.
         // Its ECH/CUF controls cannot trigger the pending wrap themselves.
         // A temporary narrow space avoids clearing a previous wide head
         // when the next row starts with erased cells.
         try w.writeAll(" \x1b[1D");
-        if (!next_continues) try w.writeAll("\x1b[M");
+        if (!next_continues) try dropNextRow(w, next_row);
     }
     return false;
 }

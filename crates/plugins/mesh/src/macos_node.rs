@@ -72,6 +72,10 @@ const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Pause a Mac rotation child at a durable boundary so its parent can send SIGKILL.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "Test-only crash checkpoint panics when the harness omits its readiness path."
+)]
 pub(crate) fn rotation_crash_checkpoint(name: &str) {
     if std::env::var("INFRATERNAL_MAC_ROTATION_CRASH_POINT").as_deref() != Ok(name) {
         return;
@@ -86,6 +90,10 @@ pub(crate) fn rotation_crash_checkpoint(name: &str) {
 
 /// Pause a Mac authority replacement after durable state is written but before peers are swapped.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "Test-only crash checkpoint panics when the readiness file cannot be written."
+)]
 pub(crate) fn authority_replacement_crash_checkpoint() {
     let Some(ready) = std::env::var_os("INFRATERNAL_MAC_AUTHORITY_REPLACEMENT_READY") else {
         return;
@@ -136,7 +144,7 @@ impl RotationKey {
         &self.0[..]
     }
 
-    /// Copy this key into GotaTun's zeroizing secret type for a live update.
+    /// Copy this key into `GotaTun`'s zeroizing secret type for a live update.
     fn gotatun_secret(&self) -> StaticSecret {
         StaticSecret::from(*self.0)
     }
@@ -155,21 +163,49 @@ struct BoundUdpFactory {
     admission: Arc<RwLock<PeerAdmission>>,
 }
 
+impl BoundUdpFactory {
+    /// Bind the Mac node's direct-path probes to this factory's send socket and give the admission
+    /// guard its half, as the Linux engine does (#220, D185, J1194).
+    ///
+    /// Without this the guard has no probes, so a probe-shaped datagram would reach `GotaTun` as
+    /// garbage and no ping would ever be answered: a Linux peer measuring its direct path to this
+    /// Mac would see a peer that never answers. With it the guard consumes pings from known peer
+    /// endpoints (at most 64 pongs a second) and sends nothing on its own, so an idle Mac gains no
+    /// wakeups (D81). The Mac has no path owner yet, so the finished answers go nowhere: the
+    /// receiver is dropped and the probes never start a round of their own.
+    async fn with_probes(
+        send: GotaUdpSocket,
+        receive: GotaUdpSocket,
+        port: u16,
+        admission: Arc<RwLock<PeerAdmission>>,
+    ) -> Self {
+        let (probes, _answers) =
+            crate::direct_probe::DirectProbes::new(send.clone(), crate::direct_probe::token_seed());
+        admission.write().await.set_probes(probes);
+        Self {
+            send,
+            receive,
+            port,
+            admission,
+        }
+    }
+}
+
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
     type Recv = PeerAdmissionUdpReceiver;
 
-    async fn bind(
+    fn bind(
         &mut self,
         params: &UdpTransportFactoryParams,
-    ) -> io::Result<(Self::Send, Self::Recv)> {
+    ) -> impl std::future::Future<Output = io::Result<(Self::Send, Self::Recv)>> {
         if params.addr.is_some() || params.port != self.port {
-            return Err(io::ErrorKind::InvalidInput.into());
+            return std::future::ready(Err(io::ErrorKind::InvalidInput.into()));
         }
-        Ok((
+        std::future::ready(Ok((
             self.send.clone(),
             PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
-        ))
+        )))
     }
 }
 
@@ -334,7 +370,7 @@ impl MacUtun {
     }
 }
 
-/// Sends packets from GotaTun to one owned utun using its live interface MTU.
+/// Sends packets from `GotaTun` to one owned utun using its live interface MTU.
 struct MacUtunTx {
     fd: Arc<AsyncFd<OwnedFd>>,
     mtu: MtuWatcher,
@@ -358,7 +394,7 @@ impl IpSend for MacUtunTx {
         loop {
             let mut ready = self.fd.writable().await?;
             match ready.try_io(|fd| write(fd.get_ref(), &self.frame).map_err(io::Error::from)) {
-                Err(_) => continue,
+                Err(_) => {}
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(written)) if written == self.frame.len() => return Ok(()),
                 Ok(Ok(_)) => return Err(io::ErrorKind::WriteZero.into()),
@@ -388,7 +424,7 @@ impl IpRecv for MacUtunRx {
             let result =
                 ready.try_io(|fd| read(fd.get_ref(), &mut packet[..]).map_err(io::Error::from));
             match result {
-                Err(_) => continue,
+                Err(_) => {}
                 Ok(Err(error)) => return Err(error),
                 Ok(Ok(0)) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(Ok(length)) => {
@@ -437,12 +473,11 @@ fn route(interface: &str, address: IpAddr, operation: &str, mtu: Option<u16>) ->
         command.args(["-mtu", mtu]);
     }
     let output = command.output()?;
-    if output.status.success() {
-        Ok(())
-    } else if operation == "delete"
-        && String::from_utf8_lossy(&output.stderr)
-            .to_ascii_lowercase()
-            .contains("not in table")
+    if output.status.success()
+        || (operation == "delete"
+            && String::from_utf8_lossy(&output.stderr)
+                .to_ascii_lowercase()
+                .contains("not in table"))
     {
         Ok(())
     } else {
@@ -528,14 +563,14 @@ fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<
     }
 }
 
-/// Public durable intent shared with the Linux node journal; the WireGuard secret is never serialized.
+/// Public durable intent shared with the Linux node journal; the `WireGuard` secret is never serialized.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SavedState {
     enabled: bool,
     config: Option<crate::dataplane::Config>,
     /// True while a peer-free reset snapshot awaits the new authority's full config.
-    #[serde(default, skip_serializing_if = "is_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     authority_reset_pending: bool,
     #[serde(default)]
     routes: BTreeSet<IpAddr>,
@@ -549,11 +584,6 @@ struct SavedState {
     /// The enrolment that issued `config`; absent only in state written by slice-1 builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     binding: Option<Enrolment>,
-}
-
-/// Omit the reset marker from legacy state files when it is not needed.
-fn is_false(value: &bool) -> bool {
-    !value
 }
 
 pub use crate::enrolment::{Enrolment, MachineBindingError};
@@ -732,7 +762,7 @@ fn read_public_state(path: &Path) -> io::Result<Option<SavedState>> {
     {
         return Err(io::ErrorKind::PermissionDenied.into());
     }
-    let mut body = Vec::with_capacity(metadata.len() as usize);
+    let mut body = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
     file.read_to_end(&mut body)?;
     let mut state: SavedState =
         serde_json::from_slice(&body).map_err(|_| io::ErrorKind::InvalidData)?;
@@ -923,7 +953,7 @@ fn utun_family(packet: &[u8]) -> io::Result<u32> {
 
 /// Validate and strip the network-order address-family header from one utun frame.
 ///
-/// `mtu` is the live shared interface limit reported to the GotaTun packet workers.
+/// `mtu` is the live shared interface limit reported to the `GotaTun` packet workers.
 /// # Errors
 /// Rejects truncated, unsupported, oversized or family-mismatched frames.
 fn parse_utun_payload(frame: &[u8], mtu: u16) -> io::Result<&[u8]> {
@@ -951,7 +981,7 @@ fn installed_peers(config: &Config) -> impl Iterator<Item = &crate::dataplane::P
         .filter(|policy| policy.has_network_access())
 }
 
-/// Convert every installed identity into GotaTun peers, keeping both rotation keys installed.
+/// Convert every installed identity into `GotaTun` peers, keeping both rotation keys installed.
 ///
 /// Only the active overlap key gets routes and an endpoint, so the inactive key can accept an
 /// incoming handshake without competing to own the peer's host routes.
@@ -967,7 +997,7 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 
 /// Convert one peer to its active key or both journaled overlap keys.
 /// # Errors
-/// Rejects invalid host routes before they reach GotaTun.
+/// Rejects invalid host routes before they reach `GotaTun`.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
     let mut addresses = peer
@@ -1242,7 +1272,7 @@ enum WorkerCommand {
         budgets: PathBudgets,
         reply: sync::SyncSender<io::Result<RuntimeInfo>>,
     },
-    /// Replace the live GotaTun key on its serialized worker thread.
+    /// Replace the live `GotaTun` key on its serialized worker thread.
     SetPrivateKey {
         private_key: gotatun::x25519::StaticSecret,
         reply: sync::SyncSender<io::Result<()>>,
@@ -1292,13 +1322,9 @@ impl PendingWorker {
         let join = std::thread::Builder::new()
             .name("infraternal-mesh-macos".to_owned())
             .spawn(move || {
-                let runtime = match RuntimeBuilder::new_current_thread().enable_all().build() {
-                    Ok(runtime) => runtime,
-                    Err(_) => {
-                        let _ =
-                            info_tx.send(Err(io::Error::other("Mesh runtime could not start.")));
-                        return;
-                    }
+                let Ok(runtime) = RuntimeBuilder::new_current_thread().enable_all().build() else {
+                    let _ = info_tx.send(Err(io::Error::other("Mesh runtime could not start.")));
+                    return;
                 };
                 // The listener's guard gets its own copy; the device takes `private_key` below.
                 let guard_key = private_key.clone();
@@ -1401,7 +1427,7 @@ impl PendingWorker {
                 #[cfg(feature = "mesh-dns")]
                 let (device, dns_resolver, dns_integration) = device;
                 if ready_tx.send(Ok(())).is_err() {
-                    let _ = runtime.block_on(device.stop());
+                    runtime.block_on(device.stop());
                     return;
                 }
                 let state = RuntimeState {
@@ -1503,12 +1529,7 @@ async fn bind_udp(
                     return Err(io::ErrorKind::AddrInUse.into());
                 }
                 return Ok((
-                    BoundUdpFactory {
-                        send,
-                        receive,
-                        port,
-                        admission,
-                    },
+                    BoundUdpFactory::with_probes(send, receive, port, admission).await,
                     port,
                 ));
             }
@@ -1525,12 +1546,7 @@ async fn bind_udp(
         let port = send.local_addr()?.port();
         if port != 0 && port != 51_820 {
             return Ok((
-                BoundUdpFactory {
-                    send,
-                    receive,
-                    port,
-                    admission,
-                },
+                BoundUdpFactory::with_probes(send, receive, port, admission).await,
                 port,
             ));
         }
@@ -1595,7 +1611,7 @@ impl Worker {
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
     }
 
-    /// Replace the live GotaTun key on its serialized worker thread.
+    /// Replace the live `GotaTun` key on its serialized worker thread.
     /// # Errors
     /// Reports a stopped worker or a rejected key update.
     fn set_private_key(&self, private_key: gotatun::x25519::StaticSecret) -> io::Result<()> {
@@ -1666,7 +1682,7 @@ struct RuntimeState {
 }
 
 impl RuntimeState {
-    /// Change the private identity on the active WireGuard device without restarting its utun.
+    /// Change the private identity on the active `WireGuard` device without restarting its utun.
     /// # Errors
     /// Reports a stopped device or a rejected key update.
     async fn set_private_key(
@@ -2170,18 +2186,15 @@ fn validate_macos_rotation_proof(
         return Ok(());
     }
     let previous_public = RotationKey::from_private(&rotation.previous)?.1;
-    let valid = if !rotation.commit_requested {
-        current == previous_public && recorded == previous_public && saved_public == previous_public
-    } else {
-        (current == previous_public
+    let valid = if rotation.commit_requested {
+        ((current == previous_public || current == candidate_public)
             && recorded == previous_public
             && saved_public == previous_public)
             || (current == candidate_public
-                && recorded == previous_public
-                && saved_public == previous_public)
-            || (current == candidate_public
                 && recorded == candidate_public
                 && (saved_public == previous_public || saved_public == candidate_public))
+    } else {
+        current == previous_public && recorded == previous_public && saved_public == previous_public
     };
     if !valid {
         return Err(io::ErrorKind::InvalidData.into());
@@ -2215,12 +2228,12 @@ fn macos_snapshot_binding_is_authorized(
     let previous_public = RotationKey::from_private(&rotation.previous)?.1;
     let bound_authorized =
         bound == previous_public || (rotation.commit_requested && bound == candidate_public);
-    let key_state_authorized = if !rotation.commit_requested {
-        private_public == previous_public && recorded == previous_public
-    } else {
-        (private_public == previous_public && recorded == previous_public)
-            || (private_public == previous_public && recorded == candidate_public)
+    let key_state_authorized = if rotation.commit_requested {
+        (private_public == previous_public
+            && (recorded == previous_public || recorded == candidate_public))
             || (private_public == candidate_public && recorded == candidate_public)
+    } else {
+        private_public == previous_public && recorded == previous_public
     };
     Ok(bound_authorized && key_state_authorized)
 }
@@ -2434,7 +2447,7 @@ impl Node {
         store.record_listen_port(saved_port)?;
         self.interface = Some(info.interface.clone());
         self.port = info.port;
-        self.routes = desired_routes.clone();
+        self.routes.clone_from(&desired_routes);
         self.enabled = true;
         self.persist(
             true,
@@ -2485,7 +2498,7 @@ impl Node {
         }
     }
 
-    /// Return the identity only while this node owns a running GotaTun worker and utun.
+    /// Return the identity only while this node owns a running `GotaTun` worker and utun.
     /// # Errors
     /// Refuses rotation when the node or its live interface is unavailable.
     fn rotation_identity(&self) -> io::Result<crate::dataplane::Identity> {
@@ -2545,7 +2558,7 @@ impl Node {
         Ok(())
     }
 
-    /// Prepare a local Mac identity without changing the live GotaTun worker (#285, D166).
+    /// Prepare a local Mac identity without changing the live `GotaTun` worker (#285, D166).
     /// The predecessor and candidate are durable before the coordinator may publish overlap.
     /// # Errors
     /// Refuses an inactive node, invalid request, conflicting operation, unsafe state or failed write.
@@ -2750,7 +2763,7 @@ impl Node {
         self.network_status.route_json(network)
     }
 
-    /// Read current GotaTun peer counters without exposing private key material.
+    /// Read current `GotaTun` peer counters without exposing private key material.
     /// # Errors
     /// Reports an unavailable worker thread.
     pub fn counters(&self) -> io::Result<BTreeMap<crate::policy::model::PublicKey, Counters>> {
@@ -3094,13 +3107,12 @@ impl Node {
         };
         match write_public_state(path, &state) {
             Ok(()) => Ok(()),
-            Err(atomic_error) => write_public_state_in_place(path, &state).map_err(|error| {
+            Err(atomic_error) => write_public_state_in_place(path, &state).inspect_err(|error| {
                 tracing::error!(
                     atomic_error_kind = ?atomic_error.kind(),
                     fallback_error_kind = ?error.kind(),
                     "atomic and in-place peer-free Mac state writes both failed before retirement"
                 );
-                error
             }),
         }
     }
@@ -3145,13 +3157,12 @@ impl Node {
         let persistence = self.path.as_ref().map_or(Ok(()), |path| {
             match write_public_state(path, &state) {
                 Ok(()) => Ok(()),
-                Err(atomic_error) => write_public_state_in_place(path, &state).map_err(|error| {
+                Err(atomic_error) => write_public_state_in_place(path, &state).inspect_err(|error| {
                     tracing::error!(
                         atomic_error_kind = ?atomic_error.kind(),
                         fallback_error_kind = ?error.kind(),
                         "could not persist peer-free disabled Mac mesh state after retirement failed"
                     );
-                    error
                 }),
             }
         });

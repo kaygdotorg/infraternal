@@ -87,6 +87,7 @@ impl DesktopComponent {
     /// Start the helper as the console user `uid` (a root agent, D203 C2).
     /// The helper is told `--daemon-peer`: it reads `token` from standard
     /// input, admits only root as its client, and sends the token first.
+    #[cfg(feature = "source")]
     #[must_use]
     pub(crate) fn for_console_user(
         mut self,

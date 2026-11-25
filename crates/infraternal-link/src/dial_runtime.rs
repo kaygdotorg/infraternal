@@ -1,4 +1,8 @@
 //! Owns Quinn's existing Tokio drivers for one outgoing attempt, so TCP fallback cancels losing UDP drain timers [64][130], #78.
+//!
+//! How to use it: make one [`DialRuntime`] per dial attempt, build that
+//! attempt's QUIC endpoint with [`DialRuntime::runtime`], and keep the
+//! `DialRuntime` alive exactly as long as the connection it produced.
 
 use quinn::{AsyncTimer, AsyncUdpSocket, Runtime};
 use std::{
@@ -10,17 +14,25 @@ use std::{
 
 /// Cancellation belongs to the dial attempt, rather than to detached Quinn tasks.
 /// A fresh endpoint on reconnect prevents cancellation from affecting a winner.
-pub(super) struct DialRuntime(Arc<Drivers>);
+pub struct DialRuntime(Arc<Drivers>);
 impl DialRuntime {
     /// Creates a runtime that has not spawned anything yet.
-    pub(super) fn new() -> Self {
+    #[must_use]
+    pub fn new() -> Self {
         Self(Arc::new(Drivers(Mutex::new(Vec::new()))))
     }
     /// The QUIC runtime to give to the endpoint of this one dial attempt. It
     /// delegates to Tokio but records every task the endpoint spawns, so dropping
     /// this `DialRuntime` can abort them.
-    pub(super) fn runtime(&self) -> Arc<dyn Runtime> {
+    #[must_use]
+    pub fn runtime(&self) -> Arc<dyn Runtime> {
         self.0.clone()
+    }
+}
+impl Default for DialRuntime {
+    /// The same as [`DialRuntime::new`].
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl Drop for DialRuntime {
@@ -73,6 +85,7 @@ mod tests {
     //! The owned driver must read the same clock that creates its timers.
     use super::*;
 
+    /// Advancing Tokio's paused clock advances the runtime's `now` by the same amount.
     #[tokio::test(start_paused = true)]
     async fn owned_driver_clock_advances_with_its_timer_runtime() {
         let owner = DialRuntime::new();

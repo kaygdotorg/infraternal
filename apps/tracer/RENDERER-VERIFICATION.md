@@ -5,19 +5,20 @@
 
 The tracer uses the ESM build from `ghostty-web` source commit
 `835eb2749f640a139693bb64fd67de3c1b50a598` (upstream `main`, 2026-11-18). It includes
-fix `bec9e162b137478fb032d7edf60a2f29a6e5f04b` from #180. The Ghostty core is
-`e75f8956c576ea8acf6ee4e70d45f918738e7512` (2026-03-13), the newest one upstream's WASM
-API still fits (`vendor/ghostty-web/README.md` says why). Build tools are Bun 1.4.2 and
-Zig 0.15.2. `vendor/ghostty-web/build.sh` checks these exact versions, builds from those
-immutable source revisions, and compares the output to `vendor/ghostty-web/SHA256SUMS`.
+fix `bec9e162b137478fb032d7edf60a2f29a6e5f04b` from #180. The Ghostty core is the signed
+libghostty-vt 1.0.2 release (2026-11-24), the same one the native shim builds from; the
+page talks to it through our own `web-engine.zig` (`vendor/ghostty-web/README.md` says
+why). Build tools are Bun 1.4.4 and Zig 0.17.1, as the development shell provides them.
+`vendor/ghostty-web/build.sh` checks these exact versions, builds from the pinned,
+signature-checked sources, and compares the output to `vendor/ghostty-web/SHA256SUMS`.
 
-The checked-in ESM artifact is 771,128 B and embeds its WASM. The separately retained
-WASM is 470,694 B (136,634 B gzip at level 9); its digest and the ESM and declaration
-digests are in the manifest. `scripts/verify fast` verifies all three files. The source
-rebuild command is:
+The checked-in ESM artifact is 1,080,280 B and embeds its WASM (as base64; the production
+build cuts it out). The separately retained WASM is 702,460 B (204,967 B gzip at level 9);
+its digest and the ESM and declaration digests are in the manifest. `scripts/verify fast`
+verifies all three files. The source rebuild command is:
 
 ```sh
-nix shell nixpkgs#zig_0_15 -c apps/tracer/vendor/ghostty-web/build.sh --check
+nix develop -c apps/tracer/vendor/ghostty-web/build.sh --check
 ```
 
 The upstream `ghostty-web` and Ghostty VT source are MIT licensed. Their license
@@ -220,3 +221,68 @@ cursors in 46 of 46 cases; 3 of them differ in their scrollback lines. The one d
 (205x56, `binary-no-esc-context.bin`) is a single cell: U+06DD gets width 2 instead of 1. Of 167 further terminal and renderer Chromium specs, 166 pass;
 `terminal-theme.spec.ts:209` (theme switch p99 10.6-13.1 ms against the 8.33 ms frame)
 fails identically on the old artifact (10.6-11.2 ms, 3 of 3 runs).
+
+## Engine update: the signed libghostty-vt 1.0.2 core in the browser (#575, J1165, 2026-11-25)
+
+The Ghostty core moved from `e75f8956c` (2026-03-13) to the signed libghostty-vt 1.0.2
+release (2026-11-24), the same source and dependency archives the native shim builds
+from. J1110 left this open because the core's own terminal C API (since 2026-03-13) has
+the names that upstream ghostty-web patches in, and the official API reads cells one by
+one. `vendor/ghostty-web/web-engine.zig` is the answer: our own entry points
+(`ghostty_web_*`) on top of the core's stream handler, with the one-call viewport read
+kept. Everything else is in the vendor README. Upstream ghostty-web itself has no newer
+commit or release than the pin.
+
+Engine numbers, old (`5c0eab178`) against new, Bun 1.4.4 on dev-02 (a shared host; old and
+new alternate; the log is `engine-ab-dev02.log` on #575):
+
+| Measure | Old (March core) | New (1.0.2) |
+|---|---:|---:|
+| `ghostty-vt.wasm` | 470,694 B (136,736 gzip, 107,843 Brotli) | 702,900 B (205,143 gzip, 148,700 Brotli), +49 % / +38 % Brotli |
+| WASM memory after the 50 MB behemoth / 20 MB mixed / 20 MB binary | 10.9 / 12.9 / 13.0 MiB | 4.0 / 4.0 / 4.2 MiB |
+| Headless parse of the 50 MB behemoth | 741-761 ms | 115 ms |
+| 20 MB mixed / 20 MB binary | 305-309 / 482-750 ms | 51-52 / 265 ms |
+| `write` 8 MB mixed, 64 KiB chunks / 1 KiB chunks | 119 / 119 ms | 22 / 22 ms |
+| `write`+`update`+`getViewport` per 4 KiB (8 MB) | 302-306 ms | 152-154 ms |
+| `update`+`getViewport` on a static screen, x2000 | 153 ms | 125 ms |
+| resize 80x24 to 205x56 and back, x200 | 94 ms | 26-28 ms |
+| `createTerminal`+`free` x300 | 22.5-23.5 ms | 24.6-28.5 ms |
+| scrollback line read x2000 / `isRowDirty` x56 x2000 | 0.8 / 0.17 ms | 1.3 / 0.21 ms |
+
+The WASM is the one number that got worse for the person (a one-time, immutably cached
+download, 41 KB more Brotli); the file stays outside the JavaScript budget (D188, #573).
+`transfer-budget.ts` on this build: critical JavaScript 163,898 B gzip of 327,680 (143,060 B
+Brotli of 273,408), deferred 60,572 of 61,440, largest on-demand chunk 18,838 of 20,480. The
+features compiled out (`-Dvt-features=-all,+input_encode`) saved 250 KB.
+
+D375 rows on dev-02 (the production build, unthrottled, `INFRATERNAL_LATENCY_PROFILE=1`,
+two alternating runs each; `d375-dev02-*.log`): `d375_render_10mbps` 909 / 833 fps old,
+3,333 / 3,333 fps new (gate 120; write CPU for 10 MB 96-103 ms to 10.6-11.1 ms; p99 frame
+1.1-1.2 ms to 0.3 ms); first paint on a phone 93.8 / 90.8 ms old, 90.1 / 98.0 ms new
+(gate 1,000); second-burst extra frames 0 both (gate 0). The rows that follow the
+proxy's round trip are unchanged. `terminal.spec.ts:5` (the real-passkey latency probe)
+fails the same way on both (`predictiveEcho().optedIn` is true where the scenario expects
+false), so its rows are not in the table; the perf VM was busy for over two hours and its
+rows are not part of this record.
+
+Correctness: the seven reproducers and three full fixtures pass in Bun (headless, canary
+painted); `renderer-regression.spec.ts` and `renderer-fresh-terminal.spec.ts` (the #180 and
+#241 checks, which no longer have patches of ours) pass 12/12 in Chromium; of 216
+terminal and renderer Chromium specs 211 pass. Four of the five that fail (`cursor-layer-skip`
+:194, `terminal-links` :297, `terminal-theme` :209 and `terminal` :5) fail identically on
+`5c0eab178`; the fifth is a flaky mouse drag in `terminal-selection-wrap` :65 that failed in
+two of my new-artifact runs and in 2 of 16 repeats on the old artifact (16 of 16 passed on the
+new one in the same repeat run). D307 holds: the engine answers DSR 5/6, DA1
+and DA2 and nothing else, one reply per query in all 30 corpus forms, 515 splits and three
+viewers (`terminal-query-property.test.ts`).
+
+What changed in behaviour, because the core's own handler runs now: colour operations from
+programs (OSC 4, 10, 11, 12 and their resets) are applied (the old handler ignored them),
+with the page's theme as the default they reset to, so RIS or OSC 104 returns to the theme
+(a first build returned to the core's built-in palette; `terminal-theme.spec.ts` found it);
+scrollback pruning follows the core (whole pages; 80x24 keeps 846 rows of the first 3 MB
+of the behemoth where the old core kept 992); stray ESC, C0 and invalid UTF-8 in binary
+data are handled as the 2026 parser does, which moves the cursor and the viewport after
+the binary fixtures (14 of 46 differential cases, all of them binary or large streams; the
+synthetic sequences and the three small reproducers are identical). The browser and the
+server run one engine revision now.

@@ -671,7 +671,7 @@ impl EmbeddedAgent {
         .await
     }
     /// Open a private fixed readiness command under the enrolled account.
-    #[cfg(feature = "remote")]
+    #[cfg(any(test, all(feature = "remote", feature = "ssh")))]
     pub(crate) async fn open_readiness(&self, size: TerminalSize) -> Result<[u8; 16], AgentError> {
         self.open_metadata(size, None, true)
             .await
@@ -795,7 +795,7 @@ impl EmbeddedAgent {
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
     // Native attachments belong to remote bootstrap; browser-only builds use monitored routes.
-    #[cfg(any(test, feature = "remote"))]
+    #[cfg(any(test, all(feature = "remote", feature = "ssh")))]
     pub async fn attach(
         &self,
         session_id: [u8; 16],
