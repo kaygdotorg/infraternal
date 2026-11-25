@@ -594,6 +594,15 @@ impl Session {
             {
                 match request {
                     Request::Read(seq) => p.cursor = Some(seq),
+                    // Snapshot-first is only a shortcut (#583): without room
+                    // for the repaint, the ring's raw replay serves it exactly.
+                    Request::SnapshotFirst(seq) => {
+                        if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
+                            p.snapshot_first(&self.terminal, self.ring.head(), seq)?;
+                        } else {
+                            p.cursor = Some(seq);
+                        }
+                    }
                     Request::Snapshot => {
                         if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
                             trace_host!(
@@ -621,7 +630,10 @@ impl Session {
             // Only append output to this visit's wholly unsent state/ack.
             // Never overwrite a partial frame or append a costly repaint.
             if (p.pending.is_empty() || queued_reply)
-                && !matches!(p.request, Some(Request::Snapshot))
+                && !matches!(
+                    p.request,
+                    Some(Request::Snapshot | Request::SnapshotFirst(_))
+                )
                 && let Some(seq) = p.cursor
             {
                 if seq < self.ring.start() {

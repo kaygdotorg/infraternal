@@ -70,6 +70,18 @@ impl SessionTerminal for Terminal {
 pub(crate) mod user_host;
 const CHUNK: usize = 16 * 1024;
 const MAX_PEERS: usize = 32;
+/// A viewer that reattaches further behind than this gets an exact Snapshot of
+/// the screen first, then live output, instead of a raw replay of its whole
+/// backlog (#583, D13, D381).
+///
+/// Measured on perf-01 (`scripts/bench-reattach-backlog.py`, #583): a raw
+/// replay that fits the browser's opening grant (the 1 MiB bulk window plus
+/// the 64 KiB repaint reserve) costs one round trip, the same as a Snapshot,
+/// and every further MiB costs one more; the browser also parses about 26 ms
+/// per MiB, against about 5 ms to apply a Snapshot. Below this value the raw
+/// replay is as fast and keeps the browser's own copy of every line; above it
+/// the Snapshot saves at least one round trip.
+pub const SNAPSHOT_FIRST_BACKLOG: u64 = 1024 * 1024;
 #[path = "inputs.rs"]
 mod inputs;
 use inputs::Inputs;
@@ -151,9 +163,16 @@ impl Drop for SocketPath {
         }
     }
 }
+/// What a peer asked for and has not been served yet.
 enum Request {
+    /// Stream raw output from this cursor.
     Read(u64),
+    /// Send a Snapshot of the screen, then stream from the head.
     Snapshot,
+    /// A reattach far behind ([`SNAPSHOT_FIRST_BACKLOG`]): send an exact
+    /// Snapshot if the engine can make one, otherwise replay raw from this
+    /// cursor, which the ring still holds (see [`Peer::snapshot_first`]).
+    SnapshotFirst(u64),
 }
 #[derive(Clone, Copy)]
 enum InputReply {
@@ -355,6 +374,31 @@ impl Peer {
         }
         Ok(())
     }
+    /// Serve a reattach that is far behind with an exact Snapshot at `head`,
+    /// or, when the engine cannot make one, with the raw replay from `seq`.
+    ///
+    /// Only the exact Snapshot is a shortcut here. The ring still holds every
+    /// byte from `seq`, so the raw replay is exact, and this never trades it for
+    /// the flagged approximate repaint or an Error (unlike [`Self::snapshot`]).
+    /// A live shell's engine cannot export exactly yet (prompt redraw off,
+    /// #521), so today such a reattach keeps the raw replay; whether to accept
+    /// the approximate repaint here is an owner question on #583. The browser
+    /// keeps its own history above the Snapshot, with a "skipped" marker
+    /// (#569); the skipped lines stay in the host's scrollback (D381).
+    fn snapshot_first(
+        &mut self,
+        terminal: &impl SessionTerminal,
+        head: u64,
+        seq: u64,
+    ) -> io::Result<()> {
+        if let Ok(bytes) = terminal.snapshot() {
+            self.queue(&Frame::Snapshot(head, bytes))?;
+            self.cursor = Some(head);
+        } else {
+            self.cursor = Some(seq);
+        }
+        Ok(())
+    }
     /// Tell this link the terminal's echo mode if it changed since its last report.
     ///
     /// Only a streaming link (it has a cursor, so its handshake replies are
@@ -410,7 +454,12 @@ impl Peer {
             pty.resize(config.cols, config.rows, 0, 0)?;
             // Do not retry the refused geometry on the next accepted key.
             self.size = (config.cols, config.rows, 0, 0);
-            if self.cursor.is_some() || matches!(self.request, Some(Request::Read(_))) {
+            if self.cursor.is_some()
+                || matches!(
+                    self.request,
+                    Some(Request::Read(_) | Request::SnapshotFirst(_))
+                )
+            {
                 self.request = Some(Request::Snapshot);
             }
             // Control-only peers keep their ordered InputState fence; the
@@ -1056,6 +1105,7 @@ fn run_configured(
                 match request {
                     Request::Read(seq) => p.cursor = Some(seq),
                     Request::Snapshot => p.snapshot(&terminal, ring.head())?,
+                    Request::SnapshotFirst(seq) => p.snapshot_first(&terminal, ring.head(), seq)?,
                 }
             }
             if p.pending.is_empty()
@@ -1767,11 +1817,17 @@ fn handle<'a>(
             // decides whether they still fit it (#521). Bytes from before an
             // earlier resize are still replayed raw, because a repaint here
             // would be approximate for every shell session, on every reload.
+            //
+            // A viewer far behind gets the exact screen first when the engine
+            // can export it (#583, `SNAPSHOT_FIRST_BACKLOG`). A cursor the ring
+            // no longer holds is served by a Snapshot through `Read` already.
             let raw = !terminal.requires_approximation();
-            p.request = Some(if raw {
-                Request::Read(seq)
-            } else {
+            p.request = Some(if !raw {
                 Request::Snapshot
+            } else if seq >= ring.start() && ring.head() - seq > SNAPSHOT_FIRST_BACKLOG {
+                Request::SnapshotFirst(seq)
+            } else {
+                Request::Read(seq)
             });
             p.replay_awaits_size = raw && seq < ring.head();
         }
