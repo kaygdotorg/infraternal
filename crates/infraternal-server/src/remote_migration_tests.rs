@@ -1289,3 +1289,101 @@ async fn device_host_mode_migration_keeps_every_row_and_admits_devices_only_with
     restored.close().await;
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// A migrated-up-to-the-previous-release in-memory database with an owner and two hosts: host 1 is
+/// rootful, host 2 is rootless. Used by the tests of what the device migration does to rows that the
+/// stricter rules would refuse.
+async fn before_device_host_mode_with_hosts() -> sqlx::SqlitePool {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    before_device_host_mode().run(&pool).await.unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','Owner',1,'fixture','owner','Owner')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    insert_host(&pool, 1, "rootful", Some(0)).await.unwrap();
+    insert_host(&pool, 2, "rootless", Some(1000)).await.unwrap();
+    pool
+}
+
+/// Insert a join token for host `id` with the given mode and algorithm (the digest is `seed`).
+async fn insert_token(pool: &sqlx::SqlitePool, id: u128, mode: &str, algorithm: &str, seed: u8) {
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at,expected_key_digest,key_algorithm) VALUES (?,?,?,100,700,?,?)")
+        .bind(uuid::Uuid::from_u128(id).as_bytes().as_slice())
+        .bind(mode)
+        .bind([seed; 32].as_slice())
+        .bind([seed; 32].as_slice())
+        .bind(algorithm)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// A P-256 invitation for a host that is not a device can never be redeemed, and the stricter
+/// `remote_join_tokens` rule would refuse it, so the migration deletes it and keeps the others.
+#[tokio::test]
+async fn device_host_mode_migration_deletes_p256_invitations_of_non_device_hosts() {
+    let pool = before_device_host_mode_with_hosts().await;
+    insert_token(&pool, 1, "rootful", "p256", 7).await;
+    insert_token(&pool, 2, "rootless", "ed25519", 8).await;
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    let left: Vec<(Vec<u8>, String)> =
+        sqlx::query_as("SELECT host_id, key_algorithm FROM remote_join_tokens")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        left,
+        vec![(uuid::Uuid::from_u128(2).as_bytes().to_vec(), "ed25519".to_owned())]
+    );
+    let checks: (String, i64) = sqlx::query_as(
+        "SELECT (SELECT integrity_check FROM pragma_integrity_check), (SELECT count(*) FROM pragma_foreign_key_check)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(checks, ("ok".into(), 0));
+}
+
+/// A P-256 certificate on a host that is not a device cannot come from any writer of the server.
+/// The migration refuses to continue (it deletes no identity), rolls back whole, and leaves the
+/// database as the previous release had it, including the invitation it would have deleted.
+#[tokio::test]
+async fn device_host_mode_migration_aborts_on_a_p256_certificate_of_a_non_device_host() {
+    let pool = before_device_host_mode_with_hosts().await;
+    insert_token(&pool, 1, "rootful", "p256", 7).await;
+    let point = [[4_u8].as_slice(), &[9; 64]].concat();
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) VALUES (?,?,zeroblob(32),?,100,604900,0,'p256')")
+        .bind([5_u8; 32].as_slice())
+        .bind(uuid::Uuid::from_u128(1).as_bytes().as_slice())
+        .bind(&point)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let hosts = host_rows(&pool).await;
+    let error = sqlx::migrate!("./migrations").run(&pool).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no_p256_certificate_on_a_non_device_host"),
+        "{error}"
+    );
+    assert_eq!(host_rows(&pool).await, hosts);
+    let (tokens, uid_required, recorded): (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM remote_join_tokens), \
+                (SELECT \"notnull\" FROM pragma_table_info('remote_hosts') WHERE name='execution_uid'), \
+                (SELECT count(*) FROM _sqlx_migrations WHERE version=?)",
+    )
+    .bind(DEVICE_HOST_MODE)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (tokens, uid_required, recorded),
+        (1, 1, 0),
+        "rolled back: the invitation stays, the schema is the old one, the version is unrecorded"
+    );
+}

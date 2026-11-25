@@ -37,6 +37,25 @@
 -- reloads the connection's schema in the same transaction (a malformed text fails
 -- there and the migration rolls back), and the trigger changes below bump the
 -- schema cookie so the pool's other connections reload too.
+-- Existing rows must satisfy the stricter rules, because the `writable_schema` edit below
+-- (like SQLite's own shortcut, which is for removing constraints) validates nothing.
+-- Before this migration no host has the mode `device`, so:
+-- - a P-256 invitation can only belong to a non-device host and can never be redeemed
+--   (the join refuses the pairing); it is deleted, and its owner issues a new one;
+-- - a P-256 certificate on a non-device host cannot exist through any writer of the
+--   server, and deleting an identity is not this migration's call, so it stops the
+--   migration (rolled back, nothing changed) for a person to look at.
+DELETE FROM remote_join_tokens WHERE key_algorithm = 'p256';
+CREATE TEMP TABLE device_host_mode_precheck (
+    no_p256_certificate_on_a_non_device_host INTEGER NOT NULL
+        CHECK (no_p256_certificate_on_a_non_device_host = 1)
+);
+INSERT INTO device_host_mode_precheck VALUES ((
+    SELECT count(*) = 0 FROM remote_certificates c
+    WHERE c.key_algorithm = 'p256'
+      AND NOT EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id = c.host_id AND h.mode = 'device')));
+DROP TABLE device_host_mode_precheck;
+
 PRAGMA writable_schema = ON;
 
 UPDATE sqlite_schema
