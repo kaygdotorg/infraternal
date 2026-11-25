@@ -204,8 +204,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const actions = rec.card.body.querySelector<HTMLElement>(".cl-node-actions");
     // Only the owner approves (the source of routes exists only for the owner); while a change is on its way the buttons rest.
     if (actions) {
-      actions.hidden = route?.state !== "pending" || !routesSource();
-      for (const b of actions.querySelectorAll("button")) b.disabled = route?.saving === true;
+      // Written only when they differ: this runs for every card on every refresh, and a rewrite of an unchanged attribute still invalidates style.
+      const hide = route?.state !== "pending" || !routesSource();
+      if (actions.hidden !== hide) actions.hidden = hide;
+      const rest = route?.saving === true;
+      for (const b of actions.querySelectorAll("button")) if (b.disabled !== rest) b.disabled = rest;
     }
     root.toggleAttribute("data-saving", route?.saving === true);
     const sub = rec.card.body.querySelector<HTMLElement>(".cl-node-sub");

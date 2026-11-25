@@ -76,6 +76,15 @@ export class Arrow {
   private tailGrab: SVGCircleElement | undefined;
   private headGrab: SVGCircleElement | undefined;
   private ends: { p0: Pt; p1: Pt; r: string } | undefined;
+  /**
+   * The path data last written to the curve and to the head. Writing a path attribute again, even with the same text,
+   * invalidates the element's style and its SVG resource, and a graph redraws every arrow when one of them changes
+   * (the confirm click on the Mesh view redrew 50 arrows that had not moved, #580); an unchanged path is not written.
+   */
+  private lineD = "";
+  private headD = "";
+  /** What the handles were last placed for (the curve, the head's tip and the ring radius), so an unchanged arrow does not rewrite them. */
+  private handleKey = "";
   /** Last tip, so the press of the head can pivot on it. */
   private tip: Pt = { x: 0, y: 0 };
   private pressing: Animation | undefined;
@@ -138,17 +147,20 @@ export class Arrow {
     const ux = dx / len, uy = dy / len;
     const end = { x: p1.x - ux * size * 0.7, y: p1.y - uy * size * 0.7 };
     const d = `M${p0.x.toFixed(1)} ${p0.y.toFixed(1)}C${c0.x.toFixed(1)} ${c0.y.toFixed(1)} ${c1.x.toFixed(1)} ${c1.y.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
-    this.line.setAttribute("d", d);
+    const moved = d !== this.lineD;
+    if (moved) { this.line.setAttribute("d", d); this.lineD = d; }
     this.curve = { p0, c0, c1, p1: end };
     if (this.hit) {
-      this.hit.setAttribute("d", d);
+      if (moved) this.hit.setAttribute("d", d);
       const r = (size * 0.85).toFixed(1);
+      const key = `${d}|${p1.x.toFixed(1)},${p1.y.toFixed(1)}|${r}`;
       this.ends = { p0, p1, r };
-      this.placeHandles(p0, p1, r);
+      if (key !== this.handleKey) { this.handleKey = key; this.placeHandles(p0, p1, r); }
     }
     const w = size * 0.55;
     const bx = p1.x - ux * size, by = p1.y - uy * size;
-    this.head.setAttribute("d", `M${p1.x.toFixed(1)} ${p1.y.toFixed(1)}L${(bx - uy * w).toFixed(1)} ${(by + ux * w).toFixed(1)}L${(bx + uy * w).toFixed(1)} ${(by - ux * w).toFixed(1)}Z`);
+    const headD = `M${p1.x.toFixed(1)} ${p1.y.toFixed(1)}L${(bx - uy * w).toFixed(1)} ${(by + ux * w).toFixed(1)}L${(bx + uy * w).toFixed(1)} ${(by - ux * w).toFixed(1)}Z`;
+    if (headD !== this.headD) { this.head.setAttribute("d", headD); this.headD = headD; }
     this.tip = p1;
   }
 

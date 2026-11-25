@@ -205,6 +205,11 @@ export function createViews(cx: Ctx): ViewsModule {
     }
   }
 
+  /** Sets each inline style property of `el` that does not already hold the value; the others are left alone. */
+  function put(el: HTMLElement, values: Record<string, string>): void {
+    for (const [name, value] of Object.entries(values)) if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
+  }
+
   function geometry(c: ViewRec): void {
     fitWidths(c);
     // Columns are the truth: read them back from the DOM so drags, resizes and moves persist, then make the DOM agree with
@@ -225,15 +230,17 @@ export function createViews(cx: Ctx): ViewsModule {
     }
     const size = contentSize(c.view, state.metrics);
     const box = boxOf(c.view, state.metrics);
-    c.el.style.width = `${box.w}px`;
-    c.el.style.height = `${box.h}px`;
-    c.content.style.cssText = `left:${MARGIN.l}px;top:${MARGIN.t}px;width:${size.w}px;height:${size.h}px`;
-    c.region.style.cssText = `left:${MARGIN.l - 16}px;top:${MARGIN.t - 16}px;width:${size.w + 32}px;height:${size.h + 32}px`;
-    c.label.style.left = `${MARGIN.l - 16}px`;
-    c.label.style.top = `${MARGIN.t - 16}px`;
+    // Each value is written only when it differs: a rewrite of the same inline style still invalidates the style of
+    // everything under it, and this runs on every refresh of a view (a confirmed arrow edit on the Mesh view, #580).
+    put(c.el, { width: `${box.w}px`, height: `${box.h}px` });
+    put(c.content, { left: `${MARGIN.l}px`, top: `${MARGIN.t}px`, width: `${size.w}px`, height: `${size.h}px` });
+    put(c.region, { left: `${MARGIN.l - 16}px`, top: `${MARGIN.t - 16}px`, width: `${size.w + 32}px`, height: `${size.h + 32}px` });
+    put(c.label, { left: `${MARGIN.l - 16}px`, top: `${MARGIN.t - 16}px` });
     const count = c.view.layout === "graph" ? (cx.mesh?.countText(c) ?? `${c.view.nodes.filter((v) => v.kind === "host").length} hosts`) : `${c.wins.size} window${c.wins.size === 1 ? "" : "s"}`;
-    c.labelMeta.textContent = c.wins.size || c.view.layout === "graph" ? `· ${count}` : "· empty";
-    c.label.setAttribute("aria-label", `${c.view.name}, ${count}. Fly to this view`);
+    const meta = c.wins.size || c.view.layout === "graph" ? `· ${count}` : "· empty";
+    if (c.labelMeta.textContent !== meta) c.labelMeta.textContent = meta;
+    const aria = `${c.view.name}, ${count}. Fly to this view`;
+    if (c.label.getAttribute("aria-label") !== aria) c.label.setAttribute("aria-label", aria);
     if (c.view.published) cx.sharing?.schedulePublish(c);
   }
 
