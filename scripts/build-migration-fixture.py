@@ -309,7 +309,7 @@ def seed_synthetic_data(conn: sqlite3.Connection) -> None:
         ],
     )
 
-    # 7. Remote identity rotation rows: Ed25519 complete, Ed25519 issued,
+    # 7. Remote identity rotation rows: Ed25519 complete, P-256 issued (65-byte keys; the rotation table has no host-mode rule),
     #    and Ed25519 challenged.
     conn.executemany(
         "INSERT INTO remote_identity_rotation(host_id, sequence, last_completed_at, phase, "
@@ -321,8 +321,8 @@ def seed_synthetic_data(conn: sqlite3.Connection) -> None:
             (h_rootful_ed, 3, T0 + 100, "complete", None, None, None, None, None, None, None, None, None, None, None, None),
             (
                 h_rootful_p256, 1, T0 + 20, "issued", uuid_bytes(0x41), blob32(0x42),
-                blob32(0x14), blob32(0x24), issuer_fp, 1, T0 + 200, blob32(0x43),
-                blob32(0x44), blob32(0x45), b"synthetic-ed25519-candidate-der", T0 + 210,
+                blob32(0x14), p256_pub(0x24), issuer_fp, 1, T0 + 200, blob32(0x43),
+                p256_pub(0x44), blob32(0x45), b"synthetic-p256-candidate-der", T0 + 210,
             ),
             (
                 h_rootless_ed, 2, T0 + 10, "challenged", uuid_bytes(0x46), blob32(0x47),

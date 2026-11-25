@@ -347,10 +347,10 @@ fn assert_fixture_coverage(path: &Path, snapshot: &DatabaseSnapshot) {
     );
     assert_eq!(
         count(
-            "SELECT count(DISTINCT key_algorithm) FROM remote_join_tokens WHERE key_algorithm IN ('ed25519', 'p256')"
+            "SELECT count(DISTINCT key_algorithm) FROM remote_join_tokens WHERE key_algorithm = 'ed25519'"
         ),
-        2,
-        "fixture must include join tokens for both key algorithms"
+        1,
+        "fixture must include Ed25519 join tokens (a P-256 invitation is for a device, #580)"
     );
     assert!(
         count(
