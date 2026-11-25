@@ -262,10 +262,14 @@ async fn server_refuses_wrong_or_missing_binding_on_its_own_tls() {
     let server = start_server(&leaf, &agent.root, store, Some(&https)).await;
     for binding in [Some([7u8; agent_link::BINDING_LEN]), None] {
         let mut connector = SslConnector::builder(SslMethod::tls_client()).unwrap();
-        connector
-            .cert_store_mut()
-            .add_cert(https.certificate.clone())
+        // The pinned certificate is a self-issued leaf, so it must be
+        // trusted as a partial chain, as the agent's own connector does.
+        let mut trust = openssl::x509::store::X509StoreBuilder::new().unwrap();
+        trust.add_cert(https.certificate.clone()).unwrap();
+        trust
+            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
             .unwrap();
+        connector.set_cert_store(trust.build());
         let ssl = connector
             .build()
             .configure()
