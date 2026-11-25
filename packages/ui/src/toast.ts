@@ -178,8 +178,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   for (const neighbor of neighbors) spacing?.observe(neighbor);
 
   const items: Item[] = [];
-  /** Toasts shown since the last frame whose message layout and height have not been read yet. */
-  const unfitted = new Set<Item>();
   /** Why the stack is held: "mouse", "focus" or "touch". Any hold fans the stack out and stops every clock. */
   const holds = new Set<string>();
   let serial = 0;
@@ -232,18 +230,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     measure();
   };
   /**
-   * Reads the layout of the toasts shown since the last read: each message is fitted, and its natural height is taken, which
-   * is only true while it is the front card (a card behind is clamped to the front's height). So `show` calls this before it
-   * puts another toast in front, and the frame calls it for the rest.
-   */
-  const readNew = (): void => {
-    if (!unfitted.size) return;
-    for (const it of unfitted) if (it.card.isConnected) fit(it);
-    fittedWidth = wrap.clientWidth;
-    for (const it of unfitted) if (!it.leaving) it.height = it.card.offsetHeight || it.height;
-    unfitted.clear();
-  };
-  /**
    * One batched frame for the fanned-out offsets and the stack's reserved height. Only the front card is read
    * here: a card behind it is clamped to the front's height by CSS, so its own natural height was taken once, in
    * `show`, while it was the front.
@@ -252,7 +238,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
     if (frame || disposed) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      readNew();
       const visible = live().filter((it) => it.card.dataset.hidden !== "true").reverse();
       if (visible[0]) visible[0].height = visible[0].card.offsetHeight || visible[0].height;
       let lift = 0;
@@ -517,7 +502,6 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
   return {
     setEdge(edge) { if (wrap.dataset.placement === "parent") wrap.dataset.edge = edge; },
     show(value) {
-      readNew();
       const key = value.key ?? `${value.tone ?? "ok"}|${value.message}`;
       let it = live().find((other) => other.key === key);
       if (it) {
@@ -545,11 +529,10 @@ export function mountToast(parent: HTMLElement, options: ToastOptions = {}): Toa
       fill(it, value);
       it.card.dataset.open = it.card.dataset.open ?? "false";
       arrange();
-      // Its layout is read in the next animation frame's callbacks (see `measure`), not here: `show` runs inside the handler
-      // of whatever happened (a confirm click), and a read here pays for every style and layout change that handler has
-      // made so far, a second time over the one the frame makes. The frame's callbacks still run before its first paint.
-      unfitted.add(it);
-      measure();
+      fit(it);
+      fittedWidth = wrap.clientWidth;
+      // The newest toast is unclamped (it is the front), so this is its natural height: one forced layout per toast.
+      it.height = it.card.offsetHeight || it.height;
       clocks();
       // A fast receipt can dismiss this message before its first animation frame.
       const shown = it;
