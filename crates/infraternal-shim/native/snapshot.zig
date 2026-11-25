@@ -367,7 +367,20 @@ fn regions(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
 }
 
+/// Restore the cursor's shape and blink for `screen`.
+///
+/// A cursor that follows the terminal's default (no DECSCUSR from the
+/// program, or `CSI 0 SP q`) is restored as the default, not as the shape the
+/// default happens to be here: the viewer keeps its own default cursor (the
+/// browser's setting), and a later configuration change still applies to it
+/// (#521). The blink mode is written after, because selecting the default
+/// also resets it. An explicit shape, or a screen whose shape differs from
+/// the default while the terminal-wide flag says default, is written as is.
 fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
+    if (t.cursor.is_default and screen.cursor.cursor_style == t.cursor.default_style) {
+        try w.print("\x1b[0 q\x1b[?12{c}", .{@as(u8, if (t.modes.get(.cursor_blinking)) 'h' else 'l')});
+        return;
+    }
     const shape: u8 = switch (screen.cursor.cursor_style) {
         .block => 1,
         .underline => 3,
@@ -749,6 +762,9 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
     if (a.flags.modify_other_keys_2 != b.flags.modify_other_keys_2) return 6600000;
     if (a.flags.mouse_shift_capture != b.flags.mouse_shift_capture) return 6600001;
     if (a.screens.active.cursor.cursor_style != b.screens.active.cursor.cursor_style) return 6600002;
+    // Whether the cursor follows the default decides what the viewer shows
+    // under its own cursor setting, so it is part of the visible state (#521).
+    if (a.cursor.is_default != b.cursor.is_default) return 6600004;
     if (!charsetEqual(a.screens.active.charset, b.screens.active.charset)) return 6600003;
     if (strict) {
         inline for (.{ "foreground", "background", "cursor" }) |name| {
