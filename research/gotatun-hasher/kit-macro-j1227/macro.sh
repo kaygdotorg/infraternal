@@ -1,6 +1,6 @@
 #!/bin/bash
-# J1227 (#260) macro driver on hd01: for each hold, wait until no other job's hold is on the two
-# VMs, stage the binaries (never during a hold), then run the series (it takes the locks itself).
+# J1227 (#260) macro driver on hd01: run one hold's series (series.sh takes the locks itself and
+# stages the binaries inside the hold). Queue the next hold only after others waiting have had a turn.
 #   macro.sh <hold> <row>...
 set -uo pipefail
 J=$HOME/.cache/codex-scratch/j1227

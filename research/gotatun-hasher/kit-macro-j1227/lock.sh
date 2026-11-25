@@ -16,7 +16,6 @@ take)
     done
     [[ -z $others ]] || { echo "other hold still present: $others" >&2; exit 1; }
     mkdir /run/j1227.lock
-    mkdir -p /run/j11-j1227.lock   # matches the /run/j11*.lock pattern other jobs wait on
     echo "$2 $(date -u +%FT%TZ)" > /run/j1227.lock/tag
     # Open each lock read-only (no O_CREAT): fs.protected_regular=2 refuses root an O_CREAT
     # open of another user's file in the sticky /var/lock, and flock(2) needs no write access.
@@ -38,6 +37,9 @@ take)
         rm -rf /run/j1227.lock /run/j11-j1227.lock
         echo "lock wait timed out" >&2; exit 1
     fi
+    # The marker other jobs wait on goes up only now that the flocks are ours: raised while still
+    # queueing (as in the J1227 holds M1-M3) it blocks waiters although nothing is being measured.
+    mkdir -p /run/j11-j1227.lock
     echo "held: $(ls -l /proc/$(cat /run/j1227.lock/holder)/fd | grep -o "/[^ ]*lock[^ ]*\|/tmp/[^ ]*" | tr "\n" " ")" ;;
 release)
     [[ -s /run/j1227.lock/holder ]] && kill "$(cat /run/j1227.lock/holder)" 2>/dev/null || true

@@ -37,6 +37,9 @@ take)
         rm -rf /run/j1227.lock
         echo "lock wait timed out" >&2; exit 1
     fi
+    # The marker other jobs wait on goes up only now that the flocks are ours: raised while still
+    # queueing (as in the J1227 holds M1-M3) it blocks waiters although nothing is being measured.
+    mkdir -p /run/j11-j1227.lock
     echo "held: $(ls -l /proc/$(cat /run/j1227.lock/holder)/fd | grep -o "/[^ ]*lock[^ ]*\|/tmp/[^ ]*" | tr "\n" " ")" ;;
 release)
     [[ -s /run/j1227.lock/holder ]] && kill "$(cat /run/j1227.lock/holder)" 2>/dev/null || true

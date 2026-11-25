@@ -94,8 +94,8 @@ for h in $A $B; do
     done
 done
 log "binaries staged"
-# The kit (scripts, a few KB) is refreshed inside our own hold; binaries were staged before it
-# (stage.sh, only while no hold was active) and only their hashes are checked here.
+# The kit (scripts, a few KB) is refreshed inside our own hold as well; the binaries were staged
+# just above, and their hashes are recorded here.
 for h in $A $B; do tar -C "$PWD" --exclude __pycache__ --exclude series.sh -cf - . | on $h "tar -C $R -xf - --no-same-owner && chmod 700 $R/*.sh"; done
 for h in $A $B; do echo "== $h"; on $h "sha256sum $R/bin/* | cut -c1-16,65-; uptime; nproc"; done > "$ev/stage.log" 2>&1 || { log "hash check failed"; exit 1; }
 ns_all_down > /dev/null 2>&1
