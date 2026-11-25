@@ -48,6 +48,16 @@ use tokio::sync::{Notify, mpsc};
 pub const PING: u8 = 0xF2;
 /// First byte of the answer to a probe; like [`PING`], never a `WireGuard` type.
 pub const PONG: u8 = 0xF3;
+/// A fresh probe-token seed from the clock. Tokens only match an answer to its probe; they are not
+/// secret, so the clock is enough. Both engines (Linux and macOS) start their probes with this.
+#[must_use]
+pub fn token_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(1, |since| {
+            since.as_secs().rotate_left(32) ^ u64::from(since.subsec_nanos())
+        })
+}
 /// Length of every probe: kind, three zero bytes, a big-endian 64-bit token.
 pub const PROBE_LEN: usize = 12;
 /// Length of a `WireGuard` keepalive: a data packet with an empty payload, a 16-byte header
@@ -637,5 +647,59 @@ mod tests {
                 .is_err(),
             "one request wakes once"
         );
+    }
+
+    /// Hold an idle guarded receiver for `seconds`, with or without probes installed. Measurement
+    /// for D81 (#220, J1206), see [`idle_receiver`].
+    async fn idle_hold(with_probes: bool, seconds: u64) {
+        let params = UdpTransportFactoryParams {
+            addr: Some(Ipv4Addr::LOCALHOST.into()),
+            port: 0,
+            #[cfg(target_os = "linux")]
+            fwmark: None,
+        };
+        let (send, receive) = UdpSocketFactory::default()
+            .bind(&params)
+            .await
+            .expect("bind");
+        let admission = Arc::new(RwLock::new(PeerAdmission::new(StaticSecret::from([9; 32]))));
+        let _answers = if with_probes {
+            let (probes, answers) = DirectProbes::new(send, 1);
+            admission.write().await.set_probes(probes);
+            Some(answers)
+        } else {
+            None
+        };
+        let mut receiver = PeerAdmissionUdpReceiver::new(receive, Arc::clone(&admission));
+        let task = tokio::spawn(async move {
+            let mut buffer = <PeerAdmissionUdpReceiver as UdpRecv>::RecvManyBuf::default();
+            let mut pool = PacketBufPool::new(8);
+            let mut packets = Vec::new();
+            while receiver
+                .recv_many_from(&mut buffer, &mut pool, &mut packets)
+                .await
+                .is_ok()
+            {
+                packets.clear();
+            }
+        });
+        // sleep: the idle window itself is what is measured.
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        task.abort();
+    }
+
+    /// Holds an idle guarded receiver for `IDLE_SECONDS` (default 30), with probes installed
+    /// unless `IDLE_PROBES=0`. Run it under `/usr/bin/time -l` (macOS) or `-v` (Linux) at two
+    /// window lengths and subtract the voluntary context switches: the difference over the
+    /// difference in seconds is the idle rate, free of start-up cost.
+    #[tokio::test]
+    #[ignore = "measurement"]
+    async fn idle_receiver() {
+        let seconds = std::env::var("IDLE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(30);
+        let with_probes = std::env::var("IDLE_PROBES").as_deref() != Ok("0");
+        idle_hold(with_probes, seconds).await;
     }
 }
