@@ -77,7 +77,7 @@ pub(crate) const MAX_DEVICE_LINKS: usize = 10_000;
 /// `u32::MAX` is `(uid_t)-1`, which no account can have, so this epoch
 /// can never be a host's. Cutting the host (its removal) cuts every epoch
 /// with its id, this one included.
-const DEVICE_EPOCH_UID: u32 = u32::MAX;
+pub(crate) const DEVICE_EPOCH_UID: u32 = u32::MAX;
 
 /// The device links currently held, one per device.
 #[derive(Default)]

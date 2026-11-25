@@ -22,6 +22,10 @@ use uuid::Uuid;
 #[derive(Default)]
 pub(crate) struct Revocations {
     signals: Mutex<HashMap<Epoch, Weak<Revocation>>>,
+    /// Device links' signals (#580), kept apart from `signals` so the two
+    /// kinds cannot starve each other at the cap: always-on devices must not
+    /// lock out host connections, reconnects after a restart included.
+    device_signals: Mutex<HashMap<Epoch, Weak<Revocation>>>,
     // Storage refusal must not let the last transport drop the cancellation
     // signal and permit a reconnect. Successful tombstones release this hold.
     cuts: Mutex<Cuts>,
@@ -92,6 +96,21 @@ impl Revocations {
         }
     }
 
+    /// Every live signal of `host`, host epochs and device links alike.
+    fn live_of(&self, host: Uuid) -> Vec<Arc<Revocation>> {
+        [&self.signals, &self.device_signals]
+            .into_iter()
+            .flat_map(|list| {
+                list.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .filter(|((id, _), _)| *id == host)
+                    .filter_map(|(_, signal)| signal.upgrade())
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     /// The live signal for `epoch`, creating it when there is none. A signal
     /// created while its host or epoch is cut starts cancelled.
     pub(crate) fn register(&self, host: Uuid, uid: u32) -> io::Result<Arc<Revocation>> {
@@ -103,8 +122,12 @@ impl Revocations {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // This map contains only independent weak registrations; Rust containers
         // retain their invariants after unwinding, so poison can be recovered.
-        let mut signals = self
-            .signals
+        let list = if uid == crate::remote_device_link::DEVICE_EPOCH_UID {
+            &self.device_signals
+        } else {
+            &self.signals
+        };
+        let mut signals = list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(signal) = signals.get(&epoch).and_then(Weak::upgrade) {
@@ -125,20 +148,14 @@ impl Revocations {
     /// helper as a cleanup-only reconnect; absent actors are never confirmed.
     #[cfg(test)]
     pub(crate) async fn revoke_login(&self, host: Uuid, person: Uuid) -> bool {
-        let actor = self
-            .signals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter(|((id, _), _)| *id == host)
-            .find_map(|(_, signal)| signal.upgrade())
-            .and_then(|signal| {
-                signal
-                    .login_actor
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-            });
+        // Device signals carry no login actor, so skip to one that does.
+        let actor = self.live_of(host).into_iter().find_map(|signal| {
+            signal
+                .login_actor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        });
         let Some(actor) = actor else {
             return false;
         };
@@ -172,14 +189,7 @@ impl Revocations {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         cuts.hosts.insert(host);
-        let live: Vec<Arc<Revocation>> = self
-            .signals
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter(|((id, _), _)| *id == host)
-            .filter_map(|(_, signal)| signal.upgrade())
-            .collect();
+        let live = self.live_of(host);
         for signal in &live {
             signal.changed.send_replace(true);
         }
@@ -657,6 +667,27 @@ mod cut_tests {
     /// J415 R2: the handover cuts the rootless epoch only. The root
     /// successor's signal, on the same host, stays live, and a fresh rootless
     /// registration stays cancelled until that epoch's end is durable.
+    /// Device links fill their own list: at its cap new devices wait, but a
+    /// host (a reconnect after a restart, a root-upgrade handover) still
+    /// registers, and a host's removal still cuts its device signal (#580).
+    #[test]
+    fn full_device_signals_do_not_lock_out_hosts() {
+        let revocations = Revocations::default();
+        let device = crate::remote_device_link::DEVICE_EPOCH_UID;
+        let held: Vec<_> = (0..10_000u128)
+            .map(|n| revocations.register(Uuid::from_u128(n + 1), device).unwrap())
+            .collect();
+        assert!(revocations.register(Uuid::from_u128(99_999), device).is_err());
+        let host = Uuid::from_u128(0xabc);
+        let signal = revocations.register(host, 1000).unwrap();
+        assert!(revocations.register(host, 0).is_ok());
+        let device_signal = &held[0];
+        let cut = revocations.cut(Uuid::from_u128(1)).unwrap();
+        assert!(*device_signal.changed.borrow());
+        assert!(!*signal.changed.borrow());
+        drop(cut);
+    }
+
     #[test]
     fn an_epoch_cut_leaves_the_hosts_other_epoch_live() {
         let revocations = Revocations::default();
