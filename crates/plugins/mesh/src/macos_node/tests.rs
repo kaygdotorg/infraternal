@@ -417,7 +417,7 @@ fn restored_snapshot_replaces_stale_peers() {
         port: 51820,
         path: Some(state_path),
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("initial epoch snapshot");
@@ -471,7 +471,7 @@ fn same_authority_equal_revision_conflict_is_refused() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let result = chunks_with_epoch(None, &conflicting, AUTHORITY_EPOCH_A)
         .into_iter()
@@ -523,7 +523,7 @@ fn equal_revision_restore_retires_stale_peers() {
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("current epoch snapshot");
@@ -579,7 +579,7 @@ fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement()
         port: 51820,
         path: None,
         binding: None,
-        network_status: Default::default(),
+        network_status: super::subnet::NetworkStatus::default(),
     };
     let mut complete = chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_B)
         .pop()
