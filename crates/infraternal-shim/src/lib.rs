@@ -373,6 +373,8 @@ mod heap_accounting;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod session;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod carry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod terminal;
 #[cfg(all(feature = "process-per-user", target_os = "linux"))]
 mod terminal_limits;

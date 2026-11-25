@@ -397,3 +397,34 @@ fn snapshot_during_discard_preserves_the_unfinished_string_boundary() {
         );
     }
 }
+
+/// #561: the carry follows the engine on C1 bytes inside a sequence. The
+/// engine obeys 0x9C there (it ends the escape), so nothing is left to carry
+/// and a snapshot must not repeat the text that followed it.
+#[test]
+fn carry_ends_where_the_engine_ends_a_sequence_on_a_c1_byte() {
+    let mut terminal = reset_terminal(20, 3).unwrap();
+    terminal.process(b"\x1b\x9c'");
+    assert!(terminal.pending.is_empty(), "ESC 0x9C finished the escape");
+    terminal.process(b"\x1b[1\x84X");
+    assert!(terminal.pending.is_empty(), "a C1 control ends a CSI");
+    // An introducer replaces the sequence it interrupts, and only it is carried.
+    terminal.process(b"\x1b[1;2\x9b3");
+    assert_eq!(terminal.pending, b"\x9b3");
+    let mut viewer = reset_terminal(20, 3).unwrap();
+    viewer.process(&terminal.snapshot().unwrap());
+    terminal.process(b"m!");
+    viewer.process(b"m!");
+    assert_eq!(terminal.screen_difference(&viewer), 0);
+}
+
+/// C0 controls inside DCS or APC data are payload, so the carry keeps them;
+/// inside a CSI the engine runs them, so the carry drops them.
+#[test]
+fn carry_keeps_c0_payload_of_strings_only() {
+    let mut terminal = reset_terminal(20, 3).unwrap();
+    terminal.process(b"\x1b[1\n2");
+    assert_eq!(terminal.pending, b"\x1b[12");
+    terminal.process(b"m\x1b_a\nb");
+    assert_eq!(terminal.pending, b"\x1b_a\nb");
+}
