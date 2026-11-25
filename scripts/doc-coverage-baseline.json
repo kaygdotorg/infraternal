@@ -16,6 +16,10 @@
    "documented": 41,
    "total": 82
   },
+  "rust:crates/infraternal-link": {
+   "documented": 134,
+   "total": 134
+  },
   "rust:crates/infraternal-mesh": {
    "documented": 143,
    "total": 198

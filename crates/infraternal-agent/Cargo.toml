@@ -11,10 +11,10 @@ bench-probes = []
 # Exposes `control_checks` for the workspace fuzz harness crate only; never in shipping builds.
 parser-checks = []
 # Generic plugin media lanes stay absent from terminal-only builds (#146).
-native-streams = ["infraternal-plugin-api/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
+native-streams = ["infraternal-plugin-api/native-streams", "infraternal-link/native-streams", "remote", "infraternal-plugin-remote/native-streams"]
 # The root agent starts its helper through the shim's console-user entry (D203 C2).
 desktop = ["native-streams", "dep:infraternal-plugin-desktop", "infraternal-shim/desktop-user"]
-remote = ["infraternal-plugin-api/native-wire", "infraternal-plugin-api/tls-roots", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url", "dep:zeroize"]
+remote = ["infraternal-plugin-api/native-wire", "infraternal-plugin-api/tls-roots", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/agent", "infraternal-link/quic", "dep:openssl", "dep:tokio-openssl", "dep:quinn", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:url", "dep:zeroize"]
 default = ["plugin-host-facts"]
 plugin-host-facts = ["dep:infraternal-plugin-host-facts"]
 
@@ -31,6 +31,8 @@ infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", opt
 bytes.workspace = true
 infraternal-plugin-proxy = { path = "../plugins/proxy", version = "0.1.0", optional = true }
 infraternal-protocol.workspace = true
+# Leg B's client side: the frame codec always, the QUIC dial runtime with `remote` (#580).
+infraternal-link.workspace = true
 infraternal-plugin-api = { path = "../infraternal-plugin-api", version = "0.1.0" }
 infraternal-shim = { workspace = true, features = ["async-fd"] }
 nix = { workspace = true, features = ["inotify", "event", "dir"] }
@@ -79,6 +81,8 @@ nix = { workspace = true, features = ["time"] }
 # Paused test time controls frame-expiry ordering without changing runtime timers.
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 infraternal-plugin-remote = { path = "../plugins/remote", version = "0.1.0", default-features = false, features = ["test-support"] }
+# The offline-limit override and receiver inspection hooks used by the agent's tests.
+infraternal-link = { workspace = true, features = ["test-support"] }
 
 # The root upgrade's real-host proof driver seals like the browser (#399).
 ring.workspace = true

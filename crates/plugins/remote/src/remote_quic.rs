@@ -2,6 +2,14 @@
 
 pub use crate::remote_path_proof::path_probe_header;
 use crate::remote_tls::Identity;
+/// The client's QUIC config and the shared transport settings live in
+/// `infraternal-link` (#580, L2); this module adapts the OpenSSL identity to
+/// them and keeps the server side.
+pub use infraternal_link::quic::{PATH_SAFE_UDP_PAYLOAD, transport_with_liveness};
+use infraternal_link::{
+    identity::{ClientIdentity, Ed25519Pkcs8},
+    quic::ALPN,
+};
 use openssl::x509::X509;
 use std::{io, sync::Arc};
 
@@ -44,27 +52,29 @@ pub fn negotiate_binding(
     }
 }
 
-/// Application protocol name offered and required in the TLS handshake. A peer that does not speak it is refused.
-const ALPN: &[u8] = b"infraternal/1";
 /// Largest writer-binding request, in bytes.
 const BINDING_LIMIT: usize = 128;
 /// How long a new stream has to deliver its binding request before it is refused.
 const BINDING_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The DER of each certificate, for the TLS library. Fails with the generic
+/// refusal if one cannot be encoded.
+fn certificates_der(
+    certificates: &[X509],
+) -> io::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    certificates
+        .iter()
+        .map(|certificate| {
+            certificate
+                .to_der()
+                .map(rustls::pki_types::CertificateDer::from)
+                .map_err(|_| denied())
+        })
+        .collect()
+}
 /// Builds the trusted CA store from `certificates`. Accepts one to sixteen certificates; none, more than sixteen, or an unparsable one is refused.
 fn roots(certificates: &[X509]) -> io::Result<rustls::RootCertStore> {
-    if certificates.is_empty() || certificates.len() > 16 {
-        return Err(denied());
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in certificates {
-        roots
-            .add(rustls::pki_types::CertificateDer::from(
-                certificate.to_der().map_err(|_| denied())?,
-            ))
-            .map_err(|_| denied())?;
-    }
-    Ok(roots)
+    infraternal_link::quic::root_store(&certificates_der(certificates)?)
 }
 /// Converts this side's certificate and private key into the forms the TLS library needs. Fails with the generic refusal if either cannot be encoded.
 fn identity(
@@ -81,6 +91,24 @@ fn identity(
     );
     Ok((vec![certificate], key.into()))
 }
+/// The host's OpenSSL identity as the link crate's client identity: the leaf
+/// as DER and its Ed25519 key, re-read from PKCS#8 by [`Ed25519Pkcs8`]. The
+/// PKCS#8 copy is wiped once the signer has parsed it.
+/// # Errors
+/// The generic refusal if the certificate or key cannot be encoded, or the
+/// key is not Ed25519 (every enrolled host identity is, D168).
+fn client_identity(identity: &Identity) -> io::Result<ClientIdentity> {
+    let certificate = rustls::pki_types::CertificateDer::from(
+        identity.certificate.to_der().map_err(|_| denied())?,
+    );
+    let document =
+        zeroize::Zeroizing::new(identity.key.private_key_to_pkcs8().map_err(|_| denied())?);
+    let signer = Ed25519Pkcs8::from_pkcs8(&document).map_err(|_| denied())?;
+    Ok(ClientIdentity {
+        chain: vec![certificate],
+        signer: Arc::new(signer),
+    })
+}
 /// The peer's verified leaf certificate on an established connection. On a
 /// dialed connection this is the server's leaf, which the infraternal agent
 /// checks against its [`crate::server_leaf_floor::ServerLeafFloor`] (#559).
@@ -94,24 +122,6 @@ pub fn peer_leaf(connection: &quinn::Connection) -> io::Result<X509> {
     X509::from_der(chain.first().ok_or_else(denied)?).map_err(|_| denied())
 }
 
-/// Largest UDP payload a host connection may discover. The connection can move
-/// onto the mesh below QUIC without seeing a path change (`remote_path_socket`),
-/// so its discovered size must also fit the mesh interface: 1380-byte interface
-/// MTU minus the 20-byte IPv4 and 8-byte UDP headers. A larger datagram would
-/// be dropped locally (EMSGSIZE) and stall until black-hole detection.
-pub const PATH_SAFE_UDP_PAYLOAD: u16 = 1352;
-/// Received QUIC DATAGRAM bytes buffered per connection. This is also the
-/// largest DATAGRAM the peer may send. Terminal-only builds receive only
-/// one-byte liveness probes while on the mesh and nothing reads them; the bound
-/// keeps that buffer at a few entries instead of Quinn's default.
-#[cfg(not(feature = "native-streams"))]
-const DATAGRAM_BUFFER: usize = 64;
-/// Native plugin lanes (desktop video, #146) send 1 KiB fragments over the same
-/// connection and read them as they arrive, so builds with them accept a full
-/// fragment and a short burst of a keyframe. A cap, not an allocation.
-#[cfg(feature = "native-streams")]
-const DATAGRAM_BUFFER: usize = 128 * 1024;
-
 /// Transport settings for a server-side connection: keep-alive every 15 seconds, idle timeout 60 seconds, and room for `incoming_streams` peer-initiated streams.
 fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
     transport_with_liveness(
@@ -120,52 +130,6 @@ fn transport(incoming_streams: u32) -> std::sync::Arc<quinn::TransportConfig> {
         std::time::Duration::from_secs(60),
         false,
     )
-}
-/// Shared transport settings with explicit `keep_alive` and `idle` times. Limits received datagram bytes, caps the discovered packet size to [`PATH_SAFE_UDP_PAYLOAD`], and for a client (`client` true) asks the peer to delay acknowledgements by at most 5 ms.
-fn transport_with_liveness(
-    incoming_streams: u32,
-    keep_alive: std::time::Duration,
-    idle: std::time::Duration,
-    client: bool,
-) -> std::sync::Arc<quinn::TransportConfig> {
-    let mut config = quinn::TransportConfig::default();
-    config.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
-    if client {
-        // Enrolled ciphertext copies and ACK delay share the backed path's
-        // 30ms response margin. Negotiate 5ms without extending loss detection;
-        // preserve the ordinary immediate ACK on the first reordered packet.
-        let mut frequency = quinn::AckFrequencyConfig::default();
-        frequency.max_ack_delay(Some(std::time::Duration::from_millis(5)));
-        frequency.reordering_threshold(1u32.into());
-        config.ack_frequency_config(Some(frequency));
-    }
-    // Both directions retain their learned MTU across a socket-level mesh move.
-    let mut discovery = quinn::MtuDiscoveryConfig::default();
-    discovery.upper_bound(PATH_SAFE_UDP_PAYLOAD);
-    config.mtu_discovery_config(Some(discovery));
-    config.congestion_controller_factory(std::sync::Arc::new(
-        quinn::congestion::BbrConfig::default(),
-    ));
-    // Transport probes preserve stateful mappings without database or authority
-    // work. The caller chooses its measured liveness profile; acknowledged
-    // traffic resets idle expiry, with QUIC retaining its minimum PTO bound.
-    config
-        .max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(
-            u32::try_from(idle.as_millis()).unwrap_or(60_000),
-        ))))
-        .keep_alive_interval(Some(keep_alive));
-    config.max_concurrent_uni_streams(0u32.into());
-    // Quinn preallocates slots up to this limit. Hosts initiate only control0;
-    // server-opened terminals use the daemon's existing attachment bound, not
-    // the deployment-wide viewer count multiplied across every idle host.
-    config.max_concurrent_bidi_streams(incoming_streams.into());
-    // Credit bounds outstanding bytes across streams, not just stream count.
-    // 1MiB per peer is <=1GiB outstanding at the 1000-host admission target.
-    config
-        .receive_window(1_048_576u32.into())
-        .stream_receive_window(262_144u32.into())
-        .send_window(1_048_576);
-    std::sync::Arc::new(config)
 }
 /// Configure authenticated server admission and event-driven BBR transport.
 /// Callers must bound `Incoming`/`Connecting` and control-Hello negotiation
@@ -223,33 +187,14 @@ pub fn client_config_with_liveness(
     keep_alive: std::time::Duration,
     idle: std::time::Duration,
 ) -> io::Result<quinn::ClientConfig> {
-    if keep_alive < std::time::Duration::from_millis(1)
-        || keep_alive >= idle
-        || idle > std::time::Duration::from_secs(60)
-    {
-        return Err(std::io::ErrorKind::InvalidInput.into());
-    }
-    let (chain, key) = identity(endpoint)?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|_| denied())?
-        .with_root_certificates(roots(certificates)?)
-        .with_client_auth_cert(chain, key)
-        .map_err(|_| denied())?;
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-    // No replayable 0-RTT: terminal input and enrollment are stateful authority.
-    tls.enable_early_data = false;
-    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| denied())?;
-    let mut config = quinn::ClientConfig::new(Arc::new(crypto));
-    config.transport_config(transport_with_liveness(
-        u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS)
-            .map_err(|_| denied())?,
+    // Interval errors come first, before any credential work, as they always did.
+    infraternal_link::quic::check_liveness(keep_alive, idle)?;
+    infraternal_link::quic::client_config_with_liveness(
+        &client_identity(endpoint)?,
+        &certificates_der(certificates)?,
         keep_alive,
         idle,
-        true,
-    ));
-    Ok(config)
+    )
 }
 /// Samples authenticated frames after path proof; raw UDP arrivals cannot keep
 /// a failed path alive. Stream and flow-control frames also count, because a
