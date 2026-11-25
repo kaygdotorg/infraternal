@@ -284,9 +284,9 @@ mod tests {
         candidates: &[&str],
     ) -> crate::dataplane::Config {
         use crate::{
-            dataplane::{Addresses, Config, DefaultPolicy, Peer, PeerNetworks, PeerPolicy},
+            dataplane::{Config, DefaultPolicy, Peer, PeerNetworks, PeerPolicy},
             policy::{
-                model::{NodeId, PublicKey},
+                model::{Addresses, NodeId, PublicKey},
                 rules::TrafficPolicy,
             },
         };
