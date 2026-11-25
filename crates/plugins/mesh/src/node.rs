@@ -2711,6 +2711,19 @@ impl Node {
             }
         };
         let wanted = crate::subnet_routes::reachable_networks(&config);
+        // Every address the tunnel's own UDP goes to, including endpoints learned since the
+        // snapshot. A network holding one is left out (see `Device::sync_network_routes`).
+        // Limit: this runs when a snapshot is applied or the node starts, not when an endpoint
+        // is learned later, so a peer that roams into an already routed network keeps that
+        // route until the next snapshot (follow-up: the live-endpoint callback has no access to
+        // the node's route status).
+        let endpoints = crate::subnet_routes::underlay_addresses(
+            &config,
+            lock_route_state(&self.peer_route_state)
+                .live_endpoints
+                .values()
+                .copied(),
+        );
         let previous: Vec<_> = self
             .subnet
             .routes
@@ -2719,7 +2732,12 @@ impl Node {
             .map(|(network, _)| *network)
             .collect();
         self.subnet.routes =
-            match Device::sync_network_routes(&wanted, &previous, config.addresses.ipv4) {
+            match Device::sync_network_routes(
+                &wanted,
+                &previous,
+                config.addresses.ipv4,
+                &endpoints,
+            ) {
                 Ok(states) => states,
                 Err(error) => {
                     tracing::warn!(error = %error, "mesh subnet routes could not be installed");
@@ -2809,7 +2827,7 @@ impl Node {
             .collect();
         if !previous.is_empty()
             && let Some(config) = &self.config
-            && let Err(error) = Device::sync_network_routes(&[], &previous, config.addresses.ipv4)
+            && let Err(error) = Device::sync_network_routes(&[], &previous, config.addresses.ipv4, &[])
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");

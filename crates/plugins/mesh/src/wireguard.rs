@@ -506,13 +506,23 @@ impl Device {
     /// last call installed: a /32 network cannot be told from a peer host route by its prefix, so it
     /// is removed by name.
     ///
+    /// A network that holds an underlay address of a mesh peer (`endpoints`: its configured endpoint,
+    /// walk candidates and learned endpoints) is left out too, reported as [`RouteState::Skipped`], and
+    /// a route we installed for it earlier is removed. The mesh's UDP socket carries no firewall mark
+    /// and is not bound to the link, so with such a route the kernel would send the tunnel's own
+    /// packets back into the tunnel. Leaving the network out (as a Mac does, D197 M3) keeps the
+    /// plain main-table design; a mark plus a policy rule would instead take over the machine's
+    /// routing rules, which also belong to Docker, VPNs and the administrator.
+    ///
     /// [`RouteState::Overlaps`]: crate::subnet_routes::RouteState::Overlaps
+    /// [`RouteState::Skipped`]: crate::subnet_routes::RouteState::Skipped
     /// # Errors
     /// A missing mesh link or a failed route dump.
     pub(crate) fn sync_network_routes(
         networks: &[crate::policy::networks::Network],
         previous: &[crate::policy::networks::Network],
         source: std::net::Ipv4Addr,
+        endpoints: &[std::net::IpAddr],
     ) -> io::Result<BTreeMap<crate::policy::networks::Network, crate::subnet_routes::RouteState>>
     {
         use crate::{policy::networks::Network, subnet_routes::RouteState};
@@ -560,8 +570,8 @@ impl Device {
                 foreign.push(network);
             }
         }
-        let mut states = BTreeMap::new();
-        for network in networks {
+        let (routable, mut states) = crate::subnet_routes::split_by_underlay(networks, endpoints);
+        for network in &routable {
             if let Some(other) = foreign.iter().find(|other| other.overlaps(*network)) {
                 states.insert(*network, RouteState::Overlaps(*other));
                 continue;
