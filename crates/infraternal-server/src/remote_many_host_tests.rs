@@ -15,7 +15,15 @@
 //!
 //! Environment: `INFRATERNAL_REMOTE_TEST_BINARY` (the agent binary),
 //! `INFRATERNAL_MANY_HOSTS` (N), `INFRATERNAL_MANY_PORT` (default 4702),
-//! `INFRATERNAL_MANY_MANIFEST` and `INFRATERNAL_MANY_STOP` (file paths).
+//! `INFRATERNAL_MANY_MANIFEST` and `INFRATERNAL_MANY_STOP` (file paths),
+//! and `INFRATERNAL_MANY_RUNTIME` (see [`fixture_runtime`]).
+//!
+//! The server runs on the same kind of tokio runtime the shipped binary
+//! builds (`tokio::runtime::Runtime::new()` in `crates/infraternal/src/main.rs`).
+//! A plain `#[tokio::test]` would put it on a current-thread runtime instead,
+//! and then every host link, quinn driver and socket shares the test thread:
+//! J1220's profile read that thread (`runtime::remote`, the test path cut to
+//! 15 bytes) as the server being single-threaded (#562, J1246).
 
 use super::*;
 
@@ -24,10 +32,33 @@ fn env_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("{name} is required")))
 }
 
+/// Build the runtime the fixture's server runs on.
+///
+/// By default this is the runtime the shipped server uses: tokio's
+/// multi-thread runtime with one worker per CPU this process may run on, built
+/// by the same `Runtime::new()` call as `main.rs`. `INFRATERNAL_MANY_RUNTIME=current`
+/// selects a current-thread runtime, the shape of a plain `#[tokio::test]`,
+/// so earlier many-host numbers (J1220) can be reproduced side by side.
+fn fixture_runtime() -> tokio::runtime::Runtime {
+    match std::env::var("INFRATERNAL_MANY_RUNTIME").as_deref() {
+        Ok("current") => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+        Ok("production") | Err(_) => tokio::runtime::Runtime::new().unwrap(),
+        Ok(other) => panic!("INFRATERNAL_MANY_RUNTIME must be production or current, not {other}"),
+    }
+}
+
 /// Start N agents against one disposable server and hold them until the stop file appears.
-#[tokio::test]
+#[test]
 #[ignore = "fixture for scripts/measure-many-hosts.py; needs INFRATERNAL_REMOTE_TEST_BINARY and INFRATERNAL_MANY_*"]
-async fn many_host_server_fixture() {
+fn many_host_server_fixture() {
+    fixture_runtime().block_on(run_many_host_fixture());
+}
+
+/// The fixture itself: enrol the hosts, publish the manifest, idle until told to stop.
+async fn run_many_host_fixture() {
     let binary = env_path("INFRATERNAL_REMOTE_TEST_BINARY");
     let manifest = env_path("INFRATERNAL_MANY_MANIFEST");
     let stop = env_path("INFRATERNAL_MANY_STOP");
