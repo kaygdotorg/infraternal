@@ -239,3 +239,425 @@ async fn host_close_preserves_socket(code: u16, reason: &'static str) {
     host.abort();
     server.abort();
 }
+
+/// Enroll a remote host identity into an on-disk database so `RemoteListeners`
+/// can admit a real mTLS link owned by `owner`.
+#[cfg(feature = "remote")]
+async fn enroll_remote_host(
+    pool: &sqlx::SqlitePool,
+    owner: &str,
+    host_identity: &infraternal_agent::remote_tls::Identity,
+    root: &openssl::x509::X509,
+    now: i64,
+) -> (crate::enrollment::EnrollmentStore, uuid::Uuid) {
+    let store = crate::enrollment::EnrollmentStore::new(pool.clone());
+    let host = uuid::Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,?)",
+    )
+    .bind(host.as_bytes().as_slice())
+    .bind(owner)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+    let fingerprint = openssl::sha::sha256(&host_identity.certificate.to_der().unwrap());
+    let key_digest = openssl::sha::sha256(&host_identity.key.raw_public_key().unwrap());
+    let token = store
+        .issue(
+            owner,
+            host,
+            crate::enrollment::Mode::Rootless,
+            now,
+            &key_digest,
+        )
+        .await
+        .unwrap();
+    store
+        .redeem(
+            token.secret(),
+            host,
+            crate::enrollment::Mode::Rootless,
+            now,
+            &crate::enrollment::CertificateRecord {
+                fingerprint,
+                issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
+                public_key: crate::identity_key::IdentityKey::Ed25519(
+                    host_identity
+                        .key
+                        .raw_public_key()
+                        .unwrap()
+                        .try_into()
+                        .unwrap(),
+                ),
+                not_before: now,
+                not_after: now + 604_800,
+            },
+        )
+        .await
+        .unwrap();
+    (store, host)
+}
+
+/// Read browser frames until `stream` receives its `Close`, answering control
+/// pings and ignoring unrelated session-snapshot events along the way.
+#[cfg(feature = "remote")]
+async fn read_stream_close<S>(socket: &mut S, stream: u32) -> (u16, String)
+where
+    S: Stream<Item = std::result::Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    loop {
+        let wire = read_client_frame(socket).await;
+        let decoded = decode_muxed_frame(&wire).unwrap();
+        match decoded.frame {
+            Frame::Ping { nonce, sent_us } if decoded.stream_id == 0 => {
+                client_ws_send(socket, 0, &Frame::Pong { nonce, sent_us }).await;
+            }
+            Frame::Close { code, reason } if decoded.stream_id == stream => {
+                return (code, reason.to_owned());
+            }
+            Frame::Ack { .. } | Frame::Event { .. } => {}
+            other => panic!(
+                "unexpected frame on stream {} while waiting for stream {stream} close: {other:?}",
+                decoded.stream_id
+            ),
+        }
+    }
+}
+
+/// End-to-end socket regression for #588 (J1224 follow-up): a browser opens a
+/// terminal on a real mTLS-linked remote host, attaches two streams to it, and
+/// the remote host answers `Close { code: 4404 }` on each stream.
+///
+/// Proves the live `websocket.rs` `TerminalOutput::Closed` wiring:
+/// 1. The browser receives `4404` (`CLOSE_SESSION_GONE`) on the stream while
+///    the shared socket stays up.
+/// 2. `terminal_sessions.closed_at` is written through the D379 writer on the
+///    first `4404` and left untouched by the second `4404` (set exactly once).
+/// 3. `terminal_session_prune::prune_closed_sessions` later removes the row.
+#[cfg(feature = "remote")]
+#[tokio::test]
+async fn remote_session_reported_gone_closes_row_once_and_prunes() {
+    use crate::remote_runtime::{RemoteHosts, RemoteListeners};
+    use infraternal_agent::{
+        remote_quic, remote_tls,
+        transport::{Receive, Transmit},
+    };
+
+    let _guard = SERIAL.lock().await;
+    let dir =
+        std::env::temp_dir().join(format!("infraternal-remote-gone-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.join("infraternal.sqlite"))
+                .create_if_missing(true)
+                .foreign_keys(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal),
+        )
+        .await
+        .unwrap();
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    assert!(
+        auth.database().is_some(),
+        "on-disk Auth must run the D379 writer"
+    );
+
+    let now = crate::runtime::unix_seconds().unwrap();
+    let user = uuid::Uuid::new_v4().to_string();
+    let session_token = "remote-gone-socket-token";
+    sqlx::query(
+        "INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES (?,'remote-gone','remote-gone','Remote Gone',1,'unused-test-hash')",
+    )
+    .bind(&user)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'browser',?,?,1)",
+    )
+    .bind(crate::auth::hash(session_token))
+    .bind(&user)
+    .bind(now + 3600)
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (server_identity, host_identity, root, _) = crate::remote_runtime::tests::identities();
+    let (store, host) = enroll_remote_host(&pool, &user, &host_identity, &root, now).await;
+    let hosts = RemoteHosts::default();
+    let listeners = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server_identity,
+        std::slice::from_ref(&root),
+        store,
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let remote_addr = listeners.local_addr().unwrap();
+    let client_tls = remote_tls::client_config(&host_identity, &[root]).unwrap();
+
+    // Wire-faithful remote host peer over real mTLS: serves `terminal.open`,
+    // accepts two concurrent attachments to the same session, reports 4404 on
+    // the first immediately, and sends a second 4404 once released by the test.
+    let remote_session = uuid::Uuid::new_v4();
+    let (release_second, wait_second) = tokio::sync::oneshot::channel::<()>();
+    let peer = tokio::spawn(async move {
+        let connection = remote_tls::dial(remote_addr, "localhost", &client_tls)
+            .await
+            .unwrap();
+        let mut receive = Receive::default();
+        let mut transmit = Transmit::default();
+        transmit
+            .send(
+                &connection.channel,
+                0,
+                &Frame::Hello {
+                    version: 1,
+                    caps: remote_quic::REMOTE_WRITER_BINDING,
+                    client_info: "remote-gone-fixture",
+                },
+            )
+            .await
+            .unwrap();
+        let _ = receive.next(&connection.channel).await.unwrap();
+
+        let mut attached_streams = Vec::new();
+        loop {
+            let decoded = receive.next(&connection.channel).await.unwrap();
+            let stream_id = decoded.stream_id;
+            match decoded.frame {
+                Frame::Ping { nonce, sent_us } => {
+                    transmit
+                        .send(&connection.channel, 0, &Frame::Pong { nonce, sent_us })
+                        .await
+                        .unwrap();
+                }
+                Frame::Call {
+                    call_id,
+                    action_id: "terminal.open",
+                    ..
+                } => {
+                    let body =
+                        serde_json::json!({ "session_id": remote_session.to_string() }).to_string();
+                    transmit
+                        .send(
+                            &connection.channel,
+                            0,
+                            &Frame::Result {
+                                call_id,
+                                ok: true,
+                                json: body.as_bytes(),
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                Frame::AttachTerm { session_id, .. } => {
+                    assert_eq!(session_id, remote_session.as_bytes());
+                    attached_streams.push(stream_id);
+                    if attached_streams.len() == 2 {
+                        let gone = Frame::Close {
+                            code: CLOSE_SESSION_GONE,
+                            reason: SESSION_GONE_REASON,
+                        };
+                        transmit
+                            .send(&connection.channel, attached_streams[0], &gone)
+                            .await
+                            .unwrap();
+                        let _ = wait_second.await;
+                        transmit
+                            .send(&connection.channel, attached_streams[1], &gone)
+                            .await
+                            .unwrap();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Keep the mTLS link open until the test tears the peer down.
+        let _ = receive.next(&connection.channel).await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hosts.actor(host).await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("remote host actor did not become available");
+
+    let (local_socket, _local_peer) = UnixStream::pair().unwrap();
+    let state = crate::websocket::WebSocketState::new(
+        auth.clone(),
+        pool.clone(),
+        EmbeddedAgent::from_test_socket(local_socket),
+    )
+    .await
+    .unwrap()
+    .with_remote_hosts(hosts);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = crate::websocket::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut browser = welcomed(address, session_token).await;
+
+    // 1. Open the remote terminal session through the browser WebSocket.
+    let open_input = serde_json::json!({ "host_id": host }).to_string();
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Call {
+            call_id: 4404,
+            action_id: "ssh.session.open",
+            input_json: open_input.as_bytes(),
+        },
+    )
+    .await;
+    let opened: serde_json::Value = loop {
+        let wire = read_client_frame(&mut browser).await;
+        let decoded = decode_muxed_frame(&wire).unwrap();
+        match decoded.frame {
+            Frame::Ping { nonce, sent_us } if decoded.stream_id == 0 => {
+                client_ws_send(&mut browser, 0, &Frame::Pong { nonce, sent_us }).await;
+            }
+            Frame::Result { call_id, ok, json } if decoded.stream_id == 0 && call_id == 4404 => {
+                assert!(
+                    ok,
+                    "remote ssh.session.open failed: {}",
+                    String::from_utf8_lossy(json)
+                );
+                break serde_json::from_slice(json).unwrap();
+            }
+            Frame::Event { .. } => {}
+            other => panic!("unexpected frame while opening remote session: {other:?}"),
+        }
+    };
+    assert_eq!(opened["session_id"], remote_session.to_string());
+
+    let (stored_host, before_close): (Option<Vec<u8>>, Option<i64>) =
+        sqlx::query_as("SELECT remote_host_id, closed_at FROM terminal_sessions WHERE id=?")
+            .bind(remote_session.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored_host.as_deref(), Some(host.as_bytes().as_slice()));
+    assert_eq!(before_close, None, "newly opened remote row must be open");
+
+    // 2. Attach two browser streams while the row is still open so both 4404s
+    //    arrive through `websocket.rs`'s `TerminalOutput::Closed` arm.
+    for stream in [1_u32, 3_u32] {
+        client_ws_send(
+            &mut browser,
+            stream,
+            &Frame::AttachTerm {
+                session_id: remote_session.as_bytes(),
+                last_out_seq: 0,
+                last_in_seq: 0,
+            },
+        )
+        .await;
+    }
+
+    let (code_1, reason_1) = read_stream_close(&mut browser, 1).await;
+    assert_eq!(code_1, CLOSE_SESSION_GONE);
+    assert_eq!(reason_1, SESSION_GONE_REASON);
+
+    let first_closed_at: Option<i64> =
+        sqlx::query_scalar("SELECT closed_at FROM terminal_sessions WHERE id=?")
+            .bind(remote_session.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let first_closed_at = first_closed_at.expect("first 4404 must set closed_at");
+
+    // 3. Backdate `closed_at` through the D379 writer, then trigger the second
+    //    4404 from the remote host and verify `closed_at` is not overwritten.
+    let sentinel = first_closed_at - 60;
+    let session_bytes = *remote_session.as_bytes();
+    auth.database()
+        .unwrap()
+        .write(move |tx| {
+            tx.execute(
+                "UPDATE terminal_sessions SET closed_at=?1 WHERE id=?2",
+                infraternal_db::rusqlite::params![sentinel, session_bytes.as_slice()],
+            )?;
+            Ok::<_, infraternal_db::Error>(())
+        })
+        .await
+        .unwrap();
+    release_second.send(()).unwrap();
+
+    let (code_2, reason_2) = read_stream_close(&mut browser, 3).await;
+    assert_eq!(code_2, CLOSE_SESSION_GONE);
+    assert_eq!(reason_2, SESSION_GONE_REASON);
+
+    let after_repeat: Option<i64> =
+        sqlx::query_scalar("SELECT closed_at FROM terminal_sessions WHERE id=?")
+            .bind(remote_session.as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        after_repeat,
+        Some(sentinel),
+        "second 4404 must not overwrite the first closed_at"
+    );
+
+    // The shared browser socket remains usable after both 4404 stream closes.
+    client_ws_send(
+        &mut browser,
+        0,
+        &Frame::Ping {
+            nonce: 588,
+            sent_us: 0,
+        },
+    )
+    .await;
+    loop {
+        let wire = read_client_frame(&mut browser).await;
+        let decoded = decode_muxed_frame(&wire).unwrap();
+        match decoded.frame {
+            Frame::Pong { nonce: 588, .. } if decoded.stream_id == 0 => break,
+            Frame::Event { .. } => {}
+            other => panic!("unexpected frame waiting for socket pong: {other:?}"),
+        }
+    }
+
+    // 4. Retention prune later removes the ended remote row.
+    let pruned = crate::terminal_session_prune::prune_closed_sessions(
+        Some(&auth),
+        &pool,
+        first_closed_at + 31 * 86_400,
+        100,
+    )
+    .await;
+    assert_eq!(
+        pruned,
+        Ok(1),
+        "retention prune must remove the ended remote row"
+    );
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM terminal_sessions WHERE id=?")
+        .bind(remote_session.as_bytes().as_slice())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 0);
+
+    peer.abort();
+    server.abort();
+    drop(listeners);
+    auth.close_database().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
