@@ -209,12 +209,18 @@ impl InvitationIssuer {
         })
     }
 
+    /// Whether the CA key source is currently unlocked and ready to sign.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn ready(&self) -> bool {
         self.0.source.load().is_ok()
     }
+    /// The server's public origin advertised in join invitations.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn origin(&self) -> &str {
         self.0.auth.origin()
     }
+    /// The underlying enrollment store shared with bootstrap and promotion flows.
+    #[cfg(any(feature = "ssh", test))]
     pub(crate) fn store(&self) -> &EnrollmentStore {
         &self.0.store
     }

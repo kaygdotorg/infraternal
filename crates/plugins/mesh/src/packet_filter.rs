@@ -284,7 +284,7 @@ impl PreparedPolicy {
     ///
     /// Used when an earlier transaction fails mid-apply so the filter stops admitting removed or
     /// moved peers' packets while the previous snapshot is restored.
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn without_peers(mut self, withdrawn: &std::collections::BTreeSet<NodeId>) -> Self {
         self.0.withdraw(withdrawn);
         self
