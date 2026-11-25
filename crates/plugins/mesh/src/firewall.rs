@@ -1160,7 +1160,10 @@ fn render_guard_only(
         script,
         " chain ingress {{ type filter hook prerouting priority -310; policy accept; {own} iifname != \"{INTERFACE}\" ip saddr @mesh4 drop; iifname != \"{INTERFACE}\" ip6 saddr @mesh6 drop; {delivery} }}"
     );
-    let served = render_served_networks(config, &mut script);
+    let ServedRules {
+        forward: served,
+        input: served_fence,
+    } = render_served_networks(config, &mut script);
     let _ = writeln!(
         script,
         " chain forward {{ type filter hook forward priority -10; policy accept; {delivery} {served} iifname \"{INTERFACE}\" drop; oifname \"{INTERFACE}\" drop; }}"
@@ -1188,7 +1191,7 @@ fn render_guard_only(
     };
     let _ = writeln!(
         script,
-        " chain input {{ type filter hook input priority -10; policy accept; {delivery} {public_gate} }}"
+        " chain input {{ type filter hook input priority -10; policy accept; {delivery} {served_fence} {public_gate} }}"
     );
     script.push_str("}\n");
     script
@@ -1221,8 +1224,17 @@ pub(crate) fn served_networks(
     )
 }
 
+/// The rules a subnet router adds to the `GotaTun` guard's chains; both are empty when this node
+/// serves nothing.
+struct ServedRules {
+    /// Rules that go in front of the forward chain's mesh drops.
+    forward: String,
+    /// The fence that keeps the mesh off this node's own addresses inside the served networks.
+    input: String,
+}
+
 /// Add the subnet-router part of the `GotaTun` guard to `script` (D197 M3, D384) and return the
-/// rules that go in front of the forward chain's mesh drops; empty when this node serves nothing.
+/// rules it puts in the forward and input chains.
 ///
 /// The `GotaTun` packet filter has already decided, per peer and port, which packets from the mesh
 /// interface may enter a served network, so the kernel accepts exactly two things: packets from the
@@ -1231,10 +1243,24 @@ pub(crate) fn served_networks(
 /// a host on the network can never start a connection into the mesh. Masqueraded networks get a
 /// `srcnat` chain that rewrites the source of mesh traffic leaving toward them to the router's own
 /// address on that network; it lives in the same owned table, so removing the table removes it.
-fn render_served_networks(config: &Config, script: &mut String) -> String {
+///
+/// Invariant (#580, J1179): a network grant reaches the hosts on the network, never this node's
+/// own services. A router usually owns an address inside the network it serves (its LAN
+/// address), and Linux delivers a packet for that address locally instead of forwarding it, so
+/// the packet filter's routed verdict, which only knows the router's mesh addresses as local,
+/// would open the router's own listeners on every granted port, even with node access `None`.
+/// The input chain therefore drops everything from the mesh interface addressed into a served
+/// network. The router's own services stay reachable at its mesh address, under the node grant
+/// and the packet filter's node rules; the mesh never reaches them through a served address. The
+/// interface is matched first: almost every packet input sees is underlay traffic on another
+/// interface, and the name compare rejects it before the interval-set lookup.
+fn render_served_networks(config: &Config, script: &mut String) -> ServedRules {
     let (served, masqueraded) = served_networks(config);
     if served.is_empty() {
-        return String::new();
+        return ServedRules {
+            forward: String::new(),
+            input: String::new(),
+        };
     }
     let list = |networks: &[infraternal_mesh::networks::Network]| {
         networks
@@ -1259,9 +1285,12 @@ fn render_served_networks(config: &Config, script: &mut String) -> String {
             " chain served_nat {{ type nat hook postrouting priority srcnat; policy accept; iifname \"{INTERFACE}\" oifname != \"{INTERFACE}\" ip daddr @masquerade4 masquerade; }}"
         );
     }
-    format!(
-        "iifname \"{INTERFACE}\" oifname != \"{INTERFACE}\" ip daddr @served4 accept; oifname \"{INTERFACE}\" iifname != \"{INTERFACE}\" ct state established,related ct original ip daddr @served4 accept;"
-    )
+    ServedRules {
+        forward: format!(
+            "iifname \"{INTERFACE}\" oifname != \"{INTERFACE}\" ip daddr @served4 accept; oifname \"{INTERFACE}\" iifname != \"{INTERFACE}\" ct state established,related ct original ip daddr @served4 accept;"
+        ),
+        input: format!("iifname \"{INTERFACE}\" ip daddr @served4 drop;"),
+    }
 }
 
 // Both packet directions consult the initiating tuple. A reply's ephemeral
@@ -1463,6 +1492,58 @@ mod tests {
                 "unexpected {policy_rule}: {rules}"
             );
         }
+    }
+
+    /// A subnet router's guard keeps the mesh off its own addresses inside the networks it serves
+    /// (#580, J1179): the input chain drops mesh packets for a served network, while the forward
+    /// chain still lets them through to the hosts. A node that serves nothing gets no such rule.
+    #[test]
+    fn a_served_network_is_forwarded_but_never_delivered_to_the_router_itself() {
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+        let input = |rules: &str| {
+            rules
+                .lines()
+                .find(|line| line.contains("chain input"))
+                .expect("guard input chain")
+                .to_owned()
+        };
+        let fence = "iifname \"infraternal0\" ip daddr @served4 drop;";
+
+        let plain = render_guard_only(&config(), true, &[], &ingress);
+        assert!(!input(&plain).contains("@served4"), "{plain}");
+
+        let mut router = config();
+        router
+            .peers
+            .values_mut()
+            .next()
+            .expect("peer")
+            .networks
+            .served
+            .push(crate::dataplane::ServedNetwork {
+                network: "198.51.100.0/24".parse().expect("network"),
+                inbound: TrafficPolicy::All,
+                keep_source: false,
+            });
+        let rules = render_guard_only(&router, true, &[], &ingress);
+        let input = input(&rules);
+        assert!(input.contains(fence), "{input}");
+        // The mesh-address delivery fence still comes first, unchanged.
+        assert!(
+            input.find("ip daddr 10.254.0.1 ").expect("delivery fence")
+                < input.find(fence).expect("served fence"),
+            "{input}"
+        );
+        let forward = rules
+            .lines()
+            .find(|line| line.contains("chain forward"))
+            .expect("guard forward chain");
+        assert!(
+            forward.contains(
+                "iifname \"infraternal0\" oifname != \"infraternal0\" ip daddr @served4 accept;"
+            ),
+            "{forward}"
+        );
     }
 
     /// A first guard install adds a table directly; only an owned replacement deletes it first.

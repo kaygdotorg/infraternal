@@ -2711,29 +2711,21 @@ impl Node {
             }
         };
         let wanted = crate::subnet_routes::reachable_networks(&config);
-        let previous: Vec<_> = self
-            .subnet
-            .routes
-            .iter()
-            .filter(|(_, state)| **state == crate::subnet_routes::RouteState::Installed)
-            .map(|(network, _)| *network)
-            .collect();
-        self.subnet.routes =
-            match Device::sync_network_routes(&wanted, &previous, config.addresses.ipv4) {
-                Ok(states) => states,
-                Err(error) => {
-                    tracing::warn!(error = %error, "mesh subnet routes could not be installed");
-                    wanted
-                        .iter()
-                        .map(|network| {
-                            (
-                                *network,
-                                crate::subnet_routes::RouteState::Failed(error.to_string()),
-                            )
-                        })
-                        .collect()
-                }
-            };
+        self.subnet.routes = match Device::sync_network_routes(&wanted, config.addresses.ipv4) {
+            Ok(states) => states,
+            Err(error) => {
+                tracing::warn!(error = %error, "mesh subnet routes could not be installed");
+                wanted
+                    .iter()
+                    .map(|network| {
+                        (
+                            *network,
+                            crate::subnet_routes::RouteState::Failed(error.to_string()),
+                        )
+                    })
+                    .collect()
+            }
+        };
         let (served, _) = crate::firewall::served_networks(&config);
         if served.is_empty() {
             self.stop_forwarding();
@@ -2800,16 +2792,17 @@ impl Node {
     }
 
     /// Stop every subnet-route effect: forwarding, and the routes this node installed.
+    ///
+    /// The route dump runs only when the last reconcile wanted some network (installed, failed or
+    /// overlapping), so the many snapshots of a node that routes nothing cost no netlink round
+    /// trip. A route an earlier run left behind goes at the next reconcile, which always dumps,
+    /// or with the link.
     fn stop_subnet_routes(&mut self) {
         self.stop_forwarding();
-        let previous: Vec<_> = std::mem::take(&mut self.subnet.routes)
-            .into_iter()
-            .filter(|(_, state)| *state == crate::subnet_routes::RouteState::Installed)
-            .map(|(network, _)| network)
-            .collect();
-        if !previous.is_empty()
+        let wanted_any = !std::mem::take(&mut self.subnet.routes).is_empty();
+        if wanted_any
             && let Some(config) = &self.config
-            && let Err(error) = Device::sync_network_routes(&[], &previous, config.addresses.ipv4)
+            && let Err(error) = Device::sync_network_routes(&[], config.addresses.ipv4)
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");
