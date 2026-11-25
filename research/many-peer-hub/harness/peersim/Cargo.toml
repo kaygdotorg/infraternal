@@ -1,0 +1,18 @@
+[package]
+name = "peersim"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Simulated WireGuard peers and a UDP sink for the many-peer hub measurement (#260, J1234)"
+publish = false
+
+[dependencies]
+boringtun = { version = "0.6", default-features = false }
+libc = "0.2"
+mio = { version = "1", features = ["os-poll", "net", "os-ext"] }
+serde_json = "1"
+
+[workspace]
+
+[profile.release]
+debug = 1

@@ -1,0 +1,11 @@
+{"cmd":"identity","sim_cpu_s":0.0,"wire_rx":0,"wire_tx":0}
+{"cmd":"connect","established":4096,"hs_max_ms":28072.520529999998,"hs_p50_ms":11168.357079,"hs_p99_ms":23898.519964,"max_attempts":6,"peers":4096,"peers_retried":3596,"sim_cpu_s":2.13,"wall_ms":28113.003042,"wire_rx":4596,"wire_tx":16714}
+{"cmd":"keepalive","sim_cpu_s":0.0,"wire_rx":4596,"wire_tx":16714}
+{"cmd":"hold","sim_cpu_s":0.1499999999999999,"wire_rx":18298,"wire_tx":26559}
+{"cmd":"keepalive","sim_cpu_s":0.010000000000000231,"wire_rx":18298,"wire_tx":26559}
+{"active":100,"cmd":"send","inner_mbit":1778.9786194639378,"secs":10.000064422,"sent":1737295,"sim_cpu_s":6.44,"wire_rx":20079,"wire_tx":1763854}
+{"active":100,"cmd":"send","inner_mbit":975.6103017557741,"secs":10.000005927,"sent":952745,"sim_cpu_s":6.9,"wire_rx":22181,"wire_tx":2716599}
+{"active":100,"cmd":"send","inner_mbit":390.24453221327246,"secs":10.000021622,"sent":381099,"sim_cpu_s":7.959999999999999,"wire_rx":24168,"wire_tx":3097698}
+{"active":4096,"cmd":"send","inner_mbit":97.56245880011848,"secs":6.000052143,"sent":57166,"sim_cpu_s":5.719999999999999,"wire_rx":24567,"wire_tx":3154871}
+{"cmd":"storm","established":4096,"hs_max_ms":7510.298121,"hs_p50_ms":3741.592394,"hs_p99_ms":7122.854706,"max_attempts":2,"peers":4096,"peers_retried":426,"sim_cpu_s":7.510000000000002,"wall_ms":7511.187330000001,"wire_rx":76025,"wire_tx":3196208}
+{"cmd":"exit"}

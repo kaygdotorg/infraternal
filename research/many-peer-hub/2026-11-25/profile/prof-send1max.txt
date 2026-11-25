@@ -1,0 +1,53 @@
+# self time, top 25
+    10.05%  hubprof            [.] ring_core_0_17_14__chacha20_poly1305_open_avx2                                                                                         
+     3.73%  [kernel.kallsyms]  [k] entry_SYSRETQ_unsafe_stack                                                                                                             
+     3.73%  [kernel.kallsyms]  [k] rep_movs_alternative                                                                                                                   
+     2.47%  hubprof            [.] <gotatun::device::parallel_crypto::OrderedCompletions<gotatun::device::parallel_crypto::IncomingCompletion>>::complete_run_inner::<<got
+     2.28%  hubprof            [.] <infraternal_plugin_mesh::handshake_admission::PeerAdmissionUdpReceiver as gotatun::udp::UdpRecv>::recv_many_from::{closure#0}         
+     2.15%  [kernel.kallsyms]  [k] nft_do_chain                                                                                                                           
+     2.12%  hubprof            [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPack
+     2.06%  [kernel.kallsyms]  [k] entry_SYSCALL_64_after_hwframe                                                                                                         
+     1.83%  [kernel.kallsyms]  [k] syscall_return_via_sysret                                                                                                              
+     1.58%  [kernel.kallsyms]  [k] fib_table_lookup                                                                                                                       
+     1.38%  hubprof            [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPack
+     1.11%  hubprof            [.] <infraternal_plugin_mesh::packet_filter::PacketFilter>::check_at                                                                       
+     1.07%  libc.so.6          [.] _int_malloc                                                                                                                            
+     1.05%  hubprof            [.] <ip_network_table_deps_treebitmap::tree_bitmap::TreeBitmap<alloc::sync::Arc<tokio::sync::mutex::Mutex<gotatun::device::peer_state::Peer
+     0.99%  [kernel.kallsyms]  [k] memset_orig                                                                                                                            
+     0.96%  hubprof            [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPack
+     0.90%  [kernel.kallsyms]  [k] __pv_queued_spin_lock_slowpath                                                                                                         
+     0.90%  libc.so.6          [.] malloc                                                                                                                                 
+     0.89%  [kernel.kallsyms]  [k] udpv6_recvmsg                                                                                                                          
+     0.81%  [kernel.kallsyms]  [k] nft_meta_get_eval                                                                                                                      
+     0.80%  [kernel.kallsyms]  [k] vfs_writev                                                                                                                             
+     0.73%  [vdso]             [.] __vdso_clock_gettime                                                                                                                   
+     0.73%  [kernel.kallsyms]  [k] __check_object_size                                                                                                                    
+     0.69%  [kernel.kallsyms]  [k] __virt_addr_valid                                                                                                                      
+     0.69%  [kernel.kallsyms]  [k] clear_bhb_loop                                                                                                                         
+
+# inclusive time, product and engine frames, top 25
+    35.40%     0.25%  [.] infraternal_plugin_mesh::gotatun_tun::write_frame::{closure#0}                                                                                                      
+    16.87%     2.28%  [.] <infraternal_plugin_mesh::handshake_admission::PeerAdmissionUdpReceiver as gotatun::udp::UdpRecv>::recv_many_from::{closure#0}                                      
+     5.75%     0.55%  [.] nft_do_chain_inet                                                                                                                                                   
+     5.20%     2.15%  [.] nft_do_chain                                                                                                                                                        
+     2.66%     2.47%  [.] <gotatun::device::parallel_crypto::OrderedCompletions<gotatun::device::parallel_crypto::IncomingCompletion>>::complete_run_inner::<<gotatun::device::DeviceState<(in
+     2.30%     2.12%  [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPacketIo, infraternal_plugin_mesh
+     1.76%     1.38%  [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPacketIo, infraternal_plugin_mesh
+     1.58%     1.58%  [k] fib_table_lookup                                                                                                                                                    
+     1.36%     0.51%  [.] nft_meta_store_ifname                                                                                                                                               
+     1.12%     1.05%  [.] <ip_network_table_deps_treebitmap::tree_bitmap::TreeBitmap<alloc::sync::Arc<tokio::sync::mutex::Mutex<gotatun::device::peer_state::PeerState>>>>::longest_match     
+     1.11%     1.11%  [.] <infraternal_plugin_mesh::packet_filter::PacketFilter>::check_at                                                                                                    
+     1.09%     0.06%  [.] fib_validate_source                                                                                                                                                 
+     1.04%     0.44%  [.] __fib_validate_source                                                                                                                                               
+     0.96%     0.96%  [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPacketIo, infraternal_plugin_mesh
+     0.88%     0.29%  [.] nft_lookup_eval                                                                                                                                                     
+     0.81%     0.81%  [k] nft_meta_get_eval                                                                                                                                                   
+     0.75%     0.31%  [.] infraternal_plugin_mesh::gotatun_node::filter_ip_packet                                                                                                             
+     0.67%     0.46%  [.] <core::pin::Pin<alloc::boxed::Box<<gotatun::task::Task>::spawn<<gotatun::tun::buffer::BufferedIpSend>::new<infraternal_plugin_mesh::gotatun_node::LinuxPacketIo>::{c
+     0.64%     0.64%  [.] <infraternal_plugin_mesh::gotatun_tun::LinuxTun>::send_packets::{closure#0}                                                                                         
+     0.59%     0.18%  [.] nft_set_do_lookup                                                                                                                                                   
+     0.58%     0.52%  [.] <gotatun::noise::session::Session>::decrypt_packet_data                                                                                                             
+     0.51%     0.51%  [.] <gotatun::device::PacketLookup>::contains_peer                                                                                                                      
+     0.48%     0.48%  [.] <gotatun::device::PacketLookup>::peer_by_ip                                                                                                                         
+     0.42%     0.32%  [.] gotatun::device::parallel_crypto::decrypt_run                                                                                                                       
+     0.41%     0.28%  [k] nft_rhash_lookup                                                                                                                                                    

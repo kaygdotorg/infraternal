@@ -1,0 +1,113 @@
+
+running 1 test
+[10/r1-spread] baseline       rss                    12252 KiB 
+[10/r1-spread] baseline       hwm                    12252 KiB 
+[10/r1-spread] baseline       pss                    12244 KiB 
+[10/r1-spread] baseline       fds                    17  
+[10/r1-spread] baseline       idle_voluntary_per_s   0.35 1/s 
+[10/r1-spread] baseline       idle_involuntary_per_s 0.0 1/s 
+[10/r1-spread] baseline       idle_cpu_pct           0.0 % 
+[10/r1-spread] baseline       threads                6  
+[10/r1-spread] apply_full     apply_ms               33.88 ms 1 chunks
+[10/r1-spread] apply_full     apply_us_per_peer      3388.3 us 
+[10/r1-spread] configured     rss                    14036 KiB 
+[10/r1-spread] configured     hwm                    14036 KiB 
+[10/r1-spread] configured     pss                    14028 KiB 
+[10/r1-spread] configured     fds                    26  
+[10/r1-spread] configured     rss_per_peer           182682 B 
+[10/r1-spread] configured     routes                 12  
+[10/r1-spread] configured     nft_lines              51  
+[10/r1-spread] configured     mesh_mtu               1280 B 
+[10/r1-spread] configured     idle_voluntary_per_s   0.95 1/s 
+[10/r1-spread] configured     idle_involuntary_per_s 0.0 1/s 
+[10/r1-spread] configured     idle_cpu_pct           0.0 % 
+[10/r1-spread] configured     threads                8  
+[10/r1-spread] cold_storm     established            10 of 10 
+[10/r1-spread] cold_storm     wall_ms                4.8 ms 
+[10/r1-spread] cold_storm     hs_p50_ms              3.737045 ms 
+[10/r1-spread] cold_storm     hs_p99_ms              4.001992 ms 
+[10/r1-spread] cold_storm     hs_max_ms              4.0510850000000005 ms 
+[10/r1-spread] cold_storm     peers_retried          0 of 10 
+[10/r1-spread] cold_storm     max_attempts           1 initiations 
+[10/r1-spread] cold_storm     hub_cpu_s              0.0 s 
+[10/r1-spread] cold_storm     sim_cpu_s              0.0 s 
+[10/r1-spread] connected      rss                    14540 KiB 
+[10/r1-spread] connected      hwm                    14588 KiB 
+[10/r1-spread] connected      pss                    14532 KiB 
+[10/r1-spread] connected      fds                    26  
+[10/r1-spread] connected      rss_per_peer           234291 B 
+test node::many_peer_hub_bench::many_peer_hub has been running for over 60 seconds
+[10/r1-spread] connected      idle_voluntary_per_s   0.95 1/s 
+[10/r1-spread] connected      idle_involuntary_per_s 0.0 1/s 
+[10/r1-spread] connected      idle_cpu_pct           0.0 % 
+[10/r1-spread] connected      threads                9  
+[10/r1-spread] keepalive25    idle_voluntary_per_s   1.48 1/s 10 peers send 1 keepalive/25 s each = 0.4 pkt/s
+[10/r1-spread] keepalive25    idle_cpu_pct           0.017 % 
+[10/r1-spread] send_1_max     offered_mbit           2118.3 Mbit/s 
+[10/r1-spread] send_1_max     delivered_mbit         2118.3 Mbit/s window 11.1s
+[10/r1-spread] send_1_max     loss_pct               0.0 % 
+[10/r1-spread] send_1_max     hub_cpu_s              16.05 s 
+[10/r1-spread] send_1_max     hub_cpu_s_per_gbit     0.76 cpu-s/Gbit 
+[10/r1-spread] send_1_max     busiest_threads        infraternal-mes=8.15s;infraternal-mes=7.85s;gotatun-crypto-=0.01s;gotatun-crypto-=0.01s  
+[10/r1-spread] send_1_max     sim_cpu_s              6.48 s 
+[10/r1-spread] send_1_max     hub_ns_counters        Ip.InReceives=4137382;Ip.InAddrErrors=0;Ip.ForwDatagrams=0;Ip.InDiscards=0;Ip.InDelivers=4137382;Udp.InDatagrams=4137382;Udp.NoPorts=0;Udp.InErrors=0;Udp.OutDatagrams=5;Udp.RcvbufErrors=0  
+[10/r1-spread] send_1_400mbit offered_mbit           390.2 Mbit/s 
+[10/r1-spread] send_1_400mbit delivered_mbit         390.2 Mbit/s window 11.2s
+[10/r1-spread] send_1_400mbit loss_pct               0.0 % 
+[10/r1-spread] send_1_400mbit hub_cpu_s              5.61 s 
+[10/r1-spread] send_1_400mbit hub_cpu_s_per_gbit     1.44 cpu-s/Gbit 
+[10/r1-spread] send_1_400mbit busiest_threads        infraternal-mes=3.78s;infraternal-mes=1.83s;node::many_peer=0.00s;mesh-route-repa=0.00s  
+[10/r1-spread] send_1_400mbit sim_cpu_s              7.98 s 
+[10/r1-spread] send_1_400mbit hub_ns_counters        Ip.InReceives=762198;Ip.InAddrErrors=0;Ip.ForwDatagrams=0;Ip.InDiscards=0;Ip.InDelivers=762198;Udp.InDatagrams=762198;Udp.NoPorts=0;Udp.InErrors=0;Udp.OutDatagrams=6;Udp.RcvbufErrors=0  
+[10/r1-spread] send_10_max    offered_mbit           2079.4 Mbit/s 
+[10/r1-spread] send_10_max    delivered_mbit         2079.4 Mbit/s window 11.2s
+[10/r1-spread] send_10_max    loss_pct               0.0 % 
+[10/r1-spread] send_10_max    hub_cpu_s              16.62 s 
+[10/r1-spread] send_10_max    hub_cpu_s_per_gbit     0.8 cpu-s/Gbit 
+[10/r1-spread] send_10_max    busiest_threads        infraternal-mes=8.31s;infraternal-mes=8.30s;node::many_peer=0.00s;mesh-route-repa=0.00s  
+[10/r1-spread] send_10_max    sim_cpu_s              6.45 s 
+[10/r1-spread] send_10_max    hub_ns_counters        Ip.InReceives=4061394;Ip.InAddrErrors=0;Ip.ForwDatagrams=0;Ip.InDiscards=0;Ip.InDelivers=4061394;Udp.InDatagrams=4061394;Udp.NoPorts=0;Udp.InErrors=0;Udp.OutDatagrams=10;Udp.RcvbufErrors=0  
+[10/r1-spread] send_10_400mbit offered_mbit           390.2 Mbit/s 
+[10/r1-spread] send_10_400mbit delivered_mbit         390.2 Mbit/s window 11.0s
+[10/r1-spread] send_10_400mbit loss_pct               0.0 % 
+[10/r1-spread] send_10_400mbit hub_cpu_s              5.62 s 
+[10/r1-spread] send_10_400mbit hub_cpu_s_per_gbit     1.44 cpu-s/Gbit 
+[10/r1-spread] send_10_400mbit busiest_threads        infraternal-mes=5.61s;node::many_peer=0.00s;mesh-route-repa=0.00s;mesh-dns-udp=0.00s  
+[10/r1-spread] send_10_400mbit sim_cpu_s              7.99 s 
+[10/r1-spread] send_10_400mbit hub_ns_counters        Ip.InReceives=762198;Ip.InAddrErrors=0;Ip.ForwDatagrams=0;Ip.InDiscards=0;Ip.InDelivers=762198;Udp.InDatagrams=762198;Udp.NoPorts=0;Udp.InErrors=0;Udp.OutDatagrams=10;Udp.RcvbufErrors=0  
+[10/r1-spread] after_load     rss                    21576 KiB 
+[10/r1-spread] after_load     hwm                    21576 KiB 
+[10/r1-spread] after_load     pss                    21568 KiB 
+[10/r1-spread] after_load     fds                    26  
+[10/r1-spread] after_load     rss_per_peer           954778 B 
+[10/r1-spread] after_load_15s rss                    16072 KiB 
+[10/r1-spread] after_load_15s hwm                    21356 KiB 
+[10/r1-spread] after_load_15s pss                    16064 KiB 
+[10/r1-spread] after_load_15s fds                    26  
+[10/r1-spread] after_load     idle_voluntary_per_s   0.4 1/s 
+[10/r1-spread] after_load     idle_involuntary_per_s 0.0 1/s 
+[10/r1-spread] after_load     idle_cpu_pct           0.05 % 
+[10/r1-spread] after_load     threads                10  
+[10/r1-spread] rekey_storm    established            10 of 10 
+[10/r1-spread] rekey_storm    wall_ms                4.6 ms 
+[10/r1-spread] rekey_storm    hs_p50_ms              3.5905440000000004 ms 
+[10/r1-spread] rekey_storm    hs_p99_ms              3.7434209999999997 ms 
+[10/r1-spread] rekey_storm    hs_max_ms              3.762167 ms 
+[10/r1-spread] rekey_storm    peers_retried          0 of 10 
+[10/r1-spread] rekey_storm    max_attempts           1 initiations 
+[10/r1-spread] rekey_storm    hub_cpu_s              0.0 s 
+[10/r1-spread] rekey_storm    busiest_threads        infraternal-mes=0.01s;node::many_peer=0.00s;mesh-route-repa=0.00s;mesh-dns-udp=0.00s  
+[10/r1-spread] apply_one_change apply_ms               45.55 ms 
+[10/r1-spread] apply_reapply  apply_ms               55.23 ms same list, one peer reverts
+[10/r1-spread] apply_same     apply_ms               1.4 ms identical list
+[10/r1-spread] apply_add_one  apply_ms               36.81 ms one new peer joins
+[10/r1-spread] apply_remove_one apply_ms               42.61 ms that peer leaves
+[10/r1-spread] counters       counters_ms            0.02 ms 10 peers
+[10/r1-spread] final          rss                    16680 KiB 
+[10/r1-spread] final          hwm                    21356 KiB 
+[10/r1-spread] final          pss                    16672 KiB 
+[10/r1-spread] final          fds                    26  
+test node::many_peer_hub_bench::many_peer_hub ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 617 filtered out; finished in 217.56s
+
