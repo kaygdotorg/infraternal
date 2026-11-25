@@ -1989,3 +1989,8 @@ mod review_j354_integration;
 #[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
 #[path = "review_j519_dns.rs"]
 mod review_j519_dns;
+
+/// Probes that mesh DNS reaches systemd-resolved only for its own link and namespace (#584, J1208).
+#[cfg(all(test, target_os = "linux", feature = "mesh-dns"))]
+#[path = "review_j1208_dns.rs"]
+mod review_j1208_dns;

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Runs the J1208 mesh DNS scope probes in throwaway namespaces with a fake resolver (#584).
+#
+# Why: mesh DNS once reached the HOST's systemd-resolved from a test's network namespace and
+# rewrote the DNS of whatever host link shared the TUN's index (compute01's eth0, tailscale0,
+# docker0, wt0). These probes must never be able to do that again, so nothing real is reachable:
+#
+# - each probe runs alone in new user, mount, PID and network namespaces (`unshare -Urnmpf`), as
+#   the caller's uid mapped to 0, never as host root, so the system bus would refuse it anyway;
+# - /etc, /tmp, /run and /nix are private tmpfs mounts (the Nix store is bound back read-only),
+#   so the host's /etc/hosts, NetworkManager drop-ins and D-Bus socket are out of reach;
+# - `resolvectl` is a fake in the private root Nix profile that only logs its arguments, and a
+#   stand-in process named `systemd-resolved` marks "resolved's" namespace for the product check;
+# - the probe's namespace holds an owned mesh link `infraternal0` (a TUN with the agent marker).
+#
+# Everything is torn down by the kernel when the namespace's PID 1 exits; nothing needs undoing.
+#
+# Usage: scripts/review-j1208-resolved-scope [TEST_NAME|all]   (inside `nix develop`)
+set -euo pipefail
+
+tests=(
+    review_j1208_foreign_namespace_never_reaches_resolved
+    review_j1208_owned_link_is_addressed_by_index_and_reverted_alone
+    review_j1208_unowned_or_missing_link_is_refused
+    review_j1208_vanished_link_is_not_reverted
+)
+cargo_args=(test --locked -p infraternal-plugin-mesh --lib --no-default-features
+    --features server,agent,mesh-dns)
+
+if [ "${1:-}" != --inside-namespace ]; then
+    selected=${1:-all}
+    if [ "$selected" = all ]; then selected=("${tests[@]}"); else selected=("$selected"); fi
+    # Build with the network first; the namespaces below have none.
+    cargo "${cargo_args[@]}" --no-run
+    status=0
+    for name in "${selected[@]}"; do
+        echo "== $name"
+        unshare -Urnmpf --kill-child --mount-proc bash "$0" --inside-namespace "$name" || status=1
+    done
+    exit "$status"
+fi
+
+test_name="${2:?name one J1208 probe}"
+printf '%s\n' "${tests[@]}" | grep -qx -- "$test_name" || { echo "unknown J1208 probe: $test_name" >&2; exit 2; }
+
+# Refuse to run as real host root: only a mapped uid 0 is safe here.
+read -r mapped_uid outside_uid mapped_count < /proc/self/uid_map
+test "$mapped_uid" = 0 && test "$outside_uid" != 0 && test "$mapped_count" = 1
+
+ip_tool=$(command -v ip)
+mount --make-rprivate /
+mount -t tmpfs -o mode=755,size=8m tmpfs /run
+mount -t tmpfs -o mode=1777,size=64m tmpfs /tmp
+store=/tmp/j1208-nix-store
+mkdir -p "$store"
+mount --bind /nix/store "$store"
+# While /nix is covered, the dev shell's tools are gone: use the host's until the store is back.
+/usr/bin/mount -t tmpfs -o mode=755,size=32m tmpfs /nix
+/usr/bin/mkdir -p /nix/store
+/usr/bin/mount --bind "$store" /nix/store
+mount -t tmpfs -o mode=755,size=32m tmpfs /etc
+printf '127.0.0.1 localhost\n' > /etc/hosts
+
+mkdir -p /tmp/j1208/bin /nix/var/nix/profiles/default/bin
+: > /tmp/j1208/resolvectl.calls
+cat > /nix/var/nix/profiles/default/bin/resolvectl <<'EOF'
+#!/bin/sh
+echo "$*" >> /tmp/j1208/resolvectl.calls
+exit 0
+EOF
+chmod 755 /nix/var/nix/profiles/default/bin/resolvectl
+# The stand-in's comm is its file name ("systemd-resolve", cut to 15 bytes), like the real one.
+cat > /tmp/j1208/bin/systemd-resolved <<'EOF'
+#!/bin/sh
+while :; do sleep 3600; done
+EOF
+chmod 755 /tmp/j1208/bin/systemd-resolved
+/tmp/j1208/bin/systemd-resolved &
+
+"$ip_tool" link set lo up
+"$ip_tool" tuntap add dev infraternal0 mode tun
+"$ip_tool" link set dev infraternal0 alias infraternal.mesh.gotatun.v1
+
+cargo "${cargo_args[@]}" --offline \
+    "dns_integration::review_j1208_dns::$test_name" -- --ignored --exact --nocapture
