@@ -559,6 +559,12 @@ impl EnrollmentStore {
         certificate: &CertificateRecord,
     ) -> Result<(), PromotionError> {
         canonical(secret)?;
+        // A successor is a root infraternal agent on a Linux or macOS host, so
+        // its key is always Ed25519; device keys (#580) never take this path.
+        let crate::identity_key::IdentityKey::Ed25519(successor_key) = &certificate.public_key
+        else {
+            return Err(PromotionError::Denied);
+        };
         if certificate.not_before < 0
             || certificate.not_before > now
             || certificate.not_after <= now
@@ -579,11 +585,11 @@ impl EnrollmentStore {
                  AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id = h.id AND q.confirmed = 0))",
         )
         .bind(certificate.fingerprint.as_slice())
-        .bind(certificate.public_key.as_slice())
+        .bind(successor_key.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(Sha256::digest(secret.as_bytes()).as_slice())
         .bind(now)
-        .bind(Sha256::digest(certificate.public_key).as_slice())
+        .bind(Sha256::digest(successor_key).as_slice())
         .execute(&mut *transaction)
         .await?
         .rows_affected();
@@ -598,7 +604,7 @@ impl EnrollmentStore {
         .bind(certificate.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(certificate.issuer_fingerprint.as_slice())
-        .bind(certificate.public_key.as_slice())
+        .bind(successor_key.as_slice())
         .bind(certificate.not_before)
         .bind(certificate.not_after)
         .execute(&mut *transaction)

@@ -88,6 +88,9 @@ tokio-tungstenite = { workspace = true, optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
+# A second P-256 implementation signs test requests, so the server's OpenSSL
+# verifier is checked against the encoding the client core produces (#580).
+ring.workspace = true
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Native-lane regressions opt in explicitly; shipping remote terminals do not.

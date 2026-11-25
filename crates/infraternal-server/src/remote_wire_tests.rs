@@ -22,6 +22,7 @@ impl Pair {
     async fn new(caps: u64) -> Self {
         Self::with_credit(caps, None).await
     }
+    /// A connected server/host pair with `caps`, and an explicit initial credit when `credit` is set.
     async fn with_credit(caps: u64, credit: Option<u32>) -> Self {
         let (server, host, root, _) = crate::remote_runtime::tests::identities();
         let fingerprint = openssl::sha::sha256(&host.certificate.to_der().unwrap());
@@ -53,7 +54,9 @@ impl Pair {
                 &crate::enrollment::CertificateRecord {
                     fingerprint,
                     issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
-                    public_key: host.key.raw_public_key().unwrap().try_into().unwrap(),
+                    public_key: crate::identity_key::IdentityKey::Ed25519(
+                        host.key.raw_public_key().unwrap().try_into().unwrap(),
+                    ),
                     not_before: now,
                     not_after: now + 604_800,
                 },

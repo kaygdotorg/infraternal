@@ -8,6 +8,7 @@ use infraternal_protocol::{
     encode_frame_into,
 };
 
+/// Builds one enrolled node fixture owned by `owner` for the node-host tests.
 async fn node(
     owner: &str,
 ) -> (
@@ -31,7 +32,7 @@ async fn node(
             &CertificateRecord {
                 fingerprint: [2; 32],
                 issuer_fingerprint: [9; 32],
-                public_key: [3; 32],
+                public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
                 not_before: now,
                 not_after: now + 604_800,
             },

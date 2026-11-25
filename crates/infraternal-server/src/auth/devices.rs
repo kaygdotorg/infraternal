@@ -103,14 +103,32 @@ pub(super) struct ApprovalCeremony {
     order: u64,
 }
 
+/// Whether the server accepts `device` machine joins: an iPhone whose identity
+/// key is a P-256 key in its Secure Enclave (#580, client-core plan §7 P3).
+///
+/// Off outside tests. A device has no uid, so the host row a device join
+/// creates still has to be decided (a new host mode, or another shape) before
+/// plan step P5 turns this on; until then `device` requests are refused at
+/// validation, exactly like any other unknown mode.
+pub(crate) const DEVICE_JOINS: bool = cfg!(test);
+
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
+///
+/// `mode` is `system` (the infraternal agent runs as root, `execution_uid` 0),
+/// `user` (a non-zero `execution_uid`) or, only while [`DEVICE_JOINS`] is on,
+/// `device` (no `execution_uid`; the key is P-256). `key_fingerprint` is
+/// `SHA256:` and the unpadded base64 of the key digest in the key's own
+/// algorithm ([`crate::identity_key::IdentityKey::digest`]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JoinMachineRequest {
     pub(crate) host_id: Uuid,
     pub(crate) hostname: String,
     pub(crate) mode: String,
-    pub(crate) execution_uid: u32,
+    /// Present for `system` and `user`, absent for `device`. Host requests
+    /// serialise exactly as before, so stored approvals keep their bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) execution_uid: Option<u32>,
     pub(crate) key_fingerprint: String,
 }
 
@@ -136,6 +154,19 @@ struct ApprovalDraft<'a> {
 }
 
 impl JoinMachineRequest {
+    /// The algorithm the approved key must use: P-256 for a `device`, Ed25519
+    /// for every host (owner question Q4 on #580: only devices hold P-256 keys).
+    /// The invitation records it, and the join refuses a CSR of the other one.
+    #[cfg(feature = "remote")]
+    pub(crate) fn key_algorithm(&self) -> crate::identity_key::KeyAlgorithm {
+        if self.mode == "device" {
+            crate::identity_key::KeyAlgorithm::P256
+        } else {
+            crate::identity_key::KeyAlgorithm::Ed25519
+        }
+    }
+
+    /// The 32-byte key digest named by `key_fingerprint`, refusing any other spelling.
     pub(crate) fn key_digest(&self) -> Result<[u8; 32]> {
         let encoded = self
             .key_fingerprint
@@ -151,15 +182,26 @@ impl JoinMachineRequest {
     /// The host name is the one fact the owner reads before approving, so it
     /// is exactly the ASCII set `infraternal up` sends: no bidi, zero-width or
     /// look-alike character can make it read as another machine (#263, J134 P3-3).
+    /// Returns the key digest once the name, the mode and its uid agree.
     fn validate(&self) -> Result<[u8; 32]> {
+        self.validate_with(DEVICE_JOINS)
+    }
+
+    /// [`Self::validate`] with the `device` mode switched by `device_joins`
+    /// instead of [`DEVICE_JOINS`], so tests can prove both settings.
+    fn validate_with(&self, device_joins: bool) -> Result<[u8; 32]> {
         if self.hostname.is_empty()
             || self.hostname.len() > 128
             || !self
                 .hostname
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-            || !matches!(self.mode.as_str(), "system" | "user")
-            || (self.mode == "system") != (self.execution_uid == 0)
+            || !match (self.mode.as_str(), self.execution_uid) {
+                ("system", Some(uid)) => uid == 0,
+                ("user", Some(uid)) => uid != 0,
+                ("device", None) => device_joins,
+                _ => false,
+            }
         {
             return Err(Error::Invalid);
         }
@@ -179,11 +221,19 @@ impl JoinMachineRequest {
         }
         let key_digest = self.key_digest()?;
         let mut digest = Sha256::new();
-        digest.update(b"infraternal/device-join-receipt/v1\0");
+        // A host's receipt keeps its v1 bytes, so an approval in flight across an
+        // update still derives the same invitation. A device has no uid and
+        // gets its own domain, so no host receipt input can equal a device one.
+        digest.update(match self.execution_uid {
+            Some(_) => b"infraternal/device-join-receipt/v1\0".as_slice(),
+            None => b"infraternal/device-join-receipt/v1-device\0".as_slice(),
+        });
         digest.update(poll_bytes);
         digest.update(self.host_id.as_bytes());
         digest.update(self.mode.as_bytes());
-        digest.update(self.execution_uid.to_be_bytes());
+        if let Some(uid) = self.execution_uid {
+            digest.update(uid.to_be_bytes());
+        }
         digest.update(key_digest);
         Ok(B64.encode(digest.finalize()))
     }
@@ -210,7 +260,12 @@ pub(crate) fn check_join_machine_sample(data: &[u8]) {
     };
     assert!((1..=128).contains(&request.hostname.len()));
     assert!(request.hostname.bytes().all(|byte| byte.is_ascii_graphic()));
-    assert_eq!(request.mode == "system", request.execution_uid == 0);
+    match request.mode.as_str() {
+        "system" => assert_eq!(request.execution_uid, Some(0)),
+        "user" => assert!(request.execution_uid.is_some_and(|uid| uid != 0)),
+        "device" => assert!(DEVICE_JOINS && request.execution_uid.is_none()),
+        other => panic!("an unknown mode {other:?} was accepted"),
+    }
     assert_eq!(
         request.key_fingerprint,
         format!("SHA256:{}", FingerprintB64.encode(digest))
@@ -897,4 +952,90 @@ pub(super) async fn api_key_time(
             .await?;
     }
     Ok(wall.max(recorded))
+}
+
+/// Tests for the `device` machine-join mode (#580) and for host requests keeping their bytes.
+#[cfg(all(test, feature = "remote"))]
+#[allow(clippy::unwrap_used)]
+mod device_mode_tests {
+    use super::{FingerprintB64, JoinMachineRequest};
+    use crate::identity_key::KeyAlgorithm;
+    use base64::Engine;
+
+    /// A machine-join request for `mode` and `uid` with a fixed host and key digest.
+    fn request(mode: &str, execution_uid: Option<u32>) -> JoinMachineRequest {
+        JoinMachineRequest {
+            host_id: uuid::Uuid::from_u128(7),
+            hostname: "phone".into(),
+            mode: mode.into(),
+            execution_uid,
+            key_fingerprint: format!("SHA256:{}", FingerprintB64.encode([5_u8; 32])),
+        }
+    }
+
+    /// `device` is accepted only with no uid and only while device joins are
+    /// on; with them off (production until P5) it is refused like any unknown mode.
+    #[test]
+    fn device_mode_needs_no_uid_and_the_switch() {
+        assert!(request("device", None).validate_with(true).is_ok());
+        assert!(request("device", None).validate_with(false).is_err());
+        for (mode, uid) in [
+            ("device", Some(0)),
+            ("device", Some(501)),
+            ("system", None),
+            ("user", None),
+            ("system", Some(1000)),
+            ("user", Some(0)),
+            ("phone", None),
+        ] {
+            assert!(
+                request(mode, uid).validate_with(true).is_err(),
+                "{mode} {uid:?}"
+            );
+        }
+        assert!(request("system", Some(0)).validate_with(false).is_ok());
+        assert!(request("user", Some(1000)).validate_with(false).is_ok());
+    }
+
+    /// Only a device's key is P-256 (owner question Q4 on #580).
+    #[test]
+    fn only_a_device_key_is_p256() {
+        assert_eq!(request("device", None).key_algorithm(), KeyAlgorithm::P256);
+        assert_eq!(
+            request("system", Some(0)).key_algorithm(),
+            KeyAlgorithm::Ed25519
+        );
+        assert_eq!(
+            request("user", Some(1000)).key_algorithm(),
+            KeyAlgorithm::Ed25519
+        );
+    }
+
+    /// A host request serialises exactly as before #580 (the uid is a plain
+    /// number), so stored approvals and their receipts keep their bytes, and a
+    /// device request carries no uid at all.
+    #[test]
+    fn host_requests_keep_their_bytes_and_receipts() {
+        let host = request("user", Some(1000));
+        let encoded = serde_json::to_value(&host).unwrap();
+        assert_eq!(encoded["execution_uid"], 1000);
+        let device = serde_json::to_value(request("device", None)).unwrap();
+        assert!(device.get("execution_uid").is_none());
+        let poll = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([9_u8; 32]);
+        // The v1 receipt input, spelled out: any change here breaks in-flight approvals.
+        let mut expected = sha2::Sha256::default();
+        sha2::Digest::update(&mut expected, b"infraternal/device-join-receipt/v1\0");
+        sha2::Digest::update(&mut expected, [9_u8; 32]);
+        sha2::Digest::update(&mut expected, uuid::Uuid::from_u128(7).as_bytes());
+        sha2::Digest::update(&mut expected, b"user");
+        sha2::Digest::update(&mut expected, 1000_u32.to_be_bytes());
+        sha2::Digest::update(&mut expected, [5_u8; 32]);
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(sha2::Digest::finalize(expected));
+        assert_eq!(host.receipt_token(&poll).unwrap(), expected);
+        assert_ne!(
+            request("device", None).receipt_token(&poll).unwrap(),
+            host.receipt_token(&poll).unwrap()
+        );
+    }
 }
