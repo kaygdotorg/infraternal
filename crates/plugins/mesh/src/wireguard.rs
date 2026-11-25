@@ -899,37 +899,35 @@ impl Device {
     /// is never written (#489 J549 P2).
     /// # Errors
     /// Refuses a missing or changed link before any write; returns route-netlink errors.
+    ///
+    /// Returns whether the link still carried IPv6 when the batch ended, so the caller can record
+    /// which routes now exist (an IPv6-off link holds no IPv6 route at all, #578).
     pub(crate) fn replace_peer_routes_on(
         link: &ActiveLink,
         routes: &[(&Peer, u16)],
-    ) -> io::Result<()> {
+    ) -> io::Result<bool> {
         if routes.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         Self::verify_repair_link(link)?;
-        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        // An IPv6-off link takes only the IPv4 routes (#578).
-        let mut ipv6 = ipv6_enabled_on(&mut socket, link.ifindex)?;
+        let mut writer = PeerRouteWriter::open(link.ifindex)?;
         for (peer, mtu) in routes {
-            for (family, prefix, address) in [
-                (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
-                (10, 128, peer.addresses.ipv6.octets().to_vec()),
-            ] {
-                // An IPv4-only peer (#578, J1142) gets no IPv6 route either.
-                if family == 10 && (!ipv6 || peer.ipv4_only) {
-                    continue;
-                }
-                let payload =
-                    peer_route_payload(family, prefix, &address, link.ifindex, Some(*mtu))?;
-                if let Err(error) = socket.request(24, 4 | 0x100 | 0x400, &payload) {
-                    if !ipv6_turned_off(&mut socket, link.ifindex, family, &error)? {
-                        return Err(error);
-                    }
-                    ipv6 = false;
-                }
-            }
+            writer.replace(peer, *mtu)?;
         }
-        Ok(())
+        Ok(writer.ipv6())
+    }
+
+    /// Open a [`PeerRouteWriter`] on the marked mesh link that holds the shared name now.
+    ///
+    /// This is the link a snapshot's route writes go to, resolved once so every write of one
+    /// batch uses the same index (a name-only lookup per write could follow a substituted link).
+    /// # Errors
+    /// Reports a missing marked link, or a socket or link-read error.
+    pub(crate) fn peer_route_writer() -> io::Result<PeerRouteWriter> {
+        let index = Self::active_link()?
+            .ok_or(io::ErrorKind::NotConnected)?
+            .ifindex;
+        PeerRouteWriter::open(index)
     }
 
     /// Re-add one missing route only when no route already occupies its destination, and say
@@ -1335,12 +1333,21 @@ pub(crate) enum RouteWake {
 /// A lost notification (`ENOBUFS`) bumps the generation too, and so does the route-repair worker's
 /// periodic inventory check, which bounds how long an unannounced change (a cached path-MTU
 /// exception) can go unseen.
+///
+/// A snapshot apply asks for [`UnderlayWatch::settled_generation`] instead (#260 J1240): it must
+/// not reuse a budget across a change the listener has been told about but not yet counted.
 #[derive(Debug, Default)]
 pub(crate) struct UnderlayWatch {
     /// Counts underlay announcements; only equality with an earlier reading matters.
     generation: std::sync::atomic::AtomicU64,
     /// Whether a listener is subscribed and will bump `generation` on the next change.
     watched: std::sync::atomic::AtomicBool,
+    /// A duplicate of the running listener's socket, which shares its receive queue, so
+    /// [`UnderlayWatch::settled_generation`] can see whether notifications are still waiting.
+    queue: std::sync::Mutex<Option<OwnedFd>>,
+    /// Whether the listener is between taking a notification off its socket and counting it,
+    /// or is inside the quiet period after lost notifications, which it counts only at the end.
+    reading: std::sync::atomic::AtomicBool,
 }
 
 impl UnderlayWatch {
@@ -1368,6 +1375,50 @@ impl UnderlayWatch {
         self.watched
             .load(std::sync::atomic::Ordering::Acquire)
             .then(|| self.generation.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// The generation, but only when it already counts every change the kernel announced before
+    /// this call; `None` otherwise, and while no listener runs (#260 J1240).
+    ///
+    /// The kernel queues a change's notification before the system call that made the change
+    /// returns, so a change that happened before this call is either still queued, being read,
+    /// or already counted. This checks those in that order: nothing waits on the listener's
+    /// socket, then the listener is not reading, then the generation is read. A listener that
+    /// takes a notification sets `reading` before its `recv` and clears it only after counting,
+    /// so a notification that left the queue before the first check is counted by the time the
+    /// second one sees `reading` clear. The check never blocks: a busy listener (it also reads
+    /// the echoes of our own route writes) only costs the caller fresh lookups.
+    pub(crate) fn settled_generation(&self) -> Option<u64> {
+        {
+            let queue = self
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let queue = queue.as_ref()?;
+            let mut waiting = [PollFd::new(queue.as_fd(), PollFlags::POLLIN)];
+            if !matches!(poll(&mut waiting, PollTimeout::ZERO), Ok(0)) {
+                return None;
+            }
+        }
+        if self.reading.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        self.generation()
+    }
+
+    /// Publish (or, with `None`, withdraw) the duplicate of the listener's socket that
+    /// [`UnderlayWatch::settled_generation`] polls.
+    fn attach_queue(&self, queue: Option<OwnedFd>) {
+        *self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = queue;
+    }
+
+    /// Mark whether the listener holds notifications it has not counted yet.
+    fn set_reading(&self, reading: bool) {
+        self.reading
+            .store(reading, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1439,6 +1490,8 @@ impl RouteMonitor {
             ),
         )?;
         announce.changed();
+        underlay.set_reading(false);
+        underlay.attach_queue(Some(fd.try_clone()?));
         Ok(Self {
             fd,
             interface_index,
@@ -1474,6 +1527,9 @@ impl RouteMonitor {
                 }
                 return Ok(RouteWake::Reconcile);
             }
+            // Everything taken off the socket so far is counted, unless a loss is still to be
+            // recovered (#260 J1240, see `UnderlayWatch::settled_generation`).
+            self.underlay.set_reading(loss.is_some());
             // PollTimeout rounds down to whole milliseconds. Check the clock again on a
             // timeout, using at least one millisecond so the last fraction does not spin.
             let timeout = PollTimeout::try_from(remaining.max(Duration::from_millis(1)))
@@ -1502,6 +1558,8 @@ impl RouteMonitor {
             // storm hid our own endpoint change for that long. The read never blocks: `POLLERR`
             // can be the only event.
             if route_events.intersects(PollFlags::POLLIN | PollFlags::POLLERR) {
+                // Before the notification leaves the queue; cleared once it is counted.
+                self.underlay.set_reading(true);
                 let length = match recv(
                     self.fd.as_raw_fd(),
                     &mut self.buffer,
@@ -1588,6 +1646,15 @@ impl RouteMonitor {
         if let Some(after) = AFTER_NOTIFICATION_DRAIN.take() {
             after();
         }
+    }
+}
+
+impl Drop for RouteMonitor {
+    /// Withdraw the socket duplicate, so the closed listener's queue is never trusted and the
+    /// socket really closes with the listener.
+    fn drop(&mut self) {
+        self.underlay.attach_queue(None);
+        self.underlay.set_reading(false);
     }
 }
 
@@ -2127,6 +2194,77 @@ fn network_route_payload(
     attribute(&mut payload, 4, &interface_index.to_ne_bytes())?;
     attribute(&mut payload, 7, &source.octets())?;
     Ok(payload)
+}
+
+/// Writes peer host routes (both families, one MTU metric) on one mesh link index.
+///
+/// One writer serves one batch: it shares a route-netlink socket across the batch and reads the
+/// link's IPv6 state once at the start. When the kernel refuses an IPv6 route because IPv6 was
+/// turned off on the link meanwhile (#578), the writer stops writing IPv6 routes for the rest
+/// of the batch instead of failing it. Each write is a create-or-replace of a route with the
+/// mesh route protocol, so writing the same route again is harmless, only wasted work.
+pub(crate) struct PeerRouteWriter {
+    /// The route-netlink socket every write of the batch uses.
+    socket: Socket,
+    /// The link index every route of the batch goes to.
+    ifindex: u32,
+    /// Whether the link carries IPv6, as last observed by this writer.
+    ipv6: bool,
+}
+
+impl PeerRouteWriter {
+    /// Open a writer for link `ifindex` and read whether that link carries IPv6.
+    /// # Errors
+    /// Reports a socket error or an unreadable link.
+    fn open(ifindex: u32) -> io::Result<Self> {
+        let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+        let ipv6 = ipv6_enabled_on(&mut socket, ifindex)?;
+        Ok(Self {
+            socket,
+            ifindex,
+            ipv6,
+        })
+    }
+
+    /// The link index this writer writes to.
+    pub(crate) fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+
+    /// Whether the link carried IPv6 at the last observation; while it does not, no IPv6 route
+    /// is written and none exists on the link.
+    pub(crate) fn ipv6(&self) -> bool {
+        self.ipv6
+    }
+
+    /// Whether a route write for `peer` installs its IPv6 host route too: only on an IPv6 link,
+    /// and never for an IPv4-only peer (#578, J1142).
+    pub(crate) fn writes_ipv6_for(&self, peer: &Peer) -> bool {
+        self.ipv6 && !peer.ipv4_only
+    }
+
+    /// Create or replace `peer`'s IPv4 host route, and its IPv6 one where
+    /// [`PeerRouteWriter::writes_ipv6_for`] says so, with the MTU metric `mtu`.
+    /// # Errors
+    /// Returns route-netlink errors; IPv6 being turned off during the write is not one.
+    pub(crate) fn replace(&mut self, peer: &Peer, mtu: u16) -> io::Result<()> {
+        for (family, prefix, address) in [
+            (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
+            (10, 128, peer.addresses.ipv6.octets().to_vec()),
+        ] {
+            if family == 10 && !self.writes_ipv6_for(peer) {
+                continue;
+            }
+            let payload = peer_route_payload(family, prefix, &address, self.ifindex, Some(mtu))?;
+            if let Err(error) = self.socket.request(24, 4 | 0x100 | 0x400, &payload) {
+                if !ipv6_turned_off(&mut self.socket, self.ifindex, family, &error)? {
+                    return Err(error);
+                }
+                self.ipv6 = false;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Builds the exact host-route payload used for installing, removing, or repairing a peer route.

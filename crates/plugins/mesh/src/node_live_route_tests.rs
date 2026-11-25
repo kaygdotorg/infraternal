@@ -1062,7 +1062,7 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let burst: Vec<_> = peers[1..]
             .iter()
-            .map(|peer| (guard.route_peer(peer), guard.written[&peer.key]))
+            .map(|peer| (guard.route_peer(peer), guard.written[&peer.key].mtu))
             .collect();
         let burst: Vec<_> = burst.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
         Device::replace_peer_routes_on(&link, &burst).expect("rewrite every other peer");
@@ -1139,7 +1139,13 @@ fn repair_of_a_present_route_keeps_its_budget() {
             repair_accepted_routes(&link, &state, Some(address))
                 .expect("a present route is not an error");
         }
-        assert_eq!(lock_route_state(&state).written.get(&key), Some(&1408));
+        assert_eq!(
+            lock_route_state(&state)
+                .written
+                .get(&key)
+                .map(|written| written.mtu),
+            Some(1408)
+        );
     }
     assert_eq!(
         update_live_peer_endpoints(&state, &refresh).expect("steady"),
