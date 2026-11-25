@@ -30,7 +30,8 @@ test("an accepted rename is sent by node id and written through every place the 
   const source = createMeshApi({ transport: transportFor(() => Promise.resolve({ revision: 2 }), calls), prime: prime(), pins: { "build-01": { x: 5, y: 6 } } });
   try {
     await source.renameNode("build-01", "  build-02 ");
-    expect(calls).toEqual([{ action: ACTION.nodeRename, input: { node_id: 1, name: "build-02" } }]);
+    // The subnet routes are listed with the mesh for a person who may manage it (D197 M3); the rename is the only edit.
+    expect(calls.filter((c) => c.action !== ACTION.routes)).toEqual([{ action: ACTION.nodeRename, input: { node_id: 1, name: "build-02" } }]);
     const data = source.data();
     expect([...data.nodes.keys()]).toEqual(["build-02", "edge-arm", "ops"]); // order kept
     expect(data.nodes.get("build-02")!.name).toBe("build-02");

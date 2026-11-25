@@ -15,6 +15,7 @@
  */
 import type { Grant, NodeModel } from "../model/types";
 import type { Cluster } from "./layout";
+import { isNetworkId, networkLabel, type MeshNetwork } from "./networks";
 import type { WireNode } from "./protocol";
 
 /**
@@ -43,6 +44,11 @@ export interface MeshData {
   tags: Readonly<Record<string, readonly string[]>>;
   /** Positions the person pinned. */
   pins: ReadonlyMap<string, { x: number; y: number }>;
+  /**
+   * The networks the Mesh view draws (D197 M3): waiting and approved subnet routes, listed by the server to its owner.
+   * Absent or empty for anyone else, and then no network card is drawn.
+   */
+  networks?: readonly MeshNetwork[];
 }
 
 export const tagNodeId = (tag: string): string => `tag:${tag}`;
@@ -93,7 +99,7 @@ export const derivedGrantName = (from: string, to: string): string =>
   `${endWord(from)}-to-${endWord(to)}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-{2,}/g, "-").slice(0, NAME_ROOM).replace(/^-+|-+$/g, "") || "access";
 /** The grant's name, or the derived one for a source without names. */
 export const grantLabel = (g: Grant): string => g.name ?? derivedGrantName(g.from, g.to);
-/** A host or tag as the person sees it on its card. */
-export const endName = (end: string): string => end;
+/** A host, tag or network as the person sees it on its card (a network by its address, never its route number). */
+export const endName = (end: string): string => (isNetworkId(end) ? networkLabel(end) : end);
 /** What hovering a grant says: a sentence for the ones nobody named, the person's own name for the rest. */
 export const grantSentence = (g: Grant): string => (g.auto !== false && (g.name === undefined || g.name === derivedGrantName(g.from, g.to)) ? `${endName(g.from)} can reach ${endName(g.to)}` : g.name!);

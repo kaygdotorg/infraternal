@@ -271,7 +271,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     void onDemand(() => import("./account/mount.on-demand")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
   }
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(updates?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
+    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(updates?.entries() ?? []), ...(mesh.routes?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -288,6 +288,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
     if (kind === "ver" && value) { version?.run(value); return; }
     if (kind === "upd" && value) { updates?.run(value); return; }
+    if (kind === "routes" && value) { mesh.routes?.run(value); return; }
     if (kind === "conn" && value) { connection.run(value); return; }
     if (kind === "acct" && value) { account?.run(action.split(":").slice(2).join(":")); return; }
     if (kind === "startup") { startupDemo?.replay(); return; }

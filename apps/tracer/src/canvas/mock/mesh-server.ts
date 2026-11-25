@@ -14,6 +14,11 @@
  * (`generateMesh`) and churn node status the way a live mesh does. Like the server it rejects unknown input fields,
  * and answers a refusal with the same short words (`forbidden`, `conflict`, `invalid input`, `not found`).
  *
+ * Subnet routes (D197 M3) are held as the server holds them: one row per advertised network, approved, declined or
+ * waiting, with the server's overlap refusal and its revoke (the row and its arrows go, and a still-advertised network
+ * waits again under a new identity). Arrows to an approved network name it `{ "Network": <route id> }` on the wire.
+ * Only the owner may list or change routes (`routeOwner`), as on the server.
+ *
  * Test double only; the product never imports this.
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
@@ -24,7 +29,23 @@ export type FakeMeshState = "ready" | "loading" | "error" | "denied";
 /** A mock mesh membership row, including whether the node can fence peers after a restore. */
 export interface FakeNode { id: number; name: string; live: boolean; behind: boolean; rttUs: number | undefined; os: HostPlatform; address: string; path: "direct" | "relay"; via: string | undefined; /** Whether the mock node can retire peers after a server restore. */ restoreSafe: boolean }
 export interface FakeGrant { name: string; arrowId: number; from: string; to: string; both: boolean; via: string | undefined }
-export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[] }
+/** One advertised network, as the server's `mesh_routes` row holds it. */
+export interface FakeRoute { id: number; nodeId: number; network: string; advertised: boolean; approved: boolean; declined: boolean; masquerade: boolean }
+/** A mesh to start from: hosts, tags, grants (ends are host names, `tag:<name>` or `net:<route id>`) and subnet routes. */
+export interface FakeMeshSeed { nodes: FakeNode[]; tags: Record<string, number[]>; grants: FakeGrant[]; routes?: FakeRoute[] }
+
+/** Parses `a.b.c.d/n` into its first and last address as numbers, or nothing for text that is not an IPv4 network. */
+function range(cidr: string): [number, number] | undefined {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d+)$/.exec(cidr);
+  if (!m) return undefined;
+  const first = ((Number(m[1]) * 256 + Number(m[2])) * 256 + Number(m[3])) * 256 + Number(m[4]);
+  return [first, first + 2 ** (32 - Number(m[5])) - 1];
+}
+/** Whether two IPv4 networks share an address (the server's own overlap rule). */
+export function overlaps(a: string, b: string): boolean {
+  const x = range(a), y = range(b);
+  return Boolean(x && y && x[0] <= y[1] && y[0] <= x[1]);
+}
 
 const OS: HostPlatform[] = ["ubuntu", "debian", "nixos", "apple", "redhat", "proxmox"];
 /** A seeded grant's name: the one the canvas derives, so seeded and drawn grants look alike to the adapter. */
@@ -48,8 +69,11 @@ export function seedMesh(grants: ReadonlyArray<{ id: string; from: string; to: s
   };
 }
 
-/** A mesh of `hosts` hosts in about hosts/40 tags with roughly one grant for every ten hosts. */
-export function generateMesh(hosts: number, extraGrants = 0): FakeMeshSeed {
+/**
+ * A mesh of `hosts` hosts in about hosts/40 tags with roughly one grant for every ten hosts, and `networks` subnet routes:
+ * every second network approved with a few arrows to it, the others waiting (the latency spec's worst case, #580).
+ */
+export function generateMesh(hosts: number, extraGrants = 0, networks = 0): FakeMeshSeed {
   const tagCount = Math.max(3, Math.round(hosts / 40));
   const tags: Record<string, number[]> = {};
   const nodes: FakeNode[] = [];
@@ -79,7 +103,13 @@ export function generateMesh(hosts: number, extraGrants = 0): FakeMeshSeed {
   for (const t of tagNames) { const m = tags[t]!; for (let i = 0; i + 1 < Math.min(m.length, 8); i += 2) add(nameOf(m[i]!), nameOf(m[i + 1]!), i % 4 === 0 ? "fra-relay" : undefined); }
   for (let i = 3; i < hosts; i += 20) add(`tag:${tagNames[i % tagNames.length]!}`, names[i]!);
   for (let k = 0; k < extraGrants; k++) add(names[(k * 13) % hosts]!, names[(k * 29 + 5) % hosts]!);
-  return { nodes, tags, grants };
+  const routes: FakeRoute[] = [];
+  for (let k = 0; k < networks; k++) {
+    const approved = k % 2 === 0;
+    routes.push({ id: k + 1, nodeId: ((k * 7) % hosts) + 1, network: `192.168.${10 + k}.0/24`, advertised: true, approved, declined: false, masquerade: true });
+    if (approved) for (let j = 0; j < 3; j++) add(j === 0 ? `tag:${tagNames[k % tagNames.length]!}` : names[(k * 11 + j * 5) % hosts]!, `net:${k + 1}`);
+  }
+  return { nodes, tags, grants, routes };
 }
 
 /** Test-only Mesh transport that returns seeded membership and emits controllable updates. */
@@ -98,6 +128,10 @@ export class FakeMeshServer implements MeshTransport {
   /** Calls seen, in order (specs read these to prove what the canvas asked for). */
   readonly calls: Array<{ action: string; input: Record<string, unknown> }> = [];
   revision = 1;
+  /** Whether the person is the server's owner, who alone may list and change subnet routes. */
+  routeOwner = true;
+  private routes: FakeRoute[];
+  private nextRoute: number;
   private nodes: Map<number, FakeNode>;
   private tags: Map<string, Set<number>>;
   private grants: FakeGrant[];
@@ -108,11 +142,14 @@ export class FakeMeshServer implements MeshTransport {
   private churnTimer = 0;
   private nextSub = 1;
 
+  /** A server holding `seed` (copied, so the caller's objects stay untouched), in `state`. */
   constructor(seed: FakeMeshSeed, state: FakeMeshState = "ready") {
     this.nodes = new Map(seed.nodes.map((n) => [n.id, { ...n }]));
     this.tags = new Map(Object.entries(seed.tags).map(([k, v]) => [k, new Set(v)]));
     this.grants = seed.grants.map((g) => ({ ...g }));
     this.nextArrow = Math.max(0, ...this.grants.map((g) => g.arrowId)) + 1;
+    this.routes = (seed.routes ?? []).map((r) => ({ ...r }));
+    this.nextRoute = Math.max(0, ...this.routes.map((r) => r.id)) + 1;
     this.state = state;
   }
 
@@ -133,7 +170,7 @@ export class FakeMeshServer implements MeshTransport {
       ...(n.live && n.path === "direct" ? { path: "direct" } : {}),
       ...(this.includeExtras ? { os: n.os, address: n.address, restore_safe: n.restoreSafe, ...(n.path === "relay" ? { path: n.path } : {}), ...(n.via ? { via: n.via } : {}), ...(n.behind ? { behind: true } : {}) } : {}),
     }));
-    const end = (e: string): Record<string, unknown> => (e.startsWith("tag:") ? { Tag: e.slice(4) } : { Node: this.idOf(e) });
+    const end = (e: string): Record<string, unknown> => (e.startsWith("tag:") ? { Tag: e.slice(4) } : e.startsWith("net:") ? { Network: Number(e.slice(4)) } : { Node: this.idOf(e) });
     const tags = [...this.tags].map(([name, m]) => ({ name, members: [...m].sort((a, b) => a - b) }));
     const grants = this.grants.map((g) => ({ name: g.name, arrow: { id: g.arrowId, from: end(g.from), to: end(g.to), both_ways: g.both, ports: "All" }, ...(this.includeExtras && g.via ? { via: g.via } : {}) }));
     // A cursor from an older revision restarts at the beginning, like the server; a page never splits an object.
@@ -212,14 +249,99 @@ export class FakeMeshServer implements MeshTransport {
     this.nodes.set(id, { id, name: n.name, live: true, behind: false, rttUs: (n.rttMs ?? 10) * 1000, os: n.os ?? "unknown", address: n.address ?? `10.69.69.${id + 60}`, path: "direct", via: undefined, restoreSafe: true });
     this.bump();
   }
+  /** A host leaves the mesh: its tags, its grants, its routes and the arrows to them go with it, and subscribers hear of it. */
   removeNode(name: string): void {
     const n = [...this.nodes.values()].find((o) => o.name === name);
     if (!n) return;
     this.nodes.delete(n.id);
     for (const m of this.tags.values()) m.delete(n.id);
     this.grants = this.grants.filter((g) => g.from !== name && g.to !== name);
+    // A node's routes go with it, and so do the arrows to them (ON DELETE CASCADE on the server).
+    const gone = new Set(this.routes.filter((r) => r.nodeId === n.id).map((r) => `net:${r.id}`));
+    this.routes = this.routes.filter((r) => r.nodeId !== n.id);
+    this.grants = this.grants.filter((g) => !gone.has(g.to));
     this.bump();
   }
+  // ---- subnet routes ----------------------------------------------------------------------------------------------
+  /** The routes as the server holds them (specs read these). */
+  routeList(): FakeRoute[] { return this.routes.map((r) => ({ ...r })); }
+  /**
+   * What `node` says it advertises, its whole word (the server's `record_routes`): named networks are advertised (new ones
+   * wait), others stop being routed if approved, stay if declined, and are forgotten otherwise.
+   */
+  advertise(node: string, networks: readonly string[]): void {
+    const id = this.idOf(node);
+    if (!id) return;
+    for (const r of [...this.routes]) {
+      if (r.nodeId !== id) continue;
+      const now = networks.includes(r.network);
+      if (!now && !r.approved && !r.declined) this.routes = this.routes.filter((o) => o !== r); else r.advertised = now;
+    }
+    for (const n of networks) if (!this.routes.some((r) => r.nodeId === id && r.network === n)) this.routes.push({ id: this.nextRoute++, nodeId: id, network: n, advertised: true, approved: false, declined: false, masquerade: true });
+    this.bump();
+  }
+  /** Replaces every route and the arrows to networks (a mockup scene). */
+  setRoutes(routes: ReadonlyArray<Omit<FakeRoute, "id" | "nodeId"> & { node: string; arrows?: readonly string[] }>): void {
+    this.grants = this.grants.filter((g) => !g.to.startsWith("net:"));
+    this.routes = [];
+    for (const r of routes) {
+      const id = this.nextRoute++;
+      this.routes.push({ id, nodeId: this.idOf(r.node), network: r.network, advertised: r.advertised, approved: r.approved, declined: r.declined, masquerade: r.masquerade });
+      for (const from of r.arrows ?? []) this.grants.push({ name: derive(from, `net:${id}`), arrowId: this.nextArrow++, from, to: `net:${id}`, both: false, via: undefined });
+    }
+    this.bump();
+  }
+  /** The server's `mesh.route.list` answer. */
+  private routesJson(): Record<string, unknown> {
+    const approved = this.routes.filter((r) => r.approved);
+    return { routes: this.routes.map((r) => {
+      const clash = !r.approved && !r.declined ? approved.find((o) => overlaps(o.network, r.network)) : undefined;
+      return {
+        route_id: r.id, node_id: r.nodeId, node: this.nodes.get(r.nodeId)?.name ?? `node-${r.nodeId}`, network: r.network,
+        state: r.approved ? (r.advertised ? "approved" : "approved, not advertised") : r.declined ? "declined" : "waiting for approval",
+        advertised: r.advertised, masquerade: r.masquerade,
+        ...(clash ? { refused: this.overlapReason(r.network, clash) } : {}),
+      };
+    }) };
+  }
+  /** The server's overlap refusal, in its own words (with its route number, which the canvas leaves out). */
+  private overlapReason(network: string, approved: FakeRoute): string {
+    return `${network} overlaps ${approved.network}, which is already approved (route ${approved.id}); revoke that one first or pick a network that does not overlap`;
+  }
+  /** Answers a `mesh.route.*` action as the server does: owner only, strict input, refusals as `{state:"refused",reason}`. */
+  private routeAnswer(action: string, input: Record<string, unknown>): Record<string, unknown> {
+    if (!this.routeOwner) throw new ActionRefused(undefined, "forbidden");
+    if (action === ACTION.routes) { this.strict(input, []); return this.routesJson(); }
+    if (action === ACTION.routeApprove) {
+      for (const k of Object.keys(input)) if (!["node_id", "network", "masquerade"].includes(k)) throw new ActionRefused(undefined, "invalid input");
+      const r = this.routes.find((o) => o.nodeId === input.node_id && o.network === input.network);
+      if (!r) return { state: "refused", reason: `node ${String(input.node_id)} does not advertise ${String(input.network)}; run infraternal mesh routes advertise ${String(input.network)} on it first` };
+      const masquerade = input.masquerade !== false;
+      if (!r.approved && !r.advertised) return { state: "refused", reason: `node ${r.nodeId} no longer advertises ${r.network}` };
+      if (r.approved && r.masquerade === masquerade) return { state: "approved", route_id: r.id };
+      const clash = this.routes.find((o) => o !== r && o.approved && overlaps(o.network, r.network));
+      if (clash) return { state: "refused", reason: this.overlapReason(r.network, clash) };
+      r.approved = true; r.declined = false; r.masquerade = masquerade;
+      return { state: "approved", route_id: r.id, ...this.respond({}) };
+    }
+    if (action === ACTION.routeDecline || action === ACTION.routeRevoke) {
+      this.strict(input, ["route_id"]);
+      const r = this.routes.find((o) => o.id === input.route_id && (action === ACTION.routeRevoke ? o.approved : !o.approved));
+      if (!r) throw new ActionRefused(undefined, "not found");
+      if (action === ACTION.routeDecline) {
+        if (r.declined) return { state: "declined", route_id: r.id };
+        r.declined = true;
+        return { state: "declined", route_id: r.id, ...this.respond({}) };
+      }
+      const before = this.grants.length;
+      this.grants = this.grants.filter((g) => g.to !== `net:${r.id}`);
+      this.routes = this.routes.filter((o) => o !== r);
+      if (r.advertised) this.routes.push({ id: this.nextRoute++, nodeId: r.nodeId, network: r.network, advertised: true, approved: false, declined: false, masquerade: true });
+      return { state: "revoked", route_id: r.id, arrows_removed: before - this.grants.length, ...this.respond({}) };
+    }
+    throw new ActionRefused(undefined, "invalid input");
+  }
+
   /** Status churn: every tick a few hosts change round trip; `hz` ticks per second. */
   churn(hz: number, perTick = 5): () => void {
     window.clearInterval(this.churnTimer);
@@ -235,11 +357,14 @@ export class FakeMeshServer implements MeshTransport {
 
   // ---- the actions -----------------------------------------------------------------------------------------------
   private idOf(name: string): number { return [...this.nodes.values()].find((n) => n.name === name)?.id ?? 0; }
+  /** Reads an arrow end from an action's input into the fake's own name for it; anything unknown is refused like the server. */
   private end(v: unknown): string {
     if (typeof v === "object" && v !== null && !Array.isArray(v)) {
       const e = v as Record<string, unknown>;
       if (typeof e.Tag === "string" && this.tags.has(e.Tag)) return `tag:${e.Tag}`;
       if (typeof e.Node === "number") { const n = this.nodes.get(e.Node); if (n) return n.name; }
+      // An arrow may only end on an approved network (the server answers `not found` for any other).
+      if (typeof e.Network === "number") { if (this.routes.some((r) => r.id === e.Network && r.approved)) return `net:${e.Network}`; throw new ActionRefused(undefined, "not found"); }
     }
     throw new ActionRefused(undefined, "invalid input");
   }
@@ -252,6 +377,7 @@ export class FakeMeshServer implements MeshTransport {
   /** A host name for a rename (the server's host rule is wider than a grant name's; this fake only bounds it). */
   private hostName(v: unknown): string { if (typeof v !== "string" || !v || v.length > 200) throw new ActionRefused(undefined, "invalid input"); return v; }
 
+  /** Answers one action, or throws the refusal the server would send. */
   private answer(action: string, input: Record<string, unknown>): Record<string, unknown> {
     if (this.state === "error") throw new Error("connection lost");
     if (this.state === "denied" || !this.access.view) throw new ActionRefused(undefined, "forbidden");
@@ -260,11 +386,14 @@ export class FakeMeshServer implements MeshTransport {
       const c = input.cursor as { revision?: unknown; offset?: unknown } | undefined;
       return this.page(c && typeof c.revision === "number" && typeof c.offset === "number" ? { revision: c.revision, offset: c.offset } : undefined, this.pageSize);
     }
+    if (action.startsWith("mesh.route.")) return this.routeAnswer(action, input);
     if (!this.access.manageGrants) throw new ActionRefused(undefined, "forbidden");
     switch (action) {
       case ACTION.create: {
         this.strict(input, ["name", "from", "to", "both_ways"]);
         const name = this.name(input.name), from = this.end(input.from), to = this.end(input.to);
+        // A network is only ever the target of a one-way arrow (the mesh model refuses anything else).
+        if (from.startsWith("net:") || (to.startsWith("net:") && input.both_ways === true)) throw new ActionRefused(undefined, "invalid input");
         if (from === to || this.grants.some((g) => g.name === name || (g.from === from && g.to === to))) throw new ActionRefused(undefined, "conflict");
         const arrowId = this.nextArrow++;
         this.grants.push({ name, arrowId, from, to, both: input.both_ways === true, via: undefined });
@@ -278,6 +407,7 @@ export class FakeMeshServer implements MeshTransport {
         if (side !== "from" && side !== "to") throw new ActionRefused(undefined, "invalid input");
         const next = this.end(input.endpoint);
         const from = side === "from" ? next : g.from, to = side === "to" ? next : g.to;
+        if (from.startsWith("net:")) throw new ActionRefused(undefined, "invalid input");
         if (from === to || this.grants.some((o) => o !== g && o.from === from && o.to === to)) throw new ActionRefused(undefined, "conflict");
         g.from = from; g.to = to;
         return this.respond({});
