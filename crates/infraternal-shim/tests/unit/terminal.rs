@@ -411,11 +411,9 @@ fn carry_ends_where_the_engine_ends_a_sequence_on_a_c1_byte() {
     // An introducer replaces the sequence it interrupts, and only it is carried.
     terminal.process(b"\x1b[1;2\x9b3");
     assert_eq!(terminal.pending, b"\x9b3");
-    let mut viewer = reset_terminal(20, 3).unwrap();
-    viewer.process(&terminal.snapshot().unwrap());
-    terminal.process(b"m!");
-    viewer.process(b"m!");
-    assert_eq!(terminal.screen_difference(&viewer), 0);
+    // Snapshot continuation itself is pinned by `vt_checks` and its fuzz target.
+    terminal.process(b"m");
+    assert!(terminal.pending.is_empty(), "the CSI ended");
 }
 
 /// C0 controls inside DCS or APC data are payload, so the carry keeps them;
