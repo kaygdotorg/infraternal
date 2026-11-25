@@ -250,9 +250,18 @@ test("up is approved in the real page and enrolls over HTTPS without port 7443",
 
   expect(await readFile(decoyCalls, "utf8"), "a PATH decoy ran instead of the trusted program").toBe("");
   expect(await readFile(sudoCalls, "utf8")).toBe("sudo\n");
-  expect(await readFile(serviceSystemctlCalls, "utf8")).toBe(
-    "daemon-reload\nenable --now infraternal-agent.service\nis-active infraternal-agent.service\n",
-  );
+  // A system `up` installs the host firewall unit first (#483), then the agent service. The read-only `list-units`
+  // and `list-unit-files` probes that look for foreign units are not part of the order, so they are left out.
+  const changingCalls = (await readFile(serviceSystemctlCalls, "utf8"))
+    .split("\n")
+    .filter((line) => line !== "" && !line.startsWith("list-unit"));
+  expect(changingCalls).toEqual([
+    "daemon-reload",
+    "enable infraternal-firewall.service",
+    "restart infraternal-firewall.service",
+    "enable --now infraternal-agent.service",
+    "is-active infraternal-agent.service",
+  ]);
   expect(await readlink("/usr/local/bin/infraternal")).toBe(SERVICE_BINARY);
   expect((await stat(SERVICE_BINARY)).size).toBe((await stat(server.binary)).size);
   const unit = await readFile("/etc/systemd/system/infraternal-agent.service", "utf8");
@@ -330,12 +339,27 @@ async function provisionRemoteAuthority(target: Page): Promise<void> {
   target.on("request", onRequest);
   target.on("response", onResponse);
   target.on("requestfailed", onRequestFailed);
-  // A brand-new account has no hosts, so the server-restart toast and inbox card are not shown (#512). The
-  // Hosts settings card always carries the same Unlock action, which runs the one real passkey ceremony.
-  const unlock = target.getByLabel("Hosts settings").getByRole("button", { name: "Unlock", exact: true, includeHidden: true });
+  // A brand-new account has no hosts, so the server-restart toast and inbox card are not shown (#512). The command
+  // palette always offers "Unlock host connections", which runs the same real passkey ceremony.
+  const unlockHostConnections = async (): Promise<void> => {
+    const row = target.locator("#palette-results .result-label").filter({ hasText: "Unlock host connections" });
+    // The page learns the lock state from a status call that runs after the first paint (and again when the page
+    // returns to view, at most every 5 s). A palette opened before that answer lists no row, so close it, let the
+    // page ask again, and reopen until the row is there.
+    for (let attempt = 1; ; attempt += 1) {
+      await target.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await target.keyboard.press("Control+Shift+K");
+      await expect(target.locator("#palette")).toBeVisible();
+      await target.keyboard.type("Unlock host");
+      if (await row.isVisible() || await row.waitFor({ timeout: 3_000 }).then(() => true, () => false)) break;
+      if (attempt === 6) throw new Error("the palette never offered Unlock host connections");
+      await target.keyboard.press("Escape");
+      await target.waitForTimeout(2_000);
+    }
+    await row.click();
+  };
   try {
     await target.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
-    await expect(unlock).toHaveAttribute("data-shown", "true", { timeout: 15_000 });
     const readStatus = async (): Promise<{ status: number; body: unknown }> => target.evaluate(async () => {
       const response = await fetch("/remote/ca/status", {
         method: "POST",
@@ -346,8 +370,10 @@ async function provisionRemoteAuthority(target: Page): Promise<void> {
       return { status: response.status, body: await response.json().catch(() => null) };
     });
     const before = await readStatus();
-    expect(before).toEqual({ status: 200, body: { initialized: false, locked: true } });
-    await unlock.evaluate((button) => (button as HTMLButtonElement).click());
+    // The status answer carries more fields over time (availability, clock, roots); only these two decide the step.
+    expect(before.status).toBe(200);
+    expect(before.body).toMatchObject({ initialized: false, locked: true });
+    await unlockHostConnections();
     const messages = new Set<string>();
     let after = before;
     let ready = false;
