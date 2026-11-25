@@ -325,6 +325,7 @@ mod tests {
                             .map(|text| text.parse().unwrap())
                             .collect(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

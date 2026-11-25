@@ -248,6 +248,28 @@ impl UdpTransportFactory for BoundUdpFactory {
             PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
         )))
     }
+
+    /// The second socket for small data datagrams (#260, J1211): an ephemeral port beside the mesh
+    /// port, with the same family set-up. Its receive half runs the same admission guard as the
+    /// main one, so a stranger cannot use the second port to skip it. The direct-path probes stay
+    /// on the main socket.
+    async fn bind_side(
+        &mut self,
+        main: &Self::Send,
+        params: &UdpTransportFactoryParams,
+    ) -> io::Result<Option<(Self::Send, Self::Recv)>> {
+        if params.addr.is_some() || params.port != self.port {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let Some((send, receive)) = UdpSocketFactory::default().bind_side(main, params).await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            send,
+            PeerAdmissionUdpReceiver::new(receive, Arc::clone(&self.admission)),
+        )))
+    }
 }
 
 /// What the worker thread reports about its running engine: the TUN, the bound port, the
@@ -1738,6 +1760,7 @@ async fn build_device(
         .with_udp(factory)
         .with_private_key(private_key)
         .with_listen_port(port)
+        .with_side_socket(crate::side_socket::enabled())
         .with_ip_pair(tun.clone(), tun)
         .with_peers(peers)
         .build()
@@ -1927,13 +1950,42 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     Ok(peers.into_iter().flatten().collect())
 }
 
+/// Convert one configured peer to its `GotaTun` identities, and decide whether small datagrams to
+/// it may leave from the device's second socket (#260, J1211).
+///
+/// That is only for a peer whose own node advertised the side-mark receive rule through the
+/// coordinator (`Peer::side_port`), and only while this node's switch is on. Everything else,
+/// including every peer of a mesh whose coordinator never heard the capability, gets an explicit
+/// `false`, so no mark is ever sent to a peer that did not say it takes them (kernel `WireGuard`
+/// and plain `GotaTun` drop marked packets).
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
+fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+    peer_for_policy_with(policy, crate::side_socket::enabled())
+}
+
+/// [`peer_for_policy`] with this node's side-socket switch given, so tests can set it.
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
+fn peer_for_policy_with(
+    policy: &crate::dataplane::PeerPolicy,
+    side_socket: bool,
+) -> io::Result<Vec<WireGuardPeer>> {
+    let side_port = side_socket && policy.peer.side_port;
+    let mut peers = identities_for_policy(policy)?;
+    for peer in &mut peers {
+        peer.side_port = Some(side_port);
+    }
+    Ok(peers)
+}
+
 /// Convert each configured peer to one live identity or its journaled overlap pair.
 ///
 /// Only the active identity owns allowed IPs and the endpoint, so the second identity can accept
 /// a handshake during overlap without stealing routes or initiating a competing path.
 /// # Errors
 /// Rejects invalid host routes before they reach the userspace device.
-fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+fn identities_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
     let mut addresses = peer
         .routed_addresses()
@@ -2076,6 +2128,7 @@ mod keep_tests {
             endpoint: Some(at(first)),
             candidates: rest.iter().map(|address| at(address)).collect(),
             ipv4_only: false,
+            side_port: false,
         }
     }
 
@@ -2287,6 +2340,79 @@ mod tests {
             .as_mut()
             .poll(&mut Context::from_waker(Waker::noop()))
             .is_ready()
+    }
+
+    /// A peer is opted in to the second socket only when its node advertised the capability and this
+    /// node's own switch is on (#260, J1211); every other peer, including both rotation identities of
+    /// one, gets an explicit "no", so the engine never marks a datagram to a peer that did not say it
+    /// takes them (kernel `WireGuard` and plain `GotaTun` drop marked packets).
+    #[test]
+    fn only_advertising_peers_are_opted_in_while_the_switch_is_on() {
+        let mut config = one_peer_config(None);
+        let policy = config.peers.get_mut(&NodeId(1)).expect("the peer");
+        let opted = |policy: &PeerPolicy, on: bool| -> Vec<Option<bool>> {
+            super::peer_for_policy_with(policy, on)
+                .expect("peer")
+                .iter()
+                .map(|peer| peer.side_port)
+                .collect()
+        };
+        assert_eq!(
+            opted(policy, true),
+            [Some(false)],
+            "no advertisement, no mark"
+        );
+        assert_eq!(opted(policy, false), [Some(false)]);
+        policy.peer.side_port = true;
+        assert_eq!(opted(policy, true), [Some(true)], "advertised and on");
+        assert_eq!(
+            opted(policy, false),
+            [Some(false)],
+            "this node's switch off beats the advertisement"
+        );
+        // Both identities of a peer mid-rotation follow the same rule.
+        policy.peer.previous_key = Some(PublicKey([9; 32]));
+        assert_eq!(opted(policy, true), [Some(true), Some(true)]);
+        policy.peer.side_port = false;
+        assert_eq!(opted(policy, true), [Some(false), Some(false)]);
+    }
+
+    /// The engine's socket factory binds the second socket on its own port with the admission guard
+    /// on its receive half, and never on a different mesh port than asked (#260, J1211).
+    #[tokio::test]
+    async fn the_factory_binds_a_second_socket_beside_the_mesh_port() {
+        use gotatun::{
+            udp::{UdpTransportFactory, UdpTransportFactoryParams},
+            x25519::StaticSecret,
+        };
+        let (mut factory, port) = super::bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            StaticSecret::from([4; 32]),
+        )
+        .await
+        .expect("bound engine socket");
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port,
+            fwmark: None,
+        };
+        let (main, _receiver) = factory.bind(&params).await.expect("main sockets");
+        let (side, _side_receiver) = factory
+            .bind_side(&main, &params)
+            .await
+            .expect("side socket binds")
+            .expect("the engine factory has a second socket");
+        let side_port = side.local_addr().expect("side address").port();
+        assert_ne!(side_port, 0);
+        assert_ne!(side_port, port, "its own port");
+        let wrong = UdpTransportFactoryParams {
+            port: port.wrapping_add(1),
+            ..params
+        };
+        assert!(factory.bind_side(&main, &wrong).await.is_err());
     }
 
     /// A packet burst uses one wakeup until the worker starts its refresh.
@@ -2845,6 +2971,7 @@ mod tests {
                         endpoint,
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

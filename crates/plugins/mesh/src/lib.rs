@@ -95,6 +95,10 @@ mod macos_machine;
 #[cfg(all(feature = "agent", target_os = "macos"))]
 pub use macos_node as node;
 
+/// The device-level switch for `GotaTun`'s second UDP socket (#260, J1211).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+mod side_socket;
+
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod gotatun_node;
 

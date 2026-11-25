@@ -31,6 +31,7 @@ fn bulk_retirement_preserves_identity_and_routes_at_1000_peers() {
             endpoint: None,
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         })
         .collect();
     let mut client = Client::new().unwrap();
@@ -83,6 +84,7 @@ fn real_kernel_chunked_peers() {
                 endpoint: Some("192.0.2.1:44000".parse().unwrap()),
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             }
         })
         .collect();
@@ -196,6 +198,7 @@ fn retired_host_routes_can_be_replayed() {
         endpoint: None,
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     Device::routes(std::slice::from_ref(&peer), false).unwrap();
     Device::routes(std::slice::from_ref(&peer), true).unwrap();
@@ -232,6 +235,7 @@ fn rotation_overlap_keeps_routes_on_old_then_current_key_until_retirement() {
         endpoint: None,
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let mut client = Client::new().unwrap();
     client.peers(std::slice::from_ref(&peer), &[]).unwrap();

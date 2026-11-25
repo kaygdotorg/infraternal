@@ -95,6 +95,18 @@ async fn read_ipv6_state(channel: &dyn NodeChannel) -> Option<bool> {
     parse_ipv6_state(&reply)
 }
 
+/// Asks a node whether it takes marked datagrams on its second UDP socket (#260, J1211), on its own like the
+/// other probes so a strict older node refuses only this one and keeps its identity. `Some(takes_marks)` when
+/// the node understands `Peer::side_port` and says whether it runs the side-mark receive rule with its second
+/// socket on; `None` for an older node or no answer.
+async fn read_side_socket(channel: &dyn NodeChannel) -> Option<bool> {
+    let reply = channel
+        .call("mesh.identity", br#"{"side_socket":true}"#.to_vec())
+        .await
+        .ok()?;
+    parse_side_socket(&reply)
+}
+
 /// Asks a node which networks it advertises (D197 M3), on its own like the other probes so a strict older
 /// node refuses only this one. `Some(networks)` when the node understands subnet routes, `None` otherwise.
 async fn read_routes(channel: &dyn NodeChannel) -> Option<Vec<crate::policy::networks::Network>> {
@@ -124,6 +136,22 @@ pub fn parse_routes(reply: &[u8]) -> Option<Vec<crate::policy::networks::Network
     }
     let reply: Reply = serde_json::from_slice(reply).ok()?;
     (reply.routes && reply.advertised.len() <= MAX_ADVERTISED_NETWORKS).then_some(reply.advertised)
+}
+
+/// Reads the side-socket fields of a `mesh.identity` reply to a `{"side_socket":true}` probe. The node's reply
+/// carries `side_socket` when it understands the probe and `side_port` only while it takes marked datagrams.
+#[must_use]
+pub fn parse_side_socket(reply: &[u8]) -> Option<bool> {
+    /// The two fields this probe adds to the identity reply.
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        side_socket: bool,
+        #[serde(default)]
+        side_port: bool,
+    }
+    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    reply.side_socket.then_some(reply.side_port)
 }
 
 /// Reads the IPv6 fields of a `mesh.identity` reply to an `{"ipv6_state":true}` probe. The node's reply
@@ -366,6 +394,9 @@ pub async fn run(
                     // Ask before the first snapshot, so a new node's first peers already carry candidates.
                     let reported = read_candidates(channel.as_ref()).await;
                     let ipv6 = read_ipv6_state(channel.as_ref()).await;
+                    // Whether this node, and so the peers that send to it, may use the second socket.
+                    // Marked peers go into every other node's snapshot, so ask before the first one.
+                    let side_port = read_side_socket(channel.as_ref()).await;
                     // Asked on every identity refresh: the node raises `mesh.changed` when its
                     // advertised networks change, which brings the worker back here (D197 M3).
                     let routes = read_routes(channel.as_ref()).await;
@@ -383,7 +414,10 @@ pub async fn run(
                         matches!(store.record_ipv6_state(node, ipv6).await, Ok(true));
                     let recorded_routes =
                         matches!(store.record_routes(node, routes.as_deref()).await, Ok(true));
-                    if updated || recorded || recorded_ipv6 || recorded_routes {
+                    let recorded_side_port =
+                        matches!(store.record_side_port(node, side_port).await, Ok(true));
+                    if updated || recorded || recorded_ipv6 || recorded_routes || recorded_side_port
+                    {
                         service.invalidate_dataplane().await;
                     }
                 } else {
@@ -772,6 +806,9 @@ mod tests {
         /// The node's IPv6 report (#578, J1142): `None` is an older node that does not report, `Some(true)`
         /// a node whose mesh link has IPv6 off. Shared by the identity probe and the configure reply.
         ipv4_only: Mutex<Option<bool>>,
+        /// The node's side-socket report (#260, J1211): `None` is an older node that does not report,
+        /// `Some(true)` a node that takes marked datagrams on its second socket.
+        side_port: Mutex<Option<bool>>,
     }
     impl Channel {
         fn new() -> Arc<Self> {
@@ -812,6 +849,7 @@ mod tests {
                 identity_probed: tokio::sync::Notify::new(),
                 legacy_hides_rotation: AtomicBool::new(false),
                 ipv4_only: Mutex::new(None),
+                side_port: Mutex::new(None),
             })
         }
         /// A test channel that presents the candidate key and advertises rotation support.
@@ -988,6 +1026,17 @@ mod tests {
                     )
                     .map_err(|_| "encoding failed")?;
                     let mut identity = identity;
+                    let side_report = (probe["side_socket"] == true)
+                        .then(|| *self.side_port.lock().unwrap())
+                        .flatten();
+                    if let (Some(takes_marks), Some(fields)) =
+                        (side_report, identity.as_object_mut())
+                    {
+                        fields.insert("side_socket".to_owned(), true.into());
+                        if takes_marks {
+                            fields.insert("side_port".to_owned(), true.into());
+                        }
+                    }
                     if let (Some(ipv4_only), Some(fields)) = (report, identity.as_object_mut()) {
                         fields.insert("ipv6_state".to_owned(), true.into());
                         if ipv4_only {
@@ -1347,6 +1396,50 @@ mod tests {
         );
         attach_once(&service, Channel::new()).await;
         assert!(!marked_for_server(&service, NodeId(2)).await);
+    }
+
+    /// What the store says about `node`'s side-port mark in the snapshot the server's node receives.
+    async fn side_port_marked_for_server(service: &MeshService, node: NodeId) -> bool {
+        let store = service.dataplane();
+        let server = store.config(NodeId(1)).await.unwrap();
+        server.peers[&node].peer.side_port
+    }
+
+    /// A node that says it takes marked datagrams is marked for peers that understand the field, from
+    /// its attach probe on (#260, J1211): the mark is in place before its first peers' snapshots.
+    #[tokio::test]
+    async fn a_node_that_takes_marks_is_marked_for_its_peers_after_it_attaches() {
+        let service = service().await;
+        let store = service.dataplane();
+        // The server's own node understands the field, so its snapshots can carry it.
+        assert!(store.record_side_port(NodeId(1), Some(true)).await.unwrap());
+        let channel = Channel::new();
+        *channel.side_port.lock().unwrap() = Some(true);
+        attach_once(&service, channel).await;
+        assert!(side_port_marked_for_server(&service, NodeId(2)).await);
+    }
+
+    /// A node that answers the probe with "no", or never answers it, is never marked: nobody sends it a
+    /// marked datagram, which kernel `WireGuard` and plain `GotaTun` would drop.
+    #[tokio::test]
+    async fn a_node_that_does_not_take_marks_is_never_marked() {
+        for report in [None, Some(false)] {
+            let service = service().await;
+            assert!(
+                service
+                    .dataplane()
+                    .record_side_port(NodeId(1), Some(true))
+                    .await
+                    .unwrap()
+            );
+            let channel = Channel::new();
+            *channel.side_port.lock().unwrap() = report;
+            attach_once(&service, channel).await;
+            assert!(
+                !side_port_marked_for_server(&service, NodeId(2)).await,
+                "report {report:?} must not mark the node"
+            );
+        }
     }
 
     #[tokio::test]

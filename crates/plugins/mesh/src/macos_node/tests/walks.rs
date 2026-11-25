@@ -113,6 +113,7 @@ impl Fixture {
                     endpoint: Some("192.0.2.5:51820".parse().expect("endpoint")),
                     candidates: Vec::new(),
                     ipv4_only: false,
+                    side_port: false,
                 },
                 inbound: TrafficPolicy::All,
                 outbound: TrafficPolicy::All,

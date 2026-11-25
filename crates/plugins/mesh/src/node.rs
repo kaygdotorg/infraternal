@@ -2063,6 +2063,13 @@ impl Node {
         self.rotation_link()
     }
 
+    /// Whether this node runs `GotaTun` with its second UDP socket on (#260, J1211), so peers may
+    /// send it marked small datagrams. The kernel engine has no second socket and never says so.
+    #[must_use]
+    pub fn side_socket(&self) -> bool {
+        self.engine_kind == EngineKind::GotaTun && crate::side_socket::enabled()
+    }
+
     /// Whether the node runs IPv4-only because the mesh link has IPv6 off (#578, J1142).
     ///
     /// This is what the last accepted snapshot installed, not a live reading: peers are told
@@ -3690,6 +3697,7 @@ impl Node {
                             && old.peer.key == peer.peer.key
                             && old.peer.addresses == peer.peer.addresses
                             && old.peer.ipv4_only == peer.peer.ipv4_only
+                            && old.peer.side_port == peer.peer.side_port
                             && old.peer.previous_key == peer.peer.previous_key
                             && old.peer.previous_active == peer.peer.previous_active
                     })

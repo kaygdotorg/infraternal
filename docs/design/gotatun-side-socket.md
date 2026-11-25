@@ -1,7 +1,7 @@
 # GotaTun side socket: small datagrams in their own `fq` flow
 
-**Job:** J1159 · **Issue:** #260 · **Status:** receive rule pinned, sender off by default (see
-Verdict) · **Decision owner:** kayg · **Follows:** J1139, J1140 (`gotatun-send-limit.md`), J1143
+**Job:** J1159, J1211 · **Issue:** #260 · **Status:** on by default for infraternal nodes, per peer, only
+for peers that advertise it (see "Turned on") · **Decision owner:** kayg · **Follows:** J1139, J1140 (`gotatun-send-limit.md`), J1143
 
 ## Problem
 
@@ -115,3 +115,31 @@ within noise. It is not turned on here because that needs work outside this job:
 - `PeerMut::set_side_port(bool)` overrides the opt-in per peer (no effect without a side socket).
 - The side socket needs replies-first's `tx` lane (on by default since J1143); with
   `GOTATUN_REPLIES_FIRST=off`, marks are cleared and everything uses the main socket.
+
+## Turned on (J1211, owner approved 2026-11-25)
+
+J1159 left three things open (see Verdict). All three are done, on Linux and macOS nodes.
+
+1. **A device-level switch.** The fork (`kayg/gotatun-fork` `cd295c2`, one commit on `e87fef9`) has
+   `DeviceBuilder::with_side_socket(bool)` and `Peer::with_side_port(bool)`. The node turns the
+   device switch on by default. `INFRATERNAL_MESH_SIDE_SOCKET=off` (or `0`) turns it off for one
+   node: no second socket, no marks, and no advertisement (`mesh/src/side_socket.rs`).
+2. **Advertising.** A node answers `mesh.identity {"side_socket":true}` with `side_socket` (it
+   understands the field) and `side_port` (it runs GotaTun, the receive rule, and has the second
+   socket on). The kernel engine never says yes. The coordinator asks at attach, before the first
+   snapshot, stores it (`mesh_nodes.side_port_supported/side_port`, one revision bump per change)
+   and sets `Peer::side_port` for a peer only when that peer said yes, and only in snapshots for
+   nodes that understand the field (the `ipv4_only` path, J1142).
+3. **Opt-in per peer, never by default.** The engine builds every peer with an explicit
+   `with_side_port(switch_on && peer.side_port)`, both rotation identities alike. A peer that did
+   not advertise, an older node, a kernel-engine node: no mark is ever sent to it.
+4. **Listening.** The device also receives on the second socket (`udp::side_recv::WithSide`, the
+   same single receive task, main socket polled first), through the same handshake admission
+   guard as the mesh port (`BoundUdpFactory::bind_side`). It is insurance: a peer that reaches
+   our second port anyway (an older node's roam, a rebinding NAT) is heard, not black-holed.
+
+Rejected: a second receive task (handshake backlog, pool and crypto order belong to one task);
+asking each node for a per-peer capability (a node is capable or it is not); sending marks to every
+peer and relying on the peer to ignore them (kernel WireGuard drops them, 71.7% loss).
+
+Measured numbers are on #260 (J1211 comment) and in `research/` receipts attached there.

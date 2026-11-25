@@ -94,6 +94,7 @@ mod tests {
                 endpoint: None,
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             },
             inbound,
             outbound: TrafficPolicy::None,

@@ -138,6 +138,7 @@ fn endpoint_route_metric_is_bounded_by_egress_link_mtu() {
         endpoint: Some("198.51.100.2:51820".parse().unwrap()),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     Device::routes(&[peer], false).unwrap();
     let underlay = ip(&["route", "get", "198.51.100.2"]);

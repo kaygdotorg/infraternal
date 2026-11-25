@@ -207,6 +207,28 @@ impl UdpTransportFactory for BoundUdpFactory {
             PeerAdmissionUdpReceiver::new(self.receive.clone(), Arc::clone(&self.admission)),
         )))
     }
+
+    /// The second socket for small data datagrams (#260, J1211): an ephemeral port beside the mesh
+    /// port, with the same family set-up. Its receive half runs the same admission guard as the
+    /// main one, so a stranger cannot use the second port to skip it. The direct-path probes stay
+    /// on the main socket.
+    async fn bind_side(
+        &mut self,
+        main: &Self::Send,
+        params: &UdpTransportFactoryParams,
+    ) -> io::Result<Option<(Self::Send, Self::Recv)>> {
+        if params.addr.is_some() || params.port != self.port {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let Some((send, receive)) = UdpSocketFactory::default().bind_side(main, params).await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((
+            send,
+            PeerAdmissionUdpReceiver::new(receive, Arc::clone(&self.admission)),
+        )))
+    }
 }
 
 /// The identities a peer list installs in `GotaTun`, which are the ones the guard admits.
@@ -995,10 +1017,39 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
     Ok(peers)
 }
 
+/// Convert one configured peer to its `GotaTun` identities, and decide whether small datagrams to
+/// it may leave from the device's second socket (#260, J1211).
+///
+/// That is only for a peer whose own node advertised the side-mark receive rule through the
+/// coordinator (`Peer::side_port`), and only while this node's switch is on. Everything else,
+/// including every peer of a mesh whose coordinator never heard the capability, gets an explicit
+/// `false`, so no mark is ever sent to a peer that did not say it takes them (kernel `WireGuard`
+/// and plain `GotaTun` drop marked packets).
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
+fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+    peer_for_policy_with(policy, crate::side_socket::enabled())
+}
+
+/// [`peer_for_policy`] with this node's side-socket switch given, so tests can set it.
+/// # Errors
+/// Rejects invalid host routes before they reach the userspace device.
+fn peer_for_policy_with(
+    policy: &crate::dataplane::PeerPolicy,
+    side_socket: bool,
+) -> io::Result<Vec<WireGuardPeer>> {
+    let side_port = side_socket && policy.peer.side_port;
+    let mut peers = identities_for_policy(policy)?;
+    for peer in &mut peers {
+        peer.side_port = Some(side_port);
+    }
+    Ok(peers)
+}
+
 /// Convert one peer to its active key or both journaled overlap keys.
 /// # Errors
 /// Rejects invalid host routes before they reach `GotaTun`.
-fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
+fn identities_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
     let mut addresses = peer
         .routed_addresses()
@@ -1390,6 +1441,7 @@ impl PendingWorker {
                         .with_udp(factory)
                         .with_private_key(private_key)
                         .with_listen_port(info.port)
+                        .with_side_socket(crate::side_socket::enabled())
                         .with_ip_pair(utun.sender(), utun.receiver())
                         .with_peers(peers)
                         .build()
@@ -2333,6 +2385,13 @@ impl Node {
     #[must_use]
     pub fn active(&self) -> bool {
         self.enabled && self.identity.is_some() && self.worker.is_some()
+    }
+
+    /// Whether this node's `GotaTun` runs with its second UDP socket on (#260, J1211), so peers
+    /// may send it marked small datagrams. The Mac node always runs `GotaTun`.
+    #[must_use]
+    pub fn side_socket(&self) -> bool {
+        crate::side_socket::enabled()
     }
 
     /// Return the active UDP listener port advertised by this node's mesh identity.
