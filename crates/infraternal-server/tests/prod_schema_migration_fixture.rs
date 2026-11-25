@@ -8,6 +8,11 @@
 //! `PRAGMA foreign_key_check`, per-table row counts, and byte-for-byte row
 //! preservation across kept tables and columns.
 
+#![expect(
+    clippy::expect_used,
+    reason = "integration test assertions fail fast on unexpected SQLite or fixture errors"
+)]
+
 use infraternal_db::rusqlite::{Connection, types::Value};
 use sqlx::{
     SqlStr, SqlitePool,
@@ -423,7 +428,7 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
     let report = infraternal_db::migrate::run(&mut conn, &runner_list)
         .expect("rusqlite runner accepts fixture");
     assert_eq!(report.validated, SHIPPING_MIGRATIONS.migrations.len());
-    assert!(report.applied.is_empty());
+    assert_eq!(report.applied, Vec::<i64>::new());
 }
 
 /// Proves the upgrade harness exercises a real pending migration on top of the
