@@ -1,60 +1,66 @@
-//! Carries the authenticated remote control channel through the public HTTPS listener [168,196], #291.
+//! Carries the leg-B mutual TLS link through the public HTTPS listener [168,196], #291, #559.
 //!
-//! The link speaks agent link v2 (see `infraternal_plugin_remote::agent_link`):
-//! the infraternal agent proves its D168 key over a transcript bound to the
-//! TLS session it sees, and the server must answer with its current leg-B
-//! leaf and a signature over the same transcript. The leaf passes the same
-//! chain, name and [`ServerLeafFloor`] checks as on a direct leg-B dial
-//! before any protocol frame is sent, so an outer HTTPS certificate alone
-//! (pinned, publicly trusted or copied) never makes a peer the server (#559).
+//! When QUIC and TCP/TLS to the server's own port are blocked, the
+//! infraternal agent opens `wss://<public origin>/remote/agent` and runs the
+//! very same leg-B TLS session it would run over TCP *inside* that WebSocket:
+//! TLS 1.3, our CA only, ALPN `infraternal/1`, its host certificate, the
+//! enrolled server name and the [`ServerLeafFloor`]. The outer HTTPS session
+//! is plain transport. Whoever terminates it (the server itself, a reverse
+//! proxy, or a relay holding a publicly trusted certificate for the name) only
+//! forwards leg-B ciphertext it cannot read, change or answer for the server.
+//!
+//! The WebSocket carries the inner TLS bytes in binary messages
+//! ([`WebSocketCarrier`]); the server's `/remote/agent` route uses the same
+//! adapter on its side.
 
-use crate::{channel::Channel, remote_tls::Identity};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use crate::remote_tls::{self, Carrier, Identity, TcpTls};
 use bytes::Bytes;
-use futures_util::{
-    SinkExt, StreamExt,
-    stream::{SplitSink, SplitStream},
-};
-use infraternal_plugin_remote::{
-    agent_link::{
-        AgentLinkChallenge, AgentLinkProofV2, AgentLinkReadyV2, AgentTranscript, NONCE_LEN,
-        PROOF_V2, READY_V2, ServerProofPolicy, agent_proof_bytes_v2, message_type, server_unproved,
-        tls_channel_binding, verify_ready_v2,
-    },
-    server_leaf_floor::ServerLeafFloor,
-};
-use infraternal_protocol::MAX_FRAME_LEN;
+use futures_util::{Sink, Stream};
+use infraternal_plugin_remote::server_leaf_floor::ServerLeafFloor;
 use openssl::{
-    hash::MessageDigest,
-    pkey::{Id, PKey, Private},
-    sign::Signer,
     ssl::{SslConnector, SslMethod, SslVerifyMode},
     x509::{X509, store::X509StoreBuilder},
 };
-use std::io;
-use std::time::Duration;
+use std::{
+    io,
+    pin::Pin,
+    task::{Context, Poll, ready},
+    time::Duration,
+};
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
-    sync::{Mutex, watch},
-    time::Instant,
+    time::{Instant, Interval, MissedTickBehavior},
 };
 use tokio_openssl::SslStream;
 use tokio_tungstenite::{
     WebSocketStream, client_async_with_config,
-    tungstenite::{Message, client::IntoClientRequest, protocol::WebSocketConfig},
+    tungstenite::{self, Message, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 use url::Url;
-use uuid::Uuid;
 
 const HANDSHAKE: Duration = Duration::from_secs(5);
+/// How often an idle link sends a WebSocket ping, so proxies that close idle
+/// upgraded connections (often after 60 s) keep it open. This is the link's
+/// only timer, as before #559.
 const KEEPALIVE: Duration = Duration::from_secs(25);
 const WS_PATH: &str = "/remote/agent";
-const MAX_WS_MESSAGE: usize = MAX_FRAME_LEN + 64;
-/// Largest `ready-v2` the agent reads: a leaf of at most 4 KiB, base64, plus
-/// a signature and field names.
-const MAX_READY_MESSAGE: usize = 8192;
+/// Largest WebSocket message either end of the link sends or accepts.
+///
+/// Each message carries at most one write of the inner TLS stream, which
+/// OpenSSL makes one record (at most 16 KiB of plaintext plus 256 bytes), so
+/// honest peers stay far below this. Keeping it small also bounds what an
+/// unauthenticated peer can make the other side buffer for one message.
+pub const CARRIER_MESSAGE_MAX: usize = 64 * 1024;
 
-type Socket = WebSocketStream<SslStream<TcpStream>>;
+/// The WebSocket settings both ends of the link use.
+#[must_use]
+pub fn carrier_config() -> WebSocketConfig {
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(CARRIER_MESSAGE_MAX);
+    config.max_frame_size = Some(CARRIER_MESSAGE_MAX);
+    config
+}
 
 /// Public-origin preflight failures the enrolling command can explain without exposing IO details.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,32 +75,166 @@ pub enum PreflightFailure {
     Tls,
     /// The app listener or its proxy did not complete a WebSocket upgrade.
     Upgrade,
-    /// The upgraded route did not return a valid app-level challenge.
-    Challenge,
+    /// The upgraded route did not answer the infraternal agent link: no leg-B
+    /// TLS listener behind it.
+    Link,
 }
 
-/// A verified HTTPS WebSocket carrying muxed infraternal protocol frames.
-pub struct AgentWebSocket {
-    writer: Mutex<SplitSink<Socket, Message>>,
-    reader: Mutex<SplitStream<Socket>>,
-    pending: Mutex<Bytes>,
-    retired: watch::Sender<bool>,
+/// A WebSocket used as an ordered byte stream: every write becomes one binary
+/// message, and reads return the bytes of the binary messages in order.
+///
+/// It is the [`Carrier`] the inner leg-B TLS session runs on, on both ends of
+/// the HTTPS link. While a read waits it also sends a ping every
+/// [`KEEPALIVE`]; pings from the peer are answered by the WebSocket layer
+/// itself. A text message is a protocol error, and a close ends the stream.
+/// Writes are buffered until `poll_flush`, which the TLS channel calls after
+/// every frame, so one frame can share a TCP segment.
+pub struct WebSocketCarrier<T> {
+    /// The upgraded WebSocket.
+    socket: WebSocketStream<T>,
+    /// The unread rest of the last binary message.
+    pending: Bytes,
+    /// Ticks every [`KEEPALIVE`] while reads wait.
+    keepalive: Interval,
+    /// A keepalive ping is due but the socket could not take it yet.
+    ping_due: bool,
+    /// A ping was queued from the read side and still has to be flushed.
+    ping_unflushed: bool,
+    /// The peer closed the WebSocket: reads return end of stream.
+    finished: bool,
 }
 
-struct RetireOnDrop<'a> {
-    retired: &'a watch::Sender<bool>,
-    complete: bool,
+impl<T> WebSocketCarrier<T> {
+    /// Use an upgraded WebSocket as a byte carrier.
+    ///
+    /// Must be created inside the Tokio runtime (it holds the keepalive timer).
+    pub fn new(socket: WebSocketStream<T>) -> Self {
+        let mut keepalive = tokio::time::interval_at(Instant::now() + KEEPALIVE, KEEPALIVE);
+        keepalive.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        Self {
+            socket,
+            pending: Bytes::new(),
+            keepalive,
+            ping_due: false,
+            ping_unflushed: false,
+            finished: false,
+        }
+    }
+
+    /// The WebSocket this carrier wraps, for its owner's bookkeeping.
+    pub fn get_mut(&mut self) -> &mut WebSocketStream<T> {
+        &mut self.socket
+    }
 }
-impl Drop for RetireOnDrop<'_> {
-    fn drop(&mut self) {
-        if !self.complete {
-            self.retired.send_replace(true);
+
+/// Map a WebSocket error to the IO error the TLS layer above understands.
+fn carrier_error(error: tungstenite::Error) -> io::Error {
+    match error {
+        tungstenite::Error::Io(error) => error,
+        tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => {
+            io::ErrorKind::BrokenPipe.into()
+        }
+        _ => io::ErrorKind::InvalidData.into(),
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> WebSocketCarrier<T> {
+    /// Queue and flush a keepalive ping when its timer is due. Never blocks
+    /// the read: a socket that cannot take the ping yet keeps it due.
+    fn poll_keepalive(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
+        if self.keepalive.poll_tick(cx).is_ready() {
+            self.ping_due = true;
+        }
+        let mut socket = Pin::new(&mut self.socket);
+        if self.ping_due
+            && let Poll::Ready(ready) = socket.as_mut().poll_ready(cx)
+        {
+            ready.map_err(carrier_error)?;
+            socket
+                .as_mut()
+                .start_send(Message::Ping(Bytes::new()))
+                .map_err(carrier_error)?;
+            self.ping_due = false;
+            self.ping_unflushed = true;
+        }
+        if self.ping_unflushed
+            && let Poll::Ready(flushed) = socket.poll_flush(cx)
+        {
+            flushed.map_err(carrier_error)?;
+            self.ping_unflushed = false;
+        }
+        Ok(())
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for WebSocketCarrier<T> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            if !this.pending.is_empty() {
+                let count = buf.remaining().min(this.pending.len());
+                buf.put_slice(&this.pending.split_to(count));
+                return Poll::Ready(Ok(()));
+            }
+            if this.finished || buf.remaining() == 0 {
+                return Poll::Ready(Ok(()));
+            }
+            this.poll_keepalive(cx)?;
+            match ready!(Pin::new(&mut this.socket).poll_next(cx)) {
+                Some(Ok(Message::Binary(data))) => this.pending = data,
+                // Answered (pings) or expected (pongs) by the WebSocket layer.
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_))) | None => this.finished = true,
+                Some(Ok(Message::Text(_))) => {
+                    return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+                }
+                Some(Err(error)) => return Poll::Ready(Err(carrier_error(error))),
+            }
         }
     }
 }
 
-fn closed() -> io::Error {
-    io::ErrorKind::BrokenPipe.into()
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WebSocketCarrier<T> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if data.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let mut socket = Pin::new(&mut self.get_mut().socket);
+        ready!(socket.as_mut().poll_ready(cx)).map_err(carrier_error)?;
+        let count = data.len().min(CARRIER_MESSAGE_MAX);
+        socket
+            .start_send(Message::Binary(Bytes::copy_from_slice(&data[..count])))
+            .map_err(carrier_error)?;
+        Poll::Ready(Ok(count))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().socket)
+            .poll_flush(cx)
+            .map_err(carrier_error)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().socket)
+            .poll_close(cx)
+            .map_err(carrier_error)
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> WebSocketCarrier<T> {
+    /// Box this carrier for [`remote_tls::dial_over`] or
+    /// [`remote_tls::accept_over`].
+    pub fn into_carrier(self) -> Carrier {
+        Carrier::Tunnel(Box::new(self))
+    }
 }
 
 fn refused() -> io::Error {
@@ -104,21 +244,9 @@ fn refused() -> io::Error {
     )
 }
 
-fn trace_client_phase<T>(phase: &'static str, result: io::Result<T>) -> io::Result<T> {
-    if std::env::var_os("INFRATERNAL_REMOTE_LINK_TRACE").is_some() {
-        match &result {
-            Ok(_) => eprintln!("remote agent HTTPS client phase={phase} complete"),
-            Err(error) => eprintln!(
-                "remote agent HTTPS client phase={phase} kind={:?}",
-                error.kind()
-            ),
-        }
-    }
-    result
-}
-
-/// The TLS client for the agent's server link: either the enrolled server's pinned root, or the
-/// first trusted fixed system bundle from [`tls_roots`].
+/// The TLS client for the outer HTTPS session: either the enrolled server's pinned certificate, or the
+/// first trusted fixed system bundle from [`tls_roots`]. It only has to reach the right listener; the
+/// inner leg-B session authenticates the server.
 ///
 /// [`tls_roots`]: infraternal_plugin_api::tls_roots
 fn https_connector(root: Option<&X509>, system_roots: bool) -> io::Result<SslConnector> {
@@ -162,18 +290,8 @@ fn origin(value: &str) -> io::Result<(Url, String, u16)> {
     Ok((parsed, host, port))
 }
 
-fn sign_challenge(key: &PKey<Private>, message: &[u8]) -> io::Result<Vec<u8>> {
-    let mut signer = match key.id() {
-        Id::ED25519 => Signer::new_without_digest(key),
-        Id::EC => Signer::new(MessageDigest::sha256(), key),
-        _ => return Err(refused()),
-    }
-    .map_err(|_| refused())?;
-    signer.sign_oneshot_to_vec(message).map_err(|_| refused())
-}
-
-/// How the infraternal agent judges the server on the HTTPS link: the same
-/// trust as its leg-B dials.
+/// How the infraternal agent judges the server on the HTTPS link: exactly
+/// the trust of its direct leg-B dials.
 pub struct ServerTrust<'a> {
     /// The enrolled CA roots.
     pub roots: &'a [X509],
@@ -181,196 +299,87 @@ pub struct ServerTrust<'a> {
     pub server_name: &'a str,
     /// The newest server leaf this enrollment accepted; refuses older ones.
     pub floor: &'a ServerLeafFloor,
-    /// Refuse a server that did not check this TLS session's binding. True
-    /// when the enrollment pins the server's own HTTPS certificate, which the
-    /// server then serves itself (see [`binding_required`]).
-    pub require_binding: bool,
 }
 
-/// Whether an enrollment must insist on a TLS-bound answer: it pins an HTTPS
-/// certificate of its own (`https_der`, the certificate `config.tls`
-/// serves), so the server terminates this TLS session itself and can always
-/// check the binding.
+/// Dial the public app origin and run the leg-B mutual TLS session inside
+/// its WebSocket, presenting `identity` and checking the server against
+/// `server`.
 ///
-/// Not with system roots (a reverse proxy terminates TLS), and not when the
-/// pin is the CA root itself (older enrollments): a TLS proxy holding a
-/// CA-issued certificate may sit in front of such a server. In both cases
-/// the server still checks the binding whenever it terminates TLS itself.
-#[must_use]
-pub fn binding_required(
-    https_root: Option<&X509>,
-    https_system_roots: bool,
-    roots: &[X509],
-) -> bool {
-    let Some(pin) = https_root.filter(|_| !https_system_roots) else {
-        return false;
-    };
-    let Ok(pin) = pin.to_der() else {
-        // An unreadable pin cannot have completed TLS; be strict.
-        return true;
-    };
-    !roots
-        .iter()
-        .any(|root| root.to_der().is_ok_and(|root| root == pin))
-}
-
-/// Dial the public app origin, prove possession of the enrolled D168 key and
-/// require the server to prove its current leg-B leaf (agent link v2).
+/// The returned channel is the same type the direct TCP fallback returns,
+/// and nothing has been sent on it yet. Round trips after the WebSocket
+/// upgrade: one (the inner TLS 1.3 handshake); the first protocol frame
+/// leaves with the agent's TLS Finished.
 /// # Errors
-/// Returns an error if TLS trust, the WebSocket upgrade, the challenge, the
-/// key proof or the server's proof fails. A server that does not prove its
-/// leaf (or answers v1) is refused with `InvalidData`, never
-/// `PermissionDenied`, so it cannot start certificate recovery.
+/// Returns an error if outer TLS, the upgrade, the inner handshake (chain,
+/// name, ALPN, client certificate) or the floor refuses. A server leaf the
+/// floor refuses is `InvalidData`, as on the direct dials.
 pub async fn connect(
     public_origin: &str,
-    host_id: Uuid,
     identity: &Identity,
     https_root: Option<&X509>,
     https_system_roots: bool,
     server: &ServerTrust<'_>,
-) -> io::Result<AgentWebSocket> {
-    let (mut socket, challenge, binding) = trace_client_phase(
-        "challenge",
-        socket_with_challenge(public_origin, https_root, https_system_roots)
-            .await
-            .map_err(preflight_io),
-    )?;
-    let server_nonce: [u8; NONCE_LEN] = trace_client_phase(
-        "nonce",
-        B64.decode(&challenge.nonce)
-            .ok()
-            .and_then(|nonce| nonce.try_into().ok())
-            .ok_or_else(refused),
-    )?;
-    let mut client_nonce = [0; NONCE_LEN];
-    openssl::rand::rand_bytes(&mut client_nonce).map_err(|_| refused())?;
-    let message = agent_proof_bytes_v2(host_id, &server_nonce, &client_nonce, binding.as_ref());
-    let certificate_der = trace_client_phase(
-        "certificate-encode",
-        identity.certificate.to_der().map_err(|_| refused()),
-    )?;
-    let signature = trace_client_phase("proof-sign", sign_challenge(&identity.key, &message))?;
-    let proof = AgentLinkProofV2 {
-        message_type: PROOF_V2.to_owned(),
-        host_id,
-        certificate_der: B64.encode(&certificate_der),
-        client_nonce: B64.encode(client_nonce),
-        channel_binding: binding.map(|binding| B64.encode(binding)),
-        signature: B64.encode(signature),
-    };
-    let encoded = trace_client_phase(
-        "proof-encode",
-        serde_json::to_string(&proof).map_err(|_| refused()),
-    )?;
-    let sent = tokio::time::timeout(HANDSHAKE, socket.send(Message::Text(encoded.into())))
+) -> io::Result<TcpTls> {
+    let socket = upgraded(public_origin, https_root, https_system_roots)
         .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
-        .and_then(|result| result.map_err(|_| refused()));
-    trace_client_phase("proof-send", sent)?;
-    let ready = tokio::time::timeout(HANDSHAKE, socket.next())
-        .await
-        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
-        .and_then(|message| {
-            message
-                .ok_or_else(closed)
-                .and_then(|message| message.map_err(|_| refused()))
-        });
-    let ready = trace_client_phase("ready-receive", ready)?;
-    let transcript = AgentTranscript {
-        host_id,
-        server_nonce: &server_nonce,
-        client_nonce: &client_nonce,
-        agent_certificate_der: &certificate_der,
-        binding: binding.as_ref(),
-    };
-    trace_client_phase("server-proof", server_proof(&ready, server, &transcript))?;
-    let (writer, reader) = socket.split();
-    Ok(AgentWebSocket {
-        writer: Mutex::new(writer),
-        reader: Mutex::new(reader),
-        pending: Mutex::new(Bytes::new()),
-        retired: watch::channel(false).0,
-    })
+        .map_err(preflight_io)?;
+    let config = remote_tls::client_config(identity, server.roots)?;
+    let connection = remote_tls::dial_over(
+        WebSocketCarrier::new(socket).into_carrier(),
+        server.server_name,
+        &config,
+    )
+    .await?;
+    // Dropping a refused connection closes it before any frame is sent.
+    let leaf = connection
+        .peer_leaf
+        .as_ref()
+        .and_then(|leaf| leaf.to_der().ok())
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))?;
+    server.floor.admit(&leaf)?;
+    Ok(connection.channel)
 }
 
-/// Check the server's answer to the proof: a `ready-v2` whose leaf and
-/// signature pass [`verify_ready_v2`] and whose leaf the floor admits. A v1
-/// `ready` (a server built before #559) proves nothing and is refused.
-fn server_proof(
-    ready: &Message,
-    server: &ServerTrust<'_>,
-    transcript: &AgentTranscript<'_>,
-) -> io::Result<()> {
-    let Message::Text(ready) = ready else {
-        return Err(server_unproved());
-    };
-    if ready.len() > MAX_READY_MESSAGE || message_type(ready.as_str()).as_deref() != Some(READY_V2)
-    {
-        return Err(server_unproved());
-    }
-    let ready: AgentLinkReadyV2 =
-        serde_json::from_str(ready.as_str()).map_err(|_| server_unproved())?;
-    let leaf_der = canonical(&ready.server_certificate_der)?;
-    let signature = canonical(&ready.signature)?;
-    verify_ready_v2(
-        &ServerProofPolicy {
-            roots: server.roots,
-            server_name: server.server_name,
-            require_binding: server.require_binding,
-        },
-        transcript,
-        &leaf_der,
-        ready.channel_bound,
-        &signature,
-    )?;
-    // `verify_ready_v2` checked that this DER is exactly the leaf it verified;
-    // the floor reads the DER itself (#580).
-    server.floor.admit(&leaf_der)
-}
-
-/// Decode canonical base64url from the server, or refuse it as unproved.
-fn canonical(value: &str) -> io::Result<Vec<u8>> {
-    let bytes = B64.decode(value).map_err(|_| server_unproved())?;
-    if B64.encode(&bytes) != value {
-        return Err(server_unproved());
-    }
-    Ok(bytes)
-}
-
-/// Prove that the target can complete the app's WebSocket route and receive its challenge.
-/// No identity is sent during preflight; the certificate proof follows only after enrollment.
+/// Prove that the target can complete the app's WebSocket route and that a
+/// leg-B TLS listener answers inside it.
+///
+/// No identity is sent and nothing is trusted during preflight (see
+/// [`remote_tls::probe_over`]); the real link checks the server fully.
 /// # Errors
-/// Returns a classified error when DNS, TCP, TLS, upgrade, or challenge setup fails.
+/// Returns a classified error when DNS, TCP, TLS, upgrade, or the inner
+/// listener check fails.
 pub async fn preflight(
     public_origin: &str,
     https_root: Option<&X509>,
     https_system_roots: bool,
 ) -> Result<(), PreflightFailure> {
-    let (socket, _, _) =
-        socket_with_challenge(public_origin, https_root, https_system_roots).await?;
-    drop(socket);
-    Ok(())
+    let socket = upgraded(public_origin, https_root, https_system_roots).await?;
+    let host = origin(public_origin)
+        .map(|(_, host, _)| host)
+        .map_err(|_| PreflightFailure::InvalidOrigin)?;
+    remote_tls::probe_over(WebSocketCarrier::new(socket).into_carrier(), &host)
+        .await
+        .map_err(|_| PreflightFailure::Link)
 }
 
+/// The IO error a link attempt reports for a preflight-stage failure.
 fn preflight_io(error: PreflightFailure) -> io::Error {
     let kind = match error {
         PreflightFailure::InvalidOrigin => io::ErrorKind::InvalidInput,
         PreflightFailure::Dns => io::ErrorKind::AddrNotAvailable,
         PreflightFailure::Connect => io::ErrorKind::NotConnected,
         PreflightFailure::Tls => io::ErrorKind::PermissionDenied,
-        PreflightFailure::Upgrade | PreflightFailure::Challenge => io::ErrorKind::InvalidData,
+        PreflightFailure::Upgrade | PreflightFailure::Link => io::ErrorKind::InvalidData,
     };
     io::Error::new(kind, "remote HTTPS agent link refused")
 }
 
-/// Dial the origin, complete TLS and the WebSocket upgrade, and read the
-/// server's challenge. Also returns the TLS session's channel binding (see
-/// [`tls_channel_binding`]), taken before any application byte.
-async fn socket_with_challenge(
+/// Dial the origin, complete the outer TLS session and the WebSocket upgrade.
+async fn upgraded(
     public_origin: &str,
     root: Option<&X509>,
     system_roots: bool,
-) -> Result<(Socket, AgentLinkChallenge, Option<[u8; 32]>), PreflightFailure> {
+) -> Result<WebSocketStream<SslStream<TcpStream>>, PreflightFailure> {
     let (mut url, host, port) =
         origin(public_origin).map_err(|_| PreflightFailure::InvalidOrigin)?;
     let connector = https_connector(root, system_roots).map_err(|_| PreflightFailure::Tls)?;
@@ -395,11 +404,10 @@ async fn socket_with_challenge(
         .into_ssl(&host)
         .map_err(|_| PreflightFailure::Tls)?;
     let mut tls = SslStream::new(ssl, stream).map_err(|_| PreflightFailure::Tls)?;
-    tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut tls).connect())
+    tokio::time::timeout(HANDSHAKE, Pin::new(&mut tls).connect())
         .await
         .map_err(|_| PreflightFailure::Tls)?
         .map_err(|_| PreflightFailure::Tls)?;
-    let binding = tls_channel_binding(tls.ssl());
     url.set_scheme("wss")
         .map_err(|()| PreflightFailure::InvalidOrigin)?;
     url.set_path(WS_PATH);
@@ -408,124 +416,124 @@ async fn socket_with_challenge(
         .as_str()
         .into_client_request()
         .map_err(|_| PreflightFailure::InvalidOrigin)?;
-    let mut config = WebSocketConfig::default();
-    config.max_message_size = Some(MAX_WS_MESSAGE);
-    config.max_frame_size = Some(MAX_WS_MESSAGE);
-    let (mut socket, _) = tokio::time::timeout(
+    let (socket, _) = tokio::time::timeout(
         HANDSHAKE,
-        client_async_with_config(request, tls, Some(config)),
+        client_async_with_config(request, tls, Some(carrier_config())),
     )
     .await
     .map_err(|_| PreflightFailure::Upgrade)?
     .map_err(|_| PreflightFailure::Upgrade)?;
-    let message = tokio::time::timeout(HANDSHAKE, socket.next())
-        .await
-        .map_err(|_| PreflightFailure::Upgrade)?
-        .ok_or(PreflightFailure::Upgrade)?
-        .map_err(|_| PreflightFailure::Upgrade)?;
-    let Message::Text(message) = message else {
-        return Err(PreflightFailure::Challenge);
-    };
-    let challenge: AgentLinkChallenge =
-        serde_json::from_str(message.as_str()).map_err(|_| PreflightFailure::Challenge)?;
-    let nonce = B64
-        .decode(&challenge.nonce)
-        .map_err(|_| PreflightFailure::Challenge)?;
-    if challenge.message_type != "challenge"
-        || nonce.len() != 32
-        || B64.encode(nonce) != challenge.nonce
-    {
-        return Err(PreflightFailure::Challenge);
-    }
-    Ok((socket, challenge, binding))
+    Ok(socket)
 }
 
-impl AgentWebSocket {
-    async fn send_control(&self, message: Message) -> io::Result<()> {
-        let mut writer = self.writer.lock().await;
-        tokio::time::timeout(HANDSHAKE, writer.send(message))
+#[cfg(test)]
+mod tests {
+    //! The byte carrier over a real in-memory WebSocket pair.
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    /// A connected client/server WebSocket pair over an in-memory pipe.
+    async fn pair() -> (
+        WebSocketStream<tokio::io::DuplexStream>,
+        WebSocketStream<tokio::io::DuplexStream>,
+    ) {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        (
+            WebSocketStream::from_raw_socket(client, Role::Client, Some(carrier_config())).await,
+            WebSocketStream::from_raw_socket(server, Role::Server, Some(carrier_config())).await,
+        )
+    }
+
+    /// Bytes cross in order in both directions, a large write is split into
+    /// messages no larger than [`CARRIER_MESSAGE_MAX`], and small reads take
+    /// a message in pieces without losing any byte.
+    #[tokio::test]
+    async fn bytes_cross_in_order_and_large_writes_are_split() {
+        let (client, server) = pair().await;
+        let mut client = WebSocketCarrier::new(client);
+        let mut server = WebSocketCarrier::new(server);
+        let large: Vec<u8> = (0..200_000u32)
+            .map(|value| value.to_le_bytes()[0])
+            .collect();
+        let writer = {
+            let large = large.clone();
+            tokio::spawn(async move {
+                client.write_all(&large).await.unwrap();
+                client.flush().await.unwrap();
+                client
+            })
+        };
+        let mut received = vec![0; large.len()];
+        let mut small = [0; 7];
+        let first = server.read(&mut small).await.unwrap();
+        received[..first].copy_from_slice(&small[..first]);
+        server.read_exact(&mut received[first..]).await.unwrap();
+        assert_eq!(received, large);
+        let mut client = writer.await.unwrap();
+        server.write_all(b"back").await.unwrap();
+        server.flush().await.unwrap();
+        let mut back = [0; 4];
+        client.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"back");
+    }
+
+    /// The raw messages a carrier writes are binary and bounded.
+    #[tokio::test]
+    async fn messages_are_binary_and_bounded() {
+        let (client, mut server) = pair().await;
+        let mut client = WebSocketCarrier::new(client);
+        client
+            .write_all(&vec![1; 3 * CARRIER_MESSAGE_MAX])
             .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-            .map_err(|_| closed())
+            .unwrap();
+        client.flush().await.unwrap();
+        for _ in 0..3 {
+            let Some(Ok(Message::Binary(data))) = server.next().await else {
+                panic!("expected a binary message");
+            };
+            assert_eq!(data.len(), CARRIER_MESSAGE_MAX);
+        }
     }
-}
 
-impl Channel for AgentWebSocket {
-    fn frame_timeout(&self) -> Option<Duration> {
-        Some(HANDSHAKE)
+    /// A close ends the stream; a text message is a protocol error.
+    #[tokio::test]
+    async fn close_is_end_of_stream_and_text_is_refused() {
+        let (client, mut server) = pair().await;
+        let mut client = WebSocketCarrier::new(client);
+        server.send(Message::Close(None)).await.unwrap();
+        let mut byte = [0; 1];
+        assert_eq!(client.read(&mut byte).await.unwrap(), 0);
+
+        let (client, mut server) = pair().await;
+        let mut client = WebSocketCarrier::new(client);
+        server.send(Message::Text("x".into())).await.unwrap();
+        assert_eq!(
+            client.read(&mut byte).await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
-    fn retire(&self) {
-        self.retired.send_replace(true);
-    }
-    async fn read(&self, bytes: &mut [u8]) -> io::Result<usize> {
-        if bytes.is_empty() {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        let mut retired = self.retired.subscribe();
-        if *retired.borrow() {
-            return Err(closed());
-        }
-        let mut pending = self.pending.lock().await;
-        if !pending.is_empty() {
-            let count = bytes.len().min(pending.len());
-            bytes[..count].copy_from_slice(&pending[..count]);
-            *pending = pending.slice(count..);
-            return Ok(count);
-        }
-        drop(pending);
-        let mut reader = self.reader.lock().await;
-        let mut keepalive = tokio::time::interval_at(Instant::now() + KEEPALIVE, KEEPALIVE);
-        loop {
-            tokio::select! {
-                biased;
-                _ = retired.changed() => return Err(closed()),
-                _ = keepalive.tick() => self.send_control(Message::Ping(Vec::new().into())).await?,
-                message = reader.next() => match message {
-                    Some(Ok(Message::Binary(data))) => {
-                        if data.is_empty() { continue; }
-                        let count = bytes.len().min(data.len());
-                        bytes[..count].copy_from_slice(&data[..count]);
-                        *self.pending.lock().await = data.slice(count..);
-                        return Ok(count);
-                    }
-                    Some(Ok(Message::Ping(data))) => self.send_control(Message::Pong(data)).await?,
-                    Some(Ok(Message::Pong(_))) => {},
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(closed()),
-                    Some(Ok(_)) => return Err(io::ErrorKind::InvalidData.into()),
-                }
-            }
-        }
-    }
-    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > MAX_WS_MESSAGE {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        let mut retired = self.retired.subscribe();
-        if *retired.borrow() {
-            return Err(closed());
-        }
-        let mut writer = tokio::select! {
-            biased;
-            _ = retired.changed() => return Err(closed()),
-            writer = self.writer.lock() => writer,
+
+    /// An idle read sends a ping every [`KEEPALIVE`] and nothing before it.
+    #[tokio::test(start_paused = true)]
+    async fn idle_reads_send_keepalive_pings() {
+        let (client, mut server) = pair().await;
+        let mut client = WebSocketCarrier::new(client);
+        let reader = tokio::spawn(async move {
+            let mut byte = [0; 1];
+            client.read(&mut byte).await.map(|_| byte[0])
+        });
+        let early = tokio::time::timeout(
+            KEEPALIVE.saturating_sub(Duration::from_secs(1)),
+            server.next(),
+        )
+        .await;
+        assert!(early.is_err(), "no ping before the keepalive interval");
+        let Some(Ok(Message::Ping(_))) = server.next().await else {
+            panic!("expected a keepalive ping");
         };
-        let mut guard = RetireOnDrop {
-            retired: &self.retired,
-            complete: false,
-        };
-        let result = tokio::select! {
-            biased;
-            _ = retired.changed() => Err(closed()),
-            result = tokio::time::timeout(
-                HANDSHAKE,
-                writer.send(Message::Binary(Bytes::copy_from_slice(bytes))),
-            ) => match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err(closed()),
-                Err(_) => Err(io::ErrorKind::TimedOut.into()),
-            },
-        };
-        guard.complete = result.is_ok();
-        result
+        server.send(Message::Binary(vec![7].into())).await.unwrap();
+        assert_eq!(reader.await.unwrap().unwrap(), 7);
     }
 }

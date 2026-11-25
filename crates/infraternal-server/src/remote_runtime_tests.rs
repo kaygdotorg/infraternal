@@ -748,9 +748,9 @@ mod additional_listeners;
 #[path = "server_leaf_listener_tests.rs"]
 mod server_leaf_listeners;
 
-/// The HTTPS agent link proves the current leg-B leaf (#559).
-#[path = "agent_link_v2_tests.rs"]
-mod agent_link_v2;
+/// The HTTPS agent link runs leg-B mutual TLS inside its WebSocket (#559).
+#[path = "agent_https_link_tests.rs"]
+mod agent_https_link;
 
 /// Forged QUIC Initials and a real host's reconnect under them (#572).
 #[path = "remote_retry_tests.rs"]

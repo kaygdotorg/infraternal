@@ -3,21 +3,21 @@
 //! A removed host's infraternal agent reconnects after its link is cut: at
 //! once when it was online, or when it comes back after being offline. That
 //! reconnect is admitted only to deliver the retained cleanup. These tests play
-//! the agent's side of a real WebSocket link to the production admission path
+//! the agent's side of a real WebSocket link, with leg-B TLS inside it, to the
+//! production admission path
 //! and pin the order the outbox keeps: the login revocation and its receipt
 //! (D352) first, then the uninstall request, then one transaction that records
 //! the answer and retires the entry. An answer that never arrives retires
 //! nothing, so the next reconnect asks again.
-use super::tests::{prove_v2, serve_leaf, signing_certificate};
+use super::tests::{HostLink, Route, hello, route};
 use super::*;
-use futures_util::{SinkExt, StreamExt};
-use infraternal_protocol::{Frame, encode_muxed_frame_into};
-use openssl::pkey::{PKey, Private};
-use tokio_tungstenite::tungstenite::Message as ClientMessage;
+use infraternal_agent::remote_tls::Identity;
+use infraternal_protocol::Frame;
+use openssl::x509::X509;
+use uuid::Uuid;
 
-/// The host side of one agent WebSocket link.
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// The host side of one agent link.
+type Socket = HostLink;
 
 /// A host removed by its owner, `person`, with an uninstall still to deliver,
 /// and a server whose agent route admits its cleanup-only reconnect.
@@ -31,24 +31,20 @@ struct Removed {
     hosts: RemoteHosts,
     /// The removed host.
     host: Uuid,
-    /// The host's enrolled certificate, still valid and individually unrevoked.
-    certificate: X509,
-    /// The host's key, which signs the link's proof.
-    key: PKey<Private>,
-    /// Where the server's agent route listens.
-    endpoint: std::net::SocketAddr,
-    /// The server task, aborted when a test ends.
-    server: tokio::task::JoinHandle<()>,
-    /// The leg-B listeners whose leaf the route signs `ready-v2` with.
-    _leaf: crate::remote_runtime::RemoteListeners,
+    /// The host's CA-issued identity, still valid and individually unrevoked.
+    identity: Identity,
+    /// The CA root both sides trust.
+    root: X509,
+    /// The server's agent route, stopped when the fixture is dropped.
+    route: Route,
 }
 
 /// Enrol a host, then record its removal the way `publish` commits it for a
 /// person's host: the cleanup row plus a removal row whose uninstall is
 /// `pending`.
 async fn removed() -> Removed {
-    let (certificate, key) = signing_certificate();
-    let fingerprint = certificate.digest(MessageDigest::sha256()).unwrap();
+    let (leaf, identity, root, _) = crate::remote_runtime::tests::identities();
+    let fingerprint = openssl::sha::sha256(&identity.certificate.to_der().unwrap());
     // The shared fixture gives every test the same host id, but the cleanup
     // lane is process-wide and admits one cleanup per host at a time. So each
     // test enrolls a host of its own, with its own certificate, or parallel
@@ -79,8 +75,8 @@ async fn removed() -> Removed {
             crate::enrollment::Mode::Rootless,
             now,
             &crate::enrollment::CertificateRecord {
-                fingerprint: fingerprint.as_ref().try_into().unwrap(),
-                issuer_fingerprint: [9; 32],
+                fingerprint,
+                issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
                 public_key: crate::identity_key::IdentityKey::Ed25519([3; 32]),
                 not_before: now - 1,
                 not_after: now - 1 + 604_800,
@@ -111,58 +107,35 @@ async fn removed() -> Removed {
         .unwrap();
     let waiter = store.clone();
     let hosts = RemoteHosts::default();
-    let leaf = serve_leaf(&hosts, &waiter).await;
-    let api = Api {
-        hosts: hosts.clone(),
+    let route = route(
         store,
-        admission: Arc::new(Semaphore::new(4)),
-        sources: Arc::new(crate::remote_admission::SourceSlots::new(4)),
-    };
-    let router = Router::new()
-        .route("/remote/agent", get(upgrade))
-        .with_state(api);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
+        hosts.clone(),
+        Arc::new(Semaphore::new(4)),
+        Arc::new(crate::remote_admission::SourceSlots::new(4)),
+        &leaf,
+        &root,
+    )
+    .await;
     Removed {
         pool,
         store: waiter,
         hosts,
         host,
-        certificate,
-        key,
-        endpoint,
-        server,
-        _leaf: leaf,
+        identity,
+        root,
+        route,
     }
 }
 
 impl Removed {
-    /// Reconnect as the removed host's infraternal agent: proof, then Hello.
+    /// Reconnect as the removed host's infraternal agent: leg-B TLS inside
+    /// the WebSocket, then Hello.
     async fn reconnect(&self) -> Socket {
-        let (mut socket, _) =
-            tokio_tungstenite::connect_async(format!("ws://{}/remote/agent", self.endpoint))
-                .await
-                .unwrap();
-        let ready = prove_v2(&mut socket, self.host, &self.certificate, &self.key).await;
-        assert!(ready.contains("ready-v2"));
-        send(
-            &mut socket,
-            &Frame::Hello {
-                version: 1,
-                caps: 0,
-                client_info: "removal-outbox-test",
-            },
-        )
-        .await;
-        socket
+        let link = HostLink::dial(self.route.endpoint, &self.identity, &self.root)
+            .await
+            .unwrap();
+        link.send(&hello("removal-outbox-test")).await.unwrap();
+        link
     }
 
     /// The removal's ledger: (receipt confirmed, entry retired, uninstall state).
@@ -206,12 +179,7 @@ impl Removed {
 
 /// Write one control-stream frame from the host's side.
 async fn send(socket: &mut Socket, frame: &Frame<'_>) {
-    let mut bytes = Vec::new();
-    encode_muxed_frame_into(0, frame, &mut bytes).unwrap();
-    socket
-        .send(ClientMessage::Binary(bytes.into()))
-        .await
-        .unwrap();
+    socket.send(frame).await.unwrap();
 }
 
 /// The next control call the server sends, as (call id, action, input), or
@@ -219,12 +187,7 @@ async fn send(socket: &mut Socket, frame: &Frame<'_>) {
 async fn try_next_call(socket: &mut Socket, wait: Duration) -> Option<(u32, String, Vec<u8>)> {
     tokio::time::timeout(wait, async {
         loop {
-            let message = socket.next().await?.ok()?;
-            if !message.is_binary() {
-                continue;
-            }
-            let bytes = message.into_data();
-            let decoded = infraternal_protocol::decode_muxed_frame(&bytes).unwrap();
+            let decoded = socket.next().await.ok()?;
             if let Frame::Call {
                 call_id,
                 action_id,
@@ -364,7 +327,7 @@ async fn outbox_asks_for_the_uninstall_after_the_receipt_then_retires() {
         waiting.await.unwrap(),
         Some(("requested".to_owned(), vec!["infraternal0".to_owned()]))
     );
-    removed.server.abort();
+    drop(removed);
 }
 
 /// A removal whose host does not answer in time gets no outcome, and the
@@ -379,7 +342,7 @@ async fn an_unanswered_removal_wait_ends_without_an_outcome() {
         .unwrap();
     assert_eq!(answered, None);
     assert_eq!(removed.ledger().await, (false, false, "pending".to_owned()));
-    removed.server.abort();
+    drop(removed);
 }
 
 /// A host that goes away before it answers the uninstall retires nothing; its
@@ -408,7 +371,7 @@ async fn lost_uninstall_answer_is_asked_again_on_the_next_reconnect() {
     )
     .await;
     removed.settles((true, true, "requested")).await;
-    removed.server.abort();
+    drop(removed);
 }
 
 /// A host that answers no still gives its receipt: the entry retires, and the
@@ -430,7 +393,7 @@ async fn refused_uninstall_retires_with_the_install_recorded_as_left() {
     )
     .await;
     removed.settles((true, true, "unreachable")).await;
-    removed.server.abort();
+    drop(removed);
 }
 
 /// A connected removal must leave its receipt pending until the reconnect has
@@ -574,5 +537,5 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
         .await
         .unwrap();
     assert_eq!(kept, 0);
-    removed.server.abort();
+    drop(removed);
 }

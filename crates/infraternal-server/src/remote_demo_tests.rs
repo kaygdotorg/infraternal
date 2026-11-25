@@ -673,23 +673,27 @@ async fn browser(address: SocketAddr, root: &X509, origin: &str, cookie: &str) -
     browser
 }
 
+/// The app listener upgrades `/remote/agent` and a leg-B TLS listener
+/// answers inside it; the server sends nothing before the inner `ClientHello`.
 #[tokio::test]
 #[ignore = "requires exclusive loopback port 4701"]
-async fn agent_websocket_upgrade_uses_the_app_listener_and_starts_key_proof() {
+async fn agent_websocket_upgrade_uses_the_app_listener_and_speaks_leg_b_tls() {
     let directory = Directory::new();
     let fixture = fixture(&directory).await;
+    // Preflight completes the upgrade and a certificate-free inner TLS 1.3
+    // handshake that must select the leg-B ALPN.
     infraternal_agent::remote_websocket::preflight(
         "https://localhost:4701",
         Some(&fixture.root),
         false,
     )
     .await
-    .expect("target preflight must complete the app's WebSocket challenge");
+    .expect("target preflight must reach leg-B TLS inside the app's WebSocket");
     let request = "wss://localhost:4701/remote/agent"
         .into_client_request()
         .unwrap();
     // This TLS connector has ordinary server trust and no client certificate.
-    // Agent identity must be proved after the application's WebSocket upgrade.
+    // Agent identity is proved by the inner leg-B TLS after the upgrade.
     let upgraded =
         tokio_tungstenite::client_async(request, tls(fixture.address, &fixture.root).await).await;
     assert!(
@@ -698,18 +702,14 @@ async fn agent_websocket_upgrade_uses_the_app_listener_and_starts_key_proof() {
         upgraded.err()
     );
     let (mut socket, _) = upgraded.unwrap();
-    let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let Message::Text(challenge) = message else {
-        panic!("the app listener did not send its agent key challenge");
-    };
-    let challenge: infraternal_plugin_remote::agent_link::AgentLinkChallenge =
-        serde_json::from_str(&challenge).unwrap();
-    assert_eq!(challenge.message_type, "challenge");
-    assert_eq!(B64.decode(challenge.nonce).unwrap().len(), 32);
+    // The server speaks only after the inner ClientHello: no challenge, no
+    // plaintext of its own.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), socket.next())
+            .await
+            .is_err(),
+        "the app listener sent something before the inner TLS ClientHello"
+    );
     socket.close(None).await.unwrap();
 }
 

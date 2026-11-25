@@ -5,17 +5,15 @@
     allow(clippy::expect_used, clippy::unwrap_used)
 )]
 
+/// The join's wire models; they live in `infraternal-link` (#580).
+#[cfg(feature = "transport")]
+pub use infraternal_link::enrollment;
 #[cfg(feature = "transport")]
 use infraternal_plugin_api::channel;
 use infraternal_plugin_api::{
     API_VERSION, ActionDef, DefaultValue, Dependency, DryRun, Effect, Permission, PluginDescriptor,
     RoleDef, SchemaRef, SettingDefault, Target,
 };
-#[cfg(feature = "transport")]
-pub mod agent_link;
-/// The join's wire models; they live in `infraternal-link` (#580).
-#[cfg(feature = "transport")]
-pub use infraternal_link::enrollment;
 /// Server-challenged host identity-key rotation proof and bounded wire types [285].
 #[cfg(feature = "transport")]
 pub mod identity_rotation;

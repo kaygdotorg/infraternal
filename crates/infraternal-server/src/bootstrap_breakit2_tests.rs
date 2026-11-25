@@ -260,7 +260,7 @@ setup_step upload 'exit 31'
 /// The provisioning listener's socket admission is exercised directly below.
 fn enrollment_acceptor(
     config: axum_server::tls_openssl::OpenSSLConfig,
-) -> crate::server_tls::HttpsAcceptor {
+) -> axum_server::tls_openssl::OpenSSLAcceptor<crate::send_queue::SocketAdmission> {
     crate::server_tls::acceptor(config)
 }
 
