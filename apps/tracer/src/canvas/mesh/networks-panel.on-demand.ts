@@ -116,11 +116,16 @@ export function renderNetworks(cx: Ctx, pane: HTMLElement, source: RoutesSource)
 
   /** What the window shows: every network but a declined one its machine no longer offers (it cannot be approved). */
   const shown = (): MeshNetwork[] => source.list().filter((n) => n.state !== "declined" || n.advertised);
+  /** What the window was last drawn from; a change that leaves it the same (an arrow between two hosts) does not redraw it. */
+  let drawn = "";
   const paint = (): void => {
+    const list = shown();
+    const now = JSON.stringify(list.map((n) => [n, source.arrowsTo(n.id)]));
+    if (now === drawn) return;
+    drawn = now;
     for (const run of cleanup) run();
     cleanup = [];
     root.replaceChildren();
-    const list = shown();
     if (!list.length) {
       root.append(el("p", "cl-settings-later", "No machine advertises a network. When one does, it waits here for you to approve it."));
       return;

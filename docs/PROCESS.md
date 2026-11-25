@@ -36,6 +36,20 @@ judgment, and nothing waits on either.**
   build host (compute01, dev-02). On the perf VM, run them through
   `TRACER_PERF=1 perf-run -- bun x playwright test --grep @perf` from
   `apps/tracer`. A new spec that asserts wall-clock cost gets the tag.
+  The perf VM has no checkout tooling for the browser suite, so a run there is set up
+  by hand in a folder of your own (J1225): `git archive <sha> | tar x` into it,
+  `bun install --frozen-lockfile` in `apps/tracer` with bun 1.4.4 from the nix store
+  (`/nix/store/*-bun-1.4.4/bin`), `PLAYWRIGHT_BROWSERS_PATH=~/nightly-latency/browsers`
+  (the headless shell, read-only), and a private copy of `~/nightly-latency/libs`
+  whose `fonts.conf` points its `cachedir` at your own folder (`LD_LIBRARY_PATH` to
+  `libs/usr/lib/x86_64-linux-gnu`, `FONTCONFIG_FILE` to that `fonts.conf`). Then
+  `TRACER_PERF=1 TRACER_TEST_PORT=<free port> TMPDIR=<private dir> perf-run --out <dir> -- bun x playwright test <spec>`.
+  Headless Chromium paints at 60 Hz there; `TRACER_CHROMIUM_FLAGS="--disable-renderer-backgrounding
+  --disable-gpu-vsync --disable-frame-rate-limit"` lifts the cap (the frame callbacks then run
+  at 500 to 900 Hz, which is the page's rate and not a monitor's; `mesh-arrow-latency.spec.ts`
+  reports it as `displayHz`). `perf-run`'s lock is not first come first served: a queued run
+  can wait an hour behind other jobs, so start it early. A run that is stopped by `timeout`
+  leaves its test server (`serve-tracer`) listening: stop it by pid before the next run.
   Currently tagged: mesh-perf, the mesh frame budgets, motion-audit,
   clusters-frames and clusters-keyboard-split. Not tagged: `perf-hud` (checks
   that an injected stall is recorded, not how fast anything is) and

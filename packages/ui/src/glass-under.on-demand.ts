@@ -40,6 +40,13 @@ import { TINT_USERS } from "./themes";
 
 /** What counts as a picture; see the module note. */
 const PICTURE = "video, img, canvas.aw-surface, [data-glass-picture]";
+/** Everything a surface could be over and care about: a picture, or a registered terminal screen. */
+const CANDIDATES = `${PICTURE}, [data-glass-grid]`;
+/**
+ * The box a surface is given while nothing it could be over exists: not a real box, so the first {@link recheck} reads the
+ * surface's true box (after a frame has laid it out, when the read costs nothing) and looks under it then.
+ */
+const PENDING = "pending";
 /** The smallest side of an image that counts as a picture, so icons do not. */
 const MIN_SIDE = 64;
 /** How often an on-screen surface is checked for having moved, in milliseconds. */
@@ -87,22 +94,34 @@ export function registerGlassGrid(grid: GlassGrid): () => void {
   idle(() => void import("./glass-adapt.on-demand").catch(() => undefined));
   // A card that opened before this screen registered (a terminal that mounts or reconnects under an open card) looks again now,
   // instead of waiting for it to move.
-  queueMicrotask(() => { for (const [surface, box] of watched) if (box) evaluate(surface); });
+  queueMicrotask(() => { const near = candidates(); for (const [surface, box] of watched) if (box) evaluate(surface, near); });
   return () => {
     grids.delete(grid.element);
     delete grid.element.dataset.glassGrid;
     // Cards that were tracking this screen look again: with the grid gone they fall back to the themed set or another thing under them.
-    for (const [surface, box] of watched) if (box && tracking.get(surface)?.key === grid.element) evaluate(surface);
+    { const near = candidates(); for (const [surface, box] of watched) if (box && tracking.get(surface)?.key === grid.element) evaluate(surface, near); }
   };
 }
+
+/**
+ * Every element in the document that a surface could be over: a picture or a terminal screen. One query by selector, which
+ * reads no layout, so it is safe inside an input handler's task. Callers that look under several surfaces ask once and share it.
+ */
+const candidates = (): Element[] => [...document.querySelectorAll(CANDIDATES)];
 
 /** What is under a surface. */
 interface Found { picture?: HTMLElement; grid?: GlassGrid }
 
-/** Finds a picture or a registered grid under `surface` (see the module note for where and how). */
-function whatIsUnder(surface: HTMLElement): Found {
+/**
+ * Finds a picture or a registered grid under `surface` (see the module note for where and how). `near` is every candidate
+ * in the document ({@link candidates}). A picture or a screen paints inside its own box, so when no candidate's box touches the
+ * surface's box nothing can be under it, and the nine hit tests (about 3 ms in the Mesh view's confirm click, #580) are skipped.
+ */
+function whatIsUnder(surface: HTMLElement, near: readonly Element[]): Found {
   const r = surface.getBoundingClientRect();
   if (r.width < 8 || r.height < 8) return {};
+  const touches = near.some((c) => { const b = c.getBoundingClientRect(); return b.right > r.left && b.left < r.right && b.bottom > r.top && b.top < r.bottom; });
+  if (!touches) return {};
   const found: Found = {};
   for (const fx of [0.02, 0.5, 0.98]) for (const fy of [0.02, 0.5, 0.98]) {
     const x = r.left + Math.min(r.width - 2, Math.max(2, r.width * fx)), y = r.top + Math.min(r.height - 2, Math.max(2, r.height * fy));
@@ -135,7 +154,8 @@ let quiet = 0;
 
 /** The box of `surface` as a comparable string, or an empty string when it is not on screen. */
 function boxOf(surface: HTMLElement): string {
-  if (!surface.isConnected || surface.hidden) return "";
+  // A surface inside a hidden element is not drawn either; the attribute says so without a style or layout read.
+  if (!surface.isConnected || surface.closest("[hidden]")) return "";
   const r = surface.getBoundingClientRect();
   return r.width < 8 || r.height < 8 ? "" : `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`;
 }
@@ -148,8 +168,8 @@ function release(surface: HTMLElement): void {
 }
 
 /** Looks under `surface` and starts, keeps or stops its tracking to match. */
-function evaluate(surface: HTMLElement): void {
-  const { picture, grid } = whatIsUnder(surface);
+function evaluate(surface: HTMLElement, near: readonly Element[]): void {
+  const { picture, grid } = whatIsUnder(surface, near);
   const key = picture ?? grid?.element;
   const before = tracking.get(surface);
   if (!key) { release(surface); return; }
@@ -172,13 +192,14 @@ function evaluate(surface: HTMLElement): void {
 function recheck(): void {
   timer = 0;
   let moved = false;
+  const near = candidates();
   for (const [surface, last] of watched) {
     const box = boxOf(surface);
     if (!surface.isConnected) { release(surface); watched.delete(surface); continue; }
     if (box === last) continue;
     moved = true;
     watched.set(surface, box);
-    if (box) evaluate(surface); else release(surface);
+    if (box) evaluate(surface, near); else release(surface);
   }
   quiet = moved ? 0 : quiet + 1;
   if (watched.size && quiet < QUIET_ROUNDS) timer = window.setTimeout(recheck, WATCH_MS);
@@ -190,12 +211,26 @@ function wake(): void {
   if (!timer && watched.size) timer = window.setTimeout(recheck, WATCH_MS);
 }
 
-/** Starts watching one glass surface: looks under it now and keeps it checked. */
-function watch(surface: HTMLElement): void {
+/**
+ * Starts watching one glass surface: looks under it now and keeps it checked. `near` gives {@link candidates} when they are
+ * needed. A surface that is fading in (`data-open="false"`: the toast, the sidebar card and the tooltip are drawn invisible
+ * until an animation frame sets `"true"`, which is watched too), or a document with no picture or screen at all, needs no look
+ * yet: the surface is only noted, and its box is read by the next recheck or when it opens. So a surface that a handler adds
+ * (a toast on a click) forces no style or layout there. A hidden surface, or one inside a hidden element (the breadcrumbs, which
+ * the top bar rewrites on every refresh), costs nothing to look at (its box is empty without a layout read) and is released as before.
+ */
+function watch(surface: HTMLElement, near: () => readonly Element[]): void {
+  const hidden = surface.closest("[hidden]") !== null;
+  const found = !hidden && surface.dataset.open !== "false" ? near() : [];
+  if (!hidden && !found.length) {
+    if (!watched.has(surface)) watched.set(surface, PENDING);
+    wake();
+    return;
+  }
   const box = boxOf(surface);
   if (!watched.has(surface) || watched.get(surface) !== box) {
     watched.set(surface, box);
-    if (box) evaluate(surface); else release(surface);
+    if (box) evaluate(surface, found); else release(surface);
   }
   wake();
 }
@@ -211,12 +246,15 @@ export function watchGlassSurfaces(): void {
   if (started || typeof MutationObserver === "undefined" || !document.body) return;
   started = true;
   document.documentElement.setAttribute("data-glass-watching", "");
+  /** The candidates for the batch of mutations being handled: asked for at the first surface that needs them, shared by the rest. */
+  let near: readonly Element[] | undefined;
   const consider = (node: Node): void => {
     if (!(node instanceof Element)) return;
-    if (node.matches(TINT_USERS)) watch(node as HTMLElement);
-    for (const inner of node.querySelectorAll<HTMLElement>(TINT_USERS)) watch(inner);
+    if (node.matches(TINT_USERS)) watch(node as HTMLElement, () => (near ??= candidates()));
+    for (const inner of node.querySelectorAll<HTMLElement>(TINT_USERS)) watch(inner, () => (near ??= candidates()));
   };
   new MutationObserver((records) => {
+    near = undefined;
     for (const record of records) {
       if (record.type === "childList") record.addedNodes.forEach(consider);
       else consider(record.target);
