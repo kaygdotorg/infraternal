@@ -22,8 +22,8 @@
  * opens is still found (it is skipped by identity, not by position in the stack). A picture with `pointer-events: none`
  * is not seen by a hit test and is not covered.
  *
- * When. In the animation-frame step after the mutation callback saw the surface (before that frame's style, layout and first
- * paint, and never inside an input handler's own task), when it is shown (`hidden`, `data-open`), and every 250 ms while the page is changing, but only re-evaluated when its box moved or resized. That
+ * When. In the mutation callback that sees the surface (a microtask, before the first paint), when it is shown (`hidden`,
+ * `data-open`), and every 250 ms while the page is changing, but only re-evaluated when its box moved or resized. That
  * is a handful of box reads a few times a second, never per frame, and never in an input handler. An idle page keeps no
  * timer (the motion audit holds an idle screen to none): the checks stop after {@link QUIET_ROUNDS} rounds in which nothing
  * moved, and start again on a DOM change, input, scroll, resize or the end of an animation, which is everything that can move a
@@ -211,12 +211,16 @@ function wake(): void {
 }
 
 /**
- * Starts watching one glass surface: looks under it now and keeps it checked. `near` is {@link candidates}; with none in the
- * document the surface is only noted (its box is read by the next recheck), so a surface that appears inside an input
- * handler's task forces no layout there.
+ * Starts watching one glass surface: looks under it now and keeps it checked. `near` gives {@link candidates} when they are
+ * needed. A surface that is fading in (`data-open="false"`: the toast, the sidebar card and the tooltip are drawn invisible
+ * until an animation frame sets `"true"`, which is watched too), or a document with no picture or screen at all, needs no look
+ * yet: the surface is only noted, and its box is read by the next recheck or when it opens. So a surface that a handler adds
+ * (a toast on a click) forces no style or layout there. A hidden surface costs nothing to look at (its box is empty without a
+ * layout read) and is released as before.
  */
-function watch(surface: HTMLElement, near: readonly Element[]): void {
-  if (!near.length) {
+function watch(surface: HTMLElement, near: () => readonly Element[]): void {
+  const found = !surface.hidden && surface.dataset.open !== "false" ? near() : [];
+  if (!surface.hidden && !found.length) {
     if (!watched.has(surface)) watched.set(surface, PENDING);
     wake();
     return;
@@ -224,7 +228,7 @@ function watch(surface: HTMLElement, near: readonly Element[]): void {
   const box = boxOf(surface);
   if (!watched.has(surface) || watched.get(surface) !== box) {
     watched.set(surface, box);
-    if (box) evaluate(surface, near); else release(surface);
+    if (box) evaluate(surface, found); else release(surface);
   }
   wake();
 }
@@ -240,40 +244,21 @@ export function watchGlassSurfaces(): void {
   if (started || typeof MutationObserver === "undefined" || !document.body) return;
   started = true;
   document.documentElement.setAttribute("data-glass-watching", "");
-  /**
-   * The nodes the observer has seen and the frame has not looked at yet. The callback only notes them: the looking reads
-   * layout (the box of each surface, then the boxes of its candidates), and a callback runs as a microtask of the task that
-   * changed the DOM, so inside an input handler's task it would pay for every pending style and layout change at once (about 9
-   * ms on the Mesh view's confirm click, #580). {@link drain} looks in the next animation frame's callbacks, which still
-   * run before that frame's style, layout and first paint, so a surface that a handler or a timer shows is marked before
-   * it is first drawn. The one case that is a frame late: a surface shown inside another animation-frame callback (the
-   * frame is already past the callbacks when the observer reports it), which is almost always a fade-in from invisible.
-   */
-  const noted = new Set<Node>();
-  let frame = 0;
-  /** Watches `node` if it is a glass surface, and every surface inside it; `near` gives the candidates when the first one needs them. */
-  const consider = (node: Node, near: () => readonly Element[]): void => {
-    if (!(node instanceof Element) || !node.isConnected) return;
-    if (node.matches(TINT_USERS)) watch(node as HTMLElement, near());
-    for (const inner of node.querySelectorAll<HTMLElement>(TINT_USERS)) watch(inner, near());
-  };
-  /** Looks at every noted node once; the candidates are asked for at the first surface and shared by the rest. */
-  const drain = (): void => {
-    frame = 0;
-    let found: readonly Element[] | undefined;
-    const near = (): readonly Element[] => (found ??= candidates());
-    const nodes = [...noted];
-    noted.clear();
-    for (const node of nodes) consider(node, near);
+  /** The candidates for the batch of mutations being handled: asked for at the first surface that needs them, shared by the rest. */
+  let near: readonly Element[] | undefined;
+  const consider = (node: Node): void => {
+    if (!(node instanceof Element)) return;
+    if (node.matches(TINT_USERS)) watch(node as HTMLElement, () => (near ??= candidates()));
+    for (const inner of node.querySelectorAll<HTMLElement>(TINT_USERS)) watch(inner, () => (near ??= candidates()));
   };
   new MutationObserver((records) => {
+    near = undefined;
     for (const record of records) {
-      if (record.type === "childList") record.addedNodes.forEach((node) => { if (node instanceof Element) noted.add(node); });
-      else noted.add(record.target);
+      if (record.type === "childList") record.addedNodes.forEach(consider);
+      else consider(record.target);
     }
-    if (noted.size && !frame) frame = requestAnimationFrame(drain);
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["hidden", "data-open"] });
-  consider(document.body, candidates);
+  consider(document.body);
   // Whatever can move a card without touching the DOM: input and scrolling (a drag, a pan), a resize, and a transition or animation
   // ending (a fly settles). Each only arms the check timer if it is stopped; passive and in the capture phase, so it sees them all
   // and never delays one.
