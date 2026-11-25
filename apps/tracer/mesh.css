@@ -66,11 +66,13 @@
    stroke) is drawn again from its path on every frame of a zoom; a plain stroke is scaled with the layer. So the width
    is the world width that is one pixel at the zoom the camera last rested at (--k, set by mesh/graph.ts). */
 .cl-graph-arrows { --k: 1; }
-.cl-graph-arrows .cl-arrow-line, .cl-graph-arrows .cl-arrow-hit, .cl-graph-arrows .cl-arrow-handle { vector-effect: none; }
+.cl-graph-arrows .cl-arrow-line, .cl-graph-arrows .cl-arrow-hit, .cl-graph-arrows .cl-arrow-handle, .cl-graph-arrows .cl-arrow-grab { vector-effect: none; }
 .cl-graph-arrows .cl-arrow-line { stroke-width: calc(1.5px * var(--k)); }
 .cl-graph-arrows .cl-arrow:hover .cl-arrow-line { stroke-width: calc(0.15625rem * var(--k)); }
 .cl-graph-arrows .cl-arrow-hit { stroke-width: calc(1rem * var(--k)); }
 .cl-graph-arrows .cl-arrow-handle { stroke-width: calc(1.5px * var(--k)); }
+.cl-graph-arrows .cl-arrow-grab { vector-effect: none; stroke-width: calc(1.75rem * var(--k)); }
+@media (pointer: coarse) { .cl-graph-arrows .cl-arrow-grab { stroke-width: calc(2.75rem * var(--k)); } }
 .cl-graph-arrows .cl-arrow[data-dashed] .cl-arrow-line { stroke-dasharray: calc(0.3125rem * var(--k)) calc(0.3125rem * var(--k)); }
 
 /* The connector on a terminal's pill exists only for a person who may grant access (D187); the attribute must win over its display. */

@@ -434,8 +434,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     let candidate: string | undefined;
     let over: HTMLElement | undefined;
     const taken = (id: string): boolean => source.grants().some((o) => o.from === n.id && o.to === id);
-    const move = (ev: PointerEvent): void => {
-      const w = toLocal(ev.clientX, ev.clientY);
+    // One draw per frame, from the last pointer position (a pointer may report several moves in one frame).
+    let last: { x: number; y: number } | undefined, frame = 0;
+    const queue = (ev: PointerEvent): void => { last = { x: ev.clientX, y: ev.clientY }; if (!frame) frame = requestAnimationFrame(() => { frame = 0; if (last) moveTo(last.x, last.y); }); };
+    const move = (ev: PointerEvent): void => moveTo(ev.clientX, ev.clientY);
+    const moveTo = (clientX: number, clientY: number): void => {
+      const w = toLocal(clientX, clientY);
       live.move(w, headSize());
       const radius = (coarse.matches ? 48 : 32) / cam.z;
       const gap = (r: Rect): number => Math.hypot(Math.max(r.x - w.x, 0, w.x - (r.x + r.w)), Math.max(r.y - w.y, 0, w.y - (r.y + r.h)));
@@ -456,9 +460,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     };
     const retract = (): void => { live.retract(); live.arrow.g.dataset.leaving = ""; window.setTimeout(() => live.dispose(), 320); };
     const up = (ev: PointerEvent): void => {
-      port.removeEventListener("pointermove", move);
+      cancelAnimationFrame(frame); frame = 0;
+      if (last && ev.type === "pointerup") moveTo(ev.clientX, ev.clientY); // the release point decides the target, not the last frame
+      port.removeEventListener("pointermove", queue);
       port.removeEventListener("pointerup", up);
       port.removeEventListener("pointercancel", up);
+      port.removeEventListener("lostpointercapture", lost);
       delete rec.card.root.dataset.linking;
       over?.removeAttribute("data-drop");
       if (!candidate || ev.type === "pointercancel") { retract(); return; }
@@ -482,9 +489,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         onCancel: () => { retract(); at.done(); },
       });
     };
-    port.addEventListener("pointermove", move);
+    // The connector can leave the document under the finger (its card is rebound or dropped by a refresh): the drag ends as a cancel.
+    const lost = (ev: PointerEvent): void => { if (!port.isConnected) up(new PointerEvent("pointercancel", { pointerId: ev.pointerId })); };
+    port.addEventListener("pointermove", queue);
     port.addEventListener("pointerup", up);
     port.addEventListener("pointercancel", up);
+    port.addEventListener("lostpointercapture", lost);
     move(e);
   };
 
@@ -514,8 +524,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     let candidate: string | undefined = homeId;
     let over: HTMLElement | undefined;
     const taken = (id: string): boolean => source.grants().some((o) => o !== g && (end === "head" ? o.from === g.from && o.to === id : o.to === g.to && o.from === id));
-    const move = (ev: PointerEvent): void => {
-      const w = toLocal(ev.clientX, ev.clientY);
+    // One draw per frame, from the last pointer position, as for a card's drag.
+    let last: { x: number; y: number } | undefined, frame = 0;
+    const queue = (ev: PointerEvent): void => { last = { x: ev.clientX, y: ev.clientY }; if (!frame) frame = requestAnimationFrame(() => { frame = 0; if (last) moveTo(last.x, last.y); }); };
+    const moveTo = (clientX: number, clientY: number): void => {
+      const w = toLocal(clientX, clientY);
       live.move(w, headSize());
       // Snap: the nearest node whose edge is within the snap radius of the pointer (about 32 px, larger on touch).
       // Once snapped the radius is a quarter wider before it lets go, so the arrow does not flicker at the edge.
@@ -541,9 +554,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       }
     };
     const finish = (): void => {
-      handle.removeEventListener("pointermove", move);
+      cancelAnimationFrame(frame); frame = 0;
+      handle.removeEventListener("pointermove", queue);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
+      handle.removeEventListener("lostpointercapture", lost);
       over?.removeAttribute("data-drop");
     };
     /** Not changed: the end returns to where it came from, quickly and without overshoot, then the original arrow is back. */
@@ -552,6 +567,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       live.glideTo(home, 150, () => live.dispose());
     };
     const up = (ev: PointerEvent): void => {
+      if (last && ev.type === "pointerup") moveTo(ev.clientX, ev.clientY); // the release point decides the target, not the last frame
       finish();
       const at = tipAt({ x: ev.clientX, y: ev.clientY });
       if (ev.type === "pointercancel" || candidate === homeId) { putBack(); at.done(); return; }
@@ -602,9 +618,13 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       });
       at.done();
     };
-    handle.addEventListener("pointermove", move);
+    // The handle can leave the document mid-drag (a refresh unmounts and pools its arrow): the drag ends as a cancel, and
+    // the end goes home, instead of a live arrow left on the canvas waiting for a release that never comes.
+    const lost = (ev: PointerEvent): void => { if (!handle.isConnected) up(new PointerEvent("pointercancel", { pointerId: ev.pointerId, clientX: ev.clientX, clientY: ev.clientY })); };
+    handle.addEventListener("pointermove", queue);
     handle.addEventListener("pointerup", up);
     handle.addEventListener("pointercancel", up);
+    handle.addEventListener("lostpointercapture", lost);
   };
   // ---- the graph view ----------------------------------------------------------------------------------
   const graphs = new WeakMap<ViewRec, GraphController>();
@@ -634,9 +654,10 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     c.graphSvg = svg;
     svg.addEventListener("pointerdown", (e) => {
       // Touch: a tap on an arrow selects it (its handles show); a tap on another arrow moves the selection.
-      const hitEl = (e.target as Element).closest(".cl-arrow-hit, .cl-arrow-handle")?.closest(".cl-arrow");
+      const hitEl = (e.target as Element).closest(".cl-arrow-hit, .cl-arrow-handle, .cl-arrow-grab")?.closest(".cl-arrow");
       for (const t of topoOf(c)) t.arrow.g.toggleAttribute("data-selected", t.arrow.g === hitEl);
-      const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle");
+      // A press on an end's ring or anywhere in its grab area (28 px, 44 px on touch) takes that end.
+      const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle, .cl-arrow-grab");
       const entry = topoOf(c).find((t) => t.arrow.g === handle?.closest(".cl-arrow"));
       if (!handle || !entry || e.button !== 0) return;
       e.stopPropagation(); e.preventDefault();

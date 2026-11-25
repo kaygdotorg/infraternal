@@ -196,6 +196,11 @@
 .cl-arrow:hover .cl-arrow-head { filter: none; }
 .cl-arrow[data-editing] { opacity: 0.25; }
 .cl-arrow-handle:active { cursor: grabbing; }
+/* The grab area of an arrow end (arrows.ts): an invisible disk, 28 px on a desktop and 44 px on touch, live only where the
+   handles are (a hovered arrow, a selected one, the one being edited), so arrows that pass under cards never steal a card's press. */
+.cl-arrow-grab { fill: none; stroke: transparent; stroke-width: 1.75rem; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; cursor: grab; }
+.cl-arrow:hover .cl-arrow-grab, .cl-arrow[data-selected] .cl-arrow-grab { pointer-events: stroke; }
+@media (pointer: coarse) { .cl-arrow-grab { stroke-width: 2.75rem; } }
 /* Touch: no hover, so a tap on an arrow selects it and only then does it show its two handles (rings that leave the
    arrowhead visible); a wider invisible line makes it easy to hit. */
 .cl-arrow[data-selected] .cl-arrow-handle { pointer-events: all; opacity: 1; }
