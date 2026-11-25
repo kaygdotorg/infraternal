@@ -160,7 +160,6 @@ fn review_j354_parser_corpus_and_recovery() {
                 &config
             )
             .unwrap()
-            .unwrap()
         )
         .unwrap()
         .answers
@@ -332,7 +331,8 @@ fn review_j360_tcp_limits_connections_per_source() {
     assert_eq!(result.unwrap(), 0, "the ninth same-source client is closed");
 }
 
-/// Reverse zones stay outside the mesh authority for present and absent addresses alike.
+/// Reverse zones stay outside the mesh authority for present and absent addresses alike: each
+/// gets a non-authoritative `REFUSED` with no records (#580).
 #[test]
 fn review_j354_reverse_queries_are_unclaimed() {
     for name in [
@@ -341,11 +341,11 @@ fn review_j354_reverse_queries_are_unclaimed() {
         "2.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa",
     ] {
         for kind in [1, 28, 255, 12] {
-            assert!(
-                dns::response(&question(name, kind), &snapshot())
-                    .unwrap()
-                    .is_none()
-            );
+            let reply =
+                Message::from_vec(&dns::response(&question(name, kind), &snapshot()).unwrap())
+                    .unwrap();
+            assert_eq!(reply.metadata.response_code, ResponseCode::Refused);
+            assert!(!reply.metadata.authoritative && reply.answers.is_empty());
         }
     }
 }
@@ -408,6 +408,10 @@ fn review_j360_partial_frame_has_an_absolute_read_deadline() {
 }
 
 /// A TCP peer is disconnected after repeatedly sending malformed DNS frames.
+///
+/// Each frame here is a bare header with no question. Since #580 such a frame gets a FORMERR
+/// answer instead of silence, but it still spends the per-connection malformed-frame budget, so
+/// the resolver answers fewer than 16 of the 32 frames and then closes the connection.
 #[test]
 fn review_j360_tcp_drops_repeated_malformed_frames() {
     let resolver = TestResolver::bind(&snapshot()).unwrap();
@@ -421,8 +425,15 @@ fn review_j360_tcp_drops_repeated_malformed_frames() {
         frames.extend_from_slice(&[0; 12]);
     }
     stream.write_all(&frames).unwrap();
-    let mut byte = [0];
-    let result = stream.read(&mut byte);
+    let mut answered = Vec::new();
+    let mut chunk = [0; 512];
+    let result = loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => break Ok(0),
+            Ok(length) => answered.extend_from_slice(&chunk[..length]),
+            Err(error) => break Err(error),
+        }
+    };
     drop(resolver);
     assert!(
         matches!(result, Ok(0))
@@ -430,6 +441,12 @@ fn review_j360_tcp_drops_repeated_malformed_frames() {
                 .as_ref()
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset),
         "the malformed-frame budget closes TCP: {result:?}"
+    );
+    // Each FORMERR answer is a 2-byte length plus a 12-byte header; at most 15 come back.
+    assert!(
+        answered.len() <= 15 * 14,
+        "only frames inside the budget are answered: {} bytes",
+        answered.len()
     );
 }
 
