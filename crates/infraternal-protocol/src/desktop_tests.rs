@@ -54,7 +54,10 @@ fn desktop_messages_roundtrip_at_every_split_and_reject_trailing_fixed_fields() 
         Message::Repair {
             last_sequence: u64::MAX,
         },
-        Message::Pressure { waited_ms: 65_535 },
+        Message::Pressure {
+            waited_ms: 65_535,
+            kbit_s: u32::MAX,
+        },
         Message::Fragment {
             session_id: &id,
             sequence: 1,
@@ -279,5 +282,27 @@ fn an_end_reason_roundtrips_as_a_close_code_and_unknown_values_are_safe() {
         Some("<script>"),
     ] {
         assert_eq!(EndReason::from_helper_word(word), EndReason::WindowClosed);
+    }
+}
+
+/// A `VideoPressure` body from a server that does not measure throughput (2 bytes) still decodes,
+/// as "no measurement", and any other length is refused.
+#[test]
+fn pressure_without_a_throughput_field_decodes_as_unknown() {
+    // Frame: one length byte (the tag plus the body), the tag, the body.
+    let frame = |body_len: u8| {
+        let mut frame = vec![body_len + 1, 0x46];
+        frame.extend((0..body_len).map(|i| if i == 0 { 60 } else { 0 }));
+        frame
+    };
+    assert_eq!(
+        decode_frame(&frame(2)).unwrap().frame,
+        Frame::Desktop(Message::Pressure {
+            waited_ms: 60,
+            kbit_s: 0
+        })
+    );
+    for length in [0, 1, 3, 4, 5, 7] {
+        assert!(decode_frame(&frame(length)).is_err(), "{length} bytes");
     }
 }

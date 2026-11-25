@@ -57,6 +57,9 @@ mod update_activity;
 /// The quiet-window apply, the new release's trial and the D295 undo (#211 S4).
 #[cfg(feature = "release")]
 pub mod update_apply;
+/// Preserves the wire writer-ID clock across D295 database restores (#211).
+#[cfg(feature = "release")]
+mod update_writer_clock;
 #[cfg(feature = "release")]
 pub use release_latest::release_service;
 #[cfg(feature = "parser-checks")]
@@ -151,6 +154,8 @@ mod remote_startup;
 #[cfg(feature = "remote")]
 mod remote_successor;
 mod runtime;
+/// Bounds the unsent data in each browser socket's kernel buffer (`TCP_NOTSENT_LOWAT`, #146).
+mod send_queue;
 /// The server's short-lived, rotating leg-B TLS leaf (#559).
 #[cfg(feature = "remote")]
 mod server_leaf;
@@ -158,6 +163,8 @@ mod server_tls;
 #[cfg(any(test, feature = "native-streams"))]
 mod socket_authority;
 mod stream_close;
+/// Closes local terminal rows a fresh shim census no longer lists, on the D379 writer (#562).
+mod terminal_census;
 mod terminal_exit;
 /// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
 mod terminal_input_ack;

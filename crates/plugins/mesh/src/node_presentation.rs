@@ -5,13 +5,131 @@ use infraternal_plugin_api::{
 };
 use serde_json::Value;
 
+/// Present one mesh node action's JSON for people: status, peers and the subnet route view.
 pub(crate) fn present(action: &str, output: &[u8], width: usize) -> Result<Presented, PluginError> {
     let value: Value = serde_json::from_slice(output).map_err(|_| PluginError::Rejected)?;
     match action {
         "mesh.status" => status(value, width),
         "mesh.peers" => peers(&value, width),
+        "mesh.routes" | "mesh.routes.advertise" | "mesh.routes.withdraw" => routes(&value, width),
         _ => Err(PluginError::UnknownAction),
     }
+}
+
+/// Present `mesh routes` (and the answer to `advertise` and `withdraw`, which is the same view):
+/// what this machine offers, what it serves, and the networks it reaches through other machines.
+fn routes(value: &Value, width: usize) -> Result<Presented, PluginError> {
+    let advertised: Vec<&str> = value["advertised"]
+        .as_array()
+        .ok_or(PluginError::Rejected)?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let serving = value["serving"].as_array().ok_or(PluginError::Rejected)?;
+    let reachable = value["reachable"].as_array().ok_or(PluginError::Rejected)?;
+    let mut body = String::new();
+    let mut rows: Vec<(&str, String)> = Vec::new();
+    rows.push((
+        "Advertised",
+        if advertised.is_empty() {
+            "none".to_owned()
+        } else {
+            advertised.join(", ")
+        },
+    ));
+    if !serving.is_empty() {
+        let served: Vec<String> = serving
+            .iter()
+            .map(|network| {
+                format!(
+                    "{} ({}, {})",
+                    network["network"].as_str().unwrap_or("?"),
+                    plural(network["peers"].as_u64().unwrap_or(0), "peer", "peers"),
+                    if network["masquerade"] == true {
+                        "masqueraded"
+                    } else {
+                        "keeps source addresses"
+                    }
+                )
+            })
+            .collect();
+        rows.push(("Serving", served.join(", ")));
+    }
+    let forwarding = &value["forwarding"];
+    match forwarding["state"].as_str() {
+        Some("on") => rows.push((
+            "Forwarding",
+            format!(
+                "on; IPv4 forwarding {}",
+                forwarding["ip_forward"].as_str().unwrap_or("on")
+            ),
+        )),
+        Some("unavailable") => rows.push((
+            "Forwarding",
+            format!(
+                "unavailable: {}",
+                forwarding["reason"].as_str().unwrap_or("unknown")
+            ),
+        )),
+        _ => {}
+    }
+    body.push_str(&pairs(&rows, 2, width));
+    if !reachable.is_empty() {
+        let table_rows: Vec<Vec<String>> = reachable
+            .iter()
+            .map(|network| {
+                let installed = &network["installed"];
+                let state = match installed["reason"].as_str() {
+                    Some(reason) => {
+                        format!("{}: {reason}", installed["state"].as_str().unwrap_or("?"))
+                    }
+                    None => installed["state"].as_str().unwrap_or("?").to_owned(),
+                };
+                vec![
+                    network["network"].as_str().unwrap_or("?").to_owned(),
+                    network["via"]
+                        .as_str()
+                        .map_or_else(|| format!("node {}", network["via_node"]), str::to_owned),
+                    state,
+                ]
+            })
+            .collect();
+        body.push('\n');
+        body.push_str(&table(
+            &["Network", "Through", "Route"],
+            &table_rows,
+            2,
+            width,
+            None,
+        ));
+    }
+    let tone = if forwarding["state"] == "unavailable"
+        || reachable
+            .iter()
+            .any(|network| network["installed"]["state"] != "installed")
+    {
+        Tone::Attention
+    } else {
+        Tone::Good
+    };
+    let message = format!(
+        "{} advertised, {} served, {} reachable.",
+        plural(advertised.len() as u64, "network", "networks"),
+        serving.len(),
+        reachable.len()
+    );
+    let next = if advertised.len() > serving.len() {
+        vec!["infraternal server mesh routes".to_owned()]
+    } else {
+        Vec::new()
+    };
+    Ok(Presented {
+        tone,
+        message,
+        body,
+        next,
+        data: value.clone(),
+    })
 }
 
 fn plural(count: u64, one: &str, many: &str) -> String {

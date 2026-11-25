@@ -283,6 +283,7 @@ impl WebSocketState {
         #[cfg(feature = "release")]
         crate::update_apply::set_session_inventory(inventory.clone());
         let inventory_pool = pool.clone();
+        let inventory_auth = auth.clone();
         let inventory_changes = session_changes.clone();
         tokio::spawn(async move {
             loop {
@@ -293,9 +294,13 @@ impl WebSocketState {
                         inventory_changes.send_modify(|version| *version = version.wrapping_add(1));
                     }
                     SessionInventoryState::Available(_) => {
-                        if reconcile_embedded_inventory(&inventory_pool, &inventory)
-                            .await
-                            .is_ok()
+                        if crate::terminal_census::close_ended(
+                            &inventory_auth,
+                            &inventory_pool,
+                            &inventory,
+                        )
+                        .await
+                        .is_ok()
                         {
                             {
                                 let mut queries = inventory_queries
@@ -488,39 +493,6 @@ impl WebSocketState {
         ));
         Some(slot)
     }
-}
-
-/// Close stale embedded session rows after an agent restart or a shim retirement.
-async fn reconcile_embedded_inventory(
-    pool: &SqlitePool,
-    inventory: &watch::Receiver<SessionInventoryState>,
-) -> Result<(), sqlx::Error> {
-    let mut transaction = infraternal_plugin_api::storage::begin_immediate(pool).await?;
-    // The ordered leg-B census precedes its open Result. Read the current watch
-    // only after the writer lock: a newly persisted row then has a known live ID,
-    // even if an earlier census caused this task to wait for the connection.
-    let SessionInventoryState::Available(session_ids) = inventory.borrow().clone() else {
-        return Ok(());
-    };
-    let live: HashSet<[u8; 16]> = session_ids.iter().copied().collect();
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT id FROM terminal_sessions WHERE remote_host_id IS NULL AND closed_at IS NULL",
-    )
-    .fetch_all(&mut *transaction)
-    .await?;
-    for id in rows {
-        let Ok(id_array) = <[u8; 16]>::try_from(id.as_slice()) else {
-            continue;
-        };
-        if live.contains(&id_array) {
-            continue;
-        }
-        sqlx::query("UPDATE terminal_sessions SET closed_at=COALESCE(closed_at,unixepoch()) WHERE id=? AND remote_host_id IS NULL AND closed_at IS NULL")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-    }
-    transaction.commit().await
 }
 
 /// Mount the authenticated leg-A WebSocket endpoint.
@@ -3221,7 +3193,7 @@ async fn startup_call(
         let value: serde_json::Value = serde_json::from_slice(&output).map_err(|_| invalid())?;
         if value.get("multiplexer").is_none()
             || !startup_session_untyped(&state.pool, user, session.as_bytes()).await?
-            || !terminal_startup::claim(&state.pool, user, &host_key)
+            || !terminal_startup::claim(&state.auth, &state.pool, user, &host_key)
                 .await
                 .map_err(|()| invalid())?
         {

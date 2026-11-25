@@ -273,7 +273,9 @@ private final class Session {
             try control.setActive(active)
             return (68,["state":"on","control":active,"control_visible":control.controlVisible])
         case 9:
-            if let surface { surface.congestion() } else { encoder.congestion() }
+            // `kbit_s` is the server's measurement of the viewer's link, when it has one.
+            let linkRate = (body["kbit_s"] as? Int).map { $0 * 1000 }
+            if let surface { surface.congestion(linkRate: linkRate) } else { encoder.congestion(linkRate: linkRate) }
             return (68,["state":"on"])
         case 8:
             control.release()

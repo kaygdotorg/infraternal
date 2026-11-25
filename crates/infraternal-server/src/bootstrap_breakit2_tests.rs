@@ -156,50 +156,82 @@ async fn live_fixture_keeps_the_full_image_and_selects_the_explicit_session_imag
     );
 }
 
+/// Removes a trace file when the test ends, whether it passed or panicked.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    /// Best-effort cleanup: a file that is already gone is not an error here.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[test]
 /// Check that timing probes observe the nested setup shell.
+///
+/// The nested shell names its lock files relative to its own working directory, so
+/// the test passes this crate's absolute path instead: a different cwd cannot make
+/// the lock steps fail before they write a trace (#581). The trace file has a name
+/// unique to this run, so no other process or test can share or truncate it.
 fn retry_lock_timing_runs_inside_the_nested_setup_shell() {
-    let script = r#"# INFRATERNAL_SETUP_STEPS_V1
-setup_step() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = manifest.to_str().unwrap();
+    // The path goes inside double quotes in the nested script; refuse any character that would end them.
+    assert!(
+        !manifest.contains(['"', '\'', '$', '`', '\\']),
+        "manifest path has characters the nested script cannot quote: {manifest}"
+    );
+    let script = format!(
+        r#"# INFRATERNAL_SETUP_STEPS_V1
+setup_step() {{
     printf 'STEP %s\n' "$1"
     if sh -c "$2"; then :; else status=$?; printf 'FAIL %s %s\n' "$1" "$status"; exit 0; fi
-}
-lease_birth_field() {
+}}
+lease_birth_field() {{
     flock -n 7 || exit 73
-}
-setup_step upload 'exec 9< .; exec 7< Cargo.toml; flock -n 9 || exit 73; flock -n 7 || exit 73; flock -w 2 7 || exit 73'
-"#;
-    let trace_path = std::env::current_exe()
+}}
+setup_step upload 'exec 9< "{manifest}"; exec 7< "{manifest}/Cargo.toml"; flock -n 9 || exit 73; flock -n 7 || exit 73; flock -w 2 7 || exit 73'
+"#
+    );
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("retry-lock-trace-{}", std::process::id()));
-    let _ = std::fs::remove_file(&trace_path);
+        .as_nanos();
+    let trace_path =
+        std::env::temp_dir().join(format!("retry-lock-trace-{}-{nanos}", std::process::id()));
+    let _cleanup = RemoveOnDrop(trace_path.clone());
     std::fs::File::create(&trace_path).unwrap();
     let trace_path_text = trace_path.to_str().unwrap();
     let instrumented =
-        instrument_retry_setup_with_timing(script, true, true, Some(trace_path_text));
+        instrument_retry_setup_with_timing(&script, true, true, Some(trace_path_text));
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(instrumented)
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "nested setup script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "nested setup script failed: {stderr}"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("TRACE_SETUP_STEP upload "));
     assert!(!stdout.contains("TRACE_LOCK"));
+    // setup_step reports a failed step and exits 0, so the exit status alone hides it.
+    assert!(
+        !stdout.contains("FAIL upload"),
+        "nested setup shell never reached its lock steps: stdout={stdout} stderr={stderr}"
+    );
     let trace = std::fs::read_to_string(&trace_path).unwrap();
-    assert!(trace.contains("guard_try "));
+    assert!(
+        trace.contains("guard_try "),
+        "nested setup lock trace has no guard_try: trace={trace} stdout={stdout} stderr={stderr}"
+    );
     assert!(trace.contains("lease_try "));
     assert!(
         trace.contains("lease_wait "),
         "nested setup lock trace was incomplete: {trace}"
     );
-    std::fs::remove_file(trace_path).unwrap();
 }
 
 #[test]

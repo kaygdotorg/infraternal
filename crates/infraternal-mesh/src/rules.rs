@@ -4,7 +4,10 @@
 //! enough to talk to a peer; only an arrow grants access, and it grants the
 //! right to *start* connections. Replies on established connections are always
 //! allowed.
-use crate::model::{MeshError, NodeId};
+use crate::{
+    model::{MeshError, NodeId},
+    networks::NetworkId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -15,7 +18,8 @@ pub struct RuleId(pub u64);
 /// One side of an [`Arrow`].
 ///
 /// `User` exists so the API shape is stable, but it is rejected in stage 1
-/// (D164).
+/// (D164). `Network` is an approved subnet route (D197 M3) and is only valid as
+/// the target (`to`) of a one-way arrow.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Endpoint {
     /// A single node.
@@ -24,6 +28,10 @@ pub enum Endpoint {
     Tag(String),
     /// A person, by user id. Not accepted yet.
     User(u64),
+    /// An approved network behind a router node. Only valid as `to` of a
+    /// one-way arrow: it grants the `from` side the right to start
+    /// connections into that network through its router.
+    Network(NetworkId),
 }
 
 /// The transport protocol of a port grant.
@@ -116,11 +124,19 @@ impl Arrow {
     ///
     /// # Errors
     /// Returns `UserEndpoint` if either side is a user (not supported in
-    /// stage 1) and `InvalidPorts` if the port grant is invalid (see
-    /// [`TrafficPolicy::validate_grant`]).
+    /// stage 1), `NetworkEndpoint` if a network is the source or the rule is
+    /// two-way toward a network, and `InvalidPorts` if the port grant is
+    /// invalid (see [`TrafficPolicy::validate_grant`]).
     pub fn validate(&self) -> Result<(), MeshError> {
         if matches!(self.from, Endpoint::User(_)) || matches!(self.to, Endpoint::User(_)) {
             return Err(MeshError::UserEndpoint);
+        }
+        // Hosts on a routed network have no mesh identity, so nothing can be
+        // granted *to* them as initiators (D197 M3).
+        if matches!(self.from, Endpoint::Network(_))
+            || (self.both_ways && matches!(self.to, Endpoint::Network(_)))
+        {
+            return Err(MeshError::NetworkEndpoint);
         }
         self.ports.validate_grant()
     }

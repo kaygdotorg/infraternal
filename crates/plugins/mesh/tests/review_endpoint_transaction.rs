@@ -93,6 +93,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,
                 access_ssh: None,
+                networks: infraternal_plugin_mesh::dataplane::PeerNetworks::default(),
             },
         )]),
         #[cfg(feature = "mesh-dns")]

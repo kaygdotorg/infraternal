@@ -5,8 +5,9 @@
 //! `/remote/agent` can refuse an infraternal agent proof that was made over a
 //! different TLS session, which is what a relay in the middle produces (#559).
 
+use crate::send_queue::SocketAdmission;
 use axum_server::{
-    accept::{Accept, NoDelayAcceptor},
+    accept::Accept,
     tls_openssl::{OpenSSLAcceptor, OpenSSLConfig},
 };
 #[cfg(feature = "remote")]
@@ -16,7 +17,7 @@ use tokio::net::TcpStream;
 use tower_http::add_extension::AddExtension;
 
 /// The TLS acceptor [`HttpsAcceptor`] wraps.
-type Tls = OpenSSLAcceptor<NoDelayAcceptor>;
+type Tls = OpenSSLAcceptor<SocketAdmission>;
 
 /// The TLS channel binding of the connection a request arrived on, present
 /// only when this process terminated that TLS session itself.
@@ -29,7 +30,7 @@ type Tls = OpenSSLAcceptor<NoDelayAcceptor>;
 #[derive(Clone, Copy)]
 pub(crate) struct TlsChannelBinding(pub(crate) Option<[u8; 32]>);
 
-/// The standalone HTTPS acceptor: TLS with `TCP_NODELAY`, plus (with the
+/// The standalone HTTPS acceptor: TLS over the socket admission (`TCP_NODELAY` and the unsent-data bound), plus (with the
 /// remote feature) the connection's [`TlsChannelBinding`] on every request.
 ///
 /// Export costs one TLS key derivation per connection, taken once after the
@@ -76,8 +77,9 @@ impl<S: Send + 'static> Accept<TcpStream, S> for HttpsAcceptor {
 /// Keep the standalone listener and memory-only integration fixtures on the same acceptor.
 pub(crate) fn acceptor(config: OpenSSLConfig) -> HttpsAcceptor {
     // Ack and Output are separate small writes. Nagle would couple a glyph
-    // to the browser TCP delayed-Ack timer even on a local connection.
-    HttpsAcceptor(OpenSSLAcceptor::new(config).acceptor(NoDelayAcceptor::new()))
+    // to the browser TCP delayed-Ack timer even on a local connection. The
+    // unsent-data bound keeps video and floods out of the kernel's buffer.
+    HttpsAcceptor(OpenSSLAcceptor::new(config).acceptor(SocketAdmission))
 }
 
 #[cfg(test)]

@@ -95,6 +95,37 @@ async fn read_ipv6_state(channel: &dyn NodeChannel) -> Option<bool> {
     parse_ipv6_state(&reply)
 }
 
+/// Asks a node which networks it advertises (D197 M3), on its own like the other probes so a strict older
+/// node refuses only this one. `Some(networks)` when the node understands subnet routes, `None` otherwise.
+async fn read_routes(channel: &dyn NodeChannel) -> Option<Vec<crate::policy::networks::Network>> {
+    let reply = channel
+        .call("mesh.identity", br#"{"routes":true}"#.to_vec())
+        .await
+        .ok()?;
+    parse_routes(&reply)
+}
+
+/// The most networks one node may advertise. A LAN router has a handful; the bound keeps one node's
+/// reply from growing every snapshot and the route table without limit.
+pub const MAX_ADVERTISED_NETWORKS: usize = 64;
+
+/// Reads the route fields of a `mesh.identity` reply to a `{"routes":true}` probe: `routes` says the node
+/// understands subnet routes, `advertised` lists the networks it offers. A reply with a malformed network or
+/// more than [`MAX_ADVERTISED_NETWORKS`] is treated as no answer, so nothing it says is recorded.
+#[must_use]
+pub fn parse_routes(reply: &[u8]) -> Option<Vec<crate::policy::networks::Network>> {
+    /// The two fields this probe adds to the identity reply.
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        routes: bool,
+        #[serde(default)]
+        advertised: Vec<crate::policy::networks::Network>,
+    }
+    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    (reply.routes && reply.advertised.len() <= MAX_ADVERTISED_NETWORKS).then_some(reply.advertised)
+}
+
 /// Reads the IPv6 fields of a `mesh.identity` reply to an `{"ipv6_state":true}` probe. The node's reply
 /// carries `ipv6_state` when it understands the probe and `ipv4_only` only while IPv6 is off.
 #[must_use]
@@ -335,6 +366,9 @@ pub async fn run(
                     // Ask before the first snapshot, so a new node's first peers already carry candidates.
                     let reported = read_candidates(channel.as_ref()).await;
                     let ipv6 = read_ipv6_state(channel.as_ref()).await;
+                    // Asked on every identity refresh: the node raises `mesh.changed` when its
+                    // advertised networks change, which brings the worker back here (D197 M3).
+                    let routes = read_routes(channel.as_ref()).await;
                     ipv6_reporting = ipv6.is_some();
                     known_ipv4_only = ipv6 == Some(true);
                     let Ok(_permit) = work.acquire().await else {
@@ -347,7 +381,9 @@ pub async fn run(
                     // A node that is IPv4-only must be marked before its peers' first snapshots too.
                     let recorded_ipv6 =
                         matches!(store.record_ipv6_state(node, ipv6).await, Ok(true));
-                    if updated || recorded || recorded_ipv6 {
+                    let recorded_routes =
+                        matches!(store.record_routes(node, routes.as_deref()).await, Ok(true));
+                    if updated || recorded || recorded_ipv6 || recorded_routes {
                         service.invalidate_dataplane().await;
                     }
                 } else {

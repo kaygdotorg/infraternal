@@ -335,8 +335,9 @@ final class Encoder {
         return withUnsafeBytes(of:&stamp) { Data($0) } + payload
     }
 
-    /// Tells the bit-rate controller that the viewer connection is congested.
-    func congestion() { _ = adaptation.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
+    /// Tells the bit-rate controller that the viewer connection is congested, and the rate in bits
+    /// per second the server measured it carrying, if known.
+    func congestion(linkRate: Int? = nil) { _ = adaptation.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true, linkRate:linkRate) }
 
     /// Ends the session and forgets all buffers and parameter sets. Safe to call when already stopped.
     func stop() {

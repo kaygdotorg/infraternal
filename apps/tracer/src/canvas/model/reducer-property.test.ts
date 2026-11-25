@@ -43,7 +43,7 @@ function sequence(seed: number): Intent[] {
 /** Repository root, the working directory for the oracle build and run. */
 const repo = new URL("../../../../../", import.meta.url).pathname;
 /** Cargo arguments that select the layout oracle example, shared by its build and its run. */
-const oracleArgs = ["-p", "infraternal-plugin-canvas", "--example", "layout_oracle"];
+const oracleArgs = ["-p", "infraternal-canvas-model", "--example", "layout_oracle"];
 
 // Compiling the Rust oracle is setup, not the behaviour under test. On a shared build host it can wait on
 // cargo's target-dir lock or rebuild dependencies for minutes, so it gets its own bound here and the

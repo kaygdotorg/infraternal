@@ -2293,6 +2293,11 @@ async fn replacement_child_waits_for_the_retired_child_to_be_reaped() {
     let collisions = std::fs::read_to_string(directory.join("collisions")).unwrap_or_default();
     let children = std::fs::read_to_string(directory.join("started")).unwrap_or_default();
     drop(agent);
+    // The actor stops and reaps its current child before it returns, and it owns the `restarts`
+    // sender, so `changed` fails only after that reap. Waiting for it keeps the directory
+    // unchanged while a child is still starting; otherwise the child creates files after
+    // `remove_dir_all` has listed the directory (J1162: DirectoryNotEmpty under load).
+    while restarts.changed().await.is_ok() {}
     std::fs::remove_dir_all(&directory).unwrap();
     assert!(
         replaced.is_ok_and(|changed| changed.is_ok()),

@@ -476,6 +476,12 @@ impl Engine {
         PacketFilter::prepare_policy(config, proxy_ingress)
     }
 
+    /// Let the packet filter forward for this node's served networks, or stop it (D197 M3); see
+    /// [`PacketFilter::set_forwarding`].
+    pub(crate) fn set_forwarding(&self, on: bool) {
+        self.filter.set_forwarding(on);
+    }
+
     /// Publish a previously compiled snapshot with one lock swap.
     pub(crate) fn publish_policy(&self, policy: PreparedPolicy) {
         self.filter.publish_policy(policy);
@@ -1481,7 +1487,12 @@ impl RuntimeState {
                         .config
                         .as_ref()
                         .and_then(|old| old.peers.get(id))
-                        .is_none_or(|old| !old.has_network_access() || old.peer != policy.peer)
+                        .is_none_or(|old| {
+                            !old.has_network_access()
+                                || old.peer != policy.peer
+                                // Networks behind the peer are its allowed IPs too (D197 M3).
+                                || old.networks.through != policy.networks.through
+                        })
             })
             .map(|(_, policy)| {
                 let mut peers = peer_for_policy(policy)?;
@@ -1865,13 +1876,22 @@ fn peers_for_config(config: &Config) -> io::Result<Vec<WireGuardPeer>> {
 /// Rejects invalid host routes before they reach the userspace device.
 fn peer_for_policy(policy: &crate::dataplane::PeerPolicy) -> io::Result<Vec<WireGuardPeer>> {
     let peer = &policy.peer;
-    let addresses = peer
+    let mut addresses = peer
         .routed_addresses()
         .map(|address| {
             IpNetwork::new(address, if address.is_ipv4() { 32 } else { 128 })
                 .map_err(|_| io::ErrorKind::InvalidData.into())
         })
         .collect::<io::Result<Vec<_>>>()?;
+    // Networks behind this router peer (D197 M3): the device sends packets for them to the peer
+    // and accepts replies from their hosts only from it. The packet filter still decides which
+    // flows may start.
+    for network in &policy.networks.through {
+        addresses.push(
+            IpNetwork::new(network.network.address(), network.network.prefix())
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?,
+        );
+    }
     let Some(previous) = peer.previous_key.filter(|key| *key != peer.key) else {
         let mut current =
             WireGuardPeer::new(X25519PublicKey::from(peer.key.0)).with_allowed_ips(addresses);
@@ -1923,6 +1943,28 @@ pub(crate) fn peer_keys_with_network_access(config: &Config) -> BTreeSet<PublicK
         .values()
         .filter(|peer| peer.has_network_access())
         .flat_map(policy_keys)
+        .collect()
+}
+
+/// The networks each router peer carries in its allowed IPs (D197 M3), so a change to them
+/// reconfigures the device even when the set of installed peers stays the same.
+pub(crate) fn networks_behind_peers(
+    config: &Config,
+) -> BTreeMap<crate::policy::model::NodeId, Vec<infraternal_mesh::networks::Network>> {
+    config
+        .peers
+        .iter()
+        .filter(|(_, peer)| !peer.networks.through.is_empty())
+        .map(|(id, peer)| {
+            (
+                *id,
+                peer.networks
+                    .through
+                    .iter()
+                    .map(|network| network.network)
+                    .collect(),
+            )
+        })
         .collect()
 }
 
@@ -2745,6 +2787,7 @@ mod tests {
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
                     access_ssh: None,
+                    networks: crate::dataplane::PeerNetworks::default(),
                 },
             )]),
             #[cfg(feature = "mesh-dns")]

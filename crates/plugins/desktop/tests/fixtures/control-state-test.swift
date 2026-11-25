@@ -195,6 +195,26 @@ import CoreGraphics
         assert(rate.current > 500_000 && rate.current < 12_000_000)
         for step in 301...1100 { _ = rate.feedback(at: Double(step), congested: false) }
         assert(rate.current == 12_000_000)
+        // A measured link rate [#146]: the cut goes straight to 85 percent of it, not 70 percent of the
+        // current rate, and the controller does not probe above it for 60 s.
+        var linked = AdaptiveBitrate(maximum: 4_680_000)
+        assert(linked.feedback(at: 0, congested: true, linkRate: 3_000_000) == 2_550_000)
+        // A report inside 0.5 s changes nothing; a report without a rate takes the usual step.
+        assert(linked.feedback(at: 0.1, congested: true, linkRate: 1_000_000) == 2_550_000)
+        assert(linked.feedback(at: 1, congested: true) == 1_785_000)
+        // A measured rate above the current one means the link is not the limit: the usual step.
+        var above = AdaptiveBitrate(maximum: 4_000_000)
+        assert(above.feedback(at: 0, congested: true, linkRate: 9_000_000) == 2_800_000)
+        // Healthy frames do not climb above the measured limit for 60 s, and may after that.
+        var capped = AdaptiveBitrate(maximum: 4_680_000)
+        assert(capped.feedback(at: 0, congested: true, linkRate: 2_000_000) == 1_700_000)
+        for step in 1...59 { _ = capped.feedback(at: Double(step), congested: false) }
+        assert(capped.current == 1_700_000, "no probing above the measured link for 60 s")
+        for step in 60...200 { _ = capped.feedback(at: Double(step), congested: false) }
+        assert(capped.current > 1_700_000, "probing resumes once the hold ends")
+        // The floor still applies.
+        var slow = AdaptiveBitrate(maximum: 4_000_000)
+        assert(slow.feedback(at: 0, congested: true, linkRate: 300_000) == 500_000)
         // Tile lane [#146 C]: a tile owes no refresh, but it postpones one already owed after motion.
         var tiled = DamageEncodingState()
         tiled.changed(at: 0); _ = tiled.next(at: 0); tiled.completed(delivered: true)

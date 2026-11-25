@@ -44,6 +44,8 @@ path = "src/bin/client.rs"
 required-features = ["desktop"]
 
 [dev-dependencies]
+# The slow-link probe bounds its socket's unsent data the way the server does (Linux only).
+socket2 = { version = "0.6", features = ["all"] }
 # The socket publication test watches the runtime directory (Linux inotify).
 nix = { workspace = true, features = ["event", "inotify"] }
 # Paused time keeps marker-retry tests deterministic without wall-clock sleeps.

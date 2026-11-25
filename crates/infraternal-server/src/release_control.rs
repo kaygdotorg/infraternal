@@ -28,6 +28,12 @@
 //! An apply or roll back restarts the server warm right after it answers, which closes this
 //! connection; the reply can therefore be lost. Callers treat a closed connection after such a
 //! request as "the switch started" and read the outcome from `release.update.status`.
+//!
+//! **Subnet routes (D197 M3, #580).** The same request kind also runs the three `mesh.route.*`
+//! actions ([`MESH_ACTIONS`]) for `infraternal server mesh routes`, on the server's own
+//! [`MeshService`](infraternal_plugin_mesh::api::MeshService) ([`register_mesh`]), with the same
+//! caller rule and for the same reason: approving a network is owner authority, and root on the
+//! server machine already holds it. Other devices approve with the owner's fresh passkey.
 use infraternal_plugin_release::{
     descriptor::{
         UPDATE_APPLY, UPDATE_CANCEL, UPDATE_CHECK, UPDATE_HISTORY, UPDATE_ROLLBACK,
@@ -75,8 +81,92 @@ pub const LOCAL_ACTIONS: [&str; 7] = [
     UPDATE_SETTINGS.id,
 ];
 
+/// The subnet-route actions this socket runs for `infraternal server mesh routes` (D197 M3).
+#[cfg(feature = "mesh")]
+pub const MESH_ACTIONS: [&str; 3] = [
+    infraternal_plugin_mesh::route_api::LIST,
+    infraternal_plugin_mesh::route_api::APPROVE,
+    infraternal_plugin_mesh::route_api::REVOKE,
+];
+
 /// The running server's release service and the data folder it serves.
 static REGISTERED: Mutex<Option<(PathBuf, ReleaseService)>> = Mutex::new(None);
+
+/// The running server's mesh service and the data folder it serves (see [`register_mesh`]).
+#[cfg(feature = "mesh")]
+static REGISTERED_MESH: Mutex<Option<(PathBuf, infraternal_plugin_mesh::api::MeshService)>> =
+    Mutex::new(None);
+
+/// Remember the mesh service of the server whose database is `pool`, for [`MESH_ACTIONS`].
+///
+/// The data folder is the database file's folder, as for the release service; an in-memory
+/// database (tests) registers nothing.
+#[cfg(feature = "mesh")]
+pub async fn register_mesh(
+    pool: &sqlx::SqlitePool,
+    service: infraternal_plugin_mesh::api::MeshService,
+) {
+    let Ok((_, _, filename)) = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT seq,name,file FROM pragma_database_list WHERE name='main'",
+    )
+    .fetch_one(pool)
+    .await
+    else {
+        return;
+    };
+    let Some(state) = Path::new(&filename)
+        .parent()
+        .filter(|_| !filename.is_empty())
+    else {
+        return;
+    };
+    let state = state.canonicalize().unwrap_or_else(|_| state.to_owned());
+    *REGISTERED_MESH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((state, service));
+}
+
+/// The mesh service registered for the data folder `data`, if any.
+#[cfg(feature = "mesh")]
+fn registered_mesh(data: &Path) -> Option<infraternal_plugin_mesh::api::MeshService> {
+    let data = data.canonicalize().ok()?;
+    REGISTERED_MESH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|(state, _)| *state == data)
+        .map(|(_, service)| service.clone())
+}
+
+/// Run one `mesh.route.*` action as the local operator (D400) for the server at `data`.
+#[cfg(feature = "mesh")]
+async fn mesh_reply(data: &Path, action: &str, input: &Value) -> Value {
+    let Some(service) = registered_mesh(data) else {
+        return json!({"ok":false,"error":"mesh unavailable"});
+    };
+    let input = serde_json::to_vec(input).unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .unwrap_or(0);
+    match tokio::time::timeout(
+        ACTION_LIMIT,
+        service.execute_local_route(action, &input, now),
+    )
+    .await
+    {
+        Ok(Ok(value)) => json!({"ok":true,"value":value}),
+        Ok(Err(error)) => {
+            let text = serde_json::from_slice::<Value>(error.wire_error())
+                .ok()
+                .and_then(|value| value["error"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| "mesh unavailable".to_owned());
+            json!({"ok":false,"error":text})
+        }
+        Err(_) => json!({"ok":false,"error":"the server did not finish in time"}),
+    }
+}
 
 /// Remember `service` as the one that serves the data folder `state`.
 ///
@@ -127,7 +217,11 @@ struct Request {
 ///
 /// # Errors
 /// I/O and framing failures; the connection is then simply closed.
-pub async fn answer(stream: &mut UnixStream, service: Option<ReleaseService>) -> io::Result<()> {
+pub async fn answer(
+    stream: &mut UnixStream,
+    service: Option<ReleaseService>,
+    data: &Path,
+) -> io::Result<()> {
     let length = tokio::time::timeout(IO_LIMIT, stream.read_u16())
         .await
         .map_err(|_| io::ErrorKind::TimedOut)??;
@@ -140,6 +234,19 @@ pub async fn answer(stream: &mut UnixStream, service: Option<ReleaseService>) ->
         .await
         .map_err(|_| io::ErrorKind::TimedOut)??;
     let request = serde_json::from_slice::<Request>(&body);
+    #[cfg(feature = "mesh")]
+    if let Ok(request) = &request
+        && let Some(action) = MESH_ACTIONS.iter().find(|id| **id == request.action)
+    {
+        let reply = mesh_reply(data, action, &request.input).await;
+        tracing::info!(
+            action = *action,
+            ok = reply["ok"].as_bool().unwrap_or(false),
+            "server_mesh_control"
+        );
+        return write_reply(stream, &reply).await;
+    }
+    let _ = data;
     let action = request
         .as_ref()
         .ok()
@@ -168,7 +275,12 @@ pub async fn answer(stream: &mut UnixStream, service: Option<ReleaseService>) ->
         ok = reply["ok"].as_bool().unwrap_or(false),
         "server_update_control"
     );
-    let payload = serde_json::to_vec(&reply).map_err(io::Error::other)?;
+    write_reply(stream, &reply).await
+}
+
+/// Write one framed reply: a big-endian `u32` length and the JSON body.
+async fn write_reply(stream: &mut UnixStream, reply: &Value) -> io::Result<()> {
+    let payload = serde_json::to_vec(reply).map_err(io::Error::other)?;
     if payload.len() > MAX_REPLY {
         return Err(io::ErrorKind::InvalidData.into());
     }

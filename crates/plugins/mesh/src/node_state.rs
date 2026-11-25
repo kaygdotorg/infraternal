@@ -61,6 +61,14 @@ pub struct Store {
     rotation_path: PathBuf,
     #[cfg(target_os = "linux")]
     engine_path: PathBuf,
+    /// The networks this node advertises as subnet routes (D197 M3): the operator's word, kept
+    /// across restarts and `mesh down`, and read by the coordinator's identity probe.
+    #[cfg(target_os = "linux")]
+    advertised_path: PathBuf,
+    /// Present while this node has turned IPv4 forwarding on for its served networks and owes the
+    /// host turning it off again (D197 M3); survives a crash so the next start can settle it.
+    #[cfg(target_os = "linux")]
+    ip_forward_path: PathBuf,
     /// The non-secret UDP port selected for the next automatic node start.
     listen_port_path: PathBuf,
     key_path: PathBuf,
@@ -350,6 +358,10 @@ impl Store {
         let rotation_path = parent.join("mesh-key-rotation.bin");
         #[cfg(target_os = "linux")]
         let engine_path = parent.join("mesh-engine.json");
+        #[cfg(target_os = "linux")]
+        let advertised_path = parent.join("mesh-advertised-routes.json");
+        #[cfg(target_os = "linux")]
+        let ip_forward_path = parent.join("mesh-ip-forward.json");
         let listen_port_path = parent.join("mesh-listen-port.json");
         let key_path = parent.join("mesh-private-key");
         let authority_path = parent.join(AUTHORITY_FILE);
@@ -383,6 +395,10 @@ impl Store {
                 rotation_path,
                 #[cfg(target_os = "linux")]
                 engine_path,
+                #[cfg(target_os = "linux")]
+                advertised_path,
+                #[cfg(target_os = "linux")]
+                ip_forward_path,
                 listen_port_path,
                 key_path,
                 authority_path,
@@ -834,6 +850,61 @@ impl Store {
             return Ok(());
         }
         write_public(&self.listen_port_path, &body)
+    }
+
+    /// Save the networks this node advertises (D197 M3), replacing the previous list.
+    ///
+    /// The list is sorted and free of duplicates, so the file only changes when the set does.
+    /// An empty list removes nothing else: approvals live on the server, and a network the node
+    /// stops advertising simply stops being routed.
+    /// # Errors
+    /// Reports an unsafe state file or a failed write.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_advertised_routes(
+        &self,
+        networks: &BTreeSet<crate::policy::networks::Network>,
+    ) -> io::Result<()> {
+        let body = serde_json::to_vec(networks).map_err(io::Error::other)?;
+        if existing_matches(&self.advertised_path, &body) {
+            return Ok(());
+        }
+        write_public(&self.advertised_path, &body)
+    }
+
+    /// The networks this node advertises; empty when it never advertised any.
+    /// # Errors
+    /// Rejects a malformed or non-canonical list and unsafe state-file metadata.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn advertised_routes(
+        &self,
+    ) -> io::Result<BTreeSet<crate::policy::networks::Network>> {
+        Ok(read_public(&self.advertised_path)?.unwrap_or_default())
+    }
+
+    /// Record whether this node owes the host turning IPv4 forwarding off again (D197 M3).
+    /// # Errors
+    /// Reports an unsafe state file or a failed write or removal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn record_ip_forward_owed(&self, owed: bool) -> io::Result<()> {
+        if owed {
+            let body = serde_json::to_vec(&true).map_err(io::Error::other)?;
+            if existing_matches(&self.ip_forward_path, &body) {
+                return Ok(());
+            }
+            return write_public(&self.ip_forward_path, &body);
+        }
+        match std::fs::remove_file(&self.ip_forward_path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether this node turned IPv4 forwarding on and has not turned it off yet.
+    /// # Errors
+    /// Rejects a malformed record and unsafe state-file metadata.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn ip_forward_owed(&self) -> io::Result<bool> {
+        Ok(read_public::<bool>(&self.ip_forward_path)?.unwrap_or(false))
     }
 
     /// Read the saved automatic listener choice, if this node has started before.

@@ -388,6 +388,8 @@ async fn serve_inner(
                     if socket.set_nodelay(true).is_err() {
                         tracing::warn!("could not set TCP_NODELAY on accepted server socket");
                     }
+                    // Keep video and floods out of the kernel's send buffer (#146).
+                    crate::send_queue::bound_unsent_queue(socket);
                 });
             warm_payloads(warmup);
             axum::serve(

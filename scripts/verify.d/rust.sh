@@ -200,6 +200,7 @@ rust_check_cli_plugin_compile_out() {
         infraternal-agent
         infraternal-mesh
         infraternal-plugin-backup
+        infraternal-canvas-model
         infraternal-plugin-canvas
         infraternal-plugin-host-facts
         infraternal-plugin-mesh
@@ -253,6 +254,35 @@ rust_check_release_feature_sets() {
     return "$failed"
 }
 
+# Fills APPLE_CHECK_ENV with what a Linux `cargo check` for the given Apple
+# target triples needs: the Zig-driven C toolchain (see apple-check-cc) as the
+# compiler for each triple, Zig caches inside the target, and an SDKROOT that
+# stops cc-rs asking xcrun for an SDK (the wrapper drops the -isysroot it then
+# adds). The process environment outranks the [env] table in .cargo/config.toml,
+# which points these at the Mac-only .cargo/apple-cc.sh. Deleting the target
+# cleans up the caches. Shared by the macOS and iOS compile rows.
+rust_apple_check_env() {
+    local tools zig tool triple var
+    scripts/auth-toolchain >/dev/null || return 1
+    zig="$CARGO_TARGET_DIR/auth-tools/zig/zig"
+    tools="$CARGO_TARGET_DIR/apple-check-tools"
+    mkdir -p "$tools" || return 1
+    for tool in cc c++ ar ranlib; do
+        ln -sfn "$(pwd -P)/scripts/verify.d/apple-check-cc" "$tools/$tool" || return 1
+    done
+    APPLE_CHECK_ENV=(
+        INFRATERNAL_APPLE_CHECK_ZIG="$zig"
+        ZIG_GLOBAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
+        ZIG_LOCAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
+        SDKROOT="$tools"
+        DOCS_RS=1
+    )
+    for triple in "$@"; do
+        var="${triple//-/_}"
+        APPLE_CHECK_ENV+=("CC_$var=$tools/cc" "CXX_$var=$tools/c++" "AR_$var=$tools/ar" "RANLIB_$var=$tools/ranlib")
+    done
+}
+
 # The "macOS compile" row (#260, #221). The "release feature sets" row checks the
 # macOS feature sets for Linux, so code under cfg(target_os = "macos") was never
 # compiled by any gate, and dev's macOS Mesh node stopped building unnoticed
@@ -272,41 +302,75 @@ rust_check_release_feature_sets() {
 # the Mac. On a Mac the row reports SKIP, because macos-build-check is the
 # native check there. It runs every check after a failure, so one log shows all.
 rust_check_macos_compile() {
-    local failed=0 tools zig tool
+    local failed=0
     local release_macos_host_cargo_args release_macos_helper_cargo_args
     if [[ "$(uname -s)" != Linux ]]; then
         printf 'SKIP macOS compile: Linux cross-check only; use scripts/macos-build-check on a Mac\n'
         return 77
     fi
     source scripts/release/feature-sets || return 1
-    scripts/auth-toolchain >/dev/null || return 1
-    zig="$CARGO_TARGET_DIR/auth-tools/zig/zig"
-    tools="$CARGO_TARGET_DIR/apple-check-tools"
-    mkdir -p "$tools" || return 1
-    for tool in cc c++ ar ranlib; do
-        ln -sfn "$(pwd -P)/scripts/verify.d/apple-check-cc" "$tools/$tool" || return 1
-    done
-    # The process environment outranks the [env] table in .cargo/config.toml,
-    # which points these at the Mac-only .cargo/apple-cc.sh. SDKROOT stops cc-rs
-    # asking xcrun for an SDK; the wrapper drops the -isysroot it then adds.
-    # Zig's caches live in the target, so deleting the target cleans them up.
-    local -a env=(
-        INFRATERNAL_APPLE_CHECK_ZIG="$zig"
-        ZIG_GLOBAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
-        ZIG_LOCAL_CACHE_DIR="$CARGO_TARGET_DIR/apple-check-zig-cache"
-        CC_aarch64_apple_darwin="$tools/cc"
-        CXX_aarch64_apple_darwin="$tools/c++"
-        AR_aarch64_apple_darwin="$tools/ar"
-        RANLIB_aarch64_apple_darwin="$tools/ranlib"
-        SDKROOT="$tools"
-        DOCS_RS=1
-    )
+    rust_apple_check_env aarch64-apple-darwin || return 1
+    local -a env=("${APPLE_CHECK_ENV[@]}")
     local -a check=(env "${env[@]}" cargo check --locked --target aarch64-apple-darwin)
     "${check[@]}" "${release_macos_host_cargo_args[@]}" || failed=1
     "${check[@]}" "${release_macos_helper_cargo_args[@]}" || failed=1
     "${check[@]}" --package infraternal-plugin-mesh --features agent --lib --tests || failed=1
     "${check[@]}" --package infraternal-agent --features mesh,desktop --lib --tests || failed=1
     "${check[@]}" --package infraternal-plugin-desktop --features desktop --lib --bins --tests || failed=1
+    return "$failed"
+}
+
+# The iOS client crates (#580). The two FFI crates arrive with step F1 of
+# docs/design/client-core-split.md; until they exist, the crates that already
+# build for iOS stand in, so both rows below have something to check.
+rust_ios_client_crates() {
+    local crate
+    IOS_CLIENT_CRATES=()
+    for crate in infraternal-tunnel-ffi infraternal-client-ffi; do
+        [[ -d "crates/$crate" ]] && IOS_CLIENT_CRATES+=("$crate")
+    done
+    if ((${#IOS_CLIENT_CRATES[@]} == 0)); then
+        printf 'NOTE: the iOS FFI crates (infraternal-tunnel-ffi, infraternal-client-ffi) do not exist yet (plan step F1); checking infraternal-protocol and infraternal-mesh, the crates that already build for iOS\n'
+        IOS_CLIENT_CRATES=(infraternal-protocol infraternal-mesh)
+    fi
+}
+
+# The "iOS compile" row (#580, T4). Type-checks the iOS client crates for the
+# device and the Simulator from Linux, with the same Zig C toolchain as the
+# macOS row (ring, the one C dependency of the proposed extension set, compiles
+# through it), so a break for iOS shows up without kayg@std. Nothing is linked
+# and no Apple SDK is needed. The shipped static libraries are still built on
+# std (scripts/ios, plan step F2). SKIP off Linux.
+rust_check_ios_compile() {
+    local failed=0 target
+    if [[ "$(uname -s)" != Linux ]]; then
+        printf 'SKIP iOS compile: Linux cross-check only\n'
+        return 77
+    fi
+    rust_ios_client_crates
+    local -a packages=()
+    local crate
+    for crate in "${IOS_CLIENT_CRATES[@]}"; do packages+=(--package "$crate"); done
+    rust_apple_check_env aarch64-apple-ios aarch64-apple-ios-sim || return 1
+    for target in aarch64-apple-ios aarch64-apple-ios-sim; do
+        env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" "${packages[@]}" || failed=1
+    done
+    return "$failed"
+}
+
+# The "iOS dependency guard" row (#580, T3). `cargo tree` for aarch64-apple-ios
+# resolves the iOS dependency graph without building anything, so it needs no
+# SDK and no linker. scripts/verify.d/ios-dependency-guard.py fails the row when
+# openssl, sqlx, libsqlite3-sys, aws-lc or tokio's rt-multi-thread are in it.
+# Its own tests run first, so a broken checker cannot pass the row.
+rust_check_ios_dependency_guard() {
+    local failed=0 crate tree
+    python3 scripts/test-ios-dependency-guard.py || return 1
+    rust_ios_client_crates
+    for crate in "${IOS_CLIENT_CRATES[@]}"; do
+        tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package "$crate")" || return 1
+        printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
+    done
     return "$failed"
 }
 
@@ -444,6 +508,9 @@ rust_verify_fast() {
     rust_run_gate "release feature sets" rust_check_release_feature_sets
     # cfg(target_os = "macos") code, type-checked from Linux; SKIP on a Mac (#260).
     rust_run_gate_skippable "macOS compile" rust_check_macos_compile
+    # iPhone targets, type-checked from Linux, and what must stay out of their dependency graph (#580).
+    rust_run_gate_skippable "iOS compile" rust_check_ios_compile
+    rust_run_gate "iOS dependency guard" rust_check_ios_dependency_guard
     rust_run_gate "SSH runtime test helper" cargo build --locked -p infraternal-plugin-ssh --example recovery-helper
     rust_run_gate "real-binary fixture paths" python3 scripts/test-agent-fixture.py
     rust_run_gate "latency report (D375)" python3 scripts/test-latency-report.py

@@ -13,6 +13,9 @@ mod release_cli;
 /// `infraternal server update adopt`: move an existing server onto the boot pointer (#211 S6).
 #[cfg(all(feature = "release", feature = "remote", target_os = "linux"))]
 mod server_adopt;
+/// `infraternal server mesh routes …` over the server's private control socket (D197 M3, D400).
+#[cfg(feature = "release")]
+mod server_mesh_routes_cli;
 /// `infraternal server update …` over the server's private control socket (#211, D400).
 #[cfg(feature = "release")]
 mod server_update_cli;
@@ -495,6 +498,7 @@ fn dispatch_action(
         CliHandler::RemoteAgent
         | CliHandler::ServerRestart
         | CliHandler::ServerMeshStatus
+        | CliHandler::ServerMeshRoutes
         | CliHandler::RemoveHost
         | CliHandler::SshAskpass => run_operator_action(action, matches, json_output),
     }
@@ -1647,18 +1651,23 @@ fn run_server_init(matches: &ArgMatches, json_output: bool) -> ExitCode {
         // it can serve their own script to a signed-in administrator (#146,
         // J1151). Checked here, before any data move rewrites the path, so
         // it judges the folder as it is now.
-        if let Some(web) = &args.web_root
-            && let Err(problem) = install::check_root_web_folder(web, 0)
-        {
-            if !dry_run {
-                return report_failure(
-                    "server init",
-                    "The web folder is not safe for a service that root runs.",
-                    problem,
-                    json_output,
-                );
+        // The unit stores the canonical path the check returns, so a link
+        // on the path given cannot be repointed afterwards (J1180, F3).
+        if let Some(web) = &args.web_root {
+            match install::check_root_web_folder(web, 0) {
+                Ok(canonical) => args.web_root = Some(canonical),
+                Err(problem) => {
+                    if !dry_run {
+                        return report_failure(
+                            "server init",
+                            "The web folder is not safe for a service that root runs.",
+                            problem,
+                            json_output,
+                        );
+                    }
+                    eprintln!("warning: {problem}; a real install refuses this web folder");
+                }
             }
-            eprintln!("warning: {problem}; a real install refuses this web folder");
         }
     }
     // An existing unit's non-standard folder moves to the D395 one (owner,
@@ -3392,6 +3401,10 @@ fn run_operator_action(action: &ActionDefinition, matches: &ArgMatches, json: bo
                     json,
                 ),
             };
+        }
+        #[cfg(feature = "release")]
+        if action.cli_handler == CliHandler::ServerMeshRoutes {
+            return server_mesh_routes_cli::run(action, matches, json);
         }
         #[cfg(all(feature = "plugin-server", feature = "remote"))]
         if action.cli_handler == CliHandler::ServerMeshStatus {

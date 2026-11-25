@@ -305,6 +305,7 @@ fn chunked_snapshot_is_atomic_and_applies_1000_kernel_peers() {
                         inbound: TrafficPolicy::All,
                         outbound: TrafficPolicy::All,
                         access_ssh: None,
+                        networks: crate::dataplane::PeerNetworks::default(),
                     },
                 )
             })

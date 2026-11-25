@@ -8,7 +8,7 @@
 //! - `~/Library/Application Support/infraternal/state`: mesh state and key (0700);
 //! - `~/Library/Application Support/infraternal/bin/infraternal`: the binary;
 //! - `~/Library/Logs/infraternal/agent.log`: the agent's output;
-//! - `~/Library/LaunchAgents/org.infraternal.agent.plist`: the `LaunchAgent`.
+//! - `~/Library/LaunchAgents/kayg.infraternal.agent.plist`: the `LaunchAgent`.
 //!
 //! The mesh needs root for three things only, so `up` installs the on-demand mesh helper
 //! ([`infraternal_plugin_mesh::macos_helper`]) with **one** `sudo` prompt, before the approval
@@ -21,6 +21,11 @@
 //! `LaunchAgent`, which closes the utun and with it the mesh routes, asks the helper to remove
 //! its resolver files and its own registration, and deletes the files above. It refuses
 //! unless the install's receipt names `<host>`.
+//!
+//! Builds before the move to `kayg.infraternal` (#580) installed under `org.infraternal.*`
+//! names. `up` on such a Mac moves it over ([`migrate_agent`]) and removal takes both sets;
+//! the install folders, the enrollment and the mesh key keep their paths, so the node keeps its
+//! identity.
 
 use super::{
     Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal, fail, join_approval_link,
@@ -33,7 +38,7 @@ use infraternal_plugin_mesh::{
     macos_helper,
     macos_local_network::{self, LocalNetwork},
     macos_service::MACHINE_BASE,
-    macos_user_mode::{self, AGENT_LABEL, Request},
+    macos_user_mode::{self, AGENT_LABEL, Request, legacy},
 };
 use serde_json::json;
 use std::{
@@ -48,8 +53,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-/// The root-mode `LaunchDaemon`; user mode refuses to install beside it.
-const ROOT_MODE_PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
+/// The root-mode `LaunchDaemon`, under its current and its pre-#580 name; user mode refuses to
+/// install beside either.
+const ROOT_MODE_PLISTS: [&str; 2] = [macos_user_mode::DAEMON_PLIST, legacy::DAEMON_PLIST];
 /// How long `up` waits for launchd to report the agent running.
 const START_WAIT: Duration = Duration::from_secs(15);
 /// The fixed launchctl, never found through `PATH`.
@@ -69,6 +75,8 @@ pub(super) struct Paths {
     logs: PathBuf,
     /// The `LaunchAgent` property list.
     launch_agent: PathBuf,
+    /// The `LaunchAgent` property list of a build before #580, which `up` removes.
+    legacy_launch_agent: PathBuf,
 }
 
 impl Paths {
@@ -86,6 +94,8 @@ impl Paths {
             binary: macos_user_mode::user_install_binary(&home),
             logs: library.join("Logs/infraternal"),
             launch_agent: library.join(format!("LaunchAgents/{AGENT_LABEL}.plist")),
+            legacy_launch_agent: library
+                .join(format!("LaunchAgents/{}.plist", legacy::AGENT_LABEL)),
             base,
         })
     }
@@ -120,7 +130,7 @@ fn exists(path: &Path) -> io::Result<bool> {
 
 /// Refuse a Mac where user mode cannot install cleanly, before any prompt or approval.
 fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
-    for path in [MACHINE_BASE, ROOT_MODE_PLIST] {
+    for path in [MACHINE_BASE, ROOT_MODE_PLISTS[0], ROOT_MODE_PLISTS[1]] {
         if exists(Path::new(path))? {
             return Err(io::Error::new(
                 ErrorKind::AlreadyExists,
@@ -130,7 +140,7 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
             ));
         }
     }
-    for path in [&paths.base, &paths.launch_agent] {
+    for path in [&paths.base, &paths.launch_agent, &paths.legacy_launch_agent] {
         if exists(path)? {
             return Err(io::Error::new(
                 ErrorKind::AlreadyExists,
@@ -340,14 +350,33 @@ fn refresh_existing(
     if !exists(&paths.receipt()).ok()? || macos_helper::registered_uid().ok()? != Some(uid) {
         return None;
     }
-    let helper_current = same_bytes(Path::new(macos_user_mode::HELPER_BINARY), executable);
-    let agent_current = same_bytes(&paths.binary, executable);
+    let old_names = legacy::Found {
+        agent_plist: exists(&paths.legacy_launch_agent).unwrap_or(true),
+        ..macos_helper::legacy_helper_found()
+    };
+    let old_helper = old_names.helper.plist || old_names.helper.binary || old_names.helper.socket;
+    // A `LaunchAgent` the new names lack is unfinished work too (an earlier move that stopped
+    // halfway), so a second `up` finishes it.
+    let agent_listed = exists(&paths.launch_agent).unwrap_or(false);
+    let helper_current =
+        !old_helper && same_bytes(Path::new(macos_user_mode::HELPER_BINARY), executable);
+    let agent_current =
+        !old_names.agent_plist && agent_listed && same_bytes(&paths.binary, executable);
     if helper_current && agent_current {
         return None;
     }
-    eprintln!(
-        "infraternal: this Mac already runs infraternal in user mode with another build; updating its mesh helper and infraternal agent to this one."
-    );
+    let moving = old_helper || old_names.agent_plist || !agent_listed;
+    if moving {
+        eprintln!(
+            "infraternal: this Mac runs infraternal under its old names; moving it to kayg.infraternal. Its enrollment and mesh key are kept."
+        );
+    } else {
+        eprintln!(
+            "infraternal: this Mac already runs infraternal in user mode with another build; updating its mesh helper and infraternal agent to this one."
+        );
+    }
+    // The helper first: its install also removes an old helper (one `sudo` prompt), and a
+    // refused password leaves everything as it was.
     if !helper_current && let Err(failure) = install_helper(sudo, executable, uid) {
         return Some(fail(json_output, failure));
     }
@@ -355,8 +384,15 @@ fn refresh_existing(
         if !agent_current {
             replace_binary(executable, &paths.binary)?;
         }
-        restart_agent(uid)
+        if moving {
+            migrate_agent(paths, uid)
+        } else {
+            restart_agent(uid)
+        }
     })();
+    let local_network = (moving && refreshed.is_ok())
+        .then(|| wait_for_local_network(&paths.state))
+        .flatten();
     Some(match refreshed {
         Ok(()) => emit(
             CommandResult::new(
@@ -371,6 +407,8 @@ fn refresh_existing(
                     "service": AGENT_LABEL,
                     "status": "active",
                     "path": paths.binary.display().to_string(),
+                    "migrated_names": moving,
+                    "local_network": local_network.map(LocalNetwork::word),
                 }),
             )
             .with_body(format!(
@@ -452,6 +490,77 @@ fn restart_agent(uid: u32) -> io::Result<()> {
         std::thread::sleep(Duration::from_millis(200));
     }
     Ok(())
+}
+
+/// Move the user-mode `LaunchAgent` from the old names to the new ones (#580).
+///
+/// The old agent is unloaded first, because two agents on one enrollment would fight over the
+/// utun and the mesh ports. Then the new property list is written (it names the same binary,
+/// enrollment and state, so the node keeps its identity and mesh key), the Local Network
+/// answer from the old identity is forgotten so `up` reads the new one, and the new agent is
+/// loaded and waited for. The old property list is deleted only once the new agent runs; if it
+/// does not, the old agent is loaded again, so a failed move leaves a working Mac. Safe to
+/// run again after an interruption, and when only some of the steps are needed.
+fn migrate_agent(paths: &Paths, uid: u32) -> io::Result<()> {
+    let steps = old_agent_steps(paths)?;
+    let old_agent = !steps.is_empty();
+    // Unload first; the property list is deleted only once the new agent runs.
+    for step in steps
+        .iter()
+        .filter(|step| **step == legacy::Step::UnloadAgent)
+    {
+        apply_old_agent_step(paths, uid, *step)?;
+    }
+    let result = (|| {
+        if !exists(&paths.launch_agent)? {
+            let log = paths.logs.join("agent.log");
+            let plist = macos_user_mode::agent_plist(
+                &paths.binary.to_string_lossy(),
+                &paths.data.to_string_lossy(),
+                &paths.state.to_string_lossy(),
+                &log.to_string_lossy(),
+            );
+            write_new(&paths.launch_agent, plist.as_bytes(), 0o644)?;
+        }
+        // A new identity gets its own Local Network question; the old answer is not it.
+        let _ = fs::remove_file(paths.state.join(macos_local_network::STATE_FILE));
+        stop_agent(uid)?;
+        launchctl_checked(&[
+            "bootstrap".into(),
+            format!("gui/{uid}").into(),
+            paths.launch_agent.clone().into(),
+        ])?;
+        let deadline = Instant::now() + START_WAIT;
+        while !agent_running(uid)? {
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(
+                    "launchd did not report the infraternal agent as running after the move",
+                ));
+            }
+            // sleep: launchd exposes job state only through polling.
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => steps
+            .iter()
+            .filter(|step| **step == legacy::Step::RemoveAgentPlist)
+            .try_for_each(|step| apply_old_agent_step(paths, uid, *step)),
+        Err(error) => {
+            // Put the old agent back so the Mac keeps its mesh; the new plist stays, and a
+            // second `up` finishes the move.
+            let _ = stop_agent(uid);
+            if old_agent {
+                let _ = launchctl_checked(&[
+                    "bootstrap".into(),
+                    format!("gui/{uid}").into(),
+                    paths.legacy_launch_agent.clone().into(),
+                ]);
+            }
+            Err(error)
+        }
+    }
 }
 
 /// The approval, enrollment and activation, all under the install's rollback.
@@ -698,7 +807,7 @@ impl Drop for Install {
         if let Err(error) = macos_helper::request(&Request::Remove, None) {
             eprintln!(
                 "infraternal: the mesh helper could not remove itself ({error}); run sudo {} {} to remove it.",
-                macos_user_mode::HELPER_BINARY,
+                macos_helper::installed_binary(),
                 macos_helper::REMOVE_ENTRY
             );
         }
@@ -755,7 +864,12 @@ fn agent_running(uid: u32) -> io::Result<bool> {
 
 /// Unload the user-mode agent; a job that is not loaded is already stopped.
 fn stop_agent(uid: u32) -> io::Result<()> {
-    let output = launchctl(&["bootout".into(), format!("gui/{uid}/{AGENT_LABEL}").into()])?;
+    stop_agent_label(uid, AGENT_LABEL)
+}
+
+/// Unload the agent job named `label` (the current or the pre-#580 one) from `uid`'s session.
+fn stop_agent_label(uid: u32, label: &str) -> io::Result<()> {
+    let output = launchctl(&["bootout".into(), format!("gui/{uid}/{label}").into()])?;
     let reason = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
     if output.status.success()
         || reason.contains("no such process")
@@ -766,6 +880,27 @@ fn stop_agent(uid: u32) -> io::Result<()> {
         Err(io::Error::other(
             "launchctl could not stop the infraternal agent",
         ))
+    }
+}
+
+/// The person's own old-name steps of [`legacy::plan`] for this account: what exists now.
+fn old_agent_steps(paths: &Paths) -> io::Result<Vec<legacy::Step>> {
+    Ok(legacy::plan(legacy::Found {
+        agent_plist: exists(&paths.legacy_launch_agent)?,
+        ..legacy::Found::default()
+    }))
+}
+
+/// Carry out one person-level step of [`legacy::plan`]: unload the old `LaunchAgent`, or delete
+/// its property list. Root steps belong to the helper's install and are skipped here.
+fn apply_old_agent_step(paths: &Paths, uid: u32, step: legacy::Step) -> io::Result<()> {
+    match step {
+        legacy::Step::UnloadAgent => stop_agent_label(uid, legacy::AGENT_LABEL),
+        legacy::Step::RemoveAgentPlist => match fs::remove_file(&paths.legacy_launch_agent) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+        _ => Ok(()),
     }
 }
 
@@ -830,6 +965,14 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
         ));
     }
     stop_agent(uid)?;
+    // The old-name agent, if this Mac still has it: unload only; its file goes below.
+    let old_steps = old_agent_steps(paths)?;
+    for step in old_steps
+        .iter()
+        .filter(|step| **step == legacy::Step::UnloadAgent)
+    {
+        apply_old_agent_step(paths, uid, *step)?;
+    }
     // An unreadable registration is reported after the person's own files are gone, with the
     // administrator command that removes the helper; it is never read as "no helper" (J1087).
     let helper = match macos_helper::registration_for_current_user() {
@@ -839,15 +982,17 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             error.kind(),
             format!(
                 "the mesh helper registration could not be read ({error}); run sudo {} {} to remove the helper",
-                macos_user_mode::HELPER_BINARY,
+                macos_helper::installed_binary(),
                 macos_helper::REMOVE_ENTRY
             ),
         )),
     };
-    match fs::remove_file(&paths.launch_agent) {
-        Ok(()) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    for plist in [&paths.launch_agent, &paths.legacy_launch_agent] {
+        match fs::remove_file(plist) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
     for directory in [&paths.base, &paths.logs] {
         match fs::remove_dir_all(directory) {

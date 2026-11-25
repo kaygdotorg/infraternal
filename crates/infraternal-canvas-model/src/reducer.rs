@@ -1,9 +1,11 @@
 //! Applies stable-ID semantic intents to the existing JSON representation; storage supplies permanent close IDs [183,243].
 use crate::model::{self, Document};
 use serde_json::Value;
+/// Tells whether storage has already recorded `id` as closed.
 fn is_closed(closed: &[String], id: &str) -> bool {
     closed.iter().any(|seen| seen == id)
 }
+/// Reads a required string field of an intent, as a refusal-style `Result`.
 fn s<'a>(value: &'a Value, key: &str) -> Result<&'a str, ()> {
     model::string(value, key).ok_or(())
 }
@@ -191,6 +193,7 @@ fn check_intent(value: &Value, kind: IntentKind) -> bool {
         _ => true,
     }
 }
+/// Checks an intent against its rule (type, allowed fields, field kinds) and returns the rule.
 fn validated_intent(value: &Value) -> Option<IntentRule> {
     let rule = intent_rule(model::string(value, "type")?)?;
     if !model::shape(value, rule.fields)
@@ -208,10 +211,12 @@ fn validated_intent(value: &Value) -> Option<IntentRule> {
     }
     check_intent(value, rule.kind).then_some(rule)
 }
+/// Tells whether `value` is a well-formed intent, without applying it.
 #[must_use]
 pub fn valid_intent(value: &Value) -> bool {
     validated_intent(value).is_some()
 }
+/// Finds the mutable column list of the view named `id`.
 fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Value>, ()> {
     let view = doc
         .0
@@ -226,6 +231,7 @@ fn columns<'a>(doc: &'a mut Document, id: &str) -> Result<&'a mut Vec<Value>, ()
         .and_then(Value::as_array_mut)
         .ok_or(())
 }
+/// Puts a window into a column at the requested position, splitting or creating columns as the intent asks.
 fn insert(
     cols: &mut Vec<Value>,
     column_id: &str,
@@ -269,6 +275,7 @@ fn insert(
     wins.insert(offset, window);
     Ok(())
 }
+/// Takes the window `id` out of whichever column holds it and returns it.
 fn remove(cols: &mut [Value], id: &str) -> Option<Value> {
     for col in cols {
         let wins = col.get_mut("windows")?.as_array_mut()?;
@@ -572,14 +579,17 @@ pub fn reduce(doc: &mut Document, intent: &Value, closed: &[String]) -> Result<(
 mod tests {
     use super::*;
     use serde_json::json;
+    /// A small test document with one view.
     fn document() -> Document {
         Document(
             json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[{"id":"console","kind":"console","name":"Console","cell":{"x":0,"y":0},"layout":{"type":"tiled","columns":[]}}]}),
         )
     }
+    /// A test `open` intent for window `id`.
     fn open(id: &str) -> Value {
         json!({"type":"open","view_id":"console","column_id":id,"window":{"id":id,"target":{"type":"settings","section":"appearance"}}})
     }
+    /// Independent edits give the same document in either order, and a close beats a concurrent edit.
     #[test]
     fn independent_edits_commute_and_close_wins_in_both_orders() {
         for sample in 0..128 {
@@ -610,6 +620,7 @@ mod tests {
             assert!(reduce(&mut left, &open(&a), &tombstones).is_err());
         }
     }
+    /// A split changes only the band that holds its window.
     #[test]
     fn split_divides_only_its_own_band() {
         let mut doc = document();
@@ -625,6 +636,7 @@ mod tests {
         assert_eq!(doc.windows().find(|w| w["id"] == "b").unwrap()["row"], 1);
         assert_eq!(doc.windows().find(|w| w["id"] == "new").unwrap()["row"], 1);
     }
+    /// View metadata, targets and column neighbours follow stable IDs, not positions.
     #[test]
     fn view_metadata_targets_and_column_neighbours_are_semantic() {
         let mut doc = document();
@@ -666,6 +678,7 @@ mod tests {
             &json!({"type":"target","window_id":"a","target":{"type":"unknown"}})
         ));
     }
+    /// Two creations of a built-in view keep the contents already there.
     #[test]
     fn concurrent_builtin_view_creation_preserves_existing_contents() {
         let mut doc = document();
@@ -678,6 +691,7 @@ mod tests {
         view["layout"] = json!({"type":"graph","pinned":{}});
         assert!(reduce(&mut doc, &json!({"type":"view.add","view":view}), &[]).is_err());
     }
+    /// Opening and closing the same window many times never fills the column capacity.
     #[test]
     fn repeated_open_close_does_not_exhaust_column_capacity() {
         let mut doc = document();
@@ -688,6 +702,7 @@ mod tests {
         }
         assert_eq!(doc.0["views"][0]["layout"]["columns"], json!([]));
     }
+    /// A resize with null clears a value, and absent fields keep theirs.
     #[test]
     fn nullable_resize_preserves_existing_values_and_absent_fields() {
         let mut doc = document();
@@ -712,6 +727,7 @@ mod tests {
         assert_eq!(doc, before);
         assert!(doc.valid());
     }
+    /// The sample corpus keeps each variant's strict fields and round-trips through JSON.
     #[test]
     fn sample_corpus_preserves_strict_variant_fields_and_round_trips() {
         for value in [

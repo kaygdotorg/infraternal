@@ -786,12 +786,16 @@ pub(super) fn check_root_service_program(program: &Path, owner: u32) -> Result<(
 /// ([`check_root_service_program`]): see
 /// [`crate::trusted_program::trusted_folder`].
 ///
+/// Returns the folder's canonical path. The caller stores that path, never
+/// the one it was given, so a link on the given path cannot be repointed
+/// after this check (J1180, F3).
+///
 /// `owner` is the account trusted besides root: 0 in production, the test
 /// user in tests. The error is a complete sentence that says what to do.
-pub(super) fn check_root_web_folder(web: &Path, owner: u32) -> Result<(), String> {
+pub(super) fn check_root_web_folder(web: &Path, owner: u32) -> Result<PathBuf, String> {
     use crate::trusted_program::{FolderError, trusted_folder};
     match trusted_folder(web, owner) {
-        Ok(_) => Ok(()),
+        Ok(canonical) => Ok(canonical),
         Err(FolderError::Missing) => Err(format!(
             "the web folder {} is not there, so the server cannot serve it; pass --web-root \
              with the release's web folder",
@@ -1997,7 +2001,19 @@ mod tests {
         let index = web.join("index.html");
         fs::write(&index, "<!doctype html>").unwrap();
         fs::set_permissions(&index, fs::Permissions::from_mode(0o644)).unwrap();
-        assert_eq!(check_root_web_folder(&web, me()), Ok(()));
+        assert_eq!(
+            check_root_web_folder(&web, me()),
+            Ok(fs::canonicalize(&web).unwrap())
+        );
+        // A link to it checks out, but the answer is the real folder, which
+        // is what the unit must store (J1180, F3).
+        let link = fixture.0.join("web-link");
+        std::os::unix::fs::symlink(&web, &link).unwrap();
+        assert_eq!(
+            check_root_web_folder(&link, me()),
+            Ok(fs::canonicalize(&web).unwrap())
+        );
+        fs::remove_file(&link).unwrap();
         if me() != 0 {
             // Root's view of a release unpacked in a user's folder.
             let refusal = check_root_web_folder(&web, 0).unwrap_err();

@@ -8,6 +8,7 @@ members = [
     "crates/infraternal-linux-tun",
     "crates/infraternal",
     "crates/infraternal-protocol",
+    "crates/infraternal-canvas-model",
     "crates/infraternal-plugin-api",
     "crates/infraternal-server",
     "crates/infraternal-db",
@@ -33,6 +34,7 @@ edition = "2024"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
+infraternal-canvas-model = { version = "0.1.0", path = "crates/infraternal-canvas-model" }
 infraternal-plugin-api = { version = "0.1.0", path = "crates/infraternal-plugin-api" }
 argon2 = "0.6"
 # Retain the server's HTTP, JSON, WebSocket and tracing paths; the form, query,
@@ -199,6 +201,10 @@ opt-level = "s"
 
 # Layout control intents stay off the terminal data path; bound their new code footprint [243,248].
 [profile.release.package.infraternal-plugin-canvas]
+opt-level = "s"
+
+# The canvas model code moved out of the plugin crate; it keeps the plugin's size-optimized profile [243,248].
+[profile.release.package.infraternal-canvas-model]
 opt-level = "s"
 
 # Keep the D289 SSH engine's transport fixes and optional algorithms reviewable.

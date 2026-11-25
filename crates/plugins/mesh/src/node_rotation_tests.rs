@@ -1044,6 +1044,7 @@ fn j363_config(key: crate::policy::model::PublicKey) -> Config {
                 inbound: crate::policy::rules::TrafficPolicy::All,
                 outbound: crate::policy::rules::TrafficPolicy::All,
                 access_ssh: None,
+                networks: crate::dataplane::PeerNetworks::default(),
             },
         )]),
         #[cfg(feature = "mesh-dns")]

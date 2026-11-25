@@ -351,7 +351,7 @@ fn matches(endpoint: &Endpoint, node: &Node) -> bool {
     match endpoint {
         Endpoint::Node(id) => *id == node.id,
         Endpoint::Tag(tag) => node.tags.contains(tag),
-        Endpoint::User(_) => false,
+        Endpoint::User(_) | Endpoint::Network(_) => false,
     }
 }
 /// A small deterministic pseudo-random generator: advances `seed` and returns
