@@ -91,6 +91,16 @@ pub struct Peer {
     /// dual-stack mesh's snapshots are unchanged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ipv4_only: bool,
+    /// The peer advertised that it understands the side mark (the receive rule: a marked data
+    /// packet never moves its view of our endpoint) and listens on a second UDP socket, so this
+    /// node may send it small data datagrams from its own second socket (#260, J1211). The
+    /// coordinator sets it only for a peer that said so, and only in snapshots for nodes that
+    /// understand the field, because this struct refuses unknown fields. Kernel `WireGuard` and
+    /// plain `GotaTun` drop marked packets, so it is never guessed: no mark means no second
+    /// socket for that peer. Omitted while false, so a snapshot without capable peers is
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub side_port: bool,
 }
 
 impl Peer {
@@ -518,6 +528,7 @@ mod compatibility_tests {
             endpoint: None,
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         };
         let encoded = serde_json::to_vec(&peer).unwrap();
         let legacy: PreRotationPeer = serde_json::from_slice(&encoded).unwrap();

@@ -529,6 +529,11 @@ struct IdentityProbe {
     /// advertises. Asked on its own so a strict older node refuses only this probe.
     #[serde(default)]
     routes: bool,
+    /// The coordinator understands `Peer::side_port` and wants to know whether this node runs the
+    /// side-mark receive rule with a second socket (#260, J1211). Asked on its own so a strict
+    /// older node refuses only this probe.
+    #[serde(default)]
+    side_socket: bool,
 }
 /// The networks named on a `mesh routes advertise` or `withdraw` command line.
 #[derive(Deserialize)]
@@ -595,6 +600,8 @@ pub enum Request {
         ipv6_state: bool,
         /// Whether the caller wants the advertised networks and sends `PeerPolicy::networks`.
         routes: bool,
+        /// Whether the caller wants this node's side-socket capability and sends `Peer::side_port`.
+        side_socket: bool,
     },
     /// Show advertised, served and reachable networks (D197 M3).
     Routes,
@@ -628,6 +635,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
                 candidates: probe.candidates,
                 ipv6_state: probe.ipv6_state,
                 routes: probe.routes,
+                side_socket: probe.side_socket,
             })
         }
         "mesh.routes" => {
@@ -750,11 +758,14 @@ fn rotation_response(
 /// `lan` is this node's LAN candidates ([`crate::candidates::lan_addresses`]); it is sent only to a
 /// coordinator that asked for candidates. `ipv4_only` is whether IPv6 is off on the mesh link (#578); it is
 /// reported only to a coordinator that asked, because a strict older one would not know the field.
+/// `side_port` is whether this node runs the side-mark receive rule with its second socket on
+/// (#260, J1211); it too is reported only to a coordinator that asked.
 fn identity_response(
     identity: Option<crate::dataplane::Identity>,
     requested: IdentityProbe,
     lan: Vec<std::net::SocketAddr>,
     ipv4_only: bool,
+    side_port: bool,
 ) -> Option<IdentityResponse> {
     identity.map(|identity| IdentityResponse {
         public_key: identity.public_key,
@@ -775,6 +786,8 @@ fn identity_response(
         },
         routes: false,
         advertised: Vec::new(),
+        side_socket: requested.side_socket,
+        side_port: requested.side_socket && side_port,
     })
 }
 /// What `mesh.identity` and `mesh.up` answer: the node's key and port and the optional features both sides support.
@@ -815,6 +828,14 @@ struct IdentityResponse {
     /// IPv6 is off on the mesh link, so the node runs IPv4-only. Present only with `ipv6_state`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     ipv4_only: bool,
+    /// This node understands `Peer::side_port` and reports whether it takes marked datagrams
+    /// (#260, J1211). Present only when the coordinator asked with `{"side_socket":true}`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    side_socket: bool,
+    /// This node runs `GotaTun`'s side-mark receive rule with its second socket on, so a peer may
+    /// send it marked datagrams from its own second socket. Present only with `side_socket`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    side_port: bool,
 }
 
 impl AgentPlugin for MeshNodePlugin {
@@ -883,6 +904,7 @@ impl AgentPlugin for MeshNodePlugin {
                     candidates,
                     ipv6_state,
                     routes,
+                    side_socket,
                 } => {
                     let requested = IdentityProbe {
                         compact_access,
@@ -896,6 +918,7 @@ impl AgentPlugin for MeshNodePlugin {
                         ipv6_state,
                         // Answered only by an engine that installs the networks it would receive.
                         routes: routes && understands_routes(node),
+                        side_socket,
                     };
                     let candidates = requested.candidates;
                     let identity =
@@ -914,7 +937,13 @@ impl AgentPlugin for MeshNodePlugin {
                         _ => Vec::new(),
                     };
                     let answer_routes = requested.routes;
-                    let mut response = identity_response(identity, requested, lan, ipv4_only(node));
+                    let mut response = identity_response(
+                        identity,
+                        requested,
+                        lan,
+                        ipv4_only(node),
+                        side_port(node),
+                    );
                     if answer_routes && let Some(response) = response.as_mut() {
                         response.routes = true;
                         response.advertised = advertised_routes(node);
@@ -952,6 +981,7 @@ impl AgentPlugin for MeshNodePlugin {
                         IdentityProbe::default(),
                         Vec::new(),
                         false,
+                        false,
                     ))
                 }
                 request @ (Request::RotationPrepare(_)
@@ -988,6 +1018,7 @@ impl AgentPlugin for MeshNodePlugin {
                         "udp_port": node.listen_port(),
                         "dns": node.dns_state(),
                         "ipv6": !ipv4_only(node),
+                        "side_socket": side_port(node),
                         "server_link": self.server_link,
                         "engine": engine_health(node),
                         "engine_selection": engine_selection(node),
@@ -1230,6 +1261,11 @@ fn ipv4_only(node: &Node) -> bool {
 #[cfg(target_os = "macos")]
 fn ipv4_only(_node: &Node) -> bool {
     false
+}
+
+/// Whether this node runs `GotaTun` with the second socket on, so peers may send it marks (#260, J1211).
+fn side_port(node: &Node) -> bool {
+    node.side_socket()
 }
 
 /// The Linux `GotaTun` engine's health for the status; null under kernel `WireGuard`.
@@ -1664,6 +1700,7 @@ mod tests {
                         endpoint: None,
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -1800,6 +1837,7 @@ mod tests {
                         endpoint: None,
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,
@@ -2039,6 +2077,7 @@ mod identity_upgrade_tests {
             super::IdentityProbe::default(),
             vec!["10.1.0.2:44000".parse().expect("LAN fixture")],
             false,
+            false,
         ));
         assert_eq!(legacy.as_object().map(serde_json::Map::len), Some(2));
         assert_eq!(legacy["port"], 44000);
@@ -2055,8 +2094,10 @@ mod identity_upgrade_tests {
                 candidates: false,
                 ipv6_state: false,
                 routes: false,
+                side_socket: false,
             },
             Vec::new(),
+            false,
             false,
         ));
         assert_eq!(negotiated["compact_access"], true);
@@ -2072,6 +2113,7 @@ mod identity_upgrade_tests {
                 ..super::IdentityProbe::default()
             },
             Vec::new(),
+            false,
             false,
         ));
         assert_eq!(compact_only["compact_access"], true);
@@ -2105,6 +2147,7 @@ mod identity_upgrade_tests {
             },
             lan.clone(),
             false,
+            false,
         ));
         assert_eq!(asked["candidates"], true);
         assert_eq!(asked["lan"], serde_json::json!(["10.9.0.3:10254"]));
@@ -2116,12 +2159,69 @@ mod identity_upgrade_tests {
             super::IdentityProbe::default(),
             lan,
             true,
+            false,
         ));
         assert!(plain.get("candidates").is_none());
         assert!(plain.get("lan").is_none());
         assert!(
             plain.get("ipv4_only").is_none() && plain.get("ipv6_state").is_none(),
             "a caller that did not ask never sees the IPv6 fields: {plain}"
+        );
+    }
+
+    /// A coordinator that asks learns that this node understands the side mark and whether it takes
+    /// marked datagrams (#260, J1211); nobody else sees either field, and a node that does not run the
+    /// side-mark receive rule (kernel engine, switch off) says so.
+    #[test]
+    fn the_side_socket_capability_is_sent_only_when_asked() {
+        let identity = crate::dataplane::Identity {
+            public_key: crate::policy::model::PublicKey([1; 32]),
+            port: 10254,
+            compact_access: false,
+            #[cfg(feature = "mesh-dns")]
+            dns_names: false,
+            key_rotation: false,
+            authority_epoch: false,
+            rotation_continuity: false,
+        };
+        let probe: super::IdentityProbe =
+            super::parse(br#"{"side_socket":true}"#).expect("side socket probe");
+        assert!(probe.side_socket);
+        let reply = |asked, takes_marks| {
+            serde_json::json!(super::identity_response(
+                Some(identity.clone()),
+                super::IdentityProbe {
+                    side_socket: asked,
+                    ..super::IdentityProbe::default()
+                },
+                Vec::new(),
+                false,
+                takes_marks,
+            ))
+        };
+        let capable = reply(true, true);
+        assert_eq!(capable["side_socket"], true);
+        assert_eq!(capable["side_port"], true);
+        assert_eq!(
+            crate::node_coordination::parse_side_socket(capable.to_string().as_bytes()),
+            Some(true)
+        );
+        let incapable = reply(true, false);
+        assert_eq!(incapable["side_socket"], true);
+        assert!(incapable.get("side_port").is_none());
+        assert_eq!(
+            crate::node_coordination::parse_side_socket(incapable.to_string().as_bytes()),
+            Some(false)
+        );
+        let unasked = reply(false, true);
+        assert!(
+            unasked.get("side_socket").is_none() && unasked.get("side_port").is_none(),
+            "a caller that did not ask never sees the side-socket fields: {unasked}"
+        );
+        // An older node's reply has neither field: it does not report.
+        assert_eq!(
+            crate::node_coordination::parse_side_socket(br#"{"public_key":[1],"port":1}"#),
+            None
         );
     }
 
@@ -2151,6 +2251,7 @@ mod identity_upgrade_tests {
                 },
                 Vec::new(),
                 ipv4_only,
+                false,
             ))
         };
         let off = reply(true);
@@ -2227,6 +2328,7 @@ mod peer_page_tests {
                                 ))),
                                 candidates: Vec::new(),
                                 ipv4_only: false,
+                                side_port: false,
                             },
                             inbound: TrafficPolicy::All,
                             outbound: TrafficPolicy::All,

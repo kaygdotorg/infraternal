@@ -43,6 +43,12 @@ struct Loaded {
     reports_routes: std::sync::Arc<BTreeSet<NodeId>>,
     /// Nodes whose last report said IPv6 is off on their mesh link; only nodes in `reports_ipv6` appear.
     ipv4_only: std::sync::Arc<BTreeSet<NodeId>>,
+    /// Nodes that understand `Peer::side_port` and report whether they take marked datagrams
+    /// (#260, J1211).
+    reports_side_port: std::sync::Arc<BTreeSet<NodeId>>,
+    /// Nodes whose last report said they run the side-mark receive rule with their second socket
+    /// on; only nodes in `reports_side_port` appear.
+    side_port: std::sync::Arc<BTreeSet<NodeId>>,
     /// The reflexive addresses published for each node before its current one, oldest first (J585 F3).
     reflexive_history: std::sync::Arc<BTreeMap<NodeId, Vec<SocketAddr>>>,
     default: DefaultPolicy,
@@ -166,6 +172,18 @@ impl Snapshot {
             policy.peer.ipv4_only = self.loaded.ipv4_only.contains(peer);
         }
     }
+    /// Mark each peer that takes marked datagrams on its second socket (#260, J1211), but only in the
+    /// snapshot of a node that understands the field: `Peer` refuses unknown fields, so an older node
+    /// would refuse the whole snapshot. A peer that never said so is never marked, so nobody sends it a
+    /// marked datagram (kernel `WireGuard` and plain `GotaTun` drop those).
+    fn mark_side_port(&self, node: NodeId, config: &mut Config) {
+        if !self.loaded.reports_side_port.contains(&node) {
+            return;
+        }
+        for (peer, policy) in &mut config.peers {
+            policy.peer.side_port = self.loaded.side_port.contains(peer);
+        }
+    }
     /// Whether any node is past preparation, so applied views need durable acknowledgments before the rotation moves on.
     pub(crate) fn acknowledgments_required(&self) -> bool {
         self.loaded
@@ -205,6 +223,7 @@ impl Snapshot {
                 });
         self.order_candidates(node, &mut config);
         self.mark_ipv4_only(node, &mut config);
+        self.mark_side_port(node, &mut config);
         self.gate_networks(node, &mut config);
         #[cfg(feature = "mesh-dns")]
         {
@@ -1824,6 +1843,40 @@ impl Store {
         self.commit_candidate_change(tx, updated.rows_affected() > 0)
             .await
     }
+    /// Record what a node said about its second UDP socket (#260, J1211): `Some(takes_marks)` from a node
+    /// that reports it, `None` from an older node, which is never marked as capable and gets no mark.
+    ///
+    /// Writes, and advances the revision, only when something changed, so peers' snapshots are
+    /// recompiled (adding or dropping the mark) exactly when a node's capability flips, for example
+    /// when its engine or its switch changes across a restart. Returns whether it did.
+    /// # Errors
+    /// Returns fixed public errors, not database input.
+    pub async fn record_side_port(
+        &self,
+        node: NodeId,
+        reported: Option<bool>,
+    ) -> Result<bool, &'static str> {
+        let supported = reported.is_some();
+        let takes_marks = reported.unwrap_or(false);
+        let id = i64::try_from(node.0).map_err(|_| "Mesh identity invalid.")?;
+        let mut tx = infraternal_plugin_api::storage::begin_immediate(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")?;
+        let updated = sqlx::query(
+            "UPDATE mesh_nodes SET side_port_supported=?,side_port=? \
+             WHERE id=? AND (side_port_supported IS NOT ? OR side_port IS NOT ?)",
+        )
+        .bind(supported)
+        .bind(takes_marks)
+        .bind(id)
+        .bind(supported)
+        .bind(takes_marks)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
+        self.commit_candidate_change(tx, updated.rows_affected() > 0)
+            .await
+    }
     /// Record what a node said it advertises (D197 M3): `Some(networks)` from a node that understands
     /// subnet routes, `None` from an older node, which advertises nothing and gets no routes.
     ///
@@ -2294,11 +2347,11 @@ impl Store {
         .flatten();
         #[cfg(feature = "mesh-dns")]
         let nodes_query = sqlx::query(
-            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,name_source,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,side_port_supported,side_port,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         #[cfg(not(feature = "mesh-dns"))]
         let nodes_query = sqlx::query(
-            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
+            "SELECT id,name,public_key,dataplane_host,endpoint,reflexive_endpoint,lan_endpoints,candidates_supported,ipv6_supported,ipv4_only,side_port_supported,side_port,routes_supported,reflexive_history FROM mesh_nodes ORDER BY id",
         );
         let rows = nodes_query
             .fetch_all(&mut *tx)
@@ -2311,6 +2364,8 @@ impl Store {
         let mut reports_ipv6 = BTreeSet::new();
         let mut reports_routes = BTreeSet::new();
         let mut ipv4_only = BTreeSet::new();
+        let mut reports_side_port = BTreeSet::new();
+        let mut side_port = BTreeSet::new();
         let mut reflexive_history = BTreeMap::new();
         #[cfg(feature = "mesh-dns")]
         let mut dns_placeholders = BTreeSet::new();
@@ -2378,6 +2433,18 @@ impl Store {
                     .map_err(|error| storage_sql_error(error))?
                 {
                     ipv4_only.insert(id);
+                }
+            }
+            if row
+                .try_get::<bool, _>("side_port_supported")
+                .map_err(|error| storage_sql_error(error))?
+            {
+                reports_side_port.insert(id);
+                if row
+                    .try_get::<bool, _>("side_port")
+                    .map_err(|error| storage_sql_error(error))?
+                {
+                    side_port.insert(id);
                 }
             }
             if row
@@ -2733,6 +2800,8 @@ impl Store {
             reports_ipv6: std::sync::Arc::new(reports_ipv6),
             reports_routes: std::sync::Arc::new(reports_routes),
             ipv4_only: std::sync::Arc::new(ipv4_only),
+            reports_side_port: std::sync::Arc::new(reports_side_port),
+            side_port: std::sync::Arc::new(side_port),
             reflexive_history: std::sync::Arc::new(reflexive_history),
             default,
             revision: u64::try_from(revision)
@@ -3271,6 +3340,67 @@ mod candidate_tests {
         assert!(store.record_ipv6_state(b, None).await.unwrap());
         assert_eq!(
             marked(&store.config(a).await.unwrap()),
+            Vec::<NodeId>::new()
+        );
+    }
+
+    /// The side-port mark follows what each node reported (#260, J1211): only peers that said they take
+    /// marked datagrams are marked, only in snapshots of nodes that understand the field, and the mark
+    /// goes when a node stops saying it. A peer that never reported (an older build, kernel `WireGuard`)
+    /// is never marked, so nobody sends it a marked datagram.
+    #[tokio::test]
+    async fn only_peers_that_take_marks_are_marked_and_only_for_nodes_that_understand_it() {
+        let (store, [server, a, b, c]) = mesh().await;
+        // `server` and `a` report that they take marks, `b` reports that it does not (its switch is
+        // off or it runs the kernel engine), `c` is an older node that never reports.
+        assert!(store.record_side_port(server, Some(true)).await.unwrap());
+        assert!(store.record_side_port(a, Some(true)).await.unwrap());
+        assert!(store.record_side_port(b, Some(false)).await.unwrap());
+        assert!(
+            !store.record_side_port(c, None).await.unwrap(),
+            "an older node changes nothing"
+        );
+        assert!(
+            !store.record_side_port(a, Some(true)).await.unwrap(),
+            "the same report writes nothing and publishes no revision"
+        );
+
+        let marked = |config: &Config| -> Vec<NodeId> {
+            config
+                .peers
+                .iter()
+                .filter(|(_, policy)| policy.peer.side_port)
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        assert_eq!(marked(&store.config(server).await.unwrap()), [a]);
+        assert_eq!(marked(&store.config(a).await.unwrap()), [server]);
+        assert_eq!(
+            marked(&store.config(b).await.unwrap()),
+            [server, a],
+            "`b` understands the field, so it learns which peers take marks (it sends none while its own \
+             switch is off, but the snapshot still says who could)"
+        );
+        assert_eq!(
+            marked(&store.config(c).await.unwrap()),
+            Vec::<NodeId>::new(),
+            "an older node's snapshot never carries the field"
+        );
+
+        // `a` stops saying it (its switch went off across a restart): every snapshot drops the mark.
+        let before = store.load().await.unwrap().revision;
+        assert!(store.record_side_port(a, Some(false)).await.unwrap());
+        assert_eq!(store.load().await.unwrap().revision, before + 1);
+        assert_eq!(
+            marked(&store.config(server).await.unwrap()),
+            Vec::<NodeId>::new()
+        );
+
+        // A node that downgrades to not reporting is never marked.
+        assert!(store.record_side_port(a, Some(true)).await.unwrap());
+        assert!(store.record_side_port(a, None).await.unwrap());
+        assert_eq!(
+            marked(&store.config(server).await.unwrap()),
             Vec::<NodeId>::new()
         );
     }

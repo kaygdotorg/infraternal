@@ -63,6 +63,7 @@ fn restart_retires_orphan_peer_host_routes() {
         endpoint: None,
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     // Model a stop after peers/routes reached the kernel, before public-state
     // fsync. Node deliberately has no Drop cleanup so existing sessions survive.

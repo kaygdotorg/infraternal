@@ -81,6 +81,7 @@ fn peer(id: u8, inbound: TrafficPolicy) -> (NodeId, PeerPolicy) {
                 endpoint: None,
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             },
             inbound,
             outbound: TrafficPolicy::None,

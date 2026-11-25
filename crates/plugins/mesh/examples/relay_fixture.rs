@@ -374,6 +374,7 @@ async fn node() {
                         endpoint: peer.endpoint,
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     })
                     .collect();
                 for (index, peer) in list.iter().zip(&installed).enumerate() {

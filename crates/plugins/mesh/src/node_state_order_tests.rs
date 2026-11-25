@@ -148,6 +148,7 @@ fn accepted_snapshot_persistence_at_1000_peers() {
                         endpoint: Some("192.0.2.1:44000".parse().expect("endpoint")),
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::All,
                     outbound: TrafficPolicy::All,

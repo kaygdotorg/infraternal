@@ -151,6 +151,7 @@ fn open_peer(
             endpoint,
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         },
         inbound: crate::policy::rules::TrafficPolicy::All,
         outbound: crate::policy::rules::TrafficPolicy::All,

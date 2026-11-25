@@ -3,7 +3,8 @@
 //! Each JSON line creates or updates two to four test identities and prints the exact
 //! snapshot chunks consumed by production mesh nodes. With three or four, the first is the
 //! server's own node, and the proof can drive the product's direct-path candidates (#515):
-//! `probes` carries each node's real reply to the candidate identity probe, and `observe` carries
+//! `probes` carries each node's real reply to the candidate identity probe, `side_socket_probes`
+//! its real reply to the side-socket probe (#260), and `observe` carries
 //! the server node's real presence pages. The fixture feeds both through the same code the server runs
 //! (`node_coordination::parse_candidates`, `Store::record_candidates`, `presence::Tracker`,
 //! `presence::publish_reflexive`), so the proof relays bytes and the product decides.
@@ -34,6 +35,11 @@ struct Request {
     /// Each identity's raw reply to `mesh.identity {"candidates":true}`, in identity order.
     #[serde(default)]
     probes: Option<Vec<serde_json::Value>>,
+    /// Each identity's raw reply to `mesh.identity {"side_socket":true}`, in identity order (#260,
+    /// J1211). The fixture records them through the code the server runs, so a node that takes
+    /// marked datagrams on its second socket is marked in its peers' snapshots.
+    #[serde(default)]
+    side_socket_probes: Option<Vec<serde_json::Value>>,
     /// The server node's raw `mesh.peers {"presence":true}` pages from one poll.
     #[serde(default)]
     observe: Option<Vec<serde_json::Value>>,
@@ -142,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             identities: request_identities,
             endpoints,
             probes,
+            side_socket_probes,
             observe,
             full_snapshot,
             mode,
@@ -209,6 +216,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &serde_json::to_vec(&reply)?,
                 );
                 store.record_candidates(*node, reported.as_deref()).await?;
+            }
+        }
+        if let Some(replies) = side_socket_probes {
+            for (node, reply) in members.iter().zip(replies) {
+                let reported = infraternal_plugin_mesh::node_coordination::parse_side_socket(
+                    &serde_json::to_vec(&reply)?,
+                );
+                store.record_side_port(*node, reported).await?;
             }
         }
         if let Some(pages) = observe {

@@ -76,6 +76,7 @@ fn review_live_endpoint_refresh_refuses_foreign_interface() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     // This inventory can survive a person's deletion/replacement of the live TUN. The
     // replacement has no ownership alias, so its routes are outside this node's authority.
@@ -171,6 +172,7 @@ fn live_endpoint_refresh_stays_on_the_proven_link() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -237,6 +239,7 @@ fn live_endpoint_refresh_writes_only_changed_budgets() {
             endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         })
         .collect();
     let state = Mutex::new(PeerRouteState::default());
@@ -292,6 +295,7 @@ fn live_endpoint_refresh_probes_only_after_underlay_changes() {
             endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         })
         .collect();
     let learned: Vec<_> = peers
@@ -371,6 +375,7 @@ fn live_endpoint_refresh_preserves_relay_budget_for_direct_fallback() {
         endpoint: Some(configured),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -440,6 +445,7 @@ fn review_j552_relay_fallback_does_not_derive_budget_from_relay_shim() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -515,6 +521,7 @@ fn review_scale_mesh(
             endpoint: Some(std::net::SocketAddr::from(([192, 0, 2, 2], 51820))),
             candidates: Vec::new(),
             ipv4_only: false,
+            side_port: false,
         });
         learned.push((
             key,
@@ -618,6 +625,7 @@ fn review_j609_policy_rule_change_rederives_route_budgets() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let peers = [peer(2), peer(3)];
     let learned = [
@@ -758,6 +766,7 @@ fn live_endpoint_refresh_rederives_after_nexthop_replace() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -827,6 +836,7 @@ fn live_endpoint_refresh_retries_a_failed_lookup() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -925,6 +935,7 @@ fn review_j630_ipv6_rule_alone_rederives_route_budgets() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let learned = [(peer.key, Some(endpoint))];
     let state = Arc::new(Mutex::new(PeerRouteState::default()));
@@ -1107,6 +1118,7 @@ fn repair_of_a_present_route_keeps_its_budget() {
         endpoint: Some("192.0.2.2:51820".parse().expect("configured endpoint")),
         candidates: Vec::new(),
         ipv4_only: false,
+        side_port: false,
     };
     let state = Mutex::new(PeerRouteState::default());
     {
@@ -1255,6 +1267,7 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
                 endpoint: None,
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             }
         })
         .collect();

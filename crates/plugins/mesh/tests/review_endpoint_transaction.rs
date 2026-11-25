@@ -89,6 +89,7 @@ fn refused_endpoint_persistence_preserves_kernel_endpoint() {
                     endpoint: Some(initial),
                     candidates: Vec::new(),
                     ipv4_only: false,
+                    side_port: false,
                 },
                 inbound: TrafficPolicy::None,
                 outbound: TrafficPolicy::None,

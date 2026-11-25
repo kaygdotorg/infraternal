@@ -293,6 +293,7 @@ mod tests {
                 endpoint: None,
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             },
             inbound: TrafficPolicy::Ports(
                 numbers
@@ -358,6 +359,7 @@ mod tests {
                         endpoint: None,
                         candidates: Vec::new(),
                         ipv4_only: false,
+                        side_port: false,
                     },
                     inbound: TrafficPolicy::Ports(
                         granted

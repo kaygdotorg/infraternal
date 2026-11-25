@@ -614,6 +614,7 @@ mod proxy_mesh_context_tests {
                 endpoint: None,
                 candidates: Vec::new(),
                 ipv4_only: false,
+                side_port: false,
             },
             inbound,
             outbound,
