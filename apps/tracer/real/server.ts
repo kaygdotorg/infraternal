@@ -339,7 +339,10 @@ export async function startRealServer(options: {
   });
   pem = "";
   await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
-  const origin = `https://${hostname}:${(tls.address() as AddressInfo).port}`;
+  // A browser's Origin never carries the scheme's default port, and the server pins its public origin the same way
+  // (`Url::origin`), so on 443 the fixture must name it without ":443" or every WebSocket upgrade is refused with 403.
+  const tlsPort = (tls.address() as AddressInfo).port;
+  const origin = `https://${hostname}${tlsPort === 443 ? "" : `:${tlsPort}`}`;
 
   let unit: string | undefined;
   const ownedChildren = new Set<ChildProcess>();
