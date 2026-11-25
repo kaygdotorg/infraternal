@@ -348,7 +348,10 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
         | "mesh.rotation.interval.set" => {
             MeshRequest::Default(crate::settings::parse_action(action, input)?)
         }
-        crate::route_api::LIST | crate::route_api::APPROVE | crate::route_api::REVOKE => {
+        crate::route_api::LIST
+        | crate::route_api::APPROVE
+        | crate::route_api::REVOKE
+        | crate::route_api::DECLINE => {
             MeshRequest::Route(crate::route_api::parse_action(action, input)?)
         }
         "mesh.list" => MeshRequest::List(parse(input)?),
