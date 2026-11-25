@@ -645,6 +645,7 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
             if active == 0 {
                 break;
             }
+            // sleep: bounded poll of a DB row the server updates on its own task; no event to await
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
