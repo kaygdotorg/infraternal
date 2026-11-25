@@ -130,8 +130,18 @@ impl ServerLeafFloor {
 /// A malformed certificate, a time that is not in the strict DER form, or a
 /// time before 1970.
 pub fn not_before_seconds(leaf_der: &[u8]) -> io::Result<i64> {
+    validity_seconds(leaf_der).map(|(not_before, _)| not_before)
+}
+
+/// A certificate's validity window, `(notBefore, notAfter)` in Unix seconds,
+/// read from its DER with the same strict rules as [`not_before_seconds`].
+/// The join uses it to keep an exactly pinned HTTPS certificate within its
+/// dates (`crate::join`).
+/// # Errors
+/// A malformed certificate or time, or a time before 1970.
+pub fn validity_seconds(certificate_der: &[u8]) -> io::Result<(i64, i64)> {
     // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signature }
-    let (certificate, _) = element(leaf_der, SEQUENCE)?;
+    let (certificate, _) = element(certificate_der, SEQUENCE)?;
     // TBSCertificate ::= SEQUENCE { [0] version OPTIONAL, serialNumber,
     //   signature, issuer, validity, ... }
     let (tbs, _) = element(certificate, SEQUENCE)?;
@@ -144,9 +154,17 @@ pub fn not_before_seconds(leaf_der: &[u8]) -> io::Result<i64> {
     rest = element(rest, SEQUENCE)?.1;
     // Validity ::= SEQUENCE { notBefore Time, notAfter Time }
     let (validity, _) = element(rest, SEQUENCE)?;
-    let seconds = match validity.first() {
+    let (not_before, after) = time(validity)?;
+    let (not_after, _) = time(after)?;
+    Ok((not_before, not_after))
+}
+
+/// The `Time` (`UTCTime` or `GeneralizedTime`) at the start of `bytes`, as
+/// Unix seconds, and whatever follows it.
+fn time(bytes: &[u8]) -> io::Result<(i64, &[u8])> {
+    let (seconds, rest) = match bytes.first() {
         Some(&UTC_TIME) => {
-            let (text, _) = element(validity, UTC_TIME)?;
+            let (text, rest) = element(bytes, UTC_TIME)?;
             // RFC 5280 4.1.2.5.1: two-digit years 50-99 are 19xx, 00-49 are 20xx.
             let short = digits(text, 0, 2)?;
             let year = if short >= 50 {
@@ -154,18 +172,18 @@ pub fn not_before_seconds(leaf_der: &[u8]) -> io::Result<i64> {
             } else {
                 2000 + short
             };
-            civil_seconds(year, text, 2, 13)?
+            (civil_seconds(year, text, 2, 13)?, rest)
         }
         Some(&GENERALIZED_TIME) => {
-            let (text, _) = element(validity, GENERALIZED_TIME)?;
-            civil_seconds(digits(text, 0, 4)?, text, 4, 15)?
+            let (text, rest) = element(bytes, GENERALIZED_TIME)?;
+            (civil_seconds(digits(text, 0, 4)?, text, 4, 15)?, rest)
         }
         _ => return Err(refused()),
     };
     if seconds < 0 {
         return Err(refused());
     }
-    Ok(seconds)
+    Ok((seconds, rest))
 }
 
 /// DER tag of a SEQUENCE.
@@ -311,6 +329,24 @@ mod tests {
         let mut certificate = der(SEQUENCE, &tbs);
         certificate.extend(der(SEQUENCE, &[]));
         der(SEQUENCE, &certificate)
+    }
+
+    /// The window reads both ends; a broken `notAfter` refuses the whole
+    /// certificate, as a broken `notBefore` does.
+    #[test]
+    fn reads_the_whole_validity_window() {
+        let certificate = certificate(&der(GENERALIZED_TIME, b"20240229120000Z"), true);
+        assert_eq!(
+            validity_seconds(&certificate).unwrap(),
+            (1_709_208_000, 2_524_607_999)
+        );
+        let broken = certificate
+            .windows(13)
+            .position(|window| window == b"491231235959Z")
+            .unwrap();
+        let mut bad = certificate.clone();
+        bad[broken + 2] = b'9';
+        assert!(validity_seconds(&bad).is_err());
     }
 
     /// Known instants in both time forms, with and without the version field.
