@@ -1,0 +1,24 @@
+hold,row,setup_first_s,setup_second_s,pre_machine_ctxt_s_a,pre_rss_mib_a,pre_machine_ctxt_s_b,pre_rss_mib_b,pre_machine_ctxt_s_c,pre_rss_mib_c,pre_wakeups_s,pre_procs,post_machine_ctxt_s_a,post_rss_mib_a,post_machine_ctxt_s_b,post_rss_mib_b,post_machine_ctxt_s_c,post_rss_mib_c,post_wakeups_s,post_procs
+e3,G.1,4.514,0.116,453.9,15.7,434.0,17.8,400.8,0.0,0.5,a:gotatun-j59=15MiB/0.3w b:gotatun-j59=17MiB/0.2w,471.0,39.8,437.4,31.5,414.5,0.0,0.8,a:gotatun-j59=39MiB/0.4w b:gotatun-j59=31MiB/0.4w
+e3,G.2,4.54,0.131,491.4,16.2,471.1,20.3,405.3,0.0,0.4,a:gotatun-j59=16MiB/0.1w b:gotatun-j59=20MiB/0.2w,490.5,40.2,458.4,32.5,395.2,0.0,0.0,a:gotatun-j59=40MiB/0.0w b:gotatun-j59=32MiB/0.0w
+e3,I.cap,7.044,4.79,,,,,,,0,,,,,,,,0,
+e3,J,4.502,0.121,460.3,15.4,466.3,20.0,411.1,0.0,0.2,a:gotatun-j59=15MiB/0.0w b:gotatun-j59=20MiB/0.2w,448.2,38.8,466.5,32.6,404.3,0.0,0.0,a:gotatun-j59=38MiB/0.0w b:gotatun-j59=32MiB/0.0w
+e3,K,4.293,0.03,487.9,0.0,447.1,0.0,407.7,0.0,0,,461.6,0.0,474.2,0.0,393.0,0.0,0,
+e3,W,4.471,0.13,489.4,74.4,444.7,66.8,405.2,0.0,9.0,a:wireguard-go=74MiB/4.7w b:wireguard-go=66MiB/4.4w,462.6,256.1,451.5,336.9,397.6,0.0,8.9,a:wireguard-go=256MiB/4.4w b:wireguard-go=336MiB/4.5w
+e3,X,,,437.6,0.0,442.0,0.0,407.5,0.0,0,,,,,,,,0,
+e4,G.1,4.591,0.121,451.7,15.3,436.9,16.7,429.8,0.0,0.4,a:gotatun-j59=15MiB/0.2w b:gotatun-j59=16MiB/0.2w,450.9,36.5,472.8,35.7,420.6,0.0,0.9,a:gotatun-j59=36MiB/0.4w b:gotatun-j59=35MiB/0.4w
+e4,G.2,4.588,0.119,457.1,15.6,466.1,18.1,410.9,0.0,0.5,a:gotatun-j59=15MiB/0.2w b:gotatun-j59=18MiB/0.2w,441.3,42.7,514.8,35.7,398.6,0.0,0.5,a:gotatun-j59=42MiB/0.3w b:gotatun-j59=35MiB/0.3w
+e4,J,4.462,0.114,508.4,15.0,466.0,19.2,417.7,0.0,0.5,a:gotatun-j59=15MiB/0.3w b:gotatun-j59=19MiB/0.2w,441.8,41.5,473.3,36.4,404.9,0.0,0.5,a:gotatun-j59=41MiB/0.2w b:gotatun-j59=36MiB/0.3w
+e4,K,4.31,0.018,445.7,0.0,493.0,0.0,412.4,0.0,0,,455.3,0.0,474.2,0.0,408.9,0.0,0,
+e4,W,4.455,0.114,466.7,78.1,464.8,74.5,393.5,0.0,8.3,a:wireguard-go=78MiB/4.0w b:wireguard-go=74MiB/4.3w,459.0,268.8,471.0,333.6,413.2,0.0,8.2,a:wireguard-go=268MiB/4.3w b:wireguard-go=333MiB/4.0w
+e4,X,,,456.4,0.0,442.7,0.0,434.6,0.0,0,,,,,,,,0,
+p1,I.1,7.011,4.766,490.6,32.5,433.6,21.4,408.5,0.0,1.7,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.8w b:infraternal=21MiB/0.9w,459.3,56.7,444.2,33.9,421.3,0.0,2.1,a:coordinator_fix=7MiB/0.0w a:infraternal=49MiB/1.0w b:infraternal=33MiB/1.0w
+p1,I.2,6.891,4.642,454.6,30.4,439.1,21.8,407.1,0.0,1.6,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.8w b:infraternal=21MiB/0.8w,477.8,57.8,423.8,35.2,392.6,0.0,0.8,a:coordinator_fix=7MiB/0.0w a:infraternal=50MiB/0.3w b:infraternal=35MiB/0.5w
+p1,N,6.875,0.434,561.8,64.1,500.2,64.1,401.2,77.0,61.2,a:netbird=64MiB/26.4w b:netbird=64MiB/29.2w c:netbird-server=76MiB/5.6w,534.9,66.5,515.9,66.1,416.1,79.0,66.3,a:netbird=66MiB/26.6w b:netbird=66MiB/27.6w c:netbird-server=78MiB/12.1w
+p1,T,25.734,17.49,524.3,47.6,528.4,54.0,523.2,57.9,128.2,a:tailscaled=47MiB/40.7w b:tailscaled=53MiB/40.4w c:headscale=57MiB/47.1w,548.8,61.8,622.9,60.9,493.2,58.8,124.8,a:tailscaled=61MiB/38.7w b:tailscaled=60MiB/38.0w c:headscale=58MiB/48.2w
+p1,X,,,484.4,0.0,516.5,0.0,416.5,0.0,0,,,,,,,,0,
+p2,I.1,6.883,4.658,446.8,30.9,549.4,21.1,396.6,0.0,1.5,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.7w b:infraternal=21MiB/0.8w,469.6,60.0,530.1,33.9,407.8,0.0,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=52MiB/0.6w b:infraternal=33MiB/0.6w
+p2,I.2,6.935,4.69,490.0,30.2,541.4,21.9,396.5,0.0,1.5,a:coordinator_fix=7MiB/0.0w a:infraternal=22MiB/0.7w b:infraternal=21MiB/0.8w,454.0,59.8,537.2,35.4,410.7,0.0,0.8,a:coordinator_fix=7MiB/0.0w a:infraternal=52MiB/0.4w b:infraternal=35MiB/0.4w
+p2,N,6.8,0.35,546.8,64.2,629.5,64.2,422.5,78.7,65.0,a:netbird=64MiB/31.7w b:netbird=64MiB/27.4w c:netbird-server=78MiB/6.0w,515.7,66.4,627.5,63.7,428.4,78.5,69.6,a:netbird=66MiB/29.6w b:netbird=63MiB/30.4w c:netbird-server=78MiB/9.5w
+p2,T,26.353,17.512,528.9,49.6,648.3,52.3,504.0,56.9,122.4,a:tailscaled=49MiB/40.9w b:tailscaled=52MiB/37.6w c:headscale=56MiB/43.9w,556.9,59.9,629.5,58.6,498.2,56.5,131.2,a:tailscaled=59MiB/43.6w b:tailscaled=58MiB/39.2w c:headscale=56MiB/48.4w
+p2,X,,,440.6,0.0,559.3,0.0,399.7,0.0,0,,,,,,,,0,
