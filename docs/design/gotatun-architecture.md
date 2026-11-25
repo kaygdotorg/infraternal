@@ -216,6 +216,16 @@ Each cut declares one primary target before its hold. Keep a latency cut only if
 | 10 | **AF_XDP feasibility spike**, only if the NIC path dominates after crypto and queue costs fall. Targets CPU/Gbit and throughput. | Unknown on our hardware; zero-copy requires driver support. A 4,096 × 2 KiB UMEM is 8 MiB per endpoint before metadata. | No product cut until hardware zero-copy is verified and the prototype beats the socket path outside spread, meets p99/order requirements and stays inside the idle-memory guard. The owner chooses the BPF/XDP stack first. |
 | 11 | **Multi-buffer SIMD crypto**, only if parallel `ring` workers miss the throughput target. Targets throughput and CPU/Gbit, with p99 risk from batch wait. | No defensible speed estimate for WireGuard packet sizes. Intel IPsec MB has a ChaCha20-Poly1305 job API; `ring` exposes per-message calls, not a multi-message API. | First measure parallel `ring`. A second library needs owner approval. Compare 64/512/1,380-byte messages and full R4b p99/order/RSS; keep only if throughput improves outside spread, p99 does not regress, order is preserved and idle RSS stays within budget. |
 
+**Rank 4 measured (J1230, 2026-11-25, [research/gotatun-multiqueue](../../research/gotatun-multiqueue/README.md)).**
+
+- Two whole tunnels between the perf VMs carry 17% more reverse 8-flow traffic than one, at the
+  same CPU per Gbit. One device's single pipeline is the limit, not the CPU.
+- A multi-queue TUN alone gains nothing (+0.5% / −4.6%).
+- Receive lanes (several UDP sockets per peer, the flow picked by the sender) gain 7–11% and
+  close 39% of the gap to kernel WG. They fail the keep rule, so neither candidate merged:
+  - CUBIC p99 regresses, because each outer flow gets its own `fq` allowance.
+  - The forward receiver spends 20% more CPU per Gbit.
+
 Do not spend an R4b hold repeating TUN/UDP offload work already present. NUMA is a later host-scale study, not a four-vCPU VM cut. Busy polling, SPSC rings and ECN/L4S stay conditional on the stage or path evidence stated above.
 
 ### Optional quick probes
