@@ -25,8 +25,8 @@ The ranking is the same as on x86 and the recommendation does not change.
   (x86: 34.5 and 26.3). The saving is larger on M1 than on x86, because the M1 hashes the tuple
   faster than it runs the SipHash rounds, and `canonical()` is cheap there.
 - `peers_by_idx` (the `Arc` clone dominated lookup) drops from 8.9-10.0 ns to 3.7 ns at 100 and
-  1,000 peers. At one peer all hashers sit at 7.1 ns: the entry stays hot and one of the
-  runs apparently pays the `Arc` refcount cost differently. Treat the 1-peer row as noise-prone.
+  1,000 peers. At one peer all hashers sit at 7.1 ns: the cause was not investigated
+  (the x86 rows show no such step), so do not read anything into the 1-peer row.
 - The allowed-IPs trie is 44.7 ns on M1 against 68 ns on x86, so it is still the largest single
   lookup per packet and still not a hasher question.
 
