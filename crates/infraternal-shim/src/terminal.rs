@@ -243,10 +243,10 @@ impl Terminal {
             // ESC, and a C1 introducer inside a sequence, start a fresh
             // sequence. The old prefix is dead weight, except inside a
             // control string, whose payload the terminator still needs.
-            let introducer = byte == 0x1b
-                || (self.carry.in_sequence()
-                    && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f));
-            if introducer && !self.carry.in_string() {
+            let c1_introducer = self.carry.in_sequence()
+                && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f);
+            let restart = (byte == 0x1b || c1_introducer) && !self.carry.in_string();
+            if restart {
                 self.pending.clear();
                 self.carry_overflow = false;
             }
@@ -266,6 +266,14 @@ impl Terminal {
             // C0 actions execute within CSI. Carry only its unfinished syntax,
             // otherwise the snapshot continuation executes those actions twice.
             if byte < 0x20 && byte != 0x1b && !self.carry.keeps_c0() {
+                continue;
+            }
+            // A C1 introducer only means something to an engine that is already
+            // inside a sequence; replayed at ground it would be a stray byte.
+            // A restart therefore carries its 7-bit form, ESC plus the byte
+            // minus 0x40, which leaves the engine in the same state.
+            if restart && c1_introducer {
+                self.pending.extend_from_slice(&[0x1b, byte - 0x40]);
                 continue;
             }
             let carry_limit = MAX_FRAME - 9;

@@ -408,9 +408,10 @@ fn carry_ends_where_the_engine_ends_a_sequence_on_a_c1_byte() {
     assert!(terminal.pending.is_empty(), "ESC 0x9C finished the escape");
     terminal.process(b"\x1b[1\x84X");
     assert!(terminal.pending.is_empty(), "a C1 control ends a CSI");
-    // An introducer replaces the sequence it interrupts, and only it is carried.
+    // An introducer replaces the sequence it interrupts, and only it is carried,
+    // as ESC plus its 7-bit letter: a viewer starts at ground, where 0x9B is not a CSI.
     terminal.process(b"\x1b[1;2\x9b3");
-    assert_eq!(terminal.pending, b"\x9b3");
+    assert_eq!(terminal.pending, b"\x1b[3", "carried in its 7-bit form");
     // Snapshot continuation itself is pinned by `vt_checks` and its fuzz target.
     terminal.process(b"m");
     assert!(terminal.pending.is_empty(), "the CSI ended");
