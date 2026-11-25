@@ -1602,6 +1602,24 @@ impl Node {
         Arc::new(move |relay_mtu| update_relay_route_mtu(&state, key, relay_mtu))
     }
 
+    /// The direct-path probes of the running `GotaTun` engine's `WireGuard` port, and the receiver
+    /// of their finished answers (given out once). Hand both to
+    /// `RelayPaths::with_direct_probes`. `None` for the kernel engine, whose socket this
+    /// process does not own, or while no engine runs.
+    #[cfg(feature = "relay")]
+    #[must_use]
+    pub fn direct_probes(
+        &self,
+    ) -> Option<(
+        crate::direct_probe::DirectProbes,
+        Option<tokio::sync::mpsc::Receiver<crate::direct_probe::Answer>>,
+    )> {
+        match self.engine_kind {
+            EngineKind::Kernel => None,
+            EngineKind::GotaTun => self.gotatun.as_ref()?.direct_probes(),
+        }
+    }
+
     /// Return a callback for learned endpoints reported by the `GotaTun` worker.
     ///
     /// The callback only updates installed peers and leaves relay budgets active. It runs route

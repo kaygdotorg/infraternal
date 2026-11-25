@@ -37,6 +37,19 @@
 //! only when there is a choice (two links or more). An idle pair, or one with a
 //! single relay, sends nothing extra and is never woken by this module (D81).
 //!
+//! The direct path is a candidate too (#220, [`crate::direct_probe`]). A pair that knows its
+//! peer's direct endpoint probes it from the `WireGuard` port alongside its relay links and
+//! feeds the answers into the same rule, so a direct path that works but is slower than a relay
+//! loses, and a relayed pair whose direct path opens or turns out faster moves back. The rule's
+//! direct preference applies: direct wins inside the margin, a relay needs the full margin. A
+//! pair on the direct path keeps its relay links as standby only when some relay's own round
+//! trip (which the QUIC connection measures for free) leaves room to beat the direct path;
+//! otherwise it requests none. Probe rounds of such a pair start from inbound traffic on the
+//! `WireGuard` port (the receive guard carries the clock), at one round per
+//! [`PROBE_INTERVAL`] while a decision is open and one per [`STEADY_INTERVAL`] once every window
+//! is sustained and steady, so an idle pair is never woken (D81). A peer that has never
+//! answered a direct probe (an older node) is not judged: silence is not a slow path.
+//!
 //! A relay sees the probe's token and could answer for the peer to look faster than
 //! it is. It cannot look faster than its own leg, which this node's QUIC connection
 //! to it measures independently; relays already hold the deployment's server-purpose
@@ -44,11 +57,12 @@
 
 use crate::{
     dataplane,
+    direct_probe::{self, Answer, DirectProbes},
     seam::{Received, Seam},
     wireguard,
 };
 use bytes::{BufMut, BytesMut};
-use infraternal_mesh::path_choice::{Path, Samples, Selector, first_choice};
+use infraternal_mesh::path_choice::{Path, Samples, Selector, band, first_choice};
 use infraternal_plugin_relay::{
     client::{Client, Notices},
     probe::{self, ProbeKey},
@@ -61,7 +75,7 @@ use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -85,6 +99,10 @@ const SETTLE: Duration = Duration::from_millis(25);
 /// Least time between two probe rounds of one pair. Rounds ride on the pair's traffic, so
 /// this caps probe cost at one small DATAGRAM per link per second while the pair is busy.
 const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+/// Least time between two probe rounds of a pair whose every window is sustained and steady
+/// (see [`PeerState::round_interval`]): five seconds keep a five-sample window 20 s wide, inside
+/// the path rule's freshness limit of 30 s, so the pair still judges on fresh samples.
+const STEADY_INTERVAL: Duration = Duration::from_secs(5);
 /// A link probe unanswered for this long counts as a sample of this round trip, so a link
 /// that silently stopped forwarding loses the comparison instead of keeping its old samples.
 const PROBE_LOST: Duration = Duration::from_secs(2);
@@ -256,6 +274,9 @@ struct Peer {
     handshake_starter: Arc<dyn Fn() + Send + Sync>,
     /// Updates this peer's route from the live relay MTU, or re-derives its direct-path budget.
     route_mtu_updater: RouteMtuUpdater,
+    /// Moves the engine's endpoint for this peer back to its direct endpoint, keeping the
+    /// session; `None` when the pair has no direct endpoint.
+    use_direct: Option<Arc<dyn Fn() -> io::Result<()> + Send + Sync>>,
     socket: UdpSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
@@ -292,6 +313,25 @@ struct PeerState {
     /// Whether the first measured choice was made since the pair last had nothing measured
     /// (see [`PeerState::first_measured`]).
     decided: bool,
+    /// The pair's direct path, when its peer's direct endpoint is known.
+    direct: Option<DirectPath>,
+    /// Whether a pair on the direct path asked its relays for standby links (see
+    /// [`consider_relays`]). Until then it requests none.
+    want_relay: bool,
+}
+
+/// The direct path of one pair: the endpoint probed from the `WireGuard` port and what the
+/// probes showed.
+struct DirectPath {
+    /// The peer's direct endpoint, as the engine would send to it.
+    endpoint: SocketAddr,
+    /// Round trips of probes sent to `endpoint`, lost ones included once the peer has answered.
+    samples: Samples,
+    /// Whether the peer ever answered a probe. A peer that never did (an older node, or a
+    /// path that never opened) is not judged slow: it has no samples at all.
+    answered: bool,
+    /// Whether the direct path carries the pair now (the relay links, if any, are standby).
+    on: bool,
 }
 
 impl PeerState {
@@ -305,6 +345,73 @@ impl PeerState {
             probing: vec![None; relays],
             selector: Selector::default(),
             decided: false,
+            direct: None,
+            want_relay: false,
+        }
+    }
+
+    /// The same state for a pair with a known direct endpoint. `on` says whether the direct
+    /// path carries the pair now (a pair that has not been relayed) or a relay does.
+    fn with_direct(mut self, endpoint: SocketAddr, on: bool) -> Self {
+        self.direct = Some(DirectPath {
+            endpoint,
+            samples: Samples::default(),
+            answered: false,
+            on,
+        });
+        if on {
+            self.selector.start(Some(Path::Direct));
+        }
+        self
+    }
+
+    /// Whether the direct path carries the pair.
+    fn on_direct(&self) -> bool {
+        self.direct.as_ref().is_some_and(|direct| direct.on)
+    }
+
+    /// Record one direct probe result at `now`. A loss counts only once the peer has answered
+    /// before, so a peer without a responder is never judged slow (see [`DirectPath::answered`]).
+    fn record_direct(&mut self, now: Duration, rtt: Duration, lost: bool) {
+        let Some(direct) = self.direct.as_mut() else {
+            return;
+        };
+        if lost && !direct.answered {
+            return;
+        }
+        direct.answered |= !lost;
+        direct.samples.record(now, rtt);
+    }
+
+    /// How long until the pair's next probe round: one [`PROBE_INTERVAL`] while a decision is
+    /// open, [`STEADY_INTERVAL`] once every candidate's window is sustained and the newest
+    /// direct sample sits inside the margin of its median. Pairs with no direct path keep the
+    /// fixed interval they always had.
+    fn round_interval(&self, now: Duration) -> Duration {
+        // A peer that has never answered costs one ping per steady interval, not per second: it
+        // may be an older node, or a path that has not opened. The first answer speeds it up.
+        let Some(direct) = self.direct.as_ref().filter(|direct| direct.answered) else {
+            return STEADY_INTERVAL;
+        };
+        let linked = self
+            .links
+            .iter()
+            .zip(&self.rtt)
+            .filter(|(link, _)| link.is_some())
+            .map(|(_, samples)| samples);
+        let settled = std::iter::once(&direct.samples)
+            .chain(linked)
+            .all(|samples| samples.sustained(now));
+        let steady = direct.samples.median().is_some_and(|median| {
+            direct
+                .samples
+                .newest()
+                .is_some_and(|newest| newest.abs_diff(median) <= band(median))
+        });
+        if settled && steady {
+            STEADY_INTERVAL
+        } else {
+            PROBE_INTERVAL
         }
     }
 
@@ -381,22 +488,39 @@ impl PeerState {
             rtt,
             selector,
             active,
+            direct,
             ..
         } = self;
-        let linked = links
+        let mut candidates: Vec<(Path, &Samples)> = links
             .iter()
             .zip(rtt.iter())
             .enumerate()
             .filter(|(_, (link, _))| link.is_some())
-            .map(|(index, (_, samples))| (Path::Relay(index), samples));
-        let Some(Path::Relay(index)) = selector.choose(now, linked) else {
-            return false;
-        };
-        let Some(id) = links[index] else {
-            return false;
-        };
-        *active = Some((index, id));
-        true
+            .map(|(index, (_, samples))| (Path::Relay(index), samples))
+            .collect();
+        if let Some(direct) = direct.as_ref().filter(|direct| direct.answered) {
+            candidates.push((Path::Direct, &direct.samples));
+        }
+        match selector.choose(now, candidates) {
+            Some(Path::Relay(index)) => {
+                let Some(id) = links[index] else {
+                    return false;
+                };
+                *active = Some((index, id));
+                if let Some(direct) = direct.as_mut() {
+                    direct.on = false;
+                }
+                true
+            }
+            Some(Path::Direct) => {
+                *active = None;
+                if let Some(direct) = direct.as_mut() {
+                    direct.on = true;
+                }
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -417,6 +541,9 @@ struct Shared {
     epoch: Instant,
     /// Source of probe tokens. Tokens only match answers to probes; they are not secret.
     tokens: AtomicU64,
+    /// The node's direct-path probes, when the owner gave them (see
+    /// [`RelayPaths::with_direct_probes`]); without them pairs have relay candidates only.
+    probes: OnceLock<DirectProbes>,
 }
 
 impl Shared {
@@ -511,6 +638,7 @@ impl RelayPaths {
             counters: Counters::default(),
             epoch: Instant::now(),
             tokens: AtomicU64::new(token_seed()),
+            probes: OnceLock::new(),
         });
         let drivers = (0..shared.relays.len())
             .map(|index| tokio::spawn(drive(shared.clone(), index)))
@@ -532,6 +660,35 @@ impl RelayPaths {
         peer: HostId,
         kernel: &dataplane::Peer,
     ) -> io::Result<SocketAddr> {
+        self.add_peer(endpoint_updater, peer, kernel, false).await
+    }
+
+    /// Watch a pair that is on its direct path: probe its direct endpoint (`kernel.endpoint`)
+    /// from the `WireGuard` port and move the pair to a relay only when the path rule finds a
+    /// relay measurably faster. No relay link is requested until some relay's own round trip
+    /// leaves room to win (see [`consider_relays`]), and nothing is sent while the pair is idle.
+    /// Needs [`RelayPaths::with_direct_probes`]; without probes it only registers the pair.
+    /// # Errors
+    /// Fails if the shim socket cannot be bound or the selected data plane is stopped.
+    pub async fn watch_direct(
+        &self,
+        endpoint_updater: &mut impl EndpointUpdater,
+        peer: HostId,
+        kernel: &dataplane::Peer,
+    ) -> io::Result<SocketAddr> {
+        self.add_peer(endpoint_updater, peer, kernel, true).await
+    }
+
+    /// Register `peer` with a shim socket. `standby` leaves the pair on the direct path with no
+    /// relay link requested; otherwise the pair is relayed at once and the direct path (if
+    /// `kernel` has an endpoint) is probed as a candidate to move back to.
+    async fn add_peer(
+        &self,
+        endpoint_updater: &mut impl EndpointUpdater,
+        peer: HostId,
+        kernel: &dataplane::Peer,
+        standby: bool,
+    ) -> io::Result<SocketAddr> {
         if let Some(existing) = read(&self.shared.peers).get(&peer) {
             return existing.socket.local_addr();
         }
@@ -550,16 +707,26 @@ impl RelayPaths {
         let prepare_handshake = endpoint_updater.handshake_preparer(&relayed_peer)?;
         let handshake_starter = endpoint_updater.handshake_starter(&relayed_peer)?;
         let route_mtu_updater = endpoint_updater.route_mtu_updater(kernel);
+        // Moving back to the direct path re-prepares the peer with its own endpoint.
+        let use_direct = kernel
+            .endpoint
+            .map(|_| endpoint_updater.handshake_preparer(kernel))
+            .transpose()?;
         let relays = self.shared.relays.len();
+        let mut state = PeerState::new(relays);
+        if let Some(endpoint) = kernel.endpoint {
+            state = state.with_direct(endpoint, standby);
+        }
         let shim = Arc::new(Peer {
             host: peer,
             prepare_handshake,
             handshake_starter,
             route_mtu_updater,
+            use_direct,
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
-            state: Mutex::new(PeerState::new(relays)),
+            state: Mutex::new(state),
             active: RwLock::new(None),
             refreshing_route_mtu: std::sync::atomic::AtomicBool::new(false),
             next_round_ms: AtomicU64::new(0),
@@ -568,8 +735,48 @@ impl RelayPaths {
         write(&self.shared.peers).insert(peer, shim.clone());
         let task = tokio::spawn(outbound(self.shared.clone(), shim.clone()));
         lock(&self.shims).insert(peer, task);
-        request_everywhere(&self.shared, &shim).await;
+        if standby {
+            if let Some(probes) = self.shared.probes.get() {
+                probes.want_round_in(Duration::ZERO);
+            }
+        } else {
+            request_everywhere(&self.shared, &shim).await;
+        }
         Ok(local)
+    }
+
+    /// Give this node's direct-path probes to the relay paths and start the two tasks that run
+    /// them: one starts rounds when inbound traffic says one is due, the other turns finished
+    /// probes into samples for the path rule. Without this call pairs choose between relays only.
+    #[must_use]
+    pub fn with_direct_probes(
+        mut self,
+        probes: DirectProbes,
+        answers: mpsc::Receiver<Answer>,
+    ) -> Self {
+        if self.shared.probes.set(probes.clone()).is_err() {
+            return self;
+        }
+        self.drivers.push(tokio::spawn(direct_rounds(
+            self.shared.clone(),
+            probes.clone(),
+        )));
+        self.drivers.push(tokio::spawn(direct_answers(
+            self.shared.clone(),
+            probes,
+            answers,
+        )));
+        self
+    }
+
+    /// The median direct round trip of `peer`, and whether the direct path carries it now.
+    /// `None` when the pair has no direct path or no answer yet. For diagnostics and fixtures.
+    #[must_use]
+    pub fn direct(&self, peer: HostId) -> Option<(Duration, bool)> {
+        let shim = read(&self.shared.peers).get(&peer).cloned()?;
+        let state = lock(&shim.state);
+        let direct = state.direct.as_ref()?;
+        Some((direct.samples.median()?, direct.on))
     }
 
     /// Stop relaying `peer`: withdraw its requests and close its shim socket.
@@ -740,15 +947,24 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
             // A refused send from an earlier datagram surfaces here; keep going.
             Err(_) => continue,
         }
-        let Some((live, id)) = read(&peer.active).clone() else {
+        let Some((live, id)) = read(&peer.active)
+            .clone()
+            .or_else(|| standby_link(&shared, &peer))
+        else {
             shared.counters.unlinked.fetch_add(1, Ordering::Relaxed);
             continue;
         };
         buffer[..wire::HEADER].copy_from_slice(&id.0.to_be_bytes());
+        // Whether this packet is data worth a probe round, decided before the buffer is sent.
+        let carries_data = direct_probe::is_traffic(&buffer[wire::HEADER..]);
         match live.client.connection().send_datagram(buffer.freeze()) {
             Ok(()) => {
                 shared.counters.sent.fetch_add(1, Ordering::Relaxed);
-                probe_round(&shared, &peer);
+                // Only the pair's data starts a round: an idle pair's engine keepalives, which
+                // also pass here, must not wake the probes (D81).
+                if carries_data {
+                    probe_round(&shared, &peer);
+                }
             }
             Err(quinn::SendDatagramError::TooLarge) => {
                 shared.counters.too_large.fetch_add(1, Ordering::Relaxed);
@@ -777,6 +993,19 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
             }
         }
     }
+}
+
+/// A pair on the direct path still hears from a peer that has moved to a relay: its relayed
+/// packets reach the engine, which then answers to the shim. Such an answer goes out on the best
+/// standby link, as the peer accepts packets on every link, instead of being dropped until the
+/// two ends agree again.
+fn standby_link(shared: &Shared, peer: &Peer) -> Option<(Arc<Live>, LinkId)> {
+    let state = lock(&peer.state);
+    if !state.on_direct() {
+        return None;
+    }
+    let (index, id) = state.best_link()?;
+    live(shared, index).map(|live| (live, id))
 }
 
 /// Relayed ciphertext from one relay connection, into the kernel.
@@ -906,11 +1135,16 @@ fn probe_round(shared: &Arc<Shared>, peer: &Arc<Peer>) {
         now_ms.saturating_add(millis(PROBE_INTERVAL)),
         Ordering::Relaxed,
     );
-    let (probes, moved) = {
+    let (probes, direct_ping, moved) = {
         let mut state = lock(&peer.state);
-        if state.links.iter().flatten().count() < 2 {
+        // A pair with a direct path has a choice from its first link; with no link at all it
+        // still probes the direct path, to learn whether a relay could beat it.
+        if state.direct.is_none() && state.links.iter().flatten().count() < 2 {
             return;
         }
+        let interval = state.round_interval(now);
+        peer.next_round_ms
+            .store(now_ms.saturating_add(millis(interval)), Ordering::Relaxed);
         let mut probes = Vec::new();
         for index in 0..state.links.len() {
             let Some(id) = state.links[index] else {
@@ -930,8 +1164,16 @@ fn probe_round(shared: &Arc<Shared>, peer: &Arc<Peer>) {
         if moved {
             advance_generation(peer);
         }
-        (probes, moved)
+        let direct_ping = state.direct.as_ref().map(|direct| direct.endpoint);
+        (probes, direct_ping, moved)
     };
+    if let (Some(endpoint), Some(direct_probes)) = (direct_ping, shared.probes.get()) {
+        let direct_probes = direct_probes.clone();
+        tokio::spawn(async move {
+            // A refused send is a lost sample in due course; nothing to do here.
+            let _ = direct_probes.ping(endpoint).await;
+        });
+    }
     for (index, id, token) in probes {
         if let Some(live) = live(shared, index)
             && live
@@ -977,6 +1219,140 @@ fn answered(shared: &Arc<Shared>, peer: &Arc<Peer>, index: usize, id: LinkId, to
     }
 }
 
+/// Start probe rounds when inbound traffic says one is due, then ask for the next.
+///
+/// Sleeps on [`DirectProbes::round_due`], which only the receive task wakes, so a node with no
+/// inbound traffic has no timer here (D81). Each round covers every pair with a direct path;
+/// a pair that is not due yet declines (`next_round_ms`), and the next wake is asked for at
+/// the earliest due time.
+async fn direct_rounds(shared: Arc<Shared>, probes: DirectProbes) {
+    loop {
+        probes.round_due().await;
+        let peers: Vec<Arc<Peer>> = read(&shared.peers)
+            .values()
+            .filter(|peer| lock(&peer.state).direct.is_some())
+            .cloned()
+            .collect();
+        for peer in &peers {
+            probe_round(&shared, peer);
+        }
+        let now_ms = millis(shared.now());
+        let earliest = peers
+            .iter()
+            .map(|peer| peer.next_round_ms.load(Ordering::Relaxed))
+            .min();
+        if let Some(due) = earliest {
+            probes.want_round_in(Duration::from_millis(due.saturating_sub(now_ms)));
+        }
+    }
+}
+
+/// Turn finished direct probes into samples, and time out the ones that never come back.
+///
+/// The only timer is the loss timeout of a probe that is in flight; with none in flight the
+/// task waits for the next ping or answer and costs nothing.
+async fn direct_answers(
+    shared: Arc<Shared>,
+    probes: DirectProbes,
+    mut answers: mpsc::Receiver<Answer>,
+) {
+    loop {
+        let answer = match probes.expire() {
+            Some(delay) => tokio::select! {
+                answer = answers.recv() => answer,
+                () = tokio::time::sleep(delay) => continue,
+                () = probes.pinged() => continue,
+            },
+            None => tokio::select! {
+                answer = answers.recv() => answer,
+                () = probes.pinged() => continue,
+            },
+        };
+        let Some(answer) = answer else {
+            return;
+        };
+        apply_direct(&shared, &answer);
+        while let Ok(more) = answers.try_recv() {
+            apply_direct(&shared, &more);
+        }
+    }
+}
+
+/// Record one finished direct probe for the pair it belongs to, apply the path rule, and
+/// consider standby relays.
+fn apply_direct(shared: &Arc<Shared>, answer: &Answer) {
+    let now = shared.now();
+    let peers: Vec<Arc<Peer>> = read(&shared.peers).values().cloned().collect();
+    for peer in peers {
+        let moved = {
+            let mut state = lock(&peer.state);
+            let ours = state
+                .direct
+                .as_ref()
+                .is_some_and(|direct| direct_probe::canonical(direct.endpoint) == answer.endpoint);
+            if !ours {
+                continue;
+            }
+            state.record_direct(now, answer.rtt, answer.lost);
+            // A sample that breaks the steady picture reopens the decision at the fast rate
+            // now, not at the end of the steady interval that was set before it arrived.
+            let interval = state.round_interval(now);
+            if interval < STEADY_INTERVAL {
+                let due = millis(now).saturating_add(millis(interval));
+                if peer.next_round_ms.fetch_min(due, Ordering::Relaxed) > due
+                    && let Some(probes) = shared.probes.get()
+                {
+                    probes.want_round_in(interval);
+                }
+            }
+            let moved = state.first_measured(now) || state.choose(now);
+            if moved {
+                advance_generation(&peer);
+            }
+            moved
+        };
+        if moved {
+            switched(shared, &peer);
+        }
+        consider_relays(shared, &peer);
+    }
+}
+
+/// A pair on the direct path asks its relays for standby links only when one could win: some
+/// live relay's own round trip, which its QUIC connection measures without any probe, plus the
+/// margin is below the newest direct round trip. A relay path is at least as long as this node's leg to
+/// the relay, so when even that leg is not clearly faster the direct path cannot lose and
+/// requesting links would cost relay state for nothing. Asked once; the links then stay.
+fn consider_relays(shared: &Arc<Shared>, peer: &Arc<Peer>) {
+    let worthwhile = {
+        let mut state = lock(&peer.state);
+        if !state.on_direct() || state.want_relay {
+            return;
+        }
+        // The newest sample, not the median: one slow answer is enough to prepare standby links
+        // (cheap, and kept), so the sustained windows can fill while the median catches up.
+        let Some(newest) = state
+            .direct
+            .as_ref()
+            .and_then(|direct| direct.samples.newest())
+        else {
+            return;
+        };
+        let leg = (0..shared.relays.len())
+            .filter_map(|index| live(shared, index))
+            .map(|live| live.client.connection().rtt())
+            .min();
+        let worthwhile = leg.is_some_and(|leg| leg + band(newest) < newest);
+        state.want_relay |= worthwhile;
+        worthwhile
+    };
+    if worthwhile {
+        let shared = shared.clone();
+        let peer = peer.clone();
+        tokio::spawn(async move { request_everywhere(&shared, &peer).await });
+    }
+}
+
 /// Invalidate route writes for the previously selected path. The caller holds `peer.state`,
 /// which keeps the lock order of [`settle`]: state, then generation.
 fn advance_generation(peer: &Peer) {
@@ -995,6 +1371,12 @@ fn switched(shared: &Arc<Shared>, peer: &Arc<Peer>) {
 
 /// Ask every live relay where this peer has no link and no request yet.
 async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
+    {
+        let state = lock(&peer.state);
+        if state.on_direct() && !state.want_relay {
+            return;
+        }
+    }
     for index in 0..shared.relays.len() {
         let Some(live) = live(shared, index) else {
             continue;
@@ -1030,7 +1412,12 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
             .active
             .filter(|&(index, id)| state.links[index] == Some(id))
             .filter(|_| state.measured());
-        let active = kept.or_else(|| state.best_link());
+        // On the direct path the relay links are standby: they carry nothing.
+        let active = if state.on_direct() {
+            None
+        } else {
+            kept.or_else(|| state.best_link())
+        };
         let changed = state.active != active;
         if changed {
             // Route writers hold this lock through the install, so a path change either waits
@@ -1064,9 +1451,13 @@ async fn settle(shared: &Arc<Shared>, peer: &Arc<Peer>) {
 /// prepares only if the pair had no published link.
 async fn publish(shared: &Arc<Shared>, peer: &Arc<Peer>, prepare: bool) {
     let _turn = peer.publishing.lock().await;
-    let (active, route_mtu_generation) = {
+    let (active, route_mtu_generation, on_direct) = {
         let state = lock(&peer.state);
-        (state.active, *lock(&peer.route_mtu_generation))
+        (
+            state.active,
+            *lock(&peer.route_mtu_generation),
+            state.on_direct(),
+        )
     };
     let installed = active.and_then(|(index, id)| live(shared, index).map(|live| (live, id)));
     let linked = installed.is_some();
@@ -1121,6 +1512,16 @@ async fn publish(shared: &Arc<Shared>, peer: &Arc<Peer>, prepare: bool) {
             *write(&peer.active) = None;
             if !update_peer_route_mtu(peer, route_mtu_generation, None).await {
                 tracing::warn!("Could not refresh peer route for direct-path fallback");
+            }
+            // A pair the rule moved to the direct path sends to the peer's own endpoint again
+            // (the session is kept: only the endpoint moves).
+            if on_direct && let Some(use_direct) = peer.use_direct.clone() {
+                let moved = tokio::task::spawn_blocking(move || use_direct())
+                    .await
+                    .is_ok_and(|result| result.is_ok());
+                if !moved {
+                    tracing::warn!("Could not move the engine endpoint back to the direct path");
+                }
             }
         }
     }
@@ -1470,6 +1871,185 @@ mod tests {
         assert_eq!(parse_probe(&long), None, "exact length only");
     }
 
+    /// A pair with one relay link and a direct path, driven second by second as the probe
+    /// rounds drive it: both paths get a sample with up to `jitter_percent` of noise, then the
+    /// rule runs. Returns when the pair first moved (seconds from the start), how many times
+    /// it moved in all, and whether it ended on the direct path.
+    fn simulate(
+        direct_ms: u64,
+        relay_ms: u64,
+        start_on_direct: bool,
+        jitter_percent: u64,
+        seconds: u64,
+        seed: u64,
+    ) -> (Option<u64>, u32, bool) {
+        let endpoint = "127.0.0.1:9".parse().unwrap();
+        let mut state = PeerState::new(1).with_direct(endpoint, start_on_direct);
+        state.links = vec![Some(LinkId(1))];
+        if !start_on_direct {
+            state.active = Some((0, LinkId(1)));
+            state.selector.start(Some(Path::Relay(0)));
+        }
+        let mut noise = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut jittered = |ms: u64| {
+            noise ^= noise << 13;
+            noise ^= noise >> 7;
+            noise ^= noise << 17;
+            let spread = 2 * jitter_percent + 1;
+            let offset =
+                i64::try_from(noise % spread).unwrap() - i64::try_from(jitter_percent).unwrap();
+            let micros = i64::try_from(ms * 1_000).unwrap();
+            Duration::from_micros(u64::try_from(micros + micros * offset / 100).unwrap())
+        };
+        let (mut first, mut moves) = (None, 0);
+        for second in 1..=seconds {
+            let at = Duration::from_secs(second);
+            state.record_direct(at, jittered(direct_ms), false);
+            state.rtt[0].record(at, jittered(relay_ms));
+            if state.first_measured(at) || state.choose(at) {
+                first.get_or_insert(second);
+                moves += 1;
+            }
+        }
+        (first, moves, state.on_direct())
+    }
+
+    /// A direct path 80 ms against a relay of 20 ms loses within one window of probes, and the
+    /// reverse pair never moves; the same holds under 15 % jitter for 40 seeds each.
+    #[test]
+    fn a_slow_direct_path_loses_to_a_faster_relay_and_the_reverse_stays() {
+        for seed in 1..=40 {
+            let (first, moves, direct) = simulate(80, 20, true, 15, 600, seed);
+            assert!(
+                first.is_some_and(|at| at <= 6),
+                "seed {seed}: moved at {first:?}"
+            );
+            assert_eq!(
+                (moves, direct),
+                (1, false),
+                "seed {seed}: one move, to the relay"
+            );
+            let (first, moves, direct) = simulate(20, 80, true, 15, 600, seed);
+            assert_eq!(
+                (first, moves, direct),
+                (None, 0, true),
+                "seed {seed}: direct stays"
+            );
+            let (first, moves, direct) = simulate(80, 20, false, 15, 600, seed);
+            assert_eq!(
+                (first, moves, direct),
+                (None, 0, false),
+                "seed {seed}: relay stays"
+            );
+            let (first, moves, direct) = simulate(20, 80, false, 15, 600, seed);
+            assert!(
+                first.is_some_and(|at| at <= 6),
+                "seed {seed}: moved at {first:?}"
+            );
+            assert_eq!(
+                (moves, direct),
+                (1, true),
+                "seed {seed}: one move, to direct"
+            );
+        }
+    }
+
+    /// Direct wins inside the margin: a direct path a little slower than a relay keeps the
+    /// pair (or takes it back), and a relay that is only a little faster rarely moves it. The
+    /// path rule is allowed an occasional move on a lucky streak of samples (J1105 measured 0 to
+    /// 2.4 moves an hour at 10 to 20 % jitter for two equal paths, and a relay that is really 10 %
+    /// faster is a harder case), so this counts moves over 40 ten-minute runs instead of
+    /// demanding none.
+    #[test]
+    fn direct_wins_inside_the_margin_and_nothing_flaps() {
+        let (mut off_direct, mut back, mut ended_direct) = (0, 0, 0);
+        for seed in 1..=40 {
+            let (_, moves, _) = simulate(44, 40, true, 10, 600, seed);
+            off_direct += moves;
+            let (_, moves, direct) = simulate(44, 40, false, 10, 600, seed);
+            back += moves;
+            ended_direct += u32::from(direct);
+        }
+        // Measured: 9 moves in 40 runs (6.7 hours of 1 s samples), about 1.3 an hour, for a 10 %
+        // faster relay under 10 % jitter on both paths; the bound leaves room for seed luck.
+        assert!(
+            off_direct <= 14,
+            "{off_direct} moves off direct in 40 runs of 600 s"
+        );
+        // The rule wants every direct sample inside the margin to take a pair back, so a direct
+        // path with jitter wider than the gap may stay on the relay for a whole run.
+        assert!(
+            ended_direct >= 30,
+            "only {ended_direct} of 40 relayed pairs returned to direct"
+        );
+        // Measured: 49 moves in 40 runs, 40 at most to return plus about 9 flaps (1.3 an hour).
+        assert!(
+            back <= 40 + 14,
+            "{back} moves in 40 runs that each need at most one to return"
+        );
+    }
+
+    /// A peer that never answered is not slow: lost probes before the first answer are not
+    /// samples, and the pair stays where it is.
+    #[test]
+    fn silence_before_the_first_answer_is_not_a_slow_path() {
+        let endpoint = "127.0.0.1:9".parse().unwrap();
+        let mut state = PeerState::new(1).with_direct(endpoint, true);
+        state.links = vec![Some(LinkId(1))];
+        for second in 1..=30 {
+            let at = Duration::from_secs(second);
+            state.record_direct(at, Duration::from_secs(2), true);
+            state.rtt[0].record(at, Duration::from_millis(20));
+            assert!(!state.choose(at), "second {second}");
+        }
+        assert!(state.on_direct());
+        assert_eq!(
+            state.round_interval(Duration::from_secs(30)),
+            Duration::from_secs(5),
+            "a silent peer is pinged at the steady rate"
+        );
+        // Once it has answered, losses count: a path that goes dark loses to the relay.
+        let mut at = Duration::from_secs(31);
+        state.record_direct(at, Duration::from_millis(30), false);
+        let mut moved_at = None;
+        for second in 32..=60 {
+            at = Duration::from_secs(second);
+            state.record_direct(at, Duration::from_secs(2), true);
+            state.rtt[0].record(at, Duration::from_millis(20));
+            if state.choose(at) {
+                moved_at.get_or_insert(second);
+            }
+        }
+        assert!(moved_at.is_some_and(|second| second <= 42), "{moved_at:?}");
+        assert!(!state.on_direct());
+    }
+
+    /// A pair probes every second while a decision is open and every five seconds once all its
+    /// windows are sustained and the newest direct sample sits near its median.
+    #[test]
+    fn probe_rounds_slow_down_only_when_everything_is_settled_and_steady() {
+        let endpoint = "127.0.0.1:9".parse().unwrap();
+        let mut state = PeerState::new(1).with_direct(endpoint, true);
+        state.links = vec![Some(LinkId(1))];
+        assert_eq!(
+            state.round_interval(Duration::ZERO),
+            Duration::from_secs(5),
+            "an unanswered peer is pinged at the steady rate"
+        );
+        state.record_direct(Duration::ZERO, Duration::from_millis(30), false);
+        assert_eq!(state.round_interval(Duration::ZERO), Duration::from_secs(1));
+        for second in 1..=5 {
+            let at = Duration::from_secs(second);
+            state.record_direct(at, Duration::from_millis(30), false);
+            state.rtt[0].record(at, Duration::from_millis(60));
+        }
+        let now = Duration::from_secs(5);
+        assert_eq!(state.round_interval(now), Duration::from_secs(5));
+        // One sample far from the median reopens the decision at the fast rate.
+        state.record_direct(now, Duration::from_millis(90), false);
+        assert_eq!(state.round_interval(now), Duration::from_secs(1));
+    }
+
     /// Without a usable active link, the fastest measured link wins, then the lowest index.
     #[test]
     fn the_fallback_link_is_the_fastest_measured_then_the_lowest_index() {
@@ -1691,6 +2271,7 @@ mod review_j375_tests {
             prepare_handshake: Arc::new(|| Ok(())),
             handshake_starter: Arc::new(|| {}),
             route_mtu_updater: callback,
+            use_direct: None,
             socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
             starting: AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
@@ -1716,6 +2297,7 @@ mod review_j375_tests {
             counters: Default::default(),
             epoch: Instant::now(),
             tokens: AtomicU64::new(1),
+            probes: OnceLock::new(),
         });
         let stale_generation = *lock(&peer.route_mtu_generation);
         let delayed_peer = peer.clone();

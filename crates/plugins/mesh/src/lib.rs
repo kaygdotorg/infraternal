@@ -106,6 +106,10 @@ mod gotatun_tun;
 mod underlay_announce;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+/// Round-trip probes on the direct path, sent from the `WireGuard` port.
+pub mod direct_probe;
+
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Drops handshake initiations from ungranted keys before the userspace engine sees them.
 mod handshake_admission;
 

@@ -123,6 +123,12 @@ impl Samples {
         Some(sorted[(self.len - 1) / 2])
     }
 
+    /// The most recently recorded round trip, if any.
+    #[must_use]
+    pub fn newest(&self) -> Option<Duration> {
+        (self.len > 0).then(|| self.ring[(self.next + SAMPLES - 1) % SAMPLES].1)
+    }
+
     /// The slowest held round trip.
     #[must_use]
     pub fn worst(&self) -> Option<Duration> {
