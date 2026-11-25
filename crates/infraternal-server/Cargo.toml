@@ -92,6 +92,9 @@ sha2.workspace = true
 # A second P-256 implementation signs test requests, so the server's OpenSSL
 # verifier is checked against the encoding the client core produces (#580).
 ring.workspace = true
+# The iPhone's link client, with a software P-256 key in place of the Secure
+# Enclave, joins and links against the real server in tests (#580, L3).
+infraternal-link = { workspace = true, features = ["quic", "join", "test-support"] }
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Native-lane regressions opt in explicitly; shipping remote terminals do not.
