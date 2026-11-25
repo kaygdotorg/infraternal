@@ -30,7 +30,8 @@
 import type { Grant } from "../model/types";
 import { MeshClient, type MeshSubscriptionEvent } from "../../../../../packages/protocol/src/mesh";
 import { ACTION, ActionRefused, endpointJson, parseAnswer, parseRouteAnswer, parseRoutes, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode, type WireRoute } from "./protocol";
-import { drawnInMesh, networkNodeId, refusalWords, setRoutesSource, routesSource, type MeshNetwork, type RoutesSource } from "./networks";
+import { networkNodeId, setRoutesSource, routesSource, type MeshNetwork, type RoutesSource } from "./networks";
+import { drawnInMesh, refusalWords } from "./networks-words";
 import { derivedGrantName, endName, tagNodeId, type MeshSource, type MeshStatus } from "./source";
 
 export interface MeshApiOptions {

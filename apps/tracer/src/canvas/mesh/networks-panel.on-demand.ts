@@ -25,7 +25,8 @@ import type { ValueSpec } from "../../../../../packages/ui/src/setting-value";
 import { mountConfirmTip } from "../../../../../packages/ui/src/tooltip";
 import type { Ctx } from "../context";
 import { el } from "../dom";
-import { approvedToast, declinedToast, revokeConfirm, revokedToast, type MeshNetwork, type RoutesSource } from "./networks";
+import type { MeshNetwork, RoutesSource } from "./networks";
+import { approvedToast, declinedToast, revokeConfirm, revokedToast } from "./networks-words";
 
 /** Whether the network's machines see the router's address (off, the default) or each machine's own (on). */
 const KEEP_SOURCE: ValueSpec = { kind: "switch", default: false };

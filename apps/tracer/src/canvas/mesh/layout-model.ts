@@ -14,7 +14,7 @@
 import { CELL, type Metrics } from "../layout/geometry";
 import type { NodeModel } from "../model/types";
 import { layoutMesh, type Cluster } from "./layout";
-import { networkDetail, networkSub } from "./networks";
+import { networkDetail, networkSub } from "./networks-words";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
