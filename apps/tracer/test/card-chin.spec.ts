@@ -7,6 +7,7 @@
 import { expect, test } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 
+/** A join link; its request is refused by the mock so the error card (and, reworded, the approved card) shows. */
 const LINK = "/#join=AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 
 for (const profile of [
