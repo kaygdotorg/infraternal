@@ -212,12 +212,7 @@ impl CertificateAuthority {
         }
         let der = leaf.to_der().map_err(|_| CaError)?;
         let issuer_der = self.0.issuer.to_der().map_err(|_| CaError)?;
-        let public_key = csr
-            .key()
-            .raw_public_key()
-            .map_err(|_| CaError)?
-            .try_into()
-            .map_err(|_| CaError)?;
+        let public_key = csr.identity_key().map_err(|_| CaError)?;
         let record = CertificateRecord {
             fingerprint: Sha256::digest(&der).into(),
             issuer_fingerprint: Sha256::digest(&issuer_der).into(),
@@ -444,6 +439,7 @@ impl CertificateAuthority {
     }
 }
 
+/// Signing tests, and the CA fixtures other modules' tests reuse.
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 pub(crate) mod tests {
@@ -681,6 +677,7 @@ pub(crate) mod tests {
         );
     }
 
+    /// A signed leaf carries only server-built authority (the host URI, client auth), lasts seven days and keeps the CSR's key.
     #[test]
     fn signed_identity_has_only_server_constructed_host_authority_and_seven_days() {
         let source = source(true);
@@ -693,7 +690,7 @@ pub(crate) mod tests {
         assert_eq!(signed.record.not_before, 1_800_000_000);
         assert_eq!(signed.record.not_after, 1_800_604_800);
         assert_eq!(
-            signed.record.public_key.as_slice(),
+            signed.record.public_key.as_bytes(),
             csr.key().raw_public_key().unwrap()
         );
         let sans = leaf.subject_alt_names().unwrap();

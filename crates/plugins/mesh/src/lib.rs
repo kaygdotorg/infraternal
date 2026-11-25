@@ -81,8 +81,8 @@ mod enrolment;
 #[cfg(all(feature = "agent", target_os = "linux"))]
 pub mod node;
 
-/// Subnet routes on a Linux node: routes to networks behind routers, and forwarding (D197 M3).
-#[cfg(all(feature = "agent", target_os = "linux"))]
+/// Subnet routes on a node: routes to networks behind routers, and (Linux) forwarding (D197 M3).
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod subnet_routes;
 
 /// The Mac machine binding; also built for Linux unit tests, whose pure logic needs no Mac.
@@ -167,6 +167,11 @@ pub mod macos_user_mode;
 /// Interface selection is pure code, so its tests also run in the Linux gate.
 #[cfg(all(feature = "agent", any(target_os = "macos", test)))]
 pub mod macos_local_network;
+
+/// Which subnet routes a Mac client puts on its mesh utun, and why it leaves one out (D197 M3,
+/// #580). Pure rules shared by root and user mode, so its tests also run in the Linux gate.
+#[cfg(any(all(feature = "agent", target_os = "macos"), test))]
+pub mod macos_subnet_routes;
 
 /// The on-demand root helper for macOS user mode and the agent's client for it (#146).
 #[cfg(all(feature = "agent", target_os = "macos"))]

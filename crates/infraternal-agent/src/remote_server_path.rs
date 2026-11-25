@@ -1065,20 +1065,36 @@ async fn https_once(
         }
     };
     let credentials = credentials.as_ref().unwrap_or(&identity.identity);
+    // The HTTPS link trusts the server only through its leg-B leaf, exactly
+    // like the direct dials (#559).
+    let trust = crate::remote_websocket::ServerTrust {
+        roots: &identity.roots,
+        server_name: &identity.server_name,
+        floor: &identity.server_leaf,
+        require_binding: crate::remote_websocket::binding_required(
+            identity.https_root.as_ref(),
+            identity.https_system_roots,
+            &identity.roots,
+        ),
+    };
     let channel = match crate::remote_websocket::connect(
         public_origin,
         identity.host_id,
         credentials,
         identity.https_root.as_ref(),
         identity.https_system_roots,
+        &trust,
     )
     .await
     {
         Ok(channel) => channel,
         Err(error) => {
             if let Some(line) = notes.note(started, || {
+                // Every message on this path is a fixed string with no
+                // certificate or key detail, so it is safe to log and says
+                // why the server was refused.
                 format!(
-                    "Infraternal agent HTTPS server link refused or unreachable (error {:?}); retrying",
+                    "Infraternal agent HTTPS server link refused or unreachable (error {:?}: {error}); retrying",
                     error.kind()
                 )
             }) {

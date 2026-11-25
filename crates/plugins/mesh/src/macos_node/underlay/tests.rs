@@ -702,6 +702,8 @@ fn mac_underlay_announce_device() {
             // The harness's point-to-point address installs the route with the utun.
             routes: std::collections::BTreeSet::default(),
             route_mtus: std::collections::BTreeMap::default(),
+            networks: std::collections::BTreeMap::default(),
+            network_status: crate::macos_node::subnet::NetworkStatus::default(),
             interface_mtu: 1280,
             port,
             admission,

@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
+use crate::identity_key::{IdentityKey, KeyAlgorithm};
+
 #[path = "remote_authority.rs"]
 pub(crate) mod authority;
 #[path = "bootstrap_retirement.rs"]
@@ -29,8 +31,9 @@ pub struct CertificateRecord {
     pub fingerprint: [u8; 32],
     /// SHA-256 of the signing issuer's certificate DER.
     pub issuer_fingerprint: [u8; 32],
-    /// The validated CSR's Ed25519 public key.
-    pub public_key: [u8; 32],
+    /// The validated CSR's public key: Ed25519 for hosts, P-256 for devices (#580).
+    /// Its algorithm is stored next to it in `remote_certificates.key_algorithm`.
+    pub public_key: crate::identity_key::IdentityKey,
     /// Inclusive certificate validity start, Unix seconds.
     pub not_before: i64,
     /// Exclusive certificate validity end, exactly seven days later.
@@ -51,6 +54,8 @@ pub(crate) struct ApprovedJoinReceipt<'a> {
     pub(crate) session_hash: &'a str,
     pub(crate) invitation_secret: &'a str,
     pub(crate) expected_key_digest: &'a [u8; 32],
+    /// The algorithm the approved key uses; redemption requires a CSR of exactly this one (#580).
+    pub(crate) key_algorithm: KeyAlgorithm,
 }
 
 impl JoinToken {
@@ -135,6 +140,7 @@ impl EnrollmentStore {
 
     /// Cheap public-authority preflight before CSR verification or private signing.
     /// Redemption repeats these checks atomically; this read grants no authority.
+    /// Returns the bound key digest, as [`Self::preflight_key`] does without its algorithm.
     /// # Errors
     /// Refuses noncanonical, stale, consumed, wrong-mode or revoked invitations.
     pub async fn preflight(
@@ -144,6 +150,22 @@ impl EnrollmentStore {
         mode: Mode,
         now: i64,
     ) -> Result<Option<[u8; 32]>, EnrollmentError> {
+        Ok(self.preflight_key(secret, host, mode, now).await?.0)
+    }
+
+    /// The same preflight as [`Self::preflight`], also returning the algorithm
+    /// the invitation's key must use (#580). The join parses the CSR as exactly
+    /// that algorithm, so a host invitation never admits a P-256 key.
+    /// # Errors
+    /// Refuses noncanonical, stale, consumed, wrong-mode or revoked invitations,
+    /// and a stored algorithm that is not canonical.
+    pub(crate) async fn preflight_key(
+        &self,
+        secret: &str,
+        host: Uuid,
+        mode: Mode,
+        now: i64,
+    ) -> Result<(Option<[u8; 32]>, KeyAlgorithm), EnrollmentError> {
         if secret.len() != 43 || now < 0 {
             return Err(EnrollmentError::Denied);
         }
@@ -153,21 +175,19 @@ impl EnrollmentStore {
         if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != secret {
             return Err(EnrollmentError::Denied);
         }
-        let expected: Option<Option<Vec<u8>>> = sqlx::query_scalar(
-            "SELECT t.expected_key_digest FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
+        let expected: Option<(Option<Vec<u8>>, String)> = sqlx::query_as(
+            "SELECT t.expected_key_digest, t.key_algorithm FROM remote_join_tokens t JOIN remote_hosts h ON h.id=t.host_id \
              WHERE t.host_id=? AND t.mode=? AND h.mode=t.mode AND t.digest=? \
              AND t.consumed_at IS NULL AND t.issued_at<=? AND t.expires_at>? AND h.revoked_at IS NULL",
         ).bind(host.as_bytes().as_slice()).bind(mode.as_str())
             .bind(Sha256::digest(secret.as_bytes()).as_slice()).bind(now).bind(now)
             .fetch_optional(&self.0).await?;
-        match expected {
-            None => Err(EnrollmentError::Denied),
-            Some(None) => Ok(None),
-            Some(Some(bytes)) => bytes
-                .try_into()
-                .map(Some)
-                .map_err(|_| EnrollmentError::Denied),
-        }
+        let (digest, algorithm) = expected.ok_or(EnrollmentError::Denied)?;
+        let algorithm = KeyAlgorithm::from_stored(&algorithm).ok_or(EnrollmentError::Denied)?;
+        let digest = digest
+            .map(|bytes| <[u8; 32]>::try_from(bytes).map_err(|_| EnrollmentError::Denied))
+            .transpose()?;
+        Ok((digest, algorithm))
     }
 
     /// Spend a valid invitation after a definitive refusal without publishing authority.
@@ -228,6 +248,24 @@ impl EnrollmentStore {
             .await
     }
 
+    /// The public key, in its own algorithm, of the certificate with `fingerprint` (#580).
+    /// This read grants nothing; callers use it to parse a CSR that must keep the key.
+    /// # Errors
+    /// `Denied` for an unknown certificate or a stored key that is not canonical.
+    pub(crate) async fn certificate_key(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<IdentityKey, EnrollmentError> {
+        let stored: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT key_algorithm, public_key FROM remote_certificates WHERE fingerprint=?",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        let (algorithm, key) = stored.ok_or(EnrollmentError::Denied)?;
+        IdentityKey::from_stored(&algorithm, &key).ok_or(EnrollmentError::Denied)
+    }
+
     /// Return the invitation's bound key, falling back to a legacy certificate key.
     /// A missing value covers pending and pre-upgrade invitations, both of which must fail closed.
     #[cfg(any(feature = "ssh", test))]
@@ -247,16 +285,21 @@ impl EnrollmentStore {
                 .map(Some)
                 .map_err(|_| EnrollmentError::Denied);
         }
-        let public_key: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT public_key FROM remote_certificates WHERE host_id=? ORDER BY not_after DESC LIMIT 1",
+        let public_key: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT key_algorithm, public_key FROM remote_certificates WHERE host_id=? ORDER BY not_after DESC LIMIT 1",
         )
         .bind(host.as_bytes().as_slice())
         .fetch_optional(&self.0)
         .await?;
+        // The digest of the stored key in its own algorithm (#580): for
+        // Ed25519 the SHA-256 of the raw key, exactly as before.
         public_key
-            .map(|key| <[u8; 32]>::try_from(key).map_err(|_| EnrollmentError::Denied))
+            .map(|(algorithm, key)| {
+                IdentityKey::from_stored(&algorithm, &key)
+                    .map(|key| key.digest())
+                    .ok_or(EnrollmentError::Denied)
+            })
             .transpose()
-            .map(|key| key.map(|public| Sha256::digest(public).into()))
     }
 
     async fn issue_authorized(
@@ -285,6 +328,8 @@ impl EnrollmentStore {
 
     /// Issue on the caller's transaction so host metadata and its invitation
     /// either publish together or roll back together, including cancellation.
+    /// These invitations are for hosts, so their key is always Ed25519; a
+    /// replaced row's algorithm is reset with it (#580).
     /// An undelivered revocation refuses new authority before final retirement.
     pub(crate) async fn issue_authorized_in(
         &self,
@@ -304,8 +349,8 @@ impl EnrollmentStore {
         // INSERT SELECT checks authority in the same write statement as replacement;
         // a concurrent revocation cannot race a separate read/check.
         let changed = sqlx::query(
-            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest) \
-             SELECT id, mode, ?, ?, ?, ? FROM remote_hosts \
+            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest, key_algorithm) \
+             SELECT id, mode, ?, ?, ?, ?, 'ed25519' FROM remote_hosts \
              WHERE id = ? AND owner_id = ? AND mode = ? AND revoked_at IS NULL \
              AND NOT EXISTS (SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.confirmed=0) \
              AND (? IS NULL OR EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
@@ -313,7 +358,7 @@ impl EnrollmentStore {
              AND s.expires>unixepoch() AND u.owner=1)) \
              ON CONFLICT(host_id) DO UPDATE SET digest=excluded.digest, \
              issued_at=excluded.issued_at, expires_at=excluded.expires_at, consumed_at=NULL, \
-             expected_key_digest=excluded.expected_key_digest",
+             expected_key_digest=excluded.expected_key_digest, key_algorithm=excluded.key_algorithm",
         )
         .bind(digest.as_slice())
         .bind(now)
@@ -350,6 +395,7 @@ impl EnrollmentStore {
             session_hash,
             invitation_secret,
             expected_key_digest,
+            key_algorithm,
         } = receipt;
         if invitation_secret.len() != 43 || issued_at < 0 || issued_at > now || expires_at <= now {
             return Err(EnrollmentError::Denied);
@@ -364,8 +410,8 @@ impl EnrollmentStore {
         // On conflict, only the exact still-live request may read its original receipt.
         // Existing expiry and consumption state are never refreshed by a poll retry.
         let changed = sqlx::query(
-            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest) \
-             SELECT h.id, h.mode, ?, ?, ?, ? FROM remote_hosts h \
+            "INSERT INTO remote_join_tokens (host_id, mode, digest, issued_at, expires_at, expected_key_digest, key_algorithm) \
+             SELECT h.id, h.mode, ?, ?, ?, ?, ? FROM remote_hosts h \
              WHERE h.id = ? AND h.owner_id = ? AND h.mode = ? AND h.revoked_at IS NULL \
              AND EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
                  WHERE s.token_hash=? AND s.user_id=h.owner_id AND s.unlocked=1 \
@@ -374,12 +420,14 @@ impl EnrollmentStore {
                  WHERE remote_join_tokens.digest=excluded.digest \
                  AND remote_join_tokens.issued_at=excluded.issued_at \
                  AND remote_join_tokens.expires_at=excluded.expires_at \
-                 AND remote_join_tokens.expected_key_digest=excluded.expected_key_digest",
+                 AND remote_join_tokens.expected_key_digest=excluded.expected_key_digest \
+                 AND remote_join_tokens.key_algorithm=excluded.key_algorithm",
         )
         .bind(digest.as_slice())
         .bind(issued_at)
         .bind(expires_at)
         .bind(expected_key_digest.as_slice())
+        .bind(key_algorithm.as_str())
         .bind(host.as_bytes().as_slice())
         .bind(owner)
         .bind(mode.as_str())
@@ -430,7 +478,7 @@ impl EnrollmentStore {
         let changed = sqlx::query(
             "UPDATE remote_join_tokens SET consumed_at = ? \
              WHERE host_id = ? AND mode = ? AND digest = ? AND expected_key_digest = ? \
-             AND consumed_at IS NULL \
+             AND key_algorithm = ? AND consumed_at IS NULL \
              AND issued_at <= ? AND expires_at > ? \
              AND EXISTS (SELECT 1 FROM remote_hosts h WHERE h.id = host_id \
              AND h.mode = remote_join_tokens.mode AND h.revoked_at IS NULL \
@@ -440,7 +488,8 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .bind(mode.as_str())
         .bind(digest.as_slice())
-        .bind(Sha256::digest(certificate.public_key).as_slice())
+        .bind(certificate.public_key.digest().as_slice())
+        .bind(certificate.public_key.algorithm().as_str())
         .bind(now)
         .bind(now)
         .execute(&mut *transaction)
@@ -454,12 +503,13 @@ impl EnrollmentStore {
         // uid the host row holds (J415 R1). The SELECT reads it in this write.
         let inserted = sqlx::query(
             "INSERT INTO remote_certificates (fingerprint, host_id, issuer_fingerprint, \
-             public_key, not_before, not_after, role, execution_uid) \
-             SELECT ?, h.id, ?, ?, ?, ?, 'active', h.execution_uid FROM remote_hosts h WHERE h.id=?",
+             public_key, key_algorithm, not_before, not_after, role, execution_uid) \
+             SELECT ?, h.id, ?, ?, ?, ?, ?, 'active', h.execution_uid FROM remote_hosts h WHERE h.id=?",
         )
         .bind(certificate.fingerprint.as_slice())
         .bind(certificate.issuer_fingerprint.as_slice())
-        .bind(certificate.public_key.as_slice())
+        .bind(certificate.public_key.as_bytes())
+        .bind(certificate.public_key.algorithm().as_str())
         .bind(certificate.not_before)
         .bind(certificate.not_after)
         .bind(host.as_bytes().as_slice())

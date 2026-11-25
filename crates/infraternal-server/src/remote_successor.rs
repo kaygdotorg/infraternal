@@ -337,7 +337,7 @@ mod tests {
                 &CertificateRecord {
                     fingerprint: [7; 32],
                     issuer_fingerprint: [9; 32],
-                    public_key: key,
+                    public_key: crate::identity_key::IdentityKey::Ed25519(key),
                     not_before: now,
                     not_after: now + 604_800,
                 },

@@ -637,7 +637,7 @@ async fn root_store(host: &Identity, root: &X509) -> (EnrollmentStore, sqlx::Sql
             &crate::enrollment::CertificateRecord {
                 fingerprint: openssl::sha::sha256(&host.certificate.to_der().unwrap()),
                 issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
-                public_key,
+                public_key: crate::identity_key::IdentityKey::Ed25519(public_key),
                 not_before: instant,
                 not_after: instant + 604_800,
             },

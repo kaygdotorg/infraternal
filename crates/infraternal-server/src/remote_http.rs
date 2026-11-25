@@ -576,9 +576,11 @@ async fn issue_approved_machine_join(
     now: i64,
 ) -> Result<JoinInvitation, StatusCode> {
     let request = approval.request;
-    let (mode, execution_uid) = match request.mode.as_str() {
-        "system" if request.execution_uid == 0 => (Mode::Rootful, 0),
-        "user" if request.execution_uid != 0 => (Mode::Rootless, request.execution_uid),
+    let (mode, execution_uid) = match (request.mode.as_str(), request.execution_uid) {
+        ("system", Some(0)) => (Mode::Rootful, 0),
+        ("user", Some(uid)) if uid != 0 => (Mode::Rootless, uid),
+        // A `device` join (#580) has no host row shape yet: a device runs as
+        // no uid. Plan step P5 decides it; until then nothing is published.
         _ => return Err(StatusCode::FORBIDDEN),
     };
     let expected_key_digest = request.key_digest().map_err(|_| StatusCode::FORBIDDEN)?;
@@ -642,6 +644,7 @@ async fn issue_approved_machine_join(
                 session_hash: &approval.session_hash,
                 invitation_secret: &invitation_secret,
                 expected_key_digest: &expected_key_digest,
+                key_algorithm: request.key_algorithm(),
             },
             &mut transaction,
         )

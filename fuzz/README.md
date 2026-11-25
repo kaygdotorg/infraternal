@@ -160,3 +160,18 @@ nix develop -c env PATH="$fuzz_bin:$PATH" RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEAS
   cargo fuzz run -s none -a --features mesh-node vt_stream_snapshot fuzz/corpus/vt_stream_snapshot -- \
   -max_total_time=600 -max_len=65536 -rss_limit_mb=2048
 ```
+
+## Host and device CSRs
+
+`remote_csr_decode` runs every input through both admitted request shapes:
+`ValidatedCsr::parse` (the Ed25519 host shape) and
+`ValidatedCsr::parse_as(.., KeyAlgorithm::P256)` (the P-256 device shape,
+#580). No input may pass as both. The checked-in seeds in
+`fuzz/corpus/remote_csr_decode` are an Ed25519 host request, a P-256 device
+request, and P-256/P-384 requests the envelope refuses (SHA-384, a compressed
+point, explicit curve parameters, another curve), made with `openssl req`.
+
+```sh
+CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run remote_csr_decode \
+  fuzz/corpus/remote_csr_decode -- -max_total_time=600 -max_len=4200
+```

@@ -1070,18 +1070,20 @@ impl AgentPlugin for MeshNodePlugin {
 }
 
 /// Whether this node installs and enforces the subnet routes it receives (D197 M3), so the coordinator may
-/// send them and accept its advertisements: a Linux node on the default `GotaTun` engine, whose packet filter
-/// polices routed and forwarded flows at the TUN edge (D164, D384). The kernel `WireGuard` fallback (D346)
-/// answers like an older node: it gets no networks, and its kernel table keeps refusing all forwarding.
+/// send them: a Linux node on the default `GotaTun` engine, whose packet filter polices routed and forwarded
+/// flows at the TUN edge (D164, D384), and every Mac. The kernel `WireGuard` fallback (D346) answers like an
+/// older node: it gets no networks, and its kernel table keeps refusing all forwarding.
 #[cfg(target_os = "linux")]
 fn understands_routes(node: &Node) -> bool {
     node.engine_selection().engine == crate::node::EngineKind::GotaTun
 }
 
-/// The Mac does not install subnet routes yet; it answers like an older node and gets none.
+/// A Mac is a client of subnet routes (#580): its `GotaTun` device routes the networks it may reach into its
+/// utun (root mode itself, user mode through the helper), and the shared packet filter polices the routed
+/// flows. It never serves networks, so its forwarding switch stays off.
 #[cfg(target_os = "macos")]
 const fn understands_routes(_node: &Node) -> bool {
-    false
+    true
 }
 
 /// The networks this node advertises, as the coordinator's probe reads them. A node that cannot read its
@@ -1155,22 +1157,12 @@ fn change_advertised(
     Err("This Mac can use subnet routes but cannot offer networks to the mesh.")
 }
 
-/// Whether the route to a network behind a router peer is installed on this Linux node.
-#[cfg(target_os = "linux")]
+/// Whether the route to a network behind a router peer is installed on this node, and why not.
 fn network_route_state(
     node: &Node,
     network: crate::policy::networks::Network,
 ) -> serde_json::Value {
     node.network_route_state(network)
-}
-
-/// A Mac installs no subnet routes yet (and is never sent any, see [`understands_routes`]).
-#[cfg(target_os = "macos")]
-fn network_route_state(
-    _node: &Node,
-    _network: crate::policy::networks::Network,
-) -> serde_json::Value {
-    json!({"state": "not installed", "reason": "this Mac does not install subnet routes yet"})
 }
 
 /// Whether this Linux node forwards for the networks it serves.
