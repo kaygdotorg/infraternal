@@ -467,7 +467,14 @@ pub async fn accept(socket: tokio::net::TcpStream, config: &SslAcceptor) -> io::
 
 /// Run the server side of the mutual TLS handshake over an existing carrier,
 /// with the same checks as [`accept`]. The HTTPS fallback uses it inside its
-/// WebSocket (#559). The recovery ALPN is never accepted here.
+/// WebSocket (#559).
+///
+/// The production acceptor ([`recovery_server_config`]) does offer the
+/// recovery ALPN, so a recovery peer can complete this handshake. It is still
+/// refused here: `finish` requires the ordinary `infraternal/1` ALPN and never
+/// hands the socket to the recovery exchange, which only the TCP/TLS listener
+/// runs. The test `recovery_aware_acceptor_admits_only_a_valid_host_over_the_websocket`
+/// pins this.
 /// # Errors
 /// Refuses failed mutual verification or a handshake deadline.
 pub async fn accept_over(socket: Carrier, config: &SslAcceptor) -> io::Result<Connection> {
