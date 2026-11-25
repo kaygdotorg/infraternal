@@ -252,7 +252,8 @@ async function measure(page: Page, hand: Hand, label: string, touch: boolean): P
   };
   // Enough arrows for every delete of the run (one in three gestures), added before the trace starts so their own work is not in it.
   await ensureArrows(10);
-  await page.waitForTimeout(400); // sleep: the new arrows' landing cue plays out (no event) before the first is grabbed
+  // sleep: the new arrows' landing cue plays out (no event) before the first is grabbed
+  await page.waitForTimeout(400);
   let retargets = 0, deletes = 0;
   /** Why a round of the edit loop did not complete, so a run that measured less than it should says where it lost the gesture. */
   const skipped = { noArrow: 0, noHandle: 0, noTarget: 0, noSpot: 0, noQuestion: 0 };
