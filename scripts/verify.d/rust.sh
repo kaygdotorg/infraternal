@@ -502,6 +502,7 @@ rust_verify_fast() {
     rust_run_gate "fmt" cargo fmt --all --check
     rust_run_gate "migration names" python3 scripts/verify.d/migration-names.py
     rust_run_gate "migration tooling tests" python3 scripts/test-migration-names.py
+    rust_run_gate "migration fixture" python3 scripts/build-migration-fixture.py --check
     rust_run_gate "VT native fmt" zig fmt --check crates/infraternal-shim/native/*.zig
     rust_run_gate "CLI plugin compile-out" rust_check_cli_plugin_compile_out
     rust_run_gate "clippy" cargo clippy --workspace --all-targets --locked -- -D warnings
