@@ -161,6 +161,11 @@ pub struct Firewall {
     host_listener: Option<u16>,
     mode: FirewallMode,
     guard_status: KernelGuardStatus,
+    // The nft `GotaTun` guard as this process last installed it, so the next install sends only
+    // what changed (#260 J1240). `None` whenever the table's content is not known exactly: before
+    // the first install, after `adopt` or `remove`, after any failed transaction, and for the
+    // iptables frontend.
+    guard_script: Option<GuardScript>,
 }
 impl Firewall {
     /// Select the declared compatibility backend explicitly for real-engine validation.
@@ -351,6 +356,8 @@ impl Firewall {
     /// # Errors
     /// Reports missing tools, privilege failures or unrelated rules with the same name.
     pub fn adopt(&mut self) -> io::Result<()> {
+        // What is installed now is only known by name; the next install replaces it whole.
+        self.guard_script = None;
         let optional_guard = self.guard_only();
         if self.nft_required() {
             self.require_nft()?;
@@ -691,13 +698,10 @@ impl Firewall {
             return Ok(());
         }
         let applied = if self.is_fallback() {
+            self.guard_script = None;
             crate::iptables::apply_guard_only(config, aliases, proxy_ingress)
         } else {
-            run(
-                &nft()?,
-                &["-f", "-"],
-                &render_guard_only(config, self.installed, aliases, proxy_ingress),
-            )
+            self.install_nft_guard(GuardScript::new(config, aliases, proxy_ingress))
         };
         match applied {
             Ok(()) => {
@@ -716,10 +720,39 @@ impl Firewall {
             }
         }
     }
+    /// Install the nft guard `script`, sending only what differs from the table this process
+    /// last installed (#260 J1240).
+    ///
+    /// An unchanged table sends nothing, and changed address sets send one element transaction;
+    /// anything else, or a table whose content is not known, is replaced whole, as before. When
+    /// the element transaction is refused (someone changed the table under us), the table is
+    /// replaced whole as well, so the result is always exactly `script`.
+    /// # Errors
+    /// Reports a missing nft or a refused full replacement; the recorded table is then unknown.
+    fn install_nft_guard(&mut self, script: GuardScript) -> io::Result<()> {
+        let installed = self.guard_script.take().filter(|_| self.installed);
+        let nft = nft()?;
+        let update = installed
+            .as_ref()
+            .map_or(GuardUpdate::Replace, |installed| {
+                script.update_from(installed)
+            });
+        let done = match update {
+            GuardUpdate::Unchanged => Ok(()),
+            GuardUpdate::Elements(changes) => run(&nft, &["-f", "-"], &changes)
+                .or_else(|_| run(&nft, &["-f", "-"], &script.render(true))),
+            GuardUpdate::Replace => run(&nft, &["-f", "-"], &script.render(self.installed)),
+        };
+        if done.is_ok() {
+            self.guard_script = Some(script);
+        }
+        done
+    }
     /// Remove only the owned table, leaving the host firewall intact.
     /// # Errors
     /// Returns a failed kernel deletion without claiming the component is off.
     pub fn remove(&mut self) -> io::Result<()> {
+        self.guard_script = None;
         if self.installed || self.host_listener.is_some() {
             // Close host ingress before retiring the mesh grant filter. If the
             // host transaction fails, leave the mesh filter installed and retry.
@@ -1102,54 +1135,156 @@ fn own_loopback_sources(config: &Config, aliases: &[crate::policy::model::Addres
 /// Access grants stay in userspace. This table rejects mesh-address spoofing on other
 /// interfaces, refuses underlay delivery to this node's mesh addresses, stops forwarding
 /// through the host, and closes the public listener pair until a public route is active.
+/// The node installs it through [`Firewall::install_nft_guard`]; tests read the script here.
+#[cfg(test)]
 fn render_guard_only(
     config: &Config,
     replace: bool,
     aliases: &[crate::policy::model::Addresses],
     proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
 ) -> String {
-    let addresses = std::iter::once(&config.addresses)
-        .chain(aliases)
-        .chain(config.peers.values().map(|peer| &peer.peer.addresses))
-        .flat_map(|address| {
-            [
-                std::net::IpAddr::V4(address.ipv4),
-                std::net::IpAddr::V6(address.ipv6),
-            ]
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let ipv4 = addresses
-        .iter()
-        .filter_map(|address| match address {
-            std::net::IpAddr::V4(address) => Some(address.to_string()),
-            std::net::IpAddr::V6(_) => None,
-        })
-        .collect::<Vec<_>>();
-    let ipv6 = addresses
-        .iter()
-        .filter_map(|address| match address {
-            std::net::IpAddr::V4(_) => None,
-            std::net::IpAddr::V6(address) => Some(address.to_string()),
-        })
-        .collect::<Vec<_>>();
-    let mut script = String::new();
-    if replace {
-        let _ = writeln!(script, "delete table inet {TABLE}");
+    GuardScript::new(config, aliases, proxy_ingress).render(replace)
+}
+
+/// The `GotaTun` guard table split into what grows with the peer count, the two sets of mesh
+/// addresses, and everything else, so a new snapshot can be applied as set-element changes
+/// (#260 J1240).
+///
+/// A snapshot that adds or removes peers changes only the sets; rewriting the whole table for it
+/// cost a process start and a kernel commit of every element (6,180 ruleset lines at 4,096
+/// peers). [`GuardScript::update_from`] turns two scripts into that smaller transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuardScript {
+    /// Every mesh IPv4 address the guard fences: this node's, its aliases', and each peer's.
+    mesh4: std::collections::BTreeSet<std::net::Ipv4Addr>,
+    /// The IPv6 addresses of the same owners.
+    mesh6: std::collections::BTreeSet<std::net::Ipv6Addr>,
+    /// The rest of the table after the two sets: served-network sets and every chain, ending
+    /// with the table's closing brace.
+    rest: String,
+}
+
+/// What it takes to move the installed guard table from one [`GuardScript`] to another.
+#[derive(Debug, PartialEq, Eq)]
+enum GuardUpdate {
+    /// Both scripts produce the same table: nothing to send.
+    Unchanged,
+    /// Only set elements differ: this one `nft -f` transaction adds and deletes them.
+    Elements(String),
+    /// The chains or other sets differ: the whole table is replaced, as on a first install.
+    Replace,
+}
+
+impl GuardScript {
+    /// Build the guard for `config` with the old addresses `aliases` still fenced.
+    fn new(
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+    ) -> Self {
+        let owners = std::iter::once(&config.addresses)
+            .chain(aliases)
+            .chain(config.peers.values().map(|peer| &peer.peer.addresses));
+        let mut mesh4 = std::collections::BTreeSet::new();
+        let mut mesh6 = std::collections::BTreeSet::new();
+        for address in owners {
+            mesh4.insert(address.ipv4);
+            mesh6.insert(address.ipv6);
+        }
+        Self {
+            mesh4,
+            mesh6,
+            rest: render_guard_rest(config, aliases, proxy_ingress),
+        }
     }
-    let _ = writeln!(
-        script,
-        "table inet {TABLE} {{ comment \"infraternal.mesh.v1\";"
-    );
-    let ipv4_entries = ipv4.join(", ");
-    let ipv6_entries = ipv6.join(", ");
-    let _ = writeln!(
-        script,
-        " set mesh4 {{ type ipv4_addr; elements = {{ {ipv4_entries} }}; }}"
-    );
-    let _ = writeln!(
-        script,
-        " set mesh6 {{ type ipv6_addr; elements = {{ {ipv6_entries} }}; }}"
-    );
+
+    /// The complete table as one `nft -f` script; `replace` deletes the installed table first,
+    /// in the same transaction.
+    fn render(&self, replace: bool) -> String {
+        let mut script = String::new();
+        if replace {
+            let _ = writeln!(script, "delete table inet {TABLE}");
+        }
+        let _ = writeln!(
+            script,
+            "table inet {TABLE} {{ comment \"infraternal.mesh.v1\";"
+        );
+        let _ = writeln!(
+            script,
+            " set mesh4 {{ type ipv4_addr; elements = {{ {} }}; }}",
+            join_addresses(self.mesh4.iter())
+        );
+        let _ = writeln!(
+            script,
+            " set mesh6 {{ type ipv6_addr; elements = {{ {} }}; }}",
+            join_addresses(self.mesh6.iter())
+        );
+        script.push_str(&self.rest);
+        script
+    }
+
+    /// How to turn the table `installed` left into this one.
+    ///
+    /// The element changes run as one nft transaction, so the packet path sees the old sets or
+    /// the new ones, never a mix. Deleting an element the kernel no longer holds fails the whole
+    /// transaction; the caller then replaces the table.
+    fn update_from(&self, installed: &Self) -> GuardUpdate {
+        if self.rest != installed.rest {
+            return GuardUpdate::Replace;
+        }
+        let mut script = String::new();
+        set_changes(&mut script, "mesh4", &installed.mesh4, &self.mesh4);
+        set_changes(&mut script, "mesh6", &installed.mesh6, &self.mesh6);
+        if script.is_empty() {
+            GuardUpdate::Unchanged
+        } else {
+            GuardUpdate::Elements(script)
+        }
+    }
+}
+
+/// Write the `add element` and `delete element` commands that turn set `name` from `old` into
+/// `new`; nothing when they are equal.
+fn set_changes<T: Ord + std::fmt::Display>(
+    script: &mut String,
+    name: &str,
+    old: &std::collections::BTreeSet<T>,
+    new: &std::collections::BTreeSet<T>,
+) {
+    for (verb, elements) in [
+        ("add", new.difference(old).collect::<Vec<_>>()),
+        ("delete", old.difference(new).collect::<Vec<_>>()),
+    ] {
+        if !elements.is_empty() {
+            let _ = writeln!(
+                script,
+                "{verb} element inet {TABLE} {name} {{ {} }}",
+                join_addresses(elements.into_iter())
+            );
+        }
+    }
+}
+
+/// The comma-separated element list nft expects inside `{ }`.
+fn join_addresses<T: std::fmt::Display>(addresses: impl Iterator<Item = T>) -> String {
+    let mut list = String::new();
+    for (index, address) in addresses.enumerate() {
+        if index > 0 {
+            list.push_str(", ");
+        }
+        let _ = write!(list, "{address}");
+    }
+    list
+}
+
+/// Render the part of the `GotaTun` guard after its two address sets: the served-network sets
+/// and the chains, which name the sets but hold no per-peer data.
+fn render_guard_rest(
+    config: &Config,
+    aliases: &[crate::policy::model::Addresses],
+    proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+) -> String {
+    let mut script = String::new();
     // Linux accepts a packet for any local address on any interface (the weak host model), so a
     // LAN neighbour that routes this node's mesh address via its LAN address would reach
     // mesh-bound services without passing the `GotaTun` filter. Only the node's own addresses are
@@ -1558,6 +1693,91 @@ mod tests {
 
         assert!(!first.starts_with("delete table"));
         assert!(replacement.starts_with("delete table inet infraternal_mesh\n"));
+    }
+
+    /// The guard keeps its exact rendering, now built from [`GuardScript`] (#260 J1240): the two
+    /// address sets list every owner once, sorted, and the table ends after the chains.
+    #[test]
+    fn guard_script_renders_sorted_unique_address_sets() {
+        let mut config = config();
+        config.peers.retain(|id, _| id.0 <= 3);
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+        // An alias equal to a peer's addresses is listed once.
+        let alias = config.peers.values().next().expect("peer").peer.addresses;
+        let rules = render_guard_only(&config, false, &[alias], &ingress);
+        let lines: Vec<_> = rules.lines().collect();
+        assert_eq!(
+            lines[0],
+            "table inet infraternal_mesh { comment \"infraternal.mesh.v1\";"
+        );
+        assert_eq!(
+            lines[1],
+            " set mesh4 { type ipv4_addr; elements = { 10.254.0.1, 10.254.0.2, 10.254.0.3 }; }"
+        );
+        assert_eq!(
+            lines[2],
+            " set mesh6 { type ipv6_addr; elements = { fd01::1, fd01::2, fd01::3 }; }"
+        );
+        assert_eq!(lines.last(), Some(&"}"));
+    }
+
+    /// A snapshot that only changes which peers exist becomes one element transaction, one
+    /// that changes nothing the guard holds sends nothing, and one that changes the chains or
+    /// the served networks replaces the table (#260 J1240).
+    #[test]
+    fn guard_updates_send_only_changed_elements() {
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+        let old = config();
+        let installed = GuardScript::new(&old, &[], &ingress);
+        assert_eq!(installed.update_from(&installed), GuardUpdate::Unchanged);
+
+        // Policy lives in the packet filter, not in the guard.
+        let mut closed = old.clone();
+        closed.peers.values_mut().next().expect("peer").inbound = TrafficPolicy::None;
+        assert_eq!(
+            GuardScript::new(&closed, &[], &ingress).update_from(&installed),
+            GuardUpdate::Unchanged
+        );
+
+        let mut moved = old.clone();
+        moved.peers.remove(&NodeId(2));
+        moved
+            .peers
+            .get_mut(&NodeId(3))
+            .expect("peer")
+            .peer
+            .addresses = Addresses {
+            ipv4: "10.254.200.1".parse().expect("IPv4"),
+            ipv6: "fd01::c8:1".parse().expect("IPv6"),
+        };
+        assert_eq!(
+            GuardScript::new(&moved, &[], &ingress).update_from(&installed),
+            GuardUpdate::Elements(
+                "add element inet infraternal_mesh mesh4 { 10.254.200.1 }\n\
+                 delete element inet infraternal_mesh mesh4 { 10.254.0.2, 10.254.0.3 }\n\
+                 add element inet infraternal_mesh mesh6 { fd01::c8:1 }\n\
+                 delete element inet infraternal_mesh mesh6 { fd01::2, fd01::3 }\n"
+                    .to_owned()
+            )
+        );
+
+        let mut router = old.clone();
+        router
+            .peers
+            .values_mut()
+            .next()
+            .expect("peer")
+            .networks
+            .served
+            .push(crate::dataplane::ServedNetwork {
+                network: "198.51.100.0/24".parse().expect("network"),
+                inbound: TrafficPolicy::All,
+                keep_source: false,
+            });
+        assert_eq!(
+            GuardScript::new(&router, &[], &ingress).update_from(&installed),
+            GuardUpdate::Replace
+        );
     }
 
     /// Optional guard selection uses only complete fixed-path frontends and names every gap.
