@@ -9,6 +9,7 @@
 //! agree on the protocol name and limits.
 
 use crate::identity::ClientIdentity;
+use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
 use rustls::pki_types::CertificateDer;
 use std::{io, sync::Arc, time::Duration};
 
@@ -60,6 +61,25 @@ pub fn root_store(certificates: &[CertificateDer<'static>]) -> io::Result<rustls
     Ok(roots)
 }
 
+/// QUIC streams a client lets the server hold open at once: three times the
+/// terminals one link carries ([`MAX_TERMINAL_STREAMS`], D214), #562.
+///
+/// This is not the terminal bound. Both ends enforce that one themselves; this
+/// is the room the transport needs so that a replacement terminal never waits
+/// for a stream. Two things keep a closed stream counted for a while:
+/// - the closing handshake needs a round trip, and a whole link's terminals
+///   may be replaced at once (a resumed browser, a promoted path);
+/// - the QUIC library announces freed streams only in batches larger than one
+///   eighth of this number.
+///
+/// With the credit equal to the bound, closing a few terminals on a full link
+/// announced nothing, the next open waited past the actor's one-second write
+/// deadline, and the server dropped the whole host link with every terminal on
+/// it. Twice the bound plus an eighth of the credit is the least that covers
+/// both; three times leaves a margin. The cost is a pair of empty table slots
+/// per stream, on the client only.
+pub const TERMINAL_STREAM_CREDIT: usize = 3 * MAX_TERMINAL_STREAMS;
+
 /// Shared transport settings with explicit `keep_alive` and `idle` times.
 /// Limits received datagram bytes, caps the discovered packet size to
 /// [`PATH_SAFE_UDP_PAYLOAD`], allows `incoming_streams` peer-initiated streams,
@@ -98,8 +118,9 @@ pub fn transport_with_liveness(
         .keep_alive_interval(Some(keep_alive));
     config.max_concurrent_uni_streams(0u32.into());
     // Quinn preallocates slots up to this limit. Hosts initiate only control0;
-    // server-opened terminals use the daemon's existing attachment bound, not
-    // the deployment-wide viewer count multiplied across every idle host.
+    // server-opened terminals get a per-link credit derived from the daemon's
+    // attachment bound ([`TERMINAL_STREAM_CREDIT`]), not the deployment-wide
+    // viewer count multiplied across every idle host.
     config.max_concurrent_bidi_streams(incoming_streams.into());
     // Credit bounds outstanding bytes across streams, not just stream count.
     // 1MiB per peer is <=1GiB outstanding at the 1000-host admission target.
@@ -151,8 +172,7 @@ pub fn client_config_with_liveness(
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|_| denied())?;
     let mut config = quinn::ClientConfig::new(Arc::new(crypto));
     config.transport_config(transport_with_liveness(
-        u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS)
-            .map_err(|_| denied())?,
+        u32::try_from(TERMINAL_STREAM_CREDIT).map_err(|_| denied())?,
         keep_alive,
         idle,
         true,
