@@ -103,3 +103,18 @@ test("the embedded host's mark does not wait for an account name, and no account
   expect(sessions.open("missing").noAccess).toBe(true);
   sessions.dispose();
 });
+
+test("a device is listed for removal and never offered as a place to open a shell (#580)", () => {
+  const sessions = service();
+  sessions.replaceHosts([
+    { id, name: "worker", online: true },
+    { id: "66666666-2222-3333-4444-555555555555", name: "iphone", online: false, device: true },
+  ]);
+  expect(sessions.hosts().map((host) => host.name)).toEqual(["server", "worker"]);
+  expect(sessions.devices().map((host) => host.name)).toEqual(["iphone"]);
+  // The routing for a device's id has no host to open: a shell can never be bound to it.
+  expect(sessions.open("66666666-2222-3333-4444-555555555555").noAccess).toBe(true);
+  sessions.replaceHosts([]);
+  expect(sessions.devices()).toEqual([]);
+  sessions.dispose();
+});

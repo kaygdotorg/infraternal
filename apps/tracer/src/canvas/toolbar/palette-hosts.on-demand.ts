@@ -24,6 +24,10 @@ export function hostEntries(cx: Ctx): PaletteEntry[] {
     // The consent for full access: found by typing, like every action; it opens the machine's details on the row.
     if (cx.adapters.privilege && !cx.adapters.privilege.isFull(host.name)) out.push({ group: "Hosts", glyph: "✓", icon: ICON_KEY, label: `Allow full access on ${host.name}`, hint: "host · privileged access", action: `canvas:access:${encodeURIComponent(host.name)}`, queryOnly: true });
   }
+  // A phone or tablet can be removed like a host, but it has no terminal and no uninstall, so that is the only row it gets (#580).
+  for (const device of cx.adapters.sessions.devices?.() ?? []) {
+    if (removal?.label()) out.push({ group: "Hosts", glyph: "×", label: `${removal.label()}: ${device.name}`, hint: "device · revoke access", action: `canvas:removehost:${device.id}` });
+  }
   // Mesh hosts by name, so "rename build-01" finds the way to the host's name field (the palette reaches everything). Only
   // while the Mesh draws each host as a card; a big mesh has no card to put the field on.
   const meshView = cx.views.get("mesh");

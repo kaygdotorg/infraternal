@@ -52,6 +52,8 @@ export interface WireNode {
   via: string | undefined;
   /** Whether the attached node can retire stale peers after a server authority restore. */
   restoreSafe?: boolean;
+  /** A phone or tablet: it joins the mesh but never runs the infraternal agent, so it has no terminal (#580). */
+  device?: boolean;
 }
 export interface WireGrant {
   /** The arrow's stable id, as a string. */
@@ -145,6 +147,7 @@ function parseNode(v: unknown): WireNode | undefined {
     path,
     via: optText(v.via),
     ...(restoreSafe === undefined ? {} : { restoreSafe }),
+    ...(v.device === true ? { device: true } : {}),
   };
 }
 
