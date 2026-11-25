@@ -89,15 +89,30 @@ async fn many_host_server_fixture() {
         std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o600)).unwrap();
         let data = directory.0.join("data");
         let digest = prepare_pending_join_key(&data);
-        let invitation = invitation(
-            fixture.address,
-            &fixture.root,
-            &origin,
-            &fixture.cookie,
-            host,
-            digest,
-        )
-        .await;
+        // The invitation helper asserts a 200. Under load a few attempts get 503
+        // (SQLite write-lock refusal in the issue transaction, J1220); run each attempt
+        // in its own task so a refusal is counted and retried instead of ending the run.
+        let mut retries = 0u32;
+        let invitation = loop {
+            let (address, root, origin, cookie) = (
+                fixture.address,
+                fixture.root.clone(),
+                origin.clone(),
+                fixture.cookie.clone(),
+            );
+            match tokio::spawn(async move {
+                invitation(address, &root, &origin, &cookie, host, digest).await
+            })
+            .await
+            {
+                Ok(bytes) => break bytes,
+                Err(_) => {
+                    retries += 1;
+                    assert!(retries < 500, "host {index}: invitation kept failing");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
         let spawned = Instant::now();
         let mut child = cli(&binary, directory, true, &origin);
         child.0.stdin.take().unwrap().write_all(&invitation).unwrap();
@@ -114,6 +129,7 @@ async fn many_host_server_fixture() {
             "host_id": host,
             "pid": child.0.id(),
             "enrol_ms": spawned.elapsed().as_secs_f64() * 1000.0,
+            "invitation_retries": retries,
             "state": directory.0.join("s"),
         }));
         children.push(child);
