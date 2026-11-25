@@ -5,6 +5,4 @@
 set -uo pipefail
 J=$HOME/.cache/codex-scratch/j1227
 hold=$1; shift
-until $J/stage-macro.sh > $J/stage-macro.log 2>&1; do sleep 60; done
-cat $J/stage-macro.log
 cd $J/kit-macro && DIRS="f r" CFS="cubic:1 cubic:8" ./series.sh "$hold" "$@"

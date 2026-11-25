@@ -81,6 +81,19 @@ trap cleanup EXIT
 for h in $A $B; do on $h "mkdir -p $R && chmod 700 $R && cat > $R/lock.sh && chmod 700 $R/lock.sh" < ./lock.sh; done
 take_all "$hold" || { log "lock failed"; exit 1; }
 log "locks held"
+# J1227: the criterion micro-bench inside the same hold (one wait for the perf VM, not two).
+[[ -n ${MICRO_INHOLD:-} ]] && ./micro-inhold.sh "$ev/micro" 2>&1 | tee "$ev/micro.log"
+# J1227: the binaries are staged INSIDE our own hold too (a lull between other jobs' holds never
+# came), only files whose hash differs, so nobody else's hold is touched.
+for h in $A $B; do
+    on $h "mkdir -p $R/bin && chmod 700 $R $R/bin"
+    for f in "$HOME"/.cache/codex-scratch/j1227/stage-macro/ab/*; do
+        want=$(sha256sum "$f" | cut -c1-64) name=$(basename "$f")
+        have=$(on $h "sha256sum $R/bin/$name 2>/dev/null | cut -c1-64")
+        [[ $have == "$want" ]] || on $h "umask 077; cat > $R/bin/$name && chmod 700 $R/bin/$name" < "$f"
+    done
+done
+log "binaries staged"
 # The kit (scripts, a few KB) is refreshed inside our own hold; binaries were staged before it
 # (stage.sh, only while no hold was active) and only their hashes are checked here.
 for h in $A $B; do tar -C "$PWD" --exclude __pycache__ --exclude series.sh -cf - . | on $h "tar -C $R -xf - --no-same-owner && chmod 700 $R/*.sh"; done

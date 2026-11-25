@@ -32,7 +32,7 @@ take)
     # J1227: the waiter is its own process group (setsid); remember it, so a timeout or a
     # release kills the waiter too instead of leaving it to grab the locks later and sit on them.
     echo $! > /run/j1227.lock/waiter
-    for _ in $(seq 1 3600); do [[ -s /run/j1227.lock/holder ]] && break; sleep 1; done
+    for _ in $(seq 1 28800); do [[ -s /run/j1227.lock/holder ]] && break; sleep 1; done
     if [[ ! -s /run/j1227.lock/holder ]]; then
         kill -- -"$(cat /run/j1227.lock/waiter)" 2>/dev/null || true
         rm -rf /run/j1227.lock /run/j11-j1227.lock

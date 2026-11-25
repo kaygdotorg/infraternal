@@ -31,7 +31,7 @@ on "taskset -c 3 $R/quality" > "$ev/quality-x86.txt" 2>&1
 on "taskset -c 3 $R/symmetric_quality" > "$ev/symmetric-quality-x86.md" 2>&1
 for rep in $REPS; do
   log "criterion rep $rep"
-  on "cd $R && taskset -c 3 ./$BIN --bench $FILTER --warm-up-time 1 --measurement-time 3 --sample-size 50 --noplot" > "$ev/crit-rep$rep.txt" 2>&1
+  on "cd $R && taskset -c 3 ./$BIN --bench '$FILTER' --warm-up-time 1 --measurement-time 3 --sample-size 50 --noplot" > "$ev/crit-rep$rep.txt" 2>&1
   echo "exit=$?" >> "$ev/crit-rep$rep.txt"
   on "uptime; grep -E '^cpu ' /proc/stat" >> "$ev/machine.txt" 2>&1
 done
