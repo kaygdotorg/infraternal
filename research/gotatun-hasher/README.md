@@ -127,14 +127,22 @@ receives). CPU s/Gbit is whole-machine busy time (steal excluded) of A and B tog
 hold: `I.1 H.1 H.2 I.2` (A/A pairs inside the hold). Raw: `results/macro/windows-*.csv`,
 paired table `results/macro/pairs-*.md`.
 
-Hold m1b (09:56-10:26Z), one hold:
+Holds m1b (`I.1 H.1 H.2 I.2`, 09:56-10:26Z) and m2 (`H.1 I.1 I.2 H.2`, 11:38-12:09Z), 32
+windows, all exit 0. Median over the two holds of the paired difference, and the largest A/A gap
+(same binary, two rows of one hold) seen in the cell:
 
 | cell | Gbit/s I | Gbit/s H | Δ | CPU s/Gbit I | CPU s/Gbit H | Δ CPU | A/A gap Gbit/s, CPU |
 |---|---:|---:|---:|---:|---:|---:|---|
-| forward, 1 flow | 3.066 | 3.069 | +0.1% | 1.235 | 1.212 | -1.8% | 0.2%, 0.3% |
-| forward, 8 flows | 3.133 | 3.143 | +0.3% | 1.259 | 1.236 | -1.9% | 0.4%, 0.9% |
-| reverse, 1 flow | 3.251 | 3.317 | +2.0% | 1.057 | 1.049 | -0.8% | 0.5%, 2.9% |
-| reverse, 8 flows | 3.226 | 3.323 | +3.0% | 1.036 | 1.023 | -1.3% | 2.8%, 7.3% |
+| forward, 1 flow | 3.070 | 3.070 | 0.0% | 1.232 | 1.212 | -1.6% | 0.2%, 0.6% |
+| forward, 8 flows | 3.134 | 3.142 | +0.3% | 1.273 | 1.238 | -2.8% | 0.9%, 5.3% |
+| reverse, 1 flow | 3.253 | 3.310 | +1.8% | 1.055 | 1.039 | -1.5% | 1.1%, 2.9% |
+| reverse, 8 flows | 3.232 | 3.322 | +2.8% | 1.031 | 1.029 | -0.2% | 2.8%, 7.3% |
+
+Read: forward 1 flow is clearly better (-1.6% against a 0.6% floor, both holds the same sign);
+forward 8 flows is -2.8% in the median but one of its A/A pairs differs by 5.3%, so call it
+-1 to -3%; reverse CPU is inside noise, but the reverse Gbit/s gain (+1.8% / +2.8%) has the
+same sign in both holds. Arithmetic expectation was ~-0.9% of A+B CPU; the measurement is the
+same sign and about twice the size, which fits the filter-only gain (-55 ns) plus the fork's maps.
 
 Binary size (static musl, release): 33,792,632 B baseline, 33,806,712 B patched (+14,080 B, +0.04%).
 
@@ -150,7 +158,7 @@ whole patch.
 | candidate | ns/packet | CPU/Gbit Δ vs today | binary size Δ | licence | in `Cargo.lock` today | HashDoS note |
 |---|---:|---|---|---|---|---|
 | std SipHash-1-3 `RandomState` (today for the maps) | 109 | – | 0 | std | yes | keyed, PRF-grade. The flow-table slot function uses `DefaultHasher::new()`, i.e. **zero keys**: precomputable (`results/collide.txt`: mean probe 127.5 of 512) |
-| **foldhash fast `RandomState`** | 50 | **measured -1.8 / -1.9% forward, -0.8 / -1.3% reverse (reverse inside its A/A gap)** | -2.8 KB in the probe; +14 KB for the whole patch | Zlib (in `deny.toml`) | yes, via hashbrown 0.16 / 0.17 | per-process random seed, "minimally DoS-resistant", **no claim against interactive attackers** (README). Closes the offline precomputation of the flow table |
+| **foldhash fast `RandomState`** | 50 | **measured -1.6 / -2.8% forward, -1.5 / -0.2% reverse (reverse CPU inside its A/A gap; reverse Gbit/s +1.8 / +2.8%)** | -2.8 KB in the probe; +14 KB for the whole patch | Zlib (in `deny.toml`) | yes, via hashbrown 0.16 / 0.17 | per-process random seed, "minimally DoS-resistant", **no claim against interactive attackers** (README). Closes the offline precomputation of the flow table |
 | foldhash quality | 54 | about -1.6% (derived) | similar | Zlib | yes | same family, slightly stronger mixing; no measurable gain here |
 | ahash (random state) | 59 | about -1.4% (derived) | -8.4 KB (no-rng build) | MIT OR Apache-2.0 | **no** (new crate and `zerocopy`) | documented DoS resistance with random keys; not cryptographic |
 | rustc-hash (Fx) | 46 | about -1.9% (derived) | -9.6 KB | Apache-2.0 OR MIT | yes, via quinn | **unkeyed**: collisions are constructible without any search; not acceptable for the flow table or for `peers_by_idx` (peer-chosen keys); acceptable only for rows 2, 4, 5 |
@@ -161,11 +169,11 @@ whole patch.
 
 1. If a hasher swap is wanted, use **`foldhash::fast::RandomState`** for rows 2-5 and 7 and
    for the flow-table slot function, with the per-process seed. It is already linked (no new
-   crate, licence already allowed), measured on the real product at -1.8% CPU per Gbit forward with
-   throughput unchanged, and it strictly improves the flow table's HashDoS posture over today.
+   crate, licence already allowed), measured on the real product at -1.6 to -2.8% CPU per Gbit forward with
+   throughput unchanged (reverse: +2-3% Gbit/s on the 2-core receiver), and it strictly improves the flow table's HashDoS posture over today.
    Do **not** use unkeyed Fx for the flow table or `peers_by_idx`.
 2. Be clear about the size of the prize: ~5 ms CPU per Gbit (about 0.6% of the receiver's CPU
-   budget by arithmetic; 1.8% of total A+B CPU measured forward). It does not explain J1160's
+   budget by arithmetic; 1.6-2.8% of total A+B CPU measured forward). It does not explain J1160's
    ~80 ms/Gbit of bookkeeping; the rest is parsing, the filter's locks and cache misses (the
    whole filter is 173-213 ns per packet and grows with active peers).
 3. The two larger, non-dependency levers I would measure next (separate job, no dependency choice):
@@ -191,7 +199,7 @@ whole patch.
 - Macro: `patches/*.patch` on the two trees (`build-product.sh`, `build-tests.sh`), then
   `kit-macro/macro.sh <hold> I.1 H.1 H.2 I.2` from a host with ssh to both perf VMs.
 
-Limits: one build host class (x86, Ryzen 3700X VMs); the macro run is one or two holds, and
+Limits: one build host class (x86, Ryzen 3700X VMs); the macro run is two holds, and
 throughput on the 2-core receiver moves by up to 3% between rows of the same binary; the
 patched row uses the same foldhash seed policy as the recommendation but the patch is
 throwaway code, not a proposal for review.
