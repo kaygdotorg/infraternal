@@ -83,12 +83,17 @@ for (const size of SIZES) {
           await page.evaluate(() => {
             const frames: Array<{ shown: boolean; under: string | null; overlay: string }> = [];
             (globalThis as { __frames?: typeof frames }).__frames = frames;
-            const tick = (): void => {
+            // What a frame painted is read after it, once its animation-frame callbacks, style, layout and paint are done (a message
+            // posted from the callback runs after them). Read inside a callback, a frame whose glass check runs in a later
+            // callback of the same frame would look unmarked although it is painted marked.
+            const channel = new MessageChannel();
+            const sample = (): void => {
               const p = document.querySelector<HTMLElement>("#palette");
               if (p) frames.push({ shown: !p.hidden && getComputedStyle(p).visibility !== "hidden", under: p.dataset.glassUnder ?? null, overlay: getComputedStyle(p).getPropertyValue("--overlay") });
-              if (frames.length < 120) requestAnimationFrame(tick);
+              if (frames.length < 120) requestAnimationFrame(() => channel.port2.postMessage(0));
             };
-            requestAnimationFrame(tick);
+            channel.port1.onmessage = sample;
+            requestAnimationFrame(() => channel.port2.postMessage(0));
           });
           await page.keyboard.press("Control+Shift+K");
           await expect(palette).toBeVisible();

@@ -245,7 +245,9 @@ export function watchGlassSurfaces(): void {
    * layout (the box of each surface, then the boxes of its candidates), and a callback runs as a microtask of the task that
    * changed the DOM, so inside an input handler's task it would pay for every pending style and layout change at once (about 9
    * ms on the Mesh view's confirm click, #580). {@link drain} looks in the next animation frame's callbacks, which still
-   * run before that frame's style, layout and first paint, so a surface is marked before it is first drawn.
+   * run before that frame's style, layout and first paint, so a surface that a handler or a timer shows is marked before
+   * it is first drawn. The one case that is a frame late: a surface shown inside another animation-frame callback (the
+   * frame is already past the callbacks when the observer reports it), which is almost always a fade-in from invisible.
    */
   const noted = new Set<Node>();
   let frame = 0;
