@@ -188,6 +188,7 @@ impl Promotions {
         sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN sessions s ON s.user_id = h.owner_id \
              JOIN users u ON u.id = s.user_id WHERE h.id = ? AND h.revoked_at IS NULL \
+             AND h.mode IN ('rootless', 'rootful') \
              AND s.token_hash = ? AND s.unlocked = 1 AND s.expires > ? AND u.owner = 1 \
              AND s.fresh <= ? AND ? - s.fresh < ?)",
         )

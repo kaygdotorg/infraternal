@@ -185,7 +185,7 @@ impl Inventory for Source {
         use infraternal_plugin_remote::inventory::{HOST_OFFLINE, HOST_UNAVAILABLE};
         Box::pin(async move {
             let id = Uuid::parse_str(host_id).map_err(|_| HOST_UNAVAILABLE)?;
-            let admitted: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)")
+            let admitted: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM remote_hosts h WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND h.mode IN ('rootless','rootful') AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)")
                 .bind(id.as_bytes().as_slice()).bind(account).fetch_optional(&self.pool).await.map_err(|_| HOST_UNAVAILABLE)?;
             if admitted.is_none() {
                 return Err(HOST_UNAVAILABLE);
@@ -254,6 +254,11 @@ impl Inventory for Source {
                 // or a false durable receipt; renewal already refuses this row.
                 let online = cleanup.is_none() && self.hosts.online(id).await;
                 let mut value = json!({"id":id,"name":name,"user":if mode == "rootful" {Some("root")} else {user},"os":os,"address":if address.is_empty(){None}else{Some(&address)},"online":online});
+                // A device (a phone, #580) is listed so the owner can see and remove it, and
+                // marked so no screen offers a terminal or a login on it.
+                if mode == "device" {
+                    value["device"] = true.into();
+                }
                 // `"direct": false` marks a live host whose enrollment has no
                 // direct server address: it links over HTTPS only, so the
                 // canvas asks for it to be added again before App Windows can
@@ -395,6 +400,67 @@ mod tests {
         assert_eq!(
             source.facts("owner", "not-a-uuid").await,
             Err("host unavailable")
+        );
+    }
+    /// #580: a device is listed, so its owner can see and remove it, marked `device`
+    /// so no screen offers a terminal on it; its facts are refused as for any host with
+    /// no agent, and an ordinary host carries no such mark.
+    #[tokio::test]
+    async fn a_device_is_listed_as_a_device_and_has_no_host_facts() {
+        let (_, pool, device) = crate::enrollment::authority::tests::device_host().await;
+        let ordinary = Uuid::from_u128(5);
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)").bind(ordinary.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        for (host, algorithm, key, uid) in [
+            (device, "p256", [[4_u8].as_slice(), &[3; 64]].concat(), None),
+            (ordinary, "ed25519", vec![3; 32], Some(1002_i64)),
+        ] {
+            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) VALUES(?,?,zeroblob(32),?,100,604900,?,?)")
+                .bind(openssl::sha::sha256(host.as_bytes()).as_slice())
+                .bind(host.as_bytes().as_slice())
+                .bind(key)
+                .bind(uid)
+                .bind(algorithm)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let listed = source.list("owner", None).await.unwrap();
+        let marks: Vec<(String, bool)> = listed["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["id"].as_str().unwrap().to_owned(),
+                    row.get("device") == Some(&json!(true)),
+                )
+            })
+            .collect();
+        assert_eq!(marks.len(), 2);
+        assert!(marks.contains(&(device.to_string(), true)));
+        assert!(marks.contains(&(ordinary.to_string(), false)));
+        let named = listed["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == device.to_string())
+            .unwrap();
+        assert_eq!(named["name"], "phone");
+        assert_eq!(named["online"], false);
+        assert_eq!(
+            source.facts("owner", &device.to_string()).await,
+            Err("host unavailable"),
+            "a device is not a host with an agent to ask"
+        );
+        assert_eq!(
+            source.facts("owner", &ordinary.to_string()).await,
+            Err("host offline")
         );
     }
     #[tokio::test]

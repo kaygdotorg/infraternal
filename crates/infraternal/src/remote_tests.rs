@@ -143,6 +143,7 @@ async fn restart_refuses_a_mismatched_enrolled_key_before_connecting() {
     );
 }
 
+/// A join whose uid or mode does not fit this process (including a `device` invitation) is refused before any key exists.
 #[tokio::test]
 async fn uid_and_privilege_mismatch_fails_before_key_generation() {
     let directory = Directory::new();
@@ -158,7 +159,13 @@ async fn uid_and_privilege_mismatch_fails_before_key_generation() {
     } else {
         Mode::Rootful
     };
-    for (execution_uid, mode) in [(uid.checked_add(1).unwrap(), expected), (uid, wrong)] {
+    // A `device` invitation is for a phone's own client: this command refuses it whatever uid it names.
+    for (execution_uid, mode) in [
+        (uid.checked_add(1).unwrap(), expected),
+        (uid, wrong),
+        (uid, Mode::Device),
+        (0, Mode::Device),
+    ] {
         let invitation = JoinInvitation {
             host_id: uuid::Uuid::new_v4(),
             mode,

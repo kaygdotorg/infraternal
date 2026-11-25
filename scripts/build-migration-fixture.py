@@ -276,7 +276,8 @@ def seed_synthetic_data(conn: sqlite3.Connection) -> None:
         ],
     )
 
-    # 5. Remote certificates: both key algorithms (ed25519 + p256), active, revoked,
+    # 5. Remote certificates: Ed25519 keys only (a P-256 key belongs to a `device` host, which no
+    #    release before #580 P5 can store), active, revoked,
     #    and a successor certificate (role='successor', execution_uid=0) exercising
     #    trigger `remote_certificates_successor_is_root_insert`.
     issuer_fp = blob32(0xAA)
@@ -288,7 +289,7 @@ def seed_synthetic_data(conn: sqlite3.Connection) -> None:
             (blob32(0x11), h_rootful_ed, issuer_fp, blob32(0x21), T0, T0 + WEEK, None, "active", 0, "ed25519"),
             (blob32(0x12), h_rootful_ed, issuer_fp, blob32(0x22), T0 - WEEK, T0, T0 - 100, "active", 0, "ed25519"),
             (blob32(0x13), h_rootless_ed, issuer_fp, blob32(0x23), T0 + 10, T0 + 10 + WEEK, None, "active", 1000, "ed25519"),
-            (blob32(0x14), h_rootful_p256, issuer_fp, p256_pub(0x24), T0 + 20, T0 + 20 + WEEK, None, "active", 0, "p256"),
+            (blob32(0x14), h_rootful_p256, issuer_fp, blob32(0x24), T0 + 20, T0 + 20 + WEEK, None, "active", 0, "ed25519"),
             (blob32(0x15), h_promoting, issuer_fp, blob32(0x25), T0 + 30, T0 + 30 + WEEK, None, "active", 1001, "ed25519"),
             (blob32(0x16), h_promoting, issuer_fp, blob32(0x26), T0 + 35, T0 + 35 + WEEK, None, "successor", 0, "ed25519"),
             (blob32(0x17), h_revoked, issuer_fp, blob32(0x27), T0 + 50, T0 + 50 + WEEK, T0 + 500, "active", 1002, "ed25519"),
@@ -296,19 +297,19 @@ def seed_synthetic_data(conn: sqlite3.Connection) -> None:
         ],
     )
 
-    # 6. Join tokens: rootless+ed25519 (900s, consumed), rootful+p256 (600s, unconsumed,
+    # 6. Join tokens: rootless+ed25519 (900s, consumed), rootful+ed25519 (600s, unconsumed,
     #    with expected_key_digest), rootful+ed25519 (600s, consumed).
     conn.executemany(
         "INSERT INTO remote_join_tokens(host_id, mode, digest, issued_at, expires_at, "
         "consumed_at, expected_key_digest, key_algorithm) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (h_rootless_ed, "rootless", blob32(0x31), T0, T0 + 900, T0 + 120, None, "ed25519"),
-            (h_pending_join, "rootful", blob32(0x32), T0 + 40, T0 + 640, None, blob32(0x3A), "p256"),
+            (h_pending_join, "rootful", blob32(0x32), T0 + 40, T0 + 640, None, blob32(0x3A), "ed25519"),
             (h_rootful_ed, "rootful", blob32(0x33), T0, T0 + 600, T0 + 45, blob32(0x3B), "ed25519"),
         ],
     )
 
-    # 7. Remote identity rotation rows: Ed25519 complete, P-256 issued (65-byte keys),
+    # 7. Remote identity rotation rows: Ed25519 complete, P-256 issued (65-byte keys; the rotation table has no host-mode rule),
     #    and Ed25519 challenged.
     conn.executemany(
         "INSERT INTO remote_identity_rotation(host_id, sequence, last_completed_at, phase, "

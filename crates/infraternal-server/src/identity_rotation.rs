@@ -1036,6 +1036,10 @@ mod tests {
         key: &PKey<openssl::pkey::Private>,
     ) -> (Service, sqlx::SqlitePool, Uuid, [u8; 32], i64) {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        // Only a device holds a P-256 key (#580), and the schema enforces it.
+        if key.id() != openssl::pkey::Id::ED25519 {
+            crate::enrollment::authority::tests::into_device(&pool, host).await;
+        }
         let now: i64 = sqlx::query_scalar("SELECT unixepoch()")
             .fetch_one(&pool)
             .await

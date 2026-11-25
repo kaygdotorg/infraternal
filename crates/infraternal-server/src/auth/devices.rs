@@ -103,20 +103,11 @@ pub(super) struct ApprovalCeremony {
     order: u64,
 }
 
-/// Whether the server accepts `device` machine joins: an iPhone whose identity
-/// key is a P-256 key in its Secure Enclave (#580, client-core plan §7 P3).
-///
-/// Off outside tests. A device has no uid, so the host row a device join
-/// creates still has to be decided (a new host mode, or another shape) before
-/// plan step P5 turns this on; until then `device` requests are refused at
-/// validation, exactly like any other unknown mode.
-pub(crate) const DEVICE_JOINS: bool = cfg!(test);
-
 /// Public, bounded machine facts shown before a fresh passkey approves enrollment [#263].
 ///
 /// `mode` is `system` (the infraternal agent runs as root, `execution_uid` 0),
-/// `user` (a non-zero `execution_uid`) or, only while [`DEVICE_JOINS`] is on,
-/// `device` (no `execution_uid`; the key is P-256). `key_fingerprint` is
+/// `user` (a non-zero `execution_uid`) or `device` (no `execution_uid`; the key
+/// is P-256; an iPhone, #580). `key_fingerprint` is
 /// `SHA256:` and the unpadded base64 of the key digest in the key's own
 /// algorithm ([`crate::identity_key::IdentityKey::digest`]).
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -184,12 +175,6 @@ impl JoinMachineRequest {
     /// look-alike character can make it read as another machine (#263, J134 P3-3).
     /// Returns the key digest once the name, the mode and its uid agree.
     fn validate(&self) -> Result<[u8; 32]> {
-        self.validate_with(DEVICE_JOINS)
-    }
-
-    /// [`Self::validate`] with the `device` mode switched by `device_joins`
-    /// instead of [`DEVICE_JOINS`], so tests can prove both settings.
-    fn validate_with(&self, device_joins: bool) -> Result<[u8; 32]> {
         if self.hostname.is_empty()
             || self.hostname.len() > 128
             || !self
@@ -199,7 +184,7 @@ impl JoinMachineRequest {
             || !match (self.mode.as_str(), self.execution_uid) {
                 ("system", Some(uid)) => uid == 0,
                 ("user", Some(uid)) => uid != 0,
-                ("device", None) => device_joins,
+                ("device", None) => true,
                 _ => false,
             }
         {
@@ -263,7 +248,7 @@ pub(crate) fn check_join_machine_sample(data: &[u8]) {
     match request.mode.as_str() {
         "system" => assert_eq!(request.execution_uid, Some(0)),
         "user" => assert!(request.execution_uid.is_some_and(|uid| uid != 0)),
-        "device" => assert!(DEVICE_JOINS && request.execution_uid.is_none()),
+        "device" => assert!(request.execution_uid.is_none()),
         other => panic!("an unknown mode {other:?} was accepted"),
     }
     assert_eq!(
@@ -979,12 +964,11 @@ mod device_mode_tests {
         }
     }
 
-    /// `device` is accepted only with no uid and only while device joins are
-    /// on; with them off (production until P5) it is refused like any unknown mode.
+    /// `device` is accepted only with no uid; every other pairing of mode and
+    /// uid is refused like an unknown mode.
     #[test]
-    fn device_mode_needs_no_uid_and_the_switch() {
-        assert!(request("device", None).validate_with(true).is_ok());
-        assert!(request("device", None).validate_with(false).is_err());
+    fn device_mode_needs_no_uid() {
+        assert!(request("device", None).validate().is_ok());
         for (mode, uid) in [
             ("device", Some(0)),
             ("device", Some(501)),
@@ -993,14 +977,13 @@ mod device_mode_tests {
             ("system", Some(1000)),
             ("user", Some(0)),
             ("phone", None),
+            ("Device", None),
+            ("", None),
         ] {
-            assert!(
-                request(mode, uid).validate_with(true).is_err(),
-                "{mode} {uid:?}"
-            );
+            assert!(request(mode, uid).validate().is_err(), "{mode} {uid:?}");
         }
-        assert!(request("system", Some(0)).validate_with(false).is_ok());
-        assert!(request("user", Some(1000)).validate_with(false).is_ok());
+        assert!(request("system", Some(0)).validate().is_ok());
+        assert!(request("user", Some(1000)).validate().is_ok());
     }
 
     /// Only a device's key is P-256 (owner question Q4 on #580).

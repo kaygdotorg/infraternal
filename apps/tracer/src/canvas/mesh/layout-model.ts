@@ -26,12 +26,14 @@ import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./so
  * so the note is only added to a host that is online.
  */
 const subOf = (n: WireNode): string => {
-  if (n.state === "offline") return "offline";
-  if (n.state === "behind") return "not up to date";
+  // A phone or tablet takes part in the mesh but has no terminal; the card says so first.
+  const kind = n.device ? "device · " : "";
+  if (n.state === "offline") return `${kind}offline`;
+  if (n.state === "behind") return `${kind}not up to date`;
   const path = n.path === "relay" ? `via ${n.via ?? "another host"}` : n.path === "direct" ? "direct" : "";
   const rtt = n.rttMs === undefined ? "" : `${Math.round(n.rttMs)} ms`;
   const note = n.restoreSafe === false ? "needs an update" : "";
-  return [path, rtt, note].filter(Boolean).join(" · ") || "online";
+  return kind + ([path, rtt, note].filter(Boolean).join(" · ") || "online");
 };
 
 /** Build a cached, positioned Mesh layout while preserving card identity and stored pin coordinates. */

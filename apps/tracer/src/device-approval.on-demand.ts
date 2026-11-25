@@ -159,7 +159,7 @@ function renderJoinReview(host: HTMLElement, code: string, review: JoinApprovalR
   host.querySelector<HTMLOutputElement>("#device-approval-code")!.textContent = code;
   const facts = createKeyValueList("Machine to add");
   facts.set([
-    { key: "Runs as", value: review.mode === "system" ? "System service" : "User service" },
+    { key: "Runs as", value: review.mode === "system" ? "System service" : review.mode === "user" ? "User service" : "Phone or tablet (joins the mesh; no terminals)" },
     { key: "Machine key", value: shortFingerprint(review.keyFingerprint), copy: review.keyFingerprint },
   ]);
   host.querySelector<HTMLElement>("#device-approval-facts")!.append(facts.root);

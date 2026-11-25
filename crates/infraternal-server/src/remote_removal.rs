@@ -156,6 +156,7 @@ impl Removal {
         }
         Ok(())
     }
+    /// Dry run of a host removal: names the host (a device by its name) and hands back a single-use review.
     pub(crate) async fn start(
         &self,
         token: &str,
@@ -165,7 +166,7 @@ impl Removal {
     ) -> Result<Value, crate::auth::Error> {
         // D339: the dry run runs inside the admin window; the removal rechecks it.
         let session = self.auth.fresh_session(token, now).await?;
-        let address: Option<String> = sqlx::query_scalar("SELECT COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h JOIN users u ON u.id=h.owner_id LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND u.owner=1")
+        let address: Option<String> = sqlx::query_scalar("SELECT COALESCE(b.address,CASE WHEN h.mode='device' THEN h.hostname END,lower(hex(h.id))) FROM remote_hosts h JOIN users u ON u.id=h.owner_id LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND u.owner=1")
             .bind(host.as_bytes().as_slice()).bind(&session.user_id).fetch_optional(&self.pool).await?;
         let address = address.ok_or(crate::auth::Error::Denied)?;
         let mut pending = self.pending.lock().await;
@@ -308,7 +309,7 @@ impl Removal {
         person: &str,
         host: Uuid,
     ) -> Result<Value, crate::auth::Error> {
-        let address: Option<String> = sqlx::query_scalar("SELECT COALESCE(b.address,lower(hex(h.id))) FROM remote_hosts h JOIN users u ON u.id=h.owner_id LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND u.owner=1")
+        let address: Option<String> = sqlx::query_scalar("SELECT COALESCE(b.address,CASE WHEN h.mode='device' THEN h.hostname END,lower(hex(h.id))) FROM remote_hosts h JOIN users u ON u.id=h.owner_id LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND u.owner=1")
             .bind(host.as_bytes().as_slice()).bind(person).fetch_optional(&self.pool).await?;
         let address = address.ok_or(crate::auth::Error::Denied)?;
         let name = display_name(&address);
@@ -554,6 +555,55 @@ impl Removal {
         )
     }
 
+    /// Remove a `device` (#580) inside the writer transaction `publish` holds.
+    ///
+    /// The host row is revoked here. The retirement triggers then remove its mesh
+    /// node and grants, and record a login-cleanup obligation that is born confirmed
+    /// (migration 20261125055624), so no uninstall or receipt is ever awaited. The
+    /// answer is `removed`, never `pending`.
+    async fn retire_device(
+        &self,
+        mut tx: sqlx::Transaction<'static, sqlx::Sqlite>,
+        entry: &Pending,
+        audit_id: Option<i64>,
+        live: i64,
+    ) -> Result<Value, crate::auth::Error> {
+        let name: String = sqlx::query_scalar(
+            "SELECT COALESCE(h.hostname,lower(hex(h.id))) FROM remote_hosts h WHERE h.id=?",
+        )
+        .bind(entry.host.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,?) WHERE id=? AND revoked_at IS NULL")
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        if let Some(audit_id) = audit_id {
+            let updated = sqlx::query("UPDATE api_action_audit SET state='complete',completed_at=?,result='removed' WHERE id=? AND state='pending'")
+                .bind(live)
+                .bind(audit_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if updated != 1 {
+                return Err(crate::auth::Error::Denied);
+            }
+        }
+        self.store
+            .commit_device_retirement(tx, entry.host)
+            .await
+            .map_err(|_| crate::auth::Error::Denied)?;
+        Ok(json!({
+            "host_id": entry.host,
+            "state": "removed",
+            "host_cleanup": "none",
+            "message": format!("{} was removed. It no longer takes part in the mesh.", display_name(&name)),
+            "manual": null,
+            "left": [],
+        }))
+    }
+
     /// Persist verified denial and return pending instead of retaining admission
     /// until an offline host returns. Only its durable receipt completes retirement
     /// and removes bootstrap coordinates needed for manual uninstall.
@@ -614,6 +664,17 @@ impl Removal {
                 Some(*audit_id)
             }
         };
+        // A device (a phone, #580) has no infraternal agent to uninstall and no
+        // logins to revoke, so it is retired at once and there is nothing to wait for.
+        let is_device: bool =
+            sqlx::query_scalar("SELECT mode='device' FROM remote_hosts WHERE id=?")
+                .bind(entry.host.as_bytes().as_slice())
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(false);
+        if is_device {
+            return self.retire_device(tx, &entry, audit_id, live).await;
+        }
         // SSH setup records coordinates. A device-approved install instead
         // records its origin on the host row and must have redeemed its join.
         let bootstrap: Option<Option<String>> =
@@ -624,7 +685,7 @@ impl Removal {
         let installed_by_setup = bootstrap.is_some();
         let lookup = bootstrap.flatten();
         let (mode, name, mac_recovery): (String, String, bool) = sqlx::query_as(
-            "SELECT h.mode,COALESCE(b.address,lower(hex(h.id))),
+            "SELECT h.mode,COALESCE(b.address,CASE WHEN h.mode='device' THEN h.hostname END,lower(hex(h.id))),
              h.device_approved=1 AND h.mode='rootful'
                  AND (h.device_os IS NULL OR h.device_os='macOS')
                  AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)
