@@ -175,6 +175,7 @@ pub(crate) fn holds_endpoint_sentence(address: std::net::IpAddr, machine: &str) 
 /// candidates (a walk may move the peer to any of them) and the authenticated endpoints the
 /// engine learned since (`live`). A wanted network holding one of them is never routed into the
 /// mesh link.
+#[cfg(any(target_os = "linux", test))]
 #[must_use]
 pub(crate) fn underlay_addresses(
     config: &crate::dataplane::Config,
@@ -205,7 +206,10 @@ pub(crate) fn underlay_addresses(
 pub(crate) fn split_by_underlay(
     wanted: &[Network],
     endpoints: &[std::net::IpAddr],
-) -> (Vec<Network>, std::collections::BTreeMap<Network, RouteState>) {
+) -> (
+    Vec<Network>,
+    std::collections::BTreeMap<Network, RouteState>,
+) {
     let mut routable = Vec::new();
     let mut left_out = std::collections::BTreeMap::new();
     for network in wanted {
@@ -279,10 +283,7 @@ mod tests {
     }
 
     /// A snapshot whose one peer sits at `endpoint` with `candidates`.
-    fn config_with_peer(
-        endpoint: Option<&str>,
-        candidates: &[&str],
-    ) -> crate::dataplane::Config {
+    fn config_with_peer(endpoint: Option<&str>, candidates: &[&str]) -> crate::dataplane::Config {
         use crate::{
             dataplane::{Config, DefaultPolicy, Peer, PeerNetworks, PeerPolicy},
             policy::{
@@ -319,7 +320,10 @@ mod tests {
                             ipv6: "fd01::1".parse().unwrap(),
                         },
                         endpoint: endpoint.map(|text| text.parse().unwrap()),
-                        candidates: candidates.iter().map(|text| text.parse().unwrap()).collect(),
+                        candidates: candidates
+                            .iter()
+                            .map(|text| text.parse().unwrap())
+                            .collect(),
                         ipv4_only: false,
                     },
                     inbound: TrafficPolicy::All,
@@ -342,10 +346,15 @@ mod tests {
         let learned: std::net::SocketAddr = "172.16.4.2:40000".parse().unwrap();
         let endpoints = underlay_addresses(&config, [learned]);
         assert_eq!(endpoints.len(), 3);
-        let wanted: Vec<Network> = ["192.168.1.0/24", "10.20.0.0/16", "172.16.0.0/12", "10.99.0.0/24"]
-            .iter()
-            .map(|text| text.parse().unwrap())
-            .collect();
+        let wanted: Vec<Network> = [
+            "192.168.1.0/24",
+            "10.20.0.0/16",
+            "172.16.0.0/12",
+            "10.99.0.0/24",
+        ]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
         let (routable, left_out) = split_by_underlay(&wanted, &endpoints);
         assert_eq!(routable, vec!["10.99.0.0/24".parse::<Network>().unwrap()]);
         assert_eq!(left_out.len(), 3);

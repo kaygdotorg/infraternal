@@ -2731,27 +2731,26 @@ impl Node {
             .filter(|(_, state)| **state == crate::subnet_routes::RouteState::Installed)
             .map(|(network, _)| *network)
             .collect();
-        self.subnet.routes =
-            match Device::sync_network_routes(
-                &wanted,
-                &previous,
-                config.addresses.ipv4,
-                &endpoints,
-            ) {
-                Ok(states) => states,
-                Err(error) => {
-                    tracing::warn!(error = %error, "mesh subnet routes could not be installed");
-                    wanted
-                        .iter()
-                        .map(|network| {
-                            (
-                                *network,
-                                crate::subnet_routes::RouteState::Failed(error.to_string()),
-                            )
-                        })
-                        .collect()
-                }
-            };
+        self.subnet.routes = match Device::sync_network_routes(
+            &wanted,
+            &previous,
+            config.addresses.ipv4,
+            &endpoints,
+        ) {
+            Ok(states) => states,
+            Err(error) => {
+                tracing::warn!(error = %error, "mesh subnet routes could not be installed");
+                wanted
+                    .iter()
+                    .map(|network| {
+                        (
+                            *network,
+                            crate::subnet_routes::RouteState::Failed(error.to_string()),
+                        )
+                    })
+                    .collect()
+            }
+        };
         let (served, _) = crate::firewall::served_networks(&config);
         if served.is_empty() {
             self.stop_forwarding();
@@ -2827,7 +2826,8 @@ impl Node {
             .collect();
         if !previous.is_empty()
             && let Some(config) = &self.config
-            && let Err(error) = Device::sync_network_routes(&[], &previous, config.addresses.ipv4, &[])
+            && let Err(error) =
+                Device::sync_network_routes(&[], &previous, config.addresses.ipv4, &[])
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");

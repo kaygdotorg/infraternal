@@ -486,8 +486,14 @@ fn a_network_holding_a_peer_underlay_address_is_not_routed_into_the_mesh() {
     let (mut node_b, id_b) = up(NS_B, &state_b);
     let (a, b) = ((2, id_a.public_key), (3, id_b.public_key));
     // The router also answers on 203.0.113.2, and the client reaches that through a default route.
-    run("ip", &["-n", NS_B, "address", "add", "203.0.113.2/32", "dev", "lo"]);
-    run("ip", &["-n", NS_A, "route", "add", "default", "via", "192.0.2.2"]);
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "203.0.113.2/32", "dev", "lo"],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "route", "add", "default", "via", "192.0.2.2"],
+    );
     let network: Network = "203.0.113.0/24".parse().unwrap();
     let through = PeerNetworks {
         through: vec![ReachableNetwork {
@@ -499,7 +505,16 @@ fn a_network_holding_a_peer_underlay_address_is_not_routed_into_the_mesh() {
     let route = || {
         run(
             "ip",
-            &["-n", NS_A, "-4", "route", "show", "203.0.113.0/24", "dev", "infraternal0"],
+            &[
+                "-n",
+                NS_A,
+                "-4",
+                "route",
+                "show",
+                "203.0.113.0/24",
+                "dev",
+                "infraternal0",
+            ],
         )
     };
 
@@ -509,7 +524,12 @@ fn a_network_holding_a_peer_underlay_address_is_not_routed_into_the_mesh() {
         node_a.chunk(snapshot(a, b, inside, 1, through.clone()))
     });
     assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
-    assert_eq!(route().trim(), "", "the guarded network was routed: {}", route());
+    assert_eq!(
+        route().trim(),
+        "",
+        "the guarded network was routed: {}",
+        route()
+    );
     let state = in_ns(NS_A, || node_a.network_route_state(network));
     assert_eq!(state["state"], "not installed", "{state}");
     assert!(
