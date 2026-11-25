@@ -32,6 +32,12 @@ BROWSER_OPENING = 1024 * 1024 + 64 * 1024
 READ_BEFORE_KEY = 256 * 1024
 # Replayed bytes that prove the resumed stream is contiguous from its cursor.
 REPLAY_PROOF = 64 * 1024
+# The flood: `seq 1 150000` is about 1.09 MB after onlcr, so the reattach at
+# about 256 KiB is some 0.83 MB behind. That stays under the shim's
+# snapshot-first threshold (1 MiB, #583): a shell exports exactly since #521,
+# and a reattach further behind would rightly get the screen first instead of
+# the raw replay this test is about.
+FLOOD = b"seq 1 150000\n"
 # Use the shared fixture bound: control replies can take longer than 20 seconds
 # under gate load.
 
@@ -61,7 +67,7 @@ def run(binary):
         client.open()
         attach_like_a_browser(client)
         client.wait_for_shell()
-        client.input(b"seq 1 300000\n")
+        client.input(FLOOD)
         while client.out < READ_BEFORE_KEY:
             client.process(credit=False)
         resume_at = client.out

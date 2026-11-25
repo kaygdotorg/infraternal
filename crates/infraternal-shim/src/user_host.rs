@@ -603,7 +603,7 @@ impl Session {
                             p.cursor = Some(seq);
                         }
                     }
-                    Request::Snapshot => {
+                    request @ (Request::Snapshot | Request::Repaint) => {
                         if wire_bytes + 2 * crate::frame::MAX_FRAME <= PEER_BYTES {
                             trace_host!(
                                 SnapshotStart,
@@ -612,7 +612,11 @@ impl Session {
                                 self.ring.head(),
                                 0
                             );
-                            p.snapshot(&self.terminal, self.ring.head())?;
+                            if matches!(request, Request::Repaint) {
+                                p.repaint_for_larger_viewer(&self.terminal, self.ring.head())?;
+                            } else {
+                                p.snapshot(&self.terminal, self.ring.head())?;
+                            }
                             trace_host!(
                                 SnapshotDone,
                                 self.config.session,
@@ -632,7 +636,7 @@ impl Session {
             if (p.pending.is_empty() || queued_reply)
                 && !matches!(
                     p.request,
-                    Some(Request::Snapshot | Request::SnapshotFirst(_))
+                    Some(Request::Snapshot | Request::SnapshotFirst(_) | Request::Repaint)
                 )
                 && let Some(seq) = p.cursor
             {

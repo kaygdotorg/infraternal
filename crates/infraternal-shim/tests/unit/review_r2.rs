@@ -19,8 +19,8 @@ fn review_r2_host_history_share_fits_the_native_reservation() {
     for sessions in [1_usize, 4, 10] {
         let history = (64 * 1024 * 1024 / sessions).min(17 * 1024 * 1024);
         let mut terminal = Terminal::with_history_budget(80, 24, history).unwrap();
-        // Faithful snapshots require the RIS-initialized prompt flag; a
-        // fresh native terminal is never certifiable (snapshot.zig).
+        // Faithful snapshots require the standard (RIS) prompt flag, which
+        // new terminals start with since #521; the explicit RIS is kept.
         terminal.process(b"\x1bc");
         let mut line = [b'y'; 81];
         line[79] = b'\r';

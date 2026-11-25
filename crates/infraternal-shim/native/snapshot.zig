@@ -105,9 +105,10 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     const history = primary.pages.total_rows - t.rows;
-    const count = @min(history, tail);
+    const count = history - (historyStart(primary, t.rows, tail) orelse return error.Unrepresentable);
     if (count != 0) {
         // A truncated first row cannot inherit wrap from a discarded predecessor.
+        // `historyStart` never picks one; this stays as the invariant's guard.
         const first_history = primary.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(history - count) } }).?;
         if (first_history.rowAndCell().row.wrap_continuation) return error.Unrepresentable;
         // Inactive-screen restoration copies cursor state and leaves global
@@ -176,6 +177,49 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
+}
+
+/// The first history row of `screen` that the export paints, at most `tail`
+/// rows above the visible screen, or null when no start keeps the export
+/// exact (#521).
+///
+/// History is painted by printing each row and letting it scroll off the top,
+/// so a row that wraps into a next row not marked as its continuation cannot
+/// be painted there (the engine reaches that shape through region scrolls and
+/// reflow; on the screen `dropNextRow` rebuilds it with a region scroll, but
+/// history has no screen line left to scroll). Such a row, or an oldest row
+/// that continues a wrap from a row left out, used to refuse the whole
+/// Snapshot. The export now starts later instead: the frozen v1 format lets
+/// the history tail be shorter than asked, and the omitted rows stay in the
+/// host's scrollback (D381).
+///
+/// The start must also follow a row that does not wrap. Reflow joins a row to
+/// the next one whenever the upper row's wrap flag is set, whatever the lower
+/// row says, so a start right after a wrapping row would reflow differently
+/// from the source on the viewer's next resize. When every candidate is joined
+/// to the screen's top row there is no such start, and the state is refused
+/// as before. The scan reads one row per row it may export, as painting does.
+fn historyStart(screen: *const vt.Screen, rows: usize, tail: usize) ?usize {
+    const history = screen.pages.total_rows - rows;
+    var start = history - @min(history, tail);
+    for (start..history) |y| {
+        const p = screen.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
+        if (!p.rowAndCell().row.wrap) continue;
+        const next = p.down(1) orelse continue;
+        if (!next.rowAndCell().row.wrap_continuation) start = y + 1;
+    }
+    while (start > 0 and start <= history and wraps(screen, start - 1)) {
+        // The screen's top row continues a history row: nothing to cut.
+        if (start == history) return null;
+        start += 1;
+    }
+    return start;
+}
+
+/// Whether history (screen-coordinate) row `y` of `screen` has its wrap flag set.
+fn wraps(screen: *const vt.Screen, y: usize) bool {
+    const p = screen.pages.pin(.{ .screen = .{ .x = 0, .y = @intCast(y) } }).?;
+    return p.rowAndCell().row.wrap;
 }
 
 /// Whether recreating the pending cursor already restored its REP source.
@@ -379,7 +423,20 @@ fn regions(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     try w.print("\x1b[{d};{d}r", .{ r.top + 1, r.bottom + 1 });
 }
 
+/// Restore the cursor's shape and blink for `screen`.
+///
+/// A cursor that follows the terminal's default (no DECSCUSR from the
+/// program, or `CSI 0 SP q`) is restored as the default, not as the shape the
+/// default happens to be here: the viewer keeps its own default cursor (the
+/// browser's setting), and a later configuration change still applies to it
+/// (#521). The blink mode is written after, because selecting the default
+/// also resets it. An explicit shape, or a screen whose shape differs from
+/// the default while the terminal-wide flag says default, is written as is.
 fn cursorShape(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen) SnapshotError!void {
+    if (t.cursor.is_default and screen.cursor.cursor_style == t.cursor.default_style) {
+        try w.print("\x1b[0 q\x1b[?12{c}", .{@as(u8, if (t.modes.get(.cursor_blinking)) 'h' else 'l')});
+        return;
+    }
     const shape: u8 = switch (screen.cursor.cursor_style) {
         .block => 1,
         .underline => 3,
@@ -780,6 +837,9 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
     if (a.flags.modify_other_keys_2 != b.flags.modify_other_keys_2) return 6600000;
     if (a.flags.mouse_shift_capture != b.flags.mouse_shift_capture) return 6600001;
     if (a.screens.active.cursor.cursor_style != b.screens.active.cursor.cursor_style) return 6600002;
+    // Whether the cursor follows the default decides what the viewer shows
+    // under its own cursor setting, so it is part of the visible state (#521).
+    if (a.cursor.is_default != b.cursor.is_default) return 6600004;
     if (!charsetEqual(a.screens.active.charset, b.screens.active.charset)) return 6600003;
     if (strict) {
         inline for (.{ "foreground", "background", "cursor" }) |name| {

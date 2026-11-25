@@ -8,18 +8,19 @@
 //! from exactly what the shim sends it, and compares it with the shim's own
 //! engine, which reflows correctly on resize.
 //!
-//! A live shell's engine never leaves the state libghostty-vt's C API starts
-//! in (prompt redraw off), which the exact serializer refuses, so a real
-//! session's repaint is the flagged approximate one: visible cells and cursor
-//! are right, soft-wrap flags are not carried (D110). Those cases compare what
-//! the viewer sees; raw-replay controls and the exact-export case compare the
-//! full state, wrap flags included.
+//! A live shell's engine starts with prompt redraw on (#521), so when the
+//! viewer's size applies, its repaint is an exact Snapshot: cells, cursor and
+//! soft-wrap flags. When the viewer is larger but its size is only staged
+//! (D74), the repaint must keep the session's size with absolute positions,
+//! which only the flagged approximate painter does (D110): an exact Snapshot
+//! recreates a soft wrap by printing to the session's margin, and a wider
+//! viewer would not wrap there.
 //!
 //! Known gap, kept on purpose: a tab that reopens at the session's current
 //! size still gets the raw replay, even when the ring begins with bytes from
 //! before an earlier resize. Every session is spawned at 80x24 and resized by
-//! its first viewer, so repainting there would make every reload approximate.
-//! It becomes cheap once shell snapshots can be exact (owner question, #521).
+//! its first viewer, so this needs its own measured change now that shell
+//! snapshots can be exact (#521).
 //!
 //! D74 as amended (owner, 2026-11-16): the tab that typed last keeps the
 //! size only while it is attached. Once it has left, the next tab that
@@ -130,14 +131,19 @@ impl Session {
             Some(Request::Read(seq)) => peer.cursor = Some(seq),
             Some(Request::Snapshot) => {
                 peer.snapshot(&self.terminal, self.ring.head()).unwrap();
-                repaint = Some(self.repaint(peer, viewer));
+                repaint = Some(Self::repaint(peer, viewer));
+            }
+            Some(Request::Repaint) => {
+                peer.repaint_for_larger_viewer(&self.terminal, self.ring.head())
+                    .unwrap();
+                repaint = Some(Self::repaint(peer, viewer));
             }
             Some(Request::SnapshotFirst(seq)) => {
                 peer.snapshot_first(&self.terminal, self.ring.head(), seq)
                     .unwrap();
                 // Without a repaint it falls back to the raw replay below.
                 if !peer.pending.is_empty() {
-                    repaint = Some(self.repaint(peer, viewer));
+                    repaint = Some(Self::repaint(peer, viewer));
                 }
             }
             None => {}
@@ -150,8 +156,8 @@ impl Session {
         repaint
     }
     /// Takes the one Snapshot queued for `peer` and paints it on a fresh
-    /// `viewer` at the session's size, as the client replaces its screen.
-    fn repaint(&self, peer: &mut Peer, viewer: &mut Terminal) -> Repaint {
+    /// `viewer` of the viewer's own size, as the client replaces its screen.
+    fn repaint(peer: &mut Peer, viewer: &mut Terminal) -> Repaint {
         let frames = Decoder::default().feed(&peer.pending).unwrap();
         peer.pending.clear();
         let (repaint, bytes) = match frames.as_slice() {
@@ -159,7 +165,7 @@ impl Session {
             [Frame::SnapshotWithFlags(_, 1, bytes)] => (Repaint::Approximate, bytes),
             other => panic!("expected one Snapshot, got {other:?}"),
         };
-        let (cols, rows) = (self.config.cols, self.config.rows);
+        let (cols, rows) = viewer.dimensions();
         *viewer = Terminal::new(cols, rows).unwrap();
         viewer.process(bytes);
         repaint
@@ -228,14 +234,15 @@ fn reopen_at(cols: u16, start: &[u8]) -> (Session, Terminal, Option<Repaint>) {
 }
 
 /// J745's case: a tab reopened wider than the 42 columns its output was
-/// written at shows the shim's reflowed screen, flagged approximate.
+/// written at gets the shim's reflowed state, exactly (#521).
 #[test]
 fn reopening_wider_shows_the_shim_screen_not_the_old_width_bytes() {
     let (session, viewer, repaint) = reopen_at(45, b"");
     // Without the repaint, row 0 reads "745-echo-oknfraternal-dev-02-std:~$ echo j"
     // here, exactly as in J745's screenshot.
     assert_same_visible_screen(&viewer, &session.terminal);
-    assert_eq!(repaint, Some(Repaint::Approximate));
+    assert_eq!(repaint, Some(Repaint::Exact));
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
 /// A tab reopened narrower than the session, whose size applies, shows
@@ -244,7 +251,8 @@ fn reopening_wider_shows_the_shim_screen_not_the_old_width_bytes() {
 fn reopening_narrower_shows_the_shim_screen() {
     let (session, viewer, repaint) = reopen_at(38, b"");
     assert_same_visible_screen(&viewer, &session.terminal);
-    assert_eq!(repaint, Some(Repaint::Approximate));
+    assert_eq!(repaint, Some(Repaint::Exact));
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
 /// After RIS the engine can export itself exactly, so the reopened viewer
@@ -339,12 +347,11 @@ fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
         (42, 24),
         "staged, not applied"
     );
-    assert!(matches!(tab.request.take(), Some(Request::Snapshot)));
-    tab.snapshot(&session.terminal, session.ring.head())
+    assert!(matches!(tab.request.take(), Some(Request::Repaint)));
+    tab.repaint_for_larger_viewer(&session.terminal, session.ring.head())
         .unwrap();
     let frames = Decoder::default().feed(&tab.pending).unwrap();
-    let [Frame::Snapshot(_, bytes) | Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice()
-    else {
+    let [Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice() else {
         panic!("expected one Snapshot, got {frames:?}");
     };
     let mut repainted = Terminal::new(45, 24).unwrap();
@@ -354,8 +361,8 @@ fn reopening_wider_while_another_writer_owns_the_size_still_repaints() {
 
 /// A session is spawned at the 80x24 placeholder and prints its first
 /// prompt before its opener reports a size. Nobody saw that width, so the
-/// opener keeps the cheap raw replay (and its shell redraws on SIGWINCH);
-/// a repaint here would be approximate on every new terminal.
+/// opener keeps the cheap raw replay (and its shell redraws on SIGWINCH),
+/// rather than a repaint on every new terminal.
 #[test]
 fn opening_a_new_session_keeps_the_raw_replay() {
     let mut session = Session::spawned(80, 24);
@@ -511,7 +518,7 @@ fn reopen_after_the_typist_left(cols: u16, rows: u16) -> (Session, Terminal, Opt
 
 /// Asserts a reopen after the typist left took the size: the session is at
 /// the tab's `cols` x `rows`, the tab owns it, and the tab shows the shim's
-/// screen through the approximate repaint (D74 as amended, #521).
+/// state through the exact repaint (D74 as amended, #521).
 fn assert_took_the_size(cols: u16, rows: u16) {
     let (session, viewer, repaint) = reopen_after_the_typist_left(cols, rows);
     assert_eq!(
@@ -523,8 +530,8 @@ fn assert_took_the_size(cols: u16, rows: u16) {
     let applied = session.cursors.get(Some(1)).unwrap();
     assert_eq!(applied.requested_size, (cols, rows, 0, 0));
     assert_eq!(applied.accepted_size, (cols, rows, 0, 0));
-    assert_eq!(repaint, Some(Repaint::Approximate));
-    assert_same_visible_screen(&viewer, &session.terminal);
+    assert_eq!(repaint, Some(Repaint::Exact));
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
 }
 
 /// The tab that typed last closed, then a narrower tab reopens: it takes
@@ -591,7 +598,7 @@ fn a_departed_typist_reconnecting_does_not_reclaim_an_attached_writers_size() {
     session.resize(&mut current, 50, 30);
     assert_eq!(
         session.deliver(&mut current, &mut current_view),
-        Some(Repaint::Approximate)
+        Some(Repaint::Exact)
     );
     assert_eq!((session.config.cols, session.config.rows), (50, 30));
     assert_eq!(session.cursors.active_writer, Some(1));
@@ -658,7 +665,7 @@ fn two_tabs_reopening_after_the_typist_left_both_show_the_shim_screen_when_the_s
     assert_eq!(staged_large.accepted_size, applied_before);
     assert_eq!(
         session.deliver(&mut small, &mut small_view),
-        Some(Repaint::Approximate)
+        Some(Repaint::Exact)
     );
     assert_same_visible_screen(&small_view, &session.terminal);
     assert!(session.deliver(&mut large, &mut large_view).is_some());
@@ -699,7 +706,7 @@ fn two_tabs_reopening_after_the_typist_left_the_larger_reporting_first_takes_the
     assert_eq!(staged_small.accepted_size, applied_before);
     assert_eq!(
         session.deliver(&mut large, &mut large_view),
-        Some(Repaint::Approximate)
+        Some(Repaint::Exact)
     );
     assert_same_visible_screen(&large_view, &session.terminal);
     assert!(
@@ -784,13 +791,12 @@ fn staged_wider_reopen_mismatch(written: u16, reopened: u16) -> Option<String> {
     session.handle(&mut tab, Frame::ReadFrom(0));
     session.deliver(&mut tab, &mut viewer);
     session.resize(&mut tab, reopened, 24);
-    let repainted = matches!(tab.request.take(), Some(Request::Snapshot));
+    let repainted = matches!(tab.request.take(), Some(Request::Repaint));
     if repainted {
-        tab.snapshot(&session.terminal, session.ring.head())
+        tab.repaint_for_larger_viewer(&session.terminal, session.ring.head())
             .unwrap();
         let frames = Decoder::default().feed(&tab.pending).unwrap();
-        let [Frame::Snapshot(_, bytes) | Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice()
-        else {
+        let [Frame::SnapshotWithFlags(_, 1, bytes)] = frames.as_slice() else {
             panic!("expected one Snapshot, got {frames:?}");
         };
         viewer = Terminal::new(reopened, 24).unwrap();
@@ -912,7 +918,7 @@ fn reopening_at_another_width_keeps_the_programs_input_modes() {
             session.resize(&mut tab, cols, rows);
             let repaint = session.deliver(&mut tab, &mut viewer);
             let difference = viewer.screen_difference(&session.terminal);
-            if repaint != Some(Repaint::Approximate) || difference != 0 {
+            if repaint != Some(Repaint::Exact) || difference != 0 {
                 failures.push(format!(
                     "{name} at {cols}x{rows}, departed={departed}: repaint {repaint:?}, difference {difference}"
                 ));
@@ -1014,21 +1020,51 @@ fn a_reattach_within_the_snapshot_first_backlog_keeps_the_raw_replay() {
     assert_eq!(viewer.screen_difference(&raw), 0);
 }
 
-/// #583: a live shell's engine cannot export exactly (prompt redraw off,
-/// #521), so a reattach far behind keeps the exact raw replay: never the
-/// approximate repaint, even on a link that negotiated it, and never an Error.
+/// #583: a shell that marks its prompt with OSC 133 (fish does by default)
+/// leaves semantic state the exact serializer refuses, so a reattach far
+/// behind keeps the exact raw replay: never the approximate repaint, even on
+/// a link that negotiated it, and never an Error.
 #[test]
 fn a_reattach_far_behind_without_an_exact_export_keeps_the_raw_replay() {
     let before = backlog(1, 4096);
-    let away = backlog(
-        100_000,
-        usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap() + 1,
-    );
+    let away = [
+        backlog(
+            100_000,
+            usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap() + 1,
+        )
+        .as_slice(),
+        b"\x1b]133;A\x07user@host ~> ",
+    ]
+    .concat();
     for caps in [APPROXIMATE_SNAPSHOT, 0] {
         let (session, tab, viewer, repaint, raw) = reattach_after(&before, &away, caps);
+        assert!(
+            session.terminal.snapshot().is_err(),
+            "the prompt mark is refused"
+        );
         assert_eq!(repaint, None, "caps {caps:#x}");
         assert_eq!(tab.cursor, Some(session.ring.head()));
         assert_eq!(viewer.screen_difference(&raw), 0);
         assert_eq!(viewer.screen_difference(&session.terminal), 0);
     }
+}
+
+/// #521, #583: an ordinary shell session that never reset the terminal now
+/// gets the exact screen first when it comes back far behind.
+#[test]
+fn a_shell_reattach_far_behind_gets_the_exact_screen_first() {
+    let before = [
+        b"user@host:~$ seq 1 1000000\r\n".as_slice(),
+        &backlog(1, 4096),
+    ]
+    .concat();
+    let away = backlog(
+        100_000,
+        usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap() + 1,
+    );
+    let (session, tab, viewer, repaint, raw) = reattach_after(&before, &away, APPROXIMATE_SNAPSHOT);
+    assert_eq!(repaint, Some(Repaint::Exact));
+    assert_eq!(tab.cursor, Some(session.ring.head()));
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
+    assert_eq!(viewer.screen_difference(&raw), 0);
 }

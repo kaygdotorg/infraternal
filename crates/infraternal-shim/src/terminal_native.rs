@@ -20,6 +20,29 @@ struct TerminalModeConfig {
 }
 /// C option 28 configures the primary screen's scrollback byte cap.
 const TERMINAL_OPT_SCROLLBACK_MAX_BYTES: i32 = 28;
+/// The bytes every new engine processes before its first PTY byte: RIS, which
+/// puts the engine in the terminal's standard initial state (#521, #583).
+///
+/// The C constructor differs from that state in exactly one flag: it starts
+/// with prompt redraw off (`shell_redraws_prompt = .false`), because an
+/// embedder may not run a shell that can redraw its prompt. RIS turns it on.
+/// We want it on for three reasons:
+/// - The exact serializer (`native/snapshot.zig`) can only reproduce the
+///   standard state, since every Snapshot starts its viewer with RIS. With
+///   the flag off, a live shell could never get an exact Snapshot, only the
+///   flagged approximate repaint (D110), and snapshot-first reattaches did not
+///   help shells.
+/// - The browser's engine (`web-engine.zig`) is created with the standard
+///   state, so the shim now starts the same way as the viewers it feeds.
+/// - It changes no cell for a shell that does not mark its prompt with
+///   OSC 133. The engine reads the flag only on resize, and only clears prompt
+///   rows when the cursor is on a marked prompt (`promptRedrawStart`). A shell
+///   that does mark its prompt carries semantic state, which the serializer
+///   refuses anyway, so its reattach keeps the exact raw replay.
+///
+/// Recovery rebuilds go through the same constructor, so a rebuilt engine
+/// starts in the same state as the original.
+const INITIAL_STATE: &[u8] = b"\x1bc";
 /// C data 15 reports the number of rows currently retained in scrollback.
 #[cfg(any(test, feature = "process-per-user"))]
 const TERMINAL_DATA_SCROLLBACK_ROWS: i32 = 15;
@@ -251,11 +274,13 @@ impl Engine {
             unsafe { ghostty_terminal_free(handle.as_ptr()) };
             return Err(result_error("scrollback configuration", result));
         }
-        Ok(Self(
+        let mut engine = Self(
             Some(handle),
             #[cfg(feature = "process-per-user")]
             Some(memory),
-        ))
+        );
+        engine.process(INITIAL_STATE);
+        Ok(engine)
     }
     /// (Shared host.) `(bytes in use, peak bytes, refused)` from the memory accountant:
     /// current native allocation, its high-water mark, and whether any allocation

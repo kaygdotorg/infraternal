@@ -162,6 +162,10 @@ fn native_session_allocations_settle_after_geometry_warmup() {
     }
 }
 
+/// Ten thousand rows of shell filler stay within the session's native cap,
+/// keep exact provenance, and (since #521, prompt redraw on at creation) the
+/// shell's screen exports exactly: the earlier "fresh shell cannot export"
+/// gap was the C constructor's prompt flag, never the allocator.
 #[test]
 fn fresh_shell_filler_snapshot_gap_is_independent_of_allocator_refusal() {
     let mut terminal = Terminal::with_history_budget(80, 24, 64 * 1024 * 1024 / 50).unwrap();
@@ -177,6 +181,8 @@ fn fresh_shell_filler_snapshot_gap_is_independent_of_allocator_refusal() {
         !terminal.requires_approximation(),
         "recovery provenance remains exact"
     );
-    let error = terminal.snapshot().unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    let snapshot = terminal.snapshot().unwrap();
+    let mut viewer = Terminal::new(80, 24).unwrap();
+    viewer.process(&snapshot);
+    assert_eq!(terminal.engine.state_difference(&viewer.engine), 0);
 }

@@ -72,6 +72,12 @@ impl Terminal {
     pub(crate) fn screen_difference(&self, other: &Self) -> usize {
         self.engine.difference(&other.engine)
     }
+    /// The terminal's size as `(cols, rows)`. Tests use it to paint a
+    /// repaint into a viewer of that viewer's own size, as the client does.
+    #[cfg(test)]
+    pub(crate) fn dimensions(&self) -> (u16, u16) {
+        self.dimensions
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();
@@ -498,6 +504,12 @@ mod fidelity;
 #[cfg(test)]
 #[path = "../tests/unit/approximate_modes.rs"]
 mod approximate_modes;
+
+/// Recorded bash, zsh and fish sessions get exact Snapshots at every point
+/// (#521, #583).
+#[cfg(test)]
+#[path = "../tests/unit/shell_snapshot_corpus.rs"]
+mod shell_snapshot_corpus;
 
 #[cfg(test)]
 #[path = "../tests/unit/resize_recovery.rs"]

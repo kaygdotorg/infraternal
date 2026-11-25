@@ -22,8 +22,9 @@ Each round:
 
 It reports, per size, the median and maximum time from Attach to that marker,
 the time to the first frame, and the raw and Snapshot bytes sent. Set
-`--reset` to print RIS first: only then can a live shell's engine
-export an exact Snapshot (#521). Set `INFRATERNAL_TEST_RTT` (milliseconds) to add the latency proxy's round trip
+`--reset` to print RIS first. Since #521 a live shell's engine
+exports an exact Snapshot without it; `--reset` stays for comparison
+with older builds, which could export exactly only after RIS. Set `INFRATERNAL_TEST_RTT` (milliseconds) to add the latency proxy's round trip
 between this client and the agent. `--save DIR` keeps one round's received
 bytes per size (`raw-<size>.bin`, or `snapshot-<size>.bin` and the
 raw `tail-<size>.bin` after it) for the browser-side
@@ -134,9 +135,9 @@ def round_trip(client, state, size, number):
 def run(binary, sizes, rounds, save, reset):
     """Run `rounds` reattaches per backlog size and print one JSON line per size.
 
-    With `reset`, the shell first prints RIS. A live shell's engine cannot
-    export its state exactly until a reset turns prompt redraw on (#521), so
-    this is the session in which the shim can answer with an exact Snapshot.
+    With `reset`, the shell first prints RIS. Builds before #521 could export
+    a live shell exactly only after such a reset; since #521 the shim's engine
+    starts with prompt redraw on, so a plain shell session exports exactly too.
     """
     state = fixture_state('rb')
     state.mkdir(mode=0o700)
@@ -189,7 +190,7 @@ if __name__ == '__main__':
     parser.add_argument('--rounds', type=int, default=5)
     parser.add_argument('--sizes', type=lambda text: tuple(int(part) for part in text.split(',')), default=SIZES)
     parser.add_argument('--save', type=Path)
-    parser.add_argument('--reset', action='store_true', help='print RIS first, so the shim can export exactly')
+    parser.add_argument('--reset', action='store_true', help='print RIS first (before #521 only then could the shim export exactly)')
     args = parser.parse_args()
     assert args.rounds > 0
     run(args.binary, args.sizes, args.rounds, args.save, args.reset)
