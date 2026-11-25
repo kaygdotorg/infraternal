@@ -117,6 +117,8 @@ run_case() {
     fi
     local t0=$SECONDS rc=0
     "$H2H_KIT/lib/snapshot.sh" "$H2H_KIT" > "$dir/machine-before.txt"
+    # Which /tmp entries were already past their tmpfiles age, so their removal later is not this case's doing (#514).
+    python3 -I "$H2H_KIT/lib/tmp_aging.py" record > "$dir/tmp-before.json" 2>/dev/null || rm -f "$dir/tmp-before.json"
     export H2H_RUN=/dev/shm/h2h-$$-$name
     mkdir -m 755 "$H2H_RUN"
     local scope=() case_timeout=20m
@@ -144,7 +146,15 @@ run_case() {
         sleep 1
     done
     "$H2H_KIT/lib/snapshot.sh" "$H2H_KIT" > "$dir/machine-after.txt"
-    if diff -u "$dir/machine-before.txt" "$dir/machine-after.txt" > "$dir/machine-diff.txt"; then
+    # The raw diff is kept as evidence; machine-diff.txt drops only removals of /tmp entries that tmpfiles aged out (#514).
+    diff -u "$dir/machine-before.txt" "$dir/machine-after.txt" > "$dir/machine-diff-raw.txt" || true
+    if [[ -s "$dir/tmp-before.json" ]]; then
+        python3 -I "$H2H_KIT/lib/tmp_aging.py" filter "$dir/tmp-before.json" "$dir/machine-diff-raw.txt" \
+            > "$dir/machine-diff.txt" 2> "$dir/machine-diff-ignored.txt"
+    else
+        cp "$dir/machine-diff-raw.txt" "$dir/machine-diff.txt"
+    fi
+    if [[ ! -s "$dir/machine-diff.txt" ]]; then
         echo "machine diff: empty"
     else
         echo "machine diff NOT empty:"; head -40 "$dir/machine-diff.txt"

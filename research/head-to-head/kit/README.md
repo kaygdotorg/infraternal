@@ -268,6 +268,13 @@ journals, caches named in `snapshot.sh`, and the kit directory. Each case
 removes its namespaces, qdiscs, processes, private tmpfs state and newly
 loaded modules. The perf VM is never used to build the kit.
 
+systemd-tmpfiles ages out old `/tmp` entries on its own timer, so a long case can
+see one vanish. `lib/tmp_aging.py` records, before each case, which top-level `/tmp`
+entries were already past the age rule from `systemd-tmpfiles --cat-config` (skipping
+`x` exemptions). Removing one of those entries is left out of `machine-diff.txt`
+and listed in `machine-diff-ignored.txt`; the raw diff stays in `machine-diff-raw.txt`.
+Additions, young removals and every other section are never filtered.
+
 `browser-flood.ts` runs three 100 MB floods using Chromium and the production
 renderer behind the real-server fixture's lean TLS/WebSocket front. It records
 protocol close codes, reconnects, completion, and screenshots outside the
