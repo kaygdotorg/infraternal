@@ -17,8 +17,8 @@ use super::*;
 
 /// A terminal in the canonical post-RIS context every repaint starts from.
 ///
-/// Fresh C initialization leaves `shell_redraws_prompt` off, which makes the
-/// faithful serializer refuse the state; the wire always begins with RIS.
+/// A new terminal already starts in that context (#521); the explicit RIS
+/// keeps these cases there even if construction changes.
 fn reset_terminal(cols: u16, rows: u16) -> Terminal {
     let mut terminal = Terminal::new(cols, rows).unwrap();
     terminal.process(b"\x1bc");

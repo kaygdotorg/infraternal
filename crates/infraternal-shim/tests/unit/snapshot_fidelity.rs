@@ -1,9 +1,9 @@
 //! Differential replay checks for future-output state, with deterministic case IDs [13][40].
 use super::*;
 
-// A wire Snapshot begins with RIS. Keep faithful-repaint fixtures in that
-// canonical context; fresh C initialization has a distinct redraw default,
-// covered by an explicit rejection regression rather than normalized away.
+// A wire Snapshot begins with RIS, and every new engine processes RIS before
+// its first byte (`terminal_native::INITIAL_STATE`, #521). The explicit RIS
+// here keeps these fixtures in that context even if construction changes.
 fn reset_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
     let mut terminal = Terminal::new(cols, rows)?;
     terminal.process(b"\x1bc");
@@ -14,14 +14,11 @@ fn replay(name: &str, prefix: &[u8], cols: u16, rows: u16) {
     check_replay(name, prefix, None, cols, rows).unwrap_or_else(|error| panic!("{name}: {error}"));
 }
 
-// Preserve the pinned C constructor as a separately reported corpus context.
-// Canonical fixtures deliberately use RIS; neither context changes production.
+/// The terminal a corpus case starts from: the shim's own new terminal.
+/// Since #521 it starts in the standard state (prompt redraw on), so the old
+/// separately reported "fresh C constructor" context no longer exists.
 fn corpus_terminal(cols: u16, rows: u16) -> std::io::Result<Terminal> {
-    if std::env::var("VT_SNAPSHOT_INITIAL").as_deref() == Ok("fresh-c") {
-        Terminal::new(cols, rows)
-    } else {
-        reset_terminal(cols, rows)
-    }
+    Terminal::new(cols, rows)
 }
 
 fn check_replay(
@@ -141,6 +138,10 @@ fn fidelity_handwritten() {
     }
 }
 
+/// Replays `count` pseudo-random token sequences (fixed seed, so a case ID
+/// reproduces a failure) through an exact Snapshot. Each case must match or
+/// be refused as unrepresentable, never diverge. `extended` adds the mode,
+/// colour, hyperlink and prompt-mark tokens.
 fn generated(count: usize, extended: bool) {
     let mut tokens = vec![
         "abc",
@@ -228,12 +229,7 @@ fn generated(count: usize, extended: bool) {
         }
     }
     println!(
-        "snapshot corpus: cases={count} replayed={replayed} rejected={api_gaps} divergent=0 extended={extended} initial={} seed=22601006",
-        if std::env::var("VT_SNAPSHOT_INITIAL").as_deref() == Ok("fresh-c") {
-            "fresh-c"
-        } else {
-            "RIS"
-        }
+        "snapshot corpus: cases={count} replayed={replayed} rejected={api_gaps} divergent=0 extended={extended} seed=22601006",
     );
     assert_eq!(replayed + api_gaps, count);
 }
@@ -397,13 +393,16 @@ fn fidelity_prompt_resize_requires_explicit_rejection() {
     );
 }
 
+/// A new terminal starts with prompt redraw on (#521), so a shell that never
+/// reset the terminal still gets an exact Snapshot, prompt flag included. The
+/// C constructor alone starts with it off, which the serializer refuses.
 #[test]
-fn fidelity_fresh_c_redraw_default_is_explicitly_rejected() {
-    let a = Terminal::new(80, 24).unwrap();
-    assert!(
-        matches!(a.snapshot(), Err(e) if e.kind() == std::io::ErrorKind::Unsupported),
-        "RIS changes the fresh C redraw default; faithful snapshot must reject"
-    );
+fn fidelity_a_new_terminal_exports_exactly() {
+    let mut a = Terminal::new(80, 24).unwrap();
+    a.process(b"user@host:~$ echo hi\r\nhi\r\nuser@host:~$ ");
+    let mut restored = Terminal::new(80, 24).unwrap();
+    restored.process(&a.snapshot().unwrap());
+    assert_eq!(a.engine.state_difference(&restored.engine), 0);
 }
 
 #[test]

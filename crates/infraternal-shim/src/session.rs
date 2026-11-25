@@ -173,6 +173,11 @@ enum Request {
     /// Snapshot if the engine can make one, otherwise replay raw from this
     /// cursor, which the ring still holds (see [`Peer::snapshot_first`]).
     SnapshotFirst(u64),
+    /// Repaint the screen for a viewer at least as large as the session
+    /// whose own size is only staged (D74), then stream from the head (#521).
+    /// It needs absolute positions, so it uses the approximate painter on a
+    /// link that negotiated it; see [`Peer::repaint_for_larger_viewer`].
+    Repaint,
 }
 #[derive(Clone, Copy)]
 enum InputReply {
@@ -374,15 +379,41 @@ impl Peer {
         }
         Ok(())
     }
+    /// Queue a repaint of the screen valid at `head` for a viewer larger than
+    /// the session, whose size is only staged, then stream from there (#521).
+    ///
+    /// An exact Snapshot is no good here: it recreates each soft-wrapped row
+    /// by printing to the session's right margin and letting the viewer wrap,
+    /// so in a wider viewer the continuation would land on the same row. The
+    /// approximate painter positions every row absolutely, which fits any
+    /// viewer at least as large; it is flagged, so the client says the screen
+    /// may be out of date (D110). A link without the capability gets
+    /// [`Self::snapshot`]'s answer, as before.
+    fn repaint_for_larger_viewer(
+        &mut self,
+        terminal: &impl SessionTerminal,
+        head: u64,
+    ) -> io::Result<()> {
+        if self.caps & APPROXIMATE_SNAPSHOT == 0 {
+            return self.snapshot(terminal, head);
+        }
+        self.queue(&Frame::SnapshotWithFlags(
+            head,
+            1,
+            terminal.approximate_snapshot(),
+        ))?;
+        self.cursor = Some(head);
+        Ok(())
+    }
     /// Serve a reattach that is far behind with an exact Snapshot at `head`,
     /// or, when the engine cannot make one, with the raw replay from `seq`.
     ///
     /// Only the exact Snapshot is a shortcut here. The ring still holds every
     /// byte from `seq`, so the raw replay is exact, and this never trades it for
     /// the flagged approximate repaint or an Error (unlike [`Self::snapshot`]).
-    /// A live shell's engine cannot export exactly yet (prompt redraw off,
-    /// #521), so today such a reattach keeps the raw replay; whether to accept
-    /// the approximate repaint here is an owner question on #583. The browser
+    /// A live shell's engine exports exactly unless the shell marks its prompt
+    /// with OSC 133 (#521); such a reattach keeps the raw replay, because the
+    /// owner chose exact-only snapshot-first (2026-11-25, #583). The browser
     /// keeps its own history above the Snapshot, with a "skipped" marker
     /// (#569); the skipped lines stay in the host's scrollback (D381).
     fn snapshot_first(
@@ -1106,6 +1137,7 @@ fn run_configured(
                     Request::Read(seq) => p.cursor = Some(seq),
                     Request::Snapshot => p.snapshot(&terminal, ring.head())?,
                     Request::SnapshotFirst(seq) => p.snapshot_first(&terminal, ring.head(), seq)?,
+                    Request::Repaint => p.repaint_for_larger_viewer(&terminal, ring.head())?,
                 }
             }
             if p.pending.is_empty()
@@ -1804,8 +1836,10 @@ fn handle<'a>(
             // yet, so they keep the raw replay as before.
             let applied_here = (config.cols, config.rows) == (cols, rows);
             let fits = cols >= session_size.0 && rows >= session_size.1;
-            if replay_wrong_size && (applied_here || fits) {
+            if replay_wrong_size && applied_here {
                 p.request = Some(Request::Snapshot);
+            } else if replay_wrong_size && fits {
+                p.request = Some(Request::Repaint);
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
@@ -1815,8 +1849,7 @@ fn handle<'a>(
             // not cover omitted output. Raw bytes are laid out for the size
             // they were written at: the viewer's Resize right after this
             // decides whether they still fit it (#521). Bytes from before an
-            // earlier resize are still replayed raw, because a repaint here
-            // would be approximate for every shell session, on every reload.
+            // earlier resize are still replayed raw (a known gap, #521).
             //
             // A viewer far behind gets the exact screen first when the engine
             // can export it (#583, `SNAPSHOT_FIRST_BACKLOG`). A cursor the ring

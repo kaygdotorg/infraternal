@@ -72,6 +72,12 @@ impl Terminal {
     pub(crate) fn screen_difference(&self, other: &Self) -> usize {
         self.engine.difference(&other.engine)
     }
+    /// The terminal's size as `(cols, rows)`. Tests use it to paint a
+    /// repaint into a viewer of that viewer's own size, as the client does.
+    #[cfg(test)]
+    pub(crate) fn dimensions(&self) -> (u16, u16) {
+        self.dimensions
+    }
     #[cfg(test)]
     pub(crate) fn allocation_fixture(engine: Engine, prefix: &[u8]) -> Self {
         let mut terminal = Self::new(80, 24).unwrap();
