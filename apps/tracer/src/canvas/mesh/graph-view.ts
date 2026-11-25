@@ -632,9 +632,16 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const topoOf = (c: ViewRec): TopoArrow[] => graphOf(c)?.arrows() ?? [];
   /** Re-reads the mesh into a graph view: its nodes, its size, what is drawn, what the sidebar counts. */
   const sizes = new WeakMap<ViewRec, string>();
+  /**
+   * The source's data version each graph view last read. An edit confirmed on the canvas refreshes its view at once (so
+   * the arrow is redrawn in the same frame), and the source then tells every view that it changed: a view that already
+   * read that version has nothing new to read, and skipping it halves the work of a confirm.
+   */
+  const readVersion = new WeakMap<ViewRec, number>();
   const refreshGraph = (c: ViewRec): void => {
     const graph = graphOf(c);
     if (!graph) return;
+    readVersion.set(c, source.data().version);
     const layout = layoutOf(c, state.metrics);
     origins.set(c, layout.origin);
     c.view.nodes = layout.nodes;
@@ -695,7 +702,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       for (const port of ports) { if (port.isConnected) port.hidden = !source.canEdit() || port.hasAttribute("data-target"); else ports.delete(port); } // a dropped card's connector goes with it
       // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
       if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
-      for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
+      for (const c of views.values()) if (c.view.layout === "graph" && (rightsChanged || readVersion.get(c) !== source.data().version)) refreshGraph(c);
       tryWanted();
     },
     beginRename(id) { wanted = id; tryWanted(); },
