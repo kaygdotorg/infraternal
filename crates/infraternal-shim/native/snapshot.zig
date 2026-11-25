@@ -133,7 +133,7 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
             // The last history row wraps onto the screen's top line, which
             // becomes the top row once the rows above have scrolled off. A
             // glyph `row` already printed there is cleared and repainted.
-            skip_first = try row(w, p, skip_first, if (y + 1 == history) .boundary else .history);
+            skip_first = try row(w, p, skip_first, if (y + 1 == history) .boundary else .history, t.rows > 1);
             if (!p.rowAndCell().row.wrap) try w.writeAll("\x1b[0m\r\n");
         }
         // CRLF has already scrolled the earlier rows. Push only the remaining
@@ -405,7 +405,7 @@ fn paint(w: *Writer, t: *const vt.Terminal, screen: *const vt.Screen, keep_top_c
     for (0..t.rows) |y| {
         if (!wrap) try w.print("\x1b[{d};1H", .{y + 1});
         const p = screen.pages.pin(.{ .active = .{ .x = 0, .y = @intCast(y) } }).?;
-        skip_first = try row(w, p, skip_first, .{ .screen = .{ .line = y + 2, .rows = t.rows } });
+        skip_first = try row(w, p, skip_first, .{ .screen = .{ .line = y + 2, .rows = t.rows } }, true);
         wrap = p.rowAndCell().row.wrap;
     }
     try kittyKeyboard(w, screen);
@@ -626,7 +626,14 @@ fn dropNextRow(w: *Writer, below: Below) SnapshotError!void {
 /// undo that mark when the source's next row is not one. Returns true when the
 /// next row's first cell was already printed (a narrow glyph that a grapheme
 /// widened across this row's spacer head), so its repaint must skip it.
-fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, below: Below) SnapshotError!bool {
+///
+/// `next_below_top` says whether the next line is below the screen's top line.
+/// A spacer head that had narrowed is rebuilt by printing over a temporary
+/// wide glyph at the next line's start, and the engine narrows the head on
+/// the row above only from there (`Terminal.print` checks `cursor.y > 0`).
+/// History painted on a one-row screen wraps onto the top line itself, so that
+/// edge is refused there (found by `vt_stream_snapshot`, #521).
+fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, below: Below, next_below_top: bool) SnapshotError!bool {
     // A narrow base widened by its grapheme may already have been emitted
     // across the preceding spacer head. Reprinting it over a wide cell would
     // narrow that head. The remaining cells start after its continuation.
@@ -689,6 +696,7 @@ fn row(w: *Writer, p: vt.PageList.Pin, skip_first: bool, below: Below) SnapshotE
     const next_continues = next.rowAndCell().row.wrap_continuation;
     if (!edge.hasText() and (edge.wide == .narrow or edge.wide == .spacer_head)) {
         if (edge.wide == .spacer_head and next_continues and next.cells(.all)[0].wide != .wide) return error.Unrepresentable;
+        if (edge.wide == .narrow and !next_below_top) return error.Unrepresentable;
         // Construct a spacer head with its own attributes before painting
         // the next row: that row's first wide glyph may have a different style
         // or hyperlink. If the original head had narrowed, overwrite the

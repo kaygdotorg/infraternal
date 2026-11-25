@@ -814,3 +814,52 @@ fn fidelity_one_column_screens_keep_combining_marks() {
         replay(name, prefix.as_bytes(), 1, rows);
     }
 }
+
+/// A history row whose wrapped edge is an empty narrow cell before a wide
+/// glyph (a spacer head that narrowed, here made by reflow) is rebuilt by
+/// narrowing a temporary spacer head from the next line. The engine does that
+/// only below the top line, and history painted on a one-row screen wraps onto
+/// the top line itself, so there it is refused; with two rows it is exact
+/// (`row` in `native/snapshot.zig`, found by `vt_stream_snapshot`, #521).
+///
+/// The second input ends the wrapped line inside history, so the top row does
+/// not continue it: that state was exported (wrongly) before the boundary
+/// painter too.
+#[test]
+fn fidelity_a_narrowed_spacer_head_in_one_row_history_is_refused() {
+    // A line feed keeps the column, so the wide glyph starts at column 2 and
+    // a two-column reflow leaves two empty cells before it.
+    for (input, rows) in [
+        ("0X\n\u{7551}YZ", 1),
+        ("0X\n\u{7551}\r\nQ", 1),
+        ("0X\n\u{7551}YZ", 2),
+        ("0X\n\u{7551}\r\nQ", 2),
+    ] {
+        let mut source = corpus_terminal(20, 5).unwrap();
+        source.process(input.as_bytes());
+        source.resize(2, rows).unwrap();
+        match source.snapshot() {
+            Err(error) if rows == 1 => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+            Ok(bytes) if rows == 2 => {
+                let mut viewer = corpus_terminal(2, rows).unwrap();
+                viewer.process(&bytes);
+                assert_eq!(
+                    source.engine.state_difference(&viewer.engine),
+                    0,
+                    "{input:?}"
+                );
+                source.resize(5, 3).unwrap();
+                viewer.resize(5, 3).unwrap();
+                assert_eq!(
+                    source.engine.state_difference(&viewer.engine),
+                    0,
+                    "{input:?} after a reflow"
+                );
+            }
+            other => panic!(
+                "{input:?} at {rows} rows: unexpected {:?}",
+                other.map(|bytes| bytes.len())
+            ),
+        }
+    }
+}
