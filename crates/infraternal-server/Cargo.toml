@@ -63,6 +63,7 @@ zeroize.workspace = true
 sqlx.workspace = true
 # D379 (#473): the rusqlite pool. Slice 2 runs the session statements on it; the rest still uses sqlx.
 infraternal-db = { path = "../infraternal-db", version = "0.1.0" }
+infraternal-sign-in = { path = "../infraternal-sign-in", version = "0.1.0" }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 tower-http.workspace = true
