@@ -616,3 +616,325 @@ async fn preflight_reaches_leg_b_tls_and_reports_a_route_without_it() {
     );
     task.abort();
 }
+
+/// Cost of the HTTPS link, run by hand on the perf VM (`--ignored`):
+/// link setup through the real route, and the data path with and without the
+/// inner TLS layer over the same outer HTTPS WebSocket.
+// Printed rates and averages only: counts stay far below 2^52.
+#[allow(clippy::cast_precision_loss)]
+mod bench {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
+
+    /// CPU time this process has used so far, in microseconds.
+    fn cpu_us() -> u128 {
+        let time = nix::time::clock_gettime(nix::time::ClockId::CLOCK_PROCESS_CPUTIME_ID).unwrap();
+        Duration::from(time).as_micros()
+    }
+
+    /// The median and the 90th percentile of `samples`, in microseconds.
+    fn percentiles(samples: &mut [u128]) -> (u128, u128) {
+        samples.sort_unstable();
+        (samples[samples.len() / 2], samples[samples.len() * 9 / 10])
+    }
+
+    /// A TCP proxy that holds every chunk for `delay` in each direction, in
+    /// order, so a round trip costs `2 * delay`.
+    async fn delayed(upstream: SocketAddr, delay: Duration) -> SocketAddr {
+        /// Forward `from` to `to`, releasing each chunk `delay` after it arrived.
+        async fn pipe(
+            mut from: tokio::net::tcp::OwnedReadHalf,
+            mut to: tokio::net::tcp::OwnedWriteHalf,
+            delay: Duration,
+        ) {
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let reader = async move {
+                let mut buffer = vec![0; 64 * 1024];
+                while let Ok(read) = from.read(&mut buffer).await {
+                    if read == 0
+                        || sender
+                            .send((tokio::time::Instant::now() + delay, buffer[..read].to_vec()))
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
+            };
+            let writer = async move {
+                while let Some((due, chunk)) = receiver.recv().await {
+                    tokio::time::sleep_until(due).await;
+                    if to.write_all(&chunk).await.is_err() {
+                        break;
+                    }
+                }
+            };
+            tokio::join!(reader, writer);
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let Ok(server) = TcpStream::connect(upstream).await else {
+                    continue;
+                };
+                socket.set_nodelay(true).unwrap();
+                server.set_nodelay(true).unwrap();
+                let (client_read, client_write) = socket.into_split();
+                let (server_read, server_write) = server.into_split();
+                tokio::spawn(pipe(client_read, server_write, delay));
+                tokio::spawn(pipe(server_read, client_write, delay));
+            }
+        });
+        address
+    }
+
+    /// Link setup through the real route on a `config.tls` server: outer
+    /// TLS, upgrade, inner leg-B TLS, ledger admission and the Hello exchange.
+    /// Prints wall time and process CPU (both ends) per link, then the setup
+    /// time over a proxy adding 25 ms each way (50 ms per round trip).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "bench: run on the perf VM"]
+    async fn bench_https_link_setup() {
+        let (material, agent, store, https) = setup().await;
+        let leaf = crate::server_leaf::issue(&material, "localhost", None, now()).unwrap();
+        let server = start_server(&leaf, &agent.root, store, Some(&https)).await;
+        for _ in 0..20 {
+            agent
+                .admitted(server.app, &https.certificate)
+                .await
+                .unwrap();
+        }
+        let links = 300;
+        let mut wall = Vec::with_capacity(links);
+        let cpu = cpu_us();
+        for _ in 0..links {
+            let started = std::time::Instant::now();
+            agent
+                .admitted(server.app, &https.certificate)
+                .await
+                .unwrap();
+            wall.push(started.elapsed().as_micros());
+        }
+        let cpu = (cpu_us() - cpu) / links as u128;
+        let (median, p90) = percentiles(&mut wall);
+        println!(
+            "BENCH setup links={links} wall_median_us={median} wall_p90_us={p90} cpu_per_link_us={cpu}"
+        );
+
+        let slow = delayed(server.app, Duration::from_millis(25)).await;
+        let mut wall = Vec::new();
+        for _ in 0..9 {
+            let started = std::time::Instant::now();
+            agent.admitted(slow, &https.certificate).await.unwrap();
+            wall.push(started.elapsed().as_micros());
+        }
+        let (median, _) = percentiles(&mut wall);
+        println!(
+            "BENCH setup_rtt50 links=9 wall_median_us={median} round_trips={:.2}",
+            median as f64 / 50_000.0
+        );
+    }
+
+    /// The outer HTTPS session and WebSocket both ends of the link share,
+    /// over loopback: (agent side, server side).
+    async fn outer_pair(
+        https: &Identity,
+        config: tokio_tungstenite::tungstenite::protocol::WebSocketConfig,
+    ) -> (
+        WebSocketStream<tokio_openssl::SslStream<TcpStream>>,
+        WebSocketStream<tokio_openssl::SslStream<TcpStream>>,
+    ) {
+        let acceptor = outer_acceptor(https);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            socket.set_nodelay(true).unwrap();
+            let ssl = openssl::ssl::Ssl::new(acceptor.context()).unwrap();
+            let mut tls = tokio_openssl::SslStream::new(ssl, socket).unwrap();
+            std::pin::Pin::new(&mut tls).accept().await.unwrap();
+            tokio_tungstenite::accept_async_with_config(tls, Some(config))
+                .await
+                .unwrap()
+        });
+        let socket = TcpStream::connect(address).await.unwrap();
+        socket.set_nodelay(true).unwrap();
+        let mut connector = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        connector.set_verify(SslVerifyMode::NONE);
+        let ssl = connector
+            .build()
+            .configure()
+            .unwrap()
+            .into_ssl("localhost")
+            .unwrap();
+        let mut tls = tokio_openssl::SslStream::new(ssl, socket).unwrap();
+        std::pin::Pin::new(&mut tls).connect().await.unwrap();
+        let (client, _) = tokio_tungstenite::client_async_with_config(
+            "ws://localhost/remote/agent",
+            tls,
+            Some(config),
+        )
+        .await
+        .unwrap();
+        (client, server.await.unwrap())
+    }
+
+    /// One end of a link's data path, as each version carries frames.
+    enum Path {
+        /// Before #559's inner TLS: each frame is one WebSocket binary message.
+        Plain(
+            Box<tokio::sync::Mutex<WebSocketStream<tokio_openssl::SslStream<TcpStream>>>>,
+            tokio::sync::Mutex<Vec<u8>>,
+        ),
+        /// Now: leg-B TLS inside the WebSocket carrier.
+        Inner(TcpTls),
+    }
+
+    impl Path {
+        /// Write one frame.
+        async fn write(&self, frame: &[u8]) {
+            match self {
+                Self::Plain(socket, _) => socket
+                    .lock()
+                    .await
+                    .send(Message::Binary(bytes::Bytes::copy_from_slice(frame)))
+                    .await
+                    .unwrap(),
+                Self::Inner(channel) => channel.write(frame).await.unwrap(),
+            }
+        }
+
+        /// Read exactly `into.len()` bytes.
+        async fn read_exact(&self, into: &mut [u8]) {
+            let mut filled = 0;
+            while filled < into.len() {
+                match self {
+                    Self::Plain(socket, pending) => {
+                        let mut pending = pending.lock().await;
+                        if pending.is_empty() {
+                            let Some(Ok(Message::Binary(data))) = socket.lock().await.next().await
+                            else {
+                                panic!("the plain path ended");
+                            };
+                            pending.extend_from_slice(&data);
+                        }
+                        let count = (into.len() - filled).min(pending.len());
+                        into[filled..filled + count].copy_from_slice(&pending[..count]);
+                        pending.drain(..count);
+                        filled += count;
+                    }
+                    Self::Inner(channel) => {
+                        let read = channel.read(&mut into[filled..]).await.unwrap();
+                        assert!(read > 0, "the inner path ended");
+                        filled += read;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Both ends of one data path: (agent side, server side).
+    async fn paths(inner: bool) -> (Path, Path) {
+        let (material, agent, _store, https) = setup().await;
+        if !inner {
+            let mut config = carrier_config();
+            config.max_message_size = Some(infraternal_protocol::MAX_FRAME_LEN + 64);
+            config.max_frame_size = Some(infraternal_protocol::MAX_FRAME_LEN + 64);
+            let (client, server) = outer_pair(&https, config).await;
+            return (
+                Path::Plain(Box::new(client.into()), Vec::new().into()),
+                Path::Plain(Box::new(server.into()), Vec::new().into()),
+            );
+        }
+        let leaf = crate::server_leaf::issue(&material, "localhost", None, now()).unwrap();
+        let (client, server) = outer_pair(&https, carrier_config()).await;
+        let roots = [agent.root.clone()];
+        let acceptor = remote_tls::server_config(&leaf, &roots).unwrap();
+        let connector = remote_tls::client_config(&agent.identity, &roots).unwrap();
+        let accepting = tokio::spawn(async move {
+            remote_tls::accept_over(WebSocketCarrier::new(server).into_carrier(), &acceptor)
+                .await
+                .unwrap()
+        });
+        let dialed = remote_tls::dial_over(
+            WebSocketCarrier::new(client).into_carrier(),
+            "localhost",
+            &connector,
+        )
+        .await
+        .unwrap();
+        let accepted = accepting.await.unwrap();
+        (Path::Inner(dialed.channel), Path::Inner(accepted.channel))
+    }
+
+    /// Bulk throughput (agent to server, 16 KiB frames) and a 64-byte frame
+    /// echo, on the data path before (`plain`) and with the inner TLS layer.
+    /// Prints MB/s, process CPU per MB (both ends) and the echo round trip.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "bench: run on the perf VM"]
+    async fn bench_https_link_data_path() {
+        for inner in [false, true] {
+            let name = if inner { "inner_tls" } else { "plain" };
+            let (agent, server) = paths(inner).await;
+            let (agent, server) = (Arc::new(agent), Arc::new(server));
+            let frame = vec![0x5a; 16 * 1024];
+            let total: usize = 256 << 20;
+            let receiver = {
+                let server = server.clone();
+                tokio::spawn(async move {
+                    let mut buffer = vec![0; 16 * 1024];
+                    let mut left = total;
+                    while left > 0 {
+                        let take = left.min(buffer.len());
+                        server.read_exact(&mut buffer[..take]).await;
+                        left -= take;
+                    }
+                })
+            };
+            let cpu = cpu_us();
+            let started = std::time::Instant::now();
+            for _ in 0..total / frame.len() {
+                agent.write(&frame).await;
+            }
+            receiver.await.unwrap();
+            let elapsed = started.elapsed();
+            let cpu = cpu_us() - cpu;
+            let megabytes = (total >> 20) as f64;
+            println!(
+                "BENCH bulk path={name} mb={megabytes} mb_per_s={:.0} cpu_us_per_mb={:.0}",
+                megabytes / elapsed.as_secs_f64(),
+                cpu as f64 / megabytes
+            );
+
+            let echo = {
+                let server = server.clone();
+                tokio::spawn(async move {
+                    let mut small = [0; 64];
+                    for _ in 0..20_000 {
+                        server.read_exact(&mut small).await;
+                        server.write(&small).await;
+                    }
+                })
+            };
+            let mut samples = Vec::with_capacity(20_000);
+            let small = [0x33; 64];
+            let mut back = [0; 64];
+            let cpu = cpu_us();
+            for _ in 0..20_000 {
+                let started = std::time::Instant::now();
+                agent.write(&small).await;
+                agent.read_exact(&mut back).await;
+                samples.push(started.elapsed().as_nanos());
+            }
+            let cpu = (cpu_us() - cpu) as f64 / 20_000.0;
+            echo.await.unwrap();
+            let (median, p90) = percentiles(&mut samples);
+            println!(
+                "BENCH echo path={name} frames=20000 rtt_median_us={:.1} rtt_p90_us={:.1} cpu_us_per_round_trip={cpu:.1}",
+                median as f64 / 1000.0,
+                p90 as f64 / 1000.0
+            );
+        }
+    }
+}
