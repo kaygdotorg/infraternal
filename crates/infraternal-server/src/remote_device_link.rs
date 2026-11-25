@@ -32,7 +32,10 @@
 //! handshake lanes and per-source slots as every host; they are released
 //! once the Hellos are done.
 
-use crate::enrollment::{DeviceAuthority, EnrollmentStore};
+use crate::{
+    enrollment::{DeviceAuthority, EnrollmentStore},
+    remote_guard::Revocation,
+};
 use infraternal_agent::{
     remote_native::NativeChannel,
     transport::{Receive, Transmit},
@@ -65,6 +68,9 @@ pub(crate) const RECHECK: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(10)
 };
+
+/// How long one ledger read may take (the host path's 5 s).
+const LEDGER_DEADLINE: Duration = Duration::from_secs(5);
 
 /// How long a device has, after its handshake, to open the control stream
 /// and send its Hello.
@@ -160,6 +166,41 @@ pub(crate) async fn admit(
         .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))
 }
 
+/// [`admit`] under [`LEDGER_DEADLINE`]: a ledger read that stalls counts as a
+/// refusal, so a stuck store can never keep a revoked device's link open.
+/// # Errors
+/// `PermissionDenied` when refused or when the read did not finish in time.
+async fn admit_within(
+    store: &EnrollmentStore,
+    fingerprint: &[u8; 32],
+) -> io::Result<DeviceAuthority> {
+    tokio::time::timeout(LEDGER_DEADLINE, admit(store, fingerprint))
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?
+}
+
+/// Register the cut signal for an admitted device, then read the ledger once
+/// more (as the host guard does): a removal between `admit` and the
+/// registration either shows in this read or finds the signal and cuts it.
+/// Without the second read the link would stay up until the next recheck.
+/// The read fails closed on [`LEDGER_DEADLINE`].
+/// # Errors
+/// `WouldBlock` at the signal cap; `PermissionDenied` when the device is cut,
+/// no longer admitted, or admitted as something else.
+pub(crate) async fn watch_admitted(
+    store: &EnrollmentStore,
+    authority: &DeviceAuthority,
+    fingerprint: &[u8; 32],
+) -> io::Result<(Arc<Revocation>, tokio::sync::watch::Receiver<bool>)> {
+    let signal = store.1.register(authority.host, DEVICE_EPOCH_UID)?;
+    let mut cut = signal.cut_receiver();
+    let live = admit_within(store, fingerprint).await;
+    if *cut.borrow_and_update() || live.as_ref().ok() != Some(authority) {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok((signal, cut))
+}
+
 /// Serve one admitted device's link until something ends it (see the module
 /// docs). `handshake` holds the connection's handshake lane and source slots;
 /// they are released once the Hellos are done. The connection is always
@@ -175,12 +216,10 @@ pub(crate) async fn serve<H: Send>(
     links: Arc<DeviceLinks>,
     handshake: H,
 ) -> io::Result<()> {
-    let signal = store.1.register(authority.host, DEVICE_EPOCH_UID)?;
-    let mut cut = signal.cut_receiver();
-    if *cut.borrow_and_update() {
+    let Ok((signal, mut cut)) = watch_admitted(&store, &authority, &fingerprint).await else {
         connection.close(REVOKED.into(), b"");
         return Err(io::ErrorKind::PermissionDenied.into());
-    }
+    };
     let (control, mut receive) = match hello(&connection).await {
         Ok(opened) => opened,
         Err(error) => {
@@ -267,7 +306,7 @@ async fn hold(
             _ = cut.changed() => return Some(REVOKED),
             () = tokio::time::sleep_until(expires) => return Some(EXPIRED),
             _ = recheck.tick() => {
-                if admit(store, fingerprint).await.is_err() {
+                if admit_within(store, fingerprint).await.is_err() {
                     // Admission also ends at `notAfter`; name that as expiry.
                     let past_end = unix_now().is_ok_and(|now| now >= authority.not_after);
                     return Some(if past_end { EXPIRED } else { REVOKED });
