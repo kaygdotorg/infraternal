@@ -23,7 +23,7 @@ Most of these keys you never see. They renew by themselves while a host is onlin
 | CLI sign-in code | 10 minutes, one use | Not renewable | Works |
 | CLI sign-in API key | [Keys Last](#keys-last) | Renewed silently when used | Issued and stored; no CLI command uses it yet |
 | Host join token | [Add Link Lasts](#add-link-lasts), one use | Not renewable | Works |
-| `up` join code | [Join Code Lasts](#join-code-lasts), one use | Not renewable | Planned |
+| `up` join code | [Join Code Lasts](#join-code-lasts), one use | Not renewable | Works |
 | Host certificate | 7 days | At half-life, 3.5 days | Works. Renewal after expiry is planned |
 | Machine CA root | 10 years | Rollover is planned | Works. Expiry warnings are planned |
 | WireGuard session keys | About 2 minutes | By WireGuard itself | Works |
@@ -138,16 +138,17 @@ Adding the same host again replaces the token. If the time runs out, add the hos
 
 ### `up` join code
 
-> [!WARNING] Not available yet
-> The planned one-command install (`infraternal up <server>`) will use a join code that works once, for the time [Join Code Lasts](#join-code-lasts) sets.
+`infraternal up <server>` shows a link, a short code and a QR code. You approve the machine in a signed-in browser with a fresh passkey tap before the code runs out. See [Joining a machine](/docs/machines/joining/).
+
+The code works once, for the time [Join Code Lasts](#join-code-lasts) sets. If it runs out before you approve it, run `infraternal up` again.
 
 ### Join Code Lasts
 
 > [!FACTS]
-> Default 10 minutes, one use. How long the short code you type after `up` works.
+> Default 10 minutes, one use. How long the short code you approve after `up` works.
 
 > [!WARNING] Planned
-> This comes with the `up` command. Until it exists, the CLI sign-in code above is the only code of this kind.
+> The control in Settings to change this lifetime is not built yet. Until it is, every join code uses the 10-minute default.
 
 ### Host certificate
 

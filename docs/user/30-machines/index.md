@@ -6,7 +6,7 @@ A machine is a computer that runs the infraternal agent, the program that lets I
 
 ## What is here
 
-You add a machine from the app: the server connects to it over SSH and gives it a join token that works once. From then on the machine proves who it is with a certificate that renews by itself while it is online. See [Adding and trusting hosts](/docs/reference/keys/#adding-and-trusting-hosts) for each token and certificate and how long it lasts.
+You can add a machine from the app over SSH, or from the machine itself with [`infraternal up`](/docs/machines/joining/). From then on the machine proves who it is with a certificate that renews by itself while it is online. See [Adding and trusting hosts](/docs/reference/keys/#adding-and-trusting-hosts) for each token and certificate and how long it lasts.
 
 > [!WARNING] Planned
-> Pages for adding a machine, updates, and controlling a machine from other machines are planned. Each appears when its feature ships.
+> Pages for updates and controlling a machine from other machines are planned. Each appears when its feature ships.
