@@ -171,6 +171,8 @@ mod terminal_census;
 mod terminal_exit;
 /// Records each terminal input Ack in one D379 writer transaction before the browser sees it (#562).
 mod terminal_input_ack;
+/// Closes a remote host's terminal row once the host reports its shell gone (#588).
+mod terminal_remote_gone;
 /// Periodically prunes closed `terminal_sessions` rows older than 30 days (#571, #579).
 mod terminal_session_prune;
 /// Persists a newly opened terminal's session row on the D379 writer (#562).
