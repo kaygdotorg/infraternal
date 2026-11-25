@@ -30,6 +30,7 @@ test-support = ["agent", "infraternal-plugin-relay?/test-support"]
 mesh-dns = ["dep:hickory-proto", "dep:url"]
 
 [dependencies]
+foldhash = "0.2"
 infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
 infraternal-protocol.workspace = true
 infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }

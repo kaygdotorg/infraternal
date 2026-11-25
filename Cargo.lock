@@ -2264,6 +2264,7 @@ name = "infraternal-plugin-mesh"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "foldhash",
  "futures-util",
  "gotatun",
  "hickory-proto",

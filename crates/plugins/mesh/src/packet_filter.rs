@@ -51,8 +51,8 @@ use crate::{
 };
 use infraternal_mesh::{networks::Network, proxy_ports::MeshProxyIngress};
 use std::{
-    collections::{BTreeMap, HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::{BTreeMap, HashMap},
+    hash::BuildHasher,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{
@@ -948,7 +948,7 @@ struct CompiledPolicy {
     local6: Ipv6Addr,
     node: crate::policy::model::NodeId,
     server: Option<crate::policy::model::NodeId>,
-    peer_addresses: HashMap<IpAddr, usize>,
+    peer_addresses: HashMap<IpAddr, usize, FlowHashState>,
     peers: Vec<PeerAccess>,
     proxy_ingress: MeshProxyIngress,
     /// Every network behind a router peer that this node may reach (D197 M3), with that peer's
@@ -981,7 +981,7 @@ impl CompiledPolicy {
             local6: Ipv6Addr::UNSPECIFIED,
             node: crate::policy::model::NodeId(0),
             server: None,
-            peer_addresses: HashMap::new(),
+            peer_addresses: HashMap::default(),
             peers: Vec::new(),
             proxy_ingress: MeshProxyIngress::default(),
             through: Vec::new(),
@@ -991,7 +991,7 @@ impl CompiledPolicy {
 
     /// Build direct address indexes from one complete coordinator and proxy snapshot.
     fn compile(config: &Config, proxy_ingress: MeshProxyIngress) -> io::Result<Self> {
-        let mut peer_addresses = HashMap::new();
+        let mut peer_addresses = HashMap::default();
         peer_addresses
             .try_reserve(config.peers.len().saturating_mul(2))
             .map_err(|_| io::Error::other("mesh peer address index could not be allocated"))?;
@@ -2115,20 +2115,31 @@ impl FlowShard {
     }
 }
 
+/// Hasher state for every per-packet table in this module (#260, J1226).
+///
+/// `foldhash::fast::RandomState` is seeded randomly per process. The slot of a tuple therefore
+/// cannot be precomputed by a peer, which the previous `DefaultHasher::new()` (`SipHash` with fixed
+/// zero keys) allowed: crafted tuples piled 256 flows onto one slot (mean probe 127.5 of 512,
+/// against below 0.6 seeded; `flow_slot_collisions_stay_spread_under_a_crafted_search`). Never
+/// swap in an unkeyed hasher here: the tuples are chosen by the peer.
+type FlowHashState = foldhash::fast::RandomState;
+
+/// The one process-wide seeded state shared by the flow and fragment slot functions.
+fn flow_hash_state() -> &'static FlowHashState {
+    static STATE: std::sync::OnceLock<FlowHashState> = std::sync::OnceLock::new();
+    STATE.get_or_init(FlowHashState::default)
+}
+
 /// Index a tuple inside its peer's fixed-size table in either packet direction.
 fn flow_start(key: FlowKey) -> usize {
-    let mut tuple_hasher = DefaultHasher::new();
-    key.canonical().hash(&mut tuple_hasher);
-    let tuple_hash = tuple_hasher.finish();
+    let tuple_hash = flow_hash_state().hash_one(key.canonical());
     usize::try_from(tuple_hash % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
 }
 
 /// Index one fragment identity inside its peer's fixed-size table.
 fn fragment_start(key: FragmentKey, direction: Direction) -> usize {
-    let mut tuple_hasher = DefaultHasher::new();
-    key.hash(&mut tuple_hasher);
-    direction.hash(&mut tuple_hasher);
-    usize::try_from(tuple_hasher.finish() % FRAGMENTS_PER_PEER_HASH).unwrap_or_default()
+    let tuple_hash = flow_hash_state().hash_one((key, direction));
+    usize::try_from(tuple_hash % FRAGMENTS_PER_PEER_HASH).unwrap_or_default()
 }
 
 /// Parsed packet fields used for policy, conntrack and checksum-safe SSH translation.
@@ -2665,3 +2676,8 @@ fn add_checksum_bytes(sum: &mut u32, bytes: &[u8]) {
 /// The filter's unit tests, kept in `packet_filter_tests.rs` to stay under the per-file size
 /// limit.
 mod tests;
+
+#[cfg(test)]
+#[path = "packet_filter_hash_tests.rs"]
+/// Regression test for the seeded flow-slot hash (#260, J1226).
+mod hash_tests;

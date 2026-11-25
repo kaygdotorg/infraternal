@@ -1,6 +1,7 @@
 # Faster hashers for GotaTun's per-packet bookkeeping (#260, J1204)
 
-Measurement and recommendation only. Nothing in the product changed; a hasher is a dependency
+Measurement and recommendation. (Update 2026-11-25: the owner approved the foldhash recommendation
+and J1226 adopted it, #260; the measurement text below is unchanged.) A hasher is a dependency
 choice and the owner's call. Questions answered: which hash tables sit on the data path, what
 does each cost per lookup with its real key shape, what would another hasher (or no hash) save
 per packet and per Gbit, and what does each choice do to HashDoS exposure.
