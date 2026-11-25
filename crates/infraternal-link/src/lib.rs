@@ -13,10 +13,14 @@
 //! - [`enrollment`]: the join's wire models.
 //! - `identity`, `quic` (feature `quic`): the client identity as a signer
 //!   (Ed25519 PKCS#8 on hosts, the Secure Enclave later) and the QUIC config.
+//! - `csr` (feature `quic`): the join's PKCS#10 request over the signer.
 //! - [`server_leaf_floor`]: the server-leaf age floor, read from DER.
 //! - `wire_datagrams` (features `quic` and `native-streams`): QUIC datagram lanes for plugins.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
+/// The join's PKCS#10 request, written by hand and signed through the identity signer.
+#[cfg(feature = "quic")]
+pub mod csr;
 /// The QUIC runtime of one dial attempt, which cancels its drivers when dropped.
 #[cfg(feature = "quic")]
 pub mod dial_runtime;
