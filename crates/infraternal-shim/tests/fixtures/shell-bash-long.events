@@ -1,0 +1,446 @@
+R 30 8
+O 25
+[?2004huser@host:~/dir$ O 1
+eO 1
+cO 1
+hO 1
+oO 1
+ O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 3
+m O 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 3
+d O 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 3
+n O 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 3
+o O 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 3
+n O 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 3
+o O 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 1
+cO 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+lO 1
+oO 1
+nO 1
+gO 1
+-O 3
+c O 1
+oO 1
+mO 1
+mO 1
+aO 1
+nO 1
+dO 1
+-O 1
+eO 1
+nO 1
+dR 24 8
+O 274
+[K[A[K[A[K[A[K[A[K[A[K[A[K[A[Kuser@host:~/dir$ echo long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-endO 66
+[A[A[A[A[A[A[A[A[A[C[C[C[C[C[C[C[C[C[C[C[C[CO 13
+[C[C[C[CR 37 7
+O 225
+[Kuser@host:~/dir$ echo long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-endO 11
+
+[?2004lO 200
+long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-end
+O 8
+[?2004hO 17
+user@host:~/dir$ O 203
+echo long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-endR 20 6
+O 262
+[K[A[K[A[K[A[K[A[K[A[Kuser@host:~/dir$ echo long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-long-command-end O 84
+[A[A[A[A[A[A[A[A[A[A[A[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[C[CO 11
+^C[?2004lO 17
+[?2004h[?2004lO 2
+
+O 25
+[?2004huser@host:~/dir$ O 1
+sO 1
+eO 3
+q O 1
+ O 1
+1O 1
+ O 1
+1O 1
+5O 11
+
+[?2004lO 51
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+O 25
+[?2004huser@host:~/dir$ O 1
+pO 1
+rO 3
+i O 1
+nO 1
+tO 1
+fO 1
+ O 1
+'O 1
+%O 1
+0O 1
+4O 1
+0O 1
+0O 1
+dO 1
+\O 1
+nO 1
+'O 1
+ O 1
+0O 11
+
+[?2004lO 402
+0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+O 25
+[?2004huser@host:~/dir$ R 33 9
+O 22
+[Kuser@host:~/dir$ O 1
+eO 1
+cO 1
+hO 1
+oO 1
+ O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 3
+0 O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 3
+3 O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 3
+6 O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 3
+9 O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 1
+2O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9O 1
+0O 1
+1O 3
+2 O 1
+3O 1
+4O 1
+5O 1
+6O 1
+7O 1
+8O 1
+9R 26 7
+O 212
+[K[A[K[A[K[A[K[A[K[A[Kuser@host:~/dir$ echo 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789O 21
+[A[A[A[A[A[A[CR 31 6
+O 247
+
+
+
+
+
+
+[K[A[K[A[K[A[K[A[K[A[K[A[Kuser@host:~/dir$ echo 012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789[A[A[A[A[A

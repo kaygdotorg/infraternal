@@ -4,7 +4,9 @@
 //! The recordings in `tests/fixtures/shell-*.events` are real bash, zsh and
 //! fish sessions (`capture_shells.py`): wrapped commands, a multiline prompt,
 //! a right prompt, scrolling output, a continuation prompt, a clear, and
-//! resizes in the middle of an edit. Each is replayed through the shim's
+//! resizes in the middle of an edit. The `-long` recordings edit commands
+//! longer than their small screen, so the edited line crosses the
+//! history/screen boundary. Each is replayed through the shim's
 //! `Terminal` exactly as the PTY delivered it. After every record (one read
 //! from the PTY, or one resize) the test asks for the Snapshot the shim would
 //! send a reattaching viewer, then:
@@ -19,16 +21,17 @@
 //!    Snapshot that looks right but carries the wrong hidden state (a wrap
 //!    flag, a saved cursor) is caught when the shell later relies on it.
 //!
-//! Two states are still refused, and every refusal keeps the exact raw replay
-//! for a reattach (or the flagged repaint for a gap). The test counts them
-//! instead of hiding them, and fails if a recording is refused more often:
-//! - a shell that marks its prompt with OSC 133 (fish does by default)
-//!   leaves semantic prompt state the serializer refuses on purpose;
-//! - the screen's top row is joined to the last history row: it continues a
-//!   line wrapped from history (the first-row continuation check), or the
-//!   history row wraps into it without marking it as its continuation, which
-//!   the engine's reflow still treats as one line. The painter cannot rebuild
-//!   a soft wrap across the history/screen boundary; a follow-up on #521.
+//! A screen whose top row is joined to the last history row (a line wrapped
+//! from history, or a history row that wraps into the top row without marking
+//! it as its continuation) used to be refused: 103 of bash's 347 cut points
+//! and 3 of zsh's 328. The painter now rebuilds that soft wrap (J1238, #521),
+//! and those recordings export exactly at every point.
+//!
+//! One state is still refused on purpose, and every refusal keeps the exact
+//! raw replay for a reattach (or the flagged repaint for a gap): a shell that
+//! marks its prompt with OSC 133 (fish does by default) leaves semantic prompt
+//! state the serializer cannot import. The test counts refusals instead of
+//! hiding them, and fails if a recording is refused more often.
 use super::*;
 
 /// One record of a recorded session, in the order the shim saw it.
@@ -152,13 +155,13 @@ fn check(name: &str) -> Tally {
     tally
 }
 
-/// bash with a one-line prompt. Every cut point exports exactly, except where
-/// the screen's top row is joined to history: a few cuts early on, and from
-/// record 245 (a 300-column line at 70 columns, then a prompt) to the end.
+/// bash with a one-line prompt: every cut point exports exactly, including
+/// those where the screen's top row is joined to history (a few cuts early on,
+/// and from record 245, a 300-column line at 70 columns, to the end).
 #[test]
 fn a_bash_session_snapshots_exactly_at_every_point() {
     let tally = check("bash");
-    assert!(tally.refused <= 103, "{tally:?}");
+    assert_eq!(tally.refused, 0, "{tally:?}");
 }
 
 /// bash with a coloured two-line prompt: every cut point exports exactly.
@@ -169,12 +172,12 @@ fn a_bash_session_with_a_multiline_prompt_snapshots_exactly_at_every_point() {
 }
 
 /// zsh with a coloured prompt and a right prompt, which zsh redraws on every
-/// resize: every cut point exports exactly, except the few where the top
+/// resize: every cut point exports exactly, including the few where the top
 /// visible row continues a line wrapped from history.
 #[test]
 fn a_zsh_session_with_a_right_prompt_snapshots_exactly_at_every_point() {
     let tally = check("zsh");
-    assert!(tally.refused <= 3, "{tally:?}");
+    assert_eq!(tally.refused, 0, "{tally:?}");
 }
 
 /// fish marks its prompt with OSC 133 from the first prompt on, which the
@@ -213,4 +216,20 @@ fn a_wrapped_line_on_the_history_tail_boundary_shortens_the_tail_instead_of_refu
             "{shorts} short lines"
         );
     }
+}
+
+/// bash editing commands longer than its small screen (`LONG_SCRIPT` in
+/// `capture_shells.py`): the edited line crosses the history/screen boundary
+/// while readline redraws it, moves over it, recalls it and is resized.
+#[test]
+fn a_bash_session_editing_lines_longer_than_the_screen_snapshots_exactly() {
+    let tally = check("bash-long");
+    assert_eq!(tally.refused, 0, "{tally:?}");
+}
+
+/// zsh editing commands longer than its small screen, with its right prompt.
+#[test]
+fn a_zsh_session_editing_lines_longer_than_the_screen_snapshots_exactly() {
+    let tally = check("zsh-long");
+    assert_eq!(tally.refused, 0, "{tally:?}");
 }

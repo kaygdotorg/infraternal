@@ -5,7 +5,9 @@ snapshot corpus (#521, #583).
 Each session runs one shell on its own PTY with a scratch HOME and no startup
 files, types a fixed script one key at a time (wrapped commands, scrolling
 output, a continuation prompt, a clear, resizes in the middle of an edit), and
-writes `shell-<name>.events`. The file is a list of records, in the order the
+writes `shell-<name>.events`. The `-long` sessions type commands longer than
+their small screen, so the line being edited crosses the history/screen
+boundary while the shell redraws it (cursor moves, history recall, resizes). The file is a list of records, in the order the
 shim would see them:
 
     O <length>\\n<length raw PTY bytes>   output read from the PTY
@@ -32,7 +34,6 @@ import termios
 import time
 
 ROOT = pathlib.Path(__file__).parent
-COLS, ROWS = 40, 12
 
 # What every session types. ("k", bytes) types the bytes one key at a time;
 # ("r", cols, rows) resizes the PTY, which sends the shell SIGWINCH.
@@ -55,8 +56,36 @@ SCRIPT = [
     ("r", 44, 13),
 ]
 
+# Long commands on a screen shorter than they are (#521, J1238): a command
+# edited across the history/screen boundary, moved over with Ctrl-A and
+# Ctrl-E, resized while it crosses, recalled from history, cancelled, and a
+# long output line, so the screen's top row continues a history row often.
+LONG_SCRIPT = [
+    ("k", b"echo " + b"long-command-" * 15 + b"end"),
+    ("r", 24, 8),
+    ("k", b"\x01"),
+    ("k", b"\x05"),
+    ("r", 37, 7),
+    ("k", b"\r"),
+    ("k", b"\x1b[A"),
+    ("r", 20, 6),
+    ("k", b"\x01"),
+    ("k", b"\x03"),
+    ("k", b"seq 1 15\r"),
+    ("k", b"printf '%0400d\\n' 0\r"),
+    ("r", 33, 9),
+    ("k", b"echo " + b"0123456789" * 15),
+    ("r", 26, 7),
+    ("k", b"\x01"),
+    ("r", 31, 6),
+]
+
+# Script name -> (first cols, first rows, steps).
+SCRIPTS = {"default": (40, 12, SCRIPT), "long": (30, 8, LONG_SCRIPT)}
+
 # name -> (argv, extra environment). Prompts are fixed so recordings do not
-# carry the recording host's user or host name.
+# carry the recording host's user or host name. A name ending in `-long` is
+# the same shell typing LONG_SCRIPT.
 SHELLS = {
     "bash": (["bash", "--norc", "--noprofile", "-i"], {"PS1": "user@host:~/dir$ "}),
     "bash-multiline": (
@@ -70,6 +99,8 @@ SHELLS = {
         {},
     ),
 }
+SHELLS["bash-long"] = SHELLS["bash"]
+SHELLS["zsh-long"] = SHELLS["zsh"]
 
 
 # Primary device attributes (DA1). fish asks for them after its other
@@ -99,6 +130,7 @@ def drain(master, out, seconds):
 
 def record(name):
     argv, extra = SHELLS[name]
+    cols, rows, script = SCRIPTS["long" if name.endswith("-long") else "default"]
     if shutil.which(argv[0]) is None:
         sys.exit(f"{argv[0]} is not on PATH")
     home = tempfile.mkdtemp(prefix="corpus-home-")
@@ -113,7 +145,7 @@ def record(name):
         **extra,
     }
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     pid = os.fork()
     if pid == 0:
         os.close(master)
@@ -125,9 +157,9 @@ def record(name):
         os.chdir(home)
         os.execvpe(argv[0], argv, env)
     os.close(slave)
-    out = [b"R %d %d\n" % (COLS, ROWS)]
+    out = [b"R %d %d\n" % (cols, rows)]
     drain(master, out, 1.5)
-    for step in SCRIPT:
+    for step in script:
         if step[0] == "r":
             _, cols, rows = step
             drain(master, out, 0.3)
