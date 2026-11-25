@@ -179,4 +179,3 @@ pub fn server_proof_bytes_v2(
     bytes
 }
 
-/// Tests for the proof message layout.
