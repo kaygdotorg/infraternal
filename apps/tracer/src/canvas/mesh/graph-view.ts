@@ -23,7 +23,8 @@ import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
 import { createSay, tagChips } from "./entities";
-import { approvedToast, declinedToast, routesSource } from "./networks";
+import { routesSource } from "./networks";
+import { approvedToast, declinedToast } from "./networks-words";
 import { endName, grantSentence, type MeshSource } from "./source";
 
 export interface GraphViewModule {

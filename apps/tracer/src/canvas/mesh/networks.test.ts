@@ -1,6 +1,7 @@
 /** The words of subnet routes (D197 M3, #580): every sentence says what happens, in plain words, with no route numbers. */
 import { describe, expect, test } from "bun:test";
-import { networkSub, refusalWords, revokeConfirm, type MeshNetwork } from "./networks";
+import type { MeshNetwork } from "./networks";
+import { networkSub, refusalWords, revokeConfirm } from "./networks-words";
 
 /** An approved network the word tests ask about. */
 const approved: MeshNetwork = { id: "net:4", routeId: 4, nodeId: 1, cidr: "192.168.10.0/24", router: "build-01", state: "approved", advertised: true, keepSource: false };
