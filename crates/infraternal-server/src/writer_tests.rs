@@ -577,6 +577,79 @@ async fn terminal_exit_on_the_d379_writer_keeps_the_sqlx_rules() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A remote session the host reports gone (#588) is closed once on the D379
+/// writer: only a remote row, only under a live login session, a repeat report
+/// changes nothing, and the retention prune then removes the ended remote row.
+#[tokio::test]
+async fn remote_gone_on_the_d379_writer_closes_the_row_once() {
+    let (pool, user, _session, auth, dir) = disk_database().await;
+    let now = unix_seconds().unwrap();
+    let hash = crate::auth::hash("gone-token");
+    sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'gone',?,?,1)")
+        .bind(&hash).bind(&user).bind(now + 3600).bind(now)
+        .execute(&pool).await.unwrap();
+    let host = [9_u8; 16];
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,?,'rootless',1002,100)")
+        .bind(host.as_slice()).bind(&user).execute(&pool).await.unwrap();
+    // Row 7 is the fixture's own session, so this test uses 1 (remote) and 2 (local).
+    census_row(&pool, &user, 1, None, Some(host.as_slice())).await;
+    census_row(&pool, &user, 2, None, None).await;
+    let gone = |token: &'static str, id: u8| {
+        let (auth, pool, user) = (auth.clone(), pool.clone(), user.clone());
+        async move {
+            crate::terminal_remote_gone::record_on_writer(&auth, &pool, &user, token, &[id; 16])
+                .await
+        }
+    };
+    assert_eq!(
+        gone("other-token", 1).await,
+        Ok(false),
+        "no live login session: nothing is written"
+    );
+    assert_eq!(closed_at(&pool, 1).await, None);
+    assert_eq!(
+        gone("gone-token", 2).await,
+        Ok(false),
+        "a local row belongs to the census, not to this writer"
+    );
+    assert_eq!(closed_at(&pool, 2).await, None);
+    assert_eq!(
+        gone("gone-token", 1).await,
+        Ok(true),
+        "the first report closes the remote row"
+    );
+    let first = closed_at(&pool, 1).await;
+    assert!(first.is_some());
+    assert_eq!(
+        gone("gone-token", 1).await,
+        Ok(false),
+        "a repeat report changes nothing"
+    );
+    assert_eq!(
+        closed_at(&pool, 1).await,
+        first,
+        "the first closure time stays"
+    );
+    let pruned = crate::terminal_session_prune::prune_closed_sessions(
+        Some(&auth),
+        &pool,
+        now + 31 * 86_400,
+        100,
+    )
+    .await;
+    assert_eq!(
+        pruned,
+        Ok(1),
+        "the retention prune removes the ended remote row"
+    );
+    assert_eq!(
+        closed_at(&pool, 2).await,
+        None,
+        "the open local row is not pruned"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// The D379 branch of `terminal_input_ack::record` (#562): one transaction that
 /// advances the writer row and the session row together. It succeeds for the
 /// right stream and session; refuses a wrong stream, a wrong session, a

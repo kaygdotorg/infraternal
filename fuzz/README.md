@@ -145,7 +145,7 @@ under `fuzz/corpus/<target>/`. Each hook's unit test replays them, so
 | `agent_control_messages` | Local control-socket framing (`read_one`) in any read sizes, `sessions.*` argument checks, saved session names, CLI reply round trip, the Hello `os=` token |
 | `desktop_reassembly` | Video fragment reassembly under loss, repeats, reordering, foreign sessions and deadlines |
 | `remote_join_approval` | `/remote/join` body and canonical CSR, owner-approved `JoinMachineRequest`, receipt token, canonical invitation secret, invitation and link-challenge JSON |
-| `vt_stream_snapshot` | PTY output in any pieces gives the same snapshot; snapshots fit a frame; a snapshot continues the stream |
+| `vt_stream_snapshot` | PTY output in any pieces gives the same snapshot; snapshots fit a frame; a snapshot continues the stream. A continuation failure is labelled `CARRY-CLASS` (cutting the carry off the snapshot makes it pass: the carry observer is at fault) or `REPAINT-CLASS` (the repaint itself) |
 | `ssh_packet_read` | The SSH packet reader with its 256-byte read-ahead (#538): sealed packets survive a key change; hostile bytes end in an error without consuming a sequence number |
 
 Build hosts without a nightly toolchain can run them with the pinned stable

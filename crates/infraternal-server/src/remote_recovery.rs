@@ -744,7 +744,7 @@ impl Service {
             "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,key_algorithm,not_before,not_after,role,execution_uid) \
              SELECT ?,h.id,?,?,?,?,?,'active',h.execution_uid FROM remote_hosts h JOIN remote_certificates old ON old.host_id=h.id \
              WHERE h.id=? AND h.revoked_at IS NULL AND old.fingerprint=? AND old.revoked_at IS NULL \
-             AND old.role='active' AND old.execution_uid=h.execution_uid",
+             AND old.role='active' AND old.execution_uid IS h.execution_uid",
         )
         .bind(signed.record.fingerprint.as_slice())
         .bind(signed.record.issuer_fingerprint.as_slice())
@@ -1047,6 +1047,10 @@ mod tests {
     /// The fixture for an identity held by `identity_key`, Ed25519 or P-256.
     async fn recovery_fixture_with(identity_key: PKey<Private>) -> RecoveryFixture {
         let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        // Only a device holds a P-256 key (#580), and the schema enforces it.
+        if identity_key.id() != openssl::pkey::Id::ED25519 {
+            crate::enrollment::authority::tests::into_device(&pool, host).await;
+        }
         let clock = Arc::new(ClockHealth::default());
         clock.start_monitor();
         let now = i64::try_from(

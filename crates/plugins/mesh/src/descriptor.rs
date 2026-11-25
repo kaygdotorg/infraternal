@@ -90,6 +90,26 @@ pub const ACTIONS: &[ActionDef] = &[
         opens: None,
         api_scope: None,
         fresh_passkey: false,
+        id: "mesh.route.decline",
+        summary: "Decline a subnet route",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Pick a network waiting for approval from mesh.route.list.",
+            "It stops waiting and stays declined when the machine advertises it again; approving it later still works.",
+        ],
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"route_id":{"type":"integer","minimum":1}},"required":["route_id"],"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef("MeshRouteChange"),
+        permission: One("server.configure"),
+        effect: Effect::Write,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
         id: "mesh.default.get",
         summary: "Read Mesh default",
         instructions: &[

@@ -1,4 +1,11 @@
 //! Authenticates dial-out TCP/TLS fallback before dispatching unchanged leg-B framing; callers recheck durable host admission [64][130], #78.
+//!
+//! The same mutual TLS also runs inside the HTTPS WebSocket fallback (#559):
+//! a TLS session sits on a [`Carrier`], which is either the direct TCP socket
+//! or a byte tunnel through another protocol. Whatever carries the bytes, the
+//! handshake, the trust (our CA only), the ALPN and the checks are the same,
+//! so a carrier that terminates its own TLS (a reverse proxy) only ever sees
+//! leg-B ciphertext.
 
 use crate::channel::Channel;
 use openssl::{
@@ -6,7 +13,73 @@ use openssl::{
     ssl::{SslAcceptor, SslConnector},
     x509::X509,
 };
-use std::{io, net::SocketAddr};
+use std::{
+    io,
+    net::SocketAddr,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// An ordered, reliable byte stream that is not a TCP socket, such as the
+/// HTTPS WebSocket adapter, boxed so one [`TcpTls`] type serves every path.
+pub trait Tunnel: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> Tunnel for T {}
+
+/// What a leg-B TLS session runs on.
+///
+/// The TCP fallback keeps static dispatch (one `match` per read or write);
+/// only a tunnel pays a virtual call, which is small next to the TLS record
+/// work and the tunnel's own framing.
+pub enum Carrier {
+    /// The direct TCP/TLS fallback socket.
+    Tcp(tokio::net::TcpStream),
+    /// A byte tunnel through another protocol (#559).
+    Tunnel(Box<dyn Tunnel>),
+}
+
+impl AsyncRead for Carrier {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(socket) => Pin::new(socket).poll_read(cx, buf),
+            Self::Tunnel(tunnel) => Pin::new(tunnel.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Carrier {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(socket) => Pin::new(socket).poll_write(cx, data),
+            Self::Tunnel(tunnel) => Pin::new(tunnel.as_mut()).poll_write(cx, data),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(socket) => Pin::new(socket).poll_flush(cx),
+            Self::Tunnel(tunnel) => Pin::new(tunnel.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(socket) => Pin::new(socket).poll_shutdown(cx),
+            Self::Tunnel(tunnel) => Pin::new(tunnel.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// The TLS stream every leg-B fallback channel holds.
+type Stream = tokio_openssl::SslStream<Carrier>;
 
 /// Configured public identity plus process-local private key; no Debug or serialization.
 pub struct Identity {
@@ -48,14 +121,12 @@ pub enum AcceptedConnection {
     Recovery(RecoveryConnection),
 }
 
-/// Full-duplex TLS channel. Reader and writer retain TLS state across readiness waits.
+/// Full-duplex TLS channel over a [`Carrier`]. Reader and writer retain TLS state across readiness waits.
 /// Cancelling a partial frame write requires retiring the entire connection.
 pub struct TcpTls {
     retired: tokio::sync::watch::Sender<bool>,
-    reader:
-        tokio::sync::Mutex<tokio::io::ReadHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>>,
-    writer:
-        tokio::sync::Mutex<tokio::io::WriteHalf<tokio_openssl::SslStream<tokio::net::TcpStream>>>,
+    reader: tokio::sync::Mutex<tokio::io::ReadHalf<Stream>>,
+    writer: tokio::sync::Mutex<tokio::io::WriteHalf<Stream>>,
 }
 // A TLS frame may be partially accepted before a caller cancels its future.
 // The guard makes such cancellation terminal; no suffix can be replaced by
@@ -112,7 +183,12 @@ impl Channel for TcpTls {
         let result = tokio::select! {
             biased;
             _ = retired.changed() => Err(closed()),
-            result = tokio::time::timeout(HANDSHAKE, writer.write_all(bytes)) => {
+            // The flush is free on TCP; a tunnel may buffer until it, so
+            // every frame leaves before the write reports success.
+            result = tokio::time::timeout(HANDSHAKE, async {
+                writer.write_all(bytes).await?;
+                writer.flush().await
+            }) => {
                 result.unwrap_or_else(|_| Err(io::ErrorKind::TimedOut.into()))
             }
         };
@@ -251,18 +327,69 @@ pub async fn dial(
     name: &str,
     config: &SslConnector,
 ) -> io::Result<Connection> {
-    let socket = dial_socket(address).await?;
+    dial_over(Carrier::Tcp(dial_socket(address).await?), name, config).await
+}
+
+/// Run the outgoing mutual TLS handshake over an existing carrier and verify
+/// the server name, exactly as [`dial`] does on a fresh TCP socket. The
+/// HTTPS fallback uses it inside its WebSocket (#559).
+/// # Errors
+/// Refuses a deadline or failed mutual certificate/name verification.
+pub async fn dial_over(
+    carrier: Carrier,
+    name: &str,
+    config: &SslConnector,
+) -> io::Result<Connection> {
     let ssl = config
         .configure()
         .map_err(|_| denied())?
         .into_ssl(name)
         .map_err(|_| denied())?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
+    let mut stream = tokio_openssl::SslStream::new(ssl, carrier).map_err(|_| denied())?;
     tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).connect())
         .await
         .map_err(|_| denied())?
         .map_err(|_| denied())?;
     finish(stream, true)
+}
+
+/// Check that `carrier` reaches a leg-B TLS listener, without sending a
+/// certificate and without trusting the answer.
+///
+/// Enrollment preflight uses this inside the HTTPS WebSocket before the host
+/// has a certificate (and, for SSH joins, before it knows the CA). It proves
+/// only that something answers TLS 1.3 with the `infraternal/1` ALPN; it
+/// proves nothing about who answers, which is why it trusts nothing and the
+/// real link ([`dial_over`]) checks everything again. The server refuses the
+/// session after its first flight, because no client certificate is sent.
+/// # Errors
+/// Returns `InvalidData` when the peer does not complete a TLS 1.3 server
+/// flight with that ALPN within the handshake deadline.
+pub async fn probe_over(carrier: Carrier, name: &str) -> io::Result<()> {
+    use openssl::ssl::{SslMethod, SslVerifyMode, SslVersion};
+    let unexpected = || io::Error::from(io::ErrorKind::InvalidData);
+    let mut config = SslConnector::builder(SslMethod::tls_client()).map_err(|_| unexpected())?;
+    config
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .map_err(|_| unexpected())?;
+    config.set_verify(SslVerifyMode::NONE);
+    config.set_alpn_protos(ALPN).map_err(|_| unexpected())?;
+    let ssl = config
+        .build()
+        .configure()
+        .map_err(|_| unexpected())?
+        .verify_hostname(false)
+        .into_ssl(name)
+        .map_err(|_| unexpected())?;
+    let mut stream = tokio_openssl::SslStream::new(ssl, carrier).map_err(|_| unexpected())?;
+    tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).connect())
+        .await
+        .map_err(|_| unexpected())?
+        .map_err(|_| unexpected())?;
+    if stream.ssl().selected_alpn_protocol() != Some(PROTOCOL) {
+        return Err(unexpected());
+    }
+    Ok(())
 }
 
 /// Dial the server-authenticated recovery ALPN without offering an expired client certificate.
@@ -275,7 +402,7 @@ pub async fn dial_recovery(
 ) -> io::Result<RecoveryConnection> {
     use openssl::x509::X509VerifyResult;
 
-    let socket = dial_socket(address).await?;
+    let socket = Carrier::Tcp(dial_socket(address).await?);
     let ssl = config
         .configure()
         .map_err(|_| denied())?
@@ -335,6 +462,15 @@ async fn dial_socket(address: SocketAddr) -> io::Result<tokio::net::TcpStream> {
 /// Refuses failed mutual verification or a handshake deadline.
 pub async fn accept(socket: tokio::net::TcpStream, config: &SslAcceptor) -> io::Result<Connection> {
     socket.set_nodelay(true)?;
+    accept_over(Carrier::Tcp(socket), config).await
+}
+
+/// Run the server side of the mutual TLS handshake over an existing carrier,
+/// with the same checks as [`accept`]. The HTTPS fallback uses it inside its
+/// WebSocket (#559). The recovery ALPN is never accepted here.
+/// # Errors
+/// Refuses failed mutual verification or a handshake deadline.
+pub async fn accept_over(socket: Carrier, config: &SslAcceptor) -> io::Result<Connection> {
     let ssl = openssl::ssl::Ssl::new(config.context()).map_err(|_| denied())?;
     let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
     tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).accept())
@@ -355,7 +491,8 @@ pub async fn accept_recovery_aware(
 
     socket.set_nodelay(true)?;
     let ssl = openssl::ssl::Ssl::new(config.context()).map_err(|_| denied())?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, socket).map_err(|_| denied())?;
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, Carrier::Tcp(socket)).map_err(|_| denied())?;
     tokio::time::timeout(HANDSHAKE, std::pin::Pin::new(&mut stream).accept())
         .await
         .map_err(|_| denied())?
@@ -391,10 +528,7 @@ pub async fn accept_recovery_aware(
 /// Finish an accepted TLS connection: require the negotiated ALPN and a verified client certificate.
 /// `dialed` keeps the verified peer leaf (the server's) for the caller's
 /// server-leaf check; an accepted connection keeps only its fingerprint.
-fn finish(
-    stream: tokio_openssl::SslStream<tokio::net::TcpStream>,
-    dialed: bool,
-) -> io::Result<Connection> {
+fn finish(stream: Stream, dialed: bool) -> io::Result<Connection> {
     use openssl::{hash::MessageDigest, x509::X509VerifyResult};
     // Missing ALPN and missing client certificates cannot silently downgrade
     // this endpoint to another protocol. No application bytes escape this check.
@@ -418,7 +552,7 @@ fn finish(
 }
 
 /// Wrap an accepted TLS stream as a channel that can be retired.
-fn channel(stream: tokio_openssl::SslStream<tokio::net::TcpStream>) -> TcpTls {
+fn channel(stream: Stream) -> TcpTls {
     let (reader, writer) = tokio::io::split(stream);
     TcpTls {
         retired: tokio::sync::watch::channel(false).0,

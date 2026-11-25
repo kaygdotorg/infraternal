@@ -2027,8 +2027,8 @@ fn parse_join_key_receipt(bytes: &[u8]) -> Result<[u8; 32], Failure> {
         "PREPARE-REFUSED UPGRADE\n" => {
             "The infraternal agent on this host reached the server over HTTPS, but the WebSocket upgrade failed. Allow WebSocket upgrades through the HTTPS proxy."
         }
-        "PREPARE-REFUSED CHALLENGE\n" => {
-            "The infraternal agent reached the server over HTTPS, but the server did not return a valid challenge. Deploy a compatible server build."
+        "PREPARE-REFUSED AGENT-LINK\n" => {
+            "The infraternal agent reached the server over HTTPS, but no infraternal agent link answered inside the WebSocket. Deploy a server build that matches this infraternal agent."
         }
         "PREPARE-REFUSED REFUSED\n" => {
             "The infraternal agent could not prepare its host key. Check its private state directory and try again."

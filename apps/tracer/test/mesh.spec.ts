@@ -316,8 +316,8 @@ test.describe("editing arrows", () => {
     await page.locator(".ui-confirm-yes").click();
     // The server holds grants by name: the move names the end and the new endpoint (a node by its id), and since
     // the name still said where the grant went, a rename follows so it keeps saying so.
-    await expect.poll(() => called(page, "mesh.grant.move")).toEqual([{ name: "nix-cache to studio-mac", side: "to", endpoint: { Node: 2 } }]);
-    await expect.poll(() => called(page, "mesh.grant.rename")).toEqual([{ name: "nix-cache to studio-mac", new_name: "nix-cache to edge-arm" }]);
+    await expect.poll(() => called(page, "mesh.grant.move")).toEqual([{ name: "nix-cache-to-studio-mac", side: "to", endpoint: { Node: 2 } }]);
+    await expect.poll(() => called(page, "mesh.grant.rename")).toEqual([{ name: "nix-cache-to-studio-mac", new_name: "nix-cache-to-edge-arm" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "nix-cache can reach edge-arm");
     await expect(page.locator(".ui-toast, .toast").first()).toContainText("nix-cache can now reach edge-arm");
   });
@@ -327,11 +327,11 @@ test.describe("editing arrows", () => {
     await intoMesh(page);
     await dragEnd(page, "g7", "tail", "studio-mac");
     await page.locator(".ui-confirm-yes").click();
-    await expect.poll(() => called(page, "mesh.grant.move")).toEqual([{ name: "ci to nix-cache", side: "from", endpoint: { Node: 4 } }]);
+    await expect.poll(() => called(page, "mesh.grant.move")).toEqual([{ name: "ci-to-nix-cache", side: "from", endpoint: { Node: 4 } }]);
     await dragEnd(page, "g3", "head", undefined);
     await expect(page.locator(".ui-confirm-tip")).toContainText("Stop nix-cache reaching studio-mac?");
     await page.locator(".ui-confirm-yes").click();
-    await expect.poll(() => called(page, "mesh.grant.delete")).toEqual([{ name: "nix-cache to studio-mac" }]);
+    await expect.poll(() => called(page, "mesh.grant.delete")).toEqual([{ name: "nix-cache-to-studio-mac" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveCount(0);
     // A drag from the connector on a card onto another card allows access (the connector exists only in this view, D194).
     await page.locator('.ui-window[data-window-id="n-build-01"] .ui-window-pill').hover();
@@ -343,7 +343,7 @@ test.describe("editing arrows", () => {
     await page.mouse.up();
     await expect(page.locator(".ui-confirm-tip")).toContainText("Let build-01 reach studio-mac?");
     await page.locator(".ui-confirm-yes").click();
-    await expect.poll(() => called(page, "mesh.grant.create")).toEqual([{ name: "build-01 to studio-mac", from: { Node: 1 }, to: { Node: 4 }, both_ways: false }]);
+    await expect.poll(() => called(page, "mesh.grant.create")).toEqual([{ name: "build-01-to-studio-mac", from: { Node: 1 }, to: { Node: 4 }, both_ways: false }]);
     await expect.poll(async () => (await server(page, (s) => s.grantList())).some((g) => g.from === "build-01" && g.to === "studio-mac")).toBe(true);
     // The grant on screen is the server's (its id), not the placeholder the edit started with.
     await expect.poll(async () => (await probe(page, (p) => p.grants())).some((g) => g.id.startsWith("pending"))).toBe(false);
@@ -353,7 +353,7 @@ test.describe("editing arrows", () => {
     await open(page);
     await intoMesh(page);
     await probe(page, (p) => { const src = p.mesh.source(); src.renameGrant(src.grants().find((g) => g.id === "g3"), "release-train"); });
-    await expect.poll(() => called(page, "mesh.grant.rename")).toEqual([{ name: "nix-cache to studio-mac", new_name: "release-train" }]);
+    await expect.poll(() => called(page, "mesh.grant.rename")).toEqual([{ name: "nix-cache-to-studio-mac", new_name: "release-train" }]);
     await expect(page.locator('.cl-arrow[data-grant="g3"]')).toHaveAttribute("data-tip", "release-train");
     // A grant with its own name keeps it when an end moves.
     await dragEnd(page, "g3", "head", "edge-arm");

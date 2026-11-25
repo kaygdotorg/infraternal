@@ -14,8 +14,14 @@
  * | `mesh.grant.rename` | `{ name, new_name }`                               | `{ revision }`            |
  * | `mesh.grant.delete` | `{ name }`                                         | `{ revision }`            |
  * | `mesh.node.rename`  | `{ node_id, name }`                                | `{ revision }`            |
+ * | `mesh.route.list`   | `{}`                                               | `{ routes: [...] }`       |
+ * | `mesh.route.approve`| `{ node_id, network, masquerade }`                 | `{ state, route_id, revision? }` or `{ state: "refused", reason }` |
+ * | `mesh.route.decline`| `{ route_id }`                                     | `{ state, route_id, revision? }` |
+ * | `mesh.route.revoke` | `{ route_id }`                                     | `{ state, route_id, arrows_removed, revision }` |
  *
- * An endpoint is `{ "Node": <id> }` or `{ "Tag": "<name>" }`. A grant is referenced by its name (D180); its arrow id
+ * An endpoint is `{ "Node": <id> }`, `{ "Tag": "<name>" }` or, as the target of a one-way arrow only, `{ "Network": <route_id> }`
+ * (an approved subnet route, D197 M3; the canvas names it `net:<route_id>`). The route actions are the owner's: anyone else is
+ * refused, and the canvas then simply shows no networks. A grant is referenced by its name (D180); its arrow id
  * is stable across renames, so the canvas keys arrows by it. A subscription is `{ "topic": "mesh" }`; its events are
  * `{ "type": "snapshot" | "resync", "snapshot": <a list> }` (the canvas applies it), `{ "type": "changed",
  * "revision": n }` (it invalidates: the canvas lists again, coalesced, so a missed event costs nothing) and
@@ -52,6 +58,8 @@ export interface WireNode {
   via: string | undefined;
   /** Whether the attached node can retire stale peers after a server authority restore. */
   restoreSafe?: boolean;
+  /** A phone or tablet: it joins the mesh but never runs the infraternal agent, so it has no terminal (#580). */
+  device?: boolean;
 }
 export interface WireGrant {
   /** The arrow's stable id, as a string. */
@@ -90,6 +98,7 @@ export interface MeshTransport {
 
 export { ActionRefused } from "../../connection";
 
+/** The Mesh API's action ids, by what the canvas does with them (the table at the top of this module). */
 export const ACTION = {
   list: "mesh.list",
   create: "mesh.grant.create",
@@ -97,13 +106,18 @@ export const ACTION = {
   rename: "mesh.grant.rename",
   remove: "mesh.grant.delete",
   nodeRename: "mesh.node.rename",
+  routes: "mesh.route.list",
+  routeApprove: "mesh.route.approve",
+  routeDecline: "mesh.route.decline",
+  routeRevoke: "mesh.route.revoke",
 } as const;
 export const TOPIC = "mesh";
 
 // ---- endpoints ------------------------------------------------------------------------------------------------------
-/** The canvas's name for an endpoint to the server's. A host name needs the id table; a tag does not. */
+/** The canvas's name for an endpoint to the server's. A host name needs the id table; a tag and a network do not. */
 export function endpointJson(end: string, idOf: ReadonlyMap<string, number>): Record<string, unknown> | undefined {
   if (end.startsWith("tag:")) return { Tag: end.slice(4) };
+  if (end.startsWith("net:")) { const id = Number(end.slice(4)); return Number.isSafeInteger(id) && id > 0 ? { Network: id } : undefined; }
   const id = idOf.get(end);
   return id === undefined ? undefined : { Node: id };
 }
@@ -145,13 +159,16 @@ function parseNode(v: unknown): WireNode | undefined {
     path,
     via: optText(v.via),
     ...(restoreSafe === undefined ? {} : { restoreSafe }),
+    ...(v.device === true ? { device: true } : {}),
   };
 }
 
+/** Reads one arrow end into the canvas's name for it (a host name, `tag:<name>`, `net:<route id>`), or nothing for an end it does not show. */
 function parseEndpoint(v: unknown, nameOf: ReadonlyMap<number, string>): string | undefined {
   if (!isObject(v)) return undefined;
   if (text(v.Tag)) return `tag:${v.Tag}`;
   if (count(v.Node)) return nameOf.get(v.Node);
+  if (count(v.Network) && v.Network > 0) return `net:${v.Network}`;
   return undefined; // a user endpoint (stage 2) or one the person may not see
 }
 
@@ -203,6 +220,55 @@ export function parseEvent(v: Record<string, unknown>): MeshEvent | undefined {
   if (v.type === "changed" && count(v.revision)) return { kind: "changed", rev: v.revision };
   if (v.type === "error" && typeof v.error === "string" && v.error.length <= 64) return { kind: "error", reason: v.error };
   return undefined;
+}
+
+// ---- subnet routes (D197 M3) ---------------------------------------------------------------------------------------
+/** Where an advertised network stands, in the canvas's words (the server says "waiting for approval", "approved", ...). */
+export type WireRouteState = "pending" | "approved" | "declined";
+/** One row of `mesh.route.list`. */
+export interface WireRoute {
+  /** The route's identity: arrows to it name it (`net:<id>`). A revoke gives the network a new one. */
+  id: number;
+  /** The machine that advertises it (its router), by id and by name. */
+  nodeId: number;
+  router: string;
+  /** The network, canonical, as text (`192.168.10.0/24`). */
+  cidr: string;
+  state: WireRouteState;
+  /** The router advertises it now. An approved one it stopped advertising is not routed until it does again. */
+  advertised: boolean;
+  /** Forwarded traffic takes the router's address (the default); `false` keeps each machine's own. */
+  masquerade: boolean;
+  /** For a waiting network: the server's reason an approval would be refused now. */
+  refused: string | undefined;
+}
+/** The most routes a list may carry before it is refused as malformed. */
+const MAX_ROUTES = 4_096;
+/** The shape of a network in the server's canonical text (`192.168.10.0/24`; IPv6 kept readable though not routed yet). */
+const CIDR = /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$|^[0-9a-f:]+\/\d{1,3}$/i;
+/** Reads one route row, or nothing when it is not one. */
+function parseRoute(v: unknown): WireRoute | undefined {
+  if (!isObject(v) || !count(v.route_id) || !count(v.node_id) || !text(v.node) || !text(v.network) || !CIDR.test(v.network)) return undefined;
+  const state: WireRouteState | undefined = v.state === "declined" ? "declined"
+    : v.state === "waiting for approval" ? "pending"
+    : typeof v.state === "string" && v.state.startsWith("approved") ? "approved" : undefined;
+  if (!state) return undefined;
+  // Older servers do not say `advertised`: their "approved, not advertised" says it in the state.
+  const advertised = typeof v.advertised === "boolean" ? v.advertised : v.state !== "approved, not advertised";
+  return { id: v.route_id, nodeId: v.node_id, router: v.node, cidr: v.network, state, advertised, masquerade: v.masquerade !== false, refused: typeof v.refused === "string" && v.refused.length <= 400 ? v.refused : undefined };
+}
+/** Reads a `mesh.route.list` result; rows it cannot read are left out (never invented). */
+export function parseRoutes(v: unknown): WireRoute[] | undefined {
+  if (!isObject(v) || !Array.isArray(v.routes) || v.routes.length > MAX_ROUTES) return undefined;
+  return v.routes.flatMap((r) => { const p = parseRoute(r); return p ? [p] : []; });
+}
+/** What a route action answered: done (with the revision when something was written), or refused with the server's reason. */
+export type RouteAnswer = { ok: true; rev: number | undefined } | { ok: false; reason: string };
+/** Reads the answer of `mesh.route.approve`, `.decline` or `.revoke`. */
+export function parseRouteAnswer(v: unknown): RouteAnswer | undefined {
+  if (!isObject(v) || typeof v.state !== "string") return undefined;
+  if (v.state === "refused") return { ok: false, reason: typeof v.reason === "string" && v.reason.length <= 400 ? v.reason : "" };
+  return { ok: true, rev: count(v.revision) ? v.revision : undefined };
 }
 
 /** The revision in an action's answer (and the new grant's arrow id, for a create). */

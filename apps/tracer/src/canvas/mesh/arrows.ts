@@ -68,6 +68,13 @@ export class Arrow {
   readonly hit: SVGPathElement | undefined;
   tailHandle: SVGCircleElement | undefined;
   headHandle: SVGCircleElement | undefined;
+  /**
+   * The grab area of each end: an invisible disk around the handle, as wide as a fingertip on touch (44 px) and a small
+   * button on a desktop (28 px) at every zoom. It is a circle of almost no radius with a wide transparent stroke (the stroke's
+   * width is set in screen pixels by CSS, `--k`), so its size never depends on the zoom. Same `data-end` as its handle.
+   */
+  private tailGrab: SVGCircleElement | undefined;
+  private headGrab: SVGCircleElement | undefined;
   private ends: { p0: Pt; p1: Pt; r: string } | undefined;
   /** Last tip, so the press of the head can pivot on it. */
   private tip: Pt = { x: 0, y: 0 };
@@ -104,12 +111,19 @@ export class Arrow {
     this.tailHandle.dataset.end = "tail";
     this.headHandle = svgEl("circle", "cl-arrow-handle");
     this.headHandle.dataset.end = "head";
-    this.g.append(this.tailHandle, this.headHandle);
+    this.tailGrab = svgEl("circle", "cl-arrow-grab");
+    this.tailGrab.dataset.end = "tail";
+    this.headGrab = svgEl("circle", "cl-arrow-grab");
+    this.headGrab.dataset.end = "head";
+    // The grab areas sit under the rings, so a ring keeps its own cursor and the disk catches what misses it.
+    this.g.append(this.tailGrab, this.headGrab, this.tailHandle, this.headHandle);
     if (this.ends) this.placeHandles(this.ends.p0, this.ends.p1, this.ends.r);
   }
+  /** Puts both rings and both grab areas on the ends last drawn; `r` is the rings' radius in world pixels. */
   private placeHandles(p0: Pt, p1: Pt, r: string): void {
     if (!this.tailHandle || !this.headHandle) return;
     for (const [h, pt] of [[this.tailHandle, p0], [this.headHandle, p1]] as const) { h.setAttribute("cx", pt.x.toFixed(1)); h.setAttribute("cy", pt.y.toFixed(1)); h.setAttribute("r", r); }
+    for (const [h, pt] of [[this.tailGrab, p0], [this.headGrab, p1]] as const) { if (!h) continue; h.setAttribute("cx", pt.x.toFixed(1)); h.setAttribute("cy", pt.y.toFixed(1)); h.setAttribute("r", "0.5"); }
   }
 
   /** Draws from `p0` (leaving along `t0`) to `p1` (arriving along `t1`). `size` is the head length in world px. */

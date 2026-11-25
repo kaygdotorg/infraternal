@@ -6,6 +6,7 @@ import { ICONS } from "../../../../../packages/ui/src/icons";
 import { hostIconMarkup } from "../../../../../packages/ui/src/host-icons";
 import type { WindowModel } from "../model/types";
 
+/** The glyphs of the canvas, by name. */
 export const ICON = {
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
   /** A question mark in a ring: "read about this window" (the first button of an action group, #304). */
@@ -17,6 +18,8 @@ export const ICON = {
   logs: '<path d="M5 6h14M5 10h10M5 14h14M5 18h8"/>',
   node: '<circle cx="12" cy="12" r="2.6"/><circle cx="5.5" cy="6" r="1.8"/><circle cx="18.5" cy="7" r="1.8"/><circle cx="17.5" cy="18" r="1.8"/><path d="m10 10.4-3-3M14.4 11l2.6-2.7M13.8 13.9l2.6 2.8"/>',
   tag: '<path d="M4 4h7l9 9-7 7-9-9z"/><circle cx="8" cy="8" r="1.2"/>',
+  /** A network behind a machine (a subnet route): a small tree of boxes under one. */
+  network: '<rect x="9" y="3.5" width="6" height="5" rx="1.2"/><rect x="3" y="15.5" width="6" height="5" rx="1.2"/><rect x="15" y="15.5" width="6" height="5" rx="1.2"/><path d="M12 8.5v3.5M6 15.5V12h12v3.5"/>',
   console: ICONS.terminal,
   chevron: '<path d="m9 6 6 6-6 6"/>',
   port: '<path d="M6 12h10m-4-4 4 4-4 4"/>',

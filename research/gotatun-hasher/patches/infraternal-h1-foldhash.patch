@@ -1,0 +1,91 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 67fe251d2..eea795f6a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2247,6 +2247,7 @@ name = "infraternal-plugin-mesh"
+ version = "0.1.0"
+ dependencies = [
+  "bytes",
++ "foldhash",
+  "futures-util",
+  "gotatun",
+  "hickory-proto",
+diff --git a/crates/plugins/mesh/Cargo.toml b/crates/plugins/mesh/Cargo.toml
+index 188204deb..20501069d 100644
+--- a/crates/plugins/mesh/Cargo.toml
++++ b/crates/plugins/mesh/Cargo.toml
+@@ -30,6 +30,7 @@ test-support = ["agent", "infraternal-plugin-relay?/test-support"]
+ mesh-dns = ["dep:hickory-proto", "dep:url"]
+ 
+ [dependencies]
++foldhash = "0.2"
+ infraternal-plugin-api = { workspace = true, features = ["socket-host"] }
+ infraternal-protocol.workspace = true
+ infraternal-mesh = { version = "0.1.0", path = "../../infraternal-mesh" }
+diff --git a/crates/plugins/mesh/src/packet_filter.rs b/crates/plugins/mesh/src/packet_filter.rs
+index c07d94cb9..1626942f7 100644
+--- a/crates/plugins/mesh/src/packet_filter.rs
++++ b/crates/plugins/mesh/src/packet_filter.rs
+@@ -940,7 +940,7 @@ struct CompiledPolicy {
+     local6: Ipv6Addr,
+     node: crate::policy::model::NodeId,
+     server: Option<crate::policy::model::NodeId>,
+-    peer_addresses: HashMap<IpAddr, usize>,
++    peer_addresses: HashMap<IpAddr, usize, FlowHashState>,
+     peers: Vec<PeerAccess>,
+     proxy_ingress: MeshProxyIngress,
+     /// Every network behind a router peer that this node may reach (D197 M3), with that peer's
+@@ -973,7 +973,7 @@ impl CompiledPolicy {
+             local6: Ipv6Addr::UNSPECIFIED,
+             node: crate::policy::model::NodeId(0),
+             server: None,
+-            peer_addresses: HashMap::new(),
++            peer_addresses: HashMap::default(),
+             peers: Vec::new(),
+             proxy_ingress: MeshProxyIngress::default(),
+             through: Vec::new(),
+@@ -983,7 +983,7 @@ impl CompiledPolicy {
+ 
+     /// Build direct address indexes from one complete coordinator and proxy snapshot.
+     fn compile(config: &Config, proxy_ingress: MeshProxyIngress) -> io::Result<Self> {
+-        let mut peer_addresses = HashMap::new();
++        let mut peer_addresses = HashMap::default();
+         peer_addresses
+             .try_reserve(config.peers.len().saturating_mul(2))
+             .map_err(|_| io::Error::other("mesh peer address index could not be allocated"))?;
+@@ -2106,20 +2106,28 @@ impl FlowShard {
+     }
+ }
+ 
++/// The hasher family under test (J1204, #260): per-process random seed, so the slot of a tuple is
++/// not predictable from outside (the product's `DefaultHasher::new()` uses fixed zero keys).
++type FlowHashState = foldhash::fast::RandomState;
++
++/// One process-wide seeded state shared by the flow and fragment tables.
++fn flow_hash_state() -> &'static FlowHashState {
++    static STATE: std::sync::OnceLock<FlowHashState> = std::sync::OnceLock::new();
++    STATE.get_or_init(FlowHashState::default)
++}
++
+ /// Index a tuple inside its peer's fixed-size table in either packet direction.
+ fn flow_start(key: FlowKey) -> usize {
+-    let mut tuple_hasher = DefaultHasher::new();
+-    key.canonical().hash(&mut tuple_hasher);
+-    let tuple_hash = tuple_hasher.finish();
++    use std::hash::BuildHasher;
++    let tuple_hash = flow_hash_state().hash_one(key.canonical());
+     usize::try_from(tuple_hash % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
+ }
+ 
+ /// Index one fragment identity inside its peer's fixed-size table.
+ fn fragment_start(key: FragmentKey, direction: Direction) -> usize {
+-    let mut tuple_hasher = DefaultHasher::new();
+-    key.hash(&mut tuple_hasher);
+-    direction.hash(&mut tuple_hasher);
+-    usize::try_from(tuple_hasher.finish() % FRAGMENTS_PER_PEER_HASH).unwrap_or_default()
++    use std::hash::BuildHasher;
++    let tuple_hash = flow_hash_state().hash_one((key, direction));
++    usize::try_from(tuple_hash % FRAGMENTS_PER_PEER_HASH).unwrap_or_default()
+ }
+ 
+ /// Parsed packet fields used for policy, conntrack and checksum-safe SSH translation.

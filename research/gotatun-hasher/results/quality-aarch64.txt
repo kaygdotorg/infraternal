@@ -1,0 +1,40 @@
+== v4: 256 sequential ephemeral ports to 6 server ports
+sip13_fixed(current)               mean probe  0.465  max 13
+foldhash_fast                      mean probe  0.363  max 4
+foldhash_fast fixed seed           mean probe  0.367  max 7
+foldhash_quality                   mean probe  0.465  max 12
+ahash fixed seeds                  mean probe  0.434  max 6
+fxhash                             mean probe  0.484  max 7
+fxhash+symmetric                   mean probe  0.414  max 7
+foldhash_fast+symmetric            mean probe  0.379  max 8
+manual_fold                        mean probe  0.375  max 7
+== v4: 256 flows, 1 server port, ports +1
+sip13_fixed(current)               mean probe  0.422  max 10
+foldhash_fast                      mean probe  0.633  max 12
+foldhash_fast fixed seed           mean probe  0.367  max 8
+foldhash_quality                   mean probe  0.672  max 10
+ahash fixed seeds                  mean probe  0.516  max 9
+fxhash                             mean probe  0.000  max 0
+fxhash+symmetric                   mean probe  0.754  max 10
+foldhash_fast+symmetric            mean probe  0.449  max 10
+manual_fold                        mean probe  0.574  max 12
+== v6: 256 sequential ephemeral ports to 6 server ports
+sip13_fixed(current)               mean probe  0.453  max 17
+foldhash_fast                      mean probe  0.445  max 7
+foldhash_fast fixed seed           mean probe  0.320  max 4
+foldhash_quality                   mean probe  0.418  max 5
+ahash fixed seeds                  mean probe  0.418  max 6
+fxhash                             mean probe  0.570  max 10
+fxhash+symmetric                   mean probe  0.645  max 14
+foldhash_fast+symmetric            mean probe  0.461  max 12
+manual_fold                        mean probe  0.594  max 12
+== v6: 256 flows, 1 server port, ports +1
+sip13_fixed(current)               mean probe  0.441  max 6
+foldhash_fast                      mean probe  0.469  max 7
+foldhash_fast fixed seed           mean probe  0.699  max 10
+foldhash_quality                   mean probe  0.469  max 11
+ahash fixed seeds                  mean probe  0.414  max 13
+fxhash                             mean probe  0.000  max 0
+fxhash+symmetric                   mean probe  0.773  max 12
+foldhash_fast+symmetric            mean probe  0.453  max 7
+manual_fold                        mean probe  0.461  max 6

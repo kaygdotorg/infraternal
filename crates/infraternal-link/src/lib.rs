@@ -10,15 +10,13 @@
 //! - [`supervisor`]: the reconnect loop, its backoff and offline watchdog.
 //! - `dial_runtime` (feature `quic`): the QUIC runtime of one dial attempt.
 //! - [`transport`]: the bounded frame reader and writer over a channel.
-//! - [`enrollment`], [`agent_link`]: the join and WebSocket-proof wire models.
+//! - [`enrollment`]: the join's wire models.
 //! - `identity`, `quic` (feature `quic`): the client identity as a signer
 //!   (Ed25519 PKCS#8 on hosts, the Secure Enclave later) and the QUIC config.
 //! - [`server_leaf_floor`]: the server-leaf age floor, read from DER.
 //! - `wire_datagrams` (features `quic` and `native-streams`): QUIC datagram lanes for plugins.
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
-/// The WebSocket listener's key-possession proof: challenge, proof and ready messages.
-pub mod agent_link;
 /// The QUIC runtime of one dial attempt, which cancels its drivers when dropped.
 #[cfg(feature = "quic")]
 pub mod dial_runtime;

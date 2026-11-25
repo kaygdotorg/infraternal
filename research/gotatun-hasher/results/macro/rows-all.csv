@@ -1,0 +1,11 @@
+hold,row,setup_first_s,setup_second_s,pre_machine_ctxt_s_a,pre_rss_mib_a,pre_machine_ctxt_s_b,pre_rss_mib_b,pre_wakeups_s,pre_procs,post_machine_ctxt_s_a,post_rss_mib_a,post_machine_ctxt_s_b,post_rss_mib_b,post_wakeups_s,post_procs
+m1b,H.1,6.947,4.694,459.2,32.6,471.8,20.7,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.9w b:infraternal=20MiB/1.0w,438.8,42.7,462.0,42.4,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=35MiB/0.5w b:infraternal=42MiB/0.4w
+m1b,H.2,7.027,4.762,449.1,32.4,445.5,20.9,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/1.0w b:infraternal=20MiB/0.9w,473.4,40.0,472.5,45.5,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.5w b:infraternal=45MiB/0.7w
+m1b,I.1,6.975,4.734,473.8,30.2,483.5,21.0,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=22MiB/0.9w b:infraternal=20MiB/1.0w,445.0,38.9,469.4,41.5,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=31MiB/0.6w b:infraternal=41MiB/0.5w
+m1b,I.2,6.963,4.662,454.9,32.2,460.4,21.2,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.9w b:infraternal=21MiB/1.0w,445.1,40.7,479.8,42.0,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=33MiB/0.5w b:infraternal=41MiB/0.4w
+m1b,X,,,462.5,0.0,537.0,0.0,0,,,,,,0,
+m2,H.1,6.904,4.679,447.6,31.7,501.4,20.2,1.6,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.8w b:infraternal=20MiB/0.8w,460.9,38.2,487.8,42.6,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=30MiB/0.5w b:infraternal=42MiB/0.7w
+m2,H.2,6.983,4.747,483.7,30.9,522.1,20.6,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.9w b:infraternal=20MiB/1.0w,434.2,38.3,484.0,42.9,0.8,a:coordinator_fix=7MiB/0.0w a:infraternal=30MiB/0.3w b:infraternal=42MiB/0.5w
+m2,I.1,6.94,4.65,446.7,32.9,491.1,21.2,2.0,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/1.0w b:infraternal=21MiB/1.0w,448.0,43.4,486.2,42.8,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=36MiB/0.5w b:infraternal=42MiB/0.4w
+m2,I.2,7.023,4.754,453.7,31.0,479.4,21.4,1.9,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/1.0w b:infraternal=21MiB/0.9w,457.2,39.6,486.0,45.4,1.4,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.6w b:infraternal=45MiB/0.8w
+m2,X,,,436.1,0.0,467.8,0.0,0,,,,,,0,

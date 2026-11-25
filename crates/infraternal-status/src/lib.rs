@@ -212,10 +212,27 @@ impl Roots {
             system_units,
             user_units: config.map(|config| config.join("systemd/user")),
             run_dir,
-            // A server's database lives here when no unit names it.
-            data_dirs: vec![PathBuf::from("/var/lib/infraternal")],
+            // A server's database lives here when no unit names it. Debug builds
+            // take the same fixture hook as `infraternal`'s install paths, so tests
+            // never read the machine's real data folder.
+            data_dirs: vec![Self::default_data_dir()],
             net_class: PathBuf::from("/sys/class/net"),
         }
+    }
+}
+
+impl Roots {
+    /// The machine's system data folder, where a server with no unit naming one keeps its database.
+    ///
+    /// Debug builds honour `INFRATERNAL_TEST_LINUX_SYSTEM_BASE`, the same fixture hook
+    /// `infraternal` reads for its install defaults, so a test can say which base
+    /// the machine has. Release builds always use `/var/lib/infraternal`.
+    fn default_data_dir() -> PathBuf {
+        #[cfg(debug_assertions)]
+        if let Some(base) = std::env::var_os("INFRATERNAL_TEST_LINUX_SYSTEM_BASE") {
+            return PathBuf::from(base);
+        }
+        PathBuf::from("/var/lib/infraternal")
     }
 }
 

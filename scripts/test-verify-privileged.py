@@ -265,6 +265,21 @@ class IgnoredSelection(unittest.TestCase):
         self.assertIn('fallback_after_unobserved_deletion_repairs_inventory', found['lib'])
         self.assertNotIn('periodic_recheck_idle_measurement', found['lib'])
 
+    def test_resolver_guard_flags_only_new_mesh_dns_on_host_links(self):
+        """A host link that gains a :1053 server fails the row; the mesh link and old state do not (#584)."""
+        before = p.resolved_mesh_links(
+            'Global:\nLink 2 (eth0): 1.1.1.1 8.8.8.8\nLink 4 (docker0): 10.254.0.2:1053\n'
+            'Link 106 (infraternal0): 10.254.0.2:1053\n')
+        self.assertEqual(before, {'docker0 (ifindex 4)'})
+        after = p.resolved_mesh_links(
+            'Global:\nLink 2 (eth0): 10.254.0.1:1053\nLink 3 (tailscale0): 100.100.100.100\n'
+            'Link 4 (docker0): 10.254.0.2:1053\nLink 106 (infraternal0): 10.254.0.1:1053\n')
+        failures = p.resolved_guard_failures(before, after)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('eth0 (ifindex 2)', failures[0])
+        self.assertEqual(p.resolved_guard_failures(None, after), [])
+        self.assertEqual(p.resolved_guard_failures(before, before), [])
+
     def test_mesh_dns_is_default_and_explicit_in_the_privileged_matrix(self):
         """Shipping enables mesh DNS; the namespace matrix enables it only for the DNS target."""
         shared = dict((name, f) for name, _, f in p.PACKAGES['mesh'])['infraternal-plugin-mesh']

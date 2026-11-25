@@ -43,7 +43,6 @@ pub(crate) enum RouteState {
     Failed(String),
     /// Not installed on purpose; the sentence says why (a Mac's LAN or another VPN overlaps it,
     /// it holds a peer's underlay address, ...; see [`crate::macos_subnet_routes::Skip`]).
-    #[cfg(any(target_os = "macos", test))]
     Skipped(String),
 }
 
@@ -61,7 +60,6 @@ pub(crate) fn route_json(state: Option<&RouteState>) -> serde_json::Value {
         Some(RouteState::Failed(error)) => {
             serde_json::json!({"state": "failed", "reason": error})
         }
-        #[cfg(any(target_os = "macos", test))]
         Some(RouteState::Skipped(reason)) => {
             serde_json::json!({"state": "not installed", "reason": reason})
         }
@@ -146,6 +144,88 @@ fn read_switch(path: &Path) -> io::Result<bool> {
     }
 }
 
+/// The first underlay address in `endpoints` that lies inside `network`, if any.
+///
+/// The mesh's UDP socket is not bound to the mesh link, so routing such a network into the link
+/// would send the tunnel's own packets to that peer back into the tunnel. Both the Mac plan
+/// ([`crate::macos_subnet_routes::Skip::HoldsEndpoint`]) and the Linux install use this one test,
+/// so the two systems leave out the same networks.
+#[must_use]
+pub(crate) fn holds_endpoint(
+    network: Network,
+    endpoints: &[std::net::IpAddr],
+) -> Option<std::net::IpAddr> {
+    endpoints
+        .iter()
+        .find(|address| network.contains(**address))
+        .copied()
+}
+
+/// The reason, in words a person can act on, why a network holding `address` is left out;
+/// `machine` is how this system calls itself (`this Mac`, `this machine`).
+#[must_use]
+pub(crate) fn holds_endpoint_sentence(address: std::net::IpAddr, machine: &str) -> String {
+    format!(
+        "it holds {address}, where {machine} reaches a mesh peer; routing it into the mesh \
+         would send the tunnel's own packets back into it"
+    )
+}
+
+/// Every underlay address this node sends to: each peer's configured endpoint and walk
+/// candidates (a walk may move the peer to any of them) and the authenticated endpoints the
+/// engine learned since (`live`). A wanted network holding one of them is never routed into the
+/// mesh link.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub(crate) fn underlay_addresses(
+    config: &crate::dataplane::Config,
+    live: impl IntoIterator<Item = std::net::SocketAddr>,
+) -> Vec<std::net::IpAddr> {
+    let mut addresses: Vec<std::net::IpAddr> = config
+        .peers
+        .values()
+        .flat_map(|policy| {
+            policy
+                .peer
+                .endpoint
+                .iter()
+                .chain(policy.peer.candidates.iter())
+        })
+        .map(std::net::SocketAddr::ip)
+        .chain(live.into_iter().map(|endpoint| endpoint.ip()))
+        .collect();
+    addresses.sort_unstable();
+    addresses.dedup();
+    addresses
+}
+
+/// Split `wanted` into the networks that may be routed and the ones left out because they hold
+/// an underlay address (see [`holds_endpoint`]), with the reason text for `mesh routes`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub(crate) fn split_by_underlay(
+    wanted: &[Network],
+    endpoints: &[std::net::IpAddr],
+) -> (
+    Vec<Network>,
+    std::collections::BTreeMap<Network, RouteState>,
+) {
+    let mut routable = Vec::new();
+    let mut left_out = std::collections::BTreeMap::new();
+    for network in wanted {
+        match holds_endpoint(*network, endpoints) {
+            Some(address) => {
+                left_out.insert(
+                    *network,
+                    RouteState::Skipped(holds_endpoint_sentence(address, "this machine")),
+                );
+            }
+            None => routable.push(*network),
+        }
+    }
+    (routable, left_out)
+}
+
 /// The networks to route through router peers, and the networks to forward, from one snapshot.
 ///
 /// Only IPv4 networks with a non-empty grant count, the same set the packet filter compiles.
@@ -199,6 +279,96 @@ mod tests {
         assert_eq!(
             state.forwarding_json()["ip_forward"],
             "turned on by infraternal"
+        );
+    }
+
+    /// A snapshot whose one peer sits at `endpoint` with `candidates`.
+    fn config_with_peer(endpoint: Option<&str>, candidates: &[&str]) -> crate::dataplane::Config {
+        use crate::{
+            dataplane::{Config, DefaultPolicy, Peer, PeerNetworks, PeerPolicy},
+            policy::{
+                model::{Addresses, NodeId, PublicKey},
+                rules::TrafficPolicy,
+            },
+        };
+        Config {
+            authority_epoch: None,
+            rotation_operation: None,
+            local_key: Some(PublicKey([1; 32])),
+            server: Some(NodeId(1)),
+            node: NodeId(2),
+            #[cfg(feature = "mesh-dns")]
+            name: None,
+            #[cfg(feature = "mesh-dns")]
+            dns_suffix: crate::dataplane::DEFAULT_DNS_SUFFIX.to_owned(),
+            version: 1,
+            addresses: Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            default_policy: DefaultPolicy::Deny,
+            exposure: None,
+            peers: std::collections::BTreeMap::from([(
+                NodeId(1),
+                PeerPolicy {
+                    peer: Peer {
+                        key: PublicKey([3; 32]),
+                        previous_key: None,
+                        previous_active: false,
+                        addresses: Addresses {
+                            ipv4: "10.254.0.1".parse().unwrap(),
+                            ipv6: "fd01::1".parse().unwrap(),
+                        },
+                        endpoint: endpoint.map(|text| text.parse().unwrap()),
+                        candidates: candidates
+                            .iter()
+                            .map(|text| text.parse().unwrap())
+                            .collect(),
+                        ipv4_only: false,
+                    },
+                    inbound: TrafficPolicy::All,
+                    outbound: TrafficPolicy::All,
+                    access_ssh: None,
+                    networks: PeerNetworks::default(),
+                },
+            )]),
+            #[cfg(feature = "mesh-dns")]
+            peer_names: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A network holding a peer's endpoint, a walk candidate or a learned endpoint is left out
+    /// with the shared reason; the rest stays routable (J1195: a Linux route to it would loop the
+    /// tunnel into itself).
+    #[test]
+    fn a_network_holding_an_underlay_address_is_left_out() {
+        let config = config_with_peer(Some("192.168.1.9:51820"), &["10.20.0.5:51820"]);
+        let learned: std::net::SocketAddr = "172.16.4.2:40000".parse().unwrap();
+        let endpoints = underlay_addresses(&config, [learned]);
+        assert_eq!(endpoints.len(), 3);
+        let wanted: Vec<Network> = [
+            "192.168.1.0/24",
+            "10.20.0.0/16",
+            "172.16.0.0/12",
+            "10.99.0.0/24",
+        ]
+        .iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+        let (routable, left_out) = split_by_underlay(&wanted, &endpoints);
+        assert_eq!(routable, vec!["10.99.0.0/24".parse::<Network>().unwrap()]);
+        assert_eq!(left_out.len(), 3);
+        let state = left_out[&"192.168.1.0/24".parse::<Network>().unwrap()].clone();
+        assert_eq!(
+            route_json(Some(&state))["reason"],
+            "it holds 192.168.1.9, where this machine reaches a mesh peer; routing it into the \
+             mesh would send the tunnel's own packets back into it"
+        );
+        // The Mac says the same thing in its own words.
+        assert_eq!(
+            holds_endpoint_sentence("192.168.1.9".parse().unwrap(), "this Mac"),
+            crate::macos_subnet_routes::Skip::HoldsEndpoint("192.168.1.9".parse().unwrap())
+                .sentence()
         );
     }
 }

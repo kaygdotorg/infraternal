@@ -374,3 +374,92 @@ async fn the_local_operator_approves_without_a_session() {
     .unwrap();
     assert!(detail.contains(r#""via":"local""#), "{detail}");
 }
+
+/// A declined network stops waiting and is remembered through a withdrawal and a re-advertisement; only the owner
+/// declines; an approved network cannot be declined (that is a revoke); Approve still works and clears the decline.
+#[tokio::test]
+async fn a_declined_network_is_remembered_until_the_owner_approves_it() {
+    let (service, [_, router, client], pool) = mesh().await;
+    let store = service.dataplane();
+    store
+        .record_routes(router, Some(&[net("192.168.1.0/24")]))
+        .await
+        .unwrap();
+    let route = owner(&service, LIST, json!({})).await["routes"][0]["route_id"]
+        .as_u64()
+        .unwrap();
+    let denied = service
+        .execute(
+            "alice",
+            DECLINE,
+            &serde_json::to_vec(&json!({"route_id": route})).unwrap(),
+            1_000,
+        )
+        .await;
+    assert_eq!(denied, Err(MeshApiError::Denied));
+
+    let before = revision(&pool).await;
+    let declined = owner(&service, DECLINE, json!({"route_id": route})).await;
+    assert_eq!(declined["state"], "declined");
+    assert_eq!(
+        revision(&pool).await,
+        before + 1,
+        "a decline is one revision"
+    );
+    // Declining again writes nothing.
+    let again = owner(&service, DECLINE, json!({"route_id": route})).await;
+    assert!(again.get("revision").is_none(), "{again}");
+    assert_eq!(revision(&pool).await, before + 1);
+    let listed = owner(&service, LIST, json!({})).await;
+    assert_eq!(listed["routes"][0]["state"], "declined");
+    assert_eq!(listed["routes"][0]["advertised"], true);
+    assert!(listed["routes"][0].get("refused").is_none());
+
+    // The machine withdraws it and advertises it again: still declined, same identity.
+    store.record_routes(router, Some(&[])).await.unwrap();
+    let withdrawn = owner(&service, LIST, json!({})).await;
+    assert_eq!(withdrawn["routes"][0]["state"], "declined");
+    assert_eq!(withdrawn["routes"][0]["advertised"], false);
+    store
+        .record_routes(router, Some(&[net("192.168.1.0/24")]))
+        .await
+        .unwrap();
+    let back = owner(&service, LIST, json!({})).await;
+    assert_eq!(back["routes"][0]["state"], "declined");
+    assert_eq!(back["routes"][0]["route_id"].as_u64(), Some(route));
+    assert_eq!(through(&store.config(client).await.unwrap(), router), []);
+
+    // Approve still works and takes the decline back.
+    let approved = owner(
+        &service,
+        APPROVE,
+        json!({"node_id": router.0, "network": "192.168.1.0/24"}),
+    )
+    .await;
+    assert_eq!(approved["state"], "approved");
+    assert_eq!(
+        through(&store.config(client).await.unwrap(), router),
+        [net("192.168.1.0/24")]
+    );
+    let declined_at: Option<i64> =
+        sqlx::query_scalar("SELECT declined_at FROM mesh_routes WHERE id=?")
+            .bind(i64::try_from(route).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(declined_at, None);
+    // An approved network is revoked, never declined.
+    let refused = service
+        .execute(
+            "owner",
+            DECLINE,
+            &serde_json::to_vec(&json!({"route_id": route})).unwrap(),
+            1_000,
+        )
+        .await;
+    assert_eq!(refused, Err(MeshApiError::NotFound));
+    // Revoke puts it back to waiting (not declined), with a new identity.
+    owner(&service, REVOKE, json!({"route_id": route})).await;
+    let waiting = owner(&service, LIST, json!({})).await;
+    assert_eq!(waiting["routes"][0]["state"], "waiting for approval");
+}

@@ -16,7 +16,10 @@ brackets). The contracts in `contracts/` are written before S1 code starts.
   numbers, so they resume without loss [11]. Predictive echo hides the round
   trip.
 - **Leg B** (server ↔ agent): QUIC with a TCP/TLS fallback. Both ends are our
-  code. KCP is added only if a benchmark justifies it [11].
+  code. KCP is added only if a benchmark justifies it [11]. Where both are
+  blocked, the same mutual TLS runs inside a WebSocket on the server's public
+  HTTPS origin (`/remote/agent`), so a reverse proxy only carries leg-B
+  ciphertext (#559).
 - **Leg C** (agent ↔ host): a local PTY or engine socket, or SSH to devices that
   have no agent [13].
 

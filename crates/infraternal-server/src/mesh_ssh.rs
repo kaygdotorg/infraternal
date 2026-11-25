@@ -202,7 +202,7 @@ impl MeshSshPlugin {
                 .await
                 .ok()?,
             Some(host) => sqlx::query_scalar(
-                "SELECT owner_id FROM remote_hosts WHERE id = ? AND revoked_at IS NULL",
+                "SELECT owner_id FROM remote_hosts WHERE id = ? AND revoked_at IS NULL AND mode IN ('rootless', 'rootful')",
             )
             .bind(host.as_bytes().as_slice())
             .fetch_optional(&self.pool)
@@ -221,7 +221,7 @@ impl MeshSshPlugin {
         let (mode, uid, address): (String, i64, Option<String>) = sqlx::query_as(
             "SELECT h.mode, h.execution_uid, b.address FROM remote_hosts h \
              LEFT JOIN remote_host_bootstrap b ON b.host_id = h.id \
-             WHERE h.id = ? AND h.revoked_at IS NULL",
+             WHERE h.id = ? AND h.revoked_at IS NULL AND h.mode IN ('rootless', 'rootful')",
         )
         .bind(host.as_bytes().as_slice())
         .fetch_optional(&self.pool)

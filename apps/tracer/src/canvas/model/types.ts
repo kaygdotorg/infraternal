@@ -5,6 +5,7 @@
  * layout and references only; `toDocument` and `fromDocument` convert between the two. Nothing here is DOM.
  */
 import type { HostPlatform } from "../../../../../packages/ui/src/host-icons";
+import type { MeshNetwork } from "../mesh/networks";
 
 /**
  * What a window shows. A `flow` window holds a short guided task (add a host); it is never saved and closes itself when done. Only a `terminal` window is bound to a session and can split.
@@ -87,7 +88,7 @@ export interface ColumnModel { id: string; w: number; half?: string; group?: str
 
 /** A positioned host or tag card, including restore safety when the server proves it. */
 export interface NodeModel {
-  id: string; kind: "host" | "tag"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
+  id: string; kind: "host" | "tag" | "network"; label: string; x: number; y: number; detail: string; sub: string; os?: HostPlatform;
   /** Live state of a host (a tag has none): drives the card's status icon. */
   state?: "online" | "behind" | "offline";
   /** Whether this host can retire stale peers after a server authority restore. */
@@ -96,6 +97,8 @@ export interface NodeModel {
   tagList?: string[];
   /** The person dragged this node, so it stays where it is while the rest are laid out automatically (D180). */
   pinned?: boolean;
+  /** A network (a subnet route, D197 M3): who advertised it, whether the owner approved it, and what its machines see. */
+  route?: MeshNetwork;
 }
 
 /**

@@ -143,11 +143,18 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
         csr_der: &[u8],
         now: i64,
     ) -> Result<SignedCertificate, RemoteEnrollmentError> {
-        let identity = self
-            .store
-            .admit(predecessor, now)
-            .await
-            .map_err(|_| RemoteEnrollmentError)?;
+        // A host or a device renews the same way; the key algorithm below is
+        // read from the predecessor's own certificate, not chosen by the caller.
+        let host = match self.store.admit(predecessor, now).await {
+            Ok(identity) => identity.host,
+            Err(_) => {
+                self.store
+                    .admit_device(predecessor, now)
+                    .await
+                    .map_err(|_| RemoteEnrollmentError)?
+                    .host
+            }
+        };
         if csr_der.len() > 4096 {
             return Err(RemoteEnrollmentError);
         }
@@ -166,7 +173,7 @@ impl<S: CaKeySource + ?Sized + 'static> RemoteEnrollment<S> {
                 ValidatedCsr::parse_as(&csr_der, algorithm).map_err(|_| RemoteEnrollmentError)?;
             CertificateAuthority::from_source(source.as_ref())
                 .map_err(|_| RemoteEnrollmentError)?
-                .sign_host(identity.host, &csr, now)
+                .sign_host(host, &csr, now)
                 .map_err(|_| RemoteEnrollmentError)
         })
         .await
@@ -595,50 +602,36 @@ mod tests {
             .digest()
     }
 
-    /// Issues a host invitation bound to `digest`, then marks it as a device
-    /// receipt: the state an approved `device` join leaves (P5 publishes it for real).
-    async fn issue_device_token(
-        store: &EnrollmentStore,
-        pool: &sqlx::SqlitePool,
-        host: Uuid,
-        digest: &[u8; 32],
-        now: i64,
-    ) -> crate::enrollment::JoinToken {
-        let token = store
-            .issue("owner", host, Mode::Rootless, now, digest)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE remote_join_tokens SET key_algorithm='p256' WHERE host_id=?")
-            .bind(host.as_bytes().as_slice())
-            .execute(pool)
-            .await
-            .unwrap();
-        token
-    }
+    /// The pairs a device join may use, and the one a host may use.
+    const DEVICE: (Mode, KeyAlgorithm) = (Mode::Device, KeyAlgorithm::P256);
 
-    /// #580 P3: a device invitation admits exactly its P-256 key, and the
-    /// stored certificate records the 65-byte point as `p256`.
+    /// #580 P3/P5: a device invitation admits exactly its P-256 key, the stored
+    /// certificate records the 65-byte point as `p256` and no uid, and the device
+    /// is admitted as a device, never as a host with terminals.
     #[tokio::test]
     async fn device_invitation_admits_its_p256_key() {
-        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        let (store, pool, host) = crate::enrollment::authority::tests::device_host().await;
         let now = 1_800_000_000;
         let key = p256_key();
-        let token = issue_device_token(&store, &pool, host, &p256_digest(&key), now).await;
+        let secret = crate::enrollment::authority::tests::device_receipt(
+            &store,
+            &pool,
+            host,
+            DEVICE,
+            &p256_digest(&key),
+            now,
+        )
+        .await
+        .unwrap();
         let service =
             RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
         let signed = service
-            .join(
-                host,
-                Mode::Rootless,
-                token.secret(),
-                &p256_csr_for(&key),
-                now,
-            )
+            .join(host, Mode::Device, &secret, &p256_csr_for(&key), now)
             .await
             .unwrap();
         assert_eq!(signed.record.public_key.algorithm(), KeyAlgorithm::P256);
-        let stored: (String, Vec<u8>) = sqlx::query_as(
-            "SELECT key_algorithm, public_key FROM remote_certificates WHERE fingerprint=?",
+        let stored: (String, Vec<u8>, Option<i64>) = sqlx::query_as(
+            "SELECT key_algorithm, public_key, execution_uid FROM remote_certificates WHERE fingerprint=?",
         )
         .bind(signed.record.fingerprint.as_slice())
         .fetch_one(&pool)
@@ -647,15 +640,20 @@ mod tests {
         assert_eq!(stored.0, "p256");
         assert_eq!(stored.1, signed.record.public_key.as_bytes());
         assert_eq!(stored.1.len(), 65);
+        assert_eq!(stored.2, None, "a device certificate carries no uid");
         let leaf = openssl::x509::X509::from_der(&signed.der).unwrap();
         assert!(leaf.public_key().unwrap().public_eq(&key));
         assert_eq!(
             store
-                .admit(&signed.record.fingerprint, now)
+                .admit_device(&signed.record.fingerprint, now)
                 .await
                 .unwrap()
                 .host,
             host
+        );
+        assert!(
+            store.admit(&signed.record.fingerprint, now).await.is_err(),
+            "the host guard (terminals, logins) never admits a device"
         );
         assert_eq!(
             store.host_key_digest(host).await.unwrap(),
@@ -666,42 +664,115 @@ mod tests {
 
     /// #580 P3, Q4: a host invitation never admits a P-256 key, even one whose
     /// digest it was bound to, and a device invitation never admits an Ed25519
-    /// key. Each refusal spends the invitation and records nothing.
+    /// key. Each refusal records no certificate.
     #[tokio::test]
-    async fn cross_algorithm_joins_are_refused_and_spend_the_invitation() {
+    async fn cross_algorithm_joins_are_refused() {
         for device_invitation in [false, true] {
-            let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
             let now = 1_800_000_000;
             let p256 = p256_key();
             let ed25519 = PKey::generate_ed25519().unwrap();
-            let (token, csr) = if device_invitation {
-                let digest: [u8; 32] = Sha256::digest(ed25519.raw_public_key().unwrap()).into();
-                (
-                    issue_device_token(&store, &pool, host, &digest, now).await,
-                    csr_for(&ed25519),
+            let (store, pool, host, mode, secret, csr) = if device_invitation {
+                let (store, pool, host) = crate::enrollment::authority::tests::device_host().await;
+                // A device receipt cannot be written for an Ed25519 key at all, so it
+                // binds the P-256 digest and the join is sent an Ed25519 request.
+                let secret = crate::enrollment::authority::tests::device_receipt(
+                    &store,
+                    &pool,
+                    host,
+                    DEVICE,
+                    &p256_digest(&p256),
+                    now,
                 )
+                .await
+                .unwrap();
+                (store, pool, host, Mode::Device, secret, csr_for(&ed25519))
             } else {
+                let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
                 let token = store
                     .issue("owner", host, Mode::Rootless, now, &p256_digest(&p256))
                     .await
                     .unwrap();
-                (token, p256_csr_for(&p256))
+                (
+                    store,
+                    pool,
+                    host,
+                    Mode::Rootless,
+                    token.secret().to_owned(),
+                    p256_csr_for(&p256),
+                )
             };
             let service =
                 RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
             assert!(
-                service
-                    .join(host, Mode::Rootless, token.secret(), &csr, now)
-                    .await
-                    .is_err(),
+                service.join(host, mode, &secret, &csr, now).await.is_err(),
                 "device invitation {device_invitation}: the other algorithm was admitted"
             );
-            let committed: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_certificates")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            assert_eq!(committed, 1, "only the fixture's own certificate exists");
+            let committed: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM remote_certificates WHERE host_id=? AND key_algorithm=?",
+            )
+            .bind(host.as_bytes().as_slice())
+            .bind(if device_invitation { "ed25519" } else { "p256" })
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(committed, 0, "the refused key left no certificate");
         }
+    }
+
+    /// #580 Q4, red tests for the pairing: only a device holds P-256, and a
+    /// device holds nothing else. The receipt writer, the invitation writer and
+    /// the join each refuse the other pairings, and a device is never invited as a host.
+    #[tokio::test]
+    async fn only_a_device_pairs_with_p256() {
+        let now = 1_800_000_000;
+        let key = p256_key();
+        let digest = p256_digest(&key);
+        let (store, pool, host) = crate::enrollment::authority::tests::device_host().await;
+        for pairing in [
+            (Mode::Device, KeyAlgorithm::Ed25519),
+            (Mode::Rootless, KeyAlgorithm::P256),
+            (Mode::Rootful, KeyAlgorithm::P256),
+            (Mode::Rootless, KeyAlgorithm::Ed25519),
+        ] {
+            assert!(
+                crate::enrollment::authority::tests::device_receipt(
+                    &store, &pool, host, pairing, &digest, now
+                )
+                .await
+                .is_err(),
+                "{pairing:?} was published for a device host"
+            );
+        }
+        assert!(
+            store
+                .issue("owner", host, Mode::Device, now, &digest)
+                .await
+                .is_err(),
+            "an owner-requested invitation never makes a device invitation"
+        );
+        let secret = crate::enrollment::authority::tests::device_receipt(
+            &store, &pool, host, DEVICE, &digest, now,
+        )
+        .await
+        .unwrap();
+        let service =
+            RemoteEnrollment::new(Arc::new(crate::ca::tests::source(true)), store.clone());
+        for mode in [Mode::Rootless, Mode::Rootful] {
+            assert!(
+                service
+                    .join(host, mode, &secret, &p256_csr_for(&key), now)
+                    .await
+                    .is_err(),
+                "a device invitation redeemed as {mode:?}"
+            );
+        }
+        // The wrong-mode attempts did not spend it; the right one still joins.
+        assert!(
+            service
+                .join(host, Mode::Device, &secret, &p256_csr_for(&key), now)
+                .await
+                .is_ok()
+        );
     }
 
     /// The atomic redeem itself refuses a certificate whose algorithm differs

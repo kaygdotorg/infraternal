@@ -27,7 +27,8 @@ function page(value: Record<string, unknown>): { hosts: AdmittedHost[]; next: st
     for (const key of ["user", "os", "address"]) if (r[key] !== undefined && r[key] !== null && (typeof r[key] !== "string" || r[key].length > 1024)) return;
     if (r.state !== undefined && r.state !== "pending" && r.state !== "retired-unreachable") return;
     if (r.direct !== undefined && r.direct !== false) return;
-    hosts.push({ ...(r.state ? { state: r.state as "pending" | "retired-unreachable" } : {}), ...(r.direct === false ? { direct: false as const } : {}), id: r.id, name: r.name, online: r.online, ...(typeof r.user === "string" ? { user: r.user } : {}), ...(typeof r.os === "string" ? { os: hostPlatformFromOs(r.os) } : {}), ...(typeof r.address === "string" ? { address: r.address } : {}) });
+    if (r.device !== undefined && r.device !== true) return;
+    hosts.push({ ...(r.device === true ? { device: true as const } : {}), ...(r.state ? { state: r.state as "pending" | "retired-unreachable" } : {}), ...(r.direct === false ? { direct: false as const } : {}), id: r.id, name: r.name, online: r.online, ...(typeof r.user === "string" ? { user: r.user } : {}), ...(typeof r.os === "string" ? { os: hostPlatformFromOs(r.os) } : {}), ...(typeof r.address === "string" ? { address: r.address } : {}) });
   }
   return { hosts, next: value.next };
 }

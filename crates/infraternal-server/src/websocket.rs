@@ -1671,6 +1671,17 @@ where
             // answer, distinct from every transient close (wire §4, #158).
             let gone = code == CLOSE_SESSION_GONE;
             if gone {
+                // A remote row whose shell the host lost is closed once, so the
+                // retention prune can remove it (#588). The browser's Close below
+                // is the same either way; a failed write only leaves the row open.
+                let _ = crate::terminal_remote_gone::record_on_writer(
+                    &state.auth,
+                    &state.pool,
+                    user_id,
+                    session_token,
+                    &attachment.session_id,
+                )
+                .await;
                 state
                     .queries
                     .lock()
@@ -3132,7 +3143,7 @@ async fn startup_call(
     let (session, op, proposal, confirmed) = match request {
         Request::Get { host_id } | Request::Set { host_id, .. } => {
             if let Some(host) = host_id {
-                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+                let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND mode IN ('rootless','rootful'))")
                     .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_| invalid())?;
                 if !owned {
                     return Err(invalid());
@@ -3397,13 +3408,14 @@ async fn terminal_agent(
     state.remote_hosts.actor(host).await.ok_or(())
 }
 
-/// `Ok` only when `user` owns remote host `host` and it is not revoked.
+/// `Ok` only when `user` owns remote host `host`, it is not revoked and it runs the infraternal agent.
+/// A `device` (#580) is never a place for terminals, so it answers like a host that does not exist.
 ///
 /// Run this before telling a person anything about a host the browser named: a host ID from the
 /// browser is untrusted, and a non-owner must learn nothing about it, not even that it exists.
 #[cfg(feature = "remote")]
 async fn owns_remote_host(state: &WebSocketState, user: &str, host: uuid::Uuid) -> Result<(), ()> {
-    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND mode IN ('rootless','rootful'))")
         .bind(host.as_bytes().as_slice()).bind(user).fetch_one(&state.pool).await.map_err(|_|())?;
     allowed.then_some(()).ok_or(())
 }
@@ -3860,7 +3872,7 @@ impl SocketHost for PluginHost {
             }
             // Resolve both the current login and host owner at selection. The
             // returned host lease deliberately contains no browser credential.
-            let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN sessions s ON s.user_id=h.owner_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND s.token_hash=? AND s.unlocked=1 AND s.expires>unixepoch())")
+            let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts h JOIN sessions s ON s.user_id=h.owner_id WHERE h.id=? AND h.owner_id=? AND h.revoked_at IS NULL AND h.mode IN ('rootless','rootful') AND s.token_hash=? AND s.unlocked=1 AND s.expires>unixepoch())")
                 .bind(id.as_bytes().as_slice()).bind(&self.user).bind(&self.hash).fetch_one(&self.state.pool).await.ok()?;
             if !allowed || !self.authority.permits() {
                 return None;

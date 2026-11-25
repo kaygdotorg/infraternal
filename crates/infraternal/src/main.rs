@@ -1826,8 +1826,7 @@ fn plan_server_data_move(
     let target =
         install_paths::server_data_dir(scope, environment).map_err(|error| error.to_string())?;
     #[cfg(target_os = "linux")]
-    let target = if scope == install_paths::Scope::System
-        && target == Path::new(install_paths::LINUX_SYSTEM_BASE)
+    let target = if scope == install_paths::Scope::System && target == environment.linux_system_base
     {
         combined_server_move_target(target, recorded, &unit)?
     } else {
@@ -3207,7 +3206,7 @@ fn run_remote_agent(
                     Some(remote::Failure::Connect) => "CONNECT",
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
-                    Some(remote::Failure::Challenge) => "CHALLENGE",
+                    Some(remote::Failure::AgentLink) => "AGENT-LINK",
                     Some(
                         remote::Failure::Refused
                         | remote::Failure::IdentityMismatch
@@ -3325,7 +3324,7 @@ fn run_remote_agent(
                         remote::Failure::Refused
                         | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
-                        | remote::Failure::Challenge,
+                        | remote::Failure::AgentLink,
                     )
                     | None => Exit::Failed,
                 }),

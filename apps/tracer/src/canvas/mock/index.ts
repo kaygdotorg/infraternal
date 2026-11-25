@@ -55,6 +55,8 @@ import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account/mount.on-demand";
 import { createStartupDemo } from "./startup-demo";
 import { buildSettingsMapView } from "../settings-rows/model";
+import { rebuildSettingsView } from "../settings-rows/rebuild";
+import { onRoutesSource } from "../mesh/networks";
 import { createRowsDocs } from "../settings-rows/docs-adapter";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
@@ -271,7 +273,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     void onDemand(() => import("./account/mount.on-demand")).then((m) => { if (!signal.aborted) account = m.createAccountMock(core, dataMode); });
   }
   const removeProvider = core.addPaletteProvider(() => {
-    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(updates?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
+    const out: PaletteEntry[] = [...sessionScenes.entries(), ...connection.entries(), ...(version?.entries() ?? []), ...(updates?.entries() ?? []), ...(mesh.routes?.entries() ?? []), ...(account?.entries() ?? []), ...(startupDemo?.entries() ?? [])];
     scenes.forEach((sc, i) => out.push({ group: "Mockup", glyph: "◇", label: `Mockup: scene ${i + 1} – ${sc.name.toLowerCase()}`, hint: "scenes", action: `proto:scene:${i + 1}` }));
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: transparency", hint: "all card and window levels side by side", action: "proto:transparency" });
     out.push({ group: "Mockup", glyph: "◇", label: "Mockup: simulate device switch", hint: "continue from another device", action: "proto:devicechip" });
@@ -288,6 +290,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
     if (kind === "sessions-scene" && value) { void sessionScenes.run(Number(value)); return; }
     if (kind === "ver" && value) { version?.run(value); return; }
     if (kind === "upd" && value) { updates?.run(value); return; }
+    if (kind === "routes" && value) { mesh.routes?.run(value); return; }
     if (kind === "conn" && value) { connection.run(value); return; }
     if (kind === "acct" && value) { account?.run(action.split(":").slice(2).join(":")); return; }
     if (kind === "startup") { startupDemo?.replay(); return; }
@@ -397,6 +400,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
   (window as unknown as { __tracerClusters?: typeof probe }).__tracerClusters = probe;
 
+  // The Networks window comes and goes with the server's routes (shown to the owner only, D197 M3).
+  const offRoutes = onRoutesSource(() => rebuildSettingsView(canvas.cx, mockSettings.map()));
   return {
     dispose() {
       authority.dispose();
@@ -417,6 +422,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       mockupTag.remove();
       chip?.remove();
       stopOffer();
+      offRoutes();
       addHost.dispose(); docs?.dispose();
       canvas.dispose();
       mesh.dispose();

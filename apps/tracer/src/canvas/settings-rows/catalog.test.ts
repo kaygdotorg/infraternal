@@ -124,7 +124,7 @@ test("the owner's map: rows, windows and their order", () => {
     "You: Profile, Passkeys, Recovery, Apps, Devices",
     // App Windows: the server switch for Mac app windows (#146, D349).
     "Machines: New Machines, Updates, App Windows",
-    "Mesh: Keys, Names, Access, Connections",
+    "Mesh: Keys, Names, Access, Networks, Connections",
     "Sharing: Published Services, Certificates",
     "About: Version, Licences",
   ]);

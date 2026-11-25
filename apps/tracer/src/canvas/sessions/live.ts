@@ -59,6 +59,7 @@ export interface LiveSessionsOptions {
   getEndedSession?: (host: string, sessionId: string) => { status?: number } | undefined;
 }
 
+/** The live sessions service: the {@link SessionService} plus what the canvas needs to feed it hosts and devices. */
 export interface LiveSessions extends SessionService {
   /** The terminal of the active window, for callers outside the canvas. */
   activeClient(): TerminalClient | undefined;
@@ -67,6 +68,8 @@ export interface LiveSessions extends SessionService {
   /** Registers a known UUID that this page may open; readable labels never become routing authority. */
   registerHost(host: HostEntry & { address?: string }): void;
   forgetHost(id: string): void;
+  /** The phones and tablets from the last inventory, apart from {@link SessionService.hosts} (#580). */
+  devices(): HostEntry[];
   /** Replaces remote admission while keeping locally enrolled hosts whose setup has not finished; returns removed identities. */
   replaceHosts(hosts: (HostEntry & { address?: string })[], keepWhileSettingUp?: readonly string[]): string[];
   dispose(): void;
@@ -86,6 +89,8 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
   const listeners = new Set<() => void>();
   const bindings = new Set<Binding>();
   const remotes = new Map<string, HostEntry & { address?: string }>();
+  /** Phones and tablets: kept apart from `remotes` so nothing that opens shells can reach them (#580). */
+  const deviceHosts = new Map<string, HostEntry & { address?: string }>();
   let firstHostUsed = false;
   let firstReported = false;
   let firstSettled = false;
@@ -450,9 +455,12 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       remotes.set(entry.id, { ...entry });
       for (const listener of listeners) listener();
     },
-    replaceHosts(entries, keepWhileSettingUp = []) {
-      const ids = new Set(entries.map((entry) => entry.id));
-      if (entries.some((entry) => !isCanonicalUuid(entry.id)) || ids.size !== entries.length) throw new Error("Host inventory is not valid.");
+    replaceHosts(all, keepWhileSettingUp = []) {
+      const ids = new Set(all.map((entry) => entry.id));
+      if (all.some((entry) => !isCanonicalUuid(entry.id)) || ids.size !== all.length) throw new Error("Host inventory is not valid.");
+      const entries = all.filter((entry) => !entry.device);
+      deviceHosts.clear();
+      for (const entry of all) if (entry.device) deviceHosts.set(entry.id, { ...entry });
       const keeping = new Set(keepWhileSettingUp.filter(isCanonicalUuid));
       const retained = [...remotes].filter(([id]) => keeping.has(id) && !ids.has(id));
       const removed = [...remotes.keys()].filter((id) => !ids.has(id) && !keeping.has(id));
@@ -463,6 +471,7 @@ export function createLiveSessions(options: LiveSessionsOptions): LiveSessions {
       return removed;
     },
     forgetHost(id) { remotes.delete(id); for (const listener of listeners) listener(); },
+    devices(): HostEntry[] { return [...deviceHosts.values()]; },
     hosts(): HostEntry[] { return [{ id: "embedded", name: host.name, ...(host.user ? { user: host.user } : {}), ...(host.os ? { os: host.os } : {}) }, ...remotes.values()]; },
     onChange(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     activeClient: () => active?.client,

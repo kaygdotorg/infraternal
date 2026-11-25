@@ -1,0 +1,60 @@
+
+/// Hot-path timing of the whole packet filter (J1204, #260; throwaway, appended to
+/// `packet_filter_tests.rs` in the measurement trees only).
+///
+/// Builds a filter with 1, 100 and 1,000 peers, opens 16 established TCP flows to each of up to
+/// 256 peers, then times `check_at` over a fixed stream of data packets in both directions. The
+/// same test runs against the baseline tree and the patched tree; the difference is the hasher.
+/// Run with `--ignored hasher_bench --nocapture --test-threads 1`. The median of 15 rounds is
+/// printed as `HBENCH peers=N flows=M ns_per_packet=X`.
+#[test]
+#[ignore = "timing run, not a correctness test"]
+fn hasher_bench_check_at_per_packet() {
+    for peers in [1_u32, 100, 1000] {
+        let filter = PacketFilter::new(&scale_config(peers), MeshProxyIngress::default())
+            .expect("compile policy");
+        let now = Instant::now();
+        let active = peers.min(256);
+        let mut stream: Vec<(Vec<u8>, Direction)> = Vec::new();
+        for n in 2..active + 2 {
+            let peer = scale_peer4(n);
+            for f in 0..16_u16 {
+                let port = 30_000 + f;
+                assert!(establish4(&filter, peer, port, now));
+                stream.push((tcp4(LOCAL4, peer, port, 443, ACK), Direction::HostToMesh));
+                stream.push((tcp4(peer, LOCAL4, 443, port, ACK), Direction::MeshToHost));
+            }
+        }
+        // Spread the stream in a fixed pseudo-random order so no peer's table stays hot.
+        let mut order: Vec<usize> = (0..stream.len()).collect();
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for i in (1..order.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            order.swap(i, (state % (i as u64 + 1)) as usize);
+        }
+        let mut medians = Vec::new();
+        for round in 0..15 {
+            let started = Instant::now();
+            let mut passed = 0_usize;
+            for &i in &order {
+                let (packet, direction) = &mut stream[i];
+                passed += usize::from(filter.check_at(packet, *direction, now));
+            }
+            let elapsed = started.elapsed();
+            assert_eq!(passed, order.len(), "every established-flow packet passes");
+            if round >= 3 {
+                medians.push(elapsed.as_nanos() as f64 / order.len() as f64);
+            }
+        }
+        medians.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        println!(
+            "HBENCH peers={peers} flows={} ns_per_packet={:.1} min={:.1} max={:.1}",
+            order.len(),
+            medians[medians.len() / 2],
+            medians[0],
+            medians[medians.len() - 1]
+        );
+    }
+}

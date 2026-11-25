@@ -109,7 +109,8 @@ const DEVICE_APPROVAL_SCOPES = new Set([
 export interface JoinApprovalReview {
   kind: "join_machine";
   hostname: string;
-  mode: "system" | "user";
+  /** `device` is a phone or tablet: it joins the mesh and never runs the infraternal agent. */
+  mode: "system" | "user" | "device";
   keyFingerprint: string;
 }
 
@@ -141,6 +142,7 @@ function isHostName(value: unknown): value is string {
  */
 export async function inspectDeviceApproval(code: string, expected: "sign_in"): Promise<DeviceApprovalReview>;
 export async function inspectDeviceApproval(code: string, expected: "join_machine"): Promise<JoinApprovalReview>;
+/** The implementation of the two overloads above: one inspection, checked against the kind the link expects. */
 export async function inspectDeviceApproval(code: string, expected: ApprovalReview["kind"] = "sign_in"): Promise<ApprovalReview> {
   if (!isDeviceUserCode(code)) throw invalidDeviceApprovalLink(expected);
   let review: { kind?: unknown; device?: unknown; scopes?: unknown; lifetime_seconds?: unknown; hostname?: unknown; mode?: unknown; key_fingerprint?: unknown };
@@ -152,7 +154,7 @@ export async function inspectDeviceApproval(code: string, expected: ApprovalRevi
   if (expected === "join_machine") {
     if (review?.kind === "join_machine"
       && isHostName(review.hostname)
-      && (review.mode === "system" || review.mode === "user")
+      && (review.mode === "system" || review.mode === "user" || review.mode === "device")
       && typeof review.key_fingerprint === "string"
       && FINGERPRINT.test(review.key_fingerprint)) {
       return { kind: "join_machine", hostname: review.hostname, mode: review.mode, keyFingerprint: review.key_fingerprint };

@@ -1065,21 +1065,15 @@ async fn https_once(
         }
     };
     let credentials = credentials.as_ref().unwrap_or(&identity.identity);
-    // The HTTPS link trusts the server only through its leg-B leaf, exactly
-    // like the direct dials (#559).
+    // The HTTPS link runs leg-B mutual TLS inside its WebSocket, so the
+    // server is trusted exactly as on the direct dials (#559).
     let trust = crate::remote_websocket::ServerTrust {
         roots: &identity.roots,
         server_name: &identity.server_name,
         floor: &identity.server_leaf,
-        require_binding: crate::remote_websocket::binding_required(
-            identity.https_root.as_ref(),
-            identity.https_system_roots,
-            &identity.roots,
-        ),
     };
     let channel = match crate::remote_websocket::connect(
         public_origin,
-        identity.host_id,
         credentials,
         identity.https_root.as_ref(),
         identity.https_system_roots,
@@ -1111,8 +1105,10 @@ async fn https_once(
         reason: ServerLinkReason::MeshUnavailable,
     });
     connected.send_replace(true);
+    // The same channel type and adapter as the direct TCP fallback, so both
+    // share one compiled control loop.
     let active = daemon::run_authenticated_with_plugins(
-        &channel,
+        &super::ControlChannel::Tcp(&channel),
         state.to_path_buf(),
         identity.execution_uid,
         renewal,

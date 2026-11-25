@@ -63,6 +63,10 @@ pub struct MeshNode {
     /// that does not report its IPv6 state.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub ipv4_only: bool,
+    /// The node is a phone or tablet (a `device` host, #580): it takes part in the mesh but never
+    /// runs the infraternal agent, so no screen offers a terminal on it. Absent for every other node.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub device: bool,
 }
 
 /// A tag and its stable node membership.
@@ -348,7 +352,10 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<MeshRequest, MeshApiEr
         | "mesh.rotation.interval.set" => {
             MeshRequest::Default(crate::settings::parse_action(action, input)?)
         }
-        crate::route_api::LIST | crate::route_api::APPROVE | crate::route_api::REVOKE => {
+        crate::route_api::LIST
+        | crate::route_api::APPROVE
+        | crate::route_api::REVOKE
+        | crate::route_api::DECLINE => {
             MeshRequest::Route(crate::route_api::parse_action(action, input)?)
         }
         "mesh.list" => MeshRequest::List(parse(input)?),
@@ -2011,11 +2018,20 @@ async fn read_snapshot(
     invalid_hosts: &crate::diagnostics::InvalidHosts,
 ) -> Result<MeshSnapshot, MeshApiError> {
     let node_rows = sqlx::query(
-        "SELECT id,name,name_source,public_key,key_rotation_supported,authority_epoch_supported,last_seen,last_rtt_us,ipv6_supported,ipv4_only FROM mesh_nodes ORDER BY id",
+        "SELECT id,name,name_source,public_key,key_rotation_supported,authority_epoch_supported,last_seen,last_rtt_us,ipv6_supported,ipv4_only,dataplane_host FROM mesh_nodes ORDER BY id",
     )
     .fetch_all(&mut **tx)
     .await
     .map_err(|error| map_sql_error(error))?;
+    // The hosts that are devices, by the hex a node's `dataplane_host` reduces to. A database
+    // without the host ledger (a Mesh-only test schema) has none.
+    let devices: BTreeSet<String> =
+        sqlx::query_scalar("SELECT lower(hex(id)) FROM remote_hosts WHERE mode='device'")
+            .fetch_all(&mut **tx)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
     let mut memberships = BTreeMap::<i64, Vec<String>>::new();
     let mut tag_members = BTreeMap::<String, Vec<NodeId>>::new();
     for row in
@@ -2045,7 +2061,7 @@ async fn read_snapshot(
         if !all && !tags.iter().any(|tag| scopes.contains(tag)) {
             continue;
         }
-        if let Some(node) = decode_host(&row, id, tags, now) {
+        if let Some(node) = decode_host(&row, id, tags, now, &devices) {
             nodes.push(node);
         } else {
             invalid_hosts.report(id);
@@ -2130,6 +2146,7 @@ fn decode_host(
     id: i64,
     tags: Vec<String>,
     now: i64,
+    devices: &BTreeSet<String>,
 ) -> Option<MeshNode> {
     let host: String = row.try_get("name").ok()?;
     validate_host(&host).ok()?;
@@ -2143,6 +2160,9 @@ fn decode_host(
     let last_rtt: Option<i64> = row.try_get("last_rtt_us").ok()?;
     let ipv6_supported: bool = row.try_get("ipv6_supported").ok()?;
     let ipv4_only: bool = row.try_get("ipv4_only").ok()?;
+    let dataplane_host: Option<String> = row.try_get("dataplane_host").ok()?;
+    let device = dataplane_host
+        .is_some_and(|host| devices.contains(&host.replace('-', "").to_ascii_lowercase()));
     Some(MeshNode {
         node: Node {
             // Browser IDs must remain exact JSON integers.
@@ -2163,6 +2183,7 @@ fn decode_host(
         last_rtt_us: last_rtt.map(u64::try_from).transpose().ok()?,
         path: None,
         ipv4_only: ipv6_supported && ipv4_only,
+        device,
     })
 }
 

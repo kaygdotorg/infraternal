@@ -110,6 +110,21 @@ pub(crate) enum Message {
     /// (#477, J730 P3).
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Forget(u32, u64),
+    /// The server closed this stream: raw output the old relay still has queued must never
+    /// reach the wire. Dispatch sends it on the control lane, which the writer serves ahead
+    /// of the bulk FIFO, at the moment it retires the relay (see `Stream::retire`); the
+    /// floor is the same fresh attachment id the relay's [`Message::Forget`] carries.
+    ///
+    /// The writer marks the stream's cover retired at that floor and drops every raw
+    /// `Output` that reaches it until a newer attachment's [`Message::Attached`] arrives.
+    /// Frames carry no attachment id, but FIFO order makes this exact: everything the old
+    /// relay queued sits ahead of the new relay's marker, everything after the marker is the
+    /// new attachment's own. Without it the server reuses the stream id on a resume and gets
+    /// old frames ahead of the new replay, whose sequence numbers it then rejects
+    /// ("reader fell behind; reattach", #583). Dropped bytes are not refunded: the relay
+    /// they were charged to is gone with its credit.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Retire(u32, u64),
 }
 
 /// Source of attachment ids. Starts at 1, so 0 never names a real attachment.
@@ -570,6 +585,8 @@ async fn write_message(
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Message::Forget(stream, floor) => replace_through.forget_before(stream, floor),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        Message::Retire(stream, floor) => replace_through.retire(stream, floor),
     }
     Ok(())
 }
@@ -600,6 +617,9 @@ struct Cover {
     /// guards the first bound.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     held: Vec<(u64, Vec<u8>)>,
+    /// The server closed the stream and no newer attachment has announced itself yet:
+    /// raw output is dropped, not written (see [`Message::Retire`]).
+    retired: bool,
     /// Where dropped bytes of this attachment are refunded. `None` until the
     /// attachment's own marker arrives: frames queued before the marker belong
     /// to an older ledger that must not be refunded.
@@ -689,19 +709,39 @@ impl ReplaceCursors {
         }
     }
 
+    /// The server closed `stream`: stop writing raw output the old relay queued, until a
+    /// relay newer than `floor` announces itself with its marker.
+    ///
+    /// The cover takes the floor as its attachment id, so the old relay's own stale marker
+    /// and priority messages are ignored, and a newer attachment replaces it cleanly. A
+    /// newer attachment that already owns the stream (it overtook this message) is left alone.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn retire(&mut self, stream: u32, floor: u64) {
+        let entry = self
+            .streams
+            .entry(stream)
+            .or_insert_with(|| Cover::new(floor));
+        if entry.attachment < floor {
+            *entry = Cover::new(floor);
+        }
+        if entry.attachment == floor {
+            entry.retired = true;
+        }
+    }
+
     /// The stream closed: drop its state so a later stream with the same id starts clean.
     fn forget(&mut self, stream: u32) {
         self.streams.remove(&stream);
     }
 
     /// The server closed `stream`: drop its state unless a relay that attached after
-    /// the close (an id at or above `floor`) already owns it.
+    /// the close (an id above `floor`) already owns it. A retired cover (id == `floor`) goes too.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn forget_before(&mut self, stream: u32, floor: u64) {
         if self
             .streams
             .get(&stream)
-            .is_some_and(|entry| entry.attachment < floor)
+            .is_some_and(|entry| entry.attachment <= floor)
         {
             self.streams.remove(&stream);
         }
@@ -798,6 +838,9 @@ impl ReplaceCursors {
         let Some(entry) = self.streams.get_mut(&stream) else {
             return Ok(Some(Shim::Output(seq, bytes)));
         };
+        if entry.retired {
+            return Ok(None);
+        }
         let Some((seq, bytes)) = entry.trim(seq, bytes)? else {
             return Ok(None);
         };
@@ -1158,6 +1201,117 @@ mod tests {
                 "other 9".to_string(),
             ]
         );
+    }
+
+    /// The Close/reattach race of #583, forced deterministically: the old relay still has raw
+    /// output queued in the bulk FIFO when the server closes the stream and reattaches the
+    /// same stream id. The retire notice rides the control lane, which the writer serves ahead
+    /// of the FIFO, so none of the old output may reach the wire, a control reply sent after
+    /// the close (the fence) still comes before everything, and the new attachment's replay
+    /// from a lower cursor passes untouched.
+    #[tokio::test]
+    async fn output_queued_by_a_closed_relay_never_reaches_the_wire() {
+        let (frames, mut frames_rx) = mpsc::unbounded_channel();
+        let channel = Arc::new(HeldWriter {
+            first_write: AtomicBool::new(true),
+            started: Semaphore::new(0),
+            release: Semaphore::new(0),
+            frames,
+        });
+        let (messages, messages_rx) = mpsc::channel(16);
+        let (control, control_rx) = mpsc::channel(8);
+        let writer_channel = channel.clone();
+        let task = tokio::spawn(async move {
+            writer(
+                writer_channel.as_ref(),
+                messages_rx,
+                Some(control_rx),
+                None,
+                false,
+                false,
+                false,
+                0,
+            )
+            .await
+        });
+        // The old relay (attachment 1) has its first frame mid-write; three more wait behind it.
+        messages
+            .send(Message::Attached(4, 1, no_refunds()))
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(0, vec![b'a'; 100])))
+            .await
+            .unwrap();
+        channel.started.acquire().await.unwrap().forget();
+        for seq in [100, 200, 300] {
+            messages
+                .send(Message::Shim(4, Shim::Output(seq, vec![b'o'; 100])))
+                .await
+                .unwrap();
+        }
+        // The server closes the stream (retire + fence), then reattaches the same stream id
+        // at a lower cursor: marker plus replay queue behind the old output.
+        control.send(Message::Retire(4, 5)).await.unwrap();
+        control.send(Message::Pong(4, 1, 0)).await.unwrap();
+        messages.send(Message::Forget(4, 5)).await.unwrap();
+        messages
+            .send(Message::Attached(4, 6, no_refunds()))
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(50, vec![b'n'; 10])))
+            .await
+            .unwrap();
+        messages
+            .send(Message::Shim(4, Shim::Output(60, vec![b'n'; 10])))
+            .await
+            .unwrap();
+        channel.release.add_permits(1);
+        // Closing the bulk queue ends the writer once it is drained; closing the control
+        // sender first would end it at once (it is the end-of-channel signal), so keep it.
+        drop(messages);
+        task.await.unwrap().unwrap();
+        drop(control);
+        let mut kinds = vec![];
+        while let Ok(frame) = frames_rx.try_recv() {
+            kinds.push(match decoded(&frame) {
+                (4, infraternal_protocol::Frame::Output { out_seq, bytes }) => {
+                    format!("output {out_seq}+{}", bytes.len())
+                }
+                (4, infraternal_protocol::Frame::Pong { .. }) => "pong".to_string(),
+                (stream, _) => format!("other {stream}"),
+            });
+        }
+        assert_eq!(
+            kinds,
+            vec!["output 0+100", "pong", "output 50+10", "output 60+10"],
+            "frames of the closed relay leaked past the close"
+        );
+    }
+
+    /// A retired cover is cleaned by the relay's own Forget, spares a replacement that already
+    /// announced itself, and ignores the old relay's stale marker (#583).
+    #[test]
+    fn a_retired_stream_drops_only_the_old_relays_output() {
+        let mut cursors = ReplaceCursors::default();
+        cursors.attach(4, 1, no_refunds());
+        cursors.retire(4, 5);
+        // The old relay's stale marker cannot revive the stream.
+        cursors.attach(4, 2, no_refunds());
+        assert!(cursors.admit(4, 0, vec![1; 10]).unwrap().is_none());
+        // A newer attachment's marker reopens it.
+        cursors.attach(4, 6, no_refunds());
+        assert!(cursors.admit(4, 0, vec![1; 10]).unwrap().is_some());
+        // A retire that arrives after the replacement's marker leaves it alone.
+        cursors.retire(4, 5);
+        assert!(cursors.admit(4, 10, vec![1; 10]).unwrap().is_some());
+        // Retire with no earlier state, then the relay's Forget, leaves nothing behind.
+        cursors.retire(8, 7);
+        assert!(cursors.admit(8, 0, vec![1; 10]).unwrap().is_none());
+        cursors.forget_before(8, 7);
+        assert!(cursors.admit(8, 0, vec![1; 10]).unwrap().is_some());
+        assert_eq!(cursors.len(), 1);
     }
 
     /// A stream the server closed leaves no writer state behind, but a relay that

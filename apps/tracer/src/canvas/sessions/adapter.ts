@@ -90,6 +90,11 @@ export interface HostEntry {
    * open app windows until it is added again (#146, D349). Absent when it has the address, is offline, or did not say.
    */
   direct?: false;
+  /**
+   * A phone or tablet (#580). It takes part in the mesh and can be removed, but it never runs the infraternal agent, so it is never a place
+   * for a terminal. The service keeps such entries out of {@link SessionService.hosts}; only {@link SessionService.devices} lists them.
+   */
+  device?: true;
 }
 
 /** What the canvas asks of the sessions: bind a window to a session, make a model for a new shell, and list hosts. Implemented by the live service and by the mock. */
@@ -100,6 +105,8 @@ export interface SessionService {
   open(host: string, options?: { container?: string; from?: WindowModel; /** An existing session of the host to show (the sidebar, the palette, the manager). */ session?: string }): WindowModel;
   /** Hosts the person can open shells on. */
   hosts(): HostEntry[];
+  /** The phones and tablets the person added: listed so each can be removed, and never offered as a place to open a shell. */
+  devices?(): HostEntry[];
   /** Called when the set of hosts or sessions changes (a host appears, a session exits). */
   onChange(listener: () => void): () => void;
   /** The camera is moving at a small scale: terminals other than the active one hold their drawing until it rests (#121). Optional: test doubles draw nothing real. */

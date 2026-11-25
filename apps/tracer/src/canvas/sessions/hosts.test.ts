@@ -104,3 +104,14 @@ test("a host linked without a direct address is marked, and only false is accept
   expect(f.hosts.get(id)).not.toHaveProperty("direct");
   f.stop();
 });
+
+test("a device row is kept apart and only the literal true marks one (#580)", async () => {
+  const device = { ...row, os: undefined, user: undefined, address: undefined, device: true };
+  const f = fixture(device); await settle();
+  expect([...f.hosts.values()].map((host) => host.device)).toEqual([true]);
+  f.stop();
+  for (const bad of [false, "true", 1]) {
+    const g = fixture({ ...device, device: bad }); await settle();
+    expect(g.hosts.size).toBe(0); g.stop();
+  }
+});

@@ -166,14 +166,18 @@ main.site { box-sizing: border-box; max-width: 100rem; margin: 0 auto; padding: 
 .plain p { max-width: 68ch; }
 .plain .doc { display: block; }
 .plain .doc-code { max-width: 68ch; margin: 0 0 1.25rem; }
-.downloads { margin: 0 0 1.5rem; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--r-md); }
+.downloads { max-width: 68ch; margin: 0 0 1.5rem; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: var(--r-md); }
 .downloads li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.25rem 1rem; margin: 0; padding: 0.875rem 1rem; border-bottom: 1px solid var(--line); }
 .downloads li:last-child { border-bottom: 0; }
 .downloads strong { font-weight: var(--fw-label); }
 .downloads span { color: var(--fg-2); font-size: var(--text-secondary); }
 .downloads a { min-height: var(--row); display: inline-flex; align-items: center; font-weight: var(--fw-label); }
 .note { max-width: 68ch; padding: 0.875rem 1.125rem; border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent); border-radius: var(--r-md); background: color-mix(in oklab, var(--warn) 9%, transparent); }
+.note > :first-child { margin-top: 0; }
 .note > :last-child { margin-bottom: 0; }
+.install-status { margin: -0.75rem 0 1.5rem; color: var(--fg-2); font-size: var(--text-secondary); overflow-wrap: anywhere; }
+.install-status:empty { display: none; }
+.install-status[data-state="error"] { color: var(--warn); }
 .audiences { display: grid; gap: 1rem; margin: 0 0 2rem; padding: 0; list-style: none; }
 @media (min-width: 52rem) { .audiences { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .audiences li { margin: 0; }

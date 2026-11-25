@@ -35,11 +35,14 @@ export interface Showing {
   hasData(comp: string, group: string): boolean;
   /** Whether the Devices panel is offered. */
   devices: boolean;
+  /** Whether the server lists subnet routes to this person (its owner): the Mesh Networks window is shown only then (D197 M3). */
+  networks?: boolean;
 }
 
 /** True when the window has a themes editor, a panel the source offers, a backed setting, or data to list. */
 export function hasContent(comp: ComponentDef, group: GroupDef, showing: Showing): boolean {
   if (group.themes) return true;
+  if (group.networks) return showing.networks === true;
   const panels = group.panel === undefined ? [] : typeof group.panel === "string" ? [group.panel] : group.panel;
   if (panels.some((id) => id !== "devices" || showing.devices)) return true;
   if ((group.settings ?? []).some((id) => showing.backed(id))) return true;
@@ -76,6 +79,9 @@ const settingsWindow = (comp: ComponentDef, group: GroupDef, extra: Partial<Wind
 
 /** The name the columns of the Settings view share: the canvas groups columns that name the same group into one grid (layout/grid.ts `runsOf`). */
 export const SETTINGS_ROWS = "settings-rows";
+
+/** The ids of the windows a map draws, in order: two maps with the same ids draw the same Settings view. */
+export const windowIds = (map: readonly ComponentDef[]): string => spots(map).map((s) => winId(s.comp.id, s.group.id)).join(" ");
 
 /** The Settings view for a viewer, keeping the place `base` (the view the caller laid out) has on the canvas. */
 export function buildSettingsMapView(map: readonly ComponentDef[], m: Metrics, base: ViewModel): ViewModel {

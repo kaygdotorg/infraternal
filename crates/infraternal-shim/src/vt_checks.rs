@@ -14,7 +14,11 @@
 //! - **a snapshot continues the stream** (when the input's flag bit asks):
 //!   a fresh terminal of the same size fed the snapshot, then the same
 //!   further output as the original, ends with the same snapshot as the
-//!   original.
+//!   original. A failure is told apart by cutting the carry off the snapshot
+//!   and replaying again: when that makes the two agree, the carry is at
+//!   fault (`CARRY-CLASS`); otherwise the repaint is (`REPAINT-CLASS`). The
+//!   two classes have different owners, and a known gap in one must not hide
+//!   a regression in the other.
 //!
 //! The native engine's own code is not coverage-instrumented; the carry
 //! parser and the snapshot framing around it are.
@@ -93,19 +97,36 @@ pub fn verify_vt_stream_sample(data: &[u8]) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let Ok(mut viewer) = Terminal::new(size_now.0, size_now.1) else {
+    let carry_len = whole.carry_len();
+    whole.process(last);
+    let Ok(original) = whole.snapshot() else {
         return;
     };
-    viewer.process(&snapshot);
-    whole.process(last);
-    viewer.process(last);
-    if let (Ok(original), Ok(rebuilt)) = (whole.snapshot(), viewer.snapshot()) {
-        assert!(
-            original == rebuilt,
-            "a snapshot did not continue the stream: {}",
+    let Some(rebuilt) = replay(&snapshot, size_now, last) else {
+        return;
+    };
+    if original != rebuilt {
+        let repaint = &snapshot[..snapshot.len() - carry_len];
+        let carry_at_fault = replay(repaint, size_now, last).as_deref() == Some(&original[..]);
+        let class = if carry_at_fault {
+            "CARRY-CLASS"
+        } else {
+            "REPAINT-CLASS"
+        };
+        panic!(
+            "{class}: a snapshot did not continue the stream: {}",
             first_difference(&original, &rebuilt)
         );
     }
+}
+
+/// The snapshot a fresh terminal of `size` ends with after `replayed` and then
+/// `last` (none when the terminal cannot be made or refuses to snapshot).
+fn replay(replayed: &[u8], size: (u16, u16), last: &[u8]) -> Option<Vec<u8>> {
+    let mut viewer = Terminal::new(size.0, size.1).ok()?;
+    viewer.process(replayed);
+    viewer.process(last);
+    viewer.snapshot().ok()
 }
 
 /// Feed `bytes` to `terminal` in pieces whose sizes come from `schedule`.
@@ -223,5 +244,51 @@ mod found {
         ] {
             super::verify_vt_stream_sample(input);
         }
+    }
+
+    /// A reflow that shrinks 81 columns to 40 leaves wrapped rows on a
+    /// terminal that never printed a character, so its REP source is empty.
+    /// Repainting a wrapped edge prints a stand-in glyph, which would give
+    /// the viewer a REP source the original does not have, so the snapshot
+    /// must refuse instead (#561, finding 6; the first report of it blamed
+    /// the scroll region, which was only where the two snapshots first differ).
+    ///
+    /// Fails today: the viewer's snapshot gains a REP restore the original's
+    /// lacks. The input is the fuzzer's 153-byte crash.
+    #[test]
+    fn snapshot_refuses_painted_text_without_a_rep_source() {
+        super::verify_vt_stream_sample(b"\x50\x63\x00\x1b\x01\x00\x00\x00\x00\x00\x00\x06\x01\x05\x1c\x08\x00\x63\x1b\x05\x08\x2a\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\x23\x00\x00\x00\x00\x00\x00\x01\xff\xff\xff\xff\xff\xff\xff\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\x09\xff\xff\xff\xff\xff\x00\xfe\xfe\x27\x2e");
+    }
+
+    /// A zero-width codepoint that the grapheme rules separate from its base
+    /// (here U+061C after `w`, bytes D8 9C) is stored on the cell when
+    /// clustering is off, and dropped when it is on. The repaint replayed
+    /// every cell's extras with clustering on, so the viewer lost it
+    /// (#561, finding 5; the reported case was U+030C on a U+FFFD cell).
+    ///
+    /// Fails today: the original's cell carries the mark, the rebuilt one
+    /// does not. The input is the fuzzer's 30-byte crash.
+    #[test]
+    fn snapshot_keeps_a_mark_the_boundary_rules_would_drop() {
+        super::verify_vt_stream_sample(b"\x25\x01\x00\x1b\x1b\x63\x9c\x77\xd8\x9c\x88\xff\x3b\x3e\xff\xff\x00\x9d\x63\xfe\xfe\x06\xeb\x58\xe5\xfe\x1b\xff\x50\x3b");
+    }
+}
+
+/// The classifier's cut point must be exactly the carry.
+#[cfg(test)]
+mod classifier {
+    use crate::terminal::Terminal;
+
+    /// With an unfinished CSI on the terminal, the snapshot ends in exactly
+    /// the `carry_len` bytes of it, and with nothing pending there are none.
+    #[test]
+    fn carry_len_is_the_unfinished_sequence_at_the_end_of_a_snapshot() {
+        let mut terminal = Terminal::new(80, 24).unwrap();
+        terminal.process(b"\x1bchello");
+        assert_eq!(terminal.carry_len(), 0);
+        terminal.process(b"\x1b[1;");
+        let snapshot = terminal.snapshot().unwrap();
+        assert_eq!(terminal.carry_len(), 4);
+        assert!(snapshot.ends_with(b"\x1b[1;"));
     }
 }

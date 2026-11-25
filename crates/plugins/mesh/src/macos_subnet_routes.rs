@@ -56,10 +56,9 @@ impl Skip {
                 "this Mac already reaches {network} through {interface} (its own network or \
                  another VPN), which overlaps it"
             ),
-            Self::HoldsEndpoint(address) => format!(
-                "it holds {address}, where this Mac reaches a mesh peer; routing it into the mesh \
-                 would send the tunnel's own packets back into it"
-            ),
+            Self::HoldsEndpoint(address) => {
+                crate::subnet_routes::holds_endpoint_sentence(*address, "this Mac")
+            }
             Self::Mesh => "it overlaps this Mac's mesh addresses".to_owned(),
             Self::NotPrivate => "user mode routes only private networks (10.0.0.0/8, \
                                  172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10); run the mesh as \
@@ -270,8 +269,8 @@ fn skip_reason(
     {
         return Some(Skip::Mesh);
     }
-    if let Some(address) = endpoints.iter().find(|address| network.contains(**address)) {
-        return Some(Skip::HoldsEndpoint(*address));
+    if let Some(address) = crate::subnet_routes::holds_endpoint(network, endpoints) {
+        return Some(Skip::HoldsEndpoint(address));
     }
     for row in local.iter().chain(routes) {
         let loopback_host = row.interface == "lo0"

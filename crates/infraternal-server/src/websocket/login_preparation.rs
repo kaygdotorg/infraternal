@@ -6,6 +6,8 @@ use super::{WebSocketState, terminal_agent};
 use futures_util::{StreamExt, stream};
 use std::{sync::Arc, time::Duration};
 
+/// The owner's live hosts that run the infraternal agent (never a `device`, #580), read in the same
+/// snapshot as the session that asks.
 #[cfg(feature = "remote")]
 async fn remote_targets(
     pool: &sqlx::SqlitePool,
@@ -13,7 +15,7 @@ async fn remote_targets(
     token: &str,
 ) -> Result<Vec<uuid::Uuid>, sqlx::Error> {
     // A live session and host ownership must hold in the same read snapshot.
-    let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_hosts h WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=? AND s.user_id=h.owner_id AND s.unlocked=1 AND s.expires>unixepoch())")
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT h.id FROM remote_hosts h WHERE h.owner_id=? AND h.revoked_at IS NULL AND h.mode IN ('rootless','rootful') AND EXISTS(SELECT 1 FROM sessions s WHERE s.token_hash=? AND s.user_id=h.owner_id AND s.unlocked=1 AND s.expires>unixepoch())")
         .bind(user).bind(token).fetch_all(pool).await?;
     rows.into_iter()
         .map(|id| uuid::Uuid::from_slice(&id).map_err(|error| sqlx::Error::Decode(Box::new(error))))
@@ -68,6 +70,8 @@ mod tests {
     //! A single persisted authority snapshot excludes foreign, revoked and expired targets.
     use super::*;
 
+    /// Login preparation targets only the session owner's live hosts that run the agent: not another
+    /// person's, not a revoked one, and not a `device` (#580).
     #[tokio::test]
     async fn preparation_targets_require_live_session_and_owned_unrevoked_host() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -77,24 +81,30 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query("CREATE TABLE remote_hosts(id BLOB,owner_id TEXT,revoked_at INTEGER)")
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "CREATE TABLE remote_hosts(id BLOB,owner_id TEXT,revoked_at INTEGER,mode TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let ids = [
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
         ];
-        for (id, owner, revoked) in [
-            (ids[0], "alice", None),
-            (ids[1], "bob", None),
-            (ids[2], "alice", Some(1_i64)),
+        // The fourth is alice's live device (#580): no login is ever prepared on it.
+        for (id, owner, revoked, mode) in [
+            (ids[0], "alice", None, "rootless"),
+            (ids[1], "bob", None, "rootless"),
+            (ids[2], "alice", Some(1_i64), "rootless"),
+            (ids[3], "alice", None, "device"),
         ] {
-            sqlx::query("INSERT INTO remote_hosts VALUES(?,?,?)")
+            sqlx::query("INSERT INTO remote_hosts VALUES(?,?,?,?)")
                 .bind(id.as_bytes().as_slice())
                 .bind(owner)
                 .bind(revoked)
+                .bind(mode)
                 .execute(&pool)
                 .await
                 .unwrap();

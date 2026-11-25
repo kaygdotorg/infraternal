@@ -35,6 +35,11 @@ impl Machine {
         self.root.join("home")
     }
 
+    /// The fixture system data base that stands in for `/var/lib/infraternal`.
+    fn system_base(&self) -> PathBuf {
+        self.root.join("system-base")
+    }
+
     /// Where a per-user unit named `infraternal-server` lives.
     fn user_unit(&self) -> PathBuf {
         self.root
@@ -54,6 +59,8 @@ impl Machine {
             .current_dir(&self.root)
             .env_clear()
             .env("HOME", self.home())
+            // The system base is a fixture: `server init --system` plans must not depend on the host's /var/lib.
+            .env("INFRATERNAL_TEST_LINUX_SYSTEM_BASE", self.system_base())
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env(
                 "INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR",
@@ -157,7 +164,7 @@ fn rerunning_init_on_an_existing_user_install_plans_the_move() {
 }
 
 /// A system unit with a custom folder: without `--data` init plans the move to
-/// `/var/lib/infraternal` (or refuses because that folder is in use on this
+/// the system base (a fixture here; `/var/lib/infraternal` on a real machine) (or refuses because that folder is in use on this
 /// machine); `--data <custom> --force` keeps the custom folder.
 ///
 /// Both plans use `--host-firewall-off`, so they hold only the server unit: a
@@ -172,6 +179,8 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
     let custom = machine.root.join("custom state");
     fs::create_dir_all(&custom).expect("the old data folder");
     let custom = custom.to_str().expect("utf-8 path");
+    let base = machine.system_base();
+    let base = base.to_str().expect("utf-8 path");
     fs::write(
         machine.system_unit(),
         format!(
@@ -192,12 +201,12 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
         &[],
     );
     let message = text(&output);
-    assert!(message.contains("/var/lib/infraternal"), "{message}");
+    assert!(message.contains(base), "{message}");
     if output.status.success() {
         let plan = planned(&output);
         assert_eq!(plan["data"]["data_move"]["from"], custom);
-        assert_eq!(plan["data"]["data_move"]["to"], "/var/lib/infraternal");
-        assert!(planned_unit(&output).contains("\"--data\" \"/var/lib/infraternal\""));
+        assert_eq!(plan["data"]["data_move"]["to"], base);
+        assert!(planned_unit(&output).contains(&format!("\"--data\" \"{base}\"")));
     } else {
         assert!(
             message.contains("already holds")
@@ -223,7 +232,7 @@ fn a_system_reinstall_moves_its_custom_folder_unless_data_is_given() {
         &[],
     ));
     assert!(unit.contains(&format!("\"--data\" \"{custom}\"")), "{unit}");
-    assert!(!unit.contains("/var/lib/infraternal"), "{unit}");
+    assert!(!unit.contains(base), "{unit}");
 }
 
 /// A system `server init` unit waits for the network-online target.
