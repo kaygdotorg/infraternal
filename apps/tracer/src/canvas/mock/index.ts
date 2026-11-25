@@ -55,6 +55,8 @@ import { DATA_IDS, type DataId } from "./data-ids";
 import type { AccountMock } from "./account/mount.on-demand";
 import { createStartupDemo } from "./startup-demo";
 import { buildSettingsMapView } from "../settings-rows/model";
+import { rebuildSettingsView } from "../settings-rows/rebuild";
+import { onRoutesSource } from "../mesh/networks";
 import { createRowsDocs } from "../settings-rows/docs-adapter";
 
 const CLOSE = '<path d="m7 7 10 10M17 7 7 17"/>';
@@ -398,6 +400,8 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
   };
   (window as unknown as { __tracerClusters?: typeof probe }).__tracerClusters = probe;
 
+  // The Networks window comes and goes with the server's routes (shown to the owner only, D197 M3).
+  const offRoutes = onRoutesSource(() => rebuildSettingsView(canvas.cx, mockSettings.map()));
   return {
     dispose() {
       authority.dispose();
@@ -418,6 +422,7 @@ export async function mountMockup(core: CoreScreen, options: MockupOptions = {})
       mockupTag.remove();
       chip?.remove();
       stopOffer();
+      offRoutes();
       addHost.dispose(); docs?.dispose();
       canvas.dispose();
       mesh.dispose();

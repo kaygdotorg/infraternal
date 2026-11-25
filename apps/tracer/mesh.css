@@ -55,6 +55,10 @@
    that run beside it keep theirs. At the thumbnail zoom nothing on a card is live, as everywhere on the canvas. */
 .cl-world[data-hit="live"] .cl-graph .ui-window-pill { pointer-events: auto; cursor: grab; }
 
+/* A network's card is live where it has something to press (Approve, Decline, and the card itself, which opens its window); the arrows that end on it pass under it. */
+.cl-world[data-hit="live"] .cl-graph .ui-window[data-route] .cl-node-meta, .cl-world[data-hit="live"] .cl-graph .cl-node-actions { pointer-events: auto; }
+.cl-world[data-hit="live"] .cl-graph .ui-window[data-route="approved"] .cl-node-meta { cursor: pointer; }
+
 /* In a big graph the cards' shadow is small and plain: the soft blur costs a raster tile per card per move (mesh/graph.ts). */
 .cl-graph[data-big] .ui-window { box-shadow: 0 1px 0.1875rem rgb(0 0 0 / 0.3); }
 

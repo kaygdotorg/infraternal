@@ -14,6 +14,7 @@
 import { CELL, type Metrics } from "../layout/geometry";
 import type { NodeModel } from "../model/types";
 import { layoutMesh, type Cluster } from "./layout";
+import { networkDetail, networkSub } from "./networks";
 import type { WireNode } from "./protocol";
 import { tagNodeId, type MeshData, type MeshLayout, type MeshSource } from "./source";
 
@@ -56,6 +57,7 @@ export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: ()
     const out: NodeModel[] = [];
     let minX = 0, minY = 0;
     for (const p of placed.nodes) if (p.pinned) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); }
+    for (const net of data.networks ?? []) { const at = pins[net.id]; if (at) { minX = Math.min(minX, at.x); minY = Math.min(minY, at.y); } }
     const origin = { x: minX < 0 ? Math.ceil(-minX / CELL) * CELL : 0, y: minY < 0 ? Math.ceil(-minY / CELL) * CELL : 0 };
     for (const p of placed.nodes) {
       const w = p.kind === "host" ? nodes.get(p.id) : undefined;
@@ -69,11 +71,30 @@ export function createLayoutModel(source: Pick<MeshSource, "data">, ownPins?: ()
       if (p.pinned) n.pinned = true; else delete n.pinned;
       out.push(n);
     }
-    const live = new Set(placed.nodes.map((p) => p.id));
-    for (const id of [...objects.keys()]) if (!live.has(id)) objects.delete(id);
     const clusters: Cluster[] = origin.x || origin.y ? placed.clusters.map((k) => ({ ...k, x: k.x + origin.x, y: k.y + origin.y })) : placed.clusters;
+    // Networks (subnet routes, D197 M3) stand in their own row: they are targets, and arrows run towards them.
+    const networks = data.networks ?? [];
+    const size = { w: placed.size.w + origin.x, h: placed.size.h + origin.y };
+    // Networks sit in a row under the hosts, in the columns the hosts use, so the arrows that reach them do not run across other cards.
+    const hostCols = placed.nodes.some((p) => p.kind === "tag") ? 2 : 1, baseY = size.h - 30 + 106;
+    networks.forEach((net, i) => {
+      const id = net.id;
+      const at = pins[id];
+      const x = at ? at.x + origin.x : 30 + i * (m.nodeW + 102) + (hostCols > 1 ? m.nodeW + 102 : 0) + origin.x, y = at ? at.y + origin.y : baseY;
+      const fields = { label: net.cidr, detail: networkDetail(net), sub: networkSub(net), route: net };
+      let n = objects.get(id);
+      if (!n) { n = { id, kind: "network", x, y, ...fields } as NodeModel; objects.set(id, n); } else { Object.assign(n, fields); n.x = x; n.y = y; }
+      if (at) n.pinned = true; else delete n.pinned;
+      out.push(n);
+    });
+    if (networks.length) {
+      const right = Math.max(...out.filter((n) => n.kind === "network").map((n) => n.x + m.nodeW + 30)), bottom = Math.max(...out.map((n) => n.y + m.nodeH + 30));
+      size.w = Math.max(size.w, Math.ceil(right)); size.h = Math.max(size.h, Math.ceil(bottom));
+    }
+    const live = new Set(out.map((n) => n.id));
+    for (const id of [...objects.keys()]) if (!live.has(id)) objects.delete(id);
     // With nothing to draw the view keeps a usable size for its loading, empty and error states.
-    const layout: MeshLayout = { nodes: out, size: out.length ? { w: placed.size.w + origin.x, h: placed.size.h + origin.y } : { w: 880, h: 400 }, clusters, origin };
+    const layout: MeshLayout = { nodes: out, size: out.length ? size : { w: 880, h: 400 }, clusters, origin };
     cache = { key, layout, pins: pinned };
     return layout;
   };

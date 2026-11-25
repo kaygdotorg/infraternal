@@ -4,11 +4,14 @@
  * `{placeholders}`; `say` gives the sentence both as plain text (labels, tests) and as text with chips.
  */
 import { entityChip, entityPlain, entityText, type EntityRef } from "../../../../../packages/ui/src/entity-chip";
+import { isNetworkId, networkLabel } from "./networks";
 import type { MeshSource } from "./source";
 
 /** A tag or host id as the thing it names, with what its colours need (a host's tags, its system). */
 export function meshEntity(source: MeshSource, id: string): EntityRef {
   if (id.startsWith("tag:")) return { kind: "tag", name: id };
+  // A network is drawn by its address with no tags and no system: the chip of a machine without either (J1172 question 7).
+  if (isNetworkId(id)) return { kind: "host", name: networkLabel(id), via: [] };
   const node = source.data().nodes.get(id);
   return { kind: "host", name: id, via: node?.tags ?? [], ...(node?.os ? { platform: node.os } : {}) };
 }

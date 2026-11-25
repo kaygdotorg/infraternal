@@ -159,6 +159,24 @@
 @media (pointer: coarse) { .cl-node-detail { font-size: var(--ui-size-body); } }
 /* Two lines at most: "188 ms, through fra-relay" is longer than a card is wide, and a cut-off figure reads as a wrong one. */
 .cl-node-sub { color: var(--ui-text-secondary); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; }
+/* A network (D197 M3, #580): a card for the networks behind a machine. One that waits for approval is dashed and holds its two buttons; an approved
+   one is a normal card. A refusal is the card's second line in the warning colour; the whole sentence is its hover. */
+.ui-window[data-route="pending"] { border-style: dashed; }
+.cl-node-sub[data-tone="warn"] { color: var(--warn); }
+.cl-node-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 0.375rem; padding: 0 0.875rem 0.625rem; }
+.cl-node-actions[hidden] { display: none; }
+.cl-node-button {
+  --ui-button-min-width: 0;
+  --ui-button-height: 1.75rem;
+  --ui-button-padding: 0 0.5rem;
+  --ui-button-radius: var(--r-pill);
+  --ui-button-font: var(--fw-title) var(--ui-size-label)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
+  --ui-button-letter-spacing: var(--ui-tracking);
+}
+.ui-window[data-route] .cl-node-meta { padding-bottom: 0.375rem; }
+/* Settings > Mesh > Networks: one block per network, with the same air the Updates window has between blocks. */
+.cl-nets { display: grid; gap: 1.5rem; }
+.cl-net { display: grid; gap: 0.875rem; }
 /* Arrows pass under the cards, so a line that crosses a card is hidden by it instead of cutting through its text. */
 .cl-graph-arrows { position: absolute; left: 0; top: 0; z-index: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
 .cl-world[data-lod="thumb"] .cl-node-meta { opacity: 1; }
@@ -443,7 +461,7 @@
   --ui-button-min-width: 0;
   --ui-button-height: var(--ui-control-h, 2rem);
   --ui-button-padding: 0 1rem;
-  --ui-button-radius: 999px;
+  --ui-button-radius: var(--r-pill);
   --ui-button-font: var(--fw-title) var(--ui-size-button)/1 var(--font-ui, "Geist Mono", ui-monospace, monospace);
   --ui-button-letter-spacing: var(--ui-tracking);
 }
