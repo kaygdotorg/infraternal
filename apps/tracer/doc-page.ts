@@ -32,3 +32,9 @@ if (searchButton) {
 /** The page's main content, or `null` on a page without one. */
 const page = document.querySelector<HTMLElement>("main");
 if (page) enhanceDoc(page, null);
+/** The install page container, present only on `/install/`; its verifier script loads lazily on that page alone. */
+const installRoot = document.querySelector<HTMLElement>("[data-install-page]");
+if (installRoot?.dataset.installScript) {
+  const scriptUrl = installRoot.dataset.installScript;
+  void (import(scriptUrl) as Promise<typeof import("./install-links")>).then((module) => module.enhanceInstallPage(installRoot));
+}
