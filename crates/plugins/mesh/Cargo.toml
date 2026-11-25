@@ -100,7 +100,7 @@ url = { workspace = true, optional = true }
 # (`Peer::with_side_port`), the factory's `bind_side` and a listener on the side
 # socket let the node turn the sender on for peers that advertise the receive rule
 # (#260, J1211).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "a0be34f8d0b2b25c9c8d7e085564e941048cec39", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
