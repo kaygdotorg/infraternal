@@ -249,6 +249,70 @@ async fn relaying_proxy_cannot_complete_the_link() {
         .unwrap();
 }
 
+/// The server's own binding check, with the agent's check out of the way: a
+/// hand-built client sends a validly signed v2 proof whose channel binding
+/// is wrong, then one with no binding at all, to a `config.tls` server. Both
+/// must get no `ready-v2`, so no authority is admitted. The real agent's own
+/// check would otherwise hide a missing server check.
+#[tokio::test]
+async fn server_refuses_wrong_or_missing_binding_on_its_own_tls() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let (material, agent, store, https) = setup().await;
+    let leaf = crate::server_leaf::issue(&material, "localhost", None, now()).unwrap();
+    let server = start_server(&leaf, &agent.root, store, Some(&https)).await;
+    for binding in [Some([7u8; agent_link::BINDING_LEN]), None] {
+        let mut connector = SslConnector::builder(SslMethod::tls_client()).unwrap();
+        // The pinned certificate is a self-issued leaf, so it must be
+        // trusted as a partial chain, as the agent's own connector does.
+        let mut trust = openssl::x509::store::X509StoreBuilder::new().unwrap();
+        trust.add_cert(https.certificate.clone()).unwrap();
+        trust
+            .set_flags(openssl::x509::verify::X509VerifyFlags::PARTIAL_CHAIN)
+            .unwrap();
+        connector.set_cert_store(trust.build());
+        let ssl = connector
+            .build()
+            .configure()
+            .unwrap()
+            .into_ssl("localhost")
+            .unwrap();
+        let tcp = TcpStream::connect(server.app).await.unwrap();
+        let mut tls = tokio_openssl::SslStream::new(ssl, tcp).unwrap();
+        std::pin::Pin::new(&mut tls).connect().await.unwrap();
+        let url = format!("wss://localhost:{}/remote/agent", server.app.port());
+        let (mut socket, _) = tokio_tungstenite::client_async(url, tls).await.unwrap();
+        let Some(Ok(Message::Text(text))) = socket.next().await else {
+            panic!("expected a challenge");
+        };
+        let challenge: agent_link::AgentLinkChallenge =
+            serde_json::from_str(text.as_str()).unwrap();
+        let nonce: [u8; agent_link::NONCE_LEN] =
+            B64.decode(&challenge.nonce).unwrap().try_into().unwrap();
+        let client_nonce = [9u8; agent_link::NONCE_LEN];
+        let message =
+            agent_link::agent_proof_bytes_v2(agent.host, &nonce, &client_nonce, binding.as_ref());
+        let key = &agent.identity.key;
+        let mut signer = openssl::sign::Signer::new_without_digest(key)
+            .or_else(|_| openssl::sign::Signer::new(openssl::hash::MessageDigest::sha256(), key))
+            .unwrap();
+        let proof = agent_link::AgentLinkProofV2 {
+            message_type: agent_link::PROOF_V2.to_owned(),
+            host_id: agent.host,
+            certificate_der: B64.encode(agent.identity.certificate.to_der().unwrap()),
+            client_nonce: B64.encode(client_nonce),
+            channel_binding: binding.map(|value| B64.encode(value)),
+            signature: B64.encode(signer.sign_oneshot_to_vec(&message).unwrap()),
+        };
+        let proof = serde_json::to_string(&proof).unwrap();
+        socket.send(Message::Text(proof.into())).await.unwrap();
+        if let Some(Ok(Message::Text(answer))) = socket.next().await {
+            assert!(!answer.contains("ready-v2"), "server answered {answer}");
+        }
+    }
+}
+
 /// An impostor holding a copied state directory: its HTTPS certificate is
 /// accepted, and its leg-B leaf is CA-signed and unexpired. An agent with no
 /// history accepts it (the same residual as on the direct dials), but once

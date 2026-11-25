@@ -163,6 +163,34 @@ struct BoundUdpFactory {
     admission: Arc<RwLock<PeerAdmission>>,
 }
 
+impl BoundUdpFactory {
+    /// Bind the Mac node's direct-path probes to this factory's send socket and give the admission
+    /// guard its half, as the Linux engine does (#220, D185, J1194).
+    ///
+    /// Without this the guard has no probes, so a probe-shaped datagram would reach `GotaTun` as
+    /// garbage and no ping would ever be answered: a Linux peer measuring its direct path to this
+    /// Mac would see a peer that never answers. With it the guard consumes pings from known peer
+    /// endpoints (at most 64 pongs a second) and sends nothing on its own, so an idle Mac gains no
+    /// wakeups (D81). The Mac has no path owner yet, so the finished answers go nowhere: the
+    /// receiver is dropped and the probes never start a round of their own.
+    async fn with_probes(
+        send: GotaUdpSocket,
+        receive: GotaUdpSocket,
+        port: u16,
+        admission: Arc<RwLock<PeerAdmission>>,
+    ) -> Self {
+        let (probes, _answers) =
+            crate::direct_probe::DirectProbes::new(send.clone(), crate::direct_probe::token_seed());
+        admission.write().await.set_probes(probes);
+        Self {
+            send,
+            receive,
+            port,
+            admission,
+        }
+    }
+}
+
 impl UdpTransportFactory for BoundUdpFactory {
     type Send = GotaUdpSocket;
     type Recv = PeerAdmissionUdpReceiver;
@@ -1501,12 +1529,7 @@ async fn bind_udp(
                     return Err(io::ErrorKind::AddrInUse.into());
                 }
                 return Ok((
-                    BoundUdpFactory {
-                        send,
-                        receive,
-                        port,
-                        admission,
-                    },
+                    BoundUdpFactory::with_probes(send, receive, port, admission).await,
                     port,
                 ));
             }
@@ -1523,12 +1546,7 @@ async fn bind_udp(
         let port = send.local_addr()?.port();
         if port != 0 && port != 51_820 {
             return Ok((
-                BoundUdpFactory {
-                    send,
-                    receive,
-                    port,
-                    admission,
-                },
+                BoundUdpFactory::with_probes(send, receive, port, admission).await,
                 port,
             ));
         }
