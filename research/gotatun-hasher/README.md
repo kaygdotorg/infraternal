@@ -176,7 +176,8 @@ whole patch.
    budget by arithmetic; 1.6-2.8% of total A+B CPU measured forward). It does not explain J1160's
    ~80 ms/Gbit of bookkeeping; the rest is parsing, the filter's locks and cache misses (the
    whole filter is 173-213 ns per packet and grows with active peers).
-3. The two larger, non-dependency levers I would measure next (separate job, no dependency choice):
+3. The two larger, non-dependency levers I would measure next (separate job, no dependency choice;
+   measured since by J1227, see [`FLOW-LEVERS.md`](FLOW-LEVERS.md)):
    (a) a symmetric flow hash that needs no `FlowKey::canonical()` (13 ns of the 26 ns per packet,
    -21 ns); (b) a host-route table in front of the allowed-IPs trie (68 ns per `longest_match`,
    once per packet on each host, 3 ns for a `/32` hit; mesh peers are `/32`s, so the trie stays
