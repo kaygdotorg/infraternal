@@ -1,0 +1,53 @@
+# self time, top 25
+    35.80%  hubprof            [.] <&curve25519_dalek::backend::serial::u64::field::FieldElement51 as core::ops::arith::Mul>::mul                                         
+    23.57%  hubprof            [.] <curve25519_dalek::backend::serial::u64::field::FieldElement51>::pow2k                                                                 
+    10.75%  hubprof            [.] <curve25519_dalek::montgomery::MontgomeryPoint>::mul_clamped                                                                           
+     4.92%  hubprof            [.] <blake2::Blake2sVarCore>::compress                                                                                                     
+     1.64%  hubprof            [.] <curve25519_dalek::window::LookupTable<curve25519_dalek::backend::serial::curve_models::AffineNielsPoint>>::select                     
+     1.56%  [kernel.kallsyms]  [k] __pv_queued_spin_lock_slowpath                                                                                                         
+     0.75%  hubprof            [.] <gotatun::noise::handshake::Handshake>::receive_handshake_initialization                                                               
+     0.56%  hubprof            [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPack
+     0.52%  libc.so.6          [.] __memset_avx2_unaligned_erms                                                                                                           
+     0.48%  hubprof            [.] <gotatun::device::PacketLookup>::peer_by_key                                                                                           
+     0.45%  hubprof            [.] gotatun::device::complete_outgoing_packet::<gotatun::udp::buffer::BufferedUdpSend>::{closure#0}                                        
+     0.44%  hubprof            [.] <gotatun::device::PacketLookup>::contains_peer                                                                                         
+     0.42%  [kernel.kallsyms]  [k] update_load_avg                                                                                                                        
+     0.40%  libc.so.6          [.] __memmove_avx_unaligned_erms                                                                                                           
+     0.39%  hubprof            [.] <infraternal_plugin_mesh::handshake_admission::PeerAdmission>::check                                                                   
+     0.37%  [kernel.kallsyms]  [k] __schedule                                                                                                                             
+     0.37%  [kernel.kallsyms]  [k] entry_SYSRETQ_unsafe_stack                                                                                                             
+     0.37%  libc.so.6          [.] __memcmp_avx2_movbe                                                                                                                    
+     0.36%  [kernel.kallsyms]  [k] psi_task_switch                                                                                                                        
+     0.35%  hubprof            [.] <gotatun::udp::socket::UdpSocket as gotatun::udp::UdpSend>::send_many_to::{closure#0}                                                  
+     0.32%  [kernel.kallsyms]  [k] __dev_queue_xmit                                                                                                                       
+     0.29%  hubprof            [.] subtle::black_box::<u8>                                                                                                                
+     0.29%  hubprof            [.] <&curve25519_dalek::edwards::EdwardsPoint as core::ops::arith::Add<&curve25519_dalek::backend::serial::curve_models::AffineNielsPoint>>
+     0.28%  [kernel.kallsyms]  [k] psi_group_change                                                                                                                       
+     0.25%  hubprof            [.] <curve25519_dalek::edwards::EdwardsPoint>::mul_base_clamped                                                                            
+
+# inclusive time, product and engine frames, top 25
+     2.85%     0.13%  [.] gotatun::udp::socket::linux::send_plain_range::{closure#0}                                                                                                          
+     1.00%     0.18%  [.] <infraternal_plugin_mesh::handshake_admission::PeerAdmissionUdpReceiver as gotatun::udp::UdpRecv>::recv_many_from::{closure#0}                                      
+     0.75%     0.75%  [.] <gotatun::noise::handshake::Handshake>::receive_handshake_initialization                                                                                            
+     0.72%     0.56%  [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPacketIo, infraternal_plugin_mesh
+     0.53%     0.19%  [.] <gotatun::noise::Tunn>::put_session                                                                                                                                 
+     0.53%     0.00%  [.] gotatun::udp::socket::linux::send_plain_range::{closure#0}                                                                                                          
+     0.48%     0.48%  [.] <gotatun::device::PacketLookup>::peer_by_key                                                                                                                        
+     0.45%     0.45%  [.] gotatun::device::complete_outgoing_packet::<gotatun::udp::buffer::BufferedUdpSend>::{closure#0}                                                                     
+     0.44%     0.44%  [.] <gotatun::device::PacketLookup>::contains_peer                                                                                                                      
+     0.39%     0.39%  [.] <infraternal_plugin_mesh::handshake_admission::PeerAdmission>::check                                                                                                
+     0.35%     0.35%  [.] <gotatun::udp::socket::UdpSocket as gotatun::udp::UdpSend>::send_many_to::{closure#0}                                                                               
+     0.22%     0.22%  [.] <gotatun_packet::Packet>::try_into_wg                                                                                                                               
+     0.19%     0.19%  [.] <tokio::sync::mpsc::bounded::Receiver<gotatun::udp::buffer::BufferedUdpMessage>>::recv_many::{closure#0}                                                            
+     0.19%     0.00%  [.] <gotatun::device::parallel_crypto::OrderStore<gotatun_packet::wg::WgKind>>::failed::{closure#0}                                                                     
+     0.19%     0.19%  [.] <gotatun::device::timer_queue::QueueState>::peek_live                                                                                                               
+     0.18%     0.18%  [.] <gotatun::task::Task>::spawn::<futures_util::future::try_future::MapErr<gotatun::device::fatal_on_panic<<gotatun::device::DeviceState<(infraternal_plugin_mesh::gota
+     0.17%     0.17%  [.] tokio::runtime::task::raw::poll::<<gotatun::task::Task>::spawn<<gotatun::udp::buffer::BufferedUdpSend>::with_send_turn_and_side<gotatun::udp::socket::UdpSocket>::{c
+     0.17%     0.17%  [.] <gotatun::noise::Tunn>::reschedule_timers                                                                                                                           
+     0.16%     0.16%  [.] <alloc::sync::Arc<futures_util::stream::futures_unordered::task::Task<core::pin::Pin<alloc::boxed::Box<dyn core::future::future::Future<Output = core::result::Resul
+     0.15%     0.15%  [.] core::ptr::drop_glue::<gotatun::device::parallel_crypto::CryptoHandle>                                                                                              
+     0.15%     0.15%  [.] <gotatun::device::DeviceState<(infraternal_plugin_mesh::gotatun_node::BoundUdpFactory, infraternal_plugin_mesh::gotatun_node::LinuxPacketIo, infraternal_plugin_mesh
+     0.14%     0.14%  [.] <gotatun::device::PacketLookup>::register_handshake_idx                                                                                                             
+     0.14%     0.14%  [.] core::ptr::drop_glue::<gotatun::udp::buffer::push_to_run<gotatun::udp::socket::UdpSocket>::{closure#0}>                                                             
+     0.14%     0.14%  [k] fib_table_lookup                                                                                                                                                    
+     0.12%     0.00%  [.] fib_select_path                                                                                                                                                     

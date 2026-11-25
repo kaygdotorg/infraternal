@@ -1,0 +1,53 @@
+# self time, top 25
+     9.36%  hubprof               [.] <infraternal_plugin_mesh::wireguard::Device>::routes_with_mtu_overrides                                                             
+     4.00%  [kernel.kallsyms]     [k] entry_SYSRETQ_unsafe_stack                                                                                                          
+     3.32%  [kernel.kallsyms]     [k] memset_orig                                                                                                                         
+     2.44%  [kernel.kallsyms]     [k] __snmp6_fill_stats64.constprop.0                                                                                                    
+     2.23%  [kernel.kallsyms]     [k] syscall_return_via_sysret                                                                                                           
+     1.81%  [kernel.kallsyms]     [k] entry_SYSCALL_64_after_hwframe                                                                                                      
+     1.64%  libc.so.6             [.] __memmove_avx_unaligned_erms                                                                                                        
+     1.56%  libc.so.6             [.] __memset_avx2_unaligned_erms                                                                                                        
+     1.53%  [kernel.kallsyms]     [k] fib6_add_1.isra.0                                                                                                                   
+     1.42%  [kernel.kallsyms]     [k] __nla_validate_parse                                                                                                                
+     1.41%  libc.so.6             [.] _int_malloc                                                                                                                         
+     1.39%  libc.so.6             [.] malloc                                                                                                                              
+     1.26%  [kernel.kallsyms]     [k] rt_fibinfo_free_cpus.part.0                                                                                                         
+     1.19%  hubprof               [.] infraternal_plugin_mesh::netlink::attributes                                                                                        
+     1.02%  [kernel.kallsyms]     [k] clear_page_erms                                                                                                                     
+     0.95%  libc.so.6             [.] __memcmp_avx2_movbe                                                                                                                 
+     0.93%  [kernel.kallsyms]     [k] rtnetlink_rcv_msg                                                                                                                   
+     0.87%  [kernel.kallsyms]     [k] aa_sk_perm                                                                                                                          
+     0.85%  [kernel.kallsyms]     [k] dev_fetch_sw_netstats                                                                                                               
+     0.85%  hubprof               [.] <infraternal_plugin_mesh::dataplane::PeerPolicy as core::clone::Clone>::clone                                                       
+     0.84%  hubprof               [.] <[u8; 32] as serde_core::ser::Serialize>::serialize::<&mut serde_json::ser::Serializer<&mut alloc::vec::Vec<u8>>>                   
+     0.84%  [kernel.kallsyms]     [k] clear_bhb_loop                                                                                                                      
+     0.84%  libc.so.6             [.] _int_realloc                                                                                                                        
+     0.81%  [kernel.kallsyms]     [k] fib6_new_table                                                                                                                      
+     0.74%  [kernel.kallsyms]     [k] __skb_try_recv_datagram                                                                                                             
+
+# inclusive time, product and engine frames, top 25
+    43.71%     0.39%  [.] <infraternal_plugin_mesh::netlink::Socket>::request                                                                                                                 
+    36.19%     0.00%  [.] netlink_sendmsg                                                                                                                                                     
+    34.29%     0.56%  [.] netlink_unicast                                                                                                                                                     
+    28.56%     0.35%  [.] netlink_rcv_skb                                                                                                                                                     
+    23.52%     0.93%  [.] rtnetlink_rcv_msg                                                                                                                                                   
+    11.58%     9.36%  [.] <infraternal_plugin_mesh::wireguard::Device>::routes_with_mtu_overrides                                                                                             
+     7.07%     0.19%  [.] <infraternal_plugin_mesh::wireguard::RouteMonitor>::wait_for_deleted_peer_route                                                                                     
+     5.70%     0.24%  [.] netlink_recvmsg                                                                                                                                                     
+     5.11%     0.66%  [.] fib_table_insert                                                                                                                                                    
+     4.60%     0.00%  [.] nfnetlink_rcv                                                                                                                                                       
+     4.60%     0.00%  [.] nfnetlink_rcv_batch                                                                                                                                                 
+     4.21%     0.00%  [.] fib6_add                                                                                                                                                            
+     4.11%     0.00%  [.] fib_create_info                                                                                                                                                     
+     3.50%     0.43%  [.] netlink_ack                                                                                                                                                         
+     3.33%     0.00%  [.] fib_nh_common_init                                                                                                                                                  
+     2.64%     0.00%  [.] fib_nh_init                                                                                                                                                         
+     1.76%     0.27%  [.] netlink_broadcast_filtered                                                                                                                                          
+     1.70%     0.00%  [.] __netlink_sendskb                                                                                                                                                   
+     1.53%     1.53%  [k] fib6_add_1.isra.0                                                                                                                                                   
+     1.51%     0.00%  [.] fib_nh_common_release                                                                                                                                               
+     1.51%     0.00%  [.] free_fib_info_rcu                                                                                                                                                   
+     1.26%     1.26%  [k] rt_fibinfo_free_cpus.part.0                                                                                                                                         
+     1.19%     1.19%  [.] infraternal_plugin_mesh::netlink::attributes                                                                                                                        
+     1.13%     0.00%  [.] netlink_dump                                                                                                                                                        
+     1.12%     0.00%  [.] fib6_nh_init                                                                                                                                                        

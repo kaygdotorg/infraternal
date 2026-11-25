@@ -3,7 +3,7 @@
 
 usage: summarize.py DIR [DIR...] > pivot.md
 
-Numeric values are the median over runs (the run count is shown in the header); text values come
+Numeric values are the median over runs, with [min-max] when the runs differ; text values come
 from the first run. Rows keep the order in which the driver wrote them.
 """
 import csv, glob, statistics, sys
@@ -35,8 +35,13 @@ def fmt(values):
             return values[0]
     if not nums:
         return ""
+    def num(x):
+        return f"{x:.0f}" if abs(x) >= 100 else f"{x:.3g}"
+
     m = statistics.median(nums)
-    return f"{m:.0f}" if abs(m) >= 100 else f"{m:.3g}"
+    if len(nums) > 1 and min(nums) != max(nums):
+        return f"{num(m)} [{num(min(nums))}-{num(max(nums))}]"
+    return num(m)
 
 
 print(f"| step | metric | unit | " + " | ".join(f"N={p}" for p in peers) + " |")

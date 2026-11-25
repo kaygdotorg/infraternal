@@ -1,0 +1,14 @@
+{"cmd":"identity","sim_cpu_s":0.0,"wire_rx":0,"wire_tx":0}
+{"cmd":"connect","established":1000,"hs_max_ms":5985.718725,"hs_p50_ms":127.74124400000001,"hs_p99_ms":5974.717988,"max_attempts":2,"peers":1000,"peers_retried":500,"sim_cpu_s":0.32,"wall_ms":6044.065955,"wire_rx":1000,"wire_tx":2500}
+{"cmd":"keepalive","sim_cpu_s":0.010000000000000009,"wire_rx":1000,"wire_tx":2500}
+{"cmd":"hold","sim_cpu_s":0.04999999999999999,"wire_rx":2767,"wire_tx":4928}
+{"cmd":"keepalive","sim_cpu_s":0.0,"wire_rx":2767,"wire_tx":4928}
+{"active":1,"cmd":"send","inner_mbit":2114.870104270696,"secs":10.000005635,"sent":2065304,"sim_cpu_s":6.48,"wire_rx":3204,"wire_tx":2070232}
+{"active":1,"cmd":"send","inner_mbit":390.24454918887363,"secs":10.000021187,"sent":381099,"sim_cpu_s":8.02,"wire_rx":3706,"wire_tx":2451331}
+{"active":10,"cmd":"send","inner_mbit":2072.0579728530197,"secs":10.000004378,"sent":2023495,"sim_cpu_s":6.42,"wire_rx":4195,"wire_tx":4474826}
+{"active":10,"cmd":"send","inner_mbit":390.24470895471893,"secs":10.000017093,"sent":381099,"sim_cpu_s":8.009999999999998,"wire_rx":4682,"wire_tx":4855925}
+{"active":100,"cmd":"send","inner_mbit":2355.887893824743,"secs":10.000000994,"sent":2300672,"sim_cpu_s":9.470000000000002,"wire_rx":5177,"wire_tx":7156597}
+{"active":100,"cmd":"send","inner_mbit":390.24454349131537,"secs":10.000021333,"sent":381099,"sim_cpu_s":8.009999999999998,"wire_rx":5702,"wire_tx":7537696}
+{"active":1000,"cmd":"send","inner_mbit":97.56259055725198,"secs":6.00004404,"sent":57166,"sim_cpu_s":5.710000000000001,"wire_rx":5838,"wire_tx":7594862}
+{"cmd":"storm","established":1000,"hs_max_ms":857.283503,"hs_p50_ms":701.253344,"hs_p99_ms":854.246406,"max_attempts":1,"peers":1000,"peers_retried":0,"sim_cpu_s":0.9399999999999977,"wall_ms":935.9045,"wire_rx":11825,"wire_tx":7600349}
+{"cmd":"exit"}

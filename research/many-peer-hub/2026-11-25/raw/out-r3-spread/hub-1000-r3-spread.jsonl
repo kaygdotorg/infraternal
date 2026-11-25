@@ -1,0 +1,9 @@
+{"cmd":"identity"}
+{"apply_us":128130,"chunks":33,"cmd":"apply","encode_us":8531,"peers":1000}
+{"apply_us":123172,"chunks":33,"cmd":"change","encode_us":8914,"peers":1000}
+{"apply_us":144382,"chunks":33,"cmd":"apply","encode_us":8701,"peers":1000}
+{"apply_us":67938,"chunks":33,"cmd":"apply","encode_us":8645,"peers":1000}
+{"apply_us":127571,"chunks":33,"cmd":"apply","encode_us":8658,"peers":1001}
+{"apply_us":144738,"chunks":33,"cmd":"apply","encode_us":8682,"peers":1000}
+{"cmd":"counters","counted_peers":1000,"counters_us":881}
+{"cmd":"exit","down":true}

@@ -61,6 +61,21 @@ def switches(pid):
     return vol, invol, threads
 
 
+def thread_switches(pid):
+    """{tid: (name, voluntary context switches)} for every thread of `pid`."""
+    out = {}
+    for tid in os.listdir(f"/proc/{pid}/task"):
+        try:
+            name = open(f"/proc/{pid}/task/{tid}/comm").read().strip()
+            with open(f"/proc/{pid}/task/{tid}/status") as f:
+                for line in f:
+                    if line.startswith("voluntary_ctxt_switches"):
+                        out[tid] = (name, int(line.split()[1]))
+        except FileNotFoundError:
+            pass
+    return out
+
+
 def mem(pid):
     """RSS, HWM and PSS in KiB, plus open fds."""
     out = {}
@@ -134,6 +149,9 @@ def main():
     ap.add_argument("--load-secs", type=int, default=10)
     ap.add_argument("--mode", default="single", choices=["single", "spread", "known"],
                     help="peer source addresses: all behind one address, one /24 each, or one /24 each and told to the hub as endpoints")
+    ap.add_argument("--hub-env", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra environment for the hub (for example GOTATUN_AQM=off); repeatable")
+    ap.add_argument("--ks", default="1,10,100", help="concurrent sender counts")
     ap.add_argument("--perf", help="path to a perf binary; records call graphs of the hub per phase into --out")
     ap.add_argument("--mbit", type=int, default=400, help="fixed offered load for the CPU/Gbit rows")
     args = ap.parse_args()
@@ -220,7 +238,8 @@ def main():
         hubdir = f"{work}/hub"
         os.mkdir(hubdir, 0o700)
         hub_env = dict(os.environ, HUB_DIR=hubdir, HUB_OUT=f"{work}/hub.out", HUB_FIFO=f"{work}/hub.fifo",
-                       INFRATERNAL_CUTOFF_MEASURE="1", TMPDIR=work, RUST_BACKTRACE="1")
+                       INFRATERNAL_CUTOFF_MEASURE="1", TMPDIR=work, RUST_BACKTRACE="1",
+                       **dict(item.split("=", 1) for item in args.hub_env))
         hub = Peer(["ip", "netns", "exec", NS_HUB, "taskset", "-c", HUB_CPUS, *shlex.split(args.hub),
                     "--exact", "node::many_peer_hub_bench::many_peer_hub", "--ignored", "--nocapture"],
                    hub_env["HUB_FIFO"], hub_env["HUB_OUT"], env=hub_env, err=f"{work}/hub.err")
@@ -232,13 +251,27 @@ def main():
         hub_port = ident["port"]
         time.sleep(2)
 
+        sim_ref = []  # the simulator, once it exists; it keeps answering the hub during idle windows
+
         def idle_window(step, secs):
-            """Wakeups per second (voluntary + involuntary) and CPU over a quiet window."""
+            """Wakeups per second (voluntary + involuntary) and CPU over a quiet window.
+
+            Once peers are connected the simulator serves their sockets for the whole window
+            (`hold`), as online peers would: a silent peer would make the hub retry its own
+            handshakes and keepalives and the window would measure the retries, not idleness.
+            """
             v0, i0, t0 = switches(pid)
+            s0 = thread_switches(pid)
             c0 = cpu_s(pid)
-            time.sleep(secs)
+            if sim_ref:
+                sim_ref[0].cmd(f"hold {secs}", secs + 60)
+            else:
+                time.sleep(secs)
             v1, i1, t1 = switches(pid)
+            s1 = thread_switches(pid)
             c1 = cpu_s(pid)
+            per_thread = sorted(((s1[t][1] - s0.get(t, ("", 0))[1], s1[t][0]) for t in s1), reverse=True)[:3]
+            row(step, "idle_busiest_threads", ";".join(f"{name}={d / secs:.1f}/s" for d, name in per_thread), "")
             row(step, "idle_voluntary_per_s", round((v1 - v0) / secs, 2), "1/s")
             row(step, "idle_involuntary_per_s", round((i1 - i0) / secs, 2), "1/s")
             row(step, "idle_cpu_pct", round((c1 - c0) / secs * 100, 3), "%")
@@ -287,6 +320,7 @@ def main():
                    f"{work}/sim.fifo", f"{work}/sim.out", env=sim_env, err=f"{work}/sim.err")
         children.append(sim)
         sim.cmd(f"identity {hubkey}")
+        sim_ref.append(sim)
 
         # Cold handshake storm: every peer initiates at once.
         c0 = cpu_s(pid)
@@ -306,7 +340,8 @@ def main():
         time.sleep(10)  # let handshake confirmation and the packet pool settle before the idle window
         connected = snapshot_mem("connected")
         row("connected", "rss_per_peer", round((connected["VmRSS"] - base["VmRSS"]) * 1024 / n), "B")
-        idle_window("connected", args.idle)
+        for window in ("connected", "connected_2"):
+            idle_window(window, args.idle)
 
         # Idle with the keepalive every real peer sends (D81: 25 s), random phase.
         sim.cmd("keepalive 25")
@@ -325,8 +360,8 @@ def main():
             with open(f"{work}/sink.out") as f:
                 return json.loads(f.read().splitlines()[-1])
 
-        for k in [k for k in (1, 10, 100) if k <= n]:
-            for label, rate in (("max", 0), (f"{args.mbit}mbit", args.mbit)):
+        for k in [k for k in map(int, args.ks.split(",")) if k <= n]:
+            for label, rate in (("max", 0), ("1000mbit", 1000), (f"{args.mbit}mbit", args.mbit)):
                 s0 = sink_last()
                 c0, tc0 = cpu_s(pid), thread_cpu(pid)
                 n0 = snmp(pid)
@@ -359,7 +394,8 @@ def main():
         row("after_load", "rss_per_peer", round((loaded["VmRSS"] - base["VmRSS"]) * 1024 / n), "B")
         time.sleep(15)
         snapshot_mem("after_load_15s")
-        idle_window("after_load", args.idle)
+        for window in ("after_load", "after_load_2", "after_load_3"):
+            idle_window(window, args.idle)
 
         # Handshake storm on live sessions: all peers send a fresh initiation at once.
         c0, tc0 = cpu_s(pid), thread_cpu(pid)
