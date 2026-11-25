@@ -533,6 +533,8 @@ ESCAPES = {
     'unmount /run': 'umount /run',
     'lazily unmount /tmp': 'umount -l /tmp',
     'reach the host user bus': 'test -S "$HOST_USER_BUS"',
+    # Through the system bus, uid 0 of a test once rewrote the host's resolved links (#584).
+    'reach the host system bus': 'test -S /run/dbus/system_bus_socket || test -S /var/run/dbus/system_bus_socket',
     'reach the nix daemon socket': 'nix --extra-experimental-features nix-command store info --store daemon',
     'write a host pty': 'printf . > /dev/pts/0',
     'reach the host network': 'timeout 3 bash -c "exec 3<>/dev/tcp/$OUTSIDE_ADDRESS/22"',
@@ -622,6 +624,44 @@ def plan(root, selected, binaries, base, scratch, target, scope):
     return runs, missing
 
 
+# A mesh node's DNS listener port: a host link that gains a DNS server on it was configured by a
+# mesh node from the wrong place (#584). The mesh link itself may legitimately carry one.
+MESH_DNS_PORT = 1053
+MESH_LINK = 'infraternal0'
+
+
+def resolved_mesh_links(output=None):
+    """Host links other than the mesh link whose systemd-resolved DNS servers use the mesh port.
+
+    Reads `resolvectl dns` (read-only; `output` replaces it in tests). Returns None when resolved
+    is not running or not reachable, so hosts without it simply skip the guard.
+    """
+    if output is None:
+        try:
+            result = subprocess.run(['resolvectl', 'dns'], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode:
+            return None
+        output = result.stdout
+    links = set()
+    for line in output.splitlines():
+        match = re.match(r'Link (\d+) \(([^)]*)\):(.*)', line)
+        if match and match[2] != MESH_LINK and any(
+                server.endswith(f':{MESH_DNS_PORT}') for server in match[3].split()):
+            links.add(f'{match[2]} (ifindex {match[1]})')
+    return links
+
+
+def resolved_guard_failures(before, after):
+    """The guard's verdict: links that gained mesh DNS while the row ran (none if unreadable)."""
+    if before is None or after is None:
+        return []
+    return [f'host resolver guard: {link} gained mesh DNS on port {MESH_DNS_PORT} while the row ran; '
+            f'a test reached the host systemd-resolved (#584). Undo with `resolvectl revert <link>`.'
+            for link in sorted(after - before)]
+
+
 def run(root, selected, target):
     """Build as the caller, prove containment, then run each selected test. Returns failures."""
     if os.geteuid() == 0:
@@ -632,6 +672,9 @@ def run(root, selected, target):
     if not scope:
         print('privileged integration: no user manager; tmpfs sizes are the only memory cap', flush=True)
     scratch = Path(tempfile.mkdtemp(prefix='privileged-', dir=Path.home() / '.cache'))
+    # The sandbox has no system bus, so no test should ever change the host's resolver. Compare
+    # before and after anyway: links already carrying mesh DNS (from elsewhere) are not counted.
+    resolver_before = resolved_mesh_links()
     try:
         (scratch / 'root').mkdir()
         escaped = self_check(scratch, target, root, scope)
@@ -653,6 +696,7 @@ def run(root, selected, target):
             print(f'=== [{index}/{len(runs)}] {label}: {verdict}', flush=True)
             if result.returncode:
                 failed.append(f'{label} ({verdict.lower()})')
+        failed += resolved_guard_failures(resolver_before, resolved_mesh_links())
         return failed
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
