@@ -333,12 +333,13 @@ fn assert_fixture_coverage(path: &Path, snapshot: &DatabaseSnapshot) {
         2,
         "fixture must cover both rootless and rootful host modes"
     );
+    // A P-256 key belongs to a `device` host (#580), which no release before the device host mode
+    // can store, so the fixture holds Ed25519 certificates only. The migration's own tests cover
+    // P-256 on devices and the refusal of P-256 on any other host.
     assert_eq!(
-        count(
-            "SELECT count(DISTINCT key_algorithm) FROM remote_certificates WHERE key_algorithm IN ('ed25519', 'p256')"
-        ),
-        2,
-        "fixture must contain certificates of both key algorithms"
+        count("SELECT count(DISTINCT key_algorithm) FROM remote_certificates"),
+        1,
+        "fixture certificates are all Ed25519: P-256 is for devices only"
     );
     assert!(
         count("SELECT count(*) FROM remote_certificates WHERE role = 'successor'") >= 1,

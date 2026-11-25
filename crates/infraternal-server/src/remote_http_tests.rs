@@ -1387,6 +1387,8 @@ async fn a_ring_signed_device_csr_is_certified_and_admitted() {
         device.point(),
         "the certificate certifies the device's own key"
     );
+    // The certificate's window starts at the join's own wall-clock second, which may be after `now`.
+    let joined_at = super::now().unwrap();
     let fingerprint: [u8; 32] = leaf
         .digest(MessageDigest::sha256())
         .unwrap()
@@ -1394,11 +1396,11 @@ async fn a_ring_signed_device_csr_is_certified_and_admitted() {
         .try_into()
         .unwrap();
     assert_eq!(
-        store.admit_device(&fingerprint, now).await.unwrap().host,
+        store.admit_device(&fingerprint, joined_at).await.unwrap().host,
         host
     );
     assert!(
-        store.admit(&fingerprint, now).await.is_err(),
+        store.admit(&fingerprint, joined_at).await.is_err(),
         "the terminal host guard refuses a device certificate"
     );
     let certificate_uid: Option<i64> =
