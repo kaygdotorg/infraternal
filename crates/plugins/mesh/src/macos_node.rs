@@ -1283,8 +1283,7 @@ impl PendingWorker {
             .name("infraternal-mesh-macos".to_owned())
             .spawn(move || {
                 let Ok(runtime) = RuntimeBuilder::new_current_thread().enable_all().build() else {
-                    let _ =
-                        info_tx.send(Err(io::Error::other("Mesh runtime could not start.")));
+                    let _ = info_tx.send(Err(io::Error::other("Mesh runtime could not start.")));
                     return;
                 };
                 // The listener's guard gets its own copy; the device takes `private_key` below.

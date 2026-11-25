@@ -700,12 +700,12 @@ fn mac_underlay_announce_device() {
             walks: crate::candidate_walks::Walks::default(),
             config: Some(snapshot),
             // The harness's point-to-point address installs the route with the utun.
-            routes: BTreeSet::default(),
-            route_mtus: BTreeMap::default(),
+            routes: std::collections::BTreeSet::default(),
+            route_mtus: std::collections::BTreeMap::default(),
             interface_mtu: 1280,
             port,
             admission,
-            confirmed_feed: crate::peer_stats::ConfirmedEndpointFeed::default(),
+            confirmed_feed: crate::handshake_admission::ConfirmedEndpointFeed::default(),
             #[cfg(feature = "mesh-dns")]
             dns_resolver: None,
             #[cfg(feature = "mesh-dns")]

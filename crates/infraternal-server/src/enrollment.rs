@@ -14,7 +14,6 @@ use uuid::Uuid;
 
 #[path = "remote_authority.rs"]
 pub(crate) mod authority;
-#[cfg(any(feature = "ssh", test))]
 #[path = "bootstrap_retirement.rs"]
 mod bootstrap_retirement;
 /// The durable record of upgrading a host to root (D376).
