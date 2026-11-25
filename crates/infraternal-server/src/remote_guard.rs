@@ -675,9 +675,17 @@ mod cut_tests {
         let revocations = Revocations::default();
         let device = crate::remote_device_link::DEVICE_EPOCH_UID;
         let held: Vec<_> = (0..10_000u128)
-            .map(|n| revocations.register(Uuid::from_u128(n + 1), device).unwrap())
+            .map(|n| {
+                revocations
+                    .register(Uuid::from_u128(n + 1), device)
+                    .unwrap()
+            })
             .collect();
-        assert!(revocations.register(Uuid::from_u128(99_999), device).is_err());
+        assert!(
+            revocations
+                .register(Uuid::from_u128(99_999), device)
+                .is_err()
+        );
         let host = Uuid::from_u128(0xabc);
         let signal = revocations.register(host, 1000).unwrap();
         assert!(revocations.register(host, 0).is_ok());
