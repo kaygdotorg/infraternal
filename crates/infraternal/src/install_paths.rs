@@ -82,6 +82,10 @@ pub enum Os {
 }
 
 /// The facts the defaults come from, as plain values so tests never depend on the real environment.
+///
+/// Every host fact a default reads is a field here: `detect` fills them from
+/// the machine, and tests set them directly. A test that builds this struct
+/// by hand therefore never sees the host's real `/var/lib/infraternal`.
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Which convention to follow.
@@ -94,13 +98,21 @@ pub struct Environment {
     pub home: Option<PathBuf>,
     /// The folder holding the running binary, where a release bundle keeps `web/`.
     pub binary_dir: Option<PathBuf>,
+    /// The Linux system base a machine-wide server defaults to: [`LINUX_SYSTEM_BASE`]
+    /// on a real machine. A debug-only test hook may point `detect` elsewhere so
+    /// the CLI integration tests reason about a fixture, never the real base.
+    pub linux_system_base: PathBuf,
+    /// Whether an infraternal agent's state already sits in `linux_system_base`,
+    /// so a new machine-wide server takes the private `server/` child (see
+    /// `system_base_has_agent_state`). `detect` reads it from disk; tests set it.
+    pub agent_in_system_base: bool,
 }
 
 impl Environment {
     /// Read the real process environment, the effective user and the running binary's location.
     #[must_use]
     pub fn detect() -> Self {
-        Self::from_lookup(
+        let mut environment = Self::from_lookup(
             if cfg!(target_os = "macos") {
                 Os::MacOs
             } else {
@@ -111,7 +123,17 @@ impl Environment {
             env::current_exe()
                 .ok()
                 .and_then(|exe| exe.parent().map(Path::to_owned)),
-        )
+        );
+        // Debug builds let the CLI integration tests point the system base at a
+        // fixture, mirroring `INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR`. Release
+        // builds always use the real base.
+        #[cfg(debug_assertions)]
+        if let Some(base) = env::var_os("INFRATERNAL_TEST_LINUX_SYSTEM_BASE") {
+            environment.linux_system_base = PathBuf::from(base);
+        }
+        environment.agent_in_system_base = environment.os == Os::Linux
+            && system_base_has_agent_state(&environment.linux_system_base);
+        environment
     }
 
     /// Build an environment from a variable lookup, applying the XDG rules once.
@@ -135,6 +157,9 @@ impl Environment {
                 .filter(|home| !home.is_empty())
                 .map(PathBuf::from),
             binary_dir,
+            linux_system_base: PathBuf::from(LINUX_SYSTEM_BASE),
+            // Only `detect` looks at the disk; a built value starts with no agent state.
+            agent_in_system_base: false,
         }
     }
 
@@ -174,7 +199,11 @@ pub fn check_scope(
 /// The server's default data folder for a fresh install in this scope (see the module table).
 pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBuf, PathError> {
     match (environment.os, scope) {
-        (Os::Linux, Scope::System) => Ok(linux_system_data_dir(Path::new(LINUX_SYSTEM_BASE))),
+        (Os::Linux, Scope::System) => Ok(if environment.agent_in_system_base {
+            environment.linux_system_base.join("server")
+        } else {
+            environment.linux_system_base.clone()
+        }),
         (Os::Linux, Scope::User) => Ok(match &environment.xdg_state_home {
             Some(state) => state.join("infraternal"),
             None => environment
@@ -188,11 +217,15 @@ pub fn server_data_dir(scope: Scope, environment: &Environment) -> Result<PathBu
     }
 }
 
-/// Select the private child for new installs when the infraternal agent uses the base.
-fn linux_system_data_dir(base: &Path) -> PathBuf {
-    // A binary directory can also be part of a server-only release. Look
-    // for infraternal agent state or ownership markers instead.
-    if [
+/// Whether an infraternal agent already keeps state in the Linux system base.
+///
+/// A new machine-wide server then takes the private `server/` child, so the two
+/// do not share one folder. A binary directory can also be part of a
+/// server-only release, so this looks for agent state or ownership markers,
+/// not for the binary itself. Only [`Environment::detect`] calls this; the
+/// result is stored on the environment so tests never read the real base.
+fn system_base_has_agent_state(base: &Path) -> bool {
+    [
         "agent",
         "state",
         "sessions",
@@ -205,11 +238,7 @@ fn linux_system_data_dir(base: &Path) -> PathBuf {
     .any(|name| {
         std::fs::symlink_metadata(base.join(name))
             .is_ok_and(|entry| entry.is_dir() || entry.is_file())
-    }) {
-        base.join("server")
-    } else {
-        base.to_owned()
-    }
+    })
 }
 
 /// The release bundle's `web/` folder beside the running binary, when it exists.
@@ -570,6 +599,8 @@ mod tests {
             xdg_state_home: None,
             home: Some(PathBuf::from("/home/someone")),
             binary_dir: None,
+            linux_system_base: PathBuf::from(LINUX_SYSTEM_BASE),
+            agent_in_system_base: false,
         }
     }
 
@@ -617,12 +648,22 @@ mod tests {
     fn combined_system_default_uses_the_server_child() {
         let base = scratch("combined");
         std::fs::create_dir_all(base.join("bin")).unwrap();
-        assert_eq!(linux_system_data_dir(&base), base);
+        assert!(!system_base_has_agent_state(&base));
         std::fs::create_dir(base.join("agent")).unwrap();
-        assert_eq!(linux_system_data_dir(&base), base.join("server"));
+        assert!(system_base_has_agent_state(&base));
+        // With the probe's answer recorded, the default takes the child.
+        let combined = Environment {
+            linux_system_base: base.clone(),
+            agent_in_system_base: true,
+            ..linux()
+        };
+        assert_eq!(
+            server_data_dir(Scope::System, &combined).unwrap(),
+            base.join("server")
+        );
         std::fs::remove_dir(base.join("agent")).unwrap();
         std::fs::create_dir(base.join("server")).unwrap();
-        assert_eq!(linux_system_data_dir(&base), base);
+        assert!(!system_base_has_agent_state(&base));
         std::fs::remove_dir_all(base).unwrap();
     }
 
@@ -633,9 +674,9 @@ mod tests {
         std::fs::create_dir_all(base.join("server")).unwrap();
         std::fs::write(base.join("server/index.html"), "standalone web").unwrap();
         std::fs::write(base.join("infraternal.sqlite"), "standalone data").unwrap();
-        let selected = linux_system_data_dir(&base);
+        let standalone = system_base_has_agent_state(&base);
         std::fs::remove_dir_all(&base).unwrap();
-        assert_eq!(selected, base);
+        assert!(!standalone);
     }
 
     /// An absolute `XDG_STATE_HOME` is honoured; empty or relative ones are ignored (XDG spec).
