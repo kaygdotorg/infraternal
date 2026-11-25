@@ -2170,7 +2170,6 @@ dependencies = [
  "ring",
  "rustls",
  "serde",
- "serde_json",
  "tokio",
  "uuid",
 ]

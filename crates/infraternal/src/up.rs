@@ -1272,7 +1272,7 @@ fn map_remote_failure(error: &io::Error) -> Failure {
             | crate::remote::Failure::Connect
             | crate::remote::Failure::Tls
             | crate::remote::Failure::Upgrade
-            | crate::remote::Failure::Challenge,
+            | crate::remote::Failure::AgentLink,
         ) => Failure::Unreachable,
         Some(
             crate::remote::Failure::Refused

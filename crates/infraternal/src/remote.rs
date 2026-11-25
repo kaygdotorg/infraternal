@@ -137,8 +137,8 @@ pub(crate) enum Failure {
     Tls,
     /// The app listener or its proxy did not complete the expected upgrade.
     Upgrade,
-    /// The upgraded route did not send a valid app-level challenge.
-    Challenge,
+    /// The upgraded route did not answer the infraternal agent link (leg-B TLS inside the WebSocket).
+    AgentLink,
     /// The saved private key differs from the key certified at enrollment.
     IdentityMismatch,
     /// A saved identity or key file (or its directory) can be read by the group or by everyone.
@@ -158,7 +158,7 @@ impl std::fmt::Display for Failure {
             Self::Upgrade => "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again.",
             Self::IdentityMismatch => IDENTITY_MISMATCH,
             Self::SharedFile => SHARED_FILE,
-            Self::Challenge => "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again.",
+            Self::AgentLink => "The server opened the WebSocket at /remote/agent, but no infraternal agent link answered inside it. Deploy a server build that matches this infraternal agent and try again.",
         })
     }
 }
@@ -660,7 +660,7 @@ async fn preflight(origin: &str, root: Option<&X509>, system_roots: bool) -> io:
             WebSocketFailure::Connect => Failure::Connect.error(io::ErrorKind::NotConnected),
             WebSocketFailure::Tls => Failure::Tls.error(io::ErrorKind::PermissionDenied),
             WebSocketFailure::Upgrade => Failure::Upgrade.error(io::ErrorKind::InvalidData),
-            WebSocketFailure::Challenge => Failure::Challenge.error(io::ErrorKind::InvalidData),
+            WebSocketFailure::Link => Failure::AgentLink.error(io::ErrorKind::InvalidData),
         })
 }
 
@@ -913,8 +913,8 @@ pub(crate) fn public_error(error: &io::Error) -> &'static str {
         Some(Failure::Upgrade) => {
             "The infraternal agent on this host reached the server over HTTPS, but the server or proxy did not accept the HTTP/1.1 WebSocket upgrade at /remote/agent. Check that the TLS proxy forwards WebSocket upgrades on this path, then try again."
         }
-        Some(Failure::Challenge) => {
-            "The server opened the WebSocket but did not send a valid infraternal agent challenge. Deploy a compatible server build and try again."
+        Some(Failure::AgentLink) => {
+            "The server opened the WebSocket at /remote/agent, but no infraternal agent link answered inside it. Deploy a server build that matches this infraternal agent and try again."
         }
         Some(Failure::IdentityMismatch) => IDENTITY_MISMATCH,
         Some(Failure::SharedFile) => SHARED_FILE,

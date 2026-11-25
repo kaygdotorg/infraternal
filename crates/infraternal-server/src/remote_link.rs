@@ -4,13 +4,7 @@
 use crate::embedded::AgentError;
 #[cfg(any(test, feature = "native-streams"))]
 use crate::remote_guard::AuthorityGuard;
-// The host-link socket starts under the `/remote/agent` proof budget (#572).
-use crate::remote_agent_http::AgentSocket as WebSocket;
 use bytes::{Bytes, BytesMut};
-use futures_util::{
-    SinkExt, StreamExt,
-    stream::{SplitSink, SplitStream},
-};
 use infraternal_agent::{
     channel::Channel,
     remote_native::NativeChannel,
@@ -38,10 +32,9 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, mpsc, watch},
+    sync::{Mutex, mpsc},
     task::JoinSet,
 };
-use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 
 // Tests observe existing ownership without extending a transport's lifetime.
 #[cfg(test)]
@@ -62,139 +55,7 @@ enum LinkTransport {
         receive: Mutex<Receive>,
         prefix: Mutex<Option<Bytes>>,
     },
-    WebSocket {
-        channel: WebSocketChannel,
-        receive: Mutex<Receive>,
-        prefix: Mutex<Option<Bytes>>,
-    },
     Quic(QuicLink),
-}
-
-/// The app-listener link preserves the same bounded muxed frames as remote TCP.
-struct WebSocketChannel {
-    writer: Mutex<SplitSink<WebSocket, WebSocketMessage>>,
-    reader: Mutex<SplitStream<WebSocket>>,
-    pending: Mutex<Bytes>,
-    retired: watch::Sender<bool>,
-}
-
-struct RetireWebSocketWrite<'a> {
-    retired: &'a watch::Sender<bool>,
-    complete: bool,
-}
-impl Drop for RetireWebSocketWrite<'_> {
-    fn drop(&mut self) {
-        if !self.complete {
-            self.retired.send_replace(true);
-        }
-    }
-}
-
-impl WebSocketChannel {
-    fn new(socket: WebSocket) -> Self {
-        let (writer, reader) = socket.split();
-        Self {
-            writer: Mutex::new(writer),
-            reader: Mutex::new(reader),
-            pending: Mutex::new(Bytes::new()),
-            retired: watch::channel(false).0,
-        }
-    }
-    async fn send_control(&self, message: WebSocketMessage) -> io::Result<()> {
-        let mut writer = self.writer.lock().await;
-        tokio::time::timeout(Duration::from_secs(5), writer.send(message))
-            .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
-            .map_err(io::Error::other)
-    }
-}
-
-impl Channel for WebSocketChannel {
-    fn frame_timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(5))
-    }
-    fn retire(&self) {
-        self.retired.send_replace(true);
-    }
-    async fn read(&self, target: &mut [u8]) -> io::Result<usize> {
-        if target.is_empty() {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        let mut retired = self.retired.subscribe();
-        if *retired.borrow() {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        let mut pending = self.pending.lock().await;
-        if !pending.is_empty() {
-            let count = target.len().min(pending.len());
-            target[..count].copy_from_slice(&pending[..count]);
-            *pending = pending.slice(count..);
-            return Ok(count);
-        }
-        drop(pending);
-        let mut reader = self.reader.lock().await;
-        let mut keepalive = tokio::time::interval_at(
-            tokio::time::Instant::now() + Duration::from_secs(25),
-            Duration::from_secs(25),
-        );
-        loop {
-            tokio::select! {
-                biased;
-                _ = retired.changed() => return Err(io::ErrorKind::BrokenPipe.into()),
-                _ = keepalive.tick() => self.send_control(WebSocketMessage::Ping(Bytes::new())).await?,
-                message = reader.next() => match message {
-                    Some(Ok(WebSocketMessage::Binary(data))) => {
-                        if data.is_empty() { continue; }
-                        let count = target.len().min(data.len());
-                        target[..count].copy_from_slice(&data[..count]);
-                        *self.pending.lock().await = data.slice(count..);
-                        return Ok(count);
-                    }
-                    Some(Ok(WebSocketMessage::Ping(data))) => {
-                        self.send_control(WebSocketMessage::Pong(data)).await?;
-                    }
-                    Some(Ok(WebSocketMessage::Pong(_))) => {},
-                    Some(Ok(WebSocketMessage::Close(_))) | None => {
-                        return Err(io::ErrorKind::UnexpectedEof.into());
-                    }
-                    Some(Ok(_)) => return Err(io::ErrorKind::InvalidData.into()),
-                    Some(Err(error)) => return Err(io::Error::other(error)),
-                }
-            }
-        }
-    }
-    async fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > infraternal_protocol::MAX_FRAME_LEN + 64 {
-            return Err(io::ErrorKind::InvalidInput.into());
-        }
-        let mut retired = self.retired.subscribe();
-        if *retired.borrow() {
-            return Err(io::ErrorKind::BrokenPipe.into());
-        }
-        let mut writer = tokio::select! {
-            biased;
-            _ = retired.changed() => return Err(io::ErrorKind::BrokenPipe.into()),
-            writer = self.writer.lock() => writer,
-        };
-        let mut guard = RetireWebSocketWrite {
-            retired: &self.retired,
-            complete: false,
-        };
-        let result = tokio::select! {
-            biased;
-            _ = retired.changed() => Err(io::ErrorKind::BrokenPipe.into()),
-            result = tokio::time::timeout(
-                Duration::from_secs(5),
-                writer.send(WebSocketMessage::Binary(Bytes::copy_from_slice(bytes))),
-            ) => match result {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) => Err(io::Error::other(error)),
-                Err(_) => Err(io::ErrorKind::TimedOut.into()),
-            },
-        };
-        guard.complete = result.is_ok();
-        result
-    }
 }
 
 /// Drain the authenticated SSH greeting prefix before reading later channel bytes.
@@ -562,7 +423,6 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
-            LinkTransport::WebSocket { .. } => None,
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => None,
         }
@@ -725,12 +585,12 @@ impl RemoteLink {
             None => Ok(()),
         }
     }
+    /// End the link's transport at once, waking its reader and writer.
     pub(crate) fn retire(&self) {
         match &self.transport {
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => {}
             LinkTransport::Tcp { channel, .. } => channel.retire(),
-            LinkTransport::WebSocket { channel, .. } => channel.retire(),
             LinkTransport::Quic(link) => link.retire(),
         }
     }
@@ -917,28 +777,6 @@ impl RemoteLink {
             )),
         })
     }
-    /// Admit a key-proved app-listener socket using the existing mux and actor greeting.
-    pub(crate) async fn websocket(socket: WebSocket) -> io::Result<Self> {
-        let channel = WebSocketChannel::new(socket);
-        let mut receive = Receive::default();
-        let (prefix, greeting_sent) = greeting(&channel, &mut receive, None).await?;
-        let peer_caps = peer_caps(&prefix);
-        Ok(Self {
-            path_proof: None,
-            #[cfg(all(test, feature = "mesh-transport-proof"))]
-            diagnostic_peer: None,
-            transport: LinkTransport::WebSocket {
-                channel,
-                receive: Mutex::new(receive),
-                prefix: Mutex::new(Some(Bytes::from(prefix))),
-            },
-            authority: None,
-            renewal: std::sync::atomic::AtomicBool::new(false),
-            peer_caps: AtomicU64::new(peer_caps),
-            greeting_sent,
-            priming: Arc::new(std::sync::Mutex::new(None)),
-        })
-    }
     #[cfg(test)]
     pub(crate) async fn quic(connection: quinn::Connection) -> io::Result<Self> {
         Self::quic_admitted(connection, None).await
@@ -1041,6 +879,7 @@ impl RemoteLink {
         self
     }
 
+    /// Read the next frame from whichever transport carries this link.
     async fn read_transport(
         &self,
         target: &mut BytesMut,
@@ -1078,11 +917,6 @@ impl RemoteLink {
                     read_mux_transport(channel, receive, prefix, target, |_, _| {}).await
                 }
             }
-            LinkTransport::WebSocket {
-                channel,
-                receive,
-                prefix,
-            } => read_mux_transport(channel, receive, prefix, target, |_, _| {}).await,
             LinkTransport::Quic(link) => loop {
                 let mut incoming = link.incoming.lock().await;
                 let read_control = link
@@ -1169,12 +1003,12 @@ impl RemoteLink {
             let _ = release.await;
         }
     }
+    /// Whether a QUIC control packet is waiting; other transports have no queue.
     #[cfg(test)]
     pub(crate) async fn control_packet_ready(&self) -> bool {
         match &self.transport {
             LinkTransport::Quic(link) => !link.incoming.lock().await.control.is_empty(),
             LinkTransport::Tcp { .. } => false,
-            LinkTransport::WebSocket { .. } => false,
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => false,
         }
@@ -1234,12 +1068,12 @@ impl RemoteLink {
         link.limit_send_window(bytes);
         true
     }
+    /// The QUIC peer address, for tests; `None` on stream transports.
     #[cfg(test)]
     pub(crate) fn test_native_peer_address(&self) -> Option<std::net::SocketAddr> {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.remote_address()),
             LinkTransport::Tcp { .. } => None,
-            LinkTransport::WebSocket { .. } => None,
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => None,
         }
@@ -1251,7 +1085,6 @@ impl RemoteLink {
         match &self.transport {
             LinkTransport::Quic(link) => Some(link.connection.stats().frame_rx.stop_sending),
             LinkTransport::Tcp { .. } => None,
-            LinkTransport::WebSocket { .. } => None,
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => None,
         }
@@ -1264,13 +1097,14 @@ impl RemoteLink {
         }
     }
 
+    /// The priming admission state of this link, with its QUIC connection
+    /// when it has one.
     pub(crate) fn priming_admission(&self) -> PrimingAdmission {
         PrimingAdmission {
             state: self.priming.clone(),
             connection: match &self.transport {
                 LinkTransport::Quic(link) => Some(link.connection.clone()),
                 LinkTransport::Tcp { .. } => None,
-                LinkTransport::WebSocket { .. } => None,
                 #[cfg(feature = "ssh")]
                 LinkTransport::Ssh { .. } => None,
             },
@@ -1415,6 +1249,7 @@ impl RemoteLink {
         Ok(())
     }
 
+    /// Write one muxed frame on whichever transport carries this link.
     async fn write_transport(
         &self,
         stream: u32,
@@ -1428,7 +1263,6 @@ impl RemoteLink {
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { channel, .. } => channel.write(muxed).await,
             LinkTransport::Tcp { channel, .. } => channel.write(muxed).await,
-            LinkTransport::WebSocket { channel, .. } => channel.write(muxed).await,
             LinkTransport::Quic(link) => {
                 let terminal_close = stream != 0 && matches!(frame, Frame::Close { .. });
                 let existing = link.streams().terminal.get(&stream).cloned();
@@ -1751,7 +1585,6 @@ impl RemoteLink {
         match &link.transport {
             LinkTransport::Quic(native) => Some(native.connection.clone()),
             LinkTransport::Tcp { .. } => None,
-            LinkTransport::WebSocket { .. } => None,
             #[cfg(feature = "ssh")]
             LinkTransport::Ssh { .. } => None,
         }

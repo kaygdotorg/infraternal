@@ -259,7 +259,7 @@ It carries `Frame::Call`/`Frame::Result` (from `infraternal-protocol`) to an
 | `infraternal-agent/src/remote_client.rs` | `dial_preferred`'s race, `quic_connect`, the Hello | `run_inner`'s uid check, machine binding, `plugin_control`, `sessions`, `daemon::*` dispatch, `host_os::client_info` |
 | `infraternal-agent/src/remote_server_path.rs` | the path logic: `connect`, the Ping/Pong proof, mesh steering (`steer`, `candidate`, `to_enrolled`), `run_observed` | every parameter of type `plugin_control::Registry` becomes a small `LinkHost` trait (report the link, path preferences) |
 | `plugins/remote/src/remote_quic.rs` | the client half: `client_config_with_liveness`, the transport settings (BBR, MTU), `peer_fingerprint` | `server_config` and `WebPkiClientVerifier` (server side) |
-| `plugins/remote/src/enrollment.rs`, `agent_link.rs` | the wire models `JoinInvitation`, `JoinRequest`, `JoinResponse`, `AgentLinkChallenge`/`ProofV2`/`ReadyV2` and the v2 transcript functions | |
+| `plugins/remote/src/enrollment.rs` | the wire models `JoinInvitation`, `JoinRequest`, `JoinResponse` (the HTTPS link's JSON proof is gone since #559: leg-B TLS runs inside the WebSocket, so an iPhone needs a leg-B TLS client over a byte carrier there) | |
 | `plugins/remote/src/server_leaf_floor.rs` | the logic and `ServerLeafStore`, over DER instead of OpenSSL `X509` | |
 | `plugins/remote/src/wire_datagrams.rs` | `NativeDatagrams` (needed later, for app windows) | |
 | `crates/infraternal/src/remote.rs` (join) | the CSR builder (over a `Signer`), `redeem`, the chain and key checks (`chains_to`), the invitation and origin checks (486–535) | `default_data`, the `prepare*` functions, pending keys, `publish`, `replace`, `migrate_identity`, `IdentityPublisher`, the uid checks |

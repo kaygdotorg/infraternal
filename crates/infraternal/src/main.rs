@@ -3206,7 +3206,7 @@ fn run_remote_agent(
                     Some(remote::Failure::Connect) => "CONNECT",
                     Some(remote::Failure::Tls) => "TLS",
                     Some(remote::Failure::Upgrade) => "UPGRADE",
-                    Some(remote::Failure::Challenge) => "CHALLENGE",
+                    Some(remote::Failure::AgentLink) => "AGENT-LINK",
                     Some(
                         remote::Failure::Refused
                         | remote::Failure::IdentityMismatch
@@ -3324,7 +3324,7 @@ fn run_remote_agent(
                         remote::Failure::Refused
                         | remote::Failure::SharedFile
                         | remote::Failure::Upgrade
-                        | remote::Failure::Challenge,
+                        | remote::Failure::AgentLink,
                     )
                     | None => Exit::Failed,
                 }),
