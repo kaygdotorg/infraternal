@@ -167,11 +167,17 @@ nix develop -c env PATH="$fuzz_bin:$PATH" RUSTC_BOOTSTRAP=1 CARGO_PROFILE_RELEAS
 `ValidatedCsr::parse` (the Ed25519 host shape) and
 `ValidatedCsr::parse_as(.., KeyAlgorithm::P256)` (the P-256 device shape,
 #580). No input may pass as both. The checked-in seeds in
-`fuzz/corpus/remote_csr_decode` are an Ed25519 host request, a P-256 device
-request, and P-256/P-384 requests the envelope refuses (SHA-384, a compressed
-point, explicit curve parameters, another curve), made with `openssl req`.
+`fuzz/corpus/remote_csr_decode` come from `python3 -I fuzz/seed_csr.py`, which
+makes throwaway keys with `openssl req` and signs with `openssl dgst`. They
+are: `ed25519-host` (Ed25519 host request), `p256-device` (admitted P-256),
+`p256-high-s` (admitted; S above n/2 as a Secure Enclave can produce),
+`p256-compressed-point`, `p256-explicit-params` (refused by the envelope), and
+`p256-truncated` (refused: cut short). The script rebuilds these on demand and
+checks them with `openssl req -verify`. Its keys are temporary and never
+committed.
 
 ```sh
+python3 -I fuzz/seed_csr.py
 CARGO_PROFILE_RELEASE_LTO=false cargo +nightly fuzz run remote_csr_decode \
   fuzz/corpus/remote_csr_decode -- -max_total_time=600 -max_len=4200
 ```
