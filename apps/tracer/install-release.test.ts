@@ -10,7 +10,7 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-  DEFAULT_RELEASE_ORIGIN,
+  DEFAULT_SITE_ORIGIN,
   installCommandFor,
   parseAllowedSigners,
   parseChannelPointer,
@@ -54,7 +54,7 @@ const toBase64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString("bas
 interface TestSigner {
   allowedSigners: string;
   pubBlob: Uint8Array;
-  sign(message: Uint8Array, namespace?: string): Promise<string>;
+  sign(message: Uint8Array, namespace?: string, hashAlg?: "sha512" | "sha256"): Promise<string>;
 }
 
 /** Generates an ephemeral Ed25519 keypair and `SSHSIG` signer matching `apps/release-signer/src/index.js`. */
@@ -67,13 +67,18 @@ async function createTestSigner(): Promise<TestSigner> {
   return {
     allowedSigners,
     pubBlob,
-    async sign(message: Uint8Array, namespace = RELEASE_SIGNER_NAMESPACE): Promise<string> {
-      const hash = new Uint8Array(await crypto.subtle.digest("SHA-512", message.slice()));
+    async sign(
+      message: Uint8Array,
+      namespace = RELEASE_SIGNER_NAMESPACE,
+      hashAlg: "sha512" | "sha256" = "sha512",
+    ): Promise<string> {
+      const digestName = hashAlg === "sha512" ? "SHA-512" : "SHA-256";
+      const hash = new Uint8Array(await crypto.subtle.digest(digestName, message.slice()));
       const signed = concat(
         enc.encode("SSHSIG"),
         sshStr(enc.encode(namespace)),
         sshStr(new Uint8Array(0)),
-        sshStr(enc.encode("sha512")),
+        sshStr(enc.encode(hashAlg)),
         sshStr(hash),
       );
       const rawSig = new Uint8Array(await crypto.subtle.sign("Ed25519", pair.privateKey, signed.slice()));
@@ -84,7 +89,7 @@ async function createTestSigner(): Promise<TestSigner> {
         sshStr(pubBlob),
         sshStr(enc.encode(namespace)),
         sshStr(new Uint8Array(0)),
-        sshStr(enc.encode("sha512")),
+        sshStr(enc.encode(hashAlg)),
         sshStr(sigBlob),
       );
       const b64 = toBase64(armorBody).replace(/(.{70})/g, "$1\n").replace(/\n$/, "");
@@ -131,11 +136,11 @@ test("channel selection defaults to stable and only opts into edge when explicit
   expect(selectChannel("?channel=beta")).toBe("stable");
   expect(selectChannel("?foo=edge")).toBe("stable");
   expect(selectChannel("?channel=edge")).toBe("edge");
-  expect(installCommandFor(DEFAULT_RELEASE_ORIGIN, "stable")).toBe(
-    "curl -fsSL https://builds.infraternal.com/install.sh | sh",
+  expect(installCommandFor(DEFAULT_SITE_ORIGIN, "stable")).toBe(
+    "curl -fsSL https://infraternal.com/install.sh | sh",
   );
-  expect(installCommandFor(DEFAULT_RELEASE_ORIGIN, "edge")).toBe(
-    "curl -fsSL https://builds.infraternal.com/install.sh | sh -s -- --channel edge",
+  expect(installCommandFor(DEFAULT_SITE_ORIGIN, "edge")).toBe(
+    "curl -fsSL https://infraternal.com/install.sh | sh -s -- --channel edge",
   );
 });
 
@@ -249,6 +254,34 @@ test("refuses a tampered signature, untrusted signing key, and wrong namespace",
     fetchFn: mockFetch(wrongNsFiles).fetchFn,
   });
   expect(wrongNs.state).toBe("refused");
+
+  // 4. Signed with sha256 instead of canonical sha512 (must match Rust verifier and Worker).
+  const sha256Files = await signedReleaseFiles(trusted, version, "edge");
+  sha256Files.set(`/releases/${version}/SHA256SUMS.sig`, await trusted.sign(sums, RELEASE_SIGNER_NAMESPACE, "sha256"));
+  const sha256Sig = await resolveChannelRelease({
+    channel: "edge",
+    allowedSigners: trusted.allowedSigners,
+    fetchFn: mockFetch(sha256Files).fetchFn,
+  });
+  expect(sha256Sig.state).toBe("refused");
+
+  // 5. Non-canonical armor (leading whitespace or CRLF line endings) is refused.
+  const nonCanonicalFiles = await signedReleaseFiles(trusted, version, "edge");
+  const canonicalSig = nonCanonicalFiles.get(`/releases/${version}/SHA256SUMS.sig`)!;
+  nonCanonicalFiles.set(`/releases/${version}/SHA256SUMS.sig`, ` ${canonicalSig}`);
+  const leadingSpace = await resolveChannelRelease({
+    channel: "edge",
+    allowedSigners: trusted.allowedSigners,
+    fetchFn: mockFetch(nonCanonicalFiles).fetchFn,
+  });
+  expect(leadingSpace.state).toBe("refused");
+  nonCanonicalFiles.set(`/releases/${version}/SHA256SUMS.sig`, canonicalSig.replace(/\n/g, "\r\n"));
+  const crlfSig = await resolveChannelRelease({
+    channel: "edge",
+    allowedSigners: trusted.allowedSigners,
+    fetchFn: mockFetch(nonCanonicalFiles).fetchFn,
+  });
+  expect(crlfSig.state).toBe("refused");
 });
 
 test("refuses a signed VERSION mismatch or a manifest missing the server binary", async () => {

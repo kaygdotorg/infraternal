@@ -20,8 +20,11 @@
 /** A release channel name supported by the release bucket and updater. */
 export type ReleaseChannel = "stable" | "edge";
 
-/** The default public release origin (D223). */
+/** The default public release origin holding channel pointers and signed release files (D223). */
 export const DEFAULT_RELEASE_ORIGIN = "https://builds.infraternal.com";
+
+/** The default public site origin serving `/install.sh` and `/allowed_signers` (Pages, never the R2 release bucket). */
+export const DEFAULT_SITE_ORIGIN = "https://infraternal.com";
 
 /** The OpenSSH signature namespace every release signature must bind to (`apps/release-signer/src/index.js`). */
 export const RELEASE_SIGNER_NAMESPACE = "infraternal-release";
@@ -283,17 +286,34 @@ export function parseAllowedSigners(text: string): Uint8Array[] {
   return keys;
 }
 
-/** Strips OpenSSH `SSHSIG` PEM armor and decodes the binary signature blob. */
+/**
+ * Strips canonical 70-column OpenSSH `SSHSIG` PEM armor and decodes the binary signature blob.
+ * Matches `crates/infraternal-server/src/release_verify.rs`: refuses leading/trailing whitespace,
+ * CRLF line endings, and non-70-column wrapping so mutated armor is never accepted.
+ */
 function decodeArmoredSshSig(signatureText: string): Uint8Array {
-  const trimmed = signatureText.trim();
-  const match = /^-----BEGIN SSH SIGNATURE-----\r?\n([\s\S]+?)\r?\n-----END SSH SIGNATURE-----$/.exec(trimmed);
-  if (!match) throw new Error("release signature is malformed");
-  return decodeBase64(match[1]!);
+  const prefix = "-----BEGIN SSH SIGNATURE-----\n";
+  const suffix = "-----END SSH SIGNATURE-----\n";
+  if (!signatureText.startsWith(prefix) || !signatureText.endsWith(suffix)) {
+    throw new Error("release signature is malformed");
+  }
+  const body = signatureText.slice(prefix.length, signatureText.length - suffix.length);
+  if (body.length === 0 || body.includes("\r") || !body.endsWith("\n")) {
+    throw new Error("release signature is malformed");
+  }
+  const encoded = body.slice(0, -1).split("\n").join("");
+  let canonical = "";
+  for (let i = 0; i < encoded.length; i += 70) {
+    canonical += `${encoded.slice(i, i + 70)}\n`;
+  }
+  if (canonical !== body) throw new Error("release signature is malformed");
+  return decodeBase64(encoded);
 }
 
 /**
  * Verifies an armored OpenSSH `SSHSIG` Ed25519 signature over `message` against `trustedPubBlobs`.
- * Enforces version 1, namespace `infraternal-release`, empty reserved field, `sha512` or `sha256` hash,
+ * Enforces canonical 70-column armor, version 1, namespace `infraternal-release`, empty reserved field,
+ * `sha512` hash (matching `crates/infraternal-server/src/release_verify.rs` and the release-signer Worker),
  * exact key match against `trustedPubBlobs`, and a valid Ed25519 signature via WebCrypto.
  */
 export async function verifySshSignature(
@@ -322,10 +342,9 @@ export async function verifySshSignature(
     throw new Error("release signing key is not trusted");
   }
 
-  let webCryptoHash: "SHA-512" | "SHA-256";
-  if (hashAlgorithm === "sha512") webCryptoHash = "SHA-512";
-  else if (hashAlgorithm === "sha256") webCryptoHash = "SHA-256";
-  else throw new Error("unsupported release signature hash algorithm");
+  if (hashAlgorithm !== "sha512") {
+    throw new Error("unsupported release signature hash algorithm");
+  }
 
   const sigReader = new SshReader(sigBlob);
   const sigType = decoder.decode(sigReader.readString());
@@ -335,7 +354,7 @@ export async function verifySshSignature(
   }
 
   const rawPub = extractEd25519RawPublicKey(pubBlob);
-  const digestBytes = new Uint8Array(await crypto.subtle.digest(webCryptoHash, message.slice()));
+  const digestBytes = new Uint8Array(await crypto.subtle.digest("SHA-512", message.slice()));
   const signedPayload = concatBytes(
     SSHSIG_MAGIC,
     encodeSshString(encoder.encode(namespace)),

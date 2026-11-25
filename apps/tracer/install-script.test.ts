@@ -11,7 +11,7 @@
 import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -93,6 +93,8 @@ test("install.sh embeds the exact production release/allowed_signers trust ancho
   const script = await readFile(INSTALL_SCRIPT, "utf8");
   expect(canonical.length).toBe(2);
   for (const line of canonical) expect(script).toContain(line);
+  expect(script).toContain('--proto "$curl_proto" --proto-redir "$curl_proto"');
+  expect(script).toContain('curl_proto="=https"');
 });
 
 test("install.sh resolves stable/edge pointers, verifies signatures and checksums, and refuses tampering", async () => {
@@ -198,6 +200,25 @@ test("install.sh resolves stable/edge pointers, verifies signatures and checksum
       expect(crossRes.code).not.toBe(0);
       expect(crossRes.stderr).toContain("another channel");
       await expect(stat(outCross)).rejects.toThrow();
+
+      // 7. Refuses when --output is an existing directory, leaving it untouched.
+      files = await makeRelease(stableVersion, "stable");
+      const outDir = join(dir, "existing-dir");
+      await mkdir(outDir);
+      const dirRes = await runInstall(testScript, ["--output", outDir], origin, shimBin);
+      expect(dirRes.code).not.toBe(0);
+      expect(dirRes.stderr).toContain("is a directory");
+      expect(await readdir(outDir)).toEqual([]);
+
+      // 8. Atomic replacement of an existing file leaves no stray temp files beside --output.
+      const atomicDir = join(dir, "atomic-dest");
+      await mkdir(atomicDir);
+      const atomicOut = join(atomicDir, "infraternal");
+      await writeFile(atomicOut, "old-binary");
+      const atomicRes = await runInstall(testScript, ["--output", atomicOut], origin, shimBin);
+      expect(atomicRes.code).toBe(0);
+      expect(await readFile(atomicOut, "utf8")).toBe(binaryPayload);
+      expect(await readdir(atomicDir)).toEqual(["infraternal"]);
     } finally {
       server.stop(true);
     }

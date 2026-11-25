@@ -21,7 +21,7 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { buildDocs, INDEX_SLUG, readUserDocs, redirectPage, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 import { figures, type FigureManifest } from "./docs-figure";
-import { DEFAULT_RELEASE_ORIGIN, installCommandFor, SERVER_IMAGE_NAME } from "./install-release";
+import { DEFAULT_RELEASE_ORIGIN, DEFAULT_SITE_ORIGIN, installCommandFor, SERVER_IMAGE_NAME } from "./install-release";
 import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
@@ -71,7 +71,7 @@ function landing(figureHtml: string): string {
 <h1>Infrastructure you fully own</h1>
 <p class="lede">One server you run, on hardware you choose. Open a terminal on any of your machines from any of your devices, join the machines into a private mesh, and decide who gets in.</p>
 <div class="hero-actions"><a class="button primary" href="/install/">Install</a><a class="button" href="/docs/">Read the docs</a></div>
-${command("curl -fsSL https://builds.infraternal.com/install.sh | sh")}
+${command(installCommandFor(DEFAULT_SITE_ORIGIN, "stable"))}
 <p class="hint">Linux, x86-64 and arm64. The installer checks the build\u2019s signature before it installs anything. To check by hand first, see <a href="/install/">Install</a>.</p>
 </section>
 <section class="shot" aria-label="Screenshot"><div class="doc">${figureHtml}</div></section>
@@ -105,17 +105,17 @@ function downloads(): string {
  * `edge` only when `?channel=edge` is explicitly requested) and never hard-codes a version or pushes edge builds.
  */
 function install(): string {
-  return `<div class="plain" data-install-page data-origin="${DEFAULT_RELEASE_ORIGIN}" data-install-script="/docs/install-links.js">
+  return `<div class="plain" data-install-page data-origin="${DEFAULT_RELEASE_ORIGIN}" data-site-origin="${DEFAULT_SITE_ORIGIN}" data-install-script="/docs/install-links.js">
 <h1>Install Infraternal</h1>
 <p class="lede">One static program is the server. It runs on a Linux x86-64 machine. When you add a machine, the server installs the infraternal agent there for you, so you never download that part.</p>
 <div class="note" data-install-notice hidden></div>
 <h2>1. Download</h2>
 <p>The installer reads the current signed release, verifies its signature and checksum, and saves <code>${SERVER_IMAGE_NAME}</code>.</p>
-<div class="doc"><div class="doc-code"><pre tabindex="0"><code data-install-cmd>${escapeHtml(installCommandFor(DEFAULT_RELEASE_ORIGIN, "stable"))}</code></pre></div></div>
+<div class="doc"><div class="doc-code"><pre tabindex="0"><code data-install-cmd>${escapeHtml(installCommandFor(DEFAULT_SITE_ORIGIN, "stable"))}</code></pre></div></div>
 <p>Or download the files by hand:</p>
 ${downloads()}
 <p class="install-status" data-install-status aria-live="polite"></p>
-<p>Every file has a checksum and a signature next to it. Check them before you run anything.</p>
+<p>Every file has a checksum and a signature next to it. Download <a href="/allowed_signers">allowed_signers</a> and check them before you run anything.</p>
 ${command("ssh-keygen -Y verify -f allowed_signers -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS\nsha256sum --check --ignore-missing SHA256SUMS")}
 <h2>2. Run the server</h2>
 <p>Set it up as a service on the machine that will be your server. <code>--dry-run</code> prints the plan first. The server then prints a one-time setup code you use to create the first account.</p>
@@ -205,6 +205,7 @@ export async function buildSite(options: SiteOptions): Promise<void> {
   });
   if (!installScript.success) throw new Error(`install script: ${installScript.logs.map(String).join("; ")}`);
   await cp(resolve(root, "scripts/release/install.sh"), resolve(out, "install.sh"));
+  await cp(resolve(root, "release/allowed_signers"), resolve(out, "allowed_signers"));
 
   const chrome = (title: string, body: string, area: "home" | "docs" | "install" | "releases" | "changelog", main: "docs" | "site" = "site", here?: string): string => sitePage({ title, body, area, main, ...(here ? { here } : {}) });
   await put(out, "", chrome("Infrastructure you fully own", landing(shot.html), "home", "site", "Infraternal"));

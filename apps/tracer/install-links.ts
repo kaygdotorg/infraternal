@@ -8,6 +8,7 @@
  */
 import {
   DEFAULT_RELEASE_ORIGIN,
+  DEFAULT_SITE_ORIGIN,
   installCommandFor,
   resolveChannelRelease,
   selectChannel,
@@ -61,13 +62,14 @@ export async function enhanceInstallPage(
   options?: { search?: string; allowedSigners?: string; fetchFn?: typeof fetch },
 ): Promise<void> {
   const origin = root.dataset.origin || DEFAULT_RELEASE_ORIGIN;
+  const siteOrigin = root.dataset.siteOrigin || DEFAULT_SITE_ORIGIN;
   const channel = selectChannel(options?.search ?? window.location.search);
   const allowedSigners = options?.allowedSigners ?? __INFRATERNAL_ALLOWED_SIGNERS__;
 
   updateChannelNotice(root, channel);
 
   const cmdEl = root.querySelector<HTMLElement>("[data-install-cmd]");
-  if (cmdEl) cmdEl.textContent = installCommandFor(origin, channel);
+  if (cmdEl) cmdEl.textContent = installCommandFor(siteOrigin, channel);
 
   const versionEl = root.querySelector<HTMLElement>("[data-install-version]");
   const linksEl = root.querySelector<HTMLElement>("[data-install-links]");
@@ -85,9 +87,12 @@ export async function enhanceInstallPage(
     if (linksEl) renderVerifiedLinks(linksEl, result.binaryUrl, result.sumsUrl, result.signatureUrl);
     if (statusEl) {
       delete statusEl.dataset.state;
-      statusEl.textContent = channel === "edge"
-        ? `Signed edge release ${result.version} verified.`
-        : `Signed release ${result.version} verified.`;
+      const prefix = channel === "edge"
+        ? `Signed edge release ${result.version} verified · sha256 `
+        : `Signed release ${result.version} verified · sha256 `;
+      const code = document.createElement("code");
+      code.textContent = result.binarySha256;
+      statusEl.replaceChildren(document.createTextNode(prefix), code);
     }
     return;
   }

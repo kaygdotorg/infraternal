@@ -82,16 +82,26 @@ test("the install page resolves releases dynamically without hardcoded versions,
   try {
     const site = join(out, "site");
     await buildSite({ out: site });
+    const landing = await readFile(join(site, "index.html"), "utf8");
     const html = await readFile(join(site, "install", "index.html"), "utf8");
-    expect(html).toContain('data-install-page data-origin="https://builds.infraternal.com"');
-    expect(html).toContain("curl -fsSL https://builds.infraternal.com/install.sh | sh");
+    expect(html).toContain('data-install-page data-origin="https://builds.infraternal.com" data-site-origin="https://infraternal.com"');
+    // Both landing and /install/ advertise the installer URL on Pages, and that exact file is built into the site output.
+    for (const pageHtml of [landing, html]) {
+      const match = /curl -fsSL (https:\/\/[^\s<]+) \| sh/.exec(pageHtml);
+      expect(match).not.toBeNull();
+      const advertised = new URL(match![1]!);
+      expect(advertised.origin).toBe("https://infraternal.com");
+      const published = await readFile(join(site, advertised.pathname.replace(/^\/+/, "")), "utf8");
+      expect(published).toContain("ssh-keygen -Y verify");
+    }
+    expect(html).toContain('href="/allowed_signers"');
+    const publishedSigners = await readFile(join(site, "allowed_signers"), "utf8");
+    expect(publishedSigners).toContain('namespaces="infraternal-release"');
     expect(html).not.toContain("/releases/latest");
     expect(html).not.toContain("Placeholder links");
     expect(html).not.toContain("edge-");
     expect(html).not.toContain("--channel edge");
     const bundle = await readFile(join(site, "docs", "install-links.js"), "utf8");
     expect(bundle).toContain("infraternal-release");
-    const installer = await readFile(join(site, "install.sh"), "utf8");
-    expect(installer).toContain("ssh-keygen -Y verify");
   } finally { await rm(out, { recursive: true, force: true }); }
 });

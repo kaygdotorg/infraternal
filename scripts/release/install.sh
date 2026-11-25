@@ -9,8 +9,8 @@
 # before moving it into place (#211, D184, D223, D224, D226).
 #
 # Usage:
-#   curl -fsSL https://builds.infraternal.com/install.sh | sh
-#   curl -fsSL https://builds.infraternal.com/install.sh | sh -s -- --channel edge
+#   curl -fsSL https://infraternal.com/install.sh | sh
+#   curl -fsSL https://infraternal.com/install.sh | sh -s -- --channel edge
 #   sh install.sh [--channel stable|edge] [--output PATH]
 set -eu
 
@@ -63,6 +63,7 @@ esac
 
 # Strip trailing slashes and refuse non-HTTPS origins except loopback test fixtures.
 origin="$(printf '%s' "$origin" | sed 's:/*$::')"
+curl_proto="=https"
 case "$origin" in
   https://*) ;;
   http://127.0.0.1:*)
@@ -70,12 +71,23 @@ case "$origin" in
       printf 'invalid release origin\n' >&2
       exit 2
     }
+    curl_proto="=http"
     ;;
   *)
     printf 'release origin must use https://\n' >&2
     exit 2
     ;;
 esac
+
+if [ -d "$output" ]; then
+  printf 'output path is a directory: %s\n' "$output" >&2
+  exit 1
+fi
+out_dir="$(dirname -- "$output")"
+if [ ! -d "$out_dir" ]; then
+  printf 'output directory does not exist: %s\n' "$out_dir" >&2
+  exit 1
+fi
 
 for tool in curl ssh-keygen sha256sum awk cmp mktemp; do
   command -v "$tool" >/dev/null 2>&1 || {
@@ -93,7 +105,14 @@ fi
 
 umask 077
 staging="$(mktemp -d "${TMPDIR:-/tmp}/infraternal-install.XXXXXX")"
-trap 'rm -rf -- "$staging"' EXIT HUP INT TERM
+dest_tmp=""
+cleanup() {
+  rm -rf -- "$staging"
+  if [ -n "$dest_tmp" ]; then
+    rm -f -- "$dest_tmp"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
 
 # Embedded release signing public keys from release/allowed_signers (D184, D224).
 cat <<'EOF' > "$staging/allowed_signers"
@@ -106,8 +125,8 @@ fetch_bounded() {
   dest="$2"
   max_bytes="$3"
   allow_missing="${4:-0}"
-  status="$(curl --silent --show-error --location --connect-timeout 10 --max-time 180 \
-    --max-filesize "$max_bytes" -o "$dest" -w '%{http_code}' "$url")"
+  status="$(curl --silent --show-error --location --proto "$curl_proto" --proto-redir "$curl_proto" \
+    --connect-timeout 10 --max-time 180 --max-filesize "$max_bytes" -o "$dest" -w '%{http_code}' "$url")"
   if [ "$allow_missing" = "1" ] && [ "$status" = "404" ]; then
     return 44
   fi
@@ -216,14 +235,20 @@ if ! printf '%s\n' "$version" | cmp -s - "$staging/VERSION"; then
   exit 1
 fi
 
-# 6. Download the server image, verify its signed SHA-256 digest, and move into place.
-fetch_bounded "$base/infraternal" "$staging/infraternal" 134217728
-if ! printf '%s  %s\n' "$binary_sha" "$staging/infraternal" | sha256sum -c - >/dev/null 2>&1; then
+# 6. Download the server image next to the destination, verify its signed SHA-256 digest, and rename atomically.
+if [ -d "$output" ]; then
+  printf 'output path is a directory: %s\n' "$output" >&2
+  exit 1
+fi
+dest_tmp="$(mktemp "$out_dir/.infraternal.XXXXXX")"
+fetch_bounded "$base/infraternal" "$dest_tmp" 134217728
+if ! printf '%s  %s\n' "$binary_sha" "$dest_tmp" | sha256sum -c - >/dev/null 2>&1; then
   printf 'server binary checksum mismatch\n' >&2
   exit 1
 fi
 
-chmod 0755 "$staging/infraternal"
-mv -f "$staging/infraternal" "$output"
+chmod 0755 "$dest_tmp"
+mv -f -- "$dest_tmp" "$output"
+dest_tmp=""
 printf 'Verified and saved infraternal %s to %s\n' "$version" "$output"
 printf 'Next: %s server init --dry-run\n' "$output"
