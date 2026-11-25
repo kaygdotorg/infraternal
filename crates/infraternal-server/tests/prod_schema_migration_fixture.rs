@@ -23,6 +23,9 @@ use std::{
 /// Relative path from the `infraternal-server` crate manifest to the checked-in fixture.
 const FIXTURE_RELATIVE_PATH: &str = "tests/fixtures/prod-schema.sqlite";
 
+/// The shipping `sqlx` migration set embedded at compile time.
+static SHIPPING_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
+
 /// Tables whose row count or existing column bytes are intentionally changed by
 /// a pending migration not yet reflected in the checked-in fixture.
 ///
@@ -374,13 +377,12 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
     let before = capture_snapshot(copy.path());
     assert_fixture_coverage(copy.path(), &before);
 
-    let migrations = sqlx::migrate!("./migrations");
     let pool = open_sqlx_pool(copy.path()).await;
-    migrations
+    SHIPPING_MIGRATIONS
         .run(&pool)
         .await
         .expect("apply pending migrations to prod-schema fixture");
-    migrations
+    SHIPPING_MIGRATIONS
         .run(&pool)
         .await
         .expect("re-running migrations on fixture must be idempotent");
@@ -392,10 +394,11 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
             .expect("read _sqlx_migrations");
     assert_eq!(
         recorded.len(),
-        migrations.migrations.len(),
+        SHIPPING_MIGRATIONS.migrations.len(),
         "every migration must be recorded in _sqlx_migrations"
     );
-    for ((version, checksum, success), expected) in recorded.iter().zip(migrations.iter()) {
+    for ((version, checksum, success), expected) in recorded.iter().zip(SHIPPING_MIGRATIONS.iter())
+    {
         assert_eq!(*version, expected.version);
         assert_eq!(checksum.as_slice(), expected.checksum.as_ref());
         assert!(*success, "migration {version} must have success = 1");
@@ -407,7 +410,7 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
     assert_rows_preserved(&before, &after, "after sqlx migration");
 
     // Verify the D379 rusqlite runner accepts the migrated fixture unchanged.
-    let runner_list: Vec<infraternal_db::Migration> = migrations
+    let runner_list: Vec<infraternal_db::Migration> = SHIPPING_MIGRATIONS
         .iter()
         .map(|m| infraternal_db::Migration {
             version: m.version,
@@ -419,7 +422,7 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
     let mut conn = Connection::open(copy.path()).expect("open rusqlite connection");
     let report = infraternal_db::migrate::run(&mut conn, &runner_list)
         .expect("rusqlite runner accepts fixture");
-    assert_eq!(report.validated, migrations.migrations.len());
+    assert_eq!(report.validated, SHIPPING_MIGRATIONS.migrations.len());
     assert!(report.applied.is_empty());
 }
 
