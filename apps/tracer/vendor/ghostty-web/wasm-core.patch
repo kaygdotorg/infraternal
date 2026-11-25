@@ -1,0 +1,14 @@
+# Role: makes the Ghostty core compile the browser engine entry points of web-engine.zig into the WebAssembly build.
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -187,6 +187,10 @@
+             );
+         }
+ 
++        // The browser engine's own C entry points. The file exports them only when
++        // the target is WebAssembly, so a native build links nothing extra.
++        _ = @import("terminal/c/web.zig");
++
+         // Force-reference our memset override so its export is
+         // emitted when its needed. See quirks_memset.zig for lots of details.
+         _ = @import("quirks_memset.zig");

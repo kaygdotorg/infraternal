@@ -14,7 +14,7 @@ unchanged; an additive recovery capability is documented below.
 ## Build and production dependencies
 
 `scripts/build-vt` builds the MIT-licensed, minisign-verified libghostty-vt
-1.0.1 source and dependency archives. `scripts/libghostty-vt.sha256` pins both
+1.0.2 source and dependency archives. `scripts/libghostty-vt.sha256` pins both
 archives and their signatures; `nix/package.nix` consumes the same inputs.
 Zig is exactly 0.17.1, supplied by the development shell or the existing
 architecture-specific checksum-verified `scripts/auth-toolchain` download.
@@ -741,3 +741,25 @@ probes are `final-reviewer-credit*_probe.log`; public mouse and upstream
 allocation diagnostics are in `t2-gate-public/` and `t3-upstream-native/`.
 Final exact gate output is `final-docs-fast.log`. #26 records each atomic
 commit and its gate; this job neither pushes nor deploys.
+
+## libghostty-vt 1.0.2 (#575, J1165, 2026-11-25)
+
+The engine moved from the signed 1.0.1 release to 1.0.2 (tagged 2026-11-24; source and
+dependency archives, hashes and signatures pinned in `scripts/libghostty-vt.sha256`;
+no license or dependency change). The browser engine builds from the same archives
+(`apps/tracer/vendor/ghostty-web/`), so the server and the page run one revision.
+
+One upstream change touched the adapter: delete-line now ends a soft wrap whose next row
+it removes (the row above loses its wrap flag, and a spacer head at its edge turns
+narrow). The painter built wrapped rows with a wide glyph at the last column and
+`CSI M`, so it lost the flag and the head; it now drops the next row by scrolling a
+region from that row down by one line (LF at the region bottom), which the engine itself
+reaches the same states by and which leaves the row above alone (`dropNextRow` in
+`snapshot.zig`). A next row that is the last row cannot be a region of its own, and the
+history export has no screen position, so those two shapes are reported
+unrepresentable. Fidelity: `terminal::` lib tests 55 passed, 0 failed (53 and 2 with the
+bump alone); the 20,000-case corpus (seed 22601006, release, RIS context) has 19,904
+replayed, 96 rejected and no divergence (1.0.1: 19,905 and 95); the extended corpus is
+6,359 replayed, 13,641 rejected and no divergence (the same as 1.0.1); the fresh-C
+context rejects all 20,000, by design, as before.
+
