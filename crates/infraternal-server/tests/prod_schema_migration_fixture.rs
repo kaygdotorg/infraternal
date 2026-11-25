@@ -319,12 +319,16 @@ fn assert_fixture_coverage(path: &Path, snapshot: &DatabaseSnapshot) {
         "fixture must have hosts across several owners"
     );
     assert_eq!(
-        count("SELECT count(DISTINCT mode) FROM remote_hosts WHERE mode IN ('rootless', 'rootful')"),
+        count(
+            "SELECT count(DISTINCT mode) FROM remote_hosts WHERE mode IN ('rootless', 'rootful')"
+        ),
         2,
         "fixture must cover both rootless and rootful host modes"
     );
     assert_eq!(
-        count("SELECT count(DISTINCT key_algorithm) FROM remote_certificates WHERE key_algorithm IN ('ed25519', 'p256')"),
+        count(
+            "SELECT count(DISTINCT key_algorithm) FROM remote_certificates WHERE key_algorithm IN ('ed25519', 'p256')"
+        ),
         2,
         "fixture must contain certificates of both key algorithms"
     );
@@ -333,16 +337,22 @@ fn assert_fixture_coverage(path: &Path, snapshot: &DatabaseSnapshot) {
         "fixture must include a successor certificate"
     );
     assert_eq!(
-        count("SELECT count(DISTINCT key_algorithm) FROM remote_join_tokens WHERE key_algorithm IN ('ed25519', 'p256')"),
+        count(
+            "SELECT count(DISTINCT key_algorithm) FROM remote_join_tokens WHERE key_algorithm IN ('ed25519', 'p256')"
+        ),
         2,
         "fixture must include join tokens for both key algorithms"
     );
     assert!(
-        count("SELECT count(*) FROM remote_identity_rotation WHERE length(predecessor_public_key) = 65") >= 1,
+        count(
+            "SELECT count(*) FROM remote_identity_rotation WHERE length(predecessor_public_key) = 65"
+        ) >= 1,
         "fixture must include P-256 identity rotation rows"
     );
     assert_eq!(
-        count("SELECT count(DISTINCT COALESCE(rotation_phase, 'idle')) FROM mesh_node_key_rotation"),
+        count(
+            "SELECT count(DISTINCT COALESCE(rotation_phase, 'idle')) FROM mesh_node_key_rotation"
+        ),
         5,
         "fixture must exercise all five mesh key rotation phases"
     );
@@ -375,12 +385,11 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
         .await
         .expect("re-running migrations on fixture must be idempotent");
 
-    let recorded: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
-        "SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version",
-    )
-    .fetch_all(&pool)
-    .await
-    .expect("read _sqlx_migrations");
+    let recorded: Vec<(i64, Vec<u8>, bool)> =
+        sqlx::query_as("SELECT version, checksum, success FROM _sqlx_migrations ORDER BY version")
+            .fetch_all(&pool)
+            .await
+            .expect("read _sqlx_migrations");
     assert_eq!(
         recorded.len(),
         migrations.migrations.len(),
@@ -408,8 +417,8 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
         })
         .collect();
     let mut conn = Connection::open(copy.path()).expect("open rusqlite connection");
-    let report =
-        infraternal_db::migrate::run(&mut conn, &runner_list).expect("rusqlite runner accepts fixture");
+    let report = infraternal_db::migrate::run(&mut conn, &runner_list)
+        .expect("rusqlite runner accepts fixture");
     assert_eq!(report.validated, migrations.migrations.len());
     assert!(report.applied.is_empty());
 }
@@ -423,21 +432,24 @@ async fn prod_schema_fixture_exercises_synthetic_pending_migration_and_byte_pres
 
     let mut pending_migrator: Migrator = sqlx::migrate!("./migrations");
     let synthetic_version = 20_990_101_000_000_i64;
-    pending_migrator.migrations.to_mut().push(SqlxMigration::new(
-        synthetic_version,
-        Cow::Borrowed("synthetic fixture upgrade proof"),
-        MigrationType::Simple,
-        SqlStr::from_static(
-            "ALTER TABLE remote_hosts ADD COLUMN fixture_note TEXT; \
+    pending_migrator
+        .migrations
+        .to_mut()
+        .push(SqlxMigration::new(
+            synthetic_version,
+            Cow::Borrowed("synthetic fixture upgrade proof"),
+            MigrationType::Simple,
+            SqlStr::from_static(
+                "ALTER TABLE remote_hosts ADD COLUMN fixture_note TEXT; \
              CREATE TABLE fixture_upgrade_probe ( \
                  host_id BLOB PRIMARY KEY REFERENCES remote_hosts(id) ON DELETE CASCADE, \
                  note TEXT NOT NULL \
              ) STRICT; \
              INSERT INTO fixture_upgrade_probe(host_id, note) \
              SELECT id, 'migrated' FROM remote_hosts;",
-        ),
-        false,
-    ));
+            ),
+            false,
+        ));
 
     let pool = open_sqlx_pool(copy.path()).await;
     pending_migrator
@@ -488,10 +500,12 @@ async fn prod_schema_fixture_enforces_constraints_and_triggers_after_migration()
 
     // Trigger `remote_certificates_key_write_once` refuses key/algorithm mutation.
     assert!(
-        sqlx::query("UPDATE remote_certificates SET key_algorithm = 'p256' WHERE key_algorithm = 'ed25519'")
-            .execute(&pool)
-            .await
-            .is_err(),
+        sqlx::query(
+            "UPDATE remote_certificates SET key_algorithm = 'p256' WHERE key_algorithm = 'ed25519'"
+        )
+        .execute(&pool)
+        .await
+        .is_err(),
         "remote_certificates_key_write_once must refuse algorithm mutation"
     );
 
