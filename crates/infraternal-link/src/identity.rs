@@ -112,7 +112,14 @@ impl ClientIdentity {
 /// Adapts an [`IdentitySigner`] to rustls's `SigningKey`, so a TLS client can
 /// authenticate without the private key bytes.
 #[derive(Debug)]
-struct SignerKey(Arc<dyn IdentitySigner>);
+pub(crate) struct SignerKey(Arc<dyn IdentitySigner>);
+
+/// `signer` as a rustls signing key, for checks that compare it with a
+/// certificate (the join's reply check).
+#[cfg(feature = "join")]
+pub(crate) fn signing_key(signer: &Arc<dyn IdentitySigner>) -> SignerKey {
+    SignerKey(Arc::clone(signer))
+}
 
 impl SigningKey for SignerKey {
     fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn Signer>> {

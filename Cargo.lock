@@ -2163,15 +2163,23 @@ dependencies = [
 name = "infraternal-link"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "infraternal-plugin-api",
  "infraternal-protocol",
  "quinn",
  "ring",
  "rustls",
  "serde",
+ "serde_json",
  "tokio",
+ "tokio-rustls",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -4754,6 +4762,16 @@ checksum = "59df6849caa43bb7567f9a36f863c447d95a11d5903c9cc334ba32576a27eadd"
 dependencies = [
  "openssl",
  "openssl-sys",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-rustls"
+version = "0.26.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
+dependencies = [
+ "rustls",
  "tokio",
 ]
 

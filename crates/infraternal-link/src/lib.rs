@@ -11,6 +11,7 @@
 //! - `dial_runtime` (feature `quic`): the QUIC runtime of one dial attempt.
 //! - [`transport`]: the bounded frame reader and writer over a channel.
 //! - [`enrollment`]: the join's wire models.
+//! - `join` (feature `join`): the join client, HTTPS over rustls with the pinned root.
 //! - `identity`, `quic` (feature `quic`): the client identity as a signer
 //!   (Ed25519 PKCS#8 on hosts, the Secure Enclave later) and the QUIC config.
 //! - `csr` (feature `quic`): the join's PKCS#10 request over the signer.
@@ -29,6 +30,9 @@ pub mod enrollment;
 /// The node's identity for TLS: certificate chain plus a signer for its key.
 #[cfg(feature = "quic")]
 pub mod identity;
+/// The join client: redeem an invitation for a checked certificate over HTTPS.
+#[cfg(feature = "join")]
+pub mod join;
 /// The client's QUIC TLS config and the transport settings both ends share.
 #[cfg(feature = "quic")]
 pub mod quic;
