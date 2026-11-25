@@ -66,6 +66,26 @@ CPU per peer for a cold storm (admission + two Curve25519 operations): 0.45 ms a
 | relay-manager grill Q9: one loopback socket and task per relayed peer, 4,096 fds | resource bound to measure | The hub itself holds 26 fds at 4,096 peers (one UDP socket shared by all peers). Only relayed pairs would add a loopback socket each, and this run has none. |
 | handshake admission (`handshake_admission.rs`) | NODE_BUDGET 1,000 key agreements/s, 500/s for unknown endpoints, 100/s (200 total) per source IP | See "first thing that breaks". |
 
+## The same hub with other source addresses (one run each, `raw/out-r1-single`, `raw/out-r1-known`)
+
+The handshake admission guard has per-source, per-network and per-node budgets, so how the peers reach the hub
+decides the storm time. `spread` is the headline above; `single` puts every peer behind one source address (a whole
+site behind one NAT); `known` gives the hub each peer's endpoint in the snapshot, as a coordinator's candidates would.
+
+| | cold storm 1,000 | cold storm 4,096 | rekey storm 1,000 | rekey storm 4,096 | full apply 1,000 / 4,096 |
+|---|---|---|---|---|---|
+| `spread` (r2, r3) | 6.0 s | 28.2 s | 0.33 s | 17.5 s | 126 / 501 ms |
+| `single` (one address, 200/s per source) | **18.0 s** | **43.5 s** | 6.0 s | 22.9 s | 135 / 495 ms |
+| `known` (endpoints configured) | **0.34 s** | **1.56 s** | 0.33 s | 17.5 s | 219 / 865 ms |
+
+Reading it: with endpoints configured the hub dials the peers itself at apply time (hub-initiated handshakes are not
+subject to the admission budget), so the cold storm is 18 times faster than when it waits for peers to dial in. A rekey
+storm in which the peers initiate is admission-limited either way (17.5 s at 4,096 in both modes). Configured endpoints
+also cost more to apply (865 ms at 4,096 against 501) and, while the peers are not yet answering, the hub wakes 61/s (1,000)
+and 305/s (4,096) in the 20 s after the apply (idle window "configured", `known` rows) to retry them. How long that goes on
+for peers that stay offline (the engine's 25 s keepalive timer would re-dial them) was not measured and is the first thing to
+measure next for D81. The 100-sender steps in `known` lose 5-10% at 976 Mbit/s offered, against 0-0.01% in `spread`.
+
 ## What breaks first, and why
 
 Nothing on the data path breaks as the peer count grows. CPU per Gbit is the same at 10 and at 4,096 peers (1.44 vs
@@ -80,8 +100,8 @@ What breaks, in the order a growing mesh meets it:
    storm of live sessions 6-18 s. The hub CPU needed is small (0.38 s at 1,000, 1.86 s at 4,096, about 0.45 ms per
    handshake, 70-80% of it Curve25519), so this is policy, not capacity: `UNKNOWN_SOURCE_BUDGET` (500/s) and
    `NODE_BUDGET` (1,000/s) cap recovery at 4,096 peers to at least 4-8 s, and peers that retry on WireGuard's 5 s
-   timer round that up to 10-28 s. When the peers share one source address the per-source budget (200/s) is the cap
-   instead (see the `single` rows below). The guard drops silently, so peers cannot tell "busy" from "lost".
+   timer round that up to 10-28 s. When the peers share one source address (a site behind one NAT) the per-source budget (200/s) is the cap
+   instead: 18.0 s for 1,000 peers and 43.5 s for 4,096 (table below). The guard drops silently, so peers cannot tell "busy" from "lost".
 2. **Per-change programming cost, from about 1,000 peers.** A one-peer change re-programs every peer: 116-130 ms at 1,000,
    410-430 ms at 4,096, the same as a full apply, and even an identical snapshot costs 59 ms / 214 ms. At 4,096
    peers a coordinator that pushes one change per second keeps one core 40% busy for nothing.
@@ -110,7 +130,8 @@ What breaks, in the order a growing mesh meets it:
    424 / 214 ms to a few ms at 4,096. Largest user-visible gain; no security trade-off. Evidence above.
 2. **Decide the storm budget on purpose.** Either keep the budgets and document 6-28 s recovery at 1,000-4,096 peers, or
    let the reserved budget scale with the number of known endpoints (a known endpoint skips the per-source budget but
-   shares a 500/s reserve) after the flood tests are rerun. CPU is not the constraint: 1,000 handshakes/s is about 0.45 s
+   shares a 500/s reserve) after the flood tests are rerun. Measured effect of knowing the endpoints: cold storm 28.2 s to
+   1.56 s at 4,096 (hub-initiated), but peer-initiated rekey storms stay at 17.5 s. CPU is not the constraint: 1,000 handshakes/s is about 0.45 s
    of CPU per second. Peers' fixed 5 s retry makes the tail worse; jittered shorter first retries would cut it.
 3. **Curve25519 backend.** 48% (cold storm) to 70% (rekey storm) of storm CPU is `curve25519_dalek` serial u64
    field arithmetic. A vectorised backend would roughly halve storm CPU. This is a dependency feature choice, so it is the

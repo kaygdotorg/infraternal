@@ -20,4 +20,4 @@ c7d251a1625225f67e22bef99d77663ae192a5b8c935d23e13d6f1bf10e2296d  bin/peersim
   silent during idle windows) and an earlier peersim (1 s retry); its idle rows after connect are not used. The hub binary
   `hubtest` and the cold-storm / apply / memory / throughput rows are comparable with r2 and r3.
 - Holds (each one `perf-run --root`): r1 spread (17:24 UTC), aqmoff spread N=1000,4096 (`--hub-env GOTATUN_AQM=off --ks 100`),
-  r2 spread (19:42 UTC), r3 spread, then single and known (see summary.md if present).
+  r2 spread (19:42 UTC), r3 spread, then single and known N=1000,4096 (21:00 UTC, `all.sh r1 single|known 1000 4096`).
