@@ -178,4 +178,3 @@ pub fn server_proof_bytes_v2(
     push_binding(&mut bytes, binding);
     bytes
 }
-
