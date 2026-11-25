@@ -100,21 +100,21 @@ impl Default for Carry {
 impl Carry {
     /// True when the engine holds no unfinished sequence and no half-decoded
     /// UTF-8 character, so nothing needs carrying.
-    pub(crate) fn at_ground(&self) -> bool {
+    pub(crate) fn at_ground(self) -> bool {
         self.state == State::Ground && self.utf8 == ACCEPT
     }
 
     /// True when the engine is inside an escape sequence (not merely half
     /// way through a UTF-8 character). A C1 introducer starts a new sequence
     /// only here.
-    pub(crate) fn in_sequence(&self) -> bool {
+    pub(crate) fn in_sequence(self) -> bool {
         self.state != State::Ground
     }
 
     /// True when the engine is inside a control string (OSC, DCS, SOS, PM or
     /// APC). A later ESC or C1 introducer does not discard the carry then: the
     /// string's payload is still needed when its terminator dispatches it.
-    pub(crate) fn in_string(&self) -> bool {
+    pub(crate) fn in_string(self) -> bool {
         matches!(
             self.state,
             State::Osc
@@ -130,7 +130,7 @@ impl Carry {
     /// True when the engine treats a C0 byte inside the current sequence as
     /// payload to keep (DCS data, APC strings). Anywhere else a C0 byte is
     /// executed or ignored on the spot, so the carry must not repeat it.
-    pub(crate) fn keeps_c0(&self) -> bool {
+    pub(crate) fn keeps_c0(self) -> bool {
         matches!(self.state, State::DcsPassthrough | State::SosPmApc)
     }
 
@@ -226,6 +226,7 @@ impl Carry {
     }
 }
 
+/// Unit checks for the carry shadow, one per engine rule it copies.
 #[cfg(test)]
 #[path = "../tests/unit/carry.rs"]
 mod checks;

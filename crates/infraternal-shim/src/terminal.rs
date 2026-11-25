@@ -243,8 +243,8 @@ impl Terminal {
             // ESC, and a C1 introducer inside a sequence, start a fresh
             // sequence. The old prefix is dead weight, except inside a
             // control string, whose payload the terminator still needs.
-            let c1_introducer = self.carry.in_sequence()
-                && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f);
+            let c1_introducer =
+                self.carry.in_sequence() && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f);
             let restart = (byte == 0x1b || c1_introducer) && !self.carry.in_string();
             if restart {
                 self.pending.clear();

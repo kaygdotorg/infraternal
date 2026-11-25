@@ -440,5 +440,5 @@ fn carry_drops_utf8_bytes_the_engine_already_replaced() {
     terminal.process(&[0xe2, 0x82]);
     assert_eq!(terminal.pending, [0xe2, 0x82]);
     terminal.process(&[0xac]);
-    assert!(terminal.pending.is_empty());
+    assert_eq!(terminal.pending, [] as [u8; 0]);
 }
