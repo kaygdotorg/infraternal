@@ -505,6 +505,120 @@ fn a_peer_reaches_a_lan_behind_a_router_only_through_an_approved_route() {
     cleanup();
 }
 
+/// A network that holds a peer's underlay address is not routed into the mesh link (J1195, #580).
+///
+/// The client reaches its router peer at `203.0.113.2` through a default route (the documentation
+/// address lives only inside this sandbox). The snapshot also asks for `203.0.113.0/24` through
+/// that router. Routing it into `infraternal0` would send the tunnel's own UDP back into the
+/// tunnel, and no other route covers it, so only the guard can leave it out. A control snapshot
+/// with the router at a different address proves the same network is installed otherwise, and a
+/// walk candidate inside the network is refused the same way.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft, issue #580."]
+fn a_network_holding_a_peer_underlay_address_is_not_routed_into_the_mesh() {
+    cleanup();
+    topology();
+    let state_a = state("j1195-node-a");
+    let state_b = state("j1195-node-b");
+    let up = |ns: &str, path: &PathBuf| {
+        in_ns(ns, || {
+            let mut node = Node::restore_with_engine(path, EngineKind::GotaTun).unwrap();
+            let identity: Identity = node.up().unwrap();
+            (node, identity)
+        })
+    };
+    let (mut node_a, id_a) = up(NS_A, &state_a);
+    let (mut node_b, id_b) = up(NS_B, &state_b);
+    let (a, b) = ((2, id_a.public_key), (3, id_b.public_key));
+    // The router also answers on 203.0.113.2, and the client reaches that through a default route.
+    run(
+        "ip",
+        &["-n", NS_B, "address", "add", "203.0.113.2/32", "dev", "lo"],
+    );
+    run(
+        "ip",
+        &["-n", NS_A, "route", "add", "default", "via", "192.0.2.2"],
+    );
+    let network: Network = "203.0.113.0/24".parse().unwrap();
+    let through = PeerNetworks {
+        through: vec![ReachableNetwork {
+            network,
+            outbound: granted(),
+        }],
+        served: Vec::new(),
+    };
+    let route = || {
+        run(
+            "ip",
+            &[
+                "-n",
+                NS_A,
+                "-4",
+                "route",
+                "show",
+                "203.0.113.0/24",
+                "dev",
+                "infraternal0",
+            ],
+        )
+    };
+
+    // The router's endpoint is inside the network: left out, with the reason.
+    let inside = SocketAddr::from(([203, 0, 113, 2], id_b.port));
+    let applied = in_ns(NS_A, || {
+        node_a.chunk(snapshot(a, b, inside, 1, through.clone()))
+    });
+    assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
+    assert_eq!(
+        route().trim(),
+        "",
+        "the guarded network was routed: {}",
+        route()
+    );
+    let state = in_ns(NS_A, || node_a.network_route_state(network));
+    assert_eq!(state["state"], "not installed", "{state}");
+    assert!(
+        state["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("it holds 203.0.113.2")),
+        "{state}"
+    );
+
+    // A walk candidate inside the network is refused the same way.
+    let mut with_candidate = snapshot(
+        a,
+        b,
+        SocketAddr::from(([192, 0, 2, 2], id_b.port)),
+        2,
+        through.clone(),
+    );
+    for policy in with_candidate.upserted.values_mut() {
+        policy.peer.candidates = vec![inside];
+    }
+    let applied = in_ns(NS_A, || node_a.chunk(with_candidate));
+    assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
+    assert_eq!(route().trim(), "", "a candidate's network was routed");
+
+    // Control: with the router at its veth address nothing holds an endpoint, so it is routed.
+    let outside = SocketAddr::from(([192, 0, 2, 2], id_b.port));
+    let applied = in_ns(NS_A, || {
+        node_a.chunk(snapshot(a, b, outside, 3, through.clone()))
+    });
+    assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
+    assert!(route().contains("203.0.113.0/24"), "control: not routed");
+
+    // And when the endpoint moves into the network again, the installed route is taken off.
+    let applied = in_ns(NS_A, || node_a.chunk(snapshot(a, b, inside, 4, through)));
+    assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
+    assert_eq!(route().trim(), "", "the route outlived the endpoint change");
+
+    in_ns(NS_A, || node_a.down().unwrap());
+    in_ns(NS_B, || node_b.down().unwrap());
+    let _ = fs::remove_dir_all(&state_a);
+    let _ = fs::remove_dir_all(&state_b);
+    cleanup();
+}
+
 /// Start a `GotaTun` node in namespace `ns` from the state at `path`.
 fn start(ns: &str, path: &Path) -> (Node, Identity) {
     in_ns(ns, || {
