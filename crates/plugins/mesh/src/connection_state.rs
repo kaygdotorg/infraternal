@@ -305,6 +305,7 @@ mod tests {
             ),
             outbound: TrafficPolicy::None,
             access_ssh: None,
+            networks: crate::dataplane::PeerNetworks::default(),
         };
         let tuple = ConnectionTuple {
             source: IpAddr::from([10, 254, 0, 3]),
@@ -369,6 +370,7 @@ mod tests {
                     ),
                     outbound: TrafficPolicy::None,
                     access_ssh: None,
+                    networks: crate::dataplane::PeerNetworks::default(),
                 },
             );
             config

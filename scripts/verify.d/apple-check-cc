@@ -2,7 +2,10 @@
 # C toolchain for type-checking the arm64 macOS build from Linux (#260, #221).
 #
 # scripts/verify's "macOS compile" row runs `cargo check --target
-# aarch64-apple-darwin` on the Linux build machines. Cargo still runs the
+# aarch64-apple-darwin` on the Linux build machines, and its "iOS compile" row
+# does the same for aarch64-apple-ios and aarch64-apple-ios-sim (#580). Zig has
+# no iOS libc, but a check only needs headers that the macOS ones satisfy for
+# the C code we build (ring, measured 2026-11-24). Cargo still runs the
 # build scripts of C dependencies (OpenSSL, ring, SQLite) for a check, so they
 # need a C compiler for macOS. The pinned Zig (D213, D328) already
 # cross-compiles the terminal engine for macOS in scripts/build-vt, and it
@@ -15,7 +18,7 @@
 # The objects are only ever thrown away: the row never links, and the shipped
 # Mach-O images are built on a Mac with the OS toolchain (.cargo/apple-cc.sh).
 # So the flags that tie a compile to Apple's own driver and SDK are dropped:
-# `-arch`, `-isysroot`, `-target`/`--target=` and the minimum-version flags.
+# `-arch`, `-isysroot`, `-target`/`--target=` and the minimum-version flags (macOS, iPhone, Simulator).
 # The single `-target aarch64-macos` given to Zig replaces them.
 set -euo pipefail
 
@@ -38,7 +41,7 @@ while (($#)); do
             (($# >= 2)) || { printf 'apple-check-cc: %s needs a value\n' "$1" >&2; exit 2; }
             shift 2
             ;;
-        --target=* | -mmacosx-version-min=* | -mmacos-version-min=*)
+        --target=* | -mmacosx-version-min=* | -mmacos-version-min=* | -miphoneos-version-min=* | -mios-simulator-version-min=*)
             shift
             ;;
         *)

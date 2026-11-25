@@ -1,6 +1,6 @@
 //! Test-only line bridge exposing the shipping reducer, including rollback and close history (#243).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use infraternal_plugin_canvas::{model::Document, reducer::reduce};
+use infraternal_canvas_model::{model::Document, reducer::reduce};
 use serde_json::{Value, json};
 use std::io::{self, BufRead, Write};
 

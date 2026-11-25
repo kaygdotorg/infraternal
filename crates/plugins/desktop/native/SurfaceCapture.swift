@@ -53,6 +53,8 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var repairing = false
     /// The viewer reported congestion since the last `drain` pass.
     private var congested = false
+    /// The lowest link rate (bits per second) reported with that congestion, if any.
+    private var linkRate: Int?
     /// Decides, from changes and results, what kind of picture to encode next.
     private var damageState = DamageEncodingState()
     /// Exact-pixel history used to tell a blinking cursor from real changes and to cut tiles.
@@ -251,12 +253,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                 let frame = latest; latest = nil
                 let repair = repairing; repairing = false
                 let pressure = congested; congested = false
+                let measured = linkRate; linkRate = nil
                 let retired = stopped
                 if let frame { retained = frame }
                 let current = retained
                 mailbox.unlock()
                 if retired { break }
-                if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true) }
+                if pressure { _ = bitrate.feedback(at:ProcessInfo.processInfo.systemUptime, congested:true, linkRate:measured) }
                 let dequeued = measure ? nanos(mach_absolute_time()) : 0
                 let deferHistoryUntilAfterPaint = !pixels.hasDeliveredHistory
                 if deferHistoryUntilAfterPaint, current != nil {
@@ -371,7 +374,13 @@ final class SurfaceCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     /// Records that the viewer connection is congested; the next encoding pass lowers the bit rate.
-    func congestion() { mailbox.lock(); congested = true; mailbox.unlock() }
+    /// `linkRate` is the server's measurement of that connection in bits per second, if it has one;
+    /// the pass then cuts straight to a rate under it. Reports before the pass keep the lowest.
+    func congestion(linkRate rate: Int? = nil) {
+        mailbox.lock(); congested = true
+        if let rate { linkRate = min(linkRate ?? rate, rate) }
+        mailbox.unlock()
+    }
 
     /// Requests a keyframe, for when the viewer lost or cannot decode earlier video.
     func repair() {

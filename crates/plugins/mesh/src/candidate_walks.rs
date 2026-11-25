@@ -379,6 +379,7 @@ mod tests {
             inbound: TrafficPolicy::All,
             outbound: TrafficPolicy::All,
             access_ssh: None,
+            networks: crate::dataplane::PeerNetworks::default(),
         }
     }
 

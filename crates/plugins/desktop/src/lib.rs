@@ -131,6 +131,9 @@ pub mod wire;
 /// Delivery of video frames to viewers over reliable or datagram lanes.
 pub mod delivery;
 #[cfg(feature = "server")]
+/// Measures a viewer's link rate from its video write timings, for the host's encoder.
+pub mod link_rate;
+#[cfg(feature = "server")]
 /// Choosing which H.264 parameter sets a viewer's keyframes carry.
 pub mod parameter_sets;
 #[cfg(feature = "server")]

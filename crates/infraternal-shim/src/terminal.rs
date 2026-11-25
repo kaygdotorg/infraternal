@@ -1,40 +1,10 @@
 //! Ghostty VT state with bounded snapshot and unfinished-parser carry [13][94].
 #![forbid(unsafe_code)]
-use crate::{frame::MAX_FRAME, ring::Ring, terminal_native::Engine};
+use crate::{carry::Carry, frame::MAX_FRAME, ring::Ring, terminal_native::Engine};
 use std::io;
 /// A byte budget, not a row count: about 10,000 typical 200-column ASCII rows.
 /// Ghostty's page storage includes cell capacity and sparse style/grapheme data.
 const SCROLLBACK_BYTES: usize = 17 * 1024 * 1024;
-/// Second, lightweight parser that only watches whether the latest byte
-/// finished a sequence. `Terminal` uses it to know which bytes form an unfinished
-/// escape sequence at the end of the output, so a snapshot can carry that
-/// prefix and the live stream can continue it.
-#[derive(Default)]
-struct Observer {
-    complete: bool,
-}
-impl vte::Perform for Observer {
-    fn print(&mut self, _: char) {
-        self.complete = true;
-    }
-    fn execute(&mut self, byte: u8) {
-        if matches!(byte, 0x18 | 0x1a) {
-            self.complete = true;
-        }
-    }
-    fn csi_dispatch(&mut self, _: &vte::Params, _: &[u8], _: bool, _: char) {
-        self.complete = true;
-    }
-    fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {
-        self.complete = true;
-    }
-    fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {
-        self.complete = true;
-    }
-    fn unhook(&mut self) {
-        self.complete = true;
-    }
-}
 // Geometry changes and lost state are separate recovery certificates; neither
 // permits raw reconstruction merely because the ring still has origin bytes.
 /// How trustworthy the terminal's rebuilt state is. Geometry changes and lost
@@ -71,8 +41,8 @@ pub struct Terminal {
     host_floor: Option<std::sync::Arc<crate::terminal_memory::HostFloor>>,
     #[cfg(feature = "process-per-user")]
     limits: crate::terminal_limits::Limits,
-    observer: Observer,
-    parser: vte::Parser,
+    /// Shadow of the engine's parser; decides when `pending` is finished.
+    carry: Carry,
     pending: Vec<u8>,
     carry_overflow: bool,
     dimensions: (u16, u16),
@@ -208,8 +178,7 @@ impl Terminal {
             host_floor: None,
             #[cfg(feature = "process-per-user")]
             limits: crate::terminal_limits::Limits::default(),
-            observer: Observer::default(),
-            parser: vte::Parser::new(),
+            carry: Carry::default(),
             pending: Vec::with_capacity(4096),
             carry_overflow: false,
             dimensions: (cols, rows),
@@ -264,52 +233,60 @@ impl Terminal {
         }
         self.engine.process(bytes);
         for &byte in bytes {
-            // Only ESC can start a sequence among ground-state ASCII/C0.
-            // LF/CR/TAB and charset shifts are already handled by Ghostty;
-            // feeding them to the carry parser adds work to output floods.
-            // Inside a pending sequence, still parse C0 execution/cancellation.
+            // At ground only ESC (or the lead byte of a UTF-8 character) can
+            // start something. LF/CR/TAB and charset shifts are already
+            // handled by the engine; feeding them to the shadow adds work to
+            // output floods.
             if byte != 0x1b && byte < 0x80 && self.pending.is_empty() {
                 continue;
             }
-            let string = self
-                .pending
-                .get(1)
-                .is_some_and(|start| matches!(start, b']' | b'P' | b'_' | b'^' | b'X'));
-            if byte == 0x1b && !string {
+            // ESC, and a C1 introducer inside a sequence, start a fresh
+            // sequence. The old prefix is dead weight, except inside a
+            // control string, whose payload the terminator still needs.
+            let c1_introducer =
+                self.carry.in_sequence() && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f);
+            let restart = (byte == 0x1b || c1_introducer) && !self.carry.in_string();
+            if restart {
                 self.pending.clear();
                 self.carry_overflow = false;
             }
-            if !self.pending.is_empty() || byte == 0x1b || byte >= 0xc0 {
-                let carry_limit = MAX_FRAME - 9;
-                #[cfg(feature = "process-per-user")]
-                let carry_limit = if self.bounded {
-                    crate::terminal_limits::STRING_BYTES
-                } else {
-                    carry_limit
-                };
-                if self.pending.len() < carry_limit {
-                    self.pending.push(byte);
-                } else {
-                    self.carry_overflow = true;
-                }
-            }
-            self.observer.complete = false;
-            self.parser.advance(&mut self.observer, &[byte]);
-            if self.observer.complete {
+            if self.carry.advance(byte) {
+                // The byte cut a UTF-8 character short and starts afresh; the
+                // engine already printed a replacement for the abandoned
+                // bytes, which the carry must not repeat.
                 self.pending.clear();
                 self.carry_overflow = false;
-                if byte == 0x1b {
-                    self.pending.push(byte);
-                }
+            }
+            if self.carry.at_ground() {
+                // The engine finished (or abandoned) everything: nothing to carry.
+                self.pending.clear();
+                self.carry_overflow = false;
+                continue;
             }
             // C0 actions execute within CSI. Carry only its unfinished syntax,
             // otherwise the snapshot continuation executes those actions twice.
-            if !self.observer.complete
-                && byte < 0x20
-                && byte != 0x1b
-                && self.pending.last() == Some(&byte)
-            {
-                self.pending.pop();
+            if byte < 0x20 && byte != 0x1b && !self.carry.keeps_c0() {
+                continue;
+            }
+            // A C1 introducer only means something to an engine that is already
+            // inside a sequence; replayed at ground it would be a stray byte.
+            // A restart therefore carries its 7-bit form, ESC plus the byte
+            // minus 0x40, which leaves the engine in the same state.
+            if restart && c1_introducer {
+                self.pending.extend_from_slice(&[0x1b, byte - 0x40]);
+                continue;
+            }
+            let carry_limit = MAX_FRAME - 9;
+            #[cfg(feature = "process-per-user")]
+            let carry_limit = if self.bounded {
+                crate::terminal_limits::STRING_BYTES
+            } else {
+                carry_limit
+            };
+            if self.pending.len() < carry_limit {
+                self.pending.push(byte);
+            } else {
+                self.carry_overflow = true;
             }
         }
     }

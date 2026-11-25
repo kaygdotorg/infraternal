@@ -1,0 +1,14 @@
+# The account canvas layout tree: document model, intent reducer and tiling, with no async or server code [180,183,248].
+[package]
+name = "infraternal-canvas-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true

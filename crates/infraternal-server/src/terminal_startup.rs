@@ -126,9 +126,54 @@ pub(crate) async fn pending(pool: &SqlitePool, user: &str, host: &str) -> Result
         .bind(user).bind(host).bind(user).bind(host).bind(user).fetch_one(pool).await.map_err(|_| ())
 }
 
-pub(crate) async fn claim(pool: &SqlitePool, user: &str, host: &str) -> Result<bool, ()> {
-    let changed = sqlx::query("INSERT INTO terminal_startup_hints(user_id,host,enabled,shown) SELECT ?,?,NULL,1 WHERE COALESCE((SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host=?),(SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host='*'),1) ON CONFLICT(user_id,host) DO UPDATE SET shown=1 WHERE NOT shown AND COALESCE(terminal_startup_hints.enabled,(SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host='*'),1)")
-        .bind(user).bind(host).bind(user).bind(host).bind(user).bind(user).execute(pool).await.map_err(|_| ())?;
+/// Mark the first startup notice for `user` on `host` as shown, if hints are
+/// on there and it was not shown yet. The SELECT/upsert's conditions in one
+/// statement.
+const SQL_CLAIM: &str = "INSERT INTO terminal_startup_hints(user_id,host,enabled,shown) SELECT ?,?,NULL,1 WHERE COALESCE((SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host=?),(SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host='*'),1) ON CONFLICT(user_id,host) DO UPDATE SET shown=1 WHERE NOT shown AND COALESCE(terminal_startup_hints.enabled,(SELECT enabled FROM terminal_startup_hints WHERE user_id=? AND host='*'),1)";
+
+/// Claim the one startup notice a person gets per host: `true` only for the
+/// single caller that flips it to shown, `false` when it was shown already
+/// or hints are off for that host (then nothing is consumed).
+///
+/// Runs on the D379 writer (#562), queued FIFO with the terminal-open writes,
+/// because it is reached from a terminal's first moments (`inspect` right
+/// after the open) and an sqlx upsert there fought those writes for SQLite's
+/// write lock. Without a D379 pool (in-memory test databases) the same
+/// statement runs on sqlx through [`claim_on_sqlx`].
+pub(crate) async fn claim(
+    auth: &crate::auth::Auth,
+    pool: &SqlitePool,
+    user: &str,
+    host: &str,
+) -> Result<bool, ()> {
+    let Some(db) = auth.database() else {
+        return claim_on_sqlx(pool, user, host).await;
+    };
+    let (user, host) = (user.to_owned(), host.to_owned());
+    db.write(move |tx| {
+        let changed = tx
+            .prepare_cached(SQL_CLAIM)?
+            .execute(infraternal_db::rusqlite::params![
+                user, host, user, host, user, user
+            ])?;
+        Ok::<_, infraternal_db::Error>(changed == 1)
+    })
+    .await
+    .map_err(|_| ())
+}
+
+/// The sqlx form of [`claim`], for databases without a D379 pool.
+pub(crate) async fn claim_on_sqlx(pool: &SqlitePool, user: &str, host: &str) -> Result<bool, ()> {
+    let changed = sqlx::query(SQL_CLAIM)
+        .bind(user)
+        .bind(host)
+        .bind(user)
+        .bind(host)
+        .bind(user)
+        .bind(user)
+        .execute(pool)
+        .await
+        .map_err(|_| ())?;
     Ok(changed.rows_affected() == 1)
 }
 
@@ -209,19 +254,24 @@ mod tests {
         );
     }
 
+    /// The sqlx claim: hints that are off consume nothing, and of two
+    /// concurrent claims for one host exactly one wins.
     #[tokio::test]
     async fn only_one_caller_claims_and_disabled_hints_do_not_consume_notice() {
         let pool = pool().await;
         save(&pool, "a", "*", Some(false)).await.unwrap();
         assert!(!pending(&pool, "a", "local").await.unwrap());
-        assert!(!claim(&pool, "a", "local").await.unwrap());
+        assert!(!claim_on_sqlx(&pool, "a", "local").await.unwrap());
         save(&pool, "a", "*", Some(true)).await.unwrap();
         assert!(pending(&pool, "a", "local").await.unwrap());
-        let (one, two) = tokio::join!(claim(&pool, "a", "local"), claim(&pool, "a", "local"));
+        let (one, two) = tokio::join!(
+            claim_on_sqlx(&pool, "a", "local"),
+            claim_on_sqlx(&pool, "a", "local")
+        );
         assert_ne!(one.unwrap(), two.unwrap());
         assert!(!pending(&pool, "a", "local").await.unwrap());
-        assert!(!claim(&pool, "a", "local").await.unwrap());
-        assert!(claim(&pool, "b", "local").await.unwrap());
-        assert!(claim(&pool, "a", "other").await.unwrap());
+        assert!(!claim_on_sqlx(&pool, "a", "local").await.unwrap());
+        assert!(claim_on_sqlx(&pool, "b", "local").await.unwrap());
+        assert!(claim_on_sqlx(&pool, "a", "other").await.unwrap());
     }
 }

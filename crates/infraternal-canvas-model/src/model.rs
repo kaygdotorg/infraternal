@@ -1,10 +1,15 @@
 //! Validates the existing v1 JSON document in place, reusing the server's JSON representation [180,243,248].
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+/// Largest serialized document the server stores, in bytes.
 pub const MAX_DOCUMENT: usize = 48 * 1024;
+/// Largest accepted intent or snapshot input, in bytes.
 pub const MAX_INPUT: usize = 8 * 1024;
+/// Exclusive ceiling for operation receipt counters; storage refuses a document at or past it.
 pub const MAX_RECEIPTS: i64 = 65_536;
+/// Storage writes a full snapshot whenever the revision is a multiple of this.
 pub const CHECKPOINT: i64 = 128;
+/// The canvas document: the v1 JSON value, checked in place by `valid` and changed only through the reducer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(transparent)]
 pub struct Document(pub Value);
@@ -13,41 +18,49 @@ impl Default for Document {
         Self(json!({"format":"infraternal.canvas","version":1,"revision":0,"views":[]}))
     }
 }
+/// Tells whether `value` is a non-empty name of at most 200 UTF-16 units.
 #[must_use]
 pub fn text(value: &str) -> bool {
     !value.is_empty() && value.encode_utf16().take(201).count() <= 200
 }
+/// Tells whether `value` is finite and inside `low..=high`.
 #[must_use]
 pub fn finite(value: f64, low: f64, high: f64) -> bool {
     value.is_finite() && (low..=high).contains(&value)
 }
+/// Tells whether `value` is an object whose keys are all among `fields`; unknown keys are refused.
 #[must_use]
 pub fn shape(value: &Value, fields: &[&str]) -> bool {
     value
         .as_object()
         .is_some_and(|v| v.keys().all(|key| fields.contains(&key.as_str())))
 }
+/// Reads `key` as a string that passes `text`, or `None`.
 #[must_use]
 pub fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key)?.as_str().filter(|s| text(s))
 }
+/// Tells whether `key` holds a finite number inside `low..=high`.
 pub(crate) fn numeric(value: &Value, key: &str, low: f64, high: f64) -> bool {
     value
         .get(key)
         .and_then(Value::as_f64)
         .is_some_and(|v| finite(v, low, high))
 }
+/// Tells whether `key` is absent or a finite number in range, and a whole number when `whole` is set.
 fn optional_number(value: &Value, key: &str, low: f64, high: f64, whole: bool) -> bool {
     value.get(key).is_none_or(|n| {
         n.as_f64()
             .is_some_and(|v| finite(v, low, high) && (!whole || v.fract() == 0.0))
     })
 }
+/// Tells whether `value` is an `{x, y}` point with both coordinates within `±limit`.
 pub(crate) fn point(value: &Value, limit: f64) -> bool {
     shape(value, &["x", "y"])
         && numeric(value, "x", -limit, limit)
         && numeric(value, "y", -limit, limit)
 }
+/// Tells whether `value` is a well-formed window target (its type and the fields that type allows).
 pub(crate) fn target(value: &Value) -> bool {
     match string(value, "type") {
         Some("session") => {
@@ -81,6 +94,7 @@ pub(crate) fn target(value: &Value) -> bool {
         _ => false,
     }
 }
+/// Tells whether `value` is a well-formed window entry with its optional size fields in range.
 pub(crate) fn window(value: &Value) -> bool {
     shape(value, &["id", "target", "height", "span", "rows", "row"])
         && string(value, "id").is_some()
@@ -90,6 +104,7 @@ pub(crate) fn window(value: &Value) -> bool {
         && optional_number(value, "rows", 1.0, 64.0, true)
         && optional_number(value, "row", 0.0, 64.0, true)
 }
+/// Tells whether `value` is a well-formed view with its cell and tiled layout.
 pub(crate) fn view(value: &Value) -> bool {
     shape(value, &["id", "kind", "name", "cell", "layout"])
         && ["id", "kind", "name"]
@@ -339,12 +354,14 @@ pub(crate) fn look(value: &Value) -> bool {
         // light or dark setting instead of the theme one device happened to show first.
         && value.get("themeChosen").is_none_or(Value::is_boolean)
 }
+/// Iterates the views of a document value; empty when the shape is wrong.
 pub(crate) fn views(doc: &Value) -> impl Iterator<Item = &Value> {
     doc.get("views")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
 }
+/// Iterates the columns of a tiled view; empty when the shape is wrong.
 pub(crate) fn columns(view: &Value) -> impl Iterator<Item = &Value> {
     view.get("layout")
         .and_then(|l| l.get("columns"))
@@ -352,6 +369,7 @@ pub(crate) fn columns(view: &Value) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
 }
+/// Iterates the windows of a column; empty when the shape is wrong.
 pub(crate) fn windows(column: &Value) -> impl Iterator<Item = &Value> {
     column
         .get("windows")
@@ -359,6 +377,7 @@ pub(crate) fn windows(column: &Value) -> impl Iterator<Item = &Value> {
         .into_iter()
         .flatten()
 }
+/// Builds a JSON object from key and value pairs, keeping the last value for a repeated key.
 #[must_use]
 pub fn object(fields: Vec<(&str, Value)>) -> Value {
     let mut object = serde_json::Map::new();
@@ -376,10 +395,12 @@ pub(crate) fn column(id: &str, weight: f64, windows: Vec<Value>) -> Value {
     Value::Object(object)
 }
 impl Document {
+    /// Returns the document revision, or 0 when the field is missing.
     #[must_use]
     pub fn revision(&self) -> i64 {
         self.0.get("revision").and_then(Value::as_i64).unwrap_or(0)
     }
+    /// Iterates every window in every column of every view.
     pub fn windows(&self) -> impl Iterator<Item = &Value> {
         views(&self.0).flat_map(columns).flat_map(windows)
     }
@@ -491,6 +512,7 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The reference document passes, and each field is refused just past its bound.
     #[test]
     fn reference_document_has_strict_shape_and_bounds() {
         let mut doc = Document::default();
@@ -558,6 +580,7 @@ mod tests {
         );
     }
 
+    /// Graph pin coordinates accept both limits and refuse the next integer.
     #[test]
     fn graph_pin_coordinates_include_both_limits_but_refuse_the_next_integer() {
         let mut doc = Document::default();
@@ -574,6 +597,7 @@ mod tests {
         assert!(!doc.valid());
     }
 
+    /// The session name pin may be absent and must be a boolean when present.
     #[test]
     fn session_name_pin_is_optional_and_boolean() {
         let mut value = json!({"type":"session","id":"session","host":"host","name":"build"});
@@ -586,6 +610,7 @@ mod tests {
         assert!(!target(&value));
     }
 
+    /// Host IDs must be canonical lowercase hyphenated UUID text.
     #[test]
     fn host_id_requires_canonical_lowercase_hyphenated_text() {
         let mut value = json!({"type":"session","id":"session","host":"host"});

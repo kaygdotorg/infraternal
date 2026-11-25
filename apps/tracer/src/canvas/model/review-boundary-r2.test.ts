@@ -34,7 +34,7 @@ function sequence(seed: number): Intent[] {
 test("review r2: longer boundary-weighted sequences preserve every accepted projection", () => {
   const seeds = [0x91e10da5, 0xdeadbeef, 0x12345678, 0xabcdef01, 97, 65537, 99991, 20261019];
   const cases = seeds.map((seed) => ({ document: initial(), intents: sequence(seed) }));
-  const oracle = Bun.spawnSync(["cargo", "run", "--quiet", "-p", "infraternal-plugin-canvas", "--example", "layout_oracle"], {
+  const oracle = Bun.spawnSync(["cargo", "run", "--quiet", "-p", "infraternal-canvas-model", "--example", "layout_oracle"], {
     cwd: new URL("../../../../../", import.meta.url).pathname,
     stdin: new TextEncoder().encode(cases.map((entry) => JSON.stringify(entry)).join("\n") + "\n"), maxBuffer: 128 * 1024 * 1024,
   });

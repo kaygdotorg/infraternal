@@ -341,6 +341,10 @@ mod legacy {
     };
 
     const SYSTEM_KEYCHAIN: &str = "/Library/Keychains/System.keychain";
+    /// The service name slice-1 builds gave the item. It is deliberately NOT moved to the
+    /// `kayg.infraternal` names (#580): the item is only ever deleted, and the name to delete is
+    /// the one that was written. The mesh key itself is a file in the state directory and never
+    /// depended on any identifier, so renaming launchd labels keeps it.
     pub(super) const SERVICE: &str = "org.infraternal.mesh";
     pub(super) const ACCOUNT: &str = "wireguard-private-key";
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;

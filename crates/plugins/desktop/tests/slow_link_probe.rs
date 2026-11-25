@@ -9,8 +9,14 @@
 //! heaviest case on #146) of `bit rate / 120` bytes, a keyframe of 250 KB scaled by the current
 //! bit rate (J1078 measured 249–251 KB at 1.56 MP and the full rate) whenever the session asks for
 //! one, and adapts its rate exactly like `AdaptiveBitrate` in `native/CaptureState.swift`: a pressure
-//! report cuts it to 70 % (at most every 0.5 s, never below 500 kbit/s), eight healthy frames raise
-//! it by 5 % (at most every second, never above width × height × 3).
+//! report cuts it to 70 % (at most every 0.5 s, never below 500 kbit/s), or straight to 85 % of the
+//! link rate the report measured (J1167), and then probes no higher than that for 60 s; eight
+//! healthy frames raise it by 5 % (at most every second, never above width × height × 3).
+//!
+//! Knobs (environment): `PROBE_LOWAT=<bytes>` sets `TCP_NOTSENT_LOWAT` on the probe's socket, as
+//! the server does on accepted sockets (32 KiB, `crates/infraternal-server/src/send_queue.rs`);
+//! `PROBE_IGNORE_RATE=1` makes the modelled encoder ignore the measured link rate in pressure
+//! reports, which is the behaviour before J1167.
 //!
 //! The reader at `PROBE_ADDR` echoes each frame's sequence and capture time (16 bytes) as soon as
 //! the frame has fully arrived; the echo path is not shaped. Latency is capture to arrival at the
@@ -62,6 +68,8 @@ struct Bitrate {
     /// Experiment (`PROBE_AIMD_SPLIT=1`): a cut waits 0.5 s after the last
     /// cut only, not after the last increase as the Swift controller does.
     split: bool,
+    /// The highest rate the last measured link allows, and when that limit ends (bits per second, time).
+    link_limit: Option<(f64, Instant)>,
 }
 impl Bitrate {
     /// Starts at `maximum` (at least 500 kbit/s).
@@ -74,10 +82,12 @@ impl Bitrate {
             healthy: 0,
             last_cut: None,
             split: std::env::var_os("PROBE_AIMD_SPLIT").is_some(),
+            link_limit: None,
         }
     }
-    /// Reports one frame's outcome, as the Swift controller does.
-    fn feedback(&mut self, now: Instant, congested: bool) {
+    /// Reports one frame's outcome, as the Swift controller does. `link` is the measured link rate
+    /// in bits per second that came with a congestion report, if any.
+    fn feedback(&mut self, now: Instant, congested: bool, link: Option<f64>) {
         let since = self
             .last
             .map_or(f64::INFINITY, |last| (now - last).as_secs_f64());
@@ -86,16 +96,27 @@ impl Bitrate {
             let since_cut = self
                 .last_cut
                 .map_or(f64::INFINITY, |last| (now - last).as_secs_f64());
+            let mut target = (self.current * 0.7).max(500_000.0);
+            if let Some(link) = link {
+                let aim = (link * 0.85).max(500_000.0);
+                self.link_limit = Some((aim, now + Duration::from_secs(60)));
+                if aim < self.current {
+                    target = aim;
+                }
+            }
             if (if self.split { since_cut } else { since }) >= 0.5 {
-                self.current = (self.current * 0.7).max(500_000.0);
+                self.current = self.current.min(target);
                 self.last = Some(now);
                 self.last_cut = Some(now);
             }
         } else {
             self.healthy = (self.healthy + 1).min(8);
             if self.healthy == 8 && since >= 1.0 {
-                self.current =
-                    (self.current + (self.current / 20.0).max(50_000.0)).min(self.maximum);
+                let ceiling = self
+                    .link_limit
+                    .filter(|(_, until)| now < *until)
+                    .map_or(self.maximum, |(limit, _)| limit.min(self.maximum));
+                self.current = (self.current + (self.current / 20.0).max(50_000.0)).min(ceiling);
                 self.last = Some(now);
                 self.healthy = 0;
             }
@@ -113,6 +134,8 @@ struct Produced {
     pressure_reports: u64,
     min_rate: f64,
     rate_sum: f64,
+    /// The link rates (kbit/s) that pressure reports carried.
+    measured_kbit_s: Vec<u32>,
 }
 
 /// The value at `quantile` (0..=1) of sorted `values`.
@@ -139,6 +162,16 @@ async fn slow_link_probe() {
     let mut viewer = session.attach("owner".into()).unwrap();
     let socket = tokio::net::TcpStream::connect(&address).await.unwrap();
     socket.set_nodelay(true).unwrap();
+    // As the server's accepted sockets (`send_queue::UNSENT_LOWAT`).
+    #[cfg(target_os = "linux")]
+    if let Some(lowat) = std::env::var("PROBE_LOWAT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        socket2::SockRef::from(&socket)
+            .set_tcp_notsent_lowat(lowat)
+            .unwrap();
+    }
     let (mut read, mut write) = socket.into_split();
     let epoch = Instant::now();
 
@@ -154,6 +187,7 @@ async fn slow_link_probe() {
         let mut force = true;
         let mut sequence = 0;
         let trace = std::env::var_os("PROBE_TRACE").is_some();
+        let ignore_rate = std::env::var_os("PROBE_IGNORE_RATE").is_some();
         while epoch.elapsed() < duration {
             tick.tick().await;
             let now = Instant::now();
@@ -164,9 +198,13 @@ async fn slow_link_probe() {
                         stats.repairs_asked += 1;
                     }
                     // after-only begin
-                    HostCommand::Pressure { .. } => {
+                    HostCommand::Pressure { kbit_s, .. } => {
                         stats.pressure_reports += 1;
-                        rate.feedback(now, true);
+                        if kbit_s > 0 {
+                            stats.measured_kbit_s.push(kbit_s);
+                        }
+                        let link = (!ignore_rate && kbit_s > 0).then(|| f64::from(kbit_s) * 1000.0);
+                        rate.feedback(now, true, link);
                     }
                     // after-only end
                     _ => {}
@@ -191,7 +229,7 @@ async fn slow_link_probe() {
             stats.frames += 1;
             stats.keyframes += u64::from(keyframe);
             stats.bytes += size as u64;
-            rate.feedback(now, false);
+            rate.feedback(now, false, None);
             stats.min_rate = stats.min_rate.min(rate.current);
             stats.rate_sum += rate.current;
             if trace && stats.frames.is_multiple_of(120) {
@@ -210,7 +248,10 @@ async fn slow_link_probe() {
 
     let sent = Arc::new(Mutex::new((0_u64, 0_u64, 0_u64, 0_u64)));
     let writer_sent = Arc::clone(&sent);
+    let waits = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let writer_waits = Arc::clone(&waits);
     let writer = tokio::spawn(async move {
+        let waits = writer_waits;
         let mut wire = Vec::new();
         let mut last_write = Duration::ZERO;
         // after-only begin
@@ -237,6 +278,12 @@ async fn slow_link_probe() {
             let written =
                 tokio::time::timeout(Duration::from_secs(1), write.write_all(&wire)).await;
             last_write = began.elapsed();
+            if last_write >= Duration::from_millis(2) {
+                waits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            // after-only begin
+            viewer.record_write(wire.len(), began, Instant::now());
+            // after-only end
             let mut sent = writer_sent.lock().unwrap();
             if let Ok(Ok(())) = written {
                 sent.0 += 1;
@@ -283,9 +330,22 @@ async fn slow_link_probe() {
         latencies.len() as f64 / seconds as f64
     );
     println!(
+        "METRIC writes_that_waited={}",
+        waits.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    println!(
         "METRIC rate_min_mbit_s={:.2} rate_mean_mbit_s={:.2}",
         produced.min_rate / 1e6,
         produced.rate_sum / produced.frames.max(1) as f64 / 1e6
+    );
+    let mut measured = produced.measured_kbit_s.clone();
+    measured.sort_unstable();
+    println!(
+        "METRIC link_estimates n={} median_kbit_s={} min_kbit_s={} max_kbit_s={}",
+        measured.len(),
+        measured.get(measured.len() / 2).copied().unwrap_or(0),
+        measured.first().copied().unwrap_or(0),
+        measured.last().copied().unwrap_or(0)
     );
     println!(
         "METRIC latency_ms n={} p50={:.1} p95={:.1} p99={:.1} max={:.1}",

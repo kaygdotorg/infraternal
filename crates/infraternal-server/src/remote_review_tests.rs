@@ -37,7 +37,9 @@ async fn review_admitted_tcp() -> (
             &crate::enrollment::CertificateRecord {
                 fingerprint,
                 issuer_fingerprint: openssl::sha::sha256(&root.to_der().unwrap()),
-                public_key: host.key.raw_public_key().unwrap().try_into().unwrap(),
+                public_key: crate::identity_key::IdentityKey::Ed25519(
+                    host.key.raw_public_key().unwrap().try_into().unwrap(),
+                ),
                 not_before: instant,
                 not_after: instant + 604_800,
             },

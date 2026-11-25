@@ -28,9 +28,9 @@ use std::{
 };
 
 /// The launchd job `up` installs; also reported by `up --json` as `service`.
-pub(super) const SERVICE_NAME: &str = "org.infraternal.mesh";
+pub(super) const SERVICE_NAME: &str = macos_service::LABEL;
 /// The launchd property list `macos_service` writes for that job.
-const PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
+const PLIST: &str = macos_service::PLIST;
 /// How long `up` waits for launchd to report the started service as running.
 const START_WAIT: Duration = Duration::from_secs(15);
 /// The desktop helper's file name, in the release folder and beside the service.
@@ -63,6 +63,8 @@ pub(super) fn preflight() -> io::Result<()> {
     for path in [
         MACHINE_BASE,
         PLIST,
+        // An install of a build before the move to `kayg.infraternal` (#580) is still an install.
+        infraternal_plugin_mesh::macos_user_mode::legacy::DAEMON_PLIST,
         super::PATH_BINARY,
         "/var/lib/infraternal/agent",
         "/var/lib/infraternal/state",

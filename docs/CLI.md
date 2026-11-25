@@ -196,18 +196,25 @@ itself works there the same way.
 default. Run it as the person who uses the Mac, without `sudo`:
 
 - It asks for your administrator password once, before the approval code, to
-  install a small mesh helper (`org.infraternal.mesh-helper`). The helper runs
+  install a small mesh helper (`kayg.infraternal.mesh-helper`). The helper runs
   only when the infraternal agent asks it for something, then exits. It creates
   the mesh network interface, routes the mesh's addresses to it (it refuses if a
   network the Mac already uses overlaps them), and points `/etc/resolver` at the
   agent for `internal` names. Nothing asks for the password again, after a
   reboot or a new login either.
 - The infraternal agent runs as you, from
-  `~/Library/LaunchAgents/org.infraternal.agent.plist`, with its files in
+  `~/Library/LaunchAgents/kayg.infraternal.agent.plist`, with its files in
   `~/Library/Application Support/infraternal` and its log in
   `~/Library/Logs/infraternal/agent.log` (D395). `up` prints the `PATH` line
   to add.
 - Only one account per Mac can use user mode, and not beside root mode.
+- A Mac that joined with an older build has the same pieces under `org.infraternal.*`
+  names. Run `infraternal up` again: it asks for the administrator password once,
+  removes the old helper and the old `LaunchAgent`, and installs the new ones.
+  The enrollment and the mesh key stay where they are, so the Mac keeps its
+  identity. macOS may ask about Local Network access again, because it tracks
+  the program by its new identifier (`kayg.infraternal`); click Allow.
+  Removal takes both the old and the new pieces.
 - To remove it, run
   `~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>`
   as the same person. It stops the agent, which drops the mesh interface and

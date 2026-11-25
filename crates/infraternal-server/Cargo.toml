@@ -58,6 +58,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_cbor_2.workspace = true
 sha2.workspace = true
+socket2 = { version = "0.6", features = ["all"] }
 zeroize.workspace = true
 sqlx.workspace = true
 # D379 (#473): the rusqlite pool. Slice 2 runs the session statements on it; the rest still uses sqlx.
@@ -87,6 +88,9 @@ tokio-tungstenite = { workspace = true, optional = true }
 sha2.workspace = true
 
 [dev-dependencies]
+# A second P-256 implementation signs test requests, so the server's OpenSSL
+# verifier is checked against the encoding the client core produces (#580).
+ring.workspace = true
 # Frozen extension vectors remain covered without adding them to shipping terminals.
 infraternal-protocol = { workspace = true, features = ["desktop"] }
 # Native-lane regressions opt in explicitly; shipping remote terminals do not.

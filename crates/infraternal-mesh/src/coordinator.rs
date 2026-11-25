@@ -4,6 +4,7 @@ use crate::{
     address::{AddressAllocator, Route},
     model::{Addresses, MeshError, MeshSettings, Node, NodeId, PublicKey},
     names::{NameDiff, NameTable},
+    networks::{ApprovedNetwork, Network, NetworkId, NetworkRefusal},
     rules::{Arrow, Endpoint, RuleId, TrafficPolicy},
     view::{Peer, PeerDiff, PeerKeys, PeerView},
 };
@@ -55,6 +56,9 @@ pub struct Coordinator {
     keys: BTreeMap<PublicKey, NodeId>,
     acknowledged: BTreeMap<NodeId, u64>,
     generation: u64,
+    /// Approved subnet routes (D197 M3), by identity. Each belongs to a current member and none
+    /// overlaps another, the mesh range or a never-routed block ([`Self::approve_network`]).
+    networks: BTreeMap<NetworkId, ApprovedNetwork>,
 }
 impl Coordinator {
     /// # Errors
@@ -77,6 +81,7 @@ impl Coordinator {
             keys: BTreeMap::new(),
             acknowledged: BTreeMap::new(),
             generation: 0,
+            networks: BTreeMap::new(),
         };
         coordinator.join(server)?;
         Ok(coordinator)
@@ -107,6 +112,7 @@ impl Coordinator {
         self.members.len()
     }
 
+    /// The members an endpoint names now: the node if it is a member, every member with the tag, and nobody for a user or a network (a network is never a node-to-node endpoint).
     fn endpoint(&self, endpoint: &Endpoint) -> BTreeSet<NodeId> {
         match endpoint {
             Endpoint::Node(id) => self
@@ -116,7 +122,8 @@ impl Coordinator {
                 .into_iter()
                 .collect(),
             Endpoint::Tag(tag) => self.tags.get(tag).cloned().unwrap_or_default(),
-            Endpoint::User(_) => BTreeSet::new(),
+            // A network is not a node: it never takes part in node-to-node pairs.
+            Endpoint::User(_) | Endpoint::Network(_) => BTreeSet::new(),
         }
     }
     fn pairs(&self, arrow: &Arrow) -> BTreeSet<Pair> {
@@ -133,11 +140,12 @@ impl Coordinator {
         }
         pairs
     }
+    /// Whether `endpoint` names member `id`; a user or a network never names a member.
     fn endpoint_contains(&self, endpoint: &Endpoint, id: NodeId) -> bool {
         match endpoint {
             Endpoint::Node(node) => *node == id && self.members.contains_key(&id),
             Endpoint::Tag(tag) => self.tags.get(tag).is_some_and(|nodes| nodes.contains(&id)),
-            Endpoint::User(_) => false,
+            Endpoint::User(_) | Endpoint::Network(_) => false,
         }
     }
     fn incident_pairs(&self, arrow: &Arrow, id: NodeId) -> BTreeSet<Pair> {
@@ -344,6 +352,7 @@ impl Coordinator {
         Ok(change)
     }
 
+    /// Check an arrow's shape, and that every node it names is a member and every network it names is approved now.
     fn validate_arrow_endpoints(&self, arrow: &Arrow) -> Result<(), MeshError> {
         arrow.validate()?;
         for endpoint in [&arrow.from, &arrow.to] {
@@ -351,6 +360,11 @@ impl Coordinator {
                 && !self.members.contains_key(id)
             {
                 return Err(MeshError::UnknownNode);
+            }
+            if let Endpoint::Network(id) = endpoint
+                && !self.networks.contains_key(id)
+            {
+                return Err(MeshError::UnknownNetwork);
             }
         }
         Ok(())
@@ -454,9 +468,107 @@ impl Coordinator {
             self.grants.remove(&(id, *other));
             self.grants.remove(&(*other, id));
         }
+        // A removed router takes its approvals with it; arrows that named them stay dormant.
+        self.networks.retain(|_, network| network.router != id);
         let mut change = self.refresh(dirty);
         change.names = self.names.remove(id);
         Ok(change)
+    }
+
+    /// The approved networks, by identity.
+    #[must_use]
+    pub fn networks(&self) -> &BTreeMap<NetworkId, ApprovedNetwork> {
+        &self.networks
+    }
+
+    /// Why `network` could not be approved now, or `None` when it could.
+    ///
+    /// It applies [`crate::networks::check_routable`] and then refuses any overlap with an
+    /// approved network on any node, the same network on another router included: two routers
+    /// for one network would make the path depend on snapshot order (D197 M3, "overlaps are
+    /// refused"). `ignore` skips one approval, so re-approving it with other options does not
+    /// collide with itself.
+    #[must_use]
+    pub fn network_refusal(
+        &self,
+        network: Network,
+        ignore: Option<NetworkId>,
+    ) -> Option<NetworkRefusal> {
+        if let Err(refusal) = crate::networks::check_routable(network, &self.settings) {
+            return Some(refusal);
+        }
+        self.networks
+            .values()
+            .filter(|approved| Some(approved.id) != ignore)
+            .find(|approved| approved.network.overlaps(network))
+            .map(|approved| NetworkRefusal::Overlap {
+                network,
+                approved: *approved,
+            })
+    }
+
+    /// Records an approved network. The administrator's approval itself (owner, fresh passkey
+    /// or local root) is checked by the caller; this only keeps the network table consistent.
+    ///
+    /// Peer views are not touched: node-to-node grants do not change, and network access is
+    /// compiled per node from [`Self::network_granted`].
+    ///
+    /// # Errors
+    /// `UnknownNode` when the router is not a member, `DuplicateNetwork` for a reused identity,
+    /// and `UnroutableNetwork` when [`Self::network_refusal`] has a reason.
+    pub fn approve_network(&mut self, approved: ApprovedNetwork) -> Result<(), MeshError> {
+        if !self.members.contains_key(&approved.router) {
+            return Err(MeshError::UnknownNode);
+        }
+        if self.networks.contains_key(&approved.id) {
+            return Err(MeshError::DuplicateNetwork);
+        }
+        if self.network_refusal(approved.network, None).is_some() {
+            return Err(MeshError::UnroutableNetwork);
+        }
+        self.networks.insert(approved.id, approved);
+        Ok(())
+    }
+
+    /// Withdraws an approval. Arrows that named it stay in the rule table, dormant: they grant
+    /// nothing, and a later approval gets a new identity, so they never come back to life.
+    ///
+    /// # Errors
+    /// `UnknownNetwork` when no approval has that identity.
+    pub fn revoke_network(&mut self, id: NetworkId) -> Result<ApprovedNetwork, MeshError> {
+        self.networks.remove(&id).ok_or(MeshError::UnknownNetwork)
+    }
+
+    /// What explicit arrows let `from` start into approved network `id`: the union of their
+    /// ports, `None` when no arrow matches, the network is not approved, or `from` is the
+    /// network's own router (it reaches its own network directly, outside the mesh).
+    ///
+    /// Like [`Self::granted`] this ignores the mesh default; the compiler applies it (D216).
+    /// It walks only the rules that name this network, so its cost does not grow with the
+    /// size of the rule table.
+    #[must_use]
+    pub fn network_granted(&self, from: NodeId, id: NetworkId) -> TrafficPolicy {
+        let mut policy = TrafficPolicy::None;
+        let Some(network) = self.networks.get(&id) else {
+            return policy;
+        };
+        if network.router == from || !self.members.contains_key(&from) {
+            return policy;
+        }
+        for rule in self
+            .endpoint_rules
+            .get(&Endpoint::Network(id))
+            .into_iter()
+            .flatten()
+        {
+            if let Some(arrow) = self.rules.get(rule)
+                && arrow.to == Endpoint::Network(id)
+                && self.endpoint_contains(&arrow.from, from)
+            {
+                policy.union(&arrow.ports);
+            }
+        }
+        policy
     }
     /// # Errors
     /// Returns `UnknownNode` for a missing member.

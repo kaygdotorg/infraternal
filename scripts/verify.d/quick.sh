@@ -30,6 +30,31 @@ quick_cargo_test() {
     fi
 }
 
+# Prints the comma-separated `package/feature` list that `verify fast` gives the named packages (#581).
+# `fast` runs `cargo test --workspace`, so each package is built with the features the whole workspace
+# unifies onto it. Running `-p <pkg>` alone drops the ones that only a dependent asks for: infraternal
+# turns on infraternal-server's `remote`, which compiles auth/admin_window_tests.rs, so the row failed
+# (E0433) on unmodified dev (J1162). `cargo metadata` resolves that same unification, so each workspace
+# member's node features are the set to pass. The qualified form lets one cargo call select several
+# packages. `default` is left out: a selected package always gets its default features.
+# Prints nothing when no named package has a feature.
+quick_features_for() {
+    if (($# == 0)); then return 0; fi
+    cargo metadata --format-version 1 --locked | python3 -c '
+import json, sys
+names = set(sys.argv[1:])
+meta = json.load(sys.stdin)
+members = set(meta["workspace_members"])
+by_id = {p["id"]: p["name"] for p in meta["packages"] if p["id"] in members}
+flags = []
+for node in meta["resolve"]["nodes"]:
+    name = by_id.get(node["id"])
+    if name in names:
+        flags += [f"{name}/{feature}" for feature in sorted(node["features"]) if feature != "default"]
+print(",".join(sorted(flags)))
+' "$@"
+}
+
 # Run the inexpensive pre-check rows, stopping before compilation on a policy failure.
 verify_quick() {
     local base="${VERIFY_QUICK_BASE:-origin/dev}"
@@ -97,8 +122,8 @@ verify_quick() {
         else
             # `--lib` makes Cargo refuse a package that has no library (the `infraternal` CLI is
             # bin-only), so bin-only packages are tested with `--bins` alone, in their own run.
-            local -a lib_scope=() bin_scope=()
-            local bin_only
+            local -a lib_scope=() bin_scope=() lib_names=() bin_names=()
+            local bin_only lib_features bin_features
             bin_only="$(cargo metadata --no-deps --format-version 1 --locked | python3 -c '
 import json, sys
 meta = json.load(sys.stdin)
@@ -107,14 +132,21 @@ for pkg in meta["packages"]:
         print(pkg["name"])
 ')" || return $?
             for name in "${packages[@]}"; do
-                if grep -qxF "$name" <<< "$bin_only"; then bin_scope+=(-p "$name"); else lib_scope+=(-p "$name"); fi
+                if grep -qxF "$name" <<< "$bin_only"; then bin_scope+=(-p "$name"); bin_names+=("$name")
+                else lib_scope+=(-p "$name"); lib_names+=("$name"); fi
             done
             if ((${#lib_scope[@]})); then
-                rust_run_gate "unit tests (changed)" quick_cargo_test "${lib_scope[@]}" --lib --bins --locked
+                lib_features="$(quick_features_for "${lib_names[@]}")" || return $?
+                local -a lib_feature_args=()
+                [[ -n "$lib_features" ]] && lib_feature_args=(--features "$lib_features")
+                rust_run_gate "unit tests (changed)" quick_cargo_test "${lib_scope[@]}" "${lib_feature_args[@]}" --lib --bins --locked
                 if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi
             fi
             if ((${#bin_scope[@]})); then
-                rust_run_gate "unit tests (changed, bin-only)" quick_cargo_test "${bin_scope[@]}" --bins --locked
+                bin_features="$(quick_features_for "${bin_names[@]}")" || return $?
+                local -a bin_feature_args=()
+                [[ -n "$bin_features" ]] && bin_feature_args=(--features "$bin_features")
+                rust_run_gate "unit tests (changed, bin-only)" quick_cargo_test "${bin_scope[@]}" "${bin_feature_args[@]}" --bins --locked
             fi
         fi
         if ((RUST_GATE_FAILED)); then rust_print_summary; return 1; fi

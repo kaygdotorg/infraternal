@@ -23,28 +23,39 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
+/// The one reverse-DNS root every identifier infraternal gives macOS starts with (#580).
+///
+/// Apple wants a unique reverse-DNS-style string, not a domain we own, so the owner chose
+/// `kayg.infraternal` (2026-11-24). The iOS app uses the same root (its tunnel extension is
+/// `kayg.infraternal.tunnel`). Builds before this change used `org.infraternal`; [`legacy`]
+/// keeps those names so an existing Mac is moved over, never stranded.
+pub const IDENTIFIER_ROOT: &str = "kayg.infraternal";
 /// The bundle identifier embedded in the macOS binary's `Info.plist` section (#576), and so its
 /// code-signing identifier; the user-mode `LaunchAgent` names it in `AssociatedBundleIdentifiers`,
 /// as TN3179 asks of agents not installed through `SMAppService`, to tie the agent's Local Network
-/// use to that identity. Must equal `crates/infraternal/macos/Info.plist`.
-pub const BUNDLE_IDENTIFIER: &str = "org.infraternal.infraternal";
+/// use to that identity. Must equal `crates/infraternal/macos/Info.plist` (a test checks it).
+pub const BUNDLE_IDENTIFIER: &str = "kayg.infraternal";
+/// The launchd label of the root-mode system service (the `LaunchDaemon`).
+pub const DAEMON_LABEL: &str = "kayg.infraternal.mesh";
+/// The root-mode service's launchd property list, root-owned.
+pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/kayg.infraternal.mesh.plist";
 /// The launchd label of the on-demand root helper.
-pub const HELPER_LABEL: &str = "org.infraternal.mesh-helper";
+pub const HELPER_LABEL: &str = "kayg.infraternal.mesh-helper";
 /// The helper's launchd property list, root-owned.
-pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh-helper.plist";
+pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/kayg.infraternal.mesh-helper.plist";
 /// The root-owned copy of the binary that launchd runs as the helper.
 ///
 /// It is never the person's own copy: anything that person (or code running
 /// as them) can write must not run as root.
-pub const HELPER_BINARY: &str = "/Library/PrivilegedHelperTools/org.infraternal.mesh-helper";
+pub const HELPER_BINARY: &str = "/Library/PrivilegedHelperTools/kayg.infraternal.mesh-helper";
 /// The folder Apple reserves for privileged helper tools.
 pub const HELPER_DIRECTORY: &str = "/Library/PrivilegedHelperTools";
 /// The socket launchd listens on for the helper; owned by the registered user, mode 0600.
-pub const HELPER_SOCKET: &str = "/var/run/org.infraternal.mesh-helper.sock";
+pub const HELPER_SOCKET: &str = "/var/run/kayg.infraternal.mesh-helper.sock";
 /// The hidden first argument that turns the binary into the helper.
 pub const HELPER_ENTRY: &str = "__mesh-helper";
 /// The launchd label of the user-mode agent.
-pub const AGENT_LABEL: &str = "org.infraternal.agent";
+pub const AGENT_LABEL: &str = "kayg.infraternal.agent";
 /// The receipt in a user-mode install's base folder that names the host it belongs to.
 pub const USER_RECEIPT: &str = ".user-owner";
 /// The hidden entry a user-mode agent starts, in its own process group, to remove its install
@@ -88,7 +99,11 @@ pub fn receipt_names_host(contents: &str, host: &str) -> bool {
 /// The version both sides must speak; a mismatch is refused, never guessed.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Largest request or reply body accepted, in bytes.
-pub const MAX_MESSAGE_BYTES: usize = 4096;
+///
+/// 16 KiB: a [`Request::Networks`] reply names up to 64 networks, each left-out one with its
+/// reason (about 175 bytes), which no longer fits the earlier 4 KiB. Every other message is far
+/// smaller, and an older peer never sends or receives one this large.
+pub const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 /// Smallest MTU the helper sets: IPv6's link minimum, so the interface keeps its IPv6 address.
 pub const MIN_MTU: u16 = 1280;
 /// Largest MTU the helper sets: an Ethernet underlay's packet size.
@@ -138,6 +153,16 @@ pub enum Request {
         /// DNS suffixes; only those [`allowed_suffix`] accepts are written.
         suffixes: Vec<String>,
     },
+    /// Make the approved networks routed into the attached utun exactly `networks` (D197 M3,
+    /// #580). Declarative, so a lost reply is repaired by the next request. Each network is
+    /// checked by [`crate::macos_subnet_routes::check_requested`] (private IPv4 only, at most 64,
+    /// none overlapping another) and planned by [`crate::macos_subnet_routes::plan_networks`]
+    /// against the Mac's routes and interfaces before anything changes; the reply says what
+    /// happened to each one.
+    Networks {
+        /// The networks to route, from the agent's applied snapshot.
+        networks: Vec<infraternal_mesh::networks::Network>,
+    },
     /// Remove every resolver file the helper wrote.
     ClearResolver,
     /// Uninstall: remove resolver files and the helper's own registration and binary.
@@ -150,7 +175,7 @@ impl Request {
     pub const fn needs_utun(&self) -> bool {
         matches!(
             self,
-            Self::Address { .. } | Self::Mtu { .. } | Self::Resolver { .. }
+            Self::Address { .. } | Self::Mtu { .. } | Self::Resolver { .. } | Self::Networks { .. }
         )
     }
 }
@@ -177,9 +202,25 @@ pub struct Reply {
     /// Suffixes the helper refused to point at the agent (see [`allowed_suffix`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_suffixes: Vec<String>,
+    /// What happened to each network of a [`Request::Networks`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<NetworkOutcome>,
     /// Why the request failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// One network of a [`Request::Networks`] reply.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkOutcome {
+    /// The network, as asked.
+    pub network: infraternal_mesh::networks::Network,
+    /// Whether it is now routed into the caller's utun.
+    pub installed: bool,
+    /// Why not, as a sentence for `mesh routes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl Reply {
@@ -314,6 +355,7 @@ pub fn validate(request: &Request) -> Result<(), Refusal> {
             }
             Ok(())
         }
+        Request::Networks { networks } => crate::macos_subnet_routes::check_requested(networks),
     }
 }
 
@@ -337,7 +379,7 @@ const PRIVATE_IPV4: [(Ipv4Addr, u8); 4] = [
 ];
 
 /// The private block that holds `address`, if any.
-fn private_ipv4_block(address: Ipv4Addr) -> Option<Network> {
+pub(crate) fn private_ipv4_block(address: Ipv4Addr) -> Option<Network> {
     PRIVATE_IPV4
         .iter()
         .map(|&(network, prefix)| Network::v4(network, prefix))
@@ -705,17 +747,23 @@ fn xml_escape(value: &str) -> String {
 /// kernel's peer credentials against it.
 #[must_use]
 pub fn helper_plist(uid: u32) -> String {
+    render_helper_plist(HELPER_LABEL, HELPER_BINARY, HELPER_SOCKET, uid)
+}
+
+/// Render a helper property list for the given names; the current and the [`legacy`] names
+/// differ only in these three strings.
+fn render_helper_plist(label: &str, binary: &str, socket: &str, uid: u32) -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\"><dict>\n\
-         <key>Label</key><string>{HELPER_LABEL}</string>\n\
+         <key>Label</key><string>{label}</string>\n\
          <key>ProgramArguments</key><array>\n\
-         <string>{HELPER_BINARY}</string><string>{HELPER_ENTRY}</string><string>{uid}</string>\n\
+         <string>{binary}</string><string>{HELPER_ENTRY}</string><string>{uid}</string>\n\
          </array>\n\
          <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>\n\
          <key>Sockets</key><dict><key>Listeners</key><dict>\n\
-         <key>SockPathName</key><string>{HELPER_SOCKET}</string>\n\
+         <key>SockPathName</key><string>{socket}</string>\n\
          <key>SockPathMode</key><integer>384</integer>\n\
          <key>SockPathOwner</key><integer>{uid}</integer>\n\
          <key>SockPathGroup</key><integer>0</integer>\n\
@@ -731,10 +779,129 @@ pub fn helper_plist(uid: u32) -> String {
 /// Returns `None` for any other text, so a foreign or edited file is never treated as ours.
 #[must_use]
 pub fn helper_plist_uid(contents: &str) -> Option<u32> {
+    helper_plist_uid_with(contents, helper_plist)
+}
+
+/// [`helper_plist_uid`] for a renderer: the uid is read out, then the text must equal what the
+/// renderer writes for that uid.
+fn helper_plist_uid_with(contents: &str, render: impl Fn(u32) -> String) -> Option<u32> {
     let start = contents.find(&format!("<string>{HELPER_ENTRY}</string><string>"))?;
     let rest = &contents[start + HELPER_ENTRY.len() + "<string></string><string>".len()..];
     let uid: u32 = rest.split('<').next()?.parse().ok()?;
-    (helper_plist(uid) == contents).then_some(uid)
+    (render(uid) == contents).then_some(uid)
+}
+
+/// The identifiers of builds before the move to [`IDENTIFIER_ROOT`] (#580), and the plan that
+/// retires them.
+///
+/// Macs that joined with an older build have these names in launchd and on disk. `infraternal
+/// up` removes them and installs the new ones; uninstall removes both sets. Nothing else is
+/// renamed on disk: the install folders, the enrolment and the mesh key file keep their
+/// paths, so the node keeps its identity and its mesh public key through the move. The
+/// slice-1 keychain item (`macos_key`) is not here: no build has written it since #265, and
+/// it is only ever deleted, under the name it was created with.
+pub mod legacy {
+    use super::render_helper_plist;
+
+    /// The old `LaunchAgent` label of user mode.
+    pub const AGENT_LABEL: &str = "org.infraternal.agent";
+    /// The old label of the root-mode system service.
+    pub const DAEMON_LABEL: &str = "org.infraternal.mesh";
+    /// The old root-mode property list.
+    pub const DAEMON_PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh.plist";
+    /// The old helper label.
+    pub const HELPER_LABEL: &str = "org.infraternal.mesh-helper";
+    /// The old helper property list.
+    pub const HELPER_PLIST: &str = "/Library/LaunchDaemons/org.infraternal.mesh-helper.plist";
+    /// The old helper binary.
+    pub const HELPER_BINARY: &str = "/Library/PrivilegedHelperTools/org.infraternal.mesh-helper";
+    /// The old helper socket.
+    pub const HELPER_SOCKET: &str = "/var/run/org.infraternal.mesh-helper.sock";
+
+    /// The old helper property list for `uid`, byte for byte what those builds wrote.
+    #[must_use]
+    pub fn helper_plist(uid: u32) -> String {
+        render_helper_plist(HELPER_LABEL, HELPER_BINARY, HELPER_SOCKET, uid)
+    }
+
+    /// The uid an old helper property list serves, or `None` for any other text.
+    #[must_use]
+    pub fn helper_plist_uid(contents: &str) -> Option<u32> {
+        super::helper_plist_uid_with(contents, helper_plist)
+    }
+
+    /// Which of the old helper's three files exist.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct HelperFiles {
+        /// The old helper's property list exists.
+        pub plist: bool,
+        /// The old helper's binary exists.
+        pub binary: bool,
+        /// The old helper's socket path exists.
+        pub socket: bool,
+    }
+
+    /// What exists on this Mac from the old names, as the caller found it.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Found {
+        /// `~/Library/LaunchAgents/org.infraternal.agent.plist` exists.
+        pub agent_plist: bool,
+        /// The old helper's files.
+        pub helper: HelperFiles,
+    }
+
+    /// One removal the move makes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Step {
+        /// Unload the old `LaunchAgent` from the person's session (stops the old agent).
+        UnloadAgent,
+        /// Delete the old `LaunchAgent` property list.
+        RemoveAgentPlist,
+        /// Unload the old helper job from the system domain (root).
+        UnloadHelper,
+        /// Delete the old helper's socket path (root).
+        RemoveHelperSocket,
+        /// Delete the old helper's property list (root).
+        RemoveHelperPlist,
+        /// Delete the old helper's binary (root).
+        RemoveHelperBinary,
+    }
+
+    impl Step {
+        /// Whether the step needs root (the helper lives under `/Library` and `/var/run`).
+        #[must_use]
+        pub fn needs_root(self) -> bool {
+            !matches!(self, Self::UnloadAgent | Self::RemoveAgentPlist)
+        }
+    }
+
+    /// The removals for what was found, in the order they are safe to run.
+    ///
+    /// The job is unloaded before its files go, so launchd cannot start it from a file that
+    /// is half removed, and the property list goes before the binary it names, so a stop
+    /// halfway never leaves a plist that points at nothing. Nothing is planned for names that
+    /// are not there, so a Mac that never had the old names gets an empty plan.
+    #[must_use]
+    pub fn plan(found: Found) -> Vec<Step> {
+        let mut steps = Vec::new();
+        if found.agent_plist {
+            steps.extend([Step::UnloadAgent, Step::RemoveAgentPlist]);
+        }
+        let helper = found.helper;
+        if helper.plist || helper.binary || helper.socket {
+            steps.push(Step::UnloadHelper);
+        }
+        if helper.socket {
+            steps.push(Step::RemoveHelperSocket);
+        }
+        if helper.plist {
+            steps.push(Step::RemoveHelperPlist);
+        }
+        if helper.binary {
+            steps.push(Step::RemoveHelperBinary);
+        }
+        steps
+    }
 }
 
 /// The user-mode agent's `LaunchAgent`.
@@ -840,8 +1007,8 @@ mod tests {
             Err(Refusal::Malformed)
         );
         assert_eq!(frame_length([0, 0]), Err(Refusal::Malformed));
-        assert_eq!(frame_length([0x10, 0x01]), Err(Refusal::Malformed));
-        assert!(frame(&[0; MAX_MESSAGE_BYTES + 1]).is_err());
+        assert_eq!(frame_length([0x40, 0x01]), Err(Refusal::Malformed));
+        assert!(frame(&vec![0; MAX_MESSAGE_BYTES + 1]).is_err());
     }
 
     /// Only requests that change a held utun must carry it.
@@ -1149,7 +1316,7 @@ mod tests {
         assert!(plist.contains("<string>--state</string><string>/s</string>"));
         // Local Network privacy attributes the agent to the binary's embedded bundle (#576).
         assert!(plist.contains(
-            "<key>AssociatedBundleIdentifiers</key><array><string>org.infraternal.infraternal</string></array>"
+            "<key>AssociatedBundleIdentifiers</key><array><string>kayg.infraternal</string></array>"
         ));
     }
 
@@ -1162,5 +1329,156 @@ mod tests {
             "<key>CFBundleIdentifier</key>\n\t<string>{BUNDLE_IDENTIFIER}</string>"
         )));
         assert!(info.contains("<key>NSLocalNetworkUsageDescription</key>"));
+    }
+
+    /// Every identifier infraternal gives macOS starts with the one owner-chosen root (#580).
+    #[test]
+    fn every_identifier_shares_the_kayg_root() {
+        for name in [
+            BUNDLE_IDENTIFIER,
+            DAEMON_LABEL,
+            HELPER_LABEL,
+            AGENT_LABEL,
+            DAEMON_PLIST,
+            HELPER_PLIST,
+            HELPER_BINARY,
+            HELPER_SOCKET,
+        ] {
+            assert!(
+                name.contains(IDENTIFIER_ROOT) && !name.contains("org.infraternal"),
+                "{name}"
+            );
+        }
+        assert_eq!(BUNDLE_IDENTIFIER, IDENTIFIER_ROOT);
+        for name in [
+            legacy::AGENT_LABEL,
+            legacy::DAEMON_LABEL,
+            legacy::HELPER_LABEL,
+            legacy::HELPER_PLIST,
+            legacy::HELPER_BINARY,
+            legacy::HELPER_SOCKET,
+            legacy::DAEMON_PLIST,
+        ] {
+            assert!(name.contains("org.infraternal"), "{name}");
+        }
+    }
+
+    /// The old and new helper property lists name only their own label, binary and socket, so
+    /// a file of one generation is never read as the other.
+    #[test]
+    fn old_and_new_helper_property_lists_are_told_apart() {
+        let new = helper_plist(501);
+        let old = legacy::helper_plist(501);
+        assert_ne!(new, old);
+        assert!(!new.contains("org.infraternal") && !old.contains("kayg.infraternal"));
+        assert_eq!(helper_plist_uid(&new), Some(501));
+        assert_eq!(legacy::helper_plist_uid(&old), Some(501));
+        assert_eq!(helper_plist_uid(&old), None);
+        assert_eq!(legacy::helper_plist_uid(&new), None);
+        // An edited file (the owner no longer matches the argument) is not ours.
+        assert_eq!(
+            legacy::helper_plist_uid(
+                &old.replace("<integer>501</integer>", "<integer>502</integer>")
+            ),
+            None
+        );
+    }
+
+    /// A Mac with nothing old gets an empty plan; the plan never names a step for a path that
+    /// is not there.
+    #[test]
+    fn nothing_old_means_nothing_to_remove() {
+        assert_eq!(legacy::plan(legacy::Found::default()), []);
+    }
+
+    /// A full old install is removed in a safe order: unload before delete, the property list
+    /// before the binary it names, and the person's own steps need no root.
+    #[test]
+    fn a_full_old_install_is_removed_in_order() {
+        use legacy::Step::*;
+        let steps = legacy::plan(legacy::Found {
+            agent_plist: true,
+            helper: legacy::HelperFiles {
+                plist: true,
+                binary: true,
+                socket: true,
+            },
+        });
+        assert_eq!(
+            steps,
+            [
+                UnloadAgent,
+                RemoveAgentPlist,
+                UnloadHelper,
+                RemoveHelperSocket,
+                RemoveHelperPlist,
+                RemoveHelperBinary
+            ]
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .map(|step| step.needs_root())
+                .collect::<Vec<_>>(),
+            [false, false, true, true, true, true]
+        );
+    }
+
+    /// Leftovers of an interrupted removal are still cleaned up: a binary alone, or a socket
+    /// alone, still unloads the job and removes just what exists.
+    #[test]
+    fn a_partly_removed_old_install_is_finished() {
+        use legacy::Step::*;
+        assert_eq!(
+            legacy::plan(legacy::Found {
+                helper: legacy::HelperFiles {
+                    binary: true,
+                    ..legacy::HelperFiles::default()
+                },
+                ..legacy::Found::default()
+            }),
+            [UnloadHelper, RemoveHelperBinary]
+        );
+        assert_eq!(
+            legacy::plan(legacy::Found {
+                helper: legacy::HelperFiles {
+                    socket: true,
+                    ..legacy::HelperFiles::default()
+                },
+                ..legacy::Found::default()
+            }),
+            [UnloadHelper, RemoveHelperSocket]
+        );
+        assert_eq!(
+            legacy::plan(legacy::Found {
+                agent_plist: true,
+                ..legacy::Found::default()
+            }),
+            [UnloadAgent, RemoveAgentPlist]
+        );
+    }
+
+    /// The old helper property list is byte for byte what builds before #580 wrote, so a Mac
+    /// they set up is recognised and its helper retired (the text is copied from `2fb0b50d2`).
+    #[test]
+    fn the_old_helper_property_list_is_what_old_builds_wrote() {
+        let golden = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\"><dict>\n\
+         <key>Label</key><string>org.infraternal.mesh-helper</string>\n\
+         <key>ProgramArguments</key><array>\n\
+         <string>/Library/PrivilegedHelperTools/org.infraternal.mesh-helper</string><string>__mesh-helper</string><string>UID</string>\n\
+         </array>\n\
+         <key>inetdCompatibility</key><dict><key>Wait</key><false/></dict>\n\
+         <key>Sockets</key><dict><key>Listeners</key><dict>\n\
+         <key>SockPathName</key><string>/var/run/org.infraternal.mesh-helper.sock</string>\n\
+         <key>SockPathMode</key><integer>384</integer>\n\
+         <key>SockPathOwner</key><integer>UID</integer>\n\
+         <key>SockPathGroup</key><integer>0</integer>\n\
+         </dict></dict>\n\
+         <key>StandardOutPath</key><string>/dev/null</string>\n\
+         <key>StandardErrorPath</key><string>/dev/null</string>\n\
+         </dict></plist>\n";
+        assert_eq!(legacy::helper_plist(501), golden.replace("UID", "501"));
     }
 }

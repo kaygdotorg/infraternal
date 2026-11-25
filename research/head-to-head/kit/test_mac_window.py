@@ -356,7 +356,7 @@ class BuildHarnessTest(unittest.TestCase):
 
     def test_harness_test_is_in_the_checkout(self) -> None:
         """The ignored `mac_bench_device` test the windows run is on this branch, not elsewhere."""
-        source = (self.ROOT / "crates/plugins/mesh/src/macos_node.rs").read_text()
+        source = (self.ROOT / "crates/plugins/mesh/src/macos_node/tests.rs").read_text()
         self.assertIn("fn mac_bench_device()", source)
 
     def test_builds_only_from_the_checkout(self) -> None:

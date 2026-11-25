@@ -216,7 +216,7 @@ async fn expired_identity(
         .bind(previous.record.fingerprint.as_slice())
         .bind(host.as_bytes().as_slice())
         .bind(previous.record.issuer_fingerprint.as_slice())
-        .bind(previous.record.public_key.as_slice())
+        .bind(previous.record.public_key.as_bytes())
         .bind(previous.record.not_before)
         .bind(previous.record.not_after)
         .execute(pool)
@@ -747,6 +747,10 @@ mod additional_listeners;
 /// Live listeners serving a rotated server leaf (#559).
 #[path = "server_leaf_listener_tests.rs"]
 mod server_leaf_listeners;
+
+/// The HTTPS agent link proves the current leg-B leaf (#559).
+#[path = "agent_link_v2_tests.rs"]
+mod agent_link_v2;
 
 /// Forged QUIC Initials and a real host's reconnect under them (#572).
 #[path = "remote_retry_tests.rs"]

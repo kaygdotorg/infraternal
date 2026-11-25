@@ -10,6 +10,9 @@ pub mod names;
 
 pub mod rules;
 
+/// Subnet routes: networks a node routes for the mesh once approved (D197 M3).
+pub mod networks;
+
 pub mod view;
 
 pub mod coordinator;

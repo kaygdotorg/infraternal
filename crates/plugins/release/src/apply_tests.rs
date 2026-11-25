@@ -293,6 +293,74 @@ fn a_new_release_that_never_started_leaves_the_database_alone() {
     );
 }
 
+/// J1180 F5: the caller's step runs only when a restore happens, and sees B's database
+/// as `live` and the flushed copy as `restored`, so what it writes into the copy lands
+/// with the swap in one rename. A trial that starts or an exec that failed before B ran
+/// never calls it (the database stays unopened, J1085).
+#[test]
+fn the_restore_hands_both_databases_to_the_caller_before_the_swap() {
+    let data = Data::new();
+    write_file(&data.0.join(DATABASE), b"written-by-b");
+    let previous = data.updates().join("previous");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&previous)
+        .unwrap();
+    write_file(&previous.join(DATABASE), b"a-copy");
+    data.mark(Phase::Trial);
+    let mut seen = None;
+    assert_eq!(
+        resume_with(
+            &data.0,
+            A,
+            || Ok("aa".repeat(32)),
+            |live, restored| {
+                seen = Some((
+                    std::fs::read(live).unwrap(),
+                    std::fs::read(restored).unwrap(),
+                ));
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(restored)
+                    .unwrap()
+                    .write_all(b"+floor")
+                    .unwrap();
+            }
+        ),
+        Ok(Resume::Finished(UNDONE))
+    );
+    assert_eq!(
+        seen,
+        Some((b"written-by-b".to_vec(), b"a-copy".to_vec())),
+        "the step runs before the swap"
+    );
+    assert_eq!(
+        std::fs::read(data.0.join(DATABASE)).unwrap(),
+        b"a-copy+floor"
+    );
+
+    // No restore, no call: B never started, and a trial begins.
+    let data = Data::new();
+    data.mark(Phase::Switching);
+    let _ = resume_with(
+        &data.0,
+        A,
+        || Ok("aa".repeat(32)),
+        |_, _| panic!("B never ran, so nothing is restored"),
+    );
+    let data = Data::new();
+    data.mark(Phase::Switching);
+    assert!(matches!(
+        resume_with(
+            &data.0,
+            B,
+            || Ok("bb".repeat(32)),
+            |_, _| { panic!("a trial never restores") }
+        ),
+        Ok(Resume::Trial(_))
+    ));
+}
+
 /// A marker naming neither side (another binary was deployed by hand) is dropped
 /// without touching the database.
 #[test]

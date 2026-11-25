@@ -1067,6 +1067,8 @@ async fn viewer_loop(
     let mut delivery: Option<Operation<'static, Result<Duration, ()>>> = None;
     // How long the last completed video write took; it counts towards the lag.
     let mut last_write = Duration::ZERO;
+    // The size and start of the write in flight, for the viewer's link-rate measurement.
+    let mut in_flight = (0_usize, std::time::Instant::now());
     loop {
         tokio::select! { biased;
             () = async { if !*stopped.borrow_and_update() { let _ = stopped.changed().await; } } => return Ok(()),
@@ -1098,6 +1100,7 @@ async fn viewer_loop(
             }
             completed = async { if let Some(delivery) = delivery.as_mut() { delivery.await } else { std::future::pending().await } }, if delivery.is_some() => {
                 last_write = completed?;
+                viewer.record_write(in_flight.0, in_flight.1, std::time::Instant::now());
                 delivery = None;
             }
             frame = viewer.next(), if delivery.is_none() => {
@@ -1116,6 +1119,7 @@ async fn viewer_loop(
                 // A latest-frame watch and one retained packet prevent a slow
                 // browser from accumulating a second per-viewer bulk queue.
                 let replies = if measuring { replies.with_authority(crate::measurement::delivery(authority.clone(), &frame)) } else { replies.clone() };
+                in_flight = (encoded.len(), std::time::Instant::now());
                 delivery = Some(Box::pin(async move {
                     let began = tokio::time::Instant::now();
                     tokio::time::timeout(Duration::from_secs(1), replies.send_and_wait(Bytes::from(encoded))).await.map_err(|_| ())??;

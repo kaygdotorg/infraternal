@@ -6,15 +6,15 @@
 # gotatun-netns-bench: compare WireGuard engines on one machine.
 #
 # Two network namespaces are joined by one veth pair. Each namespace holds one
-# WireGuard interface of the engine under test. iperf3 and ping run through
-# the tunnel; /proc gives CPU, memory and idle wakeups. Nothing is routed to
+# WireGuard interface of the engine under test. iperf3 and a TCP round-trip
+# probe (rr.py) run through the tunnel; /proc gives CPU, memory and idle wakeups. Nothing is routed to
 # an uplink and nothing leaves the host: the namespaces only have loopback,
 # the veth end and the tunnel interface.
 #
 # Method: an A/A series first (the first arm against itself, to measure the
 # noise floor), then A B B A holds. `summarize.py` turns the output into a
 # table. See README.md. Needs root, bash, iproute2, wireguard-tools, iperf3,
-# ping, taskset and python3.
+# ping (handshake check only), taskset and python3.
 set -euo pipefail
 
 usage() {
@@ -29,13 +29,15 @@ usage: run.sh --arm NAME=BIN [--arm NAME=BIN ...] [options]
   --cc "cubic bbr" congestion controls (default "cubic bbr")
   --delay MS       one-way netem delay on both veth ends (default 0; 99 = 198 ms RTT)
   --loss PCT       netem loss on both veth ends (default 0)
-  --cpus "A B S C P"  CPU sets for engine A, engine B, iperf3 server, client, ping
+  --cpus "A B S C P"  CPU sets for engine A, engine B, iperf3 server, client, round-trip probe
+  --rr-reply N     bytes of each round-trip reply (default 64: a keystroke echo)
+  --rr-interval MS milliseconds between round-trip requests (default 20)
   --out DIR        output directory (default ./out-DATE)
 USAGE
 }
 die() { echo "run.sh: $*" >&2; exit 1; }
 
-HOLDS=3 SECS=20 IDLE=5 FLOWS="1 8" CCS="cubic bbr" DELAY=0 LOSS=0 CPUSPEC="" OUT=""
+HOLDS=3 SECS=20 IDLE=5 FLOWS="1 8" CCS="cubic bbr" DELAY=0 LOSS=0 CPUSPEC="" OUT="" RR_REPLY=64 RR_INTERVAL=20
 ARM_NAMES=() ARM_BINS=()
 while (($#)); do
   case $1 in
@@ -49,13 +51,15 @@ while (($#)); do
     --delay) DELAY=$2; shift 2 ;;
     --loss) LOSS=$2; shift 2 ;;
     --cpus) CPUSPEC=$2; shift 2 ;;
+    --rr-reply) RR_REPLY=$2; shift 2 ;;
+    --rr-interval) RR_INTERVAL=$2; shift 2 ;;
     --out) OUT=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; die "unknown option $1" ;;
   esac
 done
 ((${#ARM_NAMES[@]} >= 1)) || { usage >&2; die "give at least one --arm"; }
-((EUID == 0)) || die "needs root (namespaces, 10 ms ping interval)"
+((EUID == 0)) || die "needs root (network namespaces)"
 for t in ip tc wg iperf3 ping taskset python3 lscpu; do
   command -v "$t" >/dev/null || die "missing tool: $t"
 done
@@ -65,7 +69,7 @@ done
 OUT=${OUT:-./out-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$OUT/raw"
 
-# CPU layout: engines, iperf3 and ping get separate CPUs so they do not steal from each other.
+# CPU layout: engines, iperf3 and the probe get separate CPUs so they do not steal from each other.
 if [[ -n $CPUSPEC ]]; then
   read -r CPU_A CPU_B CPU_S CPU_C CPU_P <<<"$CPUSPEC"
 else
@@ -79,7 +83,8 @@ else
 fi
 
 NS_A=gtb-a NS_B=gtb-b IF_A=gtba0 IF_B=gtbb0 VETH_A=gtbv-a VETH_B=gtbv-b
-TUN_A=10.77.0.1 TUN_B=10.77.0.2 UL_A=10.78.0.1 UL_B=10.78.0.2 PORT=51820 MTU=1420
+TUN_A=10.77.0.1 TUN_B=10.77.0.2 UL_A=10.78.0.1 UL_B=10.78.0.2 PORT=51820 RR_PORT=5300 MTU=1420
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 CLK_TCK=$(getconf CLK_TCK)
 CREATED=() PIDS=()
 export WG_LOG_LEVEL=error LOG_LEVEL=error # keep logging out of the measurement
@@ -129,8 +134,8 @@ machine_header() {
     echo "governor: $(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo n/a)"
     echo "rmem_max: $(sysctl -n net.core.rmem_max)  wmem_max: $(sysctl -n net.core.wmem_max)  netdev_max_backlog: $(sysctl -n net.core.netdev_max_backlog)"
     echo "loadavg at start: $(cat /proc/loadavg)"
-    echo "cpus: A=$CPU_A B=$CPU_B iperf-server=$CPU_S iperf-client=$CPU_C ping=$CPU_P"
-    echo "run: holds=$HOLDS secs=$SECS idle=$IDLE flows=[$FLOWS] cc=[$CCS] delay=${DELAY}ms loss=${LOSS}% mtu=$MTU"
+    echo "cpus: A=$CPU_A B=$CPU_B iperf-server=$CPU_S iperf-client=$CPU_C rr-probe=$CPU_P"
+    echo "run: holds=$HOLDS secs=$SECS idle=$IDLE flows=[$FLOWS] cc=[$CCS] delay=${DELAY}ms loss=${LOSS}% mtu=$MTU rr=${RR_REPLY}B/${RR_INTERVAL}ms"
     echo "tools: $(iperf3 --version | head -1); $(wg --version | cut -d' ' -f1-2)"
     echo "veth offloads: $(in_ns $NS_A ethtool -k $VETH_A 2>/dev/null | grep -E '^(tcp-segmentation|generic-(segmentation|receive)-offload|generic-receive-offload|rx-gro)' | tr -s ' \n' ' ' || echo n/a)"
     local i
@@ -176,7 +181,7 @@ vm() { awk -v k="$2:" '$1 == k {print $2}' "/proc/$1/status"; }
 run_one() {
   local phase=$1 hold=$2 pos=$3 arm=$4 bin=$5 cc=$6 flows=$7
   local id="$phase-h$hold-p$pos-$arm-$cc-P$flows" k="$OUT/keys"
-  local load0 hs=NA ca=NA cb=NA hwm=NA rl=NA ri=NA wk=NA t0 w0 w1 sp pp ip_
+  local load0 hs=NA ca=NA cb=NA hwm=NA rl=NA ri=NA wk=NA t0 w0 w1 sp pp ip_ rs
   echo "== $id" >&2
   mkdir -p "$k"; load0=$(cut -d' ' -f1 /proc/loadavg)
   wg genkey >"$k/a.key"; wg genkey >"$k/b.key"
@@ -192,13 +197,18 @@ run_one() {
 
   ip netns exec $NS_B taskset -c "$CPU_S" iperf3 -s -1 -B $TUN_B >/dev/null 2>&1 & sp=$!; PIDS+=("$sp")
   n=0; until in_ns $NS_B ss -ltn | grep -q ':5201 '; do sleep 0.1; ((++n < 50)) || die "iperf3 server"; done
+  ip netns exec $NS_B taskset -c "$CPU_S" python3 -I "$HERE/rr.py" serve $TUN_B $RR_PORT >"$OUT/raw/$id.rrs.log" 2>&1 & rs=$!; PIDS+=("$rs")
+  n=0; until in_ns $NS_B ss -ltn | grep -q ":$RR_PORT "; do sleep 0.1; ((++n < 50)) || die "rr server"; done
   [[ -n $PID_A ]] && { ca=$(ticks "$PID_A"); cb=$(ticks "$PID_B"); }
   ip netns exec $NS_A taskset -c "$CPU_C" iperf3 -c $TUN_B -B $TUN_A -t "$SECS" -P "$flows" -C "$cc" -J \
     >"$OUT/raw/$id.iperf.json" 2>"$OUT/raw/$id.iperf.err" & ip_=$!
   sleep 1 # let the flows ramp before probing latency under load
-  ip netns exec $NS_A taskset -c "$CPU_P" ping -i 0.01 -s 64 -w $((SECS - 2)) $TUN_B >"$OUT/raw/$id.ping" 2>&1 & pp=$!
+  # A TCP request/reply probe, not ping: ping busy-waits and costs the engines 1 to 9% throughput.
+  ip netns exec $NS_A taskset -c "$CPU_P" python3 -I "$HERE/rr.py" client $TUN_B $RR_PORT "$RR_REPLY" "$RR_INTERVAL" \
+    $((SECS - 2)) "$OUT/raw/$id.rr.json" >"$OUT/raw/$id.rr.log" 2>&1 & pp=$!
   wait "$ip_" || echo "iperf3 failed in $id (see raw/$id.iperf.err)" >&2
   wait "$pp" || true; wait "$sp" 2>/dev/null || true
+  kill "$rs" 2>/dev/null || true; wait "$rs" 2>/dev/null || true
   if [[ -n $PID_A ]]; then
     ca=$((($(ticks "$PID_A") - ca) * 1000 / CLK_TCK)); cb=$((($(ticks "$PID_B") - cb) * 1000 / CLK_TCK))
     hwm=$(($(vm "$PID_A" VmHWM) + $(vm "$PID_B" VmHWM)))

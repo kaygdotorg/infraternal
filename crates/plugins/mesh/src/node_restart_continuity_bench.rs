@@ -155,6 +155,7 @@ fn open_peer(
         inbound: crate::policy::rules::TrafficPolicy::All,
         outbound: crate::policy::rules::TrafficPolicy::All,
         access_ssh: None,
+        networks: crate::dataplane::PeerNetworks::default(),
     }
 }
 

@@ -108,7 +108,7 @@ struct Worker {
     /// The viewer needs a keyframe.
     force_keyframe: Arc<AtomicBool>,
     /// The viewer's connection is backed up, so the encoder should back off.
-    congested: Arc<AtomicBool>,
+    congested: Arc<Congestion>,
     /// True when capturing a whole display. A window is followed by checking its
     /// position regularly; a display needs no such check.
     screen: bool,
@@ -148,7 +148,7 @@ impl Worker {
         let cancelled = Arc::clone(&stop);
         let force_keyframe = Arc::new(AtomicBool::new(false));
         let force = Arc::clone(&force_keyframe);
-        let congested = Arc::new(AtomicBool::new(false));
+        let congested = Arc::new(Congestion::default());
         let pressure = Arc::clone(&congested);
         let frames = Arc::new(Frames::default());
         let sender = Arc::clone(&frames);
@@ -237,6 +237,52 @@ impl Drop for Worker {
 }
 // Both capture paths share coalesced control flags and one bounded frame slot.
 // These borrows stay inside the owning worker thread; retirement joins it.
+/// What a pending congestion signal knows about the viewer's link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkReport {
+    /// The connection is backed up; no rate was measured.
+    Unmeasured,
+    /// The server measured the connection carrying this many kilobits per second (at least 1).
+    Kbit(u32),
+}
+
+/// A pending "the viewer's connection is backed up" signal, from the session thread to the
+/// capture thread.
+///
+/// Signals are coalesced: any number of [`Congestion::raise`] calls before the next
+/// [`Congestion::take`] become one, and the lowest measured link rate among them wins (it is
+/// the most recent view of a link that is getting worse).
+#[derive(Default)]
+struct Congestion(Mutex<Option<LinkReport>>);
+
+impl Congestion {
+    /// Marks the connection as backed up. `kbit_s` is the measured link rate, if the server
+    /// had one.
+    fn raise(&self, kbit_s: Option<u32>) {
+        let new = kbit_s.map_or(LinkReport::Unmeasured, LinkReport::Kbit);
+        if let Ok(mut pending) = self.0.lock() {
+            *pending = Some(match (*pending, new) {
+                (Some(LinkReport::Kbit(old)), LinkReport::Kbit(new)) => {
+                    LinkReport::Kbit(old.min(new))
+                }
+                (Some(old @ LinkReport::Kbit(_)), LinkReport::Unmeasured) => old,
+                (_, new) => new,
+            });
+        }
+    }
+    /// Takes the pending signal, if there is one.
+    fn take(&self) -> Option<LinkReport> {
+        self.0.lock().ok().and_then(|mut pending| pending.take())
+    }
+    /// The `Congested` command body for a taken signal.
+    fn body(report: LinkReport) -> Vec<u8> {
+        match report {
+            LinkReport::Unmeasured => b"{}".to_vec(),
+            LinkReport::Kbit(kbit_s) => format!(r#"{{"kbit_s":{kbit_s}}}"#).into_bytes(),
+        }
+    }
+}
+
 /// The capture thread's view of the signals shared with the session thread: see
 /// the same-named fields of `Worker`. `frames` holds the encoded frames waiting
 /// for the socket, and `wake` is notified after each frame.
@@ -245,7 +291,7 @@ struct Production<'a> {
     pending: &'a Mutex<Option<(Size, Rect)>>,
     stop: &'a Arc<AtomicBool>,
     force_keyframe: &'a AtomicBool,
-    congested: &'a AtomicBool,
+    congested: &'a Congestion,
     frames: &'a Frames,
     wake: &'a Wake,
 }
@@ -411,8 +457,8 @@ fn produce(
     let mut needs_keyframe = true;
     let mut fingerprint = None;
     while !stop.load(Ordering::Acquire) {
-        if congested.swap(false, Ordering::AcqRel) {
-            let _ = encoder.call(Kind::Congested, b"{}")?;
+        if let Some(rate) = congested.take() {
+            let _ = encoder.call(Kind::Congested, &Congestion::body(rate))?;
         }
         // Repair is a coalesced producer flag, independent of GUI control and
         // native encoding latency. A dropped IDR retains needs_keyframe below.
@@ -554,7 +600,7 @@ mod startup_recovery_tests {
         let stop = Arc::new(AtomicBool::new(false));
         let pending = Arc::new(Mutex::new(None));
         let force_keyframe = Arc::new(AtomicBool::new(false));
-        let congested = Arc::new(AtomicBool::new(false));
+        let congested = Arc::new(Congestion::default());
         let frames = Arc::new(Frames::default());
         let received = Arc::clone(&frames);
         let wake = Arc::new(Wake::default());
@@ -680,8 +726,8 @@ fn produce_surface(
     let mut native = open(&start, rect)?;
     let mut recovery = SurfaceRecovery::new();
     while !stop.load(Ordering::Acquire) {
-        if congested.swap(false, Ordering::AcqRel) {
-            let _ = native.call(Kind::Congested, b"{}")?;
+        if let Some(rate) = congested.take() {
+            let _ = native.call(Kind::Congested, &Congestion::body(rate))?;
         }
         if let Some((size, changed)) = pending.lock().ok().and_then(|mut p| p.take()) {
             let _ = native.call(Kind::Stop, b"{}");
@@ -816,7 +862,7 @@ fn run(
                     // Restore/release control before waiting for a framework capture
                     // to retire: native capture callbacks can take their bounded timeout.
                     let (reply, body) = if matches!(kind, Kind::Keyframe | Kind::Congested) {
-                        capture_request(stream.as_ref(), kind)
+                        capture_request(stream.as_ref(), kind, &payload)
                     } else {
                         crate::measurement::control("helper_native_begin", kind);
                         let reply = native.call(kind, &payload)?;
@@ -910,7 +956,7 @@ fn surface_failure(
 /// running stream; the capture thread acts on it. Returns an error reply if no
 /// stream is running.
 // Repair and quality flags target capture, never the independent GUI child.
-fn capture_request(stream: Option<&Worker>, kind: Kind) -> (Kind, Vec<u8>) {
+fn capture_request(stream: Option<&Worker>, kind: Kind, payload: &[u8]) -> (Kind, Vec<u8>) {
     let Some(stream) = stream else {
         return (
             Kind::Error,
@@ -924,7 +970,10 @@ fn capture_request(stream: Option<&Worker>, kind: Kind) -> (Kind, Vec<u8>) {
             br#"{"state":"on","keyframe_requested":true}"#.to_vec(),
         )
     } else {
-        stream.congested.store(true, Ordering::Release);
+        let rate = serde_json::from_slice::<protocol::Congested>(payload)
+            .ok()
+            .and_then(|congested| congested.kbit_s);
+        stream.congested.raise(rate);
         (Kind::State, br#"{"state":"on"}"#.to_vec())
     }
 }

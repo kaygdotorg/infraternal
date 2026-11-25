@@ -444,6 +444,16 @@ impl RemoteHosts {
         factory.as_ref().map(|factory| factory.address.port())
     }
 
+    /// The TCP/TLS acceptor the listeners use for a handshake starting now.
+    /// Its certificate and key are the server's current leg-B leaf, so
+    /// `/remote/agent` signs its v2 answer with exactly the leaf QUIC and
+    /// TCP/TLS serve, rotation included (#559). `None` before the listeners
+    /// start; the route then refuses v2 proofs.
+    pub(crate) fn current_leaf(&self) -> Option<Arc<openssl::ssl::SslAcceptor>> {
+        let factory = self.3.lock().ok()?;
+        factory.as_ref().map(|factory| factory.tls.current())
+    }
+
     #[cfg(all(feature = "remote", any(test, feature = "native-streams")))]
     pub(crate) async fn node(
         &self,

@@ -119,7 +119,8 @@ async fn mesh_plugin_discovery_disable_and_restart_preserve_control_socket() {
         .find(|plugin| plugin["descriptor"]["id"] == "mesh")
         .expect("compiled mesh feature is missing")["descriptor"];
     assert_eq!(descriptor["id"], "mesh");
-    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 21);
+    // 21 before subnet routes added list, approve and revoke (D197 M3).
+    assert_eq!(descriptor["actions"].as_array().unwrap().len(), 24);
     assert_eq!(descriptor["roles"][0]["requires"], json!(["server"]));
     for action in descriptor["actions"].as_array().unwrap() {
         assert_ne!(action["summary"].as_str().unwrap(), "");
@@ -588,6 +589,9 @@ fn mesh_destructive_metadata_matches_frozen_confirmation_requirements() {
             "mesh.role.assign",
             "mesh.role.define",
             "mesh.rotation.interval.set",
+            // Approving widens access and revoking ends it: both need the owner's fresh passkey (D197 M3).
+            "mesh.route.approve",
+            "mesh.route.revoke",
             "mesh.tag.delete",
             "mesh.tag.member.remove"
         ]

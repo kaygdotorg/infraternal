@@ -25,7 +25,65 @@ const DESTRUCTIVE: &[&str] = &[
     "Confirm with your passkey.",
     "Submit the action and read the resulting revision.",
 ];
+/// The mesh coordinator's actions (Access, inventory, defaults, rotation and subnet routes) with their permissions and passkey rules.
 pub const ACTIONS: &[ActionDef] = &[
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Unsupported,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+        id: "mesh.route.list",
+        summary: "List subnet routes",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Read every network a machine advertises, whether it is approved, and why a waiting one would be refused.",
+        ],
+        input: infraternal_plugin_api::SchemaRef("Empty"),
+        output: infraternal_plugin_api::SchemaRef("MeshRoutes"),
+        permission: One("server.configure"),
+        effect: Effect::Read,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Required,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+        id: "mesh.route.approve",
+        summary: "Approve a subnet route",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Pick a network a machine advertises from mesh.route.list.",
+            "Confirm with your passkey; overlapping and unroutable networks are refused with the reason.",
+            "Forwarded traffic is masqueraded unless masquerade is false.",
+        ],
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"node_id":{"type":"integer","minimum":1},"network":{"type":"string"},"masquerade":{"type":"boolean","default":true}},"required":["node_id","network"],"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef("MeshRouteChange"),
+        permission: One("server.configure"),
+        effect: Effect::Destructive,
+    },
+    ActionDef {
+        target: infraternal_plugin_api::Target::Global,
+        dry_run: infraternal_plugin_api::DryRun::Required,
+        opens: None,
+        api_scope: None,
+        fresh_passkey: false,
+        id: "mesh.route.revoke",
+        summary: "Revoke a subnet route",
+        instructions: &[
+            "Sign in as the server owner.",
+            "Confirm with your passkey; the network stops being routed and the arrows to it are removed.",
+        ],
+        input: infraternal_plugin_api::SchemaRef(
+            r#"{"type":"object","properties":{"route_id":{"type":"integer","minimum":1}},"required":["route_id"],"additionalProperties":false}"#,
+        ),
+        output: infraternal_plugin_api::SchemaRef("MeshRouteChange"),
+        permission: One("server.configure"),
+        effect: Effect::Destructive,
+    },
     ActionDef {
         target: infraternal_plugin_api::Target::Global,
         dry_run: infraternal_plugin_api::DryRun::Unsupported,
@@ -424,6 +482,23 @@ pub fn cli_plugin() -> infraternal_plugin_api::PluginDefinition {
                 JsonSchema::boolean("Also turn on SSH access over the mesh."),
             );
         }
+        if action.command == ["mesh", "routes", "advertise"]
+            || action.command == ["mesh", "routes", "withdraw"]
+        {
+            // The networks are typed after the command, as in
+            // `infraternal mesh routes advertise 192.168.1.0/24 10.20.0.0/16` (D197 M3).
+            action.input_schema.properties.insert(
+                "networks".to_owned(),
+                JsonSchema::array(
+                    JsonSchema::string("A network such as 192.168.1.0/24."),
+                    "The networks, each as address/prefix.",
+                ),
+            );
+            if action.command[2] == "advertise" {
+                action.input_schema.required.push("networks".to_owned());
+            }
+            action.cli_positionals = vec!["networks".to_owned()];
+        }
         plugin.actions.push(action);
     }
     #[cfg(all(feature = "agent", target_os = "macos"))]
@@ -500,6 +575,15 @@ mod macos_cli_tests {
 mod rotation_action_tests {
     //! The socket adapter grants fresh-passkey context only to destructive actions.
     use super::*;
+
+    /// The coordinator descriptor passes the plugin API's own checks; a server refuses to start
+    /// with one that does not (a destructive action without a required dry run, for example).
+    #[test]
+    fn the_coordinator_descriptor_is_valid() {
+        assert_eq!(DESCRIPTOR.validate(), Ok(()));
+        #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
+        assert_eq!(crate::node_actions::DESCRIPTOR.validate(), Ok(()));
+    }
 
     /// Changing the rotation interval is a destructive action, so the socket adapter requires a fresh passkey for it.
     #[test]

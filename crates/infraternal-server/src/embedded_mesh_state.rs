@@ -21,6 +21,10 @@ const MESH_FILES: &[&str] = &[
     "mesh-engine.json",
     "mesh-authority.json",
     "mesh-listen-port.json",
+    // Subnet routes (D197 M3): what the node advertises, and whether it owes turning IPv4
+    // forwarding off again; both must move with the node's state.
+    "mesh-advertised-routes.json",
+    "mesh-ip-forward.json",
     "mesh-enrolment.json",
     "mesh-private-key",
 ];

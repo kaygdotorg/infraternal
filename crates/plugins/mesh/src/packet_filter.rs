@@ -49,13 +49,16 @@ use crate::{
         rules::{Port, Protocol, TrafficPolicy},
     },
 };
-use infraternal_mesh::proxy_ports::MeshProxyIngress;
+use infraternal_mesh::{networks::Network, proxy_ports::MeshProxyIngress};
 use std::{
     collections::{BTreeMap, HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    sync::{Arc, Mutex, OnceLock, RwLock},
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -259,6 +262,10 @@ pub(crate) struct PacketFilter {
     /// Serialises publish, withdraw and their sweep, so a sweep never judges flows against a
     /// snapshot that a concurrent publish has already replaced.
     writer: Mutex<()>,
+    /// Whether this node forwards for the networks it serves (D197 M3): set by the node only while
+    /// the kernel table that forwards and masquerades them is in place. Shared with every published
+    /// snapshot, so turning it off refuses forwarded packets at once, open flows included.
+    forwarding: Arc<AtomicBool>,
     /// Test seam: called by the sweep just before it visits each peer's cell, so a test can
     /// pause the sweep part-way through and check what a packet can do meanwhile.
     #[cfg(test)]
@@ -300,11 +307,14 @@ impl PacketFilter {
     }
 
     /// Attach one compiled snapshot before the filter reaches packet workers.
-    fn with_policy(policy: CompiledPolicy) -> Self {
+    fn with_policy(mut policy: CompiledPolicy) -> Self {
+        let forwarding = Arc::new(AtomicBool::new(false));
+        policy.forwarding = Arc::clone(&forwarding);
         Self {
             policy: RwLock::new(Arc::new(policy)),
             tables: Mutex::new(BTreeMap::new()),
             writer: Mutex::new(()),
+            forwarding,
             #[cfg(test)]
             sweep_probe: Mutex::new(None),
         }
@@ -326,6 +336,14 @@ impl PacketFilter {
             config,
             proxy_ingress,
         )?))
+    }
+
+    /// Turn forwarding for this node's served networks on or off (D197 M3). The node turns it on
+    /// only after the kernel table that forwards and masquerades them is installed, and off before
+    /// that table goes; until then a packet for a served network is refused like any packet that
+    /// is not for this node.
+    pub(crate) fn set_forwarding(&self, on: bool) {
+        self.forwarding.store(on, Ordering::Release);
     }
 
     /// A prepared deny-all snapshot, published when a failed transaction cannot rebuild the
@@ -379,7 +397,9 @@ impl PacketFilter {
             .writer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let next = Arc::new(policy.0);
+        let mut next = policy.0;
+        next.forwarding = Arc::clone(&self.forwarding);
+        let next = Arc::new(next);
         let previous = {
             let mut current = self
                 .policy
@@ -481,10 +501,7 @@ impl PacketFilter {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let Some(peer_address) = policy.peer_for_packet(parsed.key, direction) else {
-            return false;
-        };
-        let Some(peer_index) = policy.peer_addresses.get(&peer_address).copied() else {
+        let Some((peer_address, peer_index)) = policy.resolve(parsed.key, direction) else {
             return false;
         };
         let peer = &policy.peers[peer_index];
@@ -926,6 +943,26 @@ struct CompiledPolicy {
     peer_addresses: HashMap<IpAddr, usize>,
     peers: Vec<PeerAccess>,
     proxy_ingress: MeshProxyIngress,
+    /// Every network behind a router peer that this node may reach (D197 M3), with that peer's
+    /// index. The coordinator never approves overlapping networks, so an address matches one
+    /// entry at most; a handful of entries are scanned, no prefix tree is needed.
+    through: Vec<(Network, usize)>,
+    /// The filter's forwarding switch ([`PacketFilter::set_forwarding`]), shared by every
+    /// snapshot it publishes. A snapshot not yet published holds its own, which is off.
+    forwarding: Arc<AtomicBool>,
+}
+
+/// Which grant governs a packet: an ordinary node-to-node packet, or one that crosses a router.
+enum RouteAccess<'policy> {
+    /// One end is this node and the other the peer's own mesh address: the peer's node grants,
+    /// with the mesh SSH and proxy rules, decide.
+    Host,
+    /// A subnet route (D197 M3) grants this new flow: into a network behind the peer, or into a
+    /// network this node serves for the peer. Only plain port grants apply.
+    Routed(&'policy TrafficPolicy),
+    /// A packet that crosses a router but may not start a flow: a reply that only tracked state
+    /// admits, or traffic from a routed network, whose hosts are never mesh initiators.
+    Denied,
 }
 
 impl CompiledPolicy {
@@ -939,6 +976,8 @@ impl CompiledPolicy {
             peer_addresses: HashMap::new(),
             peers: Vec::new(),
             proxy_ingress: MeshProxyIngress::default(),
+            through: Vec::new(),
+            forwarding: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -952,9 +991,15 @@ impl CompiledPolicy {
         peers
             .try_reserve(config.peers.len())
             .map_err(|_| io::Error::other("mesh peer policy index could not be allocated"))?;
+        let mut through = Vec::new();
         for (node, policy) in &config.peers {
             let index = peers.len();
             peers.push(PeerAccess::from_policy(*node, policy));
+            for network in &policy.networks.through {
+                if network.network.is_ipv4() && network.outbound != TrafficPolicy::None {
+                    through.push((network.network, index));
+                }
+            }
             for address in [
                 IpAddr::V4(policy.peer.addresses.ipv4),
                 IpAddr::V6(policy.peer.addresses.ipv6),
@@ -978,6 +1023,8 @@ impl CompiledPolicy {
             peer_addresses,
             peers,
             proxy_ingress,
+            through,
+            forwarding: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -990,9 +1037,142 @@ impl CompiledPolicy {
         let Self {
             peer_addresses,
             peers,
+            through,
             ..
         } = self;
         peer_addresses.retain(|_, index| !withdrawn.contains(&peers[*index].node));
+        through.retain(|(_, index)| !withdrawn.contains(&peers[*index].node));
+    }
+
+    /// Whether `address` is one of this node's own mesh addresses.
+    fn is_local(&self, address: IpAddr) -> bool {
+        match address {
+            IpAddr::V4(address) => address == self.local4,
+            IpAddr::V6(address) => address == self.local6,
+        }
+    }
+
+    /// Whether forwarding for served networks is on right now.
+    fn forwarding(&self) -> bool {
+        self.forwarding.load(Ordering::Acquire)
+    }
+
+    /// The peer a packet belongs to, and the address its flows are filed under.
+    ///
+    /// The address is always one of the peer's own mesh addresses, so tracked flows, fragments
+    /// and related ICMP find the peer again through [`Self::peer_addresses`] and a withdrawn peer
+    /// loses them all at once:
+    /// - this node ↔ a peer's mesh address: that address, as before subnet routes;
+    /// - this node ↔ a host in a network behind a router peer: the router's IPv4 mesh address
+    ///   (routed networks are IPv4; the `WireGuard` allowed IPs prove the router sent the reply);
+    /// - a peer ↔ a host in a network this node serves (forwarded): the peer's mesh address, and
+    ///   only while forwarding is on and the peer may reach that network.
+    ///
+    /// Anything else (a packet between two foreign addresses, or from a network nobody routes)
+    /// belongs to no peer and is refused.
+    fn resolve(&self, key: FlowKey, direction: Direction) -> Option<(IpAddr, usize)> {
+        if let Some(address) = self.peer_for_packet(key, direction) {
+            if let Some(index) = self.peer_addresses.get(&address) {
+                return Some((address, *index));
+            }
+            let index = self.router_for(address)?;
+            return Some((IpAddr::V4(self.peers[index].ipv4), index));
+        }
+        if !self.forwarding() {
+            return None;
+        }
+        let (peer_end, network_end) = match direction {
+            Direction::MeshToHost => (key.source, key.destination),
+            Direction::HostToMesh => (key.destination, key.source),
+        };
+        let index = *self.peer_addresses.get(&peer_end)?;
+        self.peers[index]
+            .served
+            .iter()
+            .any(|(network, _)| network.contains(network_end))
+            .then_some((peer_end, index))
+    }
+
+    /// The router peer for an address inside one of the networks this node may reach.
+    fn router_for(&self, address: IpAddr) -> Option<usize> {
+        self.through
+            .iter()
+            .find(|(network, _)| network.contains(address))
+            .map(|(_, index)| *index)
+    }
+
+    /// Which grant governs a flow with tuple `key` started in `direction` with `peer`.
+    ///
+    /// A routed packet never falls back to node grants: a host on a served network must not
+    /// inherit what this node may start toward its peers, and a peer's grant to this node is
+    /// not a grant to the networks behind it.
+    fn route_access<'policy>(
+        &'policy self,
+        peer: &'policy PeerAccess,
+        key: FlowKey,
+        direction: Direction,
+    ) -> RouteAccess<'policy> {
+        match direction {
+            Direction::MeshToHost if self.is_local(key.destination) => {
+                if peer.owns(key.source) {
+                    RouteAccess::Host
+                } else {
+                    // A reply from a network behind the peer: tracked state only.
+                    RouteAccess::Denied
+                }
+            }
+            Direction::MeshToHost => {
+                if !self.forwarding() || !peer.owns(key.source) {
+                    return RouteAccess::Denied;
+                }
+                peer.served
+                    .iter()
+                    .find(|(network, _)| network.contains(key.destination))
+                    .map_or(RouteAccess::Denied, |(_, access)| {
+                        RouteAccess::Routed(access)
+                    })
+            }
+            Direction::HostToMesh if self.is_local(key.source) => {
+                if peer.owns(key.destination) {
+                    return RouteAccess::Host;
+                }
+                peer.through
+                    .iter()
+                    .find(|(network, _)| network.contains(key.destination))
+                    .map_or(RouteAccess::Denied, |(_, access)| {
+                        RouteAccess::Routed(access)
+                    })
+            }
+            // From a served network toward a peer: replies only.
+            Direction::HostToMesh => RouteAccess::Denied,
+        }
+    }
+
+    /// A plain port grant for a routed flow, the same rule node flows follow without the mesh
+    /// SSH and proxy exceptions: a TCP or UDP port must be granted, anything else needs `All`.
+    fn routed_grant(access: &TrafficPolicy, key: FlowKey) -> Option<Grant> {
+        let transport = transport_protocol(key.protocol);
+        if let Some(protocol) = transport {
+            return access
+                .allows(Port {
+                    protocol,
+                    number: key.destination_port,
+                })
+                .then_some(Grant {
+                    protocol: Some(protocol),
+                    port: Some(key.destination_port),
+                    ssh: false,
+                    proxy: None,
+                    ssh_redirect_port: None,
+                });
+        }
+        matches!(access, TrafficPolicy::All).then_some(Grant {
+            protocol: None,
+            port: None,
+            ssh: false,
+            proxy: None,
+            ssh_redirect_port: None,
+        })
     }
 
     /// Find a peer by node id. `peers` is built from the config's `BTreeMap`, so it is sorted
@@ -1023,6 +1203,11 @@ impl CompiledPolicy {
 
     /// Resolve the current directional grant for a new flow, including proxy and SSH exceptions.
     fn new_grant(&self, peer: &PeerAccess, key: FlowKey, direction: Direction) -> Option<Grant> {
+        match self.route_access(peer, key, direction) {
+            RouteAccess::Host => {}
+            RouteAccess::Routed(access) => return Self::routed_grant(access, key),
+            RouteAccess::Denied => return None,
+        }
         let access = match direction {
             Direction::HostToMesh => &peer.outbound,
             Direction::MeshToHost => &peer.inbound,
@@ -1105,6 +1290,18 @@ impl CompiledPolicy {
         if peer.node != entry.peer_id {
             return false;
         }
+        // A routed flow is judged by the route grant that admitted it, against today's
+        // networks: a revoked network or a withdrawn route ends it at once.
+        match self.route_access(peer, entry.key, entry.initiated) {
+            RouteAccess::Host => {}
+            RouteAccess::Routed(access) => {
+                return match (entry.grant.protocol, entry.grant.port) {
+                    (Some(protocol), Some(number)) => access.allows(Port { protocol, number }),
+                    _ => matches!(access, TrafficPolicy::All),
+                };
+            }
+            RouteAccess::Denied => return false,
+        }
         if entry.grant.ssh {
             let expected_listener = entry.ssh_redirect_port.unwrap_or(22);
             return self.admits_ssh(peer)
@@ -1170,9 +1367,16 @@ impl CompiledPolicy {
 #[derive(Clone)]
 struct PeerAccess {
     node: NodeId,
+    /// The peer's own mesh addresses, to tell its packets from those of a network behind it.
+    ipv4: Ipv4Addr,
+    ipv6: Ipv6Addr,
     inbound: TrafficPolicy,
     outbound: TrafficPolicy,
     access_ssh: Option<bool>,
+    /// Networks behind this peer that this node may start into, with the grant (D197 M3).
+    through: Vec<(Network, TrafficPolicy)>,
+    /// This node's networks that the peer may start into, with the grant (D197 M3).
+    served: Vec<(Network, TrafficPolicy)>,
     /// This snapshot's pointer to the peer's flow cell in [`PacketFilter::tables`]. It starts
     /// unset and is set on the peer's first packet after the snapshot is published (see
     /// [`PacketFilter::flows_for`]), so compiling a snapshot allocates nothing per peer. Each
@@ -1185,10 +1389,34 @@ impl PeerAccess {
     fn from_policy(node: NodeId, policy: &PeerPolicy) -> Self {
         Self {
             node,
+            ipv4: policy.peer.addresses.ipv4,
+            ipv6: policy.peer.addresses.ipv6,
             inbound: policy.inbound.clone(),
             outbound: policy.outbound.clone(),
             access_ssh: policy.access_ssh,
+            through: policy
+                .networks
+                .through
+                .iter()
+                .filter(|network| network.network.is_ipv4())
+                .map(|network| (network.network, network.outbound.clone()))
+                .collect(),
+            served: policy
+                .networks
+                .served
+                .iter()
+                .filter(|network| network.network.is_ipv4())
+                .map(|network| (network.network, network.inbound.clone()))
+                .collect(),
             flows: OnceLock::new(),
+        }
+    }
+
+    /// Whether `address` is one of the peer's own mesh addresses.
+    fn owns(&self, address: IpAddr) -> bool {
+        match address {
+            IpAddr::V4(address) => address == self.ipv4,
+            IpAddr::V6(address) => address == self.ipv6,
         }
     }
 }
