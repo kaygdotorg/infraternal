@@ -2,17 +2,12 @@
 //! the public WebSocket listener [168], #291, and makes the server prove its
 //! current leg-B leaf on that path (#559).
 //!
-//! # The two versions
+//! # The handshake
 //!
 //! After the WebSocket upgrade the server always sends an
 //! [`AgentLinkChallenge`] (a 32-byte nonce). Then:
 //!
-//! - **v1** (infraternal agents built before #559): the agent answers an
-//!   [`AgentLinkProof`] signed over [`proof_bytes`], and the server answers
-//!   [`AgentLinkReady`]. The server proves nothing beyond the outer HTTPS
-//!   certificate. The server still accepts v1 so agents that have not updated
-//!   yet keep their link (and can receive the update).
-//! - **v2**: the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
+//! - the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
 //!   nonce and the agent's view of the TLS session ([`tls_channel_binding`],
 //!   RFC 9266 `tls-exporter`), signed over [`agent_proof_bytes_v2`]. The
 //!   server answers [`AgentLinkReadyV2`]: its current leg-B leaf and a
@@ -22,6 +17,13 @@
 //!   [`verify_server_leaf`]) and then applies the
 //!   [`crate::server_leaf_floor::ServerLeafFloor`], so a copied, older leaf
 //!   is refused here too.
+//!
+//! There is no older handshake. The first design (#291) had the agent sign
+//! only the challenge and the server answer a bare `ready`, which proved
+//! nothing about the server beyond the outer HTTPS certificate. It was
+//! removed (#559, J1198): a server refuses any other proof message and an
+//! agent refuses any other answer, with the same errors as any malformed
+//! message, so the refusal tells a prober nothing about what once existed.
 //!
 //! # What the TLS binding adds, and where
 //!
@@ -41,8 +43,7 @@
 //! # Invariants
 //!
 //! - Every signed message starts with its own domain string, so neither
-//!   side's signature is valid as the other's, as a v1 proof, or as a TLS
-//!   handshake signature.
+//!   side's signature is valid as the other's or as a TLS handshake signature.
 //! - Transcript fields are fixed-length, except the binding, which is
 //!   preceded by a presence byte. No two different inputs produce the same
 //!   bytes.
@@ -88,40 +89,6 @@ pub struct AgentLinkChallenge {
     pub message_type: String,
     /// Canonical base64url 256-bit nonce.
     pub nonce: String,
-}
-
-/// Proof carries the exact enrolled certificate and a fresh signature from its private key.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentLinkProof {
-    /// Fixed message discriminator.
-    #[serde(rename = "type")]
-    pub message_type: String,
-    /// The identity whose key signs the challenge.
-    pub host_id: Uuid,
-    /// Canonical base64url leaf certificate DER.
-    pub certificate_der: String,
-    /// Canonical base64url signature of [`proof_bytes`].
-    pub signature: String,
-}
-
-/// Sent only after the app listener admits the certificate and signature.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentLinkReady {
-    /// Fixed message discriminator.
-    #[serde(rename = "type")]
-    pub message_type: String,
-}
-
-/// Domain separates and host-binds one connection's key-possession proof.
-#[must_use]
-pub fn proof_bytes(host_id: Uuid, nonce: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(35 + nonce.len());
-    bytes.extend_from_slice(b"infraternal-agent-link-v1\0");
-    bytes.extend_from_slice(host_id.as_bytes());
-    bytes.extend_from_slice(nonce);
-    bytes
 }
 
 /// The v2 answer to an [`AgentLinkChallenge`]: the enrolled certificate, a
@@ -455,16 +422,6 @@ mod tests {
     //! session's channel binding.
     use super::*;
 
-    #[test]
-    fn proof_message_is_domain_separated_and_bound_to_host_and_nonce() {
-        let host = Uuid::from_u128(1);
-        let other_host = Uuid::from_u128(2);
-        let first = proof_bytes(host, &[7; 32]);
-        assert_ne!(first, proof_bytes(other_host, &[7; 32]));
-        assert_ne!(first, proof_bytes(host, &[8; 32]));
-        assert!(first.starts_with(b"infraternal-agent-link-v1\0"));
-    }
-
     use crate::remote_tls::{
         Identity,
         tests::{leaf, root},
@@ -546,7 +503,7 @@ mod tests {
     }
 
     /// The four signed v2 messages never collide: agent and server domains
-    /// differ from each other and from v1, and a missing binding is not a
+    /// differ from each other, and a missing binding is not a
     /// zero binding.
     #[test]
     fn v2_transcripts_are_domain_separated_and_unambiguous() {
@@ -563,7 +520,6 @@ mod tests {
             agent_unbound,
             "the two nonces must not be interchangeable"
         );
-        assert!(!proof_bytes(host, &[1; 32]).starts_with(b"infraternal-agent-link-v2"));
     }
 
     /// An honest bound answer passes and returns the leaf; any change to what
