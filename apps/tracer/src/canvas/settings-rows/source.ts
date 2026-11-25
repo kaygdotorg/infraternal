@@ -13,6 +13,7 @@ import type { SettingDef } from "./definitions.on-demand";
 import type { OutlineEntry } from "../views/settings-outline";
 import type { ComponentDef } from "./catalog";
 import { rowsOf, spotBySection, visibleMap } from "./model";
+import { routesSource } from "../mesh/networks";
 
 /** What a viewer's Settings source supplies: who is an administrator, what it stores, and what it lists. Absent parts mean the windows that need them are hidden (#568). */
 export interface RowsOptions {
@@ -39,6 +40,7 @@ export function createRowsSource(options: RowsOptions): RowsSource {
     backed,
     hasData: (comp, group) => { const d = options.data?.(comp, group); return Boolean(d?.facts?.length || d?.keys); },
     devices: options.sections?.includes("devices") ?? false,
+    networks: routesSource() !== undefined,
   });
   // The wording of every setting loads when ⌘K first asks for the rows (D188); the palette is told when it has arrived.
   let entries: typeof import("./entries.on-demand") | undefined, loading = false;

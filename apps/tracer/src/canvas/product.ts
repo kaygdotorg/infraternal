@@ -45,6 +45,8 @@ import { teachOnce } from "../hints";
 import { buildVersion } from "../build-version";
 import type { DetailsSourceLoader } from "./windows/details-source";
 import { buildSettingsMapView } from "./settings-rows/model";
+import { rebuildSettingsView } from "./settings-rows/rebuild";
+import { onRoutesSource } from "./mesh/networks";
 import { createRowsDocs } from "./settings-rows/docs-adapter";
 import { createProductRows } from "./settings-rows/product-source";
 
@@ -368,6 +370,8 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   // The Mesh view follows the server's answer (D187).
   const offMeshView = offerMeshView(canvas.cx, mesh, { keep: Boolean(savedMesh) });
+  // Settings › Mesh › Networks appears once the server lists subnet routes to this person (its owner), and goes with them (D197 M3).
+  const offRoutes = onRoutesSource(() => rebuildSettingsView(canvas.cx, productRows.map()));
   if (savedMesh) {
     const view = canvas.cx.views.get("mesh");
     if (view) { if (savedMesh.layout.type === "graph") view.view.graphPins = savedMesh.layout.pinned; view.view.x = savedMesh.cell.x * CELL; view.view.y = savedMesh.cell.y * CELL; view.sx.set(view.view.x, true); view.sy.set(view.view.y, true); }
@@ -501,6 +505,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
       disposeAccessLeft();
       startupHints.dispose();
       offMeshView();
+      offRoutes();
       addHost.dispose(); docs.dispose();
       canvas.dispose();
       appWindows.dispose();

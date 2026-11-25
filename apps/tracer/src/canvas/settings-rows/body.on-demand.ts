@@ -20,6 +20,7 @@ import type { GroupDef, KeyDef, PanelId } from "./catalog";
 import { SETTING_DEFS, type SettingDef } from "./definitions.on-demand";
 import type { Spot } from "./model";
 import { updatesSource } from "../updates/source";
+import { routesSource } from "../mesh/networks";
 
 /** Live rows by window and setting, so ⌘K can show one. A window registers on render and leaves on cleanup. */
 const live = new Map<string, Map<string, SettingRow>>();
@@ -129,7 +130,14 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
     void onDemand(() => import("../updates/panel.on-demand")).then((mod) => { if (!gone) stop = mod.renderUpdates(cx, pane, updates); });
     disposers.push(() => { gone = true; stop?.(); });
   }
-  const data = updates ? undefined : source.data?.(comp.id, group.id);
+  // The Mesh Networks window: advertised, approved and declined networks, when the server lists them to this person (its owner).
+  const routes = group.networks ? routesSource() : undefined;
+  if (routes) {
+    let gone = false, stop: (() => void) | undefined;
+    void onDemand(() => import("../mesh/networks-panel.on-demand")).then((mod) => { if (!gone) stop = mod.renderNetworks(cx, pane, routes); });
+    disposers.push(() => { gone = true; stop?.(); });
+  }
+  const data = updates || routes ? undefined : source.data?.(comp.id, group.id);
   if (data?.facts?.length) { disposers.push(renderFacts(pane, group.title, data.facts.map((g) => ({ title: g.title, rows: g.rows })))); }
   if (data?.keys) { disposers.push(renderKeys(pane, data.keys)); }
 

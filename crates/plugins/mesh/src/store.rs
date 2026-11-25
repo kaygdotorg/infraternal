@@ -1829,7 +1829,8 @@ impl Store {
     ///
     /// The list is the node's whole, current word. A network it names is marked advertised (and
     /// added, waiting for approval, when new). A network it no longer names keeps its approval but
-    /// stops being routed, and an unapproved one is forgotten. Malformed entries were refused by
+    /// stops being routed, a declined one stays declined (so re-advertising it does not ask again),
+    /// and one that is neither is forgotten. Malformed entries were refused by
     /// the parser; entries the model would never route are kept so `mesh.route.list` can say why.
     /// Commits, and advances the revision, only when something changed; returns whether it did.
     /// # Errors
@@ -1860,12 +1861,13 @@ impl Store {
             .iter()
             .map(ToString::to_string)
             .collect();
-        let rows =
-            sqlx::query("SELECT network,advertised,approved_at FROM mesh_routes WHERE node_id=?")
-                .bind(id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(|_| "Mesh storage unavailable.")?;
+        let rows = sqlx::query(
+            "SELECT network,advertised,approved_at,declined_at FROM mesh_routes WHERE node_id=?",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| "Mesh storage unavailable.")?;
         let mut known = BTreeSet::new();
         for row in rows {
             let network: String = row
@@ -1877,8 +1879,11 @@ impl Store {
             let approved: Option<i64> = row
                 .try_get("approved_at")
                 .map_err(|_| "Mesh storage unavailable.")?;
+            let declined: Option<i64> = row
+                .try_get("declined_at")
+                .map_err(|_| "Mesh storage unavailable.")?;
             let now = wanted.contains(&network);
-            if !now && approved.is_none() {
+            if !now && approved.is_none() && declined.is_none() {
                 sqlx::query("DELETE FROM mesh_routes WHERE node_id=? AND network=?")
                     .bind(id)
                     .bind(&network)

@@ -54,6 +54,8 @@ export interface GroupDef {
   themes?: boolean;
   /** The Machines Updates window (#211, S5): the owner's controls over this server's automatic update (`updates/panel.on-demand.ts`), drawn only when a source is registered (`updates/source.ts`). */
   updates?: boolean;
+  /** The Mesh Networks window (D197 M3, #580): the networks machines advertise and the owner's approvals (`mesh/networks-panel.on-demand.ts`), drawn only when a source is registered (`mesh/networks.ts`). */
+  networks?: boolean;
   docs?: DocsLink;
 }
 
@@ -96,6 +98,7 @@ export const SETTINGS_MAP: readonly ComponentDef[] = [
     { id: "keys", title: "Keys", docs: { page: "reference/keys", heading: "connection-keys" }, settings: ["connection-keys", "machine-identity", "renewal-window"] },
     { id: "names", title: "Names", settings: ["name-suffix"] },
     { id: "access", title: "Access" },
+    { id: "networks", title: "Networks", networks: true },
     { id: "connections", title: "Connections" },
   ] },
   { id: "sharing", title: "Sharing", icon: "sharing", admin: true, groups: [

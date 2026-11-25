@@ -7,7 +7,8 @@
  * through the real adapter, so the specs exercise the code the product runs.
  *
  * URL switches (review only): `?mesh=1000` a generated mesh of that many hosts, `?mesh=loading`, `?mesh=error`,
- * `?mesh=empty`, `?mesh=denied`; `?meshgrants=n` adds n more grants to a generated mesh.
+ * `?mesh=empty`, `?mesh=denied`; `?meshgrants=n` adds n more grants to a generated mesh, `?meshnets=n` n subnet routes
+ * (half approved, with arrows), `?meshowner=0` a person who is not the owner (no routes). `?routes=1` plays the subnet-route scenes on the four-host seed (`mesh-routes.ts`).
  */
 import type { Grant } from "../model/types";
 import { createMeshApi } from "../mesh/api";
@@ -15,16 +16,22 @@ import { parseSnapshot } from "../mesh/protocol";
 import type { MeshSource } from "../mesh/source";
 import { FakeMeshServer, generateMesh, seedMesh, type FakeMeshSeed, type FakeMeshState } from "./mesh-server";
 import { INITIAL_GRANTS } from "./data";
+import { ROUTE_SCENES, createRouteScenes } from "./mesh-routes";
+import type { PaletteEntry } from "../../core-screen";
 import type { MockWorld } from "./world";
 
+/** The mockup mesh: a Mesh source whose fake server, pins and subnet-route scenes a mockup scene and the specs can reach. */
 export interface MockMesh extends MeshSource {
   readonly server: FakeMeshServer;
   /** Starts again from the scene's mesh. Listeners stay; the canvas is told the mesh changed. */
   reset(): void;
   /** The pins the person made, by node (what the canvas would save). */
   pins(): Record<string, { x: number; y: number }>;
+  /** `?routes=1`: the subnet-route scenes (D197 M3, #580) for the palette. Absent otherwise. */
+  readonly routes?: { entries(): PaletteEntry[]; run(id: string): void };
 }
 
+/** Makes the mockup mesh for `world`: the real adapter over a fake server built from the URL's switches. */
 export function createMockMesh(world: MockWorld): MockMesh {
   const listeners = new Set<() => void>();
   const failures = new Set<(m: string) => void>();
@@ -32,20 +39,28 @@ export function createMockMesh(world: MockWorld): MockMesh {
   const params = new URLSearchParams(location.search);
   const mode = params.get("mesh") ?? "";
   const extra = Number(params.get("meshgrants") ?? "0") || 0;
+  const nets = Math.min(200, Number(params.get("meshnets") ?? "0") || 0);
   let server: FakeMeshServer;
   let inner: MeshSource;
   let offs: Array<() => void> = [];
+  const scenes = params.get("routes") === "1"
+    ? createRouteScenes(() => server, () => window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:mesh.networks", source: "keyboard" } })))
+    : undefined;
 
   const build = (): void => {
     for (const off of offs) off();
     inner?.dispose();
     server?.dispose();
     const count = /^\d+$/.test(mode) ? Number(mode) : 0;
-    const seed: FakeMeshSeed = count ? generateMesh(count, extra) : mode === "empty" ? { nodes: [], tags: {}, grants: [] } : seedMesh(INITIAL_GRANTS);
+    const seed: FakeMeshSeed = count ? generateMesh(count, extra, nets) : mode === "empty" ? { nodes: [], tags: {}, grants: [] } : seedMesh(INITIAL_GRANTS);
     const state: FakeMeshState = mode === "loading" ? "loading" : mode === "error" ? "error" : mode === "denied" ? "denied" : "ready";
     server = new FakeMeshServer(seed, state);
+    // `?routes=1` opens on the first scene (an approved network with arrows and one waiting).
+    if (scenes) server.setRoutes(ROUTE_SCENES[0]!.routes());
     // `?meshserver=today`: the server as it is now, without the fields the issue proposes (access, os, address, relay).
     if (params.get("meshserver") === "today") { server.includeAccess = false; server.includeExtras = false; }
+    // `?meshowner=0`: the person is not the server's owner, so the server refuses to list subnet routes (D197 M3).
+    if (params.get("meshowner") === "0") server.routeOwner = false;
     // Only an operator holds Mesh grants in the mockup (D187); everyone else gets the refusal a server would give.
     server.access = world.role === "operator" ? { view: true, manageGrants: true } : { view: false, manageGrants: false };
     // The scene's grants are the server's: the Settings panel and the probe read them from the world.
@@ -63,6 +78,7 @@ export function createMockMesh(world: MockWorld): MockMesh {
   return {
     get server() { return server; },
     reset() { build(); for (const l of [...listeners]) l(); },
+    ...(scenes ? { routes: scenes } : {}),
     pins: () => Object.fromEntries(pinned),
     data: () => inner.data(),
     grants: () => inner.grants(),

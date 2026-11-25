@@ -17,12 +17,20 @@
  *   a person chose is never touched.
  * - **Notifications are coalesced.** A burst of status changes becomes one `onChange` (80 ms), edits notify at
  *   once; nothing runs while the mesh is quiet.
+ * - **Subnet routes ride on the same revision line** (D197 M3). After every applied list the source also lists the
+ *   routes (`mesh.route.list`, one call in flight, a second asked for while it runs is run once after it), when the
+ *   person may manage access. Only the owner may list them: anyone else is refused once and the source stops asking,
+ *   so it shows no networks. Approve, decline,
+ *   revoke and keep-source are optimistic like grant edits: the network changes at once (and a revoke takes its arrows
+ *   off the screen), the server's answer settles it, and a refusal or a lost connection puts everything back and rejects
+ *   with a sentence. A route list is not applied while a route change is in flight, for the same reason as grants.
  * - Positions are the canvas's: the server holds none. Pins arrive from the saved canvas document and leave
  *   through the canvas document (`pin` marks the node; the canvas saves it, D180).
  */
 import type { Grant } from "../model/types";
 import { MeshClient, type MeshSubscriptionEvent } from "../../../../../packages/protocol/src/mesh";
-import { ACTION, ActionRefused, endpointJson, parseAnswer, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode } from "./protocol";
+import { ACTION, ActionRefused, endpointJson, parseAnswer, parseRouteAnswer, parseRoutes, parseSnapshot, type MeshTransport, type Snapshot, type WireAccess, type WireGrant, type WireNode, type WireRoute } from "./protocol";
+import { drawnInMesh, networkNodeId, refusalWords, setRoutesSource, routesSource, type MeshNetwork, type RoutesSource } from "./networks";
 import { derivedGrantName, endName, tagNodeId, type MeshSource, type MeshStatus } from "./source";
 
 export interface MeshApiOptions {
@@ -39,6 +47,10 @@ const NOTIFY_COALESCE_MS = 80;
 /** What a grant is called when nobody named it: who may reach what. */
 const derivedName = derivedGrantName;
 
+/**
+ * Makes the product's Mesh source over `options.transport`: the mesh, the grants and (for the owner) the subnet routes, kept
+ * on one revision line, with optimistic edits that the server's answers settle (the invariants are in the module comment).
+ */
 export function createMeshApi(options: MeshApiOptions): MeshSource {
   const { transport } = options;
   const pins = new Map<string, { x: number; y: number }>(Object.entries(options.pins ?? {}));
@@ -99,6 +111,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     grants = next;
     status = "ready"; retryStep = 0;
     notify(true);
+    listRoutes();
   };
 
   /** Lists the whole mesh (the client follows the server's pages) and shows it. */
@@ -135,6 +148,149 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     window.clearTimeout(retryTimer);
     const wait = RETRY_MS[Math.min(retryStep++, RETRY_MS.length - 1)]!;
     retryTimer = window.setTimeout(refresh, wait);
+  };
+
+  // ---- subnet routes (D197 M3) ---------------------------------------------------------------------------------------
+  /** `unknown` until the server answers a route list, `on` while it lists them to this person, `off` once it refused. */
+  let routesState: "unknown" | "on" | "off" = "unknown";
+  let networks: MeshNetwork[] = [];
+  const networkById = new Map<string, MeshNetwork>();
+  /** What `data()` hands the Mesh view: the networks it draws, rebuilt only when a network changes. */
+  let drawn: readonly MeshNetwork[] = [];
+  let routesListing = false, routesAgain = false, routeInflight = 0;
+  const RANK = { pending: 0, approved: 1, declined: 2 } as const;
+  const networksChanged = (): void => {
+    networks.sort((a, b) => RANK[a.state] - RANK[b.state] || (a.cidr < b.cidr ? -1 : a.cidr > b.cidr ? 1 : a.routeId - b.routeId));
+    drawn = networks.filter(drawnInMesh);
+    for (const l of [...routeListeners]) l();
+    notify(true);
+  };
+  /** The server's list, written into the same objects (cards and the Networks window hold them by identity). */
+  const applyRoutes = (wire: readonly WireRoute[]): void => {
+    const next: MeshNetwork[] = [];
+    const seen = new Set<string>();
+    for (const w of wire) {
+      const id = networkNodeId(w.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const n = networkById.get(id) ?? ({ id } as MeshNetwork);
+      n.routeId = w.id; n.nodeId = w.nodeId; n.router = w.router; n.cidr = w.cidr; n.state = w.state;
+      n.advertised = w.advertised; n.keepSource = !w.masquerade;
+      if (w.state === "pending" && w.refused) n.refusal = refusalWords(w.refused); else delete n.refusal;
+      delete n.saving;
+      next.push(n);
+    }
+    networkById.clear();
+    for (const n of next) networkById.set(n.id, n);
+    networks = next;
+    networksChanged();
+  };
+  /** Lists the routes once; a list asked for while one runs or a change is in flight runs after it. */
+  const listRoutes = (): void => {
+    // Only someone who may change who reaches what can be the owner, so nobody else is even asked about (one call fewer per list).
+    if (disposed || routesState === "off" || !access.view || !access.manageGrants) return;
+    if (routesListing || routeInflight > 0) { routesAgain = true; return; }
+    routesListing = true;
+    transport.call(ACTION.routes, {}).then((raw) => {
+      routesListing = false;
+      if (disposed) return;
+      const wire = parseRoutes(raw);
+      if (wire && routeInflight === 0) {
+        applyRoutes(wire);
+        if (routesState !== "on") { routesState = "on"; setRoutesSource(routes); }
+      }
+      if (routesAgain) { routesAgain = false; listRoutes(); }
+    }, (error: unknown) => {
+      routesListing = false;
+      if (disposed) return;
+      // Not the owner (or a server without subnet routes): no networks, and no more asking. A lost answer waits for the next list.
+      if (error instanceof ActionRefused) {
+        routesState = "off";
+        networks = []; networkById.clear();
+        if (routesSource() === routes) setRoutesSource(undefined);
+        networksChanged();
+        return;
+      }
+      if (routesAgain) { routesAgain = false; listRoutes(); }
+    });
+  };
+  /** What a refused or failed route change says. */
+  const routeFailure = (what: string, error: unknown): string => {
+    if (!(error instanceof ActionRefused)) return `Could not ${what}. Check your connection and try again.`;
+    switch (error.reason) {
+      case "forbidden": return `Could not ${what}. Only the server's owner can, with a fresh passkey check. Sign in again and try once more.`;
+      case "not found": return `Could not ${what}: the machine no longer offers it, or it changed. The list is up to date again.`;
+      case "invalid input": return `Could not ${what}: the server did not accept those details.`;
+      default: return `Could not ${what}. The mesh is busy. Try again in a moment.`;
+    }
+  };
+  /**
+   * Sends one route change: `change` shows it at once, `undo` puts it back. A refusal (`{state:"refused"}`) or an error
+   * undoes it and rejects with the sentence to show; either way the routes are listed again once nothing is in flight.
+   */
+  const routeChange = (n: MeshNetwork, what: string, action: string, input: Record<string, unknown>, change: () => void, undo: () => void): Promise<void> => {
+    routeInflight += 1;
+    change();
+    n.saving = true;
+    networksChanged();
+    const settle = (): void => { routeInflight -= 1; delete n.saving; if (routeInflight === 0) { routesAgain = false; listRoutes(); } };
+    return transport.call(action, input).then((raw) => {
+      if (disposed) return;
+      const answer = parseRouteAnswer(raw);
+      if (answer?.ok) { settle(); networksChanged(); return; }
+      undo();
+      if (answer) n.refusal = refusalWords(answer.reason);
+      settle(); networksChanged();
+      throw new Error(answer ? n.refusal!.sentence : `Could not ${what}. The server's answer was not understood; try again in a moment.`);
+    }, (error: unknown) => {
+      if (disposed) return;
+      undo(); settle(); networksChanged();
+      throw new Error(routeFailure(what, error));
+    });
+  };
+  const routeListeners = new Set<() => void>();
+  const known = (id: string): MeshNetwork => {
+    const n = networkById.get(id);
+    if (!n) throw new Error("That network is no longer listed.");
+    return n;
+  };
+  const routes: RoutesSource = {
+    list: () => networks,
+    get: (id) => networkById.get(id),
+    arrowsTo: (id) => grants.reduce((k, g) => k + (g.to === id ? 1 : 0), 0),
+    approve(id) {
+      let n: MeshNetwork;
+      try { n = known(id); } catch (e) { return Promise.reject(e as Error); }
+      if (n.state === "approved") return Promise.resolve();
+      const before = { state: n.state, refusal: n.refusal };
+      return routeChange(n, `approve ${n.cidr}`, ACTION.routeApprove, { node_id: n.nodeId, network: n.cidr, masquerade: !n.keepSource },
+        () => { n.state = "approved"; delete n.refusal; },
+        () => { n.state = before.state; if (before.refusal) n.refusal = before.refusal; });
+    },
+    decline(id) {
+      let n: MeshNetwork;
+      try { n = known(id); } catch (e) { return Promise.reject(e as Error); }
+      if (n.state !== "pending") return Promise.resolve();
+      return routeChange(n, `decline ${n.cidr}`, ACTION.routeDecline, { route_id: n.routeId }, () => { n.state = "declined"; }, () => { n.state = "pending"; });
+    },
+    revoke(id) {
+      let n: MeshNetwork;
+      try { n = known(id); } catch (e) { return Promise.reject(e as Error); }
+      if (n.state !== "approved") return Promise.resolve();
+      // The arrows to it go at once, as they do on the server; an undo brings the same objects back in their places.
+      const kept = grants;
+      return routeChange(n, `stop routing ${n.cidr}`, ACTION.routeRevoke, { route_id: n.routeId },
+        () => { n.state = "pending"; grants = grants.filter((g) => g.to !== id); for (const g of kept) if (g.to === id) grantById.delete(g.id); },
+        () => { n.state = "approved"; grants = kept; for (const g of kept) grantById.set(g.id, g); });
+    },
+    setKeepSource(id, keep) {
+      let n: MeshNetwork;
+      try { n = known(id); } catch (e) { return Promise.reject(e as Error); }
+      if (n.state !== "approved" || n.keepSource === keep) return Promise.resolve();
+      return routeChange(n, keep ? `keep each machine's address on ${n.cidr}` : `show ${n.router}'s address on ${n.cidr}`, ACTION.routeApprove,
+        { node_id: n.nodeId, network: n.cidr, masquerade: !keep }, () => { n.keepSource = keep; }, () => { n.keepSource = !keep; });
+    },
+    onChange(l) { routeListeners.add(l); return () => { routeListeners.delete(l); }; },
   };
 
   // The live part is the protocol client's: it follows the server's pages, keeps one revision line, drops answers a newer
@@ -252,7 +408,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
   const end = (name: string): Record<string, unknown> | undefined => endpointJson(name, idOf);
 
   const source: MeshSource = {
-    data: () => ({ version, nodes, tags, pins }),
+    data: () => ({ version, nodes, tags, pins, networks: drawn }),
     grants: () => grants,
     tags: () => Object.fromEntries(Object.entries(tags).map(([k, v]) => [tagNodeId(k), v])),
     status: () => status,
@@ -329,7 +485,7 @@ export function createMeshApi(options: MeshApiOptions): MeshSource {
     pin(id, x, y) { pins.set(id, { x: Math.round(x), y: Math.round(y) }); },
     onChange(l) { listeners.add(l); return () => { listeners.delete(l); }; },
     onFailure(l) { failures.add(l); return () => { failures.delete(l); }; },
-    dispose() { disposed = true; window.clearTimeout(retryTimer); window.clearTimeout(notifyTimer); offReady(); stopWatch?.(); listeners.clear(); failures.clear(); },
+    dispose() { disposed = true; if (routesSource() === routes) setRoutesSource(undefined); routeListeners.clear(); window.clearTimeout(retryTimer); window.clearTimeout(notifyTimer); offReady(); stopWatch?.(); listeners.clear(); failures.clear(); },
   };
   return source;
 }

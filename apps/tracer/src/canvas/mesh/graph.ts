@@ -49,6 +49,8 @@ export interface GraphHooks {
   dropArrow(entry: TopoArrow, fade: boolean): void;
   drawArrow(entry: TopoArrow): void;
   headSize(): number;
+  /** A mounted card's node changed: bring what the card shows beyond the shared texts (a network's buttons) up to date. */
+  refreshCard?(n: NodeModel, rec: WinRec): void;
 }
 
 /** The graph's level of detail: node `cards` when zoomed in, or one frame per tag `clusters` when zoomed out. */
@@ -492,7 +494,8 @@ export function createGraph(cx: Ctx, c: ViewRec, source: MeshSource, layoutOf: (
     for (const g of [...arrows.keys()]) if (!live.has(g)) unmountArrow(g, true);
     rebuildLanes();
     for (const [n, rec] of cards) {
-      rec.card.setStatus(n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
+      rec.card.setStatus(n.kind !== "host" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
+      hooks.refreshCard?.(n, rec);
       const [detail, sub] = rec.card.body.querySelectorAll<HTMLElement>(".cl-node-detail, .cl-node-sub");
       if (detail && detail.textContent !== n.detail) detail.textContent = n.detail;
       if (sub && sub.textContent !== n.sub) sub.textContent = n.sub;

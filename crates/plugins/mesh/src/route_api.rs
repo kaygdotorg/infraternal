@@ -1,4 +1,4 @@
-//! The administrator's side of subnet routes (D197 M3): list advertised networks, approve, revoke.
+//! The administrator's side of subnet routes (D197 M3): list advertised networks, approve, decline, revoke.
 //!
 //! Nodes advertise networks through the coordinator's identity probe ([`crate::store::Store::record_routes`]);
 //! nothing they say is routed until an administrator approves it here. Every write is the owner's:
@@ -13,6 +13,11 @@
 //! approved one anywhere in the mesh ([`crate::policy::networks::check_routable`], then every
 //! approved row, routed or not). A refusal is an answer, not an error: `{"state":"refused","reason":…}`,
 //! with nothing written, so the CLI and the UI can show the reason as it is.
+//!
+//! Declining marks a waiting network as turned down (owner, 2026-11-25: "Decline is remembered"): it
+//! stops waiting, the row outlives the node withdrawing and re-advertising it, so a machine that keeps
+//! advertising does not keep asking, and a later Approve still works and clears the decline. A
+//! decline grants nothing and takes nothing away, so it is an ordinary write without a passkey tap.
 //!
 //! Revoking deletes the approval row, every arrow that names it, and, while the node still
 //! advertises the network, puts a fresh pending row in its place. The new row has a new identity, so
@@ -32,6 +37,8 @@ pub const LIST: &str = "mesh.route.list";
 pub const APPROVE: &str = "mesh.route.approve";
 /// See [`LIST`].
 pub const REVOKE: &str = "mesh.route.revoke";
+/// See [`LIST`].
+pub const DECLINE: &str = "mesh.route.decline";
 
 /// Who is acting.
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +83,14 @@ pub struct Revoke {
     pub route_id: u64,
 }
 
+/// Input of [`DECLINE`].
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Decline {
+    /// The waiting network's identity, as [`LIST`] shows it.
+    pub route_id: u64,
+}
+
 /// A parsed route request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -85,6 +100,8 @@ pub enum Request {
     Approve(Approve),
     /// Revoke one approval.
     Revoke(Revoke),
+    /// Turn down one waiting network, and remember it.
+    Decline(Decline),
 }
 
 /// Parse one route action strictly, before any database work.
@@ -102,6 +119,7 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, MeshApiError>
         LIST => serde_json::from_slice::<Empty>(input).map(|_| Request::List),
         APPROVE => serde_json::from_slice(input).map(Request::Approve),
         REVOKE => serde_json::from_slice(input).map(Request::Revoke),
+        DECLINE => serde_json::from_slice(input).map(Request::Decline),
         _ => return Err(MeshApiError::InvalidInput),
     };
     parsed.map_err(|_| MeshApiError::InvalidInput)
@@ -143,6 +161,7 @@ pub async fn execute(
             }
         }
         Request::Revoke(revoke) => revoke_in(&mut tx, &revoke, &auditor, now).await?,
+        Request::Decline(decline) => decline_in(&mut tx, &decline, &auditor, now).await?,
     };
     // Recheck freshness at the end of the writer transaction, after every wait (D28).
     authorize(&mut tx, actor, now).await?;
@@ -208,15 +227,15 @@ async fn authorize(
     }
 }
 
-/// Every advertised or approved network, with its router's name and, for a waiting one, the
-/// reason an approval would be refused right now.
+/// Every advertised, approved or declined network, with its router's name, whether the router
+/// advertises it now, and, for a waiting one, the reason an approval would be refused right now.
 async fn list(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     settings: &crate::policy::model::MeshSettings,
 ) -> Result<Value, MeshApiError> {
     let approved = approved_networks(tx, None).await?;
     let rows = sqlx::query(
-        "SELECT r.id,r.node_id,n.name,r.network,r.advertised,r.approved_at,r.approved_by,r.masquerade \
+        "SELECT r.id,r.node_id,n.name,r.network,r.advertised,r.approved_at,r.approved_by,r.masquerade,r.declined_at \
          FROM mesh_routes AS r JOIN mesh_nodes AS n ON n.id=r.node_id ORDER BY r.node_id,r.network",
     )
     .fetch_all(&mut **tx)
@@ -236,10 +255,14 @@ async fn list(
         let advertised: bool = row
             .try_get("advertised")
             .map_err(|error| storage_sql_error(error))?;
-        let state = match (approved_at.is_some(), advertised) {
-            (true, true) => "approved",
-            (true, false) => "approved, not advertised",
-            (false, _) => "waiting for approval",
+        let declined_at: Option<i64> = row
+            .try_get("declined_at")
+            .map_err(|error| storage_sql_error(error))?;
+        let state = match (approved_at.is_some(), advertised, declined_at.is_some()) {
+            (true, true, _) => "approved",
+            (true, false, _) => "approved, not advertised",
+            (false, _, true) => "declined",
+            (false, _, false) => "waiting for approval",
         };
         let mut route = json!({
             "route_id": id,
@@ -247,12 +270,13 @@ async fn list(
             "node": row.try_get::<String, _>("name").map_err(|error| storage_sql_error(error))?,
             "network": text,
             "state": state,
+            "advertised": advertised,
             "masquerade": row.try_get::<bool, _>("masquerade").map_err(|error| storage_sql_error(error))?,
         });
         if let Some(at) = approved_at {
             route["approved_at"] = json!(at);
         }
-        if approved_at.is_none() {
+        if approved_at.is_none() && declined_at.is_none() {
             let reason = match text.parse::<Network>() {
                 Ok(network) => refusal(network, settings, &approved, None).map(|r| r.to_string()),
                 Err(error) => Some(error.to_string()),
@@ -382,7 +406,8 @@ async fn approve_in(
     if let Some(reason) = refusal(approve.network, settings, &approved, None) {
         return Ok(Err(reason.to_string()));
     }
-    sqlx::query("UPDATE mesh_routes SET approved_at=?,approved_by=?,masquerade=? WHERE id=?")
+    // Approving a declined network takes the decline back: a row is never both.
+    sqlx::query("UPDATE mesh_routes SET approved_at=?,approved_by=?,masquerade=?,declined_at=NULL,declined_by=NULL WHERE id=?")
         .bind(approved_at.unwrap_or(now))
         .bind(&auditor.user)
         .bind(approve.masquerade)
@@ -461,6 +486,55 @@ async fn revoke_in(
     Ok(json!({"state": "revoked", "route_id": id, "arrows_removed": arrows, "revision": revision}))
 }
 
+/// Decline one waiting network: mark it turned down so it stops waiting and is not asked about again.
+/// Declining twice is answered as done without a second write. An approved network is revoked, not
+/// declined (`NotFound`), so a decline can never take access away.
+async fn decline_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    decline: &Decline,
+    auditor: &Auditor,
+    now: i64,
+) -> Result<Value, MeshApiError> {
+    let id = i64::try_from(decline.route_id).map_err(|_| MeshApiError::InvalidInput)?;
+    let row = sqlx::query(
+        "SELECT node_id,network,declined_at FROM mesh_routes WHERE id=? AND approved_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| storage_sql_error(error))?
+    .ok_or(MeshApiError::NotFound)?;
+    let declined: Option<i64> = row
+        .try_get("declined_at")
+        .map_err(|error| storage_sql_error(error))?;
+    if declined.is_some() {
+        return Ok(json!({"state": "declined", "route_id": id}));
+    }
+    let node: i64 = row
+        .try_get("node_id")
+        .map_err(|error| storage_sql_error(error))?;
+    let network: String = row
+        .try_get("network")
+        .map_err(|error| storage_sql_error(error))?;
+    sqlx::query("UPDATE mesh_routes SET declined_at=?,declined_by=? WHERE id=?")
+        .bind(now)
+        .bind(&auditor.user)
+        .bind(id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|error| storage_sql_error(error))?;
+    let revision = bump(
+        tx,
+        auditor,
+        DECLINE,
+        &network,
+        now,
+        json!({"route_id": id, "node_id": node, "network": network, "via": if auditor.local { "local" } else { "session" }}),
+    )
+    .await?;
+    Ok(json!({"state": "declined", "route_id": id, "revision": revision}))
+}
+
 /// Advance the mesh revision and write the audit row for one route change.
 async fn bump(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -502,6 +576,10 @@ mod tests {
     fn route_requests_are_strict() {
         assert_eq!(parse_action(LIST, b"{}"), Ok(Request::List));
         assert_eq!(
+            parse_action(DECLINE, br#"{"route_id":4}"#),
+            Ok(Request::Decline(Decline { route_id: 4 }))
+        );
+        assert_eq!(
             parse_action(APPROVE, br#"{"node_id":2,"network":"192.168.1.0/24"}"#),
             Ok(Request::Approve(Approve {
                 node_id: 2,
@@ -516,6 +594,7 @@ mod tests {
                 br#"{"node_id":2,"network":"192.168.1.0/24","extra":1}"#,
             ),
             (REVOKE, br#"{"route_id":"1"}"#),
+            (DECLINE, br#"{"route_id":1,"why":"noise"}"#),
             (LIST, br#"{"all":true}"#),
             ("mesh.route.other", b"{}"),
             (LIST, b"[]"),

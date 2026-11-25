@@ -23,6 +23,7 @@ import { Arrow, DragArrow, anchors } from "./arrows";
 import { createGraph, type GraphController, type TopoArrow } from "./graph";
 import { createLayoutModel } from "./layout-model";
 import { createSay, tagChips } from "./entities";
+import { approvedToast, declinedToast, routesSource } from "./networks";
 import { endName, grantSentence, type MeshSource } from "./source";
 
 export interface GraphViewModule {
@@ -163,7 +164,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
    */
   const cardPool: WinRec[] = [];
   const boundTo = new WeakMap<WinRec, NodeModel>();
-  const nodeStatus = (n: NodeModel): "none" | "offline" | "connecting" | "live" => (n.kind === "tag" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
+  const nodeStatus = (n: NodeModel): "none" | "offline" | "connecting" | "live" => (n.kind !== "host" ? "none" : n.state === "offline" ? "offline" : n.state === "behind" ? "connecting" : "live");
   /** Ends a card's open drag without writing anything: set by `wireNode`, called when the card stops being that node's. */
   const endDrag = new WeakMap<WinRec, () => void>();
   const bindNode = (rec: WinRec, n: NodeModel): void => {
@@ -176,7 +177,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const { card } = rec;
     card.root.dataset.windowId = rec.model.id;
     card.setTitle({ host: n.label });
-    card.setIcon(n.kind === "tag" ? lineIcon(ICON.tag) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"));
+    card.setIcon(n.kind === "tag" ? lineIcon(ICON.tag) : n.kind === "network" ? lineIcon(ICON.network) : hostIconMarkup(n.os ?? "unknown", "ui-host-mark"));
     card.setStatus(nodeStatus(n));
     card.root.style.transform = `translate(${n.x}px,${n.y}px)`;
     const meta = card.body.firstElementChild as HTMLElement;
@@ -187,7 +188,57 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     else { if (detail.dataset.tags !== undefined) delete detail.dataset.tags; detail.textContent = n.detail; }
     (meta.children[1] as HTMLElement).textContent = n.sub;
     const port = card.pill.nextElementSibling as HTMLElement | null;
-    if (port?.classList.contains("cl-port")) { port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`; port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`); }
+    // A network is only ever the end of an arrow (D197 M3): the machines on it are not in the mesh, so it has no connector to draw from.
+    if (port?.classList.contains("cl-port")) { port.toggleAttribute("data-target", n.kind === "network"); port.hidden = n.kind === "network" || !source.canEdit(); }
+    refreshNetwork(rec, n);
+    if (port?.classList.contains("cl-port") && n.kind !== "network") { port.dataset.tip = `Drag onto another card to let ${endName(n.id)} reach it`; port.setAttribute("aria-label", `Let ${endName(n.id)} reach another card`); }
+  };
+  /**
+   * What a network's card shows beyond the shared texts (D197 M3): its state on the card (`data-route`), the two buttons of an
+   * advertisement that waits, and the words of a refusal (a short line on the card, the whole sentence on hover).
+   */
+  const refreshNetwork = (rec: WinRec, n: NodeModel): void => {
+    const root = rec.card.root;
+    const route = n.kind === "network" ? n.route : undefined;
+    if (route) root.dataset.route = route.state; else delete root.dataset.route;
+    const actions = rec.card.body.querySelector<HTMLElement>(".cl-node-actions");
+    // Only the owner approves (the source of routes exists only for the owner); while a change is on its way the buttons rest.
+    if (actions) {
+      actions.hidden = route?.state !== "pending" || !routesSource();
+      for (const b of actions.querySelectorAll("button")) b.disabled = route?.saving === true;
+    }
+    root.toggleAttribute("data-saving", route?.saving === true);
+    const sub = rec.card.body.querySelector<HTMLElement>(".cl-node-sub");
+    if (sub) {
+      if (route?.refusal) { sub.dataset.tone = "warn"; sub.dataset.tip = route.refusal.sentence; } else { delete sub.dataset.tone; delete sub.dataset.tip; }
+    }
+  };
+  /** The card of a waiting advertisement: Approve and Decline, at the card's own width (reuses the shared button). */
+  const networkActions = (rec: WinRec): HTMLElement => {
+    const row = el("div", "cl-node-actions");
+    row.hidden = true;
+    const make = (label: string, kind: "primary" | "secondary"): HTMLButtonElement => {
+      const b = el("button", "ui-button cl-node-button");
+      b.type = "button";
+      b.dataset.button = kind;
+      b.textContent = label;
+      // A press on a button is not the start of a pan or a drag of the card.
+      b.addEventListener("pointerdown", (e) => e.stopPropagation(), { signal });
+      return b;
+    };
+    const approve = make("Approve", "primary"), decline = make("Decline", "secondary");
+    // The card changes at once (the source is optimistic); a refusal puts it back, says why on the card, and in a toast.
+    const failed = (error: unknown): void => { cx.toast.show({ message: error instanceof Error ? error.message : String(error), tone: "error", duration: 8000 }); };
+    approve.addEventListener("click", () => {
+      const n = boundTo.get(rec)?.route, routes = routesSource();
+      if (n && routes) void routes.approve(n.id).then(() => cx.toast.show({ message: approvedToast(n.cidr) }), failed);
+    }, { signal });
+    decline.addEventListener("click", () => {
+      const n = boundTo.get(rec)?.route, routes = routesSource();
+      if (n && routes) void routes.decline(n.id).then(() => cx.toast.show({ message: declinedToast(n.cidr, n.router) }), failed);
+    }, { signal });
+    row.append(approve, decline);
+    return row;
   };
   const makeNode = (c: ViewRec, n: NodeModel): WinRec => {
     const pooled = cardPool.pop();
@@ -200,6 +251,13 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     const meta = el("div", "cl-node-meta");
     meta.innerHTML = `<span class="cl-node-detail"></span><span class="cl-node-sub"></span>`;
     card.body.append(meta);
+    // Every card can become a network's when the pool rebinds it, so each one carries the (hidden) buttons of a waiting network.
+    card.body.append(networkActions(rec));
+    // The rest of a network's card opens its window in Settings (keep the source address, revoke).
+    card.body.addEventListener("click", (e) => {
+      if (boundTo.get(rec)?.kind !== "network" || (e.target as Element).closest("button") || !routesSource()) return;
+      window.dispatchEvent(new CustomEvent("tracer:canvas-action", { detail: { action: "canvas:settings:mesh.networks", source: "pointer" } }));
+    }, { signal });
     wireNode(rec);
     wireLink(c, rec);
     bindNode(rec, n);
@@ -376,15 +434,19 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     let candidate: string | undefined;
     let over: HTMLElement | undefined;
     const taken = (id: string): boolean => source.grants().some((o) => o.from === n.id && o.to === id);
-    const move = (ev: PointerEvent): void => {
-      const w = toLocal(ev.clientX, ev.clientY);
+    // One draw per frame, from the last pointer position (a pointer may report several moves in one frame).
+    let last: { x: number; y: number } | undefined, frame = 0;
+    const queue = (ev: PointerEvent): void => { last = { x: ev.clientX, y: ev.clientY }; if (!frame) frame = requestAnimationFrame(() => { frame = 0; if (last) moveTo(last.x, last.y); }); };
+    const move = (ev: PointerEvent): void => moveTo(ev.clientX, ev.clientY);
+    const moveTo = (clientX: number, clientY: number): void => {
+      const w = toLocal(clientX, clientY);
       live.move(w, headSize());
       const radius = (coarse.matches ? 48 : 32) / cam.z;
       const gap = (r: Rect): number => Math.hypot(Math.max(r.x - w.x, 0, w.x - (r.x + r.w)), Math.max(r.y - w.y, 0, w.y - (r.y + r.h)));
       let id: string | undefined, best = Infinity;
       for (const o of c.view.nodes) {
         const r = nodeRect(c, o.id);
-        if (!r || o.id === n.id || taken(o.id)) continue;
+        if (!r || o.id === n.id || taken(o.id) || (o.kind === "network" && o.route?.state !== "approved")) continue; // an advertisement is no target until approved (D197 M3)
         const d = gap(r), limit = o.id === candidate ? radius * 1.25 : radius;
         if (d <= limit && d < best) { best = d; id = o.id; }
       }
@@ -398,9 +460,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     };
     const retract = (): void => { live.retract(); live.arrow.g.dataset.leaving = ""; window.setTimeout(() => live.dispose(), 320); };
     const up = (ev: PointerEvent): void => {
-      port.removeEventListener("pointermove", move);
+      cancelAnimationFrame(frame); frame = 0;
+      if (last && ev.type === "pointerup") moveTo(ev.clientX, ev.clientY); // the release point decides the target, not the last frame
+      port.removeEventListener("pointermove", queue);
       port.removeEventListener("pointerup", up);
       port.removeEventListener("pointercancel", up);
+      port.removeEventListener("lostpointercapture", lost);
       delete rec.card.root.dataset.linking;
       over?.removeAttribute("data-drop");
       if (!candidate || ev.type === "pointercancel") { retract(); return; }
@@ -424,9 +489,12 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
         onCancel: () => { retract(); at.done(); },
       });
     };
-    port.addEventListener("pointermove", move);
+    // The connector can leave the document under the finger (its card is rebound or dropped by a refresh): the drag ends as a cancel.
+    const lost = (ev: PointerEvent): void => { if (!port.isConnected) up(new PointerEvent("pointercancel", { pointerId: ev.pointerId })); };
+    port.addEventListener("pointermove", queue);
     port.addEventListener("pointerup", up);
     port.addEventListener("pointercancel", up);
+    port.addEventListener("lostpointercapture", lost);
     move(e);
   };
 
@@ -456,8 +524,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     let candidate: string | undefined = homeId;
     let over: HTMLElement | undefined;
     const taken = (id: string): boolean => source.grants().some((o) => o !== g && (end === "head" ? o.from === g.from && o.to === id : o.to === g.to && o.from === id));
-    const move = (ev: PointerEvent): void => {
-      const w = toLocal(ev.clientX, ev.clientY);
+    // One draw per frame, from the last pointer position, as for a card's drag.
+    let last: { x: number; y: number } | undefined, frame = 0;
+    const queue = (ev: PointerEvent): void => { last = { x: ev.clientX, y: ev.clientY }; if (!frame) frame = requestAnimationFrame(() => { frame = 0; if (last) moveTo(last.x, last.y); }); };
+    const moveTo = (clientX: number, clientY: number): void => {
+      const w = toLocal(clientX, clientY);
       live.move(w, headSize());
       // Snap: the nearest node whose edge is within the snap radius of the pointer (about 32 px, larger on touch).
       // Once snapped the radius is a quarter wider before it lets go, so the arrow does not flicker at the edge.
@@ -467,6 +538,8 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       for (const n of c.view.nodes) {
         const r = nodeRect(c, n.id);
         if (!r || n.id === fixedId) continue;
+        // A network is the end of an arrow, never its start, and only once approved (D197 M3).
+        if (n.kind === "network" && (end === "tail" || n.route?.state !== "approved")) continue;
         const d = gap(r), limit = n.id === candidate ? radius * 1.25 : radius;
         if (d <= limit && d < best) { best = d; id = n.id; }
       }
@@ -481,9 +554,11 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       }
     };
     const finish = (): void => {
-      handle.removeEventListener("pointermove", move);
+      cancelAnimationFrame(frame); frame = 0;
+      handle.removeEventListener("pointermove", queue);
       handle.removeEventListener("pointerup", up);
       handle.removeEventListener("pointercancel", up);
+      handle.removeEventListener("lostpointercapture", lost);
       over?.removeAttribute("data-drop");
     };
     /** Not changed: the end returns to where it came from, quickly and without overshoot, then the original arrow is back. */
@@ -492,6 +567,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       live.glideTo(home, 150, () => live.dispose());
     };
     const up = (ev: PointerEvent): void => {
+      if (last && ev.type === "pointerup") moveTo(ev.clientX, ev.clientY); // the release point decides the target, not the last frame
       finish();
       const at = tipAt({ x: ev.clientX, y: ev.clientY });
       if (ev.type === "pointercancel" || candidate === homeId) { putBack(); at.done(); return; }
@@ -542,9 +618,13 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       });
       at.done();
     };
-    handle.addEventListener("pointermove", move);
+    // The handle can leave the document mid-drag (a refresh unmounts and pools its arrow): the drag ends as a cancel, and
+    // the end goes home, instead of a live arrow left on the canvas waiting for a release that never comes.
+    const lost = (ev: PointerEvent): void => { if (!handle.isConnected) up(new PointerEvent("pointercancel", { pointerId: ev.pointerId, clientX: ev.clientX, clientY: ev.clientY })); };
+    handle.addEventListener("pointermove", queue);
     handle.addEventListener("pointerup", up);
     handle.addEventListener("pointercancel", up);
+    handle.addEventListener("lostpointercapture", lost);
   };
   // ---- the graph view ----------------------------------------------------------------------------------
   const graphs = new WeakMap<ViewRec, GraphController>();
@@ -552,9 +632,16 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
   const topoOf = (c: ViewRec): TopoArrow[] => graphOf(c)?.arrows() ?? [];
   /** Re-reads the mesh into a graph view: its nodes, its size, what is drawn, what the sidebar counts. */
   const sizes = new WeakMap<ViewRec, string>();
+  /**
+   * The source's data version each graph view last read. An edit confirmed on the canvas refreshes its view at once (so
+   * the arrow is redrawn in the same frame), and the source then tells every view that it changed: a view that already
+   * read that version has nothing new to read, and skipping it halves the work of a confirm.
+   */
+  const readVersion = new WeakMap<ViewRec, number>();
   const refreshGraph = (c: ViewRec): void => {
     const graph = graphOf(c);
     if (!graph) return;
+    readVersion.set(c, source.data().version);
     const layout = layoutOf(c, state.metrics);
     origins.set(c, layout.origin);
     c.view.nodes = layout.nodes;
@@ -574,9 +661,10 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     c.graphSvg = svg;
     svg.addEventListener("pointerdown", (e) => {
       // Touch: a tap on an arrow selects it (its handles show); a tap on another arrow moves the selection.
-      const hitEl = (e.target as Element).closest(".cl-arrow-hit, .cl-arrow-handle")?.closest(".cl-arrow");
+      const hitEl = (e.target as Element).closest(".cl-arrow-hit, .cl-arrow-handle, .cl-arrow-grab")?.closest(".cl-arrow");
       for (const t of topoOf(c)) t.arrow.g.toggleAttribute("data-selected", t.arrow.g === hitEl);
-      const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle");
+      // A press on an end's ring or anywhere in its grab area (28 px, 44 px on touch) takes that end.
+      const handle = (e.target as Element).closest<SVGElement>(".cl-arrow-handle, .cl-arrow-grab");
       const entry = topoOf(c).find((t) => t.arrow.g === handle?.closest(".cl-arrow"));
       if (!handle || !entry || e.button !== 0) return;
       e.stopPropagation(); e.preventDefault();
@@ -586,6 +674,7 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
       makeCard: (n) => makeNode(c, n),
       dropCard: dropNode,
       makeArrow: makeTopoArrow,
+      refreshCard: (n, rec) => refreshNetwork(rec, n),
       dropArrow: (entry, fade) => {
         if (!fade) { releaseArrow(entry); return; }
         entry.arrow.g.dataset.leaving = "";
@@ -610,10 +699,10 @@ export function createGraphView(cx: Ctx, source: MeshSource): GraphViewModule {
     refresh: refreshGraph,
     pulseNew,
     changed(rightsChanged) {
-      for (const port of ports) { if (port.isConnected) port.hidden = !source.canEdit(); else ports.delete(port); } // a dropped card's connector goes with it
+      for (const port of ports) { if (port.isConnected) port.hidden = !source.canEdit() || port.hasAttribute("data-target"); else ports.delete(port); } // a dropped card's connector goes with it
       // Handles on arrows exist only for people who may use them (D187): arrows are made again when that changes.
       if (rightsChanged) for (const c of views.values()) graphOf(c)?.reset();
-      for (const c of views.values()) if (c.view.layout === "graph") refreshGraph(c);
+      for (const c of views.values()) if (c.view.layout === "graph" && (rightsChanged || readVersion.get(c) !== source.data().version)) refreshGraph(c);
       tryWanted();
     },
     beginRename(id) { wanted = id; tryWanted(); },
