@@ -130,22 +130,15 @@ impl Session {
             Some(Request::Read(seq)) => peer.cursor = Some(seq),
             Some(Request::Snapshot) => {
                 peer.snapshot(&self.terminal, self.ring.head()).unwrap();
-                let frames = Decoder::default().feed(&peer.pending).unwrap();
-                peer.pending.clear();
-                let bytes = match frames.as_slice() {
-                    [Frame::Snapshot(_, bytes)] => {
-                        repaint = Some(Repaint::Exact);
-                        bytes
-                    }
-                    [Frame::SnapshotWithFlags(_, 1, bytes)] => {
-                        repaint = Some(Repaint::Approximate);
-                        bytes
-                    }
-                    other => panic!("expected one Snapshot, got {other:?}"),
-                };
-                let (cols, rows) = (self.config.cols, self.config.rows);
-                *viewer = Terminal::new(cols, rows).unwrap();
-                viewer.process(bytes);
+                repaint = Some(self.repaint(peer, viewer));
+            }
+            Some(Request::SnapshotFirst(seq)) => {
+                peer.snapshot_first(&self.terminal, self.ring.head(), seq)
+                    .unwrap();
+                // Without a repaint it falls back to the raw replay below.
+                if !peer.pending.is_empty() {
+                    repaint = Some(self.repaint(peer, viewer));
+                }
             }
             None => {}
         }
@@ -154,6 +147,21 @@ impl Session {
             peer.cursor = Some(seq + bytes.len() as u64);
             viewer.process(&bytes);
         }
+        repaint
+    }
+    /// Takes the one Snapshot queued for `peer` and paints it on a fresh
+    /// `viewer` at the session's size, as the client replaces its screen.
+    fn repaint(&self, peer: &mut Peer, viewer: &mut Terminal) -> Repaint {
+        let frames = Decoder::default().feed(&peer.pending).unwrap();
+        peer.pending.clear();
+        let (repaint, bytes) = match frames.as_slice() {
+            [Frame::Snapshot(_, bytes)] => (Repaint::Exact, bytes),
+            [Frame::SnapshotWithFlags(_, 1, bytes)] => (Repaint::Approximate, bytes),
+            other => panic!("expected one Snapshot, got {other:?}"),
+        };
+        let (cols, rows) = (self.config.cols, self.config.rows);
+        *viewer = Terminal::new(cols, rows).unwrap();
+        viewer.process(bytes);
         repaint
     }
 }
@@ -928,4 +936,99 @@ fn reopening_at_any_other_size_after_the_typist_left_shows_the_shim_screen() {
         .filter_map(|(written, cols, rows)| departed_typist_reopen_mismatch(written, cols, rows))
         .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `seq`-style lines, `first..` until `bytes` long: a build log or a flood
+/// that scrolled while the tab was away.
+fn backlog(first: u64, bytes: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes + 32);
+    let mut line = first;
+    while out.len() < bytes {
+        out.extend_from_slice(format!("{line}\r\n").as_bytes());
+        line += 1;
+    }
+    out.truncate(bytes);
+    out
+}
+
+/// A tab that saw `before` and comes back after `away` more bytes, at the
+/// session's own size: the session, the tab's link and its screen after the
+/// reattach, the repaint it got, and the screen a full raw replay would give.
+fn reattach_after(
+    before: &[u8],
+    away: &[u8],
+    caps: u64,
+) -> (Session, Peer, Terminal, Option<Repaint>, Terminal) {
+    let mut session = Session::new(80, 24);
+    // A backlog that the shim's default ring still holds in full.
+    session.ring = Ring::new(DEFAULT_CAPACITY);
+    session.output(before);
+    let mut viewer = Terminal::new(80, 24).unwrap();
+    viewer.process(before);
+    let mut raw = Terminal::new(80, 24).unwrap();
+    raw.process(&[before, away].concat());
+    session.output(away);
+    let mut tab = peer();
+    tab.caps = caps;
+    session.handle(&mut tab, Frame::ReadFrom(before.len() as u64));
+    let repaint = session.deliver(&mut tab, &mut viewer);
+    session.resize(&mut tab, 80, 24);
+    assert_eq!(
+        session.deliver(&mut tab, &mut viewer),
+        None,
+        "a same-size Resize adds no repaint"
+    );
+    (session, tab, viewer, repaint, raw)
+}
+
+/// #583: a tab that comes back further behind than `SNAPSHOT_FIRST_BACKLOG`
+/// to a session whose engine exports exactly (here after RIS) gets the screen
+/// first, not its backlog, and ends on exactly the shim's state, which is also
+/// the screen a full raw replay gives.
+#[test]
+fn a_reattach_far_behind_gets_the_exact_screen_first() {
+    let before = [b"\x1bc".as_slice(), &backlog(1, 4096)].concat();
+    let away = backlog(
+        100_000,
+        usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap() + 1,
+    );
+    let (session, tab, viewer, repaint, raw) = reattach_after(&before, &away, APPROXIMATE_SNAPSHOT);
+    assert_eq!(repaint, Some(Repaint::Exact));
+    assert_eq!(
+        tab.cursor,
+        Some(session.ring.head()),
+        "nothing of the backlog is replayed raw"
+    );
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
+    assert_eq!(viewer.screen_difference(&raw), 0);
+}
+
+/// #583: a backlog of exactly `SNAPSHOT_FIRST_BACKLOG` bytes is still replayed raw.
+#[test]
+fn a_reattach_within_the_snapshot_first_backlog_keeps_the_raw_replay() {
+    let before = [b"\x1bc".as_slice(), &backlog(1, 4096)].concat();
+    let away = backlog(100_000, usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap());
+    let (session, tab, viewer, repaint, raw) = reattach_after(&before, &away, APPROXIMATE_SNAPSHOT);
+    assert_eq!(repaint, None);
+    assert_eq!(tab.cursor, Some(session.ring.head()));
+    assert_eq!(viewer.screen_difference(&raw), 0);
+}
+
+/// #583: a live shell's engine cannot export exactly (prompt redraw off,
+/// #521), so a reattach far behind keeps the exact raw replay: never the
+/// approximate repaint, even on a link that negotiated it, and never an Error.
+#[test]
+fn a_reattach_far_behind_without_an_exact_export_keeps_the_raw_replay() {
+    let before = backlog(1, 4096);
+    let away = backlog(
+        100_000,
+        usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap() + 1,
+    );
+    for caps in [APPROXIMATE_SNAPSHOT, 0] {
+        let (session, tab, viewer, repaint, raw) = reattach_after(&before, &away, caps);
+        assert_eq!(repaint, None, "caps {caps:#x}");
+        assert_eq!(tab.cursor, Some(session.ring.head()));
+        assert_eq!(viewer.screen_difference(&raw), 0);
+        assert_eq!(viewer.screen_difference(&session.terminal), 0);
+    }
 }
