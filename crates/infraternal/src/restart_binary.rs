@@ -322,7 +322,12 @@ fn same_running_bytes(candidate: &File) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Non-Linux builds do not compare against `/proc/self/exe`.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Keep the fallible signature identical to the Linux binary check."
+)]
 fn same_running_bytes(_candidate: &File) -> io::Result<bool> {
     Ok(false)
 }

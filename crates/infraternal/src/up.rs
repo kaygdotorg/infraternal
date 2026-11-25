@@ -692,9 +692,11 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         let activation = install.activate(&image);
         #[cfg(target_os = "macos")]
         let activation = install.activate(&image, host);
-        activation.map_err(|_error| {
+        activation.map_err(|error| {
             #[cfg(target_os = "macos")]
-            eprintln!("{_error}");
+            eprintln!("{error}");
+            #[cfg(not(target_os = "macos"))]
+            let _ = error;
             Failure::Partial
         })
     })
