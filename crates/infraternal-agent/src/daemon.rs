@@ -240,8 +240,21 @@ impl Stream {
     /// id is newer. The cancelled task forwards it as [`Message::Forget`] on the
     /// bulk lane, after everything the old relay queued, so the writer's
     /// per-stream cursor state goes away without touching a replacement's (#477).
-    fn retire(self) {
-        let _ = self.cancel.send(crate::daemon_writer::next_attachment());
+    ///
+    /// It also tells the writer, on the control lane that the writer serves ahead of its bulk
+    /// FIFO, to drop the raw output this relay still has queued ([`Message::Retire`], #583).
+    /// That runs here, synchronously in dispatch, so it is ordered before anything a
+    /// reattach of the same stream id can queue, and before any control reply (such as a
+    /// Pong fence) sent after the close. A full control lane only loses the drop, which is
+    /// the old behaviour, so the failure is not fatal.
+    fn retire(self, control: &mpsc::Sender<Message>, stream: u32) {
+        let floor = crate::daemon_writer::next_attachment();
+        // Only when the relay task is still there to follow with its Forget: that Forget is
+        // what clears the writer's retired state again (a finished relay has queued all it
+        // ever will, and leaves no state to clear).
+        if self.cancel.send(floor).is_ok() {
+            let _ = reply(control, Message::Retire(stream, floor));
+        }
     }
 }
 
@@ -1834,7 +1847,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                                 Frame::Resize {cols, rows, px_w, px_h} => Command::Resize(cols, rows, px_w, px_h),
                                 Frame::Close {..} => {
                                     if let Some(entry) = streams.remove(&stream) {
-                                        entry.retire();
+                                        entry.retire(&control, stream);
                                     }
                                     registry.refresh();
                                     census_pending = !publish_session_snapshot(&control, &registry, &mut published_sessions)?;
@@ -1851,7 +1864,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
                             });
                             if overloaded {
                                 if let Some(entry) = streams.remove(&stream) {
-                                    entry.retire();
+                                    entry.retire(&control, stream);
                                 }
                                 reply(&control, Message::Close(stream, "terminal command queue full; reattach and replay unacknowledged input"))?;
                             }
