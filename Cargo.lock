@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "gotatun"
 version = "0.10.3"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8#cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=a0be34f8d0b2b25c9c8d7e085564e941048cec39#a0be34f8d0b2b25c9c8d7e085564e941048cec39"
 dependencies = [
  "aead 0.5.2",
  "base64 0.22.1",
@@ -1572,6 +1572,7 @@ dependencies = [
  "duplicate",
  "either",
  "eyre",
+ "foldhash",
  "futures",
  "gotatun-crypto",
  "gotatun-packet",
@@ -1600,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "gotatun-crypto"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8#cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=a0be34f8d0b2b25c9c8d7e085564e941048cec39#a0be34f8d0b2b25c9c8d7e085564e941048cec39"
 dependencies = [
  "ring",
  "x25519-dalek",
@@ -1609,7 +1610,7 @@ dependencies = [
 [[package]]
 name = "gotatun-packet"
 version = "0.1.0"
-source = "git+https://github.com/kaygdotorg/gotatun?rev=cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8#cd295c2e832e5ba2c74383e3ae2e3e0f71c67fc8"
+source = "git+https://github.com/kaygdotorg/gotatun?rev=a0be34f8d0b2b25c9c8d7e085564e941048cec39#a0be34f8d0b2b25c9c8d7e085564e941048cec39"
 dependencies = [
  "bitfield-struct",
  "bytes",
@@ -2263,6 +2264,7 @@ name = "infraternal-plugin-mesh"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "foldhash",
  "futures-util",
  "gotatun",
  "hickory-proto",
