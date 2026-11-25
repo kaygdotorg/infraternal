@@ -3882,6 +3882,8 @@ mod logout_commit;
 
 #[path = "action_tap_tests.rs"]
 mod action_tap_tests;
+/// Needs the remote-host removal router, which only exists with the `remote` feature.
+#[cfg(feature = "remote")]
 #[path = "admin_window_tests.rs"]
 mod admin_window_tests;
 #[path = "api_expiry_tests.rs"]
