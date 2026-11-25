@@ -14,6 +14,7 @@
 //! - `join` (feature `join`): the join client, HTTPS over rustls with the pinned root.
 //! - `identity`, `quic` (feature `quic`): the client identity as a signer
 //!   (Ed25519 PKCS#8 on hosts, the Secure Enclave later) and the QUIC config.
+//! - `device` (feature `quic`): an iPhone's held link, Hello and liveness only.
 //! - `csr` (feature `quic`): the join's PKCS#10 request over the signer.
 //! - [`server_leaf_floor`]: the server-leaf age floor, read from DER.
 //! - `wire_datagrams` (features `quic` and `native-streams`): QUIC datagram lanes for plugins.
@@ -22,6 +23,9 @@
 /// The join's PKCS#10 request, written by hand and signed through the identity signer.
 #[cfg(feature = "quic")]
 pub mod csr;
+/// A device's held link: the Hello exchange and liveness on its QUIC connection.
+#[cfg(feature = "quic")]
+pub mod device;
 /// The QUIC runtime of one dial attempt, which cancels its drivers when dropped.
 #[cfg(feature = "quic")]
 pub mod dial_runtime;
