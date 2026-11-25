@@ -1396,7 +1396,11 @@ async fn a_ring_signed_device_csr_is_certified_and_admitted() {
         .try_into()
         .unwrap();
     assert_eq!(
-        store.admit_device(&fingerprint, joined_at).await.unwrap().host,
+        store
+            .admit_device(&fingerprint, joined_at)
+            .await
+            .unwrap()
+            .host,
         host
     );
     assert!(

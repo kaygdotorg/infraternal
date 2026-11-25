@@ -1337,7 +1337,10 @@ async fn device_host_mode_migration_deletes_p256_invitations_of_non_device_hosts
             .unwrap();
     assert_eq!(
         left,
-        vec![(uuid::Uuid::from_u128(2).as_bytes().to_vec(), "ed25519".to_owned())]
+        vec![(
+            uuid::Uuid::from_u128(2).as_bytes().to_vec(),
+            "ed25519".to_owned()
+        )]
     );
     let checks: (String, i64) = sqlx::query_as(
         "SELECT (SELECT integrity_check FROM pragma_integrity_check), (SELECT count(*) FROM pragma_foreign_key_check)",
