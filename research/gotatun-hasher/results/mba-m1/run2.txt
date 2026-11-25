@@ -1,0 +1,1201 @@
+Gnuplot not found, using plotters backend
+Benchmarking flow_start/v4/sip13_fixed(current)
+Benchmarking flow_start/v4/sip13_fixed(current): Warming up for 1.0000 s
+Benchmarking flow_start/v4/sip13_fixed(current): Collecting 100 samples in estimated 3.0679 s (197k iterations)
+Benchmarking flow_start/v4/sip13_fixed(current): Analyzing
+flow_start/v4/sip13_fixed(current)
+                        time:   [15.570 µs 15.579 µs 15.591 µs]
+                        thrpt:  [65.677 Melem/s 65.728 Melem/s 65.767 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking flow_start/v4/sip13_random
+Benchmarking flow_start/v4/sip13_random: Warming up for 1.0000 s
+Benchmarking flow_start/v4/sip13_random: Collecting 100 samples in estimated 3.0153 s (207k iterations)
+Benchmarking flow_start/v4/sip13_random: Analyzing
+flow_start/v4/sip13_random
+                        time:   [14.565 µs 14.580 µs 14.605 µs]
+                        thrpt:  [70.115 Melem/s 70.231 Melem/s 70.308 Melem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) low mild
+  6 (6.00%) high mild
+  8 (8.00%) high severe
+Benchmarking flow_start/v4/sip13_random+symmetric(no canonical)
+Benchmarking flow_start/v4/sip13_random+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v4/sip13_random+symmetric(no canonical): Collecting 100 samples in estimated 3.0651 s (101k iterations)
+Benchmarking flow_start/v4/sip13_random+symmetric(no canonical): Analyzing
+flow_start/v4/sip13_random+symmetric(no canonical)
+                        time:   [30.267 µs 30.294 µs 30.319 µs]
+                        thrpt:  [33.774 Melem/s 33.802 Melem/s 33.832 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) low severe
+  4 (4.00%) low mild
+  2 (2.00%) high mild
+Benchmarking flow_start/v4/foldhash_fast
+Benchmarking flow_start/v4/foldhash_fast: Warming up for 1.0000 s
+Benchmarking flow_start/v4/foldhash_fast: Collecting 100 samples in estimated 3.0093 s (424k iterations)
+Benchmarking flow_start/v4/foldhash_fast: Analyzing
+flow_start/v4/foldhash_fast
+                        time:   [7.0909 µs 7.1035 µs 7.1195 µs]
+                        thrpt:  [143.83 Melem/s 144.16 Melem/s 144.41 Melem/s]
+Found 19 outliers among 100 measurements (19.00%)
+  6 (6.00%) high mild
+  13 (13.00%) high severe
+Benchmarking flow_start/v4/foldhash_fast+symmetric(no canonical)
+Benchmarking flow_start/v4/foldhash_fast+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v4/foldhash_fast+symmetric(no canonical): Collecting 100 samples in estimated 3.0028 s (1.2M iterations)
+Benchmarking flow_start/v4/foldhash_fast+symmetric(no canonical): Analyzing
+flow_start/v4/foldhash_fast+symmetric(no canonical)
+                        time:   [2.4253 µs 2.4264 µs 2.4277 µs]
+                        thrpt:  [421.79 Melem/s 422.03 Melem/s 422.21 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking flow_start/v4/foldhash_quality
+Benchmarking flow_start/v4/foldhash_quality: Warming up for 1.0000 s
+Benchmarking flow_start/v4/foldhash_quality: Collecting 100 samples in estimated 3.0139 s (404k iterations)
+Benchmarking flow_start/v4/foldhash_quality: Analyzing
+flow_start/v4/foldhash_quality
+                        time:   [7.4619 µs 7.4692 µs 7.4788 µs]
+                        thrpt:  [136.92 Melem/s 137.10 Melem/s 137.23 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+Benchmarking flow_start/v4/foldhash_quality+symmetric(no canonical)
+Benchmarking flow_start/v4/foldhash_quality+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v4/foldhash_quality+symmetric(no canonical): Collecting 100 samples in estimated 3.0126 s (1.0M iterations)
+Benchmarking flow_start/v4/foldhash_quality+symmetric(no canonical): Analyzing
+flow_start/v4/foldhash_quality+symmetric(no canonical)
+                        time:   [2.8798 µs 2.8813 µs 2.8833 µs]
+                        thrpt:  [355.15 Melem/s 355.39 Melem/s 355.58 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) high mild
+  4 (4.00%) high severe
+Benchmarking flow_start/v4/ahash
+Benchmarking flow_start/v4/ahash: Warming up for 1.0000 s
+Benchmarking flow_start/v4/ahash: Collecting 100 samples in estimated 3.0174 s (384k iterations)
+Benchmarking flow_start/v4/ahash: Analyzing
+flow_start/v4/ahash     time:   [8.3621 µs 8.6166 µs 8.8866 µs]
+                        thrpt:  [115.23 Melem/s 118.84 Melem/s 122.46 Melem/s]
+Benchmarking flow_start/v4/ahash+symmetric(no canonical)
+Benchmarking flow_start/v4/ahash+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v4/ahash+symmetric(no canonical): Collecting 100 samples in estimated 3.0024 s (651k iterations)
+Benchmarking flow_start/v4/ahash+symmetric(no canonical): Analyzing
+flow_start/v4/ahash+symmetric(no canonical)
+                        time:   [4.6040 µs 4.6094 µs 4.6166 µs]
+                        thrpt:  [221.81 Melem/s 222.15 Melem/s 222.42 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) high mild
+  7 (7.00%) high severe
+Benchmarking flow_start/v4/fxhash
+Benchmarking flow_start/v4/fxhash: Warming up for 1.0000 s
+Benchmarking flow_start/v4/fxhash: Collecting 100 samples in estimated 3.0103 s (475k iterations)
+Benchmarking flow_start/v4/fxhash: Analyzing
+flow_start/v4/fxhash    time:   [6.0428 µs 6.0999 µs 6.1551 µs]
+                        thrpt:  [166.37 Melem/s 167.87 Melem/s 169.46 Melem/s]
+Benchmarking flow_start/v4/fxhash+symmetric(no canonical)
+Benchmarking flow_start/v4/fxhash+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v4/fxhash+symmetric(no canonical): Collecting 100 samples in estimated 3.0067 s (1.5M iterations)
+Benchmarking flow_start/v4/fxhash+symmetric(no canonical): Analyzing
+flow_start/v4/fxhash+symmetric(no canonical)
+                        time:   [1.9438 µs 1.9496 µs 1.9554 µs]
+                        thrpt:  [523.68 Melem/s 525.24 Melem/s 526.80 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking flow_start/v4/manual_fold(no hasher)
+Benchmarking flow_start/v4/manual_fold(no hasher): Warming up for 1.0000 s
+Benchmarking flow_start/v4/manual_fold(no hasher): Collecting 100 samples in estimated 3.0036 s (1.6M iterations)
+Benchmarking flow_start/v4/manual_fold(no hasher): Analyzing
+flow_start/v4/manual_fold(no hasher)
+                        time:   [1.8578 µs 1.8586 µs 1.8596 µs]
+                        thrpt:  [550.66 Melem/s 550.96 Melem/s 551.20 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  7 (7.00%) high severe
+Benchmarking flow_start/v4/canonical_only(floor)
+Benchmarking flow_start/v4/canonical_only(floor): Warming up for 1.0000 s
+Benchmarking flow_start/v4/canonical_only(floor): Collecting 100 samples in estimated 3.0322 s (475k iterations)
+Benchmarking flow_start/v4/canonical_only(floor): Analyzing
+flow_start/v4/canonical_only(floor)
+                        time:   [6.5043 µs 6.6556 µs 6.8242 µs]
+                        thrpt:  [150.05 Melem/s 153.86 Melem/s 157.43 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking flow_start/v6/sip13_fixed(current)
+Benchmarking flow_start/v6/sip13_fixed(current): Warming up for 1.0000 s
+Benchmarking flow_start/v6/sip13_fixed(current): Collecting 100 samples in estimated 3.0223 s (101k iterations)
+Benchmarking flow_start/v6/sip13_fixed(current): Analyzing
+flow_start/v6/sip13_fixed(current)
+                        time:   [29.880 µs 29.894 µs 29.912 µs]
+                        thrpt:  [34.234 Melem/s 34.254 Melem/s 34.271 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking flow_start/v6/sip13_random
+Benchmarking flow_start/v6/sip13_random: Warming up for 1.0000 s
+Benchmarking flow_start/v6/sip13_random: Collecting 100 samples in estimated 3.1161 s (106k iterations)
+Benchmarking flow_start/v6/sip13_random: Analyzing
+flow_start/v6/sip13_random
+                        time:   [28.228 µs 28.579 µs 28.903 µs]
+                        thrpt:  [35.428 Melem/s 35.830 Melem/s 36.276 Melem/s]
+Benchmarking flow_start/v6/sip13_random+symmetric(no canonical)
+Benchmarking flow_start/v6/sip13_random+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v6/sip13_random+symmetric(no canonical): Collecting 100 samples in estimated 3.0319 s (101k iterations)
+Benchmarking flow_start/v6/sip13_random+symmetric(no canonical): Analyzing
+flow_start/v6/sip13_random+symmetric(no canonical)
+                        time:   [30.012 µs 30.039 µs 30.068 µs]
+                        thrpt:  [34.056 Melem/s 34.089 Melem/s 34.120 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking flow_start/v6/foldhash_fast
+Benchmarking flow_start/v6/foldhash_fast: Warming up for 1.0000 s
+Benchmarking flow_start/v6/foldhash_fast: Collecting 100 samples in estimated 3.0391 s (384k iterations)
+Benchmarking flow_start/v6/foldhash_fast: Analyzing
+flow_start/v6/foldhash_fast
+                        time:   [7.9129 µs 7.9209 µs 7.9326 µs]
+                        thrpt:  [129.09 Melem/s 129.28 Melem/s 129.41 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking flow_start/v6/foldhash_fast+symmetric(no canonical)
+Benchmarking flow_start/v6/foldhash_fast+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v6/foldhash_fast+symmetric(no canonical): Collecting 100 samples in estimated 3.0099 s (1000k iterations)
+Benchmarking flow_start/v6/foldhash_fast+symmetric(no canonical): Analyzing
+flow_start/v6/foldhash_fast+symmetric(no canonical)
+                        time:   [3.0083 µs 3.0095 µs 3.0111 µs]
+                        thrpt:  [340.07 Melem/s 340.25 Melem/s 340.39 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking flow_start/v6/foldhash_quality
+Benchmarking flow_start/v6/foldhash_quality: Warming up for 1.0000 s
+Benchmarking flow_start/v6/foldhash_quality: Collecting 100 samples in estimated 3.0114 s (364k iterations)
+Benchmarking flow_start/v6/foldhash_quality: Analyzing
+flow_start/v6/foldhash_quality
+                        time:   [8.2792 µs 8.2837 µs 8.2893 µs]
+                        thrpt:  [123.53 Melem/s 123.62 Melem/s 123.68 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+Benchmarking flow_start/v6/foldhash_quality+symmetric(no canonical)
+Benchmarking flow_start/v6/foldhash_quality+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v6/foldhash_quality+symmetric(no canonical): Collecting 100 samples in estimated 3.0114 s (874k iterations)
+Benchmarking flow_start/v6/foldhash_quality+symmetric(no canonical): Analyzing
+flow_start/v6/foldhash_quality+symmetric(no canonical)
+                        time:   [3.4432 µs 3.4448 µs 3.4467 µs]
+                        thrpt:  [297.09 Melem/s 297.26 Melem/s 297.40 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+Benchmarking flow_start/v6/ahash
+Benchmarking flow_start/v6/ahash: Warming up for 1.0000 s
+Benchmarking flow_start/v6/ahash: Collecting 100 samples in estimated 3.0071 s (348k iterations)
+Benchmarking flow_start/v6/ahash: Analyzing
+flow_start/v6/ahash     time:   [8.6268 µs 8.6336 µs 8.6422 µs]
+                        thrpt:  [118.49 Melem/s 118.61 Melem/s 118.70 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking flow_start/v6/ahash+symmetric(no canonical)
+Benchmarking flow_start/v6/ahash+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v6/ahash+symmetric(no canonical): Collecting 100 samples in estimated 3.0053 s (651k iterations)
+Benchmarking flow_start/v6/ahash+symmetric(no canonical): Analyzing
+flow_start/v6/ahash+symmetric(no canonical)
+                        time:   [4.6061 µs 4.6112 µs 4.6177 µs]
+                        thrpt:  [221.75 Melem/s 222.07 Melem/s 222.32 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+Benchmarking flow_start/v6/fxhash
+Benchmarking flow_start/v6/fxhash: Warming up for 1.0000 s
+Benchmarking flow_start/v6/fxhash: Collecting 100 samples in estimated 3.0147 s (419k iterations)
+Benchmarking flow_start/v6/fxhash: Analyzing
+flow_start/v6/fxhash    time:   [7.1918 µs 7.1971 µs 7.2033 µs]
+                        thrpt:  [142.16 Melem/s 142.28 Melem/s 142.38 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+Benchmarking flow_start/v6/fxhash+symmetric(no canonical)
+Benchmarking flow_start/v6/fxhash+symmetric(no canonical): Warming up for 1.0000 s
+Benchmarking flow_start/v6/fxhash+symmetric(no canonical): Collecting 100 samples in estimated 3.0039 s (1.5M iterations)
+Benchmarking flow_start/v6/fxhash+symmetric(no canonical): Analyzing
+flow_start/v6/fxhash+symmetric(no canonical)
+                        time:   [1.9462 µs 1.9513 µs 1.9563 µs]
+                        thrpt:  [523.42 Melem/s 524.78 Melem/s 526.15 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking flow_start/v6/manual_fold(no hasher)
+Benchmarking flow_start/v6/manual_fold(no hasher): Warming up for 1.0000 s
+Benchmarking flow_start/v6/manual_fold(no hasher): Collecting 100 samples in estimated 3.0097 s (1.3M iterations)
+Benchmarking flow_start/v6/manual_fold(no hasher): Analyzing
+flow_start/v6/manual_fold(no hasher)
+                        time:   [2.3542 µs 2.3551 µs 2.3562 µs]
+                        thrpt:  [434.61 Melem/s 434.81 Melem/s 434.97 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) low mild
+  8 (8.00%) high mild
+  3 (3.00%) high severe
+Benchmarking flow_start/v6/canonical_only(floor)
+Benchmarking flow_start/v6/canonical_only(floor): Warming up for 1.0000 s
+Benchmarking flow_start/v6/canonical_only(floor): Collecting 100 samples in estimated 3.0229 s (535k iterations)
+Benchmarking flow_start/v6/canonical_only(floor): Analyzing
+flow_start/v6/canonical_only(floor)
+                        time:   [5.6459 µs 5.6488 µs 5.6523 µs]
+                        thrpt:  [181.17 Melem/s 181.28 Melem/s 181.37 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking peer_addresses/1_peers/sip13_random
+Benchmarking peer_addresses/1_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/sip13_random: Collecting 100 samples in estimated 3.0059 s (278k iterations)
+Benchmarking peer_addresses/1_peers/sip13_random: Analyzing
+peer_addresses/1_peers/sip13_random
+                        time:   [10.653 µs 10.663 µs 10.675 µs]
+                        thrpt:  [95.923 Melem/s 96.033 Melem/s 96.123 Melem/s]
+Found 15 outliers among 100 measurements (15.00%)
+  6 (6.00%) high mild
+  9 (9.00%) high severe
+Benchmarking peer_addresses/1_peers/foldhash_fast
+Benchmarking peer_addresses/1_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/foldhash_fast: Collecting 100 samples in estimated 3.0020 s (1.3M iterations)
+Benchmarking peer_addresses/1_peers/foldhash_fast: Analyzing
+peer_addresses/1_peers/foldhash_fast
+                        time:   [2.2337 µs 2.2353 µs 2.2372 µs]
+                        thrpt:  [457.72 Melem/s 458.10 Melem/s 458.43 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peer_addresses/1_peers/foldhash_quality
+Benchmarking peer_addresses/1_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/foldhash_quality: Collecting 100 samples in estimated 3.0068 s (1.2M iterations)
+Benchmarking peer_addresses/1_peers/foldhash_quality: Analyzing
+peer_addresses/1_peers/foldhash_quality
+                        time:   [2.6116 µs 2.6136 µs 2.6161 µs]
+                        thrpt:  [391.42 Melem/s 391.80 Melem/s 392.10 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peer_addresses/1_peers/ahash
+Benchmarking peer_addresses/1_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/ahash: Collecting 100 samples in estimated 3.0047 s (904k iterations)
+Benchmarking peer_addresses/1_peers/ahash: Analyzing
+peer_addresses/1_peers/ahash
+                        time:   [3.3280 µs 3.4013 µs 3.5402 µs]
+                        thrpt:  [289.25 Melem/s 301.06 Melem/s 307.69 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking peer_addresses/1_peers/fxhash
+Benchmarking peer_addresses/1_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/fxhash: Collecting 100 samples in estimated 3.0014 s (1.5M iterations)
+Benchmarking peer_addresses/1_peers/fxhash: Analyzing
+peer_addresses/1_peers/fxhash
+                        time:   [1.9639 µs 1.9660 µs 1.9684 µs]
+                        thrpt:  [520.21 Melem/s 520.84 Melem/s 521.42 Melem/s]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking peer_addresses/1_peers/direct_index(no hash)
+Benchmarking peer_addresses/1_peers/direct_index(no hash): Warming up for 1.0000 s
+Benchmarking peer_addresses/1_peers/direct_index(no hash): Collecting 100 samples in estimated 3.0025 s (4.0M iterations)
+Benchmarking peer_addresses/1_peers/direct_index(no hash): Analyzing
+peer_addresses/1_peers/direct_index(no hash)
+                        time:   [749.41 ns 751.12 ns 753.27 ns]
+                        thrpt:  [1.3594 Gelem/s 1.3633 Gelem/s 1.3664 Gelem/s]
+Found 20 outliers among 100 measurements (20.00%)
+  3 (3.00%) high mild
+  17 (17.00%) high severe
+
+Benchmarking peer_addresses/100_peers/sip13_random
+Benchmarking peer_addresses/100_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/sip13_random: Collecting 100 samples in estimated 3.0158 s (252k iterations)
+Benchmarking peer_addresses/100_peers/sip13_random: Analyzing
+peer_addresses/100_peers/sip13_random
+                        time:   [11.928 µs 11.938 µs 11.947 µs]
+                        thrpt:  [85.709 Melem/s 85.778 Melem/s 85.845 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking peer_addresses/100_peers/foldhash_fast
+Benchmarking peer_addresses/100_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/foldhash_fast: Collecting 100 samples in estimated 3.0004 s (1.2M iterations)
+Benchmarking peer_addresses/100_peers/foldhash_fast: Analyzing
+peer_addresses/100_peers/foldhash_fast
+                        time:   [2.4518 µs 2.4533 µs 2.4547 µs]
+                        thrpt:  [417.15 Melem/s 417.39 Melem/s 417.66 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peer_addresses/100_peers/foldhash_quality
+Benchmarking peer_addresses/100_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/foldhash_quality: Collecting 100 samples in estimated 3.0066 s (1.0M iterations)
+Benchmarking peer_addresses/100_peers/foldhash_quality: Analyzing
+peer_addresses/100_peers/foldhash_quality
+                        time:   [2.8863 µs 2.8918 µs 2.9021 µs]
+                        thrpt:  [352.85 Melem/s 354.11 Melem/s 354.77 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peer_addresses/100_peers/ahash
+Benchmarking peer_addresses/100_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/ahash: Collecting 100 samples in estimated 3.0019 s (798k iterations)
+Benchmarking peer_addresses/100_peers/ahash: Analyzing
+peer_addresses/100_peers/ahash
+                        time:   [3.7616 µs 3.7649 µs 3.7685 µs]
+                        thrpt:  [271.73 Melem/s 271.99 Melem/s 272.22 Melem/s]
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high severe
+Benchmarking peer_addresses/100_peers/fxhash
+Benchmarking peer_addresses/100_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/fxhash: Collecting 100 samples in estimated 3.0012 s (1.3M iterations)
+Benchmarking peer_addresses/100_peers/fxhash: Analyzing
+peer_addresses/100_peers/fxhash
+                        time:   [2.2951 µs 2.2970 µs 2.2991 µs]
+                        thrpt:  [445.38 Melem/s 445.81 Melem/s 446.17 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+Benchmarking peer_addresses/100_peers/direct_index(no hash)
+Benchmarking peer_addresses/100_peers/direct_index(no hash): Warming up for 1.0000 s
+Benchmarking peer_addresses/100_peers/direct_index(no hash): Collecting 100 samples in estimated 3.0001 s (4.0M iterations)
+Benchmarking peer_addresses/100_peers/direct_index(no hash): Analyzing
+peer_addresses/100_peers/direct_index(no hash)
+                        time:   [747.63 ns 748.10 ns 748.66 ns]
+                        thrpt:  [1.3678 Gelem/s 1.3688 Gelem/s 1.3697 Gelem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking peer_addresses/1000_peers/sip13_random
+Benchmarking peer_addresses/1000_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/sip13_random: Collecting 100 samples in estimated 3.0382 s (278k iterations)
+Benchmarking peer_addresses/1000_peers/sip13_random: Analyzing
+peer_addresses/1000_peers/sip13_random
+                        time:   [10.932 µs 10.941 µs 10.952 µs]
+                        thrpt:  [93.499 Melem/s 93.590 Melem/s 93.671 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking peer_addresses/1000_peers/foldhash_fast
+Benchmarking peer_addresses/1000_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/foldhash_fast: Collecting 100 samples in estimated 3.0070 s (1.3M iterations)
+Benchmarking peer_addresses/1000_peers/foldhash_fast: Analyzing
+peer_addresses/1000_peers/foldhash_fast
+                        time:   [2.2378 µs 2.2393 µs 2.2409 µs]
+                        thrpt:  [456.95 Melem/s 457.29 Melem/s 457.59 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking peer_addresses/1000_peers/foldhash_quality
+Benchmarking peer_addresses/1000_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/foldhash_quality: Collecting 100 samples in estimated 3.0085 s (1.1M iterations)
+Benchmarking peer_addresses/1000_peers/foldhash_quality: Analyzing
+peer_addresses/1000_peers/foldhash_quality
+                        time:   [2.7941 µs 2.7955 µs 2.7972 µs]
+                        thrpt:  [366.08 Melem/s 366.30 Melem/s 366.49 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking peer_addresses/1000_peers/ahash
+Benchmarking peer_addresses/1000_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/ahash: Collecting 100 samples in estimated 3.0016 s (864k iterations)
+Benchmarking peer_addresses/1000_peers/ahash: Analyzing
+peer_addresses/1000_peers/ahash
+                        time:   [3.4731 µs 3.4750 µs 3.4773 µs]
+                        thrpt:  [294.49 Melem/s 294.68 Melem/s 294.84 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peer_addresses/1000_peers/fxhash
+Benchmarking peer_addresses/1000_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/fxhash: Collecting 100 samples in estimated 3.0030 s (1.5M iterations)
+Benchmarking peer_addresses/1000_peers/fxhash: Analyzing
+peer_addresses/1000_peers/fxhash
+                        time:   [1.9639 µs 1.9652 µs 1.9666 µs]
+                        thrpt:  [520.70 Melem/s 521.08 Melem/s 521.40 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+Benchmarking peer_addresses/1000_peers/direct_index(no hash)
+Benchmarking peer_addresses/1000_peers/direct_index(no hash): Warming up for 1.0000 s
+Benchmarking peer_addresses/1000_peers/direct_index(no hash): Collecting 100 samples in estimated 3.0001 s (4.0M iterations)
+Benchmarking peer_addresses/1000_peers/direct_index(no hash): Analyzing
+peer_addresses/1000_peers/direct_index(no hash)
+                        time:   [747.34 ns 747.67 ns 748.10 ns]
+                        thrpt:  [1.3688 Gelem/s 1.3696 Gelem/s 1.3702 Gelem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking peers_by_idx/1_peers/sip13_random
+Benchmarking peers_by_idx/1_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/sip13_random: Collecting 100 samples in estimated 3.0343 s (333k iterations)
+Benchmarking peers_by_idx/1_peers/sip13_random: Analyzing
+peers_by_idx/1_peers/sip13_random
+                        time:   [9.0888 µs 9.0974 µs 9.1077 µs]
+                        thrpt:  [112.43 Melem/s 112.56 Melem/s 112.67 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peers_by_idx/1_peers/foldhash_fast
+Benchmarking peers_by_idx/1_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/foldhash_fast: Collecting 100 samples in estimated 3.0098 s (414k iterations)
+Benchmarking peers_by_idx/1_peers/foldhash_fast: Analyzing
+peers_by_idx/1_peers/foldhash_fast
+                        time:   [7.2592 µs 7.2623 µs 7.2660 µs]
+                        thrpt:  [140.93 Melem/s 141.00 Melem/s 141.06 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peers_by_idx/1_peers/foldhash_quality
+Benchmarking peers_by_idx/1_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/foldhash_quality: Collecting 100 samples in estimated 3.0081 s (414k iterations)
+Benchmarking peers_by_idx/1_peers/foldhash_quality: Analyzing
+peers_by_idx/1_peers/foldhash_quality
+                        time:   [7.2610 µs 7.2664 µs 7.2729 µs]
+                        thrpt:  [140.80 Melem/s 140.92 Melem/s 141.03 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peers_by_idx/1_peers/ahash
+Benchmarking peers_by_idx/1_peers/ahash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/ahash: Collecting 100 samples in estimated 3.0082 s (414k iterations)
+Benchmarking peers_by_idx/1_peers/ahash: Analyzing
+peers_by_idx/1_peers/ahash
+                        time:   [7.2594 µs 7.2727 µs 7.2940 µs]
+                        thrpt:  [140.39 Melem/s 140.80 Melem/s 141.06 Melem/s]
+Found 14 outliers among 100 measurements (14.00%)
+  3 (3.00%) low severe
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  9 (9.00%) high severe
+Benchmarking peers_by_idx/1_peers/fxhash
+Benchmarking peers_by_idx/1_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/fxhash: Collecting 100 samples in estimated 3.0169 s (414k iterations)
+Benchmarking peers_by_idx/1_peers/fxhash: Analyzing
+peers_by_idx/1_peers/fxhash
+                        time:   [7.2763 µs 7.2816 µs 7.2871 µs]
+                        thrpt:  [140.52 Melem/s 140.63 Melem/s 140.73 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking peers_by_idx/1_peers/identity(unsafe ceiling)
+Benchmarking peers_by_idx/1_peers/identity(unsafe ceiling): Warming up for 1.0000 s
+Benchmarking peers_by_idx/1_peers/identity(unsafe ceiling): Collecting 100 samples in estimated 3.0242 s (409k iterations)
+Benchmarking peers_by_idx/1_peers/identity(unsafe ceiling): Analyzing
+peers_by_idx/1_peers/identity(unsafe ceiling)
+                        time:   [7.3805 µs 7.3952 µs 7.4097 µs]
+                        thrpt:  [138.20 Melem/s 138.47 Melem/s 138.74 Melem/s]
+
+Benchmarking peers_by_idx/100_peers/sip13_random
+Benchmarking peers_by_idx/100_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/sip13_random: Collecting 100 samples in estimated 3.0350 s (288k iterations)
+Benchmarking peers_by_idx/100_peers/sip13_random: Analyzing
+peers_by_idx/100_peers/sip13_random
+                        time:   [10.520 µs 10.527 µs 10.534 µs]
+                        thrpt:  [97.209 Melem/s 97.275 Melem/s 97.334 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking peers_by_idx/100_peers/foldhash_fast
+Benchmarking peers_by_idx/100_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/foldhash_fast: Collecting 100 samples in estimated 3.0131 s (788k iterations)
+Benchmarking peers_by_idx/100_peers/foldhash_fast: Analyzing
+peers_by_idx/100_peers/foldhash_fast
+                        time:   [3.8197 µs 3.8214 µs 3.8234 µs]
+                        thrpt:  [267.82 Melem/s 267.97 Melem/s 268.08 Melem/s]
+Found 17 outliers among 100 measurements (17.00%)
+  8 (8.00%) high mild
+  9 (9.00%) high severe
+Benchmarking peers_by_idx/100_peers/foldhash_quality
+Benchmarking peers_by_idx/100_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/foldhash_quality: Collecting 100 samples in estimated 3.0018 s (773k iterations)
+Benchmarking peers_by_idx/100_peers/foldhash_quality: Analyzing
+peers_by_idx/100_peers/foldhash_quality
+                        time:   [3.8828 µs 3.8854 µs 3.8882 µs]
+                        thrpt:  [263.36 Melem/s 263.55 Melem/s 263.73 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking peers_by_idx/100_peers/ahash
+Benchmarking peers_by_idx/100_peers/ahash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/ahash: Collecting 100 samples in estimated 3.0076 s (783k iterations)
+Benchmarking peers_by_idx/100_peers/ahash: Analyzing
+peers_by_idx/100_peers/ahash
+                        time:   [3.8359 µs 3.8402 µs 3.8457 µs]
+                        thrpt:  [266.27 Melem/s 266.65 Melem/s 266.95 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peers_by_idx/100_peers/fxhash
+Benchmarking peers_by_idx/100_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/fxhash: Collecting 100 samples in estimated 3.0087 s (788k iterations)
+Benchmarking peers_by_idx/100_peers/fxhash: Analyzing
+peers_by_idx/100_peers/fxhash
+                        time:   [3.8185 µs 3.8202 µs 3.8222 µs]
+                        thrpt:  [267.91 Melem/s 268.05 Melem/s 268.17 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peers_by_idx/100_peers/identity(unsafe ceiling)
+Benchmarking peers_by_idx/100_peers/identity(unsafe ceiling): Warming up for 1.0000 s
+Benchmarking peers_by_idx/100_peers/identity(unsafe ceiling): Collecting 100 samples in estimated 3.0057 s (727k iterations)
+Benchmarking peers_by_idx/100_peers/identity(unsafe ceiling): Analyzing
+peers_by_idx/100_peers/identity(unsafe ceiling)
+                        time:   [4.1286 µs 4.1305 µs 4.1328 µs]
+                        thrpt:  [247.77 Melem/s 247.91 Melem/s 248.02 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking peers_by_idx/1000_peers/sip13_random
+Benchmarking peers_by_idx/1000_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/sip13_random: Collecting 100 samples in estimated 3.0448 s (328k iterations)
+Benchmarking peers_by_idx/1000_peers/sip13_random: Analyzing
+peers_by_idx/1000_peers/sip13_random
+                        time:   [12.070 µs 13.425 µs 14.849 µs]
+                        thrpt:  [68.963 Melem/s 76.275 Melem/s 84.837 Melem/s]
+Found 21 outliers among 100 measurements (21.00%)
+  21 (21.00%) high mild
+Benchmarking peers_by_idx/1000_peers/foldhash_fast
+Benchmarking peers_by_idx/1000_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/foldhash_fast: Collecting 100 samples in estimated 3.0025 s (798k iterations)
+Benchmarking peers_by_idx/1000_peers/foldhash_fast: Analyzing
+peers_by_idx/1000_peers/foldhash_fast
+                        time:   [3.7648 µs 3.7663 µs 3.7682 µs]
+                        thrpt:  [271.75 Melem/s 271.88 Melem/s 271.99 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peers_by_idx/1000_peers/foldhash_quality
+Benchmarking peers_by_idx/1000_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/foldhash_quality: Collecting 100 samples in estimated 3.0033 s (793k iterations)
+Benchmarking peers_by_idx/1000_peers/foldhash_quality: Analyzing
+peers_by_idx/1000_peers/foldhash_quality
+                        time:   [3.7733 µs 3.7754 µs 3.7780 µs]
+                        thrpt:  [271.04 Melem/s 271.23 Melem/s 271.38 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peers_by_idx/1000_peers/ahash
+Benchmarking peers_by_idx/1000_peers/ahash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/ahash: Collecting 100 samples in estimated 3.0003 s (798k iterations)
+Benchmarking peers_by_idx/1000_peers/ahash: Analyzing
+peers_by_idx/1000_peers/ahash
+                        time:   [3.7587 µs 3.7605 µs 3.7628 µs]
+                        thrpt:  [272.14 Melem/s 272.30 Melem/s 272.44 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peers_by_idx/1000_peers/fxhash
+Benchmarking peers_by_idx/1000_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/fxhash: Collecting 100 samples in estimated 3.0031 s (798k iterations)
+Benchmarking peers_by_idx/1000_peers/fxhash: Analyzing
+peers_by_idx/1000_peers/fxhash
+                        time:   [3.7651 µs 3.7733 µs 3.7853 µs]
+                        thrpt:  [270.52 Melem/s 271.38 Melem/s 271.97 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peers_by_idx/1000_peers/identity(unsafe ceiling)
+Benchmarking peers_by_idx/1000_peers/identity(unsafe ceiling): Warming up for 1.0000 s
+Benchmarking peers_by_idx/1000_peers/identity(unsafe ceiling): Collecting 100 samples in estimated 3.0008 s (798k iterations)
+Benchmarking peers_by_idx/1000_peers/identity(unsafe ceiling): Analyzing
+peers_by_idx/1000_peers/identity(unsafe ceiling)
+                        time:   [3.7603 µs 3.7625 µs 3.7653 µs]
+                        thrpt:  [271.95 Melem/s 272.16 Melem/s 272.32 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  5 (5.00%) high severe
+
+Benchmarking peer_ids/1_peers/sip13_random
+Benchmarking peer_ids/1_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_ids/1_peers/sip13_random: Collecting 100 samples in estimated 3.0253 s (475k iterations)
+Benchmarking peer_ids/1_peers/sip13_random: Analyzing
+peer_ids/1_peers/sip13_random
+                        time:   [6.3757 µs 6.3792 µs 6.3835 µs]
+                        thrpt:  [160.41 Melem/s 160.52 Melem/s 160.61 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peer_ids/1_peers/foldhash_fast
+Benchmarking peer_ids/1_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_ids/1_peers/foldhash_fast: Collecting 100 samples in estimated 3.0020 s (2.0M iterations)
+Benchmarking peer_ids/1_peers/foldhash_fast: Analyzing
+peer_ids/1_peers/foldhash_fast
+                        time:   [1.4671 µs 1.4677 µs 1.4685 µs]
+                        thrpt:  [697.33 Melem/s 697.69 Melem/s 697.99 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  8 (8.00%) high severe
+Benchmarking peer_ids/1_peers/foldhash_quality
+Benchmarking peer_ids/1_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_ids/1_peers/foldhash_quality: Collecting 100 samples in estimated 3.0017 s (1.7M iterations)
+Benchmarking peer_ids/1_peers/foldhash_quality: Analyzing
+peer_ids/1_peers/foldhash_quality
+                        time:   [1.7786 µs 1.7815 µs 1.7842 µs]
+                        thrpt:  [573.92 Melem/s 574.80 Melem/s 575.72 Melem/s]
+Found 20 outliers among 100 measurements (20.00%)
+  2 (2.00%) high mild
+  18 (18.00%) high severe
+Benchmarking peer_ids/1_peers/ahash
+Benchmarking peer_ids/1_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_ids/1_peers/ahash: Collecting 100 samples in estimated 3.0041 s (1.5M iterations)
+Benchmarking peer_ids/1_peers/ahash: Analyzing
+peer_ids/1_peers/ahash  time:   [1.9539 µs 1.9551 µs 1.9563 µs]
+                        thrpt:  [523.43 Melem/s 523.77 Melem/s 524.08 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peer_ids/1_peers/fxhash
+Benchmarking peer_ids/1_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_ids/1_peers/fxhash: Collecting 100 samples in estimated 3.0031 s (2.3M iterations)
+Benchmarking peer_ids/1_peers/fxhash: Analyzing
+peer_ids/1_peers/fxhash time:   [1.3303 µs 1.3310 µs 1.3318 µs]
+                        thrpt:  [768.89 Melem/s 769.36 Melem/s 769.77 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  3 (3.00%) high mild
+  8 (8.00%) high severe
+
+Benchmarking peer_ids/100_peers/sip13_random
+Benchmarking peer_ids/100_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_ids/100_peers/sip13_random: Collecting 100 samples in estimated 3.0296 s (434k iterations)
+Benchmarking peer_ids/100_peers/sip13_random: Analyzing
+peer_ids/100_peers/sip13_random
+                        time:   [6.9781 µs 6.9825 µs 6.9871 µs]
+                        thrpt:  [146.56 Melem/s 146.65 Melem/s 146.75 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking peer_ids/100_peers/foldhash_fast
+Benchmarking peer_ids/100_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_ids/100_peers/foldhash_fast: Collecting 100 samples in estimated 3.0068 s (1.7M iterations)
+Benchmarking peer_ids/100_peers/foldhash_fast: Analyzing
+peer_ids/100_peers/foldhash_fast
+                        time:   [1.7770 µs 1.7778 µs 1.7788 µs]
+                        thrpt:  [575.66 Melem/s 575.98 Melem/s 576.26 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peer_ids/100_peers/foldhash_quality
+Benchmarking peer_ids/100_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_ids/100_peers/foldhash_quality: Collecting 100 samples in estimated 3.0031 s (1.6M iterations)
+Benchmarking peer_ids/100_peers/foldhash_quality: Analyzing
+peer_ids/100_peers/foldhash_quality
+                        time:   [1.9334 µs 1.9345 µs 1.9357 µs]
+                        thrpt:  [529.00 Melem/s 529.34 Melem/s 529.64 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking peer_ids/100_peers/ahash
+Benchmarking peer_ids/100_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_ids/100_peers/ahash: Collecting 100 samples in estimated 3.0044 s (1.2M iterations)
+Benchmarking peer_ids/100_peers/ahash: Analyzing
+peer_ids/100_peers/ahash
+                        time:   [2.4361 µs 2.4395 µs 2.4432 µs]
+                        thrpt:  [419.13 Melem/s 419.75 Melem/s 420.34 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking peer_ids/100_peers/fxhash
+Benchmarking peer_ids/100_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_ids/100_peers/fxhash: Collecting 100 samples in estimated 3.0017 s (1.6M iterations)
+Benchmarking peer_ids/100_peers/fxhash: Analyzing
+peer_ids/100_peers/fxhash
+                        time:   [1.8496 µs 1.8520 µs 1.8544 µs]
+                        thrpt:  [552.21 Melem/s 552.93 Melem/s 553.64 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+Benchmarking peer_ids/1000_peers/sip13_random
+Benchmarking peer_ids/1000_peers/sip13_random: Warming up for 1.0000 s
+Benchmarking peer_ids/1000_peers/sip13_random: Collecting 100 samples in estimated 3.0232 s (470k iterations)
+Benchmarking peer_ids/1000_peers/sip13_random: Analyzing
+peer_ids/1000_peers/sip13_random
+                        time:   [6.4374 µs 6.4405 µs 6.4443 µs]
+                        thrpt:  [158.90 Melem/s 158.99 Melem/s 159.07 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) low mild
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking peer_ids/1000_peers/foldhash_fast
+Benchmarking peer_ids/1000_peers/foldhash_fast: Warming up for 1.0000 s
+Benchmarking peer_ids/1000_peers/foldhash_fast: Collecting 100 samples in estimated 3.0032 s (1.9M iterations)
+Benchmarking peer_ids/1000_peers/foldhash_fast: Analyzing
+peer_ids/1000_peers/foldhash_fast
+                        time:   [1.5829 µs 1.5845 µs 1.5865 µs]
+                        thrpt:  [645.43 Melem/s 646.26 Melem/s 646.92 Melem/s]
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+Benchmarking peer_ids/1000_peers/foldhash_quality
+Benchmarking peer_ids/1000_peers/foldhash_quality: Warming up for 1.0000 s
+Benchmarking peer_ids/1000_peers/foldhash_quality: Collecting 100 samples in estimated 3.0058 s (1.5M iterations)
+Benchmarking peer_ids/1000_peers/foldhash_quality: Analyzing
+peer_ids/1000_peers/foldhash_quality
+                        time:   [1.9587 µs 1.9597 µs 1.9609 µs]
+                        thrpt:  [522.22 Melem/s 522.53 Melem/s 522.79 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking peer_ids/1000_peers/ahash
+Benchmarking peer_ids/1000_peers/ahash: Warming up for 1.0000 s
+Benchmarking peer_ids/1000_peers/ahash: Collecting 100 samples in estimated 3.0070 s (1.5M iterations)
+Benchmarking peer_ids/1000_peers/ahash: Analyzing
+peer_ids/1000_peers/ahash
+                        time:   [2.0117 µs 2.0137 µs 2.0157 µs]
+                        thrpt:  [508.00 Melem/s 508.53 Melem/s 509.03 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking peer_ids/1000_peers/fxhash
+Benchmarking peer_ids/1000_peers/fxhash: Warming up for 1.0000 s
+Benchmarking peer_ids/1000_peers/fxhash: Collecting 100 samples in estimated 3.0023 s (2.2M iterations)
+Benchmarking peer_ids/1000_peers/fxhash: Analyzing
+peer_ids/1000_peers/fxhash
+                        time:   [1.3460 µs 1.3466 µs 1.3473 µs]
+                        thrpt:  [760.04 Melem/s 760.45 Melem/s 760.79 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  6 (6.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking incoming_runs/1_peers_per_batch/sip13_random
+Benchmarking incoming_runs/1_peers_per_batch/sip13_random: Warming up for 1.0000 s
+Benchmarking incoming_runs/1_peers_per_batch/sip13_random: Collecting 100 samples in estimated 3.0061 s (2.0M iterations)
+Benchmarking incoming_runs/1_peers_per_batch/sip13_random: Analyzing
+incoming_runs/1_peers_per_batch/sip13_random
+                        time:   [1.5195 µs 1.5207 µs 1.5221 µs]
+                        thrpt:  [42.047 Melem/s 42.086 Melem/s 42.120 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_fast
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_fast: Warming up for 1.0000 s
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_fast: Collecting 100 samples in estimated 3.0001 s (8.1M iterations)
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_fast: Analyzing
+incoming_runs/1_peers_per_batch/foldhash_fast
+                        time:   [371.77 ns 371.96 ns 372.19 ns]
+                        thrpt:  [171.96 Melem/s 172.06 Melem/s 172.15 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_quality
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_quality: Warming up for 1.0000 s
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_quality: Collecting 100 samples in estimated 3.0012 s (7.7M iterations)
+Benchmarking incoming_runs/1_peers_per_batch/foldhash_quality: Analyzing
+incoming_runs/1_peers_per_batch/foldhash_quality
+                        time:   [391.23 ns 391.41 ns 391.63 ns]
+                        thrpt:  [163.42 Melem/s 163.51 Melem/s 163.59 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking incoming_runs/1_peers_per_batch/ahash
+Benchmarking incoming_runs/1_peers_per_batch/ahash: Warming up for 1.0000 s
+Benchmarking incoming_runs/1_peers_per_batch/ahash: Collecting 100 samples in estimated 3.0016 s (7.7M iterations)
+Benchmarking incoming_runs/1_peers_per_batch/ahash: Analyzing
+incoming_runs/1_peers_per_batch/ahash
+                        time:   [392.13 ns 392.41 ns 392.77 ns]
+                        thrpt:  [162.94 Melem/s 163.09 Melem/s 163.21 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking incoming_runs/1_peers_per_batch/fxhash
+Benchmarking incoming_runs/1_peers_per_batch/fxhash: Warming up for 1.0000 s
+Benchmarking incoming_runs/1_peers_per_batch/fxhash: Collecting 100 samples in estimated 3.0003 s (9.6M iterations)
+Benchmarking incoming_runs/1_peers_per_batch/fxhash: Analyzing
+incoming_runs/1_peers_per_batch/fxhash
+                        time:   [312.92 ns 313.14 ns 313.38 ns]
+                        thrpt:  [204.22 Melem/s 204.38 Melem/s 204.53 Melem/s]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+Benchmarking incoming_runs/8_peers_per_batch/sip13_random
+Benchmarking incoming_runs/8_peers_per_batch/sip13_random: Warming up for 1.0000 s
+Benchmarking incoming_runs/8_peers_per_batch/sip13_random: Collecting 100 samples in estimated 3.0019 s (1.7M iterations)
+Benchmarking incoming_runs/8_peers_per_batch/sip13_random: Analyzing
+incoming_runs/8_peers_per_batch/sip13_random
+                        time:   [1.6123 µs 1.6499 µs 1.6874 µs]
+                        thrpt:  [37.929 Melem/s 38.791 Melem/s 39.694 Melem/s]
+Found 21 outliers among 100 measurements (21.00%)
+  18 (18.00%) low severe
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_fast
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_fast: Warming up for 1.0000 s
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_fast: Collecting 100 samples in estimated 3.0000 s (3.7M iterations)
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_fast: Analyzing
+incoming_runs/8_peers_per_batch/foldhash_fast
+                        time:   [814.21 ns 814.55 ns 814.97 ns]
+                        thrpt:  [78.531 Melem/s 78.571 Melem/s 78.604 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) low severe
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_quality
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_quality: Warming up for 1.0000 s
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_quality: Collecting 100 samples in estimated 3.0003 s (3.5M iterations)
+Benchmarking incoming_runs/8_peers_per_batch/foldhash_quality: Analyzing
+incoming_runs/8_peers_per_batch/foldhash_quality
+                        time:   [846.19 ns 847.40 ns 849.51 ns]
+                        thrpt:  [75.337 Melem/s 75.525 Melem/s 75.633 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking incoming_runs/8_peers_per_batch/ahash
+Benchmarking incoming_runs/8_peers_per_batch/ahash: Warming up for 1.0000 s
+Benchmarking incoming_runs/8_peers_per_batch/ahash: Collecting 100 samples in estimated 3.0005 s (3.5M iterations)
+Benchmarking incoming_runs/8_peers_per_batch/ahash: Analyzing
+incoming_runs/8_peers_per_batch/ahash
+                        time:   [849.30 ns 849.79 ns 850.36 ns]
+                        thrpt:  [75.262 Melem/s 75.312 Melem/s 75.356 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+Benchmarking incoming_runs/8_peers_per_batch/fxhash
+Benchmarking incoming_runs/8_peers_per_batch/fxhash: Warming up for 1.0000 s
+Benchmarking incoming_runs/8_peers_per_batch/fxhash: Collecting 100 samples in estimated 3.0033 s (4.2M iterations)
+Benchmarking incoming_runs/8_peers_per_batch/fxhash: Analyzing
+incoming_runs/8_peers_per_batch/fxhash
+                        time:   [719.34 ns 720.13 ns 721.14 ns]
+                        thrpt:  [88.749 Melem/s 88.873 Melem/s 88.970 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  1 (1.00%) low severe
+  4 (4.00%) high severe
+
+Benchmarking bulk_recency/1_destinations/sip13_random
+Benchmarking bulk_recency/1_destinations/sip13_random: Warming up for 1.0000 s
+Benchmarking bulk_recency/1_destinations/sip13_random: Collecting 100 samples in estimated 3.0468 s (252k iterations)
+Benchmarking bulk_recency/1_destinations/sip13_random: Analyzing
+bulk_recency/1_destinations/sip13_random
+                        time:   [12.062 µs 12.071 µs 12.080 µs]
+                        thrpt:  [84.767 Melem/s 84.832 Melem/s 84.894 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking bulk_recency/1_destinations/foldhash_fast
+Benchmarking bulk_recency/1_destinations/foldhash_fast: Warming up for 1.0000 s
+Benchmarking bulk_recency/1_destinations/foldhash_fast: Collecting 100 samples in estimated 3.0063 s (1.1M iterations)
+Benchmarking bulk_recency/1_destinations/foldhash_fast: Analyzing
+bulk_recency/1_destinations/foldhash_fast
+                        time:   [2.6888 µs 2.6902 µs 2.6917 µs]
+                        thrpt:  [380.43 Melem/s 380.65 Melem/s 380.84 Melem/s]
+Found 18 outliers among 100 measurements (18.00%)
+  14 (14.00%) high mild
+  4 (4.00%) high severe
+Benchmarking bulk_recency/1_destinations/foldhash_quality
+Benchmarking bulk_recency/1_destinations/foldhash_quality: Warming up for 1.0000 s
+Benchmarking bulk_recency/1_destinations/foldhash_quality: Collecting 100 samples in estimated 3.0081 s (1.0M iterations)
+Benchmarking bulk_recency/1_destinations/foldhash_quality: Analyzing
+bulk_recency/1_destinations/foldhash_quality
+                        time:   [2.9758 µs 2.9775 µs 2.9796 µs]
+                        thrpt:  [343.67 Melem/s 343.92 Melem/s 344.11 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  3 (3.00%) high mild
+  6 (6.00%) high severe
+Benchmarking bulk_recency/1_destinations/ahash
+Benchmarking bulk_recency/1_destinations/ahash: Warming up for 1.0000 s
+Benchmarking bulk_recency/1_destinations/ahash: Collecting 100 samples in estimated 3.0019 s (758k iterations)
+Benchmarking bulk_recency/1_destinations/ahash: Analyzing
+bulk_recency/1_destinations/ahash
+                        time:   [3.9655 µs 3.9686 µs 3.9716 µs]
+                        thrpt:  [257.83 Melem/s 258.03 Melem/s 258.22 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking bulk_recency/1_destinations/fxhash
+Benchmarking bulk_recency/1_destinations/fxhash: Warming up for 1.0000 s
+Benchmarking bulk_recency/1_destinations/fxhash: Collecting 100 samples in estimated 3.0083 s (1.3M iterations)
+Benchmarking bulk_recency/1_destinations/fxhash: Analyzing
+bulk_recency/1_destinations/fxhash
+                        time:   [2.3359 µs 2.3380 µs 2.3406 µs]
+                        thrpt:  [437.49 Melem/s 437.97 Melem/s 438.37 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking bulk_recency/64_destinations/sip13_random
+Benchmarking bulk_recency/64_destinations/sip13_random: Warming up for 1.0000 s
+Benchmarking bulk_recency/64_destinations/sip13_random: Collecting 100 samples in estimated 3.0471 s (252k iterations)
+Benchmarking bulk_recency/64_destinations/sip13_random: Analyzing
+bulk_recency/64_destinations/sip13_random
+                        time:   [12.065 µs 12.079 µs 12.101 µs]
+                        thrpt:  [84.624 Melem/s 84.774 Melem/s 84.874 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking bulk_recency/64_destinations/foldhash_fast
+Benchmarking bulk_recency/64_destinations/foldhash_fast: Warming up for 1.0000 s
+Benchmarking bulk_recency/64_destinations/foldhash_fast: Collecting 100 samples in estimated 3.0125 s (1.1M iterations)
+Benchmarking bulk_recency/64_destinations/foldhash_fast: Analyzing
+bulk_recency/64_destinations/foldhash_fast
+                        time:   [2.6889 µs 2.6906 µs 2.6926 µs]
+                        thrpt:  [380.30 Melem/s 380.58 Melem/s 380.82 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking bulk_recency/64_destinations/foldhash_quality
+Benchmarking bulk_recency/64_destinations/foldhash_quality: Warming up for 1.0000 s
+Benchmarking bulk_recency/64_destinations/foldhash_quality: Collecting 100 samples in estimated 3.0096 s (853k iterations)
+Benchmarking bulk_recency/64_destinations/foldhash_quality: Analyzing
+bulk_recency/64_destinations/foldhash_quality
+                        time:   [3.5187 µs 3.5207 µs 3.5232 µs]
+                        thrpt:  [290.65 Melem/s 290.85 Melem/s 291.02 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking bulk_recency/64_destinations/ahash
+Benchmarking bulk_recency/64_destinations/ahash: Warming up for 1.0000 s
+Benchmarking bulk_recency/64_destinations/ahash: Collecting 100 samples in estimated 3.0023 s (758k iterations)
+Benchmarking bulk_recency/64_destinations/ahash: Analyzing
+bulk_recency/64_destinations/ahash
+                        time:   [3.9626 µs 3.9648 µs 3.9675 µs]
+                        thrpt:  [258.10 Melem/s 258.27 Melem/s 258.42 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high mild
+  7 (7.00%) high severe
+Benchmarking bulk_recency/64_destinations/fxhash
+Benchmarking bulk_recency/64_destinations/fxhash: Warming up for 1.0000 s
+Benchmarking bulk_recency/64_destinations/fxhash: Collecting 100 samples in estimated 3.0029 s (1.3M iterations)
+Benchmarking bulk_recency/64_destinations/fxhash: Analyzing
+bulk_recency/64_destinations/fxhash
+                        time:   [2.3420 µs 2.3435 µs 2.3454 µs]
+                        thrpt:  [436.61 Melem/s 436.96 Melem/s 437.24 Melem/s]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking allowed_ips/1_peers/ip_network_table_trie(current)
+Benchmarking allowed_ips/1_peers/ip_network_table_trie(current): Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/ip_network_table_trie(current): Collecting 100 samples in estimated 3.0024 s (66k iterations)
+Benchmarking allowed_ips/1_peers/ip_network_table_trie(current): Analyzing
+allowed_ips/1_peers/ip_network_table_trie(current)
+                        time:   [45.707 µs 45.729 µs 45.756 µs]
+                        thrpt:  [22.379 Melem/s 22.393 Melem/s 22.404 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+Benchmarking allowed_ips/1_peers/host_route_hash+sip13_random
+Benchmarking allowed_ips/1_peers/host_route_hash+sip13_random: Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/host_route_hash+sip13_random: Collecting 100 samples in estimated 3.0260 s (283k iterations)
+Benchmarking allowed_ips/1_peers/host_route_hash+sip13_random: Analyzing
+allowed_ips/1_peers/host_route_hash+sip13_random
+                        time:   [10.637 µs 10.648 µs 10.659 µs]
+                        thrpt:  [96.065 Melem/s 96.168 Melem/s 96.266 Melem/s]
+Found 10 outliers among 100 measurements (10.00%)
+  4 (4.00%) high mild
+  6 (6.00%) high severe
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_fast
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_fast: Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_fast: Collecting 100 samples in estimated 3.0048 s (1.3M iterations)
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_fast: Analyzing
+allowed_ips/1_peers/host_route_hash+foldhash_fast
+                        time:   [2.2342 µs 2.2384 µs 2.2457 µs]
+                        thrpt:  [455.98 Melem/s 457.48 Melem/s 458.33 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_quality
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_quality: Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_quality: Collecting 100 samples in estimated 3.0072 s (1.2M iterations)
+Benchmarking allowed_ips/1_peers/host_route_hash+foldhash_quality: Analyzing
+allowed_ips/1_peers/host_route_hash+foldhash_quality
+                        time:   [2.6129 µs 2.6148 µs 2.6170 µs]
+                        thrpt:  [391.28 Melem/s 391.61 Melem/s 391.90 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking allowed_ips/1_peers/host_route_hash+ahash
+Benchmarking allowed_ips/1_peers/host_route_hash+ahash: Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/host_route_hash+ahash: Collecting 100 samples in estimated 3.0051 s (904k iterations)
+Benchmarking allowed_ips/1_peers/host_route_hash+ahash: Analyzing
+allowed_ips/1_peers/host_route_hash+ahash
+                        time:   [3.3184 µs 3.3207 µs 3.3235 µs]
+                        thrpt:  [308.11 Melem/s 308.36 Melem/s 308.58 Melem/s]
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) low mild
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+Benchmarking allowed_ips/1_peers/host_route_hash+fxhash
+Benchmarking allowed_ips/1_peers/host_route_hash+fxhash: Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/host_route_hash+fxhash: Collecting 100 samples in estimated 3.0091 s (1.5M iterations)
+Benchmarking allowed_ips/1_peers/host_route_hash+fxhash: Analyzing
+allowed_ips/1_peers/host_route_hash+fxhash
+                        time:   [1.9607 µs 1.9618 µs 1.9631 µs]
+                        thrpt:  [521.61 Melem/s 521.97 Melem/s 522.26 Melem/s]
+Found 19 outliers among 100 measurements (19.00%)
+  13 (13.00%) high mild
+  6 (6.00%) high severe
+Benchmarking allowed_ips/1_peers/direct_index(host routes)
+Benchmarking allowed_ips/1_peers/direct_index(host routes): Warming up for 1.0000 s
+Benchmarking allowed_ips/1_peers/direct_index(host routes): Collecting 100 samples in estimated 3.0019 s (4.0M iterations)
+Benchmarking allowed_ips/1_peers/direct_index(host routes): Analyzing
+allowed_ips/1_peers/direct_index(host routes)
+                        time:   [747.78 ns 748.34 ns 749.06 ns]
+                        thrpt:  [1.3671 Gelem/s 1.3684 Gelem/s 1.3694 Gelem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+  10 (10.00%) high severe
+
+Benchmarking allowed_ips/100_peers/ip_network_table_trie(current)
+Benchmarking allowed_ips/100_peers/ip_network_table_trie(current): Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/ip_network_table_trie(current): Collecting 100 samples in estimated 3.0025 s (66k iterations)
+Benchmarking allowed_ips/100_peers/ip_network_table_trie(current): Analyzing
+allowed_ips/100_peers/ip_network_table_trie(current)
+                        time:   [45.725 µs 45.751 µs 45.783 µs]
+                        thrpt:  [22.366 Melem/s 22.382 Melem/s 22.395 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  1 (1.00%) high mild
+  7 (7.00%) high severe
+Benchmarking allowed_ips/100_peers/host_route_hash+sip13_random
+Benchmarking allowed_ips/100_peers/host_route_hash+sip13_random: Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/host_route_hash+sip13_random: Collecting 100 samples in estimated 3.0027 s (258k iterations)
+Benchmarking allowed_ips/100_peers/host_route_hash+sip13_random: Analyzing
+allowed_ips/100_peers/host_route_hash+sip13_random
+                        time:   [11.668 µs 11.684 µs 11.704 µs]
+                        thrpt:  [87.492 Melem/s 87.640 Melem/s 87.758 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  1 (1.00%) high mild
+  6 (6.00%) high severe
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_fast
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_fast: Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_fast: Collecting 100 samples in estimated 3.0077 s (1.3M iterations)
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_fast: Analyzing
+allowed_ips/100_peers/host_route_hash+foldhash_fast
+                        time:   [2.2362 µs 2.2375 µs 2.2389 µs]
+                        thrpt:  [457.37 Melem/s 457.66 Melem/s 457.92 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_quality
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_quality: Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_quality: Collecting 100 samples in estimated 3.0001 s (924k iterations)
+Benchmarking allowed_ips/100_peers/host_route_hash+foldhash_quality: Analyzing
+allowed_ips/100_peers/host_route_hash+foldhash_quality
+                        time:   [3.2472 µs 3.2493 µs 3.2516 µs]
+                        thrpt:  [314.92 Melem/s 315.14 Melem/s 315.35 Melem/s]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking allowed_ips/100_peers/host_route_hash+ahash
+Benchmarking allowed_ips/100_peers/host_route_hash+ahash: Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/host_route_hash+ahash: Collecting 100 samples in estimated 3.0188 s (763k iterations)
+Benchmarking allowed_ips/100_peers/host_route_hash+ahash: Analyzing
+allowed_ips/100_peers/host_route_hash+ahash
+                        time:   [3.9706 µs 3.9752 µs 3.9799 µs]
+                        thrpt:  [257.29 Melem/s 257.60 Melem/s 257.90 Melem/s]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking allowed_ips/100_peers/host_route_hash+fxhash
+Benchmarking allowed_ips/100_peers/host_route_hash+fxhash: Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/host_route_hash+fxhash: Collecting 100 samples in estimated 3.0020 s (1.4M iterations)
+Benchmarking allowed_ips/100_peers/host_route_hash+fxhash: Analyzing
+allowed_ips/100_peers/host_route_hash+fxhash
+                        time:   [2.1932 µs 2.1941 µs 2.1953 µs]
+                        thrpt:  [466.45 Melem/s 466.70 Melem/s 466.91 Melem/s]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking allowed_ips/100_peers/direct_index(host routes)
+Benchmarking allowed_ips/100_peers/direct_index(host routes): Warming up for 1.0000 s
+Benchmarking allowed_ips/100_peers/direct_index(host routes): Collecting 100 samples in estimated 3.0018 s (4.0M iterations)
+Benchmarking allowed_ips/100_peers/direct_index(host routes): Analyzing
+allowed_ips/100_peers/direct_index(host routes)
+                        time:   [747.54 ns 748.06 ns 748.70 ns]
+                        thrpt:  [1.3677 Gelem/s 1.3689 Gelem/s 1.3698 Gelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  7 (7.00%) high severe
+
+Benchmarking allowed_ips/1000_peers/ip_network_table_trie(current)
+Benchmarking allowed_ips/1000_peers/ip_network_table_trie(current): Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/ip_network_table_trie(current): Collecting 100 samples in estimated 3.0029 s (66k iterations)
+Benchmarking allowed_ips/1000_peers/ip_network_table_trie(current): Analyzing
+allowed_ips/1000_peers/ip_network_table_trie(current)
+                        time:   [45.711 µs 45.734 µs 45.762 µs]
+                        thrpt:  [22.376 Melem/s 22.390 Melem/s 22.402 Melem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking allowed_ips/1000_peers/host_route_hash+sip13_random
+Benchmarking allowed_ips/1000_peers/host_route_hash+sip13_random: Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/host_route_hash+sip13_random: Collecting 100 samples in estimated 3.0516 s (283k iterations)
+Benchmarking allowed_ips/1000_peers/host_route_hash+sip13_random: Analyzing
+allowed_ips/1000_peers/host_route_hash+sip13_random
+                        time:   [10.769 µs 10.782 µs 10.798 µs]
+                        thrpt:  [94.831 Melem/s 94.974 Melem/s 95.084 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  4 (4.00%) high mild
+  9 (9.00%) high severe
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_fast
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_fast: Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_fast: Collecting 100 samples in estimated 3.0102 s (1.3M iterations)
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_fast: Analyzing
+allowed_ips/1000_peers/host_route_hash+foldhash_fast
+                        time:   [2.2389 µs 2.2433 µs 2.2498 µs]
+                        thrpt:  [455.15 Melem/s 456.46 Melem/s 457.38 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  4 (4.00%) low mild
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_quality
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_quality: Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_quality: Collecting 100 samples in estimated 3.0085 s (1.1M iterations)
+Benchmarking allowed_ips/1000_peers/host_route_hash+foldhash_quality: Analyzing
+allowed_ips/1000_peers/host_route_hash+foldhash_quality
+                        time:   [2.7177 µs 2.7192 µs 2.7210 µs]
+                        thrpt:  [376.34 Melem/s 376.58 Melem/s 376.78 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) high mild
+  6 (6.00%) high severe
+Benchmarking allowed_ips/1000_peers/host_route_hash+ahash
+Benchmarking allowed_ips/1000_peers/host_route_hash+ahash: Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/host_route_hash+ahash: Collecting 100 samples in estimated 3.0062 s (904k iterations)
+Benchmarking allowed_ips/1000_peers/host_route_hash+ahash: Analyzing
+allowed_ips/1000_peers/host_route_hash+ahash
+                        time:   [3.3227 µs 3.3244 µs 3.3264 µs]
+                        thrpt:  [307.84 Melem/s 308.03 Melem/s 308.18 Melem/s]
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low mild
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+Benchmarking allowed_ips/1000_peers/host_route_hash+fxhash
+Benchmarking allowed_ips/1000_peers/host_route_hash+fxhash: Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/host_route_hash+fxhash: Collecting 100 samples in estimated 3.0004 s (1.5M iterations)
+Benchmarking allowed_ips/1000_peers/host_route_hash+fxhash: Analyzing
+allowed_ips/1000_peers/host_route_hash+fxhash
+                        time:   [1.9629 µs 1.9638 µs 1.9648 µs]
+                        thrpt:  [521.18 Melem/s 521.45 Melem/s 521.67 Melem/s]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking allowed_ips/1000_peers/direct_index(host routes)
+Benchmarking allowed_ips/1000_peers/direct_index(host routes): Warming up for 1.0000 s
+Benchmarking allowed_ips/1000_peers/direct_index(host routes): Collecting 100 samples in estimated 3.0008 s (4.0M iterations)
+Benchmarking allowed_ips/1000_peers/direct_index(host routes): Analyzing
+allowed_ips/1000_peers/direct_index(host routes)
+                        time:   [747.63 ns 748.11 ns 748.69 ns]
+                        thrpt:  [1.3677 Gelem/s 1.3688 Gelem/s 1.3697 Gelem/s]
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+
