@@ -1,0 +1,13 @@
+17:50  up 4 days, 21:19, 1 user, load averages: 1.28 1.27 1.28
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+17:59  up 4 days, 21:28, 1 user, load averages: 1.90 1.71 1.50
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+18:08  up 4 days, 21:37, 1 user, load averages: 2.38 2.07 1.76
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+0
