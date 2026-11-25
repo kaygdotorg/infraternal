@@ -5,6 +5,7 @@
  * with other words, so both share one measurement.
  */
 import { expect, test } from "playwright/test";
+import { mkdir } from "node:fs/promises";
 
 const LINK = "/#join=AbCdEfGhIjKlMnOpQrStUvWxYz012345";
 
@@ -36,6 +37,15 @@ for (const profile of [
           const mark = document.querySelector<HTMLElement>(".auth-mark")!.getBoundingClientRect();
           return { top: mark.top - card.top, bottom: card.bottom - lede.bottom };
         });
+        // Review screenshots, only when asked: J1216_CAPTURE=<dir> (outside the checkout), J1216_PHASE=before|after.
+        const dir = process.env.J1216_CAPTURE;
+        if (dir !== undefined) {
+          await mkdir(dir, { recursive: true });
+          for (const scheme of ["dark", "light"] as const) {
+            await page.emulateMedia({ colorScheme: scheme });
+            await page.screenshot({ path: `${dir}/${process.env.J1216_PHASE ?? "run"}-${variant}-${profile.name}-${scheme}.png` });
+          }
+        }
         expect(Math.abs(gaps.top - gaps.bottom)).toBeLessThanOrEqual(2);
       });
     }
