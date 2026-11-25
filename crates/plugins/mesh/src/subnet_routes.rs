@@ -175,7 +175,7 @@ pub(crate) fn holds_endpoint_sentence(address: std::net::IpAddr, machine: &str) 
 /// candidates (a walk may move the peer to any of them) and the authenticated endpoints the
 /// engine learned since (`live`). A wanted network holding one of them is never routed into the
 /// mesh link.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[must_use]
 pub(crate) fn underlay_addresses(
     config: &crate::dataplane::Config,
@@ -201,7 +201,7 @@ pub(crate) fn underlay_addresses(
 
 /// Split `wanted` into the networks that may be routed and the ones left out because they hold
 /// an underlay address (see [`holds_endpoint`]), with the reason text for `mesh routes`.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 #[must_use]
 pub(crate) fn split_by_underlay(
     wanted: &[Network],
