@@ -154,7 +154,8 @@ let quiet = 0;
 
 /** The box of `surface` as a comparable string, or an empty string when it is not on screen. */
 function boxOf(surface: HTMLElement): string {
-  if (!surface.isConnected || surface.hidden) return "";
+  // A surface inside a hidden element is not drawn either; the attribute says so without a style or layout read.
+  if (!surface.isConnected || surface.closest("[hidden]")) return "";
   const r = surface.getBoundingClientRect();
   return r.width < 8 || r.height < 8 ? "" : `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`;
 }
@@ -215,12 +216,13 @@ function wake(): void {
  * needed. A surface that is fading in (`data-open="false"`: the toast, the sidebar card and the tooltip are drawn invisible
  * until an animation frame sets `"true"`, which is watched too), or a document with no picture or screen at all, needs no look
  * yet: the surface is only noted, and its box is read by the next recheck or when it opens. So a surface that a handler adds
- * (a toast on a click) forces no style or layout there. A hidden surface costs nothing to look at (its box is empty without a
- * layout read) and is released as before.
+ * (a toast on a click) forces no style or layout there. A hidden surface, or one inside a hidden element (the breadcrumbs, which
+ * the top bar rewrites on every refresh), costs nothing to look at (its box is empty without a layout read) and is released as before.
  */
 function watch(surface: HTMLElement, near: () => readonly Element[]): void {
-  const found = !surface.hidden && surface.dataset.open !== "false" ? near() : [];
-  if (!surface.hidden && !found.length) {
+  const hidden = surface.closest("[hidden]") !== null;
+  const found = !hidden && surface.dataset.open !== "false" ? near() : [];
+  if (!hidden && !found.length) {
     if (!watched.has(surface)) watched.set(surface, PENDING);
     wake();
     return;

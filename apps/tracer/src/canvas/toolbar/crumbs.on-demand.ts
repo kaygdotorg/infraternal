@@ -199,7 +199,8 @@ export function createCrumbs(cx: Ctx): Crumbs {
     const free = !state.canvasLock && camera.lod === "thumb";
     const at = state.currentView === "settings" && !free ? here() : undefined;
     top.toggleAttribute("data-crumbs", at !== undefined);
-    root.hidden = at === undefined;
+    // Written only when it changes: an attribute written again with the same value still notifies every mutation observer.
+    if (root.hidden !== (at === undefined)) root.hidden = at === undefined;
     if (!at) { closeMenu(true); return; }
     const phoneHeader = phone.matches;
     root.toggleAttribute("data-phone", phoneHeader);
