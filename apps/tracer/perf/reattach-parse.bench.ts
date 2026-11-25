@@ -107,7 +107,9 @@ function measure(kind: string, size: number, run: () => { ms: number; screen: st
   return last;
 }
 
+/** The first final screen seen for each backlog size, to compare the other kind against. */
 const screens = new Map<string, string[]>();
+/** Sizes whose raw and Snapshot screens differed; any makes the run fail. */
 let mismatches = 0;
 for (const directory of process.argv.slice(2)) {
   for (const name of readdirSync(directory).sort()) {
