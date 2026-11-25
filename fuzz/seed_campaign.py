@@ -74,6 +74,12 @@ seeds = corpus('vt_stream_snapshot')
 (seeds / 'text').write_bytes(bytes([80, 0, 2, 0, 3]) + b'hello\r\nworld\r\n')
 (seeds / 'osc-resize').write_bytes(bytes([80, 1, 1, 2]) + b'\x1b]0;title' + b'\xfe\xfe\x28' + b'\x07done\r\n')
 (seeds / 'sgr').write_bytes(bytes([40, 1, 0]) + b'\x1b[1;31mred\x1b[0m \x1b[?1049hfull\x1b[?1049l')
+# A 50-column line at 20x5 whose middle row is the screen's top row, so the
+# top row continues the last history row (#521, J1238); then a resize that
+# reflows the crossing line, and further output. Size byte 19 is 20x5.
+boundary = b'0\r\n1\r\n2\r\n' + b'x' * 50 + b'\r\nA\r\nB\r\nC'
+(seeds / 'boundary-wrap').write_bytes(bytes([19, 1, 0]) + boundary + b'\xfe\xfe\x11' + b'more\r\n')
+(seeds / 'boundary-wrap-wide').write_bytes(bytes([19, 1, 0]) + b'0\r\n1\r\n2\r\na' + '界'.encode() * 30 + b'\r\nA\r\nB\r\nC' + b'\xfe\xfe\x0b' + b'tail')
 
 # ssh_packet_read: clear packets, then an AEAD key change, plus hostile tail.
 seeds = corpus('ssh_packet_read')

@@ -667,3 +667,199 @@ fn approximate_repaint_keeps_the_scroll_region_for_later_output() {
         "later output must scroll only the host's scroll region in the viewer"
     );
 }
+
+/// Exact Snapshots when the screen's top row is joined to the last history row
+/// (#521, J1238).
+///
+/// A shell command longer than the screen, or a long output line that has
+/// scrolled halfway off, leaves the top visible row continuing a history row.
+/// The history export prints the last history row and lets it wrap onto the
+/// top line, and the screen clear keeps that continuation (`paint` in
+/// `native/snapshot.zig`). Each case must export, match the source at once,
+/// and keep matching after every continuation probe and after a reflowing
+/// resize, which joins rows by their wrap flags. Most cases run at 12x5
+/// behind three short lines of history: plain text, the cursor on the crossing line
+/// (with and without a pending wrap), a wide glyph whose spacer head is on the
+/// history row (kept or narrowed), a glyph that a variation selector widened
+/// across the boundary, style, link and protection on the crossing line, a
+/// saved cursor on the top row, the alternate screen active, a one-row screen,
+/// and a history row that wraps into a top row that is not its continuation
+/// (made by a region scroll before the full-screen scroll).
+#[test]
+fn fidelity_soft_wrap_across_the_history_boundary_exports_exactly() {
+    let lines = "0\r\n1\r\n2\r\n";
+    let x30 = "x".repeat(30);
+    let wide = format!("a{}", "界".repeat(20));
+    let cases: Vec<(&str, String, u16, u16)> = vec![
+        (
+            "top row continues history",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC"),
+            12,
+            5,
+        ),
+        (
+            "two rows of the line in history",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\r\nD"),
+            12,
+            5,
+        ),
+        (
+            "cursor on the crossing line",
+            format!("{lines}{}", "x".repeat(70)),
+            12,
+            5,
+        ),
+        (
+            "pending wrap on the crossing line",
+            format!("{lines}{}", "x".repeat(72)),
+            12,
+            5,
+        ),
+        (
+            "spacer head on the history row",
+            format!("{lines}{wide}\r\nA\r\nB"),
+            12,
+            5,
+        ),
+        (
+            "narrowed spacer head on the history row",
+            format!("{lines}{wide}\x1b[3;1Hb\x1b[5;1H\r\nA\r\nB"),
+            12,
+            5,
+        ),
+        (
+            "glyph widened across the boundary",
+            format!(
+                "\x1b[?2027h{lines}{}\u{2764}\u{fe0f}rest\r\nA\r\nB\r\nC\r\nD",
+                "a".repeat(11)
+            ),
+            12,
+            5,
+        ),
+        (
+            "styled and linked crossing line",
+            format!(
+                "{lines}\x1b[41;1m\x1b]8;;http://example.invalid/\x1b\\{x30}\x1b]8;;\x1b\\\x1b[0m\r\nA\r\nB\r\nC"
+            ),
+            12,
+            5,
+        ),
+        (
+            "protected crossing line",
+            format!("{lines}\x1b[1\"q{x30}\x1b[0\"q\r\nA\r\nB\r\nC"),
+            12,
+            5,
+        ),
+        (
+            "saved cursor pending on the top row",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\x1b[1;12HZ\x1b7\x1b[5;2H"),
+            12,
+            5,
+        ),
+        (
+            "alternate screen active",
+            format!("{lines}{x30}\r\nA\r\nB\r\nC\x1b[?1049halt"),
+            12,
+            5,
+        ),
+        ("one-row screen", x30.clone(), 12, 1),
+        (
+            "history row wraps into a row that does not continue it",
+            // The line's first row stays on line 1 while a region scroll of
+            // lines 2-5 replaces its continuation; a full scroll then moves
+            // it into history.
+            format!("{}\x1b[2;5r\x1b[5;1H\n\x1b[r\x1b[5;1H\nA", "x".repeat(20)),
+            12,
+            5,
+        ),
+    ];
+    for (name, prefix, cols, rows) in cases {
+        replay(name, prefix.as_bytes(), cols, rows);
+    }
+}
+
+/// A line that crosses into the screen but started more than the 256-row
+/// history tail ago cannot be exported whole, and a shorter export would
+/// reflow differently on the viewer's next resize. It stays refused, so the
+/// reattach keeps the raw replay (#521).
+#[test]
+fn fidelity_a_crossing_line_longer_than_the_history_tail_is_refused() {
+    let mut source = corpus_terminal(12, 5).unwrap();
+    source.process("x".repeat(12 * 300).as_bytes());
+    assert_eq!(
+        source.snapshot().unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+}
+
+/// On a one-column screen the cursor never leaves column 0, where the engine
+/// does not cluster graphemes, so a combining mark must be replayed with
+/// clustering off to reach its cell (#521). The boundary painter made such
+/// screens exportable with history (every row there wraps), which is how the
+/// `vt_stream_snapshot` fuzzer found it; the screen-only case had the same gap.
+/// The marks here join their base, and some states also turn clustering on.
+#[test]
+fn fidelity_one_column_screens_keep_combining_marks() {
+    for (name, prefix, rows) in [
+        ("mark on a one-cell screen", "d\u{485}", 1),
+        ("mark on a one-column screen", "ad\u{485}b", 3),
+        ("mark in one-column history", "abcd\u{485}efgh", 3),
+        (
+            "mark printed with clustering on",
+            "ab\x1b[?2027hcd\u{301}\x1b[?2027lef",
+            2,
+        ),
+        ("two marks on one cell", "xe\u{301}\u{323}yz", 2),
+    ] {
+        replay(name, prefix.as_bytes(), 1, rows);
+    }
+}
+
+/// A history row whose wrapped edge is an empty narrow cell before a wide
+/// glyph (a spacer head that narrowed, here made by reflow) is rebuilt by
+/// narrowing a temporary spacer head from the next line. The engine does that
+/// only below the top line, and history painted on a one-row screen wraps onto
+/// the top line itself, so there it is refused; with two rows it is exact
+/// (`row` in `native/snapshot.zig`, found by `vt_stream_snapshot`, #521).
+///
+/// The second input ends the wrapped line inside history, so the top row does
+/// not continue it: that state was exported (wrongly) before the boundary
+/// painter too.
+#[test]
+fn fidelity_a_narrowed_spacer_head_in_one_row_history_is_refused() {
+    // A line feed keeps the column, so the wide glyph starts at column 2 and
+    // a two-column reflow leaves two empty cells before it.
+    for (input, rows) in [
+        ("0X\n\u{7551}YZ", 1),
+        ("0X\n\u{7551}\r\nQ", 1),
+        ("0X\n\u{7551}YZ", 2),
+        ("0X\n\u{7551}\r\nQ", 2),
+    ] {
+        let mut source = corpus_terminal(20, 5).unwrap();
+        source.process(input.as_bytes());
+        source.resize(2, rows).unwrap();
+        match source.snapshot() {
+            Err(error) if rows == 1 => assert_eq!(error.kind(), std::io::ErrorKind::Unsupported),
+            Ok(bytes) if rows == 2 => {
+                let mut viewer = corpus_terminal(2, rows).unwrap();
+                viewer.process(&bytes);
+                assert_eq!(
+                    source.engine.state_difference(&viewer.engine),
+                    0,
+                    "{input:?}"
+                );
+                source.resize(5, 3).unwrap();
+                viewer.resize(5, 3).unwrap();
+                assert_eq!(
+                    source.engine.state_difference(&viewer.engine),
+                    0,
+                    "{input:?} after a reflow"
+                );
+            }
+            other => panic!(
+                "{input:?} at {rows} rows: unexpected {:?}",
+                other.map(|bytes| bytes.len())
+            ),
+        }
+    }
+}
