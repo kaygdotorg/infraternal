@@ -6,17 +6,12 @@
 //! (#580) and are re-exported here; this module keeps what needs OpenSSL:
 //! the TLS exporter, signing and verifying, and the server-leaf check.
 //!
-//! # The two versions
+//! # The handshake
 //!
 //! After the WebSocket upgrade the server always sends an
 //! [`AgentLinkChallenge`] (a 32-byte nonce). Then:
 //!
-//! - **v1** (infraternal agents built before #559): the agent answers an
-//!   [`AgentLinkProof`] signed over [`proof_bytes`], and the server answers
-//!   [`AgentLinkReady`]. The server proves nothing beyond the outer HTTPS
-//!   certificate. The server still accepts v1 so agents that have not updated
-//!   yet keep their link (and can receive the update).
-//! - **v2**: the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
+//! - the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
 //!   nonce and the agent's view of the TLS session ([`tls_channel_binding`],
 //!   RFC 9266 `tls-exporter`), signed over [`agent_proof_bytes_v2`]. The
 //!   server answers [`AgentLinkReadyV2`]: its current leg-B leaf and a
@@ -26,6 +21,13 @@
 //!   [`verify_server_leaf`]) and then applies the
 //!   [`crate::server_leaf_floor::ServerLeafFloor`], so a copied, older leaf
 //!   is refused here too.
+//!
+//! There is no older handshake. The first design (#291) had the agent sign
+//! only the challenge and the server answer a bare `ready`, which proved
+//! nothing about the server beyond the outer HTTPS certificate. It was
+//! removed (#559, J1198): a server refuses any other proof message and an
+//! agent refuses any other answer, with the same errors as any malformed
+//! message, so the refusal tells a prober nothing about what once existed.
 //!
 //! # What the TLS binding adds, and where
 //!
@@ -45,8 +47,7 @@
 //! # Invariants
 //!
 //! - Every signed message starts with its own domain string, so neither
-//!   side's signature is valid as the other's, as a v1 proof, or as a TLS
-//!   handshake signature.
+//!   side's signature is valid as the other's or as a TLS handshake signature.
 //! - Transcript fields are fixed-length, except the binding, which is
 //!   preceded by a presence byte. No two different inputs produce the same
 //!   bytes.
@@ -56,9 +57,8 @@
 
 /// The wire models, constants and transcript builders, under their old paths.
 pub use infraternal_link::agent_link::{
-    AgentLinkChallenge, AgentLinkProof, AgentLinkProofV2, AgentLinkReady, AgentLinkReadyV2,
-    BINDING_LEN, CHANNEL_BINDING_LABEL, NONCE_LEN, PROOF_V2, READY_V2, agent_proof_bytes_v2,
-    message_type, proof_bytes, server_proof_bytes_v2,
+    AgentLinkChallenge, AgentLinkProofV2, AgentLinkReadyV2, BINDING_LEN, CHANNEL_BINDING_LABEL,
+    NONCE_LEN, PROOF_V2, READY_V2, agent_proof_bytes_v2, message_type, server_proof_bytes_v2,
 };
 use openssl::{
     hash::MessageDigest,
@@ -367,7 +367,7 @@ mod tests {
     }
 
     /// The four signed v2 messages never collide: agent and server domains
-    /// differ from each other and from v1, and a missing binding is not a
+    /// differ from each other, and a missing binding is not a
     /// zero binding.
     #[test]
     fn v2_transcripts_are_domain_separated_and_unambiguous() {
@@ -384,7 +384,6 @@ mod tests {
             agent_unbound,
             "the two nonces must not be interchangeable"
         );
-        assert!(!proof_bytes(host, &[1; 32]).starts_with(b"infraternal-agent-link-v2"));
     }
 
     /// An honest bound answer passes and returns the leaf; any change to what

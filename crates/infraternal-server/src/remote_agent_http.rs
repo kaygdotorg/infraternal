@@ -1,8 +1,9 @@
 //! Admits D168 host links over an app-listener WebSocket proof [168,196], #291.
 //!
-//! Two proof versions are accepted (see `infraternal_plugin_remote::agent_link`).
-//! v1 is kept for infraternal agents built before #559. For v2 the server
-//! also checks the agent's TLS channel binding against the session it
+//! The only proof accepted is `proof-v2` (see
+//! `infraternal_plugin_remote::agent_link`); any other message type, the
+//! retired first-generation `proof` included, is refused like any malformed
+//! proof (#559, J1198). The server also checks the agent's TLS channel binding against the session it
 //! terminated itself (refusing a proof relayed from another TLS session), and
 //! answers with its current leg-B leaf and a signature by that leaf's key, so
 //! the agent can hold this path to the same leaf floor as its direct dials.
@@ -22,8 +23,8 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::rt::TokioIo;
 use infraternal_plugin_remote::agent_link::{
-    self, AgentLinkChallenge, AgentLinkProof, AgentLinkProofV2, AgentLinkReady, AgentLinkReadyV2,
-    NONCE_LEN, PROOF_V2, READY_V2, agent_proof_bytes_v2, proof_bytes, server_proof_bytes_v2,
+    self, AgentLinkChallenge, AgentLinkProofV2, AgentLinkReadyV2, NONCE_LEN, PROOF_V2, READY_V2,
+    agent_proof_bytes_v2, server_proof_bytes_v2,
 };
 use openssl::{hash::MessageDigest, rand::rand_bytes, ssl::SslAcceptor, x509::X509};
 use std::{
@@ -305,19 +306,6 @@ async fn admit(
         return Err(io::ErrorKind::PermissionDenied.into());
     }
     let (authority, ready) = match agent_link::message_type(proof.as_str()).as_deref() {
-        Some("proof") => {
-            let proof: AgentLinkProof = serde_json::from_str(proof.as_str())
-                .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
-            let authority = trace_test_phase(
-                "proof-authenticate",
-                authenticate(api.store.clone(), &proof, &nonce).await,
-            )?;
-            let ready = serde_json::to_string(&AgentLinkReady {
-                message_type: "ready".to_owned(),
-            })
-            .map_err(io::Error::other)?;
-            (authority, ready)
-        }
         Some(PROOF_V2) => {
             let proof: AgentLinkProofV2 = serde_json::from_str(proof.as_str())
                 .map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
@@ -522,24 +510,6 @@ async fn admit_authority(
     Ok(authority)
 }
 
-/// Verify a v1 proof (the exact certificate's signature of the challenge)
-/// and admit its authority, see [`admit_authority`].
-async fn authenticate(
-    store: EnrollmentStore,
-    proof: &AgentLinkProof,
-    nonce: &[u8],
-) -> io::Result<AuthorityGuard> {
-    if proof.message_type != "proof" || nonce.len() != 32 {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    let (_, fingerprint) = verified_certificate(
-        &proof.certificate_der,
-        &proof.signature,
-        &proof_bytes(proof.host_id, nonce),
-    )?;
-    admit_authority(store, fingerprint, proof.host_id).await
-}
-
 #[cfg(test)]
 mod tests {
     //! Host proof validation and handshake capacity through cleanup delivery.
@@ -573,32 +543,145 @@ mod tests {
         (certificate.build(), key)
     }
 
-    /// A v1 proof verifies only for the key, host and nonce it was made for.
-    #[test]
-    fn challenge_signature_requires_the_d168_key_host_and_nonce() {
-        let (certificate, key) = signing_certificate();
-        let host_id = Uuid::from_u128(1);
-        let nonce = [9; 32];
-        let mut signer = Signer::new_without_digest(&key).unwrap();
-        let signature = signer
-            .sign_oneshot_to_vec(&proof_bytes(host_id, &nonce))
-            .unwrap();
-        assert!(verify_signature(
-            &certificate,
-            &proof_bytes(host_id, &nonce),
-            &signature
-        ));
-        assert!(!verify_signature(
-            &certificate,
-            &proof_bytes(Uuid::from_u128(2), &nonce),
-            &signature
-        ));
-        assert!(!verify_signature(
-            &certificate,
-            &proof_bytes(host_id, &[8; 32]),
-            &signature
-        ));
+    /// Start real leg-B listeners so `hosts` has a current leaf to sign
+    /// `ready-v2` with. Keep the result alive for the test's length.
+    pub(super) async fn serve_leaf(
+        hosts: &RemoteHosts,
+        store: &EnrollmentStore,
+    ) -> crate::remote_runtime::RemoteListeners {
+        let (leaf, _, root, _) = crate::remote_runtime::tests::identities();
+        crate::remote_runtime::RemoteListeners::start(
+            "127.0.0.1:0".parse().unwrap(),
+            &leaf,
+            std::slice::from_ref(&root),
+            store.clone(),
+            hosts.clone(),
+        )
+        .await
+        .unwrap()
     }
+
+    /// Play the infraternal agent's side of the handshake on a plain
+    /// WebSocket (no TLS, so no channel binding): read the challenge, send a
+    /// `proof-v2` signed by `key`, and return the server's answer text.
+    pub(super) async fn prove_v2<S>(
+        socket: &mut tokio_tungstenite::WebSocketStream<S>,
+        host: Uuid,
+        certificate: &X509,
+        key: &PKey<Private>,
+    ) -> String
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        use agent_link::{AgentLinkProofV2, BINDING_LEN};
+        let challenge = socket.next().await.unwrap().unwrap();
+        let challenge: AgentLinkChallenge =
+            serde_json::from_str(challenge.to_text().unwrap()).unwrap();
+        let nonce: [u8; NONCE_LEN] = B64.decode(challenge.nonce).unwrap().try_into().unwrap();
+        let client_nonce = [5; NONCE_LEN];
+        let signature = agent_link::sign(
+            key,
+            &agent_proof_bytes_v2(host, &nonce, &client_nonce, None::<&[u8; BINDING_LEN]>),
+        )
+        .unwrap();
+        let proof = AgentLinkProofV2 {
+            message_type: PROOF_V2.to_owned(),
+            host_id: host,
+            certificate_der: B64.encode(certificate.to_der().unwrap()),
+            client_nonce: B64.encode(client_nonce),
+            channel_binding: None,
+            signature: B64.encode(signature),
+        };
+        socket
+            .send(Message::Text(serde_json::to_string(&proof).unwrap().into()))
+            .await
+            .unwrap();
+        socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .to_string()
+    }
+
+    /// The retired first-generation proof (`type: "proof"`, a signature of the
+    /// challenge alone, answered by a bare `ready`) is refused although it
+    /// is signed by an enrolled key (#559, J1198). The refusal is the same as
+    /// for any unknown message type: the socket closes and no text, `ready`
+    /// or otherwise, is ever sent, so a prober learns nothing about what
+    /// once existed.
+    #[tokio::test]
+    async fn a_v1_proof_from_an_enrolled_host_is_refused_like_any_unknown_type() {
+        let (certificate, key) = signing_certificate();
+        let fingerprint = certificate.digest(MessageDigest::sha256()).unwrap();
+        let (store, pool, host) = crate::enrollment::authority::tests::enrolled().await;
+        sqlx::query("UPDATE remote_certificates SET fingerprint=?,not_before=unixepoch()-1,not_after=unixepoch()+604799")
+            .bind(fingerprint.as_ref()).execute(&pool).await.unwrap();
+        let hosts = RemoteHosts::default();
+        let _leaf = serve_leaf(&hosts, &store).await;
+        let api = Api {
+            hosts,
+            store,
+            admission: Arc::new(Semaphore::new(2)),
+            sources: Arc::new(crate::remote_admission::SourceSlots::new(2)),
+        };
+        let router = Router::new()
+            .route("/remote/agent", get(upgrade))
+            .with_state(api);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        // What a pre-#559 agent sent: its key's signature of the v1 transcript.
+        let v1 = |nonce: &[u8]| {
+            let mut bytes = b"infraternal-agent-link-v1\0".to_vec();
+            bytes.extend_from_slice(host.as_bytes());
+            bytes.extend_from_slice(nonce);
+            let signature = Signer::new_without_digest(&key)
+                .unwrap()
+                .sign_oneshot_to_vec(&bytes)
+                .unwrap();
+            serde_json::json!({
+                "type": "proof",
+                "host_id": host,
+                "certificate_der": B64.encode(certificate.to_der().unwrap()),
+                "signature": B64.encode(signature),
+            })
+            .to_string()
+        };
+        let unknown = serde_json::json!({"type": "proof-v9"}).to_string();
+        for make in [&v1 as &dyn Fn(&[u8]) -> String, &|_: &[u8]| unknown.clone()] {
+            let (mut socket, _) =
+                tokio_tungstenite::connect_async(format!("ws://{endpoint}/remote/agent"))
+                    .await
+                    .unwrap();
+            let challenge = socket.next().await.unwrap().unwrap();
+            let challenge: AgentLinkChallenge =
+                serde_json::from_str(challenge.to_text().unwrap()).unwrap();
+            let nonce = B64.decode(challenge.nonce).unwrap();
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    make(&nonce).into(),
+                ))
+                .await
+                .unwrap();
+            match tokio::time::timeout(Duration::from_secs(2), socket.next()).await {
+                Ok(None | Some(Err(_) | Ok(Message::Close(_)))) => {}
+                other => panic!("a retired or unknown proof type got an answer: {other:?}"),
+            }
+        }
+        server.abort();
+        let _ = server.await;
+    }
+
     /// A validated cleanup WebSocket must return both handshake permits before
     /// its durable receipt. Receiving the revoke request is the ordering fence.
     #[tokio::test]
@@ -629,8 +712,10 @@ mod tests {
         let global = Arc::new(Semaphore::new(1));
         let sources = Arc::new(crate::remote_admission::SourceSlots::new(1));
         let address: IpAddr = "127.0.0.1".parse().unwrap();
+        let hosts = RemoteHosts::default();
+        let _leaf = serve_leaf(&hosts, &store).await;
         let api = Api {
-            hosts: RemoteHosts::default(),
+            hosts,
             store,
             admission: global.clone(),
             sources: sources.clone(),
@@ -652,28 +737,8 @@ mod tests {
             tokio_tungstenite::connect_async(format!("ws://{endpoint}/remote/agent"))
                 .await
                 .unwrap();
-        let challenge = socket.next().await.unwrap().unwrap();
-        let challenge: AgentLinkChallenge =
-            serde_json::from_str(challenge.to_text().unwrap()).unwrap();
-        let nonce = B64.decode(challenge.nonce).unwrap();
-        let signature = Signer::new_without_digest(&key)
-            .unwrap()
-            .sign_oneshot_to_vec(&proof_bytes(host, &nonce))
-            .unwrap();
-        let proof = AgentLinkProof {
-            message_type: "proof".to_owned(),
-            host_id: host,
-            certificate_der: B64.encode(certificate.to_der().unwrap()),
-            signature: B64.encode(signature),
-        };
-        socket
-            .send(ClientMessage::Text(
-                serde_json::to_string(&proof).unwrap().into(),
-            ))
-            .await
-            .unwrap();
-        let ready = socket.next().await.unwrap().unwrap();
-        assert!(ready.to_text().unwrap().contains("ready"));
+        let ready = prove_v2(&mut socket, host, &certificate, &key).await;
+        assert!(ready.contains(READY_V2));
         let mut hello = Vec::new();
         encode_muxed_frame_into(
             0,

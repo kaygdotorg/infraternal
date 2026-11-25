@@ -2,22 +2,21 @@
 //! identities over the public WebSocket listener [168], #291, and makes the
 //! server prove its current leg-B leaf on that path (#559).
 //!
-//! # The two versions
+//! # The handshake
 //!
 //! After the WebSocket upgrade the server always sends an
 //! [`AgentLinkChallenge`] (a 32-byte nonce). Then:
 //!
-//! - **v1** (infraternal agents built before #559): the agent answers an
-//!   [`AgentLinkProof`] signed over [`proof_bytes`], and the server answers
-//!   [`AgentLinkReady`]. The server proves nothing beyond the outer HTTPS
-//!   certificate. The server still accepts v1 so agents that have not updated
-//!   yet keep their link (and can receive the update).
-//! - **v2**: the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
+//! - the agent answers an [`AgentLinkProofV2`]. It adds a fresh agent
 //!   nonce and the agent's view of the TLS session (RFC 9266 `tls-exporter`,
 //!   exported under [`CHANNEL_BINDING_LABEL`]), signed over
 //!   [`agent_proof_bytes_v2`]. The server answers [`AgentLinkReadyV2`]: its
 //!   current leg-B leaf and a signature by that leaf's key over
 //!   [`server_proof_bytes_v2`].
+//!
+//! There is no older handshake: the first design (#291) had the agent sign
+//! only the challenge, and it was removed (#559, J1198). Anything but a
+//! `proof-v2` is refused like any malformed message.
 //!
 //! This module holds only the messages and the exact bytes each side signs,
 //! so every client can build and parse them (#580). Signing, verifying, the
@@ -28,8 +27,7 @@
 //! # Invariants
 //!
 //! - Every signed message starts with its own domain string, so neither
-//!   side's signature is valid as the other's, as a v1 proof, or as a TLS
-//!   handshake signature.
+//!   side's signature is valid as the other's or as a TLS handshake signature.
 //! - Transcript fields are fixed-length, except the binding, which is
 //!   preceded by a presence byte. No two different inputs produce the same
 //!   bytes.
@@ -61,40 +59,6 @@ pub struct AgentLinkChallenge {
     pub message_type: String,
     /// Canonical base64url 256-bit nonce.
     pub nonce: String,
-}
-
-/// Proof carries the exact enrolled certificate and a fresh signature from its private key.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentLinkProof {
-    /// Fixed message discriminator.
-    #[serde(rename = "type")]
-    pub message_type: String,
-    /// The identity whose key signs the challenge.
-    pub host_id: Uuid,
-    /// Canonical base64url leaf certificate DER.
-    pub certificate_der: String,
-    /// Canonical base64url signature of [`proof_bytes`].
-    pub signature: String,
-}
-
-/// Sent only after the app listener admits the certificate and signature.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentLinkReady {
-    /// Fixed message discriminator.
-    #[serde(rename = "type")]
-    pub message_type: String,
-}
-
-/// Domain separates and host-binds one connection's key-possession proof.
-#[must_use]
-pub fn proof_bytes(host_id: Uuid, nonce: &[u8]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(35 + nonce.len());
-    bytes.extend_from_slice(b"infraternal-agent-link-v1\0");
-    bytes.extend_from_slice(host_id.as_bytes());
-    bytes.extend_from_slice(nonce);
-    bytes
 }
 
 /// The v2 answer to an [`AgentLinkChallenge`]: the enrolled certificate, a
@@ -213,21 +177,4 @@ pub fn server_proof_bytes_v2(
     bytes.extend_from_slice(server_leaf_sha256);
     push_binding(&mut bytes, binding);
     bytes
-}
-
-/// Tests for the proof message layout.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The proof bytes change with the host and the nonce, and start with the fixed domain label.
-    #[test]
-    fn proof_message_is_domain_separated_and_bound_to_host_and_nonce() {
-        let host = Uuid::from_u128(1);
-        let other_host = Uuid::from_u128(2);
-        let first = proof_bytes(host, &[7; 32]);
-        assert_ne!(first, proof_bytes(other_host, &[7; 32]));
-        assert_ne!(first, proof_bytes(host, &[8; 32]));
-        assert!(first.starts_with(b"infraternal-agent-link-v1\0"));
-    }
 }
