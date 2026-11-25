@@ -8,8 +8,12 @@ The mesh is a private network that joins your machines.
 
 Every machine joins the mesh, and the traffic between two machines is encrypted with WireGuard. The keys involved renew by themselves while a machine is online. See [Between machines](/docs/reference/keys/#between-machines) for each key and how long it lasts.
 
+- [Mesh networking](/docs/mesh/networking/) explains the UDP port, direct connections through firewalls, and host input rules.
+- [Mesh DNS](/docs/mesh/names/) explains machine names, split DNS on Linux and macOS, and how hidden names are answered.
+- [Subnet routes](/docs/mesh/networks/) explains sharing private IPv4 networks behind a Linux machine, approving them in the app, and how clients route them.
+
 > [!WARNING] Planned
-> Pages for connections, machine names and the mesh's keys are planned. Each appears when its feature ships.
+> Pages for connections and the mesh's keys settings are planned. Each appears when its feature ships.
 
 ## Keeping transfers responsive
 
