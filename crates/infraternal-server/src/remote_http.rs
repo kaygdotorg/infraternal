@@ -455,7 +455,13 @@ async fn issue_invitation(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .unwrap_or(false);
-    if !owner || (request.mode == Mode::Rootless) == (request.execution_uid == 0) {
+    // An invitation made by the owner's own request is for a host that runs
+    // the infraternal agent. A device joins only by the passkey-approved flow
+    // below (`issue_approved_machine_join`), never through this endpoint.
+    if !owner
+        || request.mode == Mode::Device
+        || (request.mode == Mode::Rootless) == (request.execution_uid == 0)
+    {
         return Err(StatusCode::FORBIDDEN);
     }
     // An existing id must have exactly the same authority: collisions cannot move a host.
@@ -561,11 +567,13 @@ async fn issue_approved_machine_join(
     now: i64,
 ) -> Result<JoinInvitation, StatusCode> {
     let request = approval.request;
+    // `execution_uid` is `None` for a device, which the host row stores as NULL
+    // (migration 20261125055624). The request was validated before approval, so
+    // a mode and uid that disagree here are refused again, not trusted.
     let (mode, execution_uid) = match (request.mode.as_str(), request.execution_uid) {
-        ("system", Some(0)) => (Mode::Rootful, 0),
-        ("user", Some(uid)) if uid != 0 => (Mode::Rootless, uid),
-        // A `device` join (#580) has no host row shape yet: a device runs as
-        // no uid. Plan step P5 decides it; until then nothing is published.
+        ("system", Some(0)) => (Mode::Rootful, Some(0)),
+        ("user", Some(uid)) if uid != 0 => (Mode::Rootless, Some(uid)),
+        ("device", None) => (Mode::Device, None),
         _ => return Err(StatusCode::FORBIDDEN),
     };
     let expected_key_digest = request.key_digest().map_err(|_| StatusCode::FORBIDDEN)?;
@@ -580,16 +588,19 @@ async fn issue_approved_machine_join(
     // A device approval can create only its requested owner-bound host row;
     // the SELECT below refuses a row that existed before this approval.
     sqlx::query(
-        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved) \
-         SELECT ?,?,?,?,?,1 WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
+        "INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved,hostname) \
+         SELECT ?,?,?,?,?,1,? WHERE EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id=s.user_id \
              WHERE s.token_hash=? AND s.user_id=? AND s.unlocked=1 AND s.expires>? AND u.owner=1) \
          ON CONFLICT(id) DO NOTHING",
     )
     .bind(request.host_id.as_bytes().as_slice())
     .bind(&approval.user_id)
     .bind(mode.as_str())
-    .bind(i64::from(execution_uid))
+    .bind(execution_uid.map(i64::from))
     .bind(approval.issued_at)
+    // A device has no link to report its name later, so the name it asked to
+    // join with (ASCII, checked at approval) is the one the owner reads.
+    .bind((mode == Mode::Device && request.hostname.len() <= 63).then_some(request.hostname.as_str()))
     .bind(&approval.session_hash)
     .bind(&approval.user_id)
     .bind(now)
@@ -602,7 +613,7 @@ async fn issue_approved_machine_join(
     // a poll retry still matches. An existing host whose join-token row is
     // gone (a finished root handover) would otherwise get a fresh receipt
     // bound to the requester's key, and a second active certificate (#559 F1).
-    let stored_uid: Option<i64> = sqlx::query_scalar(
+    let stored_uid: Option<Option<i64>> = sqlx::query_scalar(
         "SELECT execution_uid FROM remote_hosts WHERE id=? AND owner_id=? AND mode=? \
          AND revoked_at IS NULL AND device_approved=1 AND created_at=?",
     )
@@ -613,7 +624,7 @@ async fn issue_approved_machine_join(
     .fetch_optional(&mut *transaction)
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if stored_uid != Some(i64::from(execution_uid)) {
+    if stored_uid != Some(execution_uid.map(i64::from)) {
         return Err(StatusCode::FORBIDDEN);
     }
     let token = api
@@ -641,7 +652,8 @@ async fn issue_approved_machine_join(
     let invitation = JoinInvitation {
         host_id: request.host_id,
         mode,
-        execution_uid,
+        // A device has no uid; 0 is only the wire's filler for it.
+        execution_uid: execution_uid.unwrap_or(0),
         public_origin: api.auth.origin().to_owned(),
         token: token.secret().to_owned(),
         ca_der: B64.encode(
@@ -733,17 +745,31 @@ async fn join(
     // A root upgrade's successor (D376) is not the host yet, so ordinary
     // admission refuses its certificate by design (J415 R1); it answers as
     // uid 0 through its own check instead.
-    let execution_uid = match store.admit(&certificate.record.fingerprint, now()?).await {
-        Ok(identity) => identity.execution_uid,
-        Err(_) => store
-            .admit_successor(&certificate.record.fingerprint, now()?)
+    // A device has no uid: it answers 0 on the wire, which clients ignore for
+    // that mode. It is admitted by its own check, never by the host guard.
+    let execution_uid = if request.mode == Mode::Device {
+        store
+            .admit_device(&certificate.record.fingerprint, now()?)
             .await
             .map(|_| 0)
             .map_err(|_| {
                 tracing::debug!(event = "remote_join_refused", host_id = %request.host_id,
                     reason = "post_commit_admission", "Machine join refused");
                 StatusCode::FORBIDDEN
-            })?,
+            })?
+    } else {
+        match store.admit(&certificate.record.fingerprint, now()?).await {
+            Ok(identity) => identity.execution_uid,
+            Err(_) => store
+                .admit_successor(&certificate.record.fingerprint, now()?)
+                .await
+                .map(|_| 0)
+                .map_err(|_| {
+                    tracing::debug!(event = "remote_join_refused", host_id = %request.host_id,
+                        reason = "post_commit_admission", "Machine join refused");
+                    StatusCode::FORBIDDEN
+                })?,
+        }
     };
     Ok(Json(JoinResponse {
         certificate_der: B64.encode(certificate.der),

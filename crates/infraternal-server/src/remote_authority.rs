@@ -16,7 +16,59 @@ pub struct HostAuthority {
     pub not_after: i64,
 }
 
+/// The enrolled identity of a `device` (#580): a phone's certificate, admitted for
+/// renewal, rotation and its place in the mesh, and for nothing else.
+///
+/// It has no `execution_uid` and no [`Mode`] field on purpose: code that needs a
+/// uid or a place to run work cannot be handed one by mistake, because this type
+/// is not a [`HostAuthority`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceAuthority {
+    /// The device's host row.
+    pub host: Uuid,
+    /// Exact current certificate validity cap.
+    pub not_after: i64,
+}
+
 impl EnrollmentStore {
+    /// Admit an exact certificate fingerprint against a live `device` row (#580).
+    ///
+    /// The same live checks as [`Self::admit`] (certificate window, no
+    /// revocation of the certificate or the host, no unconfirmed cleanup), with
+    /// the opposite mode rule: only a `device` host whose certificate carries
+    /// no uid and a P-256 key passes. A rootless or rootful certificate never
+    /// does, so this cannot be used to reach a host's terminals either way.
+    /// # Errors
+    /// Refuses unknown/expired/revoked certificates, non-device hosts, invalid time and storage failure.
+    pub async fn admit_device(
+        &self,
+        fingerprint: &[u8; 32],
+        now: i64,
+    ) -> Result<DeviceAuthority, EnrollmentError> {
+        if now < 0 {
+            return Err(EnrollmentError::Denied);
+        }
+        let row: Option<(Vec<u8>, i64)> = sqlx::query_as(
+            "SELECT h.id, c.not_after FROM remote_hosts h \
+             JOIN remote_certificates c ON c.host_id=h.id \
+             WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
+             AND c.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND h.mode='device' AND h.execution_uid IS NULL \
+             AND c.role='active' AND c.execution_uid IS NULL AND c.key_algorithm='p256' \
+             AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
+        )
+        .bind(fingerprint.as_slice())
+        .bind(now)
+        .bind(now)
+        .fetch_optional(&self.0)
+        .await?;
+        let (host, not_after) = row.ok_or(EnrollmentError::Denied)?;
+        Ok(DeviceAuthority {
+            host: Uuid::from_slice(&host).map_err(|_| EnrollmentError::Denied)?,
+            not_after,
+        })
+    }
+
     /// Admit an exact certificate fingerprint against live, persisted host authority.
     ///
     /// Only the host's ordinary identity passes: a certificate with
@@ -25,6 +77,9 @@ impl EnrollmentStore {
     /// [`EnrollmentStore::admit_successor`], whose result this guard can't take.
     /// After an upgrade, a leftover rootless certificate (issued for the old
     /// uid) is refused here too, even before the handover revoked it.
+    /// A `device` certificate is refused as well (#580): this is the guard of
+    /// the link that runs terminals and logins, and a device never does. A
+    /// device is admitted by [`EnrollmentStore::admit_device`] for what it may do.
     /// # Errors
     /// Refuses unknown/expired/revoked certificates, invalid time and storage failure.
     pub async fn admit(
@@ -40,6 +95,7 @@ impl EnrollmentStore {
              JOIN remote_certificates c ON c.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
              AND c.revoked_at IS NULL AND h.revoked_at IS NULL \
+             AND h.mode IN ('rootless','rootful') \
              AND c.role='active' AND c.execution_uid=h.execution_uid \
              AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         )
@@ -77,6 +133,7 @@ impl EnrollmentStore {
              JOIN remote_login_cleanup q ON q.host_id=h.id \
              WHERE c.fingerprint=? AND c.not_before<=? AND c.not_after>? \
              AND c.revoked_at IS NULL AND q.confirmed=0 \
+             AND h.mode IN ('rootless','rootful') \
              AND c.role='active' AND c.execution_uid=h.execution_uid",
         )
         .bind(fingerprint.as_slice())
@@ -304,7 +361,7 @@ impl EnrollmentStore {
              JOIN remote_hosts h ON h.id=old.host_id \
              WHERE old.fingerprint=? AND old.public_key=? AND old.key_algorithm=? AND old.not_before<=? AND old.not_after>? \
              AND old.revoked_at IS NULL AND h.revoked_at IS NULL \
-             AND old.role='active' AND old.execution_uid=h.execution_uid \
+             AND old.role='active' AND old.execution_uid IS h.execution_uid \
              AND NOT EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0)",
         ).bind(certificate.fingerprint.as_slice()).bind(certificate.issuer_fingerprint.as_slice())
             .bind(certificate.public_key.as_bytes()).bind(certificate.not_before).bind(certificate.not_after)
@@ -458,6 +515,34 @@ impl EnrollmentStore {
         Ok(person.is_some())
     }
 
+    /// Commit a `device`'s removal and publish its denial (#580). A device has no
+    /// agent link to cut and no cleanup receipt to wait for, so this only holds
+    /// the revocation fence across the commit, as [`Self::commit_revocation_intent`]
+    /// does, and then tombstones the host in memory and tells subscribers.
+    pub(crate) async fn commit_device_retirement(
+        &self,
+        transaction: sqlx::Transaction<'static, sqlx::Sqlite>,
+        host: Uuid,
+    ) -> Result<(), EnrollmentError> {
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _fence = store.1.quiesce(host).await.map_err(|_| {
+                EnrollmentError::Storage(sqlx::Error::Protocol(
+                    "revocation fence unavailable".into(),
+                ))
+            })?;
+            transaction.commit().await?;
+            store.1.tombstoned(host);
+            store.2.publish();
+            store.publish_revoked_authority().await;
+            Ok::<_, EnrollmentError>(())
+        })
+        .await
+        .map_err(|_| {
+            EnrollmentError::Storage(sqlx::Error::Protocol("revocation finalizer failed".into()))
+        })?
+    }
+
     /// Subscribe before reading so a concurrent durable receipt cannot be lost.
     /// No background waiter, polling timer or database connection is held idle.
     async fn wait_login_cleanup(&self, host: Uuid) -> Result<(), EnrollmentError> {
@@ -510,6 +595,7 @@ pub(crate) mod tests {
         enrolled_with_pool(pool).await
     }
 
+    /// [`enrolled`] on a caller-supplied pool, so a test can keep the pool's options.
     pub(crate) async fn enrolled_with_pool(
         pool: sqlx::SqlitePool,
     ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
@@ -535,6 +621,88 @@ pub(crate) mod tests {
             .await
             .unwrap();
         (store, pool, host)
+    }
+
+    /// Turns the fixture's enrolled host into a `device` row (#580) so a test can give
+    /// it P-256 certificates. The mode and uid are write-once for hosts, so the guard
+    /// trigger is dropped for this fixture only, as the bootstrap tests do. The host's
+    /// certificates and invitation are replaced: they were issued for a uid.
+    pub(crate) async fn into_device(pool: &sqlx::SqlitePool, host: Uuid) {
+        for statement in [
+            "DROP TRIGGER remote_hosts_mode_write_once",
+            "DELETE FROM remote_certificates WHERE host_id=?",
+            "DELETE FROM remote_join_tokens WHERE host_id=?",
+            "UPDATE remote_hosts SET mode='device', execution_uid=NULL WHERE id=?",
+        ] {
+            let mut query = sqlx::query(statement);
+            if statement.contains('?') {
+                query = query.bind(host.as_bytes().as_slice());
+            }
+            query.execute(pool).await.unwrap();
+        }
+    }
+
+    /// The owner session the device fixtures approve with: its cookie hash.
+    pub(crate) const DEVICE_SESSION: &str = "device-test-session";
+
+    /// A migrated database holding the owner, a live unlocked owner session, and one
+    /// `device` host row (#580): no uid, device-approved, named `phone`, never joined.
+    pub(crate) async fn device_host() -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO users (id, name, owner, recovery_hash, username, display_name) VALUES ('owner', 'owner', 1, 'test', 'owner', 'Owner')").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,'owner','test',?,0,1)")
+            .bind(DEVICE_SESSION)
+            .bind(i64::MAX / 2)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let host = Uuid::from_u128(77);
+        sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at, device_approved, hostname) VALUES (?, 'owner', 'device', NULL, 100, 1, 'phone')")
+            .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
+        (EnrollmentStore::new(pool.clone()), pool, host)
+    }
+
+    /// Publishes the receipt an approved join leaves for `host`, bound to `key_digest`,
+    /// as the approval does at `now` (ten minutes of life). `mode` and `algorithm` are
+    /// the caller's to get wrong, so tests can prove the pairing is refused.
+    /// Returns the invitation secret, or the refusal.
+    pub(crate) async fn device_receipt(
+        store: &EnrollmentStore,
+        pool: &sqlx::SqlitePool,
+        host: Uuid,
+        (mode, algorithm): (Mode, crate::identity_key::KeyAlgorithm),
+        key_digest: &[u8; 32],
+        now: i64,
+    ) -> Result<String, EnrollmentError> {
+        use base64::Engine;
+        let secret =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
+        let mut connection = pool.acquire().await.unwrap();
+        store
+            .issue_approved_receipt_in(
+                crate::enrollment::ApprovedJoinReceipt {
+                    owner: "owner",
+                    host,
+                    mode,
+                    issued_at: now,
+                    expires_at: now + 600,
+                    now,
+                    session_hash: DEVICE_SESSION,
+                    invitation_secret: &secret,
+                    expected_key_digest: key_digest,
+                    key_algorithm: algorithm,
+                },
+                &mut connection,
+            )
+            .await
+            .map(|_| secret)
     }
 
     /// A fixture certificate record with fingerprint `seed`, valid for seven days from `now`, over a fixed Ed25519 key.

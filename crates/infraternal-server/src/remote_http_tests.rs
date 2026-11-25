@@ -12,6 +12,8 @@ use openssl::{
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
+use crate::remote_device_tests::RingDevice;
+
 /// Retains structured join diagnostics for assertions without installing a global subscriber.
 #[derive(Clone, Default)]
 struct JoinLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1158,4 +1160,296 @@ async fn a_promoted_device_approved_host_refuses_a_later_approval_but_rejoins_by
         StatusCode::OK,
         "the owner can still re-enrol the promoted host with its own key"
     );
+}
+
+/// The router and stores a device join runs against, with the CA unlocked.
+async fn device_app() -> (Router, Auth, SqlitePool, EnrollmentStore, String) {
+    let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(crate::ca_memory::MemoryCaSource::cold_start(
+        material.issuer().clone(),
+    ));
+    let endpoint = EnrollmentEndpoint {
+        ca_der: material.issuer().to_der().unwrap(),
+        endpoint: "127.0.0.1:4443".parse().unwrap(),
+        server_name: "localhost".into(),
+    };
+    let issuer = InvitationIssuer::new(
+        auth.clone(),
+        pool.clone(),
+        store.clone(),
+        EnrollmentService {
+            source: source.clone(),
+            endpoint: endpoint.clone(),
+        },
+    );
+    let app = crate::auth::router_with_invitation_issuer(auth.clone(), Some(issuer)).merge(
+        router_with_store(
+            auth.clone(),
+            pool.clone(),
+            store.clone(),
+            source.clone(),
+            endpoint,
+        ),
+    );
+    source.unlock_from(&Administrator(material)).unwrap();
+    (app, auth, pool, store, token)
+}
+
+/// Start a device-code `join_machine` approval with `body` as its request, return the response.
+async fn start_join(app: &Router, body: Value) -> Response {
+    request(
+        app,
+        "/auth/device-start",
+        json!({"kind": "join_machine", "device": "iphone", "request": body}),
+        None,
+        "https://auth.example.test",
+    )
+    .await
+}
+
+/// #580 P5, end to end: an iPhone's P-256 key joins as a `device`. The owner's approval
+/// binds the key, redemption publishes a host row with no uid, the ring-signed CSR is
+/// admitted and certified, and the certificate admits the device as a device and as nothing
+/// that runs terminals.
+#[tokio::test]
+async fn a_device_joins_with_its_p256_key_and_is_admitted_only_as_a_device() {
+    let (app, auth, pool, _store, token) = device_app().await;
+    // /remote/join reads wall time, so the approval is stamped at the wall clock.
+    let now = super::now().unwrap();
+    auth.set_test_http_time(now);
+    let device = RingDevice::new();
+    let host = Uuid::new_v4();
+    let start = start_join(
+        &app,
+        json!({
+            "host_id": host, "hostname": "kayg-iphone", "mode": "device",
+            "key_fingerprint": device.fingerprint(),
+        }),
+    )
+    .await;
+    assert_eq!(start.status(), StatusCode::OK);
+    let approval: Value =
+        serde_json::from_slice(&start.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let inspected = request(
+        &app,
+        "/auth/device-inspect",
+        json!({"code":approval["user_code"]}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    let inspected: Value =
+        serde_json::from_slice(&inspected.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(inspected["mode"], "device");
+    assert_eq!(inspected["key_fingerprint"], device.fingerprint());
+    auth.approve_without_passkey_for_tests(&token, approval["user_code"].as_str().unwrap(), now)
+        .await
+        .unwrap();
+    let redeemed = request(
+        &app,
+        "/auth/device-redeem",
+        json!({"token": approval["poll_token"]}),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(redeemed.status(), StatusCode::OK);
+    let invitation: JoinInvitation =
+        serde_json::from_slice(&redeemed.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!((invitation.host_id, invitation.mode), (host, Mode::Device));
+    // The host row: a device, no uid, named as it asked, bound to its approved key.
+    let row: (String, Option<i64>, i64, Option<String>) = sqlx::query_as(
+        "SELECT mode, execution_uid, device_approved, hostname FROM remote_hosts WHERE id=?",
+    )
+    .bind(host.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("device".into(), None, 1, Some("kayg-iphone".into())));
+    let bound: (String, Vec<u8>) = sqlx::query_as(
+        "SELECT key_algorithm, expected_key_digest FROM remote_join_tokens WHERE host_id=?",
+    )
+    .bind(host.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (bound.0.as_str(), bound.1),
+        ("p256", device.digest().to_vec())
+    );
+
+    // A request for another key is refused, whatever its signature.
+    let other = RingDevice::new();
+    let refused = request(
+        &app,
+        "/remote/join",
+        json!({"host_id": host, "mode": "device", "token": invitation.token,
+               "csr_der": B64.encode(other.csr())}),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN, "another key");
+    // The refusal spent the invitation, so the device re-approves (a new receipt) to join.
+    let spent = request(
+        &app,
+        "/remote/join",
+        json!({"host_id": host, "mode": "device", "token": invitation.token,
+               "csr_der": B64.encode(device.csr())}),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(spent.status(), StatusCode::FORBIDDEN, "a spent invitation");
+}
+
+/// The same flow, joined successfully: the ring-signed CSR yields a P-256 leaf that the server
+/// admits as a device, and the wire answers uid 0 as the filler for "no uid".
+#[tokio::test]
+async fn a_ring_signed_device_csr_is_certified_and_admitted() {
+    let (app, auth, pool, store, token) = device_app().await;
+    let now = super::now().unwrap();
+    auth.set_test_http_time(now);
+    let device = RingDevice::new();
+    let host = Uuid::new_v4();
+    let start = start_join(
+        &app,
+        json!({"host_id": host, "hostname": "kayg-iphone", "mode": "device",
+               "key_fingerprint": device.fingerprint()}),
+    )
+    .await;
+    let approval: Value =
+        serde_json::from_slice(&start.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let inspected = request(
+        &app,
+        "/auth/device-inspect",
+        json!({"code":approval["user_code"]}),
+        Some(&token),
+        "https://auth.example.test",
+    )
+    .await;
+    assert_eq!(inspected.status(), StatusCode::OK);
+    auth.approve_without_passkey_for_tests(&token, approval["user_code"].as_str().unwrap(), now)
+        .await
+        .unwrap();
+    let invitation: JoinInvitation = serde_json::from_slice(
+        &request(
+            &app,
+            "/auth/device-redeem",
+            json!({"token": approval["poll_token"]}),
+            None,
+            "",
+        )
+        .await
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes(),
+    )
+    .unwrap();
+    let joined = request(
+        &app,
+        "/remote/join",
+        json!({"host_id": host, "mode": "device", "token": invitation.token,
+               "csr_der": B64.encode(device.csr())}),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(joined.status(), StatusCode::OK);
+    let joined: JoinResponse =
+        serde_json::from_slice(&joined.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(joined.execution_uid, 0, "the wire's filler for no uid");
+    let leaf = openssl::x509::X509::from_der(&B64.decode(joined.certificate_der).unwrap()).unwrap();
+    let leaf_key = leaf.public_key().unwrap().ec_key().unwrap();
+    let group = leaf_key.group();
+    let mut context = openssl::bn::BigNumContext::new().unwrap();
+    assert_eq!(
+        leaf_key
+            .public_key()
+            .to_bytes(
+                group,
+                openssl::ec::PointConversionForm::UNCOMPRESSED,
+                &mut context
+            )
+            .unwrap(),
+        device.point(),
+        "the certificate certifies the device's own key"
+    );
+    let fingerprint: [u8; 32] = leaf
+        .digest(MessageDigest::sha256())
+        .unwrap()
+        .as_ref()
+        .try_into()
+        .unwrap();
+    assert_eq!(
+        store.admit_device(&fingerprint, now).await.unwrap().host,
+        host
+    );
+    assert!(
+        store.admit(&fingerprint, now).await.is_err(),
+        "the terminal host guard refuses a device certificate"
+    );
+    let certificate_uid: Option<i64> =
+        sqlx::query_scalar("SELECT execution_uid FROM remote_certificates WHERE fingerprint=?")
+            .bind(fingerprint.as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(certificate_uid, None);
+}
+
+/// Every refusal on the way in, each red: a device request that carries a uid, a host request
+/// that carries none, an unknown mode, the owner-invitation endpoint with `device`, and a join
+/// that names the `device` mode with a host invitation or the reverse.
+#[tokio::test]
+async fn device_requests_that_do_not_fit_the_mode_are_refused() {
+    let (app, auth, pool, _store, token) = device_app().await;
+    let now = super::now().unwrap();
+    auth.set_test_http_time(now);
+    let device = RingDevice::new();
+    for body in [
+        json!({"host_id": Uuid::new_v4(), "hostname": "p", "mode": "device", "execution_uid": 0,
+               "key_fingerprint": device.fingerprint()}),
+        json!({"host_id": Uuid::new_v4(), "hostname": "p", "mode": "device", "execution_uid": 501,
+               "key_fingerprint": device.fingerprint()}),
+        json!({"host_id": Uuid::new_v4(), "hostname": "p", "mode": "system",
+               "key_fingerprint": device.fingerprint()}),
+        json!({"host_id": Uuid::new_v4(), "hostname": "p", "mode": "user",
+               "key_fingerprint": device.fingerprint()}),
+        json!({"host_id": Uuid::new_v4(), "hostname": "p", "mode": "phone",
+               "key_fingerprint": device.fingerprint()}),
+    ] {
+        let response = start_join(&app, body.clone()).await;
+        assert_ne!(response.status(), StatusCode::OK, "{body} was accepted");
+    }
+    // The owner-invitation endpoint makes invitations for hosts that run the agent; never a device.
+    for uid in [0, 501] {
+        let invited = request(
+            &app,
+            "/remote/invitations",
+            json!({"host_id": Uuid::new_v4(), "mode": "device", "execution_uid": uid,
+                   "expected_key_digest": device.digest()}),
+            Some(&token),
+            "https://auth.example.test",
+        )
+        .await;
+        assert_eq!(invited.status(), StatusCode::FORBIDDEN, "uid {uid}");
+    }
+    let devices: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_hosts WHERE mode='device'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(devices, 0, "no refusal left a device row behind");
 }

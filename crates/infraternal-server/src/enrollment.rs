@@ -21,7 +21,7 @@ mod bootstrap_retirement;
 /// The durable record of upgrading a host to root (D376).
 #[path = "remote_promotion.rs"]
 pub(crate) mod promotion;
-pub use authority::HostAuthority;
+pub use authority::{DeviceAuthority, HostAuthority};
 
 pub use infraternal_plugin_remote::enrollment::Mode;
 
@@ -339,6 +339,12 @@ impl EnrollmentStore {
         constraints: IssueConstraints<'_>,
         connection: &mut sqlx::SqliteConnection,
     ) -> Result<JoinToken, EnrollmentError> {
+        // A device is invited only by its own passkey-approved receipt
+        // ([`Self::issue_approved_receipt_in`]), which binds its P-256 key.
+        // These invitations are Ed25519 ones; the schema refuses the pair too.
+        if mode == Mode::Device {
+            return Err(EnrollmentError::Denied);
+        }
         let expires = now
             .checked_add(900)
             .filter(|_| now >= 0)
@@ -397,6 +403,12 @@ impl EnrollmentStore {
             key_algorithm,
         } = receipt;
         if invitation_secret.len() != 43 || issued_at < 0 || issued_at > now || expires_at <= now {
+            return Err(EnrollmentError::Denied);
+        }
+        // Only a device holds a P-256 key, and a device holds nothing else
+        // (owner question Q4 on #580). The request's own mode already picked
+        // the algorithm; this refuses any caller that pairs them differently.
+        if (mode == Mode::Device) != (key_algorithm == KeyAlgorithm::P256) {
             return Err(EnrollmentError::Denied);
         }
         let decoded = URL_SAFE_NO_PAD

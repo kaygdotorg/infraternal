@@ -82,7 +82,7 @@ pub async fn grant_in(
     let key = host_key(host);
     let added_by_person = if host.is_some() {
         let current: Option<String> = sqlx::query_scalar(
-            "SELECT owner_id FROM remote_hosts WHERE id = ? AND revoked_at IS NULL",
+            "SELECT owner_id FROM remote_hosts WHERE id = ? AND revoked_at IS NULL AND mode IN ('rootless', 'rootful')",
         )
         .bind(&key)
         .fetch_optional(&mut *connection)

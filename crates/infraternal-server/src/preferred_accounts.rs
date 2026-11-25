@@ -31,13 +31,15 @@ async fn authorize(
     }
     authorize_host(tx, person, host).await
 }
+/// Whether `person` may read or set preferences for `host`: the host must be theirs, live and one that
+/// runs the infraternal agent (a `device` has no logins, #580).
 async fn authorize_host(
     tx: &mut Transaction<'_, Sqlite>,
     person: &str,
     host: Option<uuid::Uuid>,
 ) -> Result<(), &'static str> {
     if let Some(host) = host {
-        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND mode IN ('rootless','rootful'))")
             .bind(host.as_bytes().as_slice()).bind(person).fetch_one(&mut **tx).await.map_err(|_| REFUSED)?;
         if !owned {
             return Err(REFUSED);

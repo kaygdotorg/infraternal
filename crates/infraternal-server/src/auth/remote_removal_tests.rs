@@ -1409,3 +1409,60 @@ async fn the_inbox_route_answers_by_who_asks() {
         .unwrap();
     assert_eq!(inbox().await, axum::http::StatusCode::UNAUTHORIZED);
 }
+
+/// #580: a device has no agent to uninstall and no logins to revoke, so its removal retires
+/// it at once. The answer is `removed` (never `pending`), no uninstall obligation is left
+/// waiting for a receipt that cannot come, and its mesh node goes with it.
+#[tokio::test]
+async fn removing_a_device_retires_it_at_once_with_nothing_to_uninstall() {
+    let f = fixture().await;
+    let host = Uuid::new_v4();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,device_approved,hostname) VALUES(?,?,'device',NULL,1,1,'kayg-iphone')")
+        .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO mesh_nodes(id,name,public_key,dataplane_host) VALUES (1,'kayg-iphone',?,?)",
+    )
+    .bind([9_u8; 32].as_slice())
+    .bind(host.to_string())
+    .execute(&f.auth.pool)
+    .await
+    .unwrap();
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, NOW).await.unwrap();
+    assert_eq!(start["action"]["host"], "kayg-iphone");
+    let review = str_field(&start, "review");
+    let result = service
+        .finish_host(&f.session, host, review, NOW)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "removed");
+    assert_eq!(result["host_cleanup"], "none");
+    assert!(result["manual"].is_null());
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("kayg-iphone was removed"),
+        "{result}"
+    );
+    assert!(!live(&f, host).await, "retired at once, not pending");
+    let (confirmed, removals, nodes): (bool, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT confirmed FROM remote_login_cleanup WHERE host_id=?1), \
+                (SELECT count(*) FROM remote_host_removals WHERE host_id=?1), \
+                (SELECT count(*) FROM mesh_nodes)",
+    )
+    .bind(host.as_bytes().as_slice())
+    .fetch_one(&f.auth.pool)
+    .await
+    .unwrap();
+    assert!(confirmed, "nothing waits for a host receipt");
+    assert_eq!(removals, 0, "no uninstall request was queued");
+    assert_eq!(nodes, 0, "the mesh node was retired with the device");
+    assert!(
+        service
+            .finish_host(&f.session, host, review, NOW)
+            .await
+            .is_err(),
+        "a review is single use"
+    );
+}

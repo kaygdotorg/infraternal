@@ -764,9 +764,28 @@ async fn identity_key_algorithm_migration_keeps_ed25519_rows_and_restores_from_a
     insert_certificate(&pool, 3, &[3; 32], None)
         .await
         .expect("an existing writer that names no algorithm still stores Ed25519");
-    insert_certificate(&pool, 4, &point, Some("p256"))
+    // A P-256 key belongs to a device (#580 P5): its row has no uid and neither has its certificate.
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner','device',NULL,100)")
+        .bind(uuid::Uuid::from_u128(2).as_bytes().as_slice())
+        .execute(&pool)
         .await
-        .expect("a P-256 point named p256 is stored");
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) \
+         VALUES (?,?,zeroblob(32),?,100,604900,NULL,'p256')",
+    )
+    .bind([4_u8; 32].as_slice())
+    .bind(uuid::Uuid::from_u128(2).as_bytes().as_slice())
+    .bind(&point)
+    .execute(&pool)
+    .await
+    .expect("a P-256 point named p256 is stored for a device");
+    assert!(
+        insert_certificate(&pool, 12, &point, Some("p256"))
+            .await
+            .is_err(),
+        "a P-256 point is not stored for a rootless host"
+    );
     for (fingerprint, key, algorithm) in [
         (5_u8, point.clone(), None),
         (6, point.clone(), Some("ed25519")),
@@ -854,6 +873,419 @@ async fn identity_key_algorithm_migration_keeps_ed25519_rows_and_restores_from_a
     // Updating again from the restored copy migrates it exactly as the first time.
     sqlx::migrate!("./migrations").run(&restored).await.unwrap();
     assert_eq!(certificate_rows(&restored).await, before);
+    restored.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The version of the device host mode migration (#580 P5): `remote_hosts` admits `device`, with no uid.
+const DEVICE_HOST_MODE: i64 = 20_261_125_055_624;
+
+/// The migrations as a release before #580 P5 shipped them.
+fn before_device_host_mode() -> sqlx::migrate::Migrator {
+    let mut migrator = sqlx::migrate!("./migrations");
+    migrator
+        .migrations
+        .to_mut()
+        .retain(|migration| migration.version < DEVICE_HOST_MODE);
+    migrator
+}
+
+/// Every column of every host, in a fixed order, for before/after comparisons.
+type HostRow = (
+    Vec<u8>,
+    String,
+    String,
+    Option<i64>,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+);
+
+/// Every column of a join token, in a fixed order, for before/after comparisons.
+type TokenRow = (
+    Vec<u8>,
+    String,
+    Vec<u8>,
+    i64,
+    i64,
+    Option<i64>,
+    Option<Vec<u8>>,
+    String,
+);
+
+/// All host rows, ordered by id.
+async fn host_rows(pool: &sqlx::SqlitePool) -> Vec<HostRow> {
+    sqlx::query_as(
+        "SELECT id,owner_id,mode,execution_uid,created_at,revoked_at,hostname,reported_os,device_approved,device_os \
+         FROM remote_hosts ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// How many rows each child of `remote_hosts` holds: a rebuild that cascaded would lose them.
+async fn child_counts(pool: &sqlx::SqlitePool) -> Vec<(String, i64)> {
+    let mut counts = Vec::new();
+    for table in [
+        "remote_certificates",
+        "remote_join_tokens",
+        "remote_login_cleanup",
+        "remote_host_bootstrap",
+        "remote_host_removals",
+        "terminal_sessions",
+    ] {
+        let count: i64 = // The table names are the fixed list above, never input.
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        counts.push((table.to_owned(), count));
+    }
+    counts
+}
+
+/// Every table, index, trigger and view by name.
+async fn schema_objects(pool: &sqlx::SqlitePool) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Insert a host row with the given mode and uid; the result says whether the schema took it.
+async fn insert_host(
+    pool: &sqlx::SqlitePool,
+    id: u128,
+    mode: &str,
+    uid: Option<i64>,
+) -> Result<sqlx::sqlite::SqliteQueryResult, sqlx::Error> {
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'owner',?,?,100)")
+        .bind(uuid::Uuid::from_u128(id).as_bytes().as_slice())
+        .bind(mode)
+        .bind(uid)
+        .execute(pool)
+        .await
+}
+
+/// #580 P5: the host-mode rebuild, against a database shaped like a release before it with made-up
+/// rows (no real data). It keeps every host, every child row (the fourteen children include
+/// CASCADE ones a careless rebuild would empty), every index and trigger, and every column; it
+/// admits `device` only with no uid and a P-256 key and the other modes only with theirs; the
+/// retirement trigger confirms a device's cleanup at once; and a D295 undo to the pre-update
+/// `VACUUM INTO` copy gives the previous release its own schema and rows back, which migrates again.
+#[tokio::test]
+async fn device_host_mode_migration_keeps_every_row_and_admits_devices_only_without_a_uid() {
+    let root = std::env::temp_dir().join(format!("j1202-device-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir(&root).unwrap();
+    let live = root.join("infraternal.sqlite");
+    let copy = root.join("previous.sqlite");
+    let pool = file_pool(&live).await;
+    before_device_host_mode().run(&pool).await.unwrap();
+    for user in ["owner", "other"] {
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,?,?,'fixture',?,?)")
+            .bind(user)
+            .bind(user)
+            .bind(i64::from(user == "owner"))
+            .bind(user)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (alpha, bravo, charlie) = (1_u128, 2_u128, 3_u128);
+    for (id, owner, mode, uid, revoked, name) in [
+        (alpha, "owner", "rootless", 1000_i64, None, "alpha"),
+        (bravo, "owner", "rootful", 0, Some(500_i64), "bravo"),
+        (charlie, "other", "rootless", 1001, None, "charlie"),
+    ] {
+        sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,revoked_at,hostname,reported_os,device_approved,device_os) VALUES (?,?,?,?,100,?,?,'Linux',1,'Linux')")
+            .bind(uuid::Uuid::from_u128(id).as_bytes().as_slice())
+            .bind(owner)
+            .bind(mode)
+            .bind(uid)
+            .bind(revoked)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let host_id = |id: u128| uuid::Uuid::from_u128(id);
+    for (fingerprint, id, uid) in [(1_u8, alpha, 1000_i64), (2, bravo, 0), (3, charlie, 1001)] {
+        sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES (?,?,zeroblob(32),?,100,604900,?)")
+            .bind([fingerprint; 32].as_slice())
+            .bind(host_id(id).as_bytes().as_slice())
+            .bind([fingerprint + 10; 32].as_slice())
+            .bind(uid)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at,expected_key_digest) VALUES (?,'rootless',?,100,1000,?)")
+        .bind(host_id(alpha).as_bytes().as_slice())
+        .bind([5_u8; 32].as_slice())
+        .bind([6_u8; 32].as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO remote_login_cleanup(host_id,person_id,confirmed) VALUES (?,'owner',1)",
+    )
+    .bind(host_id(bravo).as_bytes().as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES (?,'root@alpha.example',NULL)")
+        .bind(host_id(alpha).as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) VALUES (?,'owner',400,1,'pending')")
+        .bind(host_id(bravo).as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) VALUES (?,'owner',100,100,?)")
+        .bind([7_u8; 16].as_slice())
+        .bind(host_id(alpha).as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (hosts, counts, objects) = (
+        host_rows(&pool).await,
+        child_counts(&pool).await,
+        schema_objects(&pool).await,
+    );
+    let tokens_before: Vec<TokenRow> =
+        sqlx::query_as("SELECT host_id,mode,digest,issued_at,expires_at,consumed_at,expected_key_digest,key_algorithm FROM remote_join_tokens")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let columns = "SELECT name FROM pragma_table_info('remote_hosts') ORDER BY cid";
+    let columns_before: Vec<String> = sqlx::query_scalar(columns).fetch_all(&pool).await.unwrap();
+    // The D295 database copy the update takes before the new release migrates.
+    sqlx::query("VACUUM INTO ?")
+        .bind(copy.to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+    assert_eq!(
+        host_rows(&pool).await,
+        hosts,
+        "every host row, every column"
+    );
+    assert_eq!(child_counts(&pool).await, counts, "no child row was lost");
+    let tokens_after: Vec<TokenRow> =
+        sqlx::query_as("SELECT host_id,mode,digest,issued_at,expires_at,consumed_at,expected_key_digest,key_algorithm FROM remote_join_tokens")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tokens_after, tokens_before);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(columns)
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        columns_before,
+        "the same columns in the same order"
+    );
+    let mut expected = objects;
+    expected.push((
+        "trigger".into(),
+        "remote_certificates_key_matches_host_mode".into(),
+    ));
+    expected.sort();
+    assert_eq!(
+        schema_objects(&pool).await,
+        expected,
+        "every index and trigger came back, and one trigger is new"
+    );
+    let uid_required: i64 = sqlx::query_scalar(
+        "SELECT \"notnull\" FROM pragma_table_info('remote_hosts') WHERE name='execution_uid'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        uid_required, 0,
+        "only a device has no uid, and a CHECK says so"
+    );
+
+    // What the schema takes now: a device has no uid and every other host keeps its own rule.
+    insert_host(&pool, 100, "device", None)
+        .await
+        .expect("a device has no uid");
+    for (id, mode, uid) in [
+        (101_u128, "device", Some(0_i64)),
+        (102, "device", Some(1000)),
+        (103, "rootless", None),
+        (104, "rootful", None),
+        (105, "rootful", Some(5)),
+        (106, "rootless", Some(0)),
+        (107, "phone", None),
+    ] {
+        assert!(
+            insert_host(&pool, id, mode, uid).await.is_err(),
+            "{mode} with uid {uid:?} was stored"
+        );
+    }
+    // Invitations: a device holds a P-256 one and no host does.
+    let token = |id: u128, mode: &'static str, algorithm: &'static str, seed: u8| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("INSERT INTO remote_join_tokens(host_id,mode,digest,issued_at,expires_at,expected_key_digest,key_algorithm) VALUES (?,?,?,100,700,?,?)")
+                .bind(uuid::Uuid::from_u128(id).as_bytes().as_slice())
+                .bind(mode)
+                .bind([seed; 32].as_slice())
+                .bind([seed; 32].as_slice())
+                .bind(algorithm)
+                .execute(&pool)
+                .await
+        }
+    };
+    assert!(token(100, "device", "ed25519", 40).await.is_err());
+    assert!(token(100, "rootless", "p256", 41).await.is_err());
+    sqlx::query("DELETE FROM remote_join_tokens WHERE host_id=?")
+        .bind(host_id(alpha).as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(token(alpha, "rootless", "p256", 43).await.is_err());
+    token(100, "device", "p256", 44)
+        .await
+        .expect("a device invitation names P-256");
+    // Certificates: the same pairing, whichever writer inserts them.
+    let point = [[4_u8].as_slice(), &[9; 64]].concat();
+    let certificate = |id: u128,
+                       algorithm: &'static str,
+                       key: Vec<u8>,
+                       uid: Option<i64>,
+                       seed: u8| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid,key_algorithm) VALUES (?,?,zeroblob(32),?,100,604900,?,?)")
+                .bind([seed; 32].as_slice())
+                .bind(uuid::Uuid::from_u128(id).as_bytes().as_slice())
+                .bind(key)
+                .bind(uid)
+                .bind(algorithm)
+                .execute(&pool)
+                .await
+        }
+    };
+    assert!(
+        certificate(100, "ed25519", vec![9; 32], None, 50)
+            .await
+            .is_err(),
+        "a device holds no Ed25519 key"
+    );
+    assert!(
+        certificate(alpha, "p256", point.clone(), Some(1000), 51)
+            .await
+            .is_err(),
+        "no host holds a P-256 key"
+    );
+    assert!(
+        certificate(bravo, "p256", point.clone(), Some(0), 52)
+            .await
+            .is_err()
+    );
+    certificate(100, "p256", point.clone(), None, 53)
+        .await
+        .expect("a device certificate");
+    // A host's mode and uid are write-once; a device has no way to become a host or gain a uid.
+    for (statement, id) in [
+        ("UPDATE remote_hosts SET mode='rootless' WHERE id=?", 100),
+        (
+            "UPDATE remote_hosts SET mode='rootful', execution_uid=0 WHERE id=?",
+            100,
+        ),
+        ("UPDATE remote_hosts SET execution_uid=7 WHERE id=?", 100),
+        (
+            "UPDATE remote_hosts SET mode='device', execution_uid=NULL WHERE id=?",
+            alpha,
+        ),
+    ] {
+        assert!(
+            sqlx::query(statement)
+                .bind(host_id(id).as_bytes().as_slice())
+                .execute(&pool)
+                .await
+                .is_err(),
+            "{statement} was applied to {id}"
+        );
+    }
+    // Retirement: a device's login cleanup is born confirmed (no agent can confirm it), a host's is
+    // not, and the device's mesh node and grants go with it as for any host.
+    sqlx::query("INSERT INTO mesh_nodes(id,name,public_key,dataplane_host) VALUES (1,'phone',?,?)")
+        .bind([8_u8; 32].as_slice())
+        .bind(host_id(100).to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    for id in [100_u128, alpha] {
+        sqlx::query("UPDATE remote_hosts SET revoked_at=900 WHERE id=?")
+            .bind(host_id(id).as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let cleanup = |id: u128| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT confirmed FROM remote_login_cleanup WHERE host_id=?",
+            )
+            .bind(host_id(id).as_bytes().as_slice())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert!(cleanup(100).await, "a device has nothing to uninstall");
+    assert!(
+        !cleanup(alpha).await,
+        "a host still waits for its agent's receipt"
+    );
+    let nodes: i64 = sqlx::query_scalar("SELECT count(*) FROM mesh_nodes")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(nodes, 0, "the device's mesh node was retired with it");
+    let checks: (String, i64) = sqlx::query_as(
+        "SELECT (SELECT integrity_check FROM pragma_integrity_check), (SELECT count(*) FROM pragma_foreign_key_check)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(checks, ("ok".into(), 0));
+    pool.close().await;
+
+    // The undo: the previous release opens the copy and finds its own schema and rows.
+    let restored = file_pool(&copy).await;
+    before_device_host_mode().run(&restored).await.unwrap();
+    assert_eq!(host_rows(&restored).await, hosts);
+    assert_eq!(child_counts(&restored).await, counts);
+    let uid_required: i64 = sqlx::query_scalar(
+        "SELECT \"notnull\" FROM pragma_table_info('remote_hosts') WHERE name='execution_uid'",
+    )
+    .fetch_one(&restored)
+    .await
+    .unwrap();
+    assert_eq!(
+        uid_required, 1,
+        "the restored copy is the pre-migration schema"
+    );
+    sqlx::migrate!("./migrations").run(&restored).await.unwrap();
+    assert_eq!(host_rows(&restored).await, hosts);
+    assert_eq!(child_counts(&restored).await, counts);
     restored.close().await;
     std::fs::remove_dir_all(root).unwrap();
 }

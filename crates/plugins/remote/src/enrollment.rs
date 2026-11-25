@@ -11,6 +11,11 @@ pub enum Mode {
     Rootless,
     /// Runs as uid zero after explicit owner consent.
     Rootful,
+    /// A phone or tablet that joins the mesh (#580). It has no uid and is never
+    /// a place to run terminals or logins: the infraternal agent never runs on
+    /// it, so nothing in the server may open a shell on it. Its identity key is
+    /// P-256, held in the device's secure hardware.
+    Device,
 }
 
 impl Mode {
@@ -20,6 +25,7 @@ impl Mode {
         match self {
             Self::Rootless => "rootless",
             Self::Rootful => "rootful",
+            Self::Device => "device",
         }
     }
 }
@@ -32,7 +38,8 @@ pub struct JoinInvitation {
     pub host_id: Uuid,
     /// Immutable privilege mode.
     pub mode: Mode,
-    /// Bound execution uid from the trusted bootstrap probe.
+    /// Bound execution uid from the trusted bootstrap probe. A `device` has no
+    /// uid; it carries 0 here, and nothing reads it for that mode.
     pub execution_uid: u32,
     /// Public HTTPS origin used by both enrollment and the agent's WebSocket link.
     #[serde(default)]
@@ -78,6 +85,7 @@ pub struct JoinRequest {
 pub struct JoinResponse {
     /// Base64url DER seven-day client certificate.
     pub certificate_der: String,
-    /// Host's trusted enrolled uid.
+    /// Host's trusted enrolled uid. A `device` has none and answers 0, which
+    /// clients ignore for that mode.
     pub execution_uid: u32,
 }

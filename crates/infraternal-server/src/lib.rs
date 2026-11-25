@@ -237,3 +237,6 @@ mod release_payload;
 
 #[cfg(all(test, feature = "remote"))]
 mod ca_update_audit_tests;
+/// Tests of the `device` host mode and the ring-signed P-256 test client (#580).
+#[cfg(all(test, feature = "remote"))]
+mod remote_device_tests;

@@ -19,7 +19,7 @@ use sqlx::SqlitePool;
 
 /// Insert the session row only if the login session is live and, for a remote
 /// host, the host is the account's and not revoked.
-const SQL_INSERT: &str = "INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL))";
+const SQL_INSERT: &str = "INSERT INTO terminal_sessions(id,user_id,created_at,last_seen,remote_host_id) SELECT ?,?,?,?,? FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>unixepoch() AND (? IS NULL OR EXISTS (SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL AND mode IN ('rootless','rootful')))";
 
 /// What to record: the new session, who opened it, where, and when.
 pub(crate) struct NewSession<'a> {

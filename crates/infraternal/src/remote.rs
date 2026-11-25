@@ -238,7 +238,12 @@ async fn join_with_key_inner(
         return Err(refused());
     }
     let uid = nix::unistd::Uid::effective().as_raw();
-    if uid != invitation.execution_uid || (invitation.mode == Mode::Rootless) == (uid == 0) {
+    // A `device` invitation is for a phone's own client, never for this command:
+    // it carries no uid, so the uid checks below would not describe it.
+    if invitation.mode == Mode::Device
+        || uid != invitation.execution_uid
+        || (invitation.mode == Mode::Rootless) == (uid == 0)
+    {
         return Err(refused());
     }
     // The host key is immutable (#78): SSH setup copies an enrolled identity
