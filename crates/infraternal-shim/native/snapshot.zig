@@ -789,11 +789,27 @@ fn text(w: *Writer, p: vt.PageList.Pin, value: *const vt.page.Cell) SnapshotErro
         // is therefore on only for extras the boundary rules join, and off for
         // the rest. The chain of previous codepoints feeds the same break
         // state machine the engine feeds.
+        //
+        // A one-column screen is the exception: the cursor never leaves
+        // column 0, and the engine clusters only when there is a cell to the
+        // left of the cursor, so an extra printed with clustering on would be
+        // dropped (#521; the history boundary painter made such screens
+        // exportable, and the fuzzer found it). There every extra must attach
+        // the way a zero-width print does without clustering, to the cell
+        // under the pending wrap. One that would not (a visible codepoint, or
+        // a variation selector on a base that is not an emoji) has no print
+        // that attaches it, and the state is refused.
+        const one_column = p.cells(.all).len == 1;
         var state: uucode.grapheme.BreakState = .default;
         var previous = value.codepoint();
         var clustering = false;
         for (extra) |cp| {
-            const joins = !unicode.graphemeBreak(unicode.table.get(previous).grapheme_break, unicode.table.get(cp).grapheme_break, &state) and
+            if (one_column) {
+                const selector = cp == 0xFE0F or cp == 0xFE0E;
+                const emoji_base = unicode.table.get(value.codepoint()).grapheme_break == .extended_pictographic;
+                if (cp <= 0xFF or unicode.table.get(cp).width != 0 or (selector and !emoji_base)) return error.Unrepresentable;
+            }
+            const joins = !one_column and !unicode.graphemeBreak(unicode.table.get(previous).grapheme_break, unicode.table.get(cp).grapheme_break, &state) and
                 unicode.graphemeWidthEffect(previous, cp) != .ignore;
             if (joins != clustering) {
                 try w.writeAll(if (joins) "\x1b[?2027h" else "\x1b[?2027l");

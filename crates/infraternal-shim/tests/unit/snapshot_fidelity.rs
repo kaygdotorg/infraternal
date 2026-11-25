@@ -791,3 +791,26 @@ fn fidelity_a_crossing_line_longer_than_the_history_tail_is_refused() {
         std::io::ErrorKind::Unsupported
     );
 }
+
+/// On a one-column screen the cursor never leaves column 0, where the engine
+/// does not cluster graphemes, so a combining mark must be replayed with
+/// clustering off to reach its cell (#521). The boundary painter made such
+/// screens exportable with history (every row there wraps), which is how the
+/// `vt_stream_snapshot` fuzzer found it; the screen-only case had the same gap.
+/// The marks here join their base, and some states also turn clustering on.
+#[test]
+fn fidelity_one_column_screens_keep_combining_marks() {
+    for (name, prefix, rows) in [
+        ("mark on a one-cell screen", "d\u{485}", 1),
+        ("mark on a one-column screen", "ad\u{485}b", 3),
+        ("mark in one-column history", "abcd\u{485}efgh", 3),
+        (
+            "mark printed with clustering on",
+            "ab\x1b[?2027hcd\u{301}\x1b[?2027lef",
+            2,
+        ),
+        ("two marks on one cell", "xe\u{301}\u{323}yz", 2),
+    ] {
+        replay(name, prefix.as_bytes(), 1, rows);
+    }
+}
