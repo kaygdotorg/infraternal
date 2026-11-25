@@ -1,0 +1,39 @@
+# Standalone measurement crate for #260 / J1204. It is NOT a member of the infraternal workspace
+# (the empty [workspace] table below keeps cargo from looking for the parent one) and nothing in
+# the product depends on it.
+[package]
+name = "hasher-bench"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "Micro-benchmarks of the per-packet hash tables on GotaTun's data path (#260, J1204)"
+
+[workspace]
+
+[dependencies]
+foldhash = "0.2"
+ahash = { version = "0.8", default-features = false, features = ["std", "no-rng"] }
+rustc-hash = "2.1"
+ip_network = "0.4.1"
+ip_network_table = "0.2.0"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[features]
+# One hasher per size-probe build (see src/bin/size_probe.rs); none selects std's SipHash-1-3.
+fold = []
+ahash-probe = []
+fx = []
+
+[[bench]]
+name = "hot_paths"
+harness = false
+
+[profile.release]
+# The product's release settings matter for inlining of the hashers.
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

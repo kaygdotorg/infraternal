@@ -1,0 +1,9 @@
+
+running 1 test
+test packet_filter::tests::hasher_bench_check_at_per_packet ... HBENCH peers=1 flows=32 ns_per_packet=173.8 min=173.4 max=174.1
+HBENCH peers=100 flows=3200 ns_per_packet=190.2 min=187.7 max=195.2
+HBENCH peers=1000 flows=8192 ns_per_packet=210.1 min=208.2 max=219.5
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 600 filtered out; finished in 0.05s
+
