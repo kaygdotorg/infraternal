@@ -1,0 +1,10 @@
+    15.03%  server-test      
+     6.38%  [kernel.kallsyms]
+     0.47%  [vdso]           
+     0.46%  [nf_tables]      
+     0.35%  [nf_conntrack]   
+     0.12%  [nf_nat]         
+     0.03%  [unknown]        
+     0.02%  [nf_defrag_ipv4] 
+     0.01%  [ext4]           
+     0.01%  [tcp_bbr]        
