@@ -938,3 +938,168 @@ mod bench {
         }
     }
 }
+
+/// A real WebSocket pair over loopback, configured as the HTTPS fallback
+/// configures it (`carrier_config`): (agent side, server side). The outer TLS
+/// is not under test here, so the pair runs on plain TCP.
+async fn websocket_pair() -> (
+    tokio_tungstenite::WebSocketStream<TcpStream>,
+    tokio_tungstenite::WebSocketStream<TcpStream>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_async_with_config(
+            socket,
+            Some(remote_websocket::carrier_config()),
+        )
+        .await
+        .unwrap()
+    });
+    let socket = TcpStream::connect(address).await.unwrap();
+    let (client, _) = tokio_tungstenite::client_async_with_config(
+        "ws://localhost/remote/agent",
+        socket,
+        Some(remote_websocket::carrier_config()),
+    )
+    .await
+    .unwrap();
+    (client, server.await.unwrap())
+}
+
+/// A raw TLS client for one probe: it trusts `roots`, presents `identity` when
+/// given, offers only `alpn`, and stays on TLS 1.2 when `tls12`. It is built
+/// by hand, not with `client_config`, so each case can break one rule.
+fn probe_client(
+    roots: &[X509],
+    identity: Option<&Identity>,
+    alpn: &[u8],
+    tls12: bool,
+) -> SslConnector {
+    use openssl::{
+        ssl::{SslVerifyMode, SslVersion},
+        x509::store::X509StoreBuilder,
+    };
+    let mut builder = SslConnector::builder(SslMethod::tls_client()).unwrap();
+    let mut trust = X509StoreBuilder::new().unwrap();
+    for root in roots {
+        trust.add_cert(root.clone()).unwrap();
+    }
+    builder.set_cert_store(trust.build());
+    builder.set_verify(SslVerifyMode::PEER);
+    if let Some(identity) = identity {
+        builder.set_certificate(&identity.certificate).unwrap();
+        builder.set_private_key(&identity.key).unwrap();
+    }
+    builder.set_alpn_protos(alpn).unwrap();
+    if tls12 {
+        builder
+            .set_max_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
+    }
+    builder.build()
+}
+
+/// Run the server side of the inner handshake with `accept_over` (the path
+/// `/remote/agent` takes) over one real WebSocket carrier, and the client side
+/// as a bare TLS connect over the other end. Returns (server result, whether
+/// the client finished its TLS handshake).
+///
+/// The client is a bare connect, not `dial_over`, on purpose: `dial_over` also
+/// requires `infraternal/1` as the negotiated ALPN, so it would report every
+/// recovery-ALPN handshake as a failure, even one the TLS layer completed.
+async fn inner_handshake(config: &SslAcceptor, client: &SslConnector) -> (io::Result<()>, bool) {
+    let (agent_socket, server_socket) = websocket_pair().await;
+    let server =
+        remote_tls::accept_over(WebSocketCarrier::new(server_socket).into_carrier(), config);
+    let ssl = client.configure().unwrap().into_ssl("localhost").unwrap();
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, WebSocketCarrier::new(agent_socket).into_carrier())
+            .unwrap();
+    let client_completes = std::pin::Pin::new(&mut stream).connect();
+    let (server, client_completes) = tokio::join!(server, client_completes);
+    (server.map(|_| ()), client_completes.is_ok())
+}
+
+/// The production `/remote/agent` acceptor is `recovery_server_config`, which
+/// offers the recovery ALPN as well as `infraternal/1` (`start_with_recovery`,
+/// runtime.rs). Over the WebSocket, only a valid enrolled host may get a link:
+/// every other peer is refused by `accept_over`, including one that speaks
+/// the recovery ALPN with a valid certificate. J1232 found this case
+/// unpinned, so a later change to `accept_over` or `finish` could open it
+/// without a test failing.
+///
+/// Each row says whether the client finishes its own TLS handshake. For a
+/// TLS 1.3 client that is true even when the server refuses, because the
+/// server's check runs after the client has sent its Finished. A TLS 1.2-only
+/// client must fail at the handshake, since the server speaks TLS 1.3 only.
+#[tokio::test]
+async fn recovery_aware_acceptor_admits_only_a_valid_host_over_the_websocket() {
+    const RECOVERY: &[u8] = b"\x1dinfraternal/remote-recovery/1";
+    const HOST: &[u8] = b"\x0dinfraternal/1";
+    let (material, agent, _store, foreign) = setup().await;
+    let leaf = crate::server_leaf::issue(&material, "localhost", None, now()).unwrap();
+    let roots = std::slice::from_ref(&agent.root);
+    let config = remote_tls::recovery_server_config(&leaf, roots).unwrap();
+    let host = Some(&agent.identity);
+    let foreign = Some(&foreign);
+    // (case, client, client completes its handshake, server admits the host)
+    let cases = [
+        (
+            "recovery ALPN, no certificate",
+            probe_client(roots, None, RECOVERY, false),
+            true,
+            false,
+        ),
+        (
+            "recovery ALPN, foreign-CA certificate",
+            probe_client(roots, foreign, RECOVERY, false),
+            true,
+            false,
+        ),
+        (
+            "recovery ALPN, valid host certificate",
+            probe_client(roots, host, RECOVERY, false),
+            true,
+            false,
+        ),
+        (
+            "infraternal/1, no certificate",
+            probe_client(roots, None, HOST, false),
+            true,
+            false,
+        ),
+        (
+            "infraternal/1, foreign-CA certificate",
+            probe_client(roots, foreign, HOST, false),
+            true,
+            false,
+        ),
+        (
+            "infraternal/1, TLS 1.2 only",
+            probe_client(roots, host, HOST, true),
+            false,
+            false,
+        ),
+        (
+            "infraternal/1, valid host certificate",
+            probe_client(roots, host, HOST, false),
+            true,
+            true,
+        ),
+    ];
+    for (case, client, client_completes, admitted) in cases {
+        let (server, completed) = inner_handshake(&config, &client).await;
+        assert_eq!(completed, client_completes, "{case}: client TLS handshake");
+        if admitted {
+            server.unwrap_or_else(|error| panic!("{case}: refused: {error}"));
+        } else {
+            assert_eq!(
+                server.unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied,
+                "{case}: server must refuse with the transport's denial"
+            );
+        }
+    }
+}
