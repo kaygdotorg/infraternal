@@ -362,34 +362,25 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
         )
         .await
         .unwrap();
-    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
-        .await
-        .unwrap();
+    // Real registration flow on the on-disk pool (so the D379 writer runs), then
+    // extend the fixture session's wall-clock lifetime: fixtures are stamped at a
+    // fixed `NOW` in the past, which the live websocket would refuse.
+    let (auth, token) = empty_with_pool(pool.clone()).await;
+    let f = fixture_with_bootstrap(auth, token).await;
+    let auth = f.auth.clone();
     assert!(
         auth.database().is_some(),
         "on-disk Auth must run the D379 writer"
     );
-
+    sqlx::query("UPDATE sessions SET expires=unixepoch()+3600, fresh=unixepoch() WHERE user_id=?")
+        .bind(&f.user)
+        .execute(&pool)
+        .await
+        .unwrap();
     let now = crate::runtime::unix_seconds().unwrap();
-    let user = uuid::Uuid::new_v4().to_string();
-    let session_token = "remote-gone-socket-token";
-    sqlx::query(
-        "INSERT INTO users(id,name,username,display_name,owner,recovery_hash) VALUES (?,'remote-gone','remote-gone','Remote Gone',1,'unused-test-hash')",
-    )
-    .bind(&user)
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,?,'browser',?,?,1)",
-    )
-    .bind(crate::auth::hash(session_token))
-    .bind(&user)
-    .bind(now + 3600)
-    .bind(now)
-    .execute(&pool)
-    .await
-    .unwrap();
+    let user = f.user.clone();
+    let session_token = f.session.clone();
+    let session_token = session_token.as_str();
 
     let (server_identity, host_identity, root, _) = crate::remote_runtime::tests::identities();
     let (store, host) = enroll_remote_host(&pool, &user, &host_identity, &root, now).await;
@@ -635,7 +626,35 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
         }
     }
 
-    // 4. Retention prune later removes the ended remote row.
+    // 4. Retention prune later removes the ended remote row. Prune skips rows a
+    //    writer claim still references, and claims hang off the browser's
+    //    `websocket_connections` row (ON DELETE CASCADE) which survives a
+    //    disconnect until its resume window expires. So the browser leaves, the
+    //    connection goes inactive, and the expired connection row is swept the
+    //    way the connection sweeper does it; only then can prune proceed.
+    drop(browser);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM websocket_connections WHERE user_id=? AND active=1",
+            )
+            .bind(&user)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if active == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("browser socket close must deactivate its connection row");
+    sqlx::query("DELETE FROM websocket_connections WHERE user_id=? AND active=0")
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
     let pruned = crate::terminal_session_prune::prune_closed_sessions(
         Some(&auth),
         &pool,
