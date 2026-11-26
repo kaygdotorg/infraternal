@@ -141,7 +141,7 @@ fn fidelity_handwritten() {
 /// Replays `count` pseudo-random token sequences (fixed seed, so a case ID
 /// reproduces a failure) through an exact Snapshot. Each case must match or
 /// be refused as unrepresentable, never diverge. `extended` adds the mode,
-/// colour, hyperlink and prompt-mark tokens.
+/// colour, hyperlink, prompt-mark and status-display tokens.
 fn generated(count: usize, extended: bool) {
     let mut tokens = vec![
         "abc",
@@ -192,6 +192,9 @@ fn generated(count: usize, extended: bool) {
             "\x1b]133;A;redraw=1\x07$ prompt",
             "\x1b]133;B\x07input",
             "\x1b]133;C\x07output",
+            "\x1b[1$}",
+            "\x1b[0$}",
+            "\x1b[2$~",
         ]);
     }
     let mut seed = 0x2260_1006_u64;

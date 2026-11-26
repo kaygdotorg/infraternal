@@ -80,6 +80,9 @@ seeds = corpus('vt_stream_snapshot')
 boundary = b'0\r\n1\r\n2\r\n' + b'x' * 50 + b'\r\nA\r\nB\r\nC'
 (seeds / 'boundary-wrap').write_bytes(bytes([19, 1, 0]) + boundary + b'\xfe\xfe\x11' + b'more\r\n')
 (seeds / 'boundary-wrap-wide').write_bytes(bytes([19, 1, 0]) + b'0\r\n1\r\n2\r\na' + '界'.encode() * 30 + b'\r\nA\r\nB\r\nC' + b'\xfe\xfe\x0b' + b'tail')
+# The status line selected (DECSASD) across a resize, with a status-line type
+# (DECSSDT); the further output writes to it, then to the main display (#594).
+(seeds / 'status-display-selected').write_bytes(bytes([80, 1, 0]) + b'main\x1b[2$~\x1b[1$}status' + b'\xfe\xfe\x28' + b'more\x1b[0$}back')
 
 # ssh_packet_read: clear packets, then an AEAD key change, plus hostile tail.
 seeds = corpus('ssh_packet_read')
