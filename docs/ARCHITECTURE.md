@@ -55,6 +55,7 @@ and UI adapters come from that definition.
 crates/        server, db (SQLite access, D379), agent, shim, protocol, plugin-api, plugins/*
 apps/tracer    the product UI (TypeScript); its build is the `web/` folder the server serves (`--web-root`), and it holds the browser tests
 apps/release-signer  the release signing service
+apps/website   the infraternal.com Pages Function for signed release downloads (D401)
 docs/user      user docs, published at /docs and shown in the app's Docs view (D317)
 packages/protocol  the browser side of the wire protocol: codec and stream decoder (TypeScript)
 packages/ui    shared tokens and components (vendored from calternal until @kayg/ui exists)
@@ -62,6 +63,5 @@ contracts/     protocol, plugin and action specs (written before code)
 scripts/       verify (quick | iterate | fast | nightly | integration | browser | latency | bench), release/ (build, publish and deploy)
 ```
 
-Planned, not in the tree yet: `apps/website` (infraternal.com) and `apps/docs`
-(D44). Commercial-licensed features live in their own repository,
+The standalone website and docs are built by `apps/tracer/site-build.ts`. Commercial-licensed features live in their own repository,
 `kayg/infraternal-enterprise`, never here (D277).

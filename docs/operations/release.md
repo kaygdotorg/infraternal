@@ -63,7 +63,7 @@ verification failures cannot enable the development fallback.
 
    ```sh
    # From the repository root, with the existing production values set.
-   (cd apps/tracer && bun install --frozen-lockfile && bun run site ../website/site-dist)
+   (cd apps/tracer && bun install --frozen-lockfile && bun run site-build.ts ../website/site-dist)
    (cd apps/website && npx wrangler pages deploy site-dist \
        --project-name "$PAGES_PROJECT" --branch "$PAGES_PRODUCTION_BRANCH")
    ```
