@@ -927,3 +927,84 @@ async fn a_stalled_admission_is_unavailable_not_refused() {
         Some(NotAdmitted::Unavailable)
     );
 }
+
+/// Take the fixture's only database connection and wait until the held link's
+/// recheck is stuck behind it.
+async fn stall_rechecks(server: &DeviceServer) -> sqlx::pool::PoolConnection<sqlx::Sqlite> {
+    let connection = server.pool.acquire().await.unwrap();
+    // sleep: two recheck periods, so a recheck is in flight and waiting for the connection.
+    tokio::time::sleep(crate::remote_device_link::RECHECK * 2).await;
+    connection
+}
+
+/// Pings are answered while a recheck waits for the ledger.
+#[tokio::test]
+async fn a_stalled_recheck_does_not_delay_pings() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let mut link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    for _ in 0..5 {
+        let round_trip = link.ping().await.unwrap();
+        assert!(round_trip < Duration::from_secs(1), "{round_trip:?}");
+    }
+}
+
+/// A removal's cut closes the link at once while a recheck waits for the
+/// ledger.
+#[tokio::test]
+async fn a_removal_closes_the_link_during_a_stalled_recheck() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    // Every removal cuts before it commits, and the commit needs the store.
+    let removed = Instant::now();
+    let _cut = server.store.1.cut(joined.host_id).unwrap();
+    assert_eq!(close_code(&link).await, Some(REVOKED.into()));
+    let latency = removed.elapsed();
+    assert!(latency < Duration::from_secs(1), "closed in {latency:?}");
+    eprintln!("removal during a stalled recheck, to link close: {latency:?}");
+}
+
+/// The certificate's `notAfter` closes the link on time while a recheck waits
+/// for the ledger.
+#[tokio::test]
+async fn expiry_closes_the_link_during_a_stalled_recheck() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    // As in the expiry test: move the whole seven-day window to end soon, but
+    // late enough to stall a recheck first and well before its 5 s deadline.
+    let fingerprint =
+        ring::digest::digest(&ring::digest::SHA256, joined.identity.chain[0].as_ref());
+    let ends = unix_now() + 3;
+    sqlx::query("UPDATE remote_certificates SET not_before=?, not_after=? WHERE fingerprint=?")
+        .bind(ends - 604_800)
+        .bind(ends)
+        .bind(fingerprint.as_ref())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    assert_eq!(close_code(&link).await, Some(EXPIRED.into()));
+    assert!(unix_now() >= ends);
+    let late = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .saturating_sub(Duration::from_secs(ends.try_into().unwrap()));
+    assert!(
+        late < Duration::from_secs(1),
+        "closed {late:?} after notAfter"
+    );
+    eprintln!("expiry during a stalled recheck, close after notAfter: {late:?}");
+}

@@ -32,6 +32,10 @@
 //! "no" ([`NotAdmitted`]). The codes and what a device does with them are
 //! documented in [`infraternal_link::device::close`].
 //!
+//! The recheck runs beside the frame loop: while it reads the ledger, Pings
+//! are still answered and a removal or the expiry still closes the link at
+//! once.
+//!
 //! (Tests shorten [`RECHECK`]; its production value is 10 s.)
 //!
 //! Limits: one live link per device (the newest wins), and at most
@@ -317,9 +321,12 @@ async fn hello(connection: &quinn::Connection) -> io::Result<(NativeChannel, Rec
     .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
 }
 
-/// Hold the link: answer Pings, refuse everything else, and watch the cut,
-/// the certificate's expiry and its admission. Returns the close code, or
-/// `None` when the connection ended by itself.
+/// Hold the link until it ends. Returns the close code, or `None` when the
+/// connection ended by itself.
+///
+/// The two halves run beside each other, so neither can delay the other: a
+/// ledger read in progress holds back no Pong, removal or expiry, and a Pong
+/// the device is slow to take holds back no removal or expiry.
 async fn hold(
     connection: &quinn::Connection,
     control: &NativeChannel,
@@ -329,28 +336,71 @@ async fn hold(
     fingerprint: &[u8; 32],
     store: &EnrollmentStore,
 ) -> Option<u32> {
+    tokio::select! {
+        biased;
+        code = authority_ends(cut, authority, fingerprint, store) => Some(code),
+        code = answer_pings(connection, control, receive) => code,
+    }
+}
+
+/// Wait until the device may no longer hold its link, and return the close
+/// code: its cut, its certificate's expiry, or a recheck that did not admit
+/// it. The cut and the expiry are watched while a recheck reads the ledger.
+async fn authority_ends(
+    cut: &mut tokio::sync::watch::Receiver<bool>,
+    authority: &DeviceAuthority,
+    fingerprint: &[u8; 32],
+    store: &EnrollmentStore,
+) -> u32 {
     // The expiry instant, to the sub-second: the timer must not fire before
     // the wall clock reaches `notAfter`, nor a second after it. A clock that
     // cannot be read ends the link, since expiry could not be kept.
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
-        return Some(close::EXPIRED);
+        return close::EXPIRED;
     };
     let not_after = Duration::from_secs(u64::try_from(authority.not_after).unwrap_or(0));
     let expires = Instant::now() + not_after.saturating_sub(now);
-    let mut recheck = tokio::time::interval_at(Instant::now() + RECHECK, RECHECK);
+    tokio::select! {
+        biased;
+        _ = cut.changed() => close::REVOKED,
+        () = tokio::time::sleep_until(expires) => close::EXPIRED,
+        code = failed_recheck(authority, fingerprint, store) => code,
+    }
+}
+
+/// Re-read the device's admission every [`RECHECK`] until a read does not
+/// admit it, and return the close code that says why.
+async fn failed_recheck(
+    authority: &DeviceAuthority,
+    fingerprint: &[u8; 32],
+    store: &EnrollmentStore,
+) -> u32 {
+    let mut ticks = tokio::time::interval_at(Instant::now() + RECHECK, RECHECK);
+    loop {
+        ticks.tick().await;
+        if let Err(reason) = admit_within(store, fingerprint).await {
+            // Admission also ends at `notAfter`; name that as expiry.
+            let past_end = unix_now().is_ok_and(|now| now >= authority.not_after);
+            return if past_end {
+                close::EXPIRED
+            } else {
+                reason.close_code()
+            };
+        }
+    }
+}
+
+/// Answer the device's Pings and refuse everything else it sends. Returns the
+/// close code, or `None` when the connection ended by itself.
+async fn answer_pings(
+    connection: &quinn::Connection,
+    control: &NativeChannel,
+    receive: &mut Receive,
+) -> Option<u32> {
     let mut transmit = Transmit::default();
     loop {
         tokio::select! {
             biased;
-            _ = cut.changed() => return Some(close::REVOKED),
-            () = tokio::time::sleep_until(expires) => return Some(close::EXPIRED),
-            _ = recheck.tick() => {
-                if let Err(reason) = admit_within(store, fingerprint).await {
-                    // Admission also ends at `notAfter`; name that as expiry.
-                    let past_end = unix_now().is_ok_and(|now| now >= authority.not_after);
-                    return Some(if past_end { close::EXPIRED } else { reason.close_code() });
-                }
-            }
             _ = connection.closed() => return None,
             _ = connection.accept_bi() => return Some(close::REFUSED),
             _ = connection.accept_uni() => return Some(close::REFUSED),
