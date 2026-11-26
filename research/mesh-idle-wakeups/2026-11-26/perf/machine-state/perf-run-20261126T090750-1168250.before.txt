@@ -1,0 +1,19 @@
+== machine state: before (2026-11-26T09:07:50+01:00) ==
+host: infraternal-perf-01-backup01  kernel: 6.12.113+deb13-amd64
+loadavg: 0.00 0.04 0.00 1/231 1168259
+-- memory --
+MemTotal:       12185064 kB
+MemFree:         8284588 kB
+MemAvailable:   11472012 kB
+Cached:          2857716 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+-- cpu governor/freq --
+not visible (VM: no cpufreq)
+model name	: AMD Ryzen 7 3700X 8-Core Processor
+cpu MHz		: 3593.248
+model name	: AMD Ryzen 7 3700X 8-Core Processor
+cpu MHz		: 3593.248
+-- steal (cumulative jiffies) -- steal=1773 total=164279646
+-- 1s CPU sample, processes >0.5% (top, 2nd iteration) --
+-- quiet: no process >5% CPU --

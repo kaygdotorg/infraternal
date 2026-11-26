@@ -1,0 +1,7 @@
+{"step": "applied", "peers": 4096, "scenario": "offline", "apply_ms": 266.813}
+{"step": "window", "t": 0, "at_s": 0.0, "secs": 10.0, "wakeups_per_s": 85.38, "threads": {"infraternal-mes": 85.38}, "cpu_pct": 2.3, "udp_out": 5462, "udp_in": 0}
+{"step": "window", "t": 10, "at_s": 10.0, "secs": 10.0, "wakeups_per_s": 80.29, "threads": {"infraternal-mes": 80.29}, "cpu_pct": 1.8, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 20, "at_s": 20.0, "secs": 10.0, "wakeups_per_s": 0.8, "threads": {"infraternal-mes": 0.7, "mesh-route-repa": 0.1}, "cpu_pct": 0.1, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 30, "at_s": 30.0, "secs": 10.0, "wakeups_per_s": 80.79, "threads": {"infraternal-mes": 80.79}, "cpu_pct": 2.0, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 40, "at_s": 40.0, "secs": 10.0, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 50, "at_s": 50.0, "secs": 10.0, "wakeups_per_s": 78.48, "threads": {"hubexp": 0.1, "infraternal-mes": 78.28, "mesh-route-repa": 0.1}, "cpu_pct": 2.499, "udp_out": 4096, "udp_in": 0}

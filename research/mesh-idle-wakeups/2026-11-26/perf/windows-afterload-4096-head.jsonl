@@ -1,0 +1,12 @@
+{"step": "applied", "peers": 4096, "scenario": "afterload", "apply_ms": 411.047}
+{"step": "connected", "established": 4096, "wall_ms": 28111.019378}
+{"step": "sent", "datagrams": 57166}
+{"step": "window", "t": 0, "at_s": 0.0, "secs": 10.0, "wakeups_per_s": 188.93, "threads": {"infraternal-mes": 188.93}, "cpu_pct": 0.399, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 10, "at_s": 10.0, "secs": 10.0, "wakeups_per_s": 0.2, "threads": {"ld-linux-x86-64": 0.1, "mesh-route-repa": 0.1}, "cpu_pct": 0.1, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 20, "at_s": 20.1, "secs": 10.0, "wakeups_per_s": 101.65, "threads": {"infraternal-mes": 101.65}, "cpu_pct": 0.598, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 30, "at_s": 30.1, "secs": 10.0, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 40, "at_s": 40.1, "secs": 10.0, "wakeups_per_s": 0.1, "threads": {"mesh-route-repa": 0.1}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 50, "at_s": 50.1, "secs": 10.1, "wakeups_per_s": 106.8, "threads": {"infraternal-mes": 106.8}, "cpu_pct": 0.397, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 60, "at_s": 60.2, "secs": 10.0, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}
+{"step": "window", "t": 70, "at_s": 70.2, "secs": 10.1, "wakeups_per_s": 99.23, "threads": {"infraternal-mes": 99.13, "mesh-route-repa": 0.1}, "cpu_pct": 0.198, "udp_out": 4096, "udp_in": 0}
+{"step": "window", "t": 80, "at_s": 80.3, "secs": 10.0, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}

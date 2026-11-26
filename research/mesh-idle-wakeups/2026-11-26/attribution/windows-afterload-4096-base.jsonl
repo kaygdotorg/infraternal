@@ -1,0 +1,19 @@
+{"step": "applied", "peers": 4096, "scenario": "afterload", "apply_ms": 257.022}
+{"step": "connected", "established": 4096, "wall_ms": 28142.509898}
+{"step": "sent", "datagrams": 57166}
+{"step": "trace_until_start", "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 2215, "Received handshake_initiation": 4096}}
+{"step": "window", "t": 0, "at_s": 0.0, "secs": 10.0, "wakeups_per_s": 95.68, "threads": {"infraternal-mes": 95.68}, "cpu_pct": 0.2, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(KEEPALIVE_TIMEOUT)": 4096}}
+{"step": "window", "t": 10, "at_s": 10.1, "secs": 10.0, "wakeups_per_s": 1.59, "threads": {"hubtest": 0.1, "infraternal-mes": 1.39, "mesh-route-repa": 0.1}, "cpu_pct": 0.299, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 20, "at_s": 20.2, "secs": 10.0, "wakeups_per_s": 41.74, "threads": {"infraternal-mes": 41.74}, "cpu_pct": 0.199, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 4096}}
+{"step": "window", "t": 30, "at_s": 30.3, "secs": 10.0, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 40, "at_s": 40.3, "secs": 10.0, "wakeups_per_s": 0.6, "threads": {"infraternal-mes": 0.5, "mesh-route-repa": 0.1}, "cpu_pct": 0.1, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 50, "at_s": 50.4, "secs": 10.0, "wakeups_per_s": 36.22, "threads": {"infraternal-mes": 36.22}, "cpu_pct": 0.1, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 4096}}
+{"step": "window", "t": 60, "at_s": 60.5, "secs": 10.1, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 70, "at_s": 70.6, "secs": 10.1, "wakeups_per_s": 195.98, "threads": {"infraternal-mes": 195.78, "mesh-route-repa": 0.2}, "cpu_pct": 0.298, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 4096}}
+{"step": "window", "t": 80, "at_s": 80.7, "secs": 10.0, "wakeups_per_s": 1.3, "threads": {"infraternal-mes": 1.3}, "cpu_pct": 0.2, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 90, "at_s": 90.8, "secs": 10.1, "wakeups_per_s": 0, "threads": {}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 100, "at_s": 100.9, "secs": 10.0, "wakeups_per_s": 208.27, "threads": {"infraternal-mes": 208.17, "mesh-route-repa": 0.1}, "cpu_pct": 0.199, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 4096}}
+{"step": "window", "t": 110, "at_s": 111.0, "secs": 10.1, "wakeups_per_s": 0.5, "threads": {"infraternal-mes": 0.5}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0, "events": {}}
+{"step": "window", "t": 120, "at_s": 121.1, "secs": 10.1, "wakeups_per_s": 141.74, "threads": {"infraternal-mes": 141.74}, "cpu_pct": 0.199, "udp_out": 4096, "udp_in": 0, "events": {"KEEPALIVE(PERSISTENT_KEEPALIVE)": 4096}}
+{"step": "window", "t": 130, "at_s": 131.2, "secs": 10.0, "wakeups_per_s": 1.49, "threads": {"infraternal-mes": 1.39, "mesh-route-repa": 0.1}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0, "events": {"SESSION_EXPIRED(REJECT_AFTER_TIME)": 1000}}
+{"step": "window", "t": 140, "at_s": 141.3, "secs": 10.1, "wakeups_per_s": 1.49, "threads": {"infraternal-mes": 1.49}, "cpu_pct": 0.099, "udp_out": 0, "udp_in": 0, "events": {"SESSION_EXPIRED(REJECT_AFTER_TIME)": 1215}}
