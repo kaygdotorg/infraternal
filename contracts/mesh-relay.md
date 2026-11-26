@@ -6,11 +6,12 @@ keys and does not inspect tunnel traffic. The slice follows D163, D176, D185,
 D196, D197, D201, D313 and D316. It does not select a new transport, crypto
 engine or path selector.
 
-The relay runtime is opt-in at build time: `infraternal-plugin-relay/runtime`
+The relay runtime lives behind build features: `infraternal-plugin-relay/runtime`
 contains the service and client, `infraternal-mesh/relay` contains the bounded
 peer-socket discovery book, and `infraternal-plugin-mesh/relay` contains the
-seam C shim. None of these features is enabled by the default `infraternal`
-shipping feature set. The relay CLI declarations can be compiled without the
+seam C shim and the node's relay manager. Since D401 slice 1 the Linux
+infraternal agent builds the mesh plugin with `relay`, so every shipped Linux
+node can relay a pair and serve the relay role. The relay CLI declarations can be compiled without the
 runtime. The D243 release check records this slice's static shipping-image
 delta.
 
