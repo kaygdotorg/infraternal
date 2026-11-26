@@ -1,0 +1,60 @@
+     4.43%  [k] 0xffffffffb330d22d
+     3.05%  [k] 0xffffffffb3f1870d
+     1.20%  [.] infraternal_agent::daemon::terminal_run::{closure#0}
+     1.02%  [.] sccp
+     0.82%  [.] <tracing::instrument::Instrumented<<quinn::connection::Connecting>::new::{closure#0}> as core::future::future::Future>::poll
+     0.77%  [.] memset
+     0.77%  [.] epoll_pwait
+     0.76%  [.] infraternal_shim::session::run_configured
+     0.66%  [.] <quinn_proto::connection::Connection>::poll_transmit
+     0.63%  [.] __vdso_clock_gettime
+     0.60%  [.] mi_malloc_aligned
+     0.58%  [.] <quinn_proto::connection::Connection>::process_payload
+     0.57%  [k] 0xffffffffb3f18e55
+     0.57%  [k] 0xffffffffb3f04696
+     0.56%  [k] 0xffffffffb3f0a2d8
+     0.56%  [.] memcpy
+     0.55%  [.] <tracing::instrument::Instrumented<<quinn::endpoint::Endpoint>::new_with_abstract_socket::{closure#0}> as core::future::future::Future>::poll
+     0.48%  [.] <quinn_proto::connection::Connection>::populate_packet
+     0.46%  [.] <tokio::sync::notify::NotifiedProject>::poll_notified
+     0.45%  [.] <quinn::endpoint::RecvState>::poll_socket
+     0.45%  [k] nft_do_chain
+     0.42%  [.] infraternal_agent::daemon::run_channel_inner::<false, infraternal_agent::remote_client::ControlChannel>::{closure#0}::{closure#6}
+     0.41%  [.] <quinn_proto::endpoint::Endpoint>::handle
+     0.40%  [.] <quinn::recv_stream::Read as core::future::future::Future>::poll
+     0.40%  [.] poll
+     0.40%  [.] <alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle> as tokio::runtime::task::Schedule>::schedule
+     0.38%  [.] <tokio::runtime::time::handle::Handle>::process_at_time
+     0.38%  [.] tokio::runtime::task::waker::wake_by_val
+     0.35%  [.] <tokio::runtime::io::driver::Driver>::turn
+     0.34%  [.] infraternal_agent::daemon::run_bound_terminal_mode::<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}
+     0.33%  [k] 0xffffffffb367342c
+     0.32%  [.] <core::pin::Pin<alloc::boxed::Box<infraternal_agent::remote_client::run_inner::{closure#0}>> as core::future::future::Future>::poll
+     0.32%  [.] <tokio::sync::mpsc::list::Rx<infraternal_agent::daemon_writer::Message>>::pop
+     0.31%  [.] <core::pin::Pin<&mut infraternal_agent::remote_client::server_path::session::{closure#0}> as core::future::future::Future>::poll
+     0.31%  [.] <tokio::sync::mpsc::list::Rx<infraternal_agent::daemon_writer::PriorityMessage>>::pop
+     0.31%  [.] ring_core_0_17_14__aes_hw_ctr32_encrypt_blocks
+     0.30%  [.] <quinn_proto::connection::Connection>::handle_decode
+     0.29%  [.] <quinn::runtime::tokio::UdpSocket as quinn::runtime::AsyncUdpSocket>::poll_recv
+     0.28%  [.] <tokio::process::imp::GlobalOrphanQueue>::reap_orphans
+     0.28%  [.] __clock_gettime
+     0.28%  [.] <infraternal_link::transport::Receive>::next::<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}
+     0.27%  [.] infraternal_agent::block_on_io
+     0.27%  [.] <tokio::sync::task::atomic_waker::AtomicWaker>::register_by_ref
+     0.26%  [.] <tokio::runtime::io::registration::Registration>::poll_ready
+     0.26%  [.] infraternal_agent::remote_client::server_path::run_observed::{closure#0}
+     0.25%  [.] infraternal::remote::run::{closure#0}
+     0.24%  [k] 0xffffffffb3673407
+     0.24%  [.] <quinn_proto::connection::streams::SendStream>::write
+     0.24%  [.] tokio::runtime::task::raw::schedule::<alloc::sync::Arc<tokio::runtime::scheduler::current_thread::Handle>>
+     0.23%  [.] <infraternal_plugin_remote::remote_path_socket::PathSocket as quinn::runtime::AsyncUdpSocket>::poll_recv
+     0.23%  [.] infraternal_shim::session::consume_peer::<infraternal_shim::terminal::Terminal>
+     0.23%  [k] 0xffffffffb3666ca7
+     0.22%  [.] <&mut core::pin::Pin<&mut infraternal_agent::daemon_writer::writer<infraternal_plugin_remote::remote_native::NativeChannel>::{closure#0}> as core::future::future::Future>::poll
+     0.22%  [.] <quinn_proto::connection::Connection>::on_ack_received
+     0.21%  [k] 0xffffffffb3eaf8a9
+     0.21%  [.] <quinn_proto::connection::Connection>::on_packet_acked
+     0.20%  [.] <tracing::span::Span>::record_all
+     0.20%  [k] 0xffffffffb3c0b651
+     0.20%  [k] 0xffffffffb3c0b62f
+     0.20%  [.] <tokio::sync::mpsc::list::Rx<(quinn_proto::endpoint::ConnectionHandle, quinn_proto::shared::EndpointEvent)>>::pop

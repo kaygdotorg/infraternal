@@ -1,0 +1,60 @@
+     1.90%  [k] 0xffffffffb3f1870d
+     0.59%  [.] <quinn::connection::ConnectionDriver as core::future::future::Future>::poll
+     0.47%  [.] __vdso_clock_gettime
+     0.43%  [.] <tokio::sync::notify::NotifiedProject>::poll_notified
+     0.41%  [.] infraternal_server::embedded::run_actor::{closure#0}
+     0.35%  [.] <infraternal_server::remote_guard::AuthorityGuard>::cancelled::{closure#0}
+     0.32%  [.] memcpy
+     0.30%  [k] nft_do_chain
+     0.28%  [.] <quinn_proto::connection::Connection>::process_payload
+     0.25%  [.] __libc_free
+     0.25%  [.] tokio::runtime::task::waker::wake_by_val
+     0.25%  [k] 0xffffffffb3f0a2d8
+     0.24%  [.] __libc_malloc_impl
+     0.23%  [.] <quinn::endpoint::RecvState>::poll_socket
+     0.23%  [k] 0xffffffffb330d22d
+     0.22%  [.] <infraternal_server::remote_guard::AuthorityGuard>::permits
+     0.22%  [.] <quinn_proto::connection::Connection>::populate_packet
+     0.21%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::remote_link::Packet>>::pop
+     0.20%  [.] <tokio::sync::notify::NotifiedProject>::drop_notified
+     0.18%  [k] __nf_conntrack_find_get
+     0.18%  [.] <tokio::sync::task::atomic_waker::AtomicWaker>::register_by_ref
+     0.18%  [.] infraternal_server::remote_link::pump::{closure#0}
+     0.16%  [.] alloc_slot
+     0.16%  [.] <core::future::poll_fn::PollFn<<quinn::send_stream::SendStream>::write::{closure#0}::{closure#0}> as core::future::future::Future>::poll
+     0.15%  [.] <infraternal_server::remote_link::RemoteLink>::read_transport::{closure#0}
+     0.15%  [.] <quinn::recv_stream::RecvStream>::poll_read_buf
+     0.15%  [.] <quinn_proto::connection::Connection>::on_packet_acked
+     0.15%  [.] <tokio::sync::mpsc::list::Rx<quinn::ConnectionEvent>>::pop
+     0.15%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::remote_link::RemoteLink>>::pop
+     0.14%  [.] <infraternal_server::remote_link::RemoteLink>::write_transport::{closure#0}
+     0.14%  [.] ring_core_0_17_14__aes_hw_ctr32_encrypt_blocks
+     0.13%  [.] <infraternal_plugin_remote::remote_native::NativeChannel as infraternal_plugin_api::channel::Channel>::write::{closure#0}
+     0.13%  [.] tokio::runtime::task::waker::clone_waker
+     0.12%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::embedded::Retirement>>::pop
+     0.12%  [.] <infraternal_server::embedded::priming::State>::next::{closure#0}
+     0.11%  [.] <alloc::collections::btree::map::BTreeMap<u64, u64>>::range::<u64, (core::ops::range::Bound<u64>, core::ops::range::Bound<u64>)>
+     0.11%  [.] <tokio::time::sleep::Sleep as core::future::future::Future>::poll
+     0.11%  [.] tokio::runtime::task::waker::drop_waker
+     0.11%  [.] <quinn_proto::connection::packet_builder::PacketBuilder>::finish_and_track
+     0.11%  [.] <tokio::task::coop::Coop<tokio::sync::watch::changed_impl<bool>::{closure#0}> as core::future::future::Future>::poll
+     0.11%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::embedded::Command>>::pop
+     0.10%  [.] <quinn_proto::connection::Connection>::handle_decode
+     0.10%  [.] <quinn_proto::connection::packet_builder::PacketBuilder>::new
+     0.10%  [.] <tokio::runtime::scheduler::current_thread::Context>::run_task
+     0.10%  [.] <quinn_proto::connection::Connection>::on_ack_received
+     0.10%  [.] ring_core_0_17_14__gcm_ghash_avx
+     0.10%  [.] infraternal_server::embedded::route_proofs::tick::{closure#0}
+     0.09%  [.] <tokio::runtime::time::entry::TimerEntry as core::ops::drop::Drop>::drop
+     0.09%  [.] <tokio::sync::watch::big_notify::BigNotify>::notified
+     0.09%  [.] infraternal_protocol::decode_frame.2298
+     0.09%  [.] <tokio::sync::mpsc::chan::Tx<infraternal_server::remote_link::Packet, tokio::sync::mpsc::bounded::Semaphore>>::send
+     0.09%  [k] 0xffffffffb3f04696
+     0.08%  [.] <alloc::collections::binary_heap::BinaryHeap<quinn_proto::connection::assembler::Buffer>>::push
+     0.08%  [.] <tokio::runtime::time::handle::Handle>::process_at_time
+     0.08%  [.] <tokio::time::sleep::Sleep>::reset
+     0.08%  [.] <tracing::instrument::Instrumented<<quinn::connection::Connecting>::new::{closure#0}> as core::future::future::Future>::poll
+     0.08%  [.] sccp
+     0.08%  [.] <quinn::runtime::UdpPollHelper<<quinn::runtime::tokio::UdpSocket as quinn::runtime::AsyncUdpSocket>::create_io_poller::{closure#0}, <quinn::runtime::tokio::UdpSocket as quinn::runtime::AsyncUdpSocket>::create_io_poller::{closure#0}::{closure#0}> as quinn::runtime::UdpPoller>::poll_writable
+     0.08%  [.] <tokio::sync::batch_semaphore::Semaphore>::add_permits_locked
+     0.07%  [.] <infraternal_server::liveness::Liveness>::pong
