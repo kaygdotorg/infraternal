@@ -238,3 +238,188 @@ relies on it.
    each, the handshake-queue drain made per lane). It touches the lock-order rules in
    `device/mod.rs` and is a larger change. Recommendation: not before the lanes pass the keep
    rule.
+
+## 7. Round 2: fixing the receive lanes (J1239)
+
+J1239 tried to make 2 lanes pass the keep rule by fixing the two failures above: CUBIC p99 and the
+forward receiver's CPU. Fork branch `j1239-lanes2` (kayg/gotatun-fork) is J1230's branch rebased
+onto the dev pin `cd295c2e`, plus four bench switches, all off by default:
+
+| switch | commit | what it does |
+|---|---|---|
+| `GOTATUN_LANE_SOCKBUF=split` | 8f9d77c | the n lane sockets share one socket's forced 7 MiB SO_RCVBUF/SO_SNDBUF |
+| `GOTATUN_LANE_BATCH_LOCK=1` | 73085aa | a receive turn keeps the peer lock across its data packets |
+| `GOTATUN_TUN_GROUP_FLOWS=1` | b5556a4 | a queued TUN write run is grouped by inner flow before GSO coalescing |
+| `GOTATUN_SNDBUF_BUDGET=<bytes>` | 9118284 | one SO_SNDBUF budget per device, split over the lane sockets |
+
+The kit is [kit-r2/](kit-r2/): J1230's fixture (netns `j39`, the same VMs, the lock protocol and
+the guard table) plus:
+
+- `qs.py`: every 250 ms over the steady window, the per-socket queue bytes and drops (from
+  `/proc/<pid>/net/udp`), UDP buffer errors, TUN drops and eth0's `fq` backlog/`flows_plimit`, on
+  both VMs.
+- Rate-capped windows (`cubic:8@2000`: iperf3 `-b 250M` per stream, 2.0 Gbit/s in total).
+- One extra profiled forward window per chosen row: `perf record -a` (cycles) plus `perf stat`
+  syscall tracepoints on B. Debian's `perf` 6.12.117 is unpacked under /root/j1239 and not
+  installed. Profiled windows are never used as results.
+- `qsum.py` (queue CSV) and `pdiff.py` (absolute-cycle profile diff).
+
+### 7.1 Diagnosis hold d1
+
+Hold d1 ran 2026-11-26 00:51–01:28Z with rows G, L2n, L2s and L2b. All 20 windows exited 0. Data:
+[r2-d1-windows.csv](results/r2-d1-windows.csv), [r2-d1-queues.csv](results/r2-d1-queues.csv),
+[r2-d1-profile/](results/r2-d1-profile/).
+
+**Where the standing queue sits.**
+
+- **Forward (A sends).** The queue is A's socket write memory: skbs in eth0 `fq` and the NIC ring.
+  - Its mean is 3,499 KiB with one socket and 5,711 KiB summed over two lane sockets (+63%), while
+    `fq`'s backlog in packets stays the same (171 vs 157).
+  - `fq`'s 100-packet flow limit counts UDP GSO super-packets (up to 64 datagrams each), so every
+    outer flow, and so every lane, holds megabytes.
+  - The probe's loaded p50 follows that queue divided by the rate: 3.5 MiB at 3.1 Gbit/s is about
+    9.3 ms (G's p50 is 9.30 ms), and 5.7 MiB is about 15 ms (L2n's p50 is 14.74 ms).
+  - J1230 named the right mechanism (`fq` per outer flow), but the unit is GSO packets, not
+    datagrams.
+  - The forced 7 MiB socket buffers (14 MiB in the kernel) never bind, so L2s cannot bound the
+    queue.
+- **Reverse.**
+  - No socket drops, no RcvbufErrors, and G has no retransmits. The inner flows are
+    window-limited, and the receiver's socket queue is about 1 MiB.
+  - At the 2 Gbit/s cap, p99 is equal (G 3.49, L2n 3.60, L2b 3.53 ms). The reverse p99 growth at
+    full speed comes with the higher rate, not with the lanes themselves.
+
+**Where the forward receiver's extra CPU goes.** From `perf record -a`, 20 s at the same 3.1 Gbit/s
+on B, total cycles go from 160 to 190 G (+19%):
+
+- Crypto is unchanged: chacha20-poly1305 open is 18.2 vs 18.4 Gcycles; it only moves between
+  threads.
+- The extra cycles spread over per-packet work: tokio's `batch_semaphore` (+1.3 G), kernel spinlock
+  slow path, page clearing, allocation, and the inner stack (nft, fib, netif_receive).
+
+Syscalls in the same 20 s on B:
+
+| | G | L2n | L2n vs G |
+|---|---:|---:|---:|
+| TUN `write` | 275,418 | 465,615 | +69% |
+| `recvmmsg` | 353,354 | 561,821 | +59% |
+| `futex` | 247,237 | 517,228 | ×2.1 |
+| context switches | 1.75 M | 2.04 M | +17% |
+
+Each lane socket sees half the rate, so each receive turn returns about half as many datagrams, and
+the decrypted run it hands to the TUN writer is about half as long. The writer coalesces only
+adjacent packets of a flow within what is queued, so TUN frames get smaller and their number grows.
+The batch peer lock (L2b, 0.874 vs 0.901 s/Gbit) is within noise of L2n, so it was dropped.
+
+### 7.2 Candidate hold r2
+
+Hold r2 ran 2026-11-26 02:41–04:24Z with rows in the order G.a Lc.a Lg Lw Gc Lc.b G.b K. All 66
+windows exited 0 and no probe was lost in any window. Data:
+[r2-windows.csv](results/r2-windows.csv), [r2-rows.csv](results/r2-rows.csv),
+[r2-queues.csv](results/r2-queues.csv).
+
+Rows:
+
+| row | lanes | switches |
+|---|---|---|
+| Lc | 2 | flow grouping + send budget of 1.75 MiB asked (3.5 MiB effective in total, G's own occupancy) |
+| Lg | 2 | flow grouping |
+| Lw | 2 | send budget |
+| Gc | 1 | both switches, no lanes: what the switches do on their own |
+
+Throughput (Gbit/s):
+
+| window | G.a / G.b | Lc.a / Lc.b | Lg | Lw | Gc | K |
+|---|---|---|---|---|---|---|
+| reverse CUBIC 8 | 3.360 / 3.350 | 3.606 / 3.654 (+8.2%) | 3.645 | 3.611 | 3.340 | 4.125 |
+| reverse BBR 8 | 3.494 / 3.502 | 3.763 / 3.749 (+7.4%) | 3.763 | 3.770 | 3.493 | 4.090 |
+| reverse CUBIC 1 | 3.352 / 3.341 | 3.346 / 3.354 | 3.335 | 3.353 | 3.321 | 2.955 |
+| forward CUBIC 8 | 3.165 / 3.135 | 3.157 / 3.110 | 3.099 | 3.125 | 3.177 | 3.125 |
+
+rr p99 in ms (64 B request/reply every 20 ms):
+
+| window | G.a / G.b | Lc.a / Lc.b | Lg | Lw | Gc | K |
+|---|---|---|---|---|---|---|
+| reverse CUBIC 8 | 7.44 / 7.42 | 9.15 / 11.45 | 9.19 | 9.31 | 7.73 | 6.44 |
+| reverse CUBIC 8 @2G | 3.64 / 3.79 | 6.53 / 3.29 | 4.85 | 3.17 | 4.11 | 2.51 |
+| reverse BBR 8 | 23.08 / 27.59 | 19.02 / 19.58 | 20.11 | 18.38 | 38.79 | 27.99 |
+| reverse CUBIC 1 | 4.87 / 4.83 | 4.01 / 3.82 | 4.14 | 3.96 | 5.31 | 1.53 |
+| forward CUBIC 8 | 12.73 / 13.73 | **54.48 / 54.31** | 19.81 | **52.57** | **58.49** | 10.17 |
+| forward CUBIC 8 @2G | 3.99 / 3.96 | 4.19 / 4.13 | 4.81 | 4.68 | 4.26 | 2.75 |
+| forward BBR 8 | 10.95 / 10.18 | 8.44 / 9.41 | 6.09 | 7.00 | 10.59 | 8.35 |
+| forward CUBIC 1 | 7.52 / 7.72 | 7.06 / 7.21 | 5.16 | 6.63 | 7.93 | 1.93 |
+
+Forward receiver B, CPU per Gbit (whole machine, steal excluded, s/Gbit):
+
+| window | G.a / G.b | Lc.a / Lc.b | Lg | Lw | Gc |
+|---|---|---|---|---|---|
+| forward CUBIC 8 | 0.762 / 0.769 | 0.877 / 0.864 | 0.899 | 0.865 | 0.762 |
+| forward CUBIC 8 @2G | 0.753 / 0.754 | 0.863 / 0.823 | 0.857 | 0.830 | 0.763 |
+| forward BBR 8 | 0.763 / 0.775 | 0.889 / 0.885 | 0.895 | 0.894 | 0.761 |
+
+**Idle and memory.**
+
+- Idle wakeups stay at 0.0–0.5/s for every GotaTun row, before and after load.
+- RSS before load is 14.5–18.6 MiB on A and 18.3–21.1 MiB on B. Fifteen seconds after load it is
+  31–65 MiB on A and 27–38 MiB on B for every row; G itself is at 33–37 / 32–37. That is before
+  the 5 s quiet period plus the release completed, as in J1230.
+
+**Reading.**
+
+1. **The lanes' throughput gain reproduces.** Reverse 8-flow throughput is +7.4–9.1% in every
+   lane row (the A/A floor is at most 0.3%). The 1-flow and BBR p99 get lower with lanes, as in
+   J1230.
+2. **The send budget is wrong.**
+   - Capping the sockets' write memory moved the queue upstream into GotaTun's own send pipeline,
+     where all inner flows share one FIFO. `SndbufErrors` went from 142 to 8,191–9,657 per window.
+   - Forward CUBIC 8 p99 rose to 52–58 ms with lanes (Lc, Lw) and without them (Gc). The
+     regression belongs to the budget, not to the lanes.
+   - Rejected.
+3. **Flow grouping does not remove the CPU cost.**
+   - It cut TUN writes by only 12%: 409k against 466k in 20 s (G: 275k). Lg's CPU per Gbit is
+     0.899, the same as plain lanes.
+   - The merged queue rarely holds runs of both lanes at once. The real cause is the smaller run
+     per receive turn on each lane.
+   - Rejected.
+4. **Lanes still fail the keep rule.**
+   - CUBIC 8 p99 regresses at full speed in both directions: reverse 7.4 → 9.2–11.5 ms, forward
+     12.7–13.7 → 19.8 ms (Lg).
+   - The forward receiver spends 13–17% more CPU per Gbit.
+   - At the 2 Gbit/s cap, p99 is mostly within spread in reverse but 5–20% higher forward.
+
+### 7.3 What would be needed, and owner questions
+
+The two failures have one root each, and neither is a small fix:
+
+- **p99: the forward queue scales with the number of outer flows** at the sender's `fq` (GSO
+  packets × 100 per flow). Bounding it from the socket side only moves it into the engine's FIFO.
+  The ways out:
+  - Keep one outer 5-tuple for all lanes and let the receiver pick the lane socket, for example
+    with an `SO_ATTACH_REUSEPORT_CBPF` program reading the lane byte. Then `fq` sees one flow, as
+    today. Risk: UDP GRO can merge datagrams of different lanes into one receive, which would break
+    per-flow order unless GRO is off on lane sockets or the receiver re-splits.
+  - Or give the engine's send pipeline per-inner-flow queuing (rank 2 of the roadmap), so a queue
+    pushed back from the socket stops being one FIFO.
+- **CPU: every lane halves its receive batch,** so per-packet fixed costs (TUN write, wakeups,
+  semaphore) double per byte. The ways out:
+  - Coalesce receives deliberately (wait a few tens of µs for more datagrams). Tokio's 1 ms timer
+    is too coarse for that, so it would need a different wait primitive.
+  - Or merge the lanes' decrypted runs per flow in one place before the TUN write. That puts back a
+    serial stage, which is what lanes remove.
+
+Questions for the owner:
+
+1. **Should receive lanes continue at all?**
+   - Two rounds have not found a cheap fix, and each remaining route is a design change:
+     - one outer 5-tuple with BPF socket steering, which is a new kernel-facing dependency;
+     - per-flow queuing in the send pipeline;
+     - receive coalescing with a sub-millisecond wait.
+   - Recommendation: park lanes. Do roadmap rank 2 (per-peer/per-flow FQ in the engine) first,
+     because it fixes the p99 side for lanes and for the single pipeline alike. Revisit lanes after
+     it, with the reuseport-steering variant measured for both GRO on and GRO off.
+2. **Should the reuseport-steering variant be prototyped now** as a measurement job?
+   Recommendation: only after rank 2. Its order risk under GRO needs its own proof, and its gain
+   is capped by the same CPU cost per byte.
+
+The four bench switches stay on the scratch branch, off by default. Nothing here changes the
+product.

@@ -1,0 +1,21 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 86K of event 'cycles:P'
+# Event count (approx.): 160077879941
+#
+# Overhead  Command          Shared Object           
+# ........  ...............  ........................
+#
+    41.00%  tokio-rt-worker  [kernel.kallsyms]       
+    31.45%  tokio-rt-worker  gotatun-g               
+    15.26%  swapper          [kernel.kallsyms]       
+     5.67%  iperf3           [kernel.kallsyms]       
+     4.43%  gotatun-crypto-  gotatun-g               
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

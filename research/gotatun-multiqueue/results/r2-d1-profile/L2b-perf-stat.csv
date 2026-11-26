@@ -1,0 +1,12 @@
+# started on Thu Nov 26 02:25:54 2026
+
+620545,,syscalls:sys_enter_recvmmsg,120027197635,100.00,,
+0,,syscalls:sys_enter_sendmmsg,120027235916,100.00,,
+483180,,syscalls:sys_enter_futex,120027234795,100.00,,
+635,,syscalls:sys_enter_epoll_wait,120027232810,100.00,,
+13,,syscalls:sys_enter_writev,120027191722,100.00,,
+456762,,syscalls:sys_enter_write,120027186834,100.00,,
+2021703,,sched:sched_switch,120027182345,100.00,,
+1035007,,sched:sched_wakeup,120027176637,100.00,,
+2021703,,context-switches,120027169932,100.00,,
+161885,,cpu-migrations,120027167778,100.00,,
