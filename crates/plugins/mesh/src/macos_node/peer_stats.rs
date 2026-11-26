@@ -1,6 +1,6 @@
 //! Reads the live Mac device's per-peer statistics on the worker: the counters the node
-//! reports to the coordinator, and the endpoints `GotaTun` confirmed, which the worker's
-//! periodic scan hands to the handshake admission guard (J736).
+//! reports to the coordinator, and the endpoints `GotaTun` confirmed, which the worker hands to
+//! the handshake admission guard when they change (J736, J1253).
 //!
 //! These run on the worker's current-thread runtime, which also carries the packet path, so each
 //! is one `peers()` read of the device and no blocking work.
@@ -12,10 +12,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// How often the Mac worker hands `GotaTun`'s confirmed endpoints to the admission guard: the
-/// period of the Linux worker's endpoint scan, so a roamed peer becomes known as fast on both.
-pub(super) const CONFIRMED_ENDPOINT_SCAN: Duration = Duration::from_millis(250);
-
 impl RuntimeState {
     /// Give the admission guard the endpoints `GotaTun` confirmed for active installed peers.
     ///
@@ -24,7 +20,8 @@ impl RuntimeState {
     /// Feeding it in lets the peer keep the guard's reserved budget under a flood (J717, J736).
     /// Only keys with allowed IPs count, like the Linux scan: an overlap key that no longer
     /// routes has no path to vouch for. With no device the list is emptied. The shared feed
-    /// takes the guard's write lock only on a change.
+    /// takes the guard's write lock only on a change. The worker calls it when the engine reports
+    /// a changed confirmed endpoint and after commands that change the peers.
     pub(super) async fn admit_confirmed_endpoints(&mut self) {
         let endpoints: Vec<SocketAddr> = match self.device.as_ref() {
             Some(device) => device

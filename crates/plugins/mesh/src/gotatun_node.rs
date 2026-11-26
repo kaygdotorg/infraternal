@@ -58,7 +58,9 @@ use tokio::{
 use crate::listen_port::Request as ListenPortRequest;
 /// The node's route listener and the worker share this; see [`crate::underlay_announce`].
 pub(crate) use crate::underlay_announce::UnderlayAnnounce;
-use crate::underlay_announce::{AnnouncementWaiter, CoalescedSchedule, CoalescedWake};
+use crate::underlay_announce::{
+    AnnouncementWaiter, CoalescedSchedule, CoalescedWake, confirmed_changed,
+};
 use crate::{
     candidate_walks::{
         EngineEndpoint, HANDSHAKE_WAIT, Observed, Walks, active_peer_key, engine_endpoint,
@@ -123,17 +125,6 @@ impl EndpointRefreshSignal {
         self.wake.begin();
     }
 }
-
-/// How long the endpoint scan waits when no datagram from an unconfirmed source woke it (#260
-/// J1077 finding 3). The receive path wakes the scan for every change it can see, so this only
-/// covers a change it cannot: a peer that moves to an address another peer already confirmed
-/// (both behind one relay, say). A node with nothing to do wakes once per this period.
-const ENDPOINT_SCAN_FALLBACK: Duration = Duration::from_secs(15);
-
-/// One extra scan this long after a scan that a wake caused. The wake comes when the datagram
-/// arrives, and `GotaTun` confirms the endpoint a moment later in its crypto workers; the
-/// scan's own debounce is usually enough, and this makes the rare race harmless.
-const ENDPOINT_SCAN_SETTLE: Duration = Duration::from_secs(1);
 
 /// Selects the node's data plane. `GotaTun` is the Linux default (D346), so the product runs on
 /// it and its bugs surface; kernel `WireGuard` stays an explicit per-machine opt-out. Reaching
@@ -943,15 +934,14 @@ async fn run_worker(
 ) {
     let mut announcements = AnnouncementWaiter::new(underlay_announce);
     let mut endpoint_refresh_schedule = CoalescedSchedule::default();
-    // The endpoint scan runs when the receive path saw a source `GotaTun` has not confirmed
-    // (and after anything that rebuilds the engine's peers), then once more to settle, and
-    // otherwise on a slow fallback. It no longer ticks: an idle node costs no wakeup for it.
+    // The endpoint scan runs only on a reason to: `GotaTun` reports a changed confirmed
+    // endpoint, the receive path saw a source it has not confirmed, or something rebuilt the
+    // engine's peers. There is no timer: an idle node costs no wakeup for it (D81, #260 J1253).
     let sources = match state.pending.as_ref() {
         Some(pending) => pending.factory.admission.read().await.sources(),
         None => Arc::default(),
     };
     let mut scan_schedule = CoalescedSchedule::default();
-    let mut scan_due = Instant::now() + ENDPOINT_SCAN_FALLBACK;
     sources.wake.request();
     let mut observed_endpoints = Some(state.configured_peer_endpoint_snapshot());
     // A restored configuration may already carry candidates; no session predates it.
@@ -960,6 +950,12 @@ async fn run_worker(
     let mut confirmed_feed = ConfirmedEndpointFeed::default();
     loop {
         let next_walk = state.walks.next_due();
+        // The running engine's change signal; a rebuilt engine brings its own, and the rebuild
+        // asks for a scan itself.
+        let confirmed = state
+            .device
+            .as_ref()
+            .map(|device| device.confirmed_endpoint_changes());
         tokio::select! {
             command = commands.recv() => match command {
                 Some(WorkerCommand::Apply { config, reply }) => {
@@ -1028,17 +1024,14 @@ async fn run_worker(
             () = sources.wake.notified(), if !scan_schedule.is_armed() => {
                 scan_schedule.arm(Instant::now());
             }
+            () = confirmed_changed(confirmed), if !scan_schedule.is_armed() => {
+                scan_schedule.arm(Instant::now());
+            }
             () = scan_schedule.wait() => {
                 scan_schedule.start();
                 sources.wake.begin();
                 scan_endpoints(&state, &mut confirmed_feed, &mut observed_endpoints, &endpoint_refresh).await;
-                let now = Instant::now();
-                scan_schedule.finish(now);
-                scan_due = now + ENDPOINT_SCAN_SETTLE;
-            }
-            () = tokio::time::sleep_until(scan_due) => {
-                scan_endpoints(&state, &mut confirmed_feed, &mut observed_endpoints, &endpoint_refresh).await;
-                scan_due = Instant::now() + ENDPOINT_SCAN_FALLBACK;
+                scan_schedule.finish(Instant::now());
             }
             () = announcements.next() => {
                 if let Some(device) = &state.device {

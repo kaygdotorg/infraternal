@@ -22,7 +22,7 @@
 
 use super::{
     CounterMap, GotaDevice, RuntimeState, WireGuardPeer, WorkerCommand, X25519PublicKey,
-    installed_keys, installed_peers, peer_for_policy, peer_stats, peers_for_config,
+    installed_keys, installed_peers, peer_for_policy, peers_for_config,
     underlay::UnderlayAnnouncer,
 };
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
     },
     dataplane::{Config, Peer, PeerPolicy},
     policy::model::PublicKey,
+    underlay_announce::{CoalescedSchedule, confirmed_changed},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -39,16 +40,17 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::{sync::mpsc::UnboundedReceiver, time::Instant};
 
 /// Run the Mac worker: apply queued commands one at a time, step candidate walks when one is
 /// due, and reap finished handshake tasks. It stops cleanly when told to or when its queue
 /// closes.
 ///
 /// A walk reads the counters only after the reply to an apply has been sent, so a snapshot's
-/// caller never waits on it. Between commands it also scans the device's confirmed endpoints
-/// every [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker
-/// does (J736, #483).
+/// caller never waits on it. Between commands it also hands the device's confirmed endpoints to
+/// the admission guard, as the Linux worker does (J736, #483): when the engine reports a change
+/// and after a command that changes the peers, at most every 250 ms, and never on a timer, so
+/// an idle node costs no wakeup for it (D81, #260 J1253).
 ///
 /// Every walk reads its peers through [`installed_peers`], the same filter
 /// [`peers_for_config`] installs with, so a peer without network access is never walked.
@@ -63,18 +65,34 @@ pub(super) async fn run_worker(
         state.utun.as_ref().map(super::MacUtun::name),
         mac_connected_sends_enabled(),
     );
-    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
-    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut confirmed_scan = CoalescedSchedule::default();
+    confirmed_scan.arm(Instant::now());
     // A restored configuration may carry subnet routes and candidates; no session predates it.
     state.sync_networks().await;
     state.refresh_walks(&BTreeMap::new()).await;
     loop {
         let next_walk = state.walks.next_due();
+        let confirmed = state
+            .device
+            .as_ref()
+            .map(|device| device.confirmed_endpoint_changes());
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
                 };
+                // A command that changes the peers or the device changes what the guard
+                // should hold, whether or not any endpoint moved.
+                if !confirmed_scan.is_armed()
+                    && matches!(
+                        command,
+                        WorkerCommand::Apply { .. }
+                            | WorkerCommand::ReplaceAuthority { .. }
+                            | WorkerCommand::SetPrivateKey { .. }
+                    )
+                {
+                    confirmed_scan.arm(Instant::now());
+                }
                 match command {
                     WorkerCommand::Apply {
                         config,
@@ -133,8 +151,13 @@ pub(super) async fn run_worker(
                     }
                 }
             }
-            _ = confirmed_scan.tick() => {
+            () = confirmed_changed(confirmed), if !confirmed_scan.is_armed() => {
+                confirmed_scan.arm(Instant::now());
+            }
+            () = confirmed_scan.wait() => {
+                confirmed_scan.start();
                 state.admit_confirmed_endpoints().await;
+                confirmed_scan.finish(Instant::now());
             }
             () = announcement_due(announcer.as_mut()) => {
                 if let Some(device) = &state.device
