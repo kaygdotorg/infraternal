@@ -982,10 +982,9 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
         }
         let mut buffer = BytesMut::with_capacity(wire::HEADER + PACKET);
         buffer.put_u32(0);
-        match peer.socket.try_recv(&mut buffer) {
-            Ok(_) => {}
-            // A refused send from an earlier datagram surfaces here; keep going.
-            Err(_) => continue,
+        // Read readiness can go stale, and a refused send can surface on this receive.
+        if peer.socket.try_recv(&mut buffer).is_err() {
+            continue;
         }
         let Some((live, id)) = read(&peer.active)
             .clone()
