@@ -441,6 +441,94 @@ fn random_snapshot_sequences_converge_to_a_full_apply() {
     }
 }
 
+/// A new peer must pass cached prefixes and mesh-wide uniqueness, and live route changes must
+/// still be checked against peers that keep their addresses.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn incremental_validation_refuses_new_and_unchanged_address_conflicts() {
+    require_isolated_namespace();
+    underlay_up();
+    let state = StateDir::new();
+    let mut node = Node::restore_with_engine(&state.0, EngineKind::GotaTun).unwrap();
+    let identity = node.up().unwrap();
+    let keys: Vec<_> = (0..2)
+        .map(|_| crate::wireguard::Key::generate().unwrap().1)
+        .collect();
+    let old_peer = Facts {
+        key: 0,
+        address: 10,
+        endpoint: None,
+        closed: false,
+        ipv4_only: false,
+    };
+    let mut peers = BTreeMap::from([(2, old_peer.clone())]);
+    let cached_prefix = [
+        "route",
+        "add",
+        "10.254.1.20/32",
+        "dev",
+        UNDERLAY,
+        "table",
+        "100",
+    ];
+    ip(&cached_prefix);
+    deliver(&mut node, &snapshot(identity.public_key, &keys, &peers, 2));
+    peers.insert(
+        3,
+        Facts {
+            key: 1,
+            address: 20,
+            ..old_peer
+        },
+    );
+    let next = snapshot(identity.public_key, &keys, &peers, 3);
+    assert_eq!(
+        node.apply(next.clone()).unwrap_err().kind(),
+        io::ErrorKind::AddrInUse
+    );
+    let mut del = cached_prefix;
+    del[1] = "del";
+    ip(&del);
+
+    // Each address family independently refuses a new peer colliding with an unchanged peer.
+    let old = next.peers[&NodeId(2)].peer.addresses;
+    for ipv6 in [false, true] {
+        let mut duplicate = next.clone();
+        let address = &mut duplicate.peers.get_mut(&NodeId(3)).unwrap().peer.addresses;
+        if ipv6 {
+            address.ipv6 = old.ipv6;
+        } else {
+            address.ipv4 = old.ipv4;
+        }
+        assert_eq!(
+            node.apply(duplicate).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    // The proposed revision changes only the new peer. This new IPv6 route covers the old one.
+    let mut live_prefix = [
+        "-6",
+        "route",
+        "add",
+        "fd01::1:a/128",
+        "dev",
+        UNDERLAY,
+        "table",
+        "100",
+    ];
+    ip(&live_prefix);
+    assert_eq!(
+        node.apply(next.clone()).unwrap_err().kind(),
+        io::ErrorKind::AddrInUse
+    );
+    assert_eq!(node.config().unwrap().version, 2);
+    live_prefix[2] = "del";
+    ip(&live_prefix);
+    deliver(&mut node, &next);
+    node.down().unwrap();
+}
+
 /// The child side of [`a_restart_after_a_kill_mid_apply_converges`]: apply the first snapshot,
 /// then stop for good inside the second one, after its routes and guard are in the kernel and
 /// before it is saved, so the parent can kill this process there.
