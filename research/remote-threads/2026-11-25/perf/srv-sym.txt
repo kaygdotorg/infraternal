@@ -1,0 +1,40 @@
+     1.89%  [k] 0xffffffffb3f1870d
+     0.62%  [.] <quinn::connection::ConnectionDriver as core::future::future::Future>::poll
+     0.52%  [k] 0xffffffffb330d22d
+     0.51%  [.] infraternal_server::embedded::run_actor::{closure#0}
+     0.43%  [.] __vdso_clock_gettime
+     0.42%  [.] <tokio::sync::notify::NotifiedProject>::poll_notified
+     0.36%  [k] 0xffffffffb3f0a2d8
+     0.36%  [k] nft_do_chain
+     0.36%  [.] <infraternal_server::remote_guard::AuthorityGuard>::cancelled::{closure#0}
+     0.33%  [.] memcpy
+     0.32%  [.] __libc_malloc_impl
+     0.30%  [.] __libc_free
+     0.27%  [.] <quinn_proto::connection::Connection>::populate_packet
+     0.26%  [.] <quinn_proto::connection::Connection>::process_payload
+     0.23%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::remote_link::Packet>>::pop
+     0.23%  [.] <infraternal_server::remote_guard::AuthorityGuard>::permits
+     0.21%  [.] <tokio::sync::task::atomic_waker::AtomicWaker>::register_by_ref
+     0.20%  [.] <core::future::poll_fn::PollFn<<quinn::send_stream::SendStream>::write::{closure#0}::{closure#0}> as core::future::future::Future>::poll
+     0.20%  [.] <quinn::endpoint::RecvState>::poll_socket
+     0.19%  [.] tokio::runtime::task::waker::wake_by_val
+     0.18%  [.] alloc_slot
+     0.18%  [.] <tokio::sync::notify::NotifiedProject>::drop_notified
+     0.17%  [.] <quinn_proto::connection::Connection>::on_packet_acked
+     0.17%  [.] ring_core_0_17_14__aes_hw_ctr32_encrypt_blocks
+     0.16%  [.] <infraternal_server::embedded::priming::State>::next::{closure#0}
+     0.16%  [k] __nf_conntrack_find_get
+     0.15%  [.] <infraternal_server::remote_link::RemoteLink>::read_transport::{closure#0}
+     0.15%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::embedded::Retirement>>::pop
+     0.14%  [.] <tokio::sync::mpsc::list::Rx<quinn::ConnectionEvent>>::pop
+     0.14%  [.] <infraternal_plugin_remote::remote_native::NativeChannel as infraternal_plugin_api::channel::Channel>::write::{closure#0}
+     0.14%  [.] <tokio::sync::mpsc::list::Rx<infraternal_server::remote_link::RemoteLink>>::pop
+     0.14%  [.] tokio::runtime::task::waker::clone_waker
+     0.13%  [.] <infraternal_server::remote_link::RemoteLink>::write_transport::{closure#0}
+     0.13%  [.] <quinn::recv_stream::RecvStream>::poll_read_buf
+     0.13%  [.] tokio::runtime::task::raw::poll::<tokio::runtime::blocking::task::BlockingTask<<tokio::runtime::scheduler::multi_thread::worker::Launch>::launch::{closure#0}>, tokio::runtime::blocking::schedule::BlockingSchedule>
+     0.13%  [.] <tokio::time::sleep::Sleep as core::future::future::Future>::poll
+     0.12%  [.] <quinn_proto::connection::Connection>::handle_decode
+     0.12%  [.] <tokio::runtime::scheduler::multi_thread::worker::Context>::run_task
+     0.12%  [.] <tokio::runtime::time::handle::Handle>::reregister
+     0.12%  [.] ring_core_0_17_14__gcm_ghash_avx

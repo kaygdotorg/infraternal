@@ -1,0 +1,12 @@
+    61.75%  infraternal    
+    25.44%  tokio-rt-worker
+     5.58%  python3        
+     5.50%  bash           
+     0.40%  sqlx-sqlite-wor
+     0.24%  systemctl      
+     0.19%  db-writer      
+     0.14%  db-reader-0    
+     0.13%  db-reader-1    
+     0.12%  id             
+     0.10%  cat            
+     0.09%  dircolors      
