@@ -301,13 +301,43 @@ impl RelayManager {
     pub(super) fn set_list(&self, list: &RelayList) -> Option<u16> {
         let serving = self.set_role(list);
         let mut state = lock(&self.state);
+        // Pairs installed while no relay was listed had no deadline; they get one now.
+        let first_relays = state.relays.is_empty() && !list.relays.is_empty();
         if state.relays != list.relays {
             state.relays.clone_from(&list.relays);
             state.starting = true;
         }
+        let pending: Vec<(NodeId, u64, Duration)> = if first_relays {
+            let now = SystemTime::now();
+            state
+                .pairs
+                .iter()
+                .filter(|(_, pair)| pair.relayed.is_none())
+                .map(|(node, pair)| {
+                    let waited = now.duration_since(pair.installed).unwrap_or_default();
+                    (*node, pair.generation, GRACE.saturating_sub(waited))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         drop(state);
         self.start_paths();
+        for (node, generation, wait) in pending {
+            self.deadline(node, generation, wait);
+        }
         serving
+    }
+
+    /// Judge `node` once, `wait` from now (D81: one timer per installed peer, never repeated).
+    fn deadline(&self, node: NodeId, generation: u64, wait: Duration) {
+        let owner = self.owner.clone();
+        let state = self.state.clone();
+        self.spawn(async move {
+            // sleep: this pair's one deadline.
+            tokio::time::sleep(wait).await;
+            judge(&owner, &state, node, generation, false).await;
+        });
     }
 
     /// Run the relay role `list.serve` asks for, if any, and return its bound port.
@@ -395,6 +425,11 @@ impl RelayManager {
 
     /// A complete configuration was accepted: release removed peers and give every new or
     /// changed peer its one relay deadline.
+    ///
+    /// What counts as changed: for a relayed pair only its keys (they name its pair tokens),
+    /// so the candidates and endpoint the coordinator republishes whenever it sees a NAT
+    /// mapping move do not drop a working relay; for any other pair any change, since a new
+    /// address may fail or work. A node with no relay listed sets no deadline at all.
     pub(super) fn configured(&self, config: Option<&Config>) {
         let Some(config) = config else {
             return;
@@ -402,8 +437,10 @@ impl RelayManager {
         let now = SystemTime::now();
         let mut due = Vec::new();
         let mut released = Vec::new();
+        let relays_listed;
         {
             let mut state = lock(&self.state);
+            relays_listed = !state.relays.is_empty();
             let peers: BTreeMap<NodeId, &Peer> = config
                 .peers
                 .iter()
@@ -411,8 +448,23 @@ impl RelayManager {
                 .map(|(node, policy)| (*node, &policy.peer))
                 .collect();
             state.pairs.retain(|node, pair| {
-                let keep = peers.get(node).is_some_and(|peer| **peer == pair.peer);
-                if !keep && pair.relayed.is_some() {
+                let Some(peer) = peers.get(node) else {
+                    if pair.relayed.is_some() {
+                        released.push(*node);
+                    }
+                    return false;
+                };
+                let same_keys = peer.key == pair.peer.key
+                    && peer.previous_key == pair.peer.previous_key
+                    && peer.previous_active == pair.peer.previous_active;
+                let keep = if pair.relayed.is_some() {
+                    same_keys
+                } else {
+                    **peer == pair.peer
+                };
+                if keep {
+                    pair.peer = (*peer).clone();
+                } else if pair.relayed.is_some() {
                     released.push(*node);
                 }
                 keep
@@ -445,14 +497,11 @@ impl RelayManager {
                 self.spawn(async move { paths.release(label(node)).await });
             }
         }
+        if !relays_listed {
+            return;
+        }
         for (node, generation) in due {
-            let owner = self.owner.clone();
-            let state = self.state.clone();
-            self.spawn(async move {
-                // sleep: the one deadline per installed peer (D81: nothing repeats).
-                tokio::time::sleep(GRACE).await;
-                judge(&owner, &state, node, generation, false).await;
-            });
+            self.deadline(node, generation, GRACE);
         }
     }
 
