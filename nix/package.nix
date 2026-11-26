@@ -111,7 +111,7 @@ let
   cargoDeps = rustPlatform.importCargoLock {
     lockFile = ../Cargo.lock;
     # Fixed source hash for the commit pinned in Cargo.lock; required in the sandbox.
-    outputHashes."gotatun-0.10.3" = "sha256-kIJxzXKa3FHMyEKWDSKcDMfBUzIIn0Aps/x+sJlv8uY=";
+    outputHashes."gotatun-0.10.3" = "sha256-tdcr3J4mSESeGPohLyzFRZ1Qara2EcDMdKoVlJOqAkA=";
   };
   bunDeps = stdenv.mkDerivation {
     name = "infraternal-bun-deps";
