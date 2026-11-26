@@ -2799,6 +2799,42 @@ mod tests {
             .sum()
     }
 
+    /// Block until no thread named `name` has blocked and been woken again for a second, and all
+    /// of them are asleep. The engine retries far more often than that, so this returns only once
+    /// it has given up on every peer and the start-up work has drained, however long a loaded host
+    /// takes for that (#597). Panics if the threads are never still.
+    fn wait_until_still(name: &str) {
+        use std::time::{Duration, Instant};
+        const QUIET: Duration = Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut previous = wakeups_of(name);
+        let mut quiet_since = Instant::now();
+        while quiet_since.elapsed() < QUIET {
+            assert!(Instant::now() < deadline, "{name} threads never went still");
+            // sleep: sample the kernel's counters; nothing is sent to the threads.
+            std::thread::sleep(Duration::from_millis(50));
+            let current = wakeups_of(name);
+            if current != previous || !all_asleep(name) {
+                quiet_since = Instant::now();
+            }
+            previous = current;
+        }
+    }
+
+    /// Whether every thread of this process named `name` is in interruptible sleep: none is
+    /// waiting for a CPU or a disk.
+    fn all_asleep(name: &str) -> bool {
+        std::fs::read_dir("/proc/self/task")
+            .expect("tasks")
+            .flatten()
+            .filter_map(|task| std::fs::read_to_string(task.path().join("stat")).ok())
+            .filter(|stat| stat.contains(&format!("({name})")))
+            .all(|stat| {
+                stat.rsplit_once(") ")
+                    .is_some_and(|(_, rest)| rest.starts_with('S'))
+            })
+    }
+
     /// D81 for offline peers (#260 J1253): once the engine has given up on every peer, the
     /// node's worker and engine threads do not wake at all, however many peers there are.
     ///
@@ -2910,8 +2946,7 @@ mod tests {
             ));
             (commands, worker)
         });
-        // sleep: every attempt gives up after 2 s; the rest lets the start-up work finish.
-        std::thread::sleep(Duration::from_secs(5));
+        wait_until_still(THREADS);
         sink.set_nonblocking(true).expect("sink mode");
         let mut buffer = [0_u8; 256];
         // The sink's buffer keeps only the first initiations; that some arrived shows the
