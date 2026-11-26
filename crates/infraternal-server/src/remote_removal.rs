@@ -83,7 +83,14 @@ impl Removal {
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
         let user = self.auth.bootstrap_owner(token, now).await?;
-        if !self.auth.bootstrap_host(&user, host).await {
+        // Both Remove and Forget renew the same owner session. A host
+        // awaiting cleanup still qualifies, matching the finish check below.
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+            .bind(host.as_bytes().as_slice())
+            .bind(&user)
+            .fetch_one(&self.pool)
+            .await?;
+        if !owned {
             return Err(crate::auth::Error::Denied);
         }
         let mut taps = self.taps.lock().await;
