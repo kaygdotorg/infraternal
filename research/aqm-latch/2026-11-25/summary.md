@@ -8,8 +8,8 @@ load falls?
 
 ## Verdict
 
-1. **No latch.** The controller cannot stay in a drop state after load falls. In every run here, TCP or UDP, the traffic
-   after an overload arrived in full, and the engine counted no drop and no CE mark in any later step.
+1. **No latch.** The controller cannot stay in a drop state after load falls. In every run here, TCP or UDP, the paced
+   traffic after an overload arrived in full; on the perf VM the engine counted no signal in those paced phases.
 2. **TCP does not collapse.** Under a 100-flow TCP overload on the perf VM the hub delivered more with the AQM than
    without it.
 3. **J1234's collapse during the overload is real, and the AQM causes it.** With J1234's own harness, 100 open-loop UDP
@@ -53,8 +53,8 @@ client each; 10 s phases. Raw rows: `perf-vm/matrix.csv`, `perf-vm/single-flow.c
 | 1 flow (UDP: 600 offered) | 2641 | 3770 | 3530 | 600 | 600 |
 | 10 x 39, after 10 s more idle | 390 | 390 | 390 | 390 | 390 |
 
-Engine counters (`perf-vm/*.aqm.txt`): drops or marks stop within 0.4 s of the overload clients exiting and stay at zero
-through all later phases.
+Engine counters (`perf-vm/*.aqm.txt`): drops or marks stop within 0.4 s of the overload clients exiting. No later
+phase has a drop or a mark, except 5 CE marks during the ECN run's own single-flow phase.
 
 The 2641 single-flow cell is not an AQM cost: that phase had no drop and no mark. Three repeats each of "fresh engine"
 and "after overload" (`single-flow.csv`), delivered Mbit/s, median (min-max):
