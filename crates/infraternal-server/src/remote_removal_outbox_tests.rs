@@ -396,24 +396,11 @@ async fn refused_uninstall_retires_with_the_install_recorded_as_left() {
     drop(removed);
 }
 
-/// A connected removal must leave its receipt pending until the reconnect has
-/// requested uninstall. An early receipt would retire that delivery forever.
-#[tokio::test]
-async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
-    let removed = removed().await;
+/// Give the fixture's host owner a live admin window for the removal service.
+async fn owner_removal(removed: &Removed) -> (crate::remote_removal::Removal, &'static str, i64) {
     let person: String = sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
         .bind(removed.host.as_bytes().as_slice())
         .fetch_one(&removed.pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM remote_login_cleanup WHERE host_id=?")
-        .bind(removed.host.as_bytes().as_slice())
-        .execute(&removed.pool)
-        .await
-        .unwrap();
-    sqlx::query("DELETE FROM remote_host_removals WHERE host_id=?")
-        .bind(removed.host.as_bytes().as_slice())
-        .execute(&removed.pool)
         .await
         .unwrap();
     sqlx::query("UPDATE users SET owner=0")
@@ -433,7 +420,7 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
     .await
     .unwrap();
     let now = crate::runtime::unix_seconds().unwrap();
-    let token = "connected-removal-test-session";
+    let token = "outbox-removal-test-session";
     sqlx::query(
         "INSERT INTO sessions(token_hash,user_id,device,expires,fresh) VALUES(?,?,'test',?,?)",
     )
@@ -451,6 +438,57 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
         removed.hosts.clone(),
         std::path::PathBuf::new(),
     );
+    (service, token, now)
+}
+
+/// Forget must stop delivery after acknowledgement of the first cleanup step.
+#[tokio::test]
+async fn forget_stops_an_admitted_cleanup_before_its_next_step() {
+    let removed = removed().await;
+    let (service, token, now) = owner_removal(&removed).await;
+    let mut socket = removed.reconnect().await;
+    let (call_id, action, _) = next_call(&mut socket).await;
+    assert_eq!(action, "terminal.login.revoke");
+
+    let result = service
+        .forget_browser(token, removed.host, now)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "forgotten");
+
+    let fingerprint = openssl::sha::sha256(&removed.identity.certificate.to_der().unwrap());
+    assert!(removed.store.admit(&fingerprint, now).await.is_err());
+    assert!(removed.store.admit_cleanup(&fingerprint, now).await.is_err());
+
+    // The first cleanup call preceded Forget. Its late reply must never
+    // cause a new uninstall call on the already admitted connection.
+    let _ = socket
+        .send(&Frame::Result {
+            call_id,
+            ok: true,
+            json: br#"{"revoked":true}"#,
+        })
+        .await;
+    let next = try_next_call(&mut socket, Duration::from_secs(3)).await;
+    assert!(next.is_none(), "cleanup continued after Forget: {next:?}");
+}
+
+/// A connected removal must leave its receipt pending until the reconnect has
+/// requested uninstall. An early receipt would retire that delivery forever.
+#[tokio::test]
+async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
+    let removed = removed().await;
+    sqlx::query("DELETE FROM remote_login_cleanup WHERE host_id=?")
+        .bind(removed.host.as_bytes().as_slice())
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM remote_host_removals WHERE host_id=?")
+        .bind(removed.host.as_bytes().as_slice())
+        .execute(&removed.pool)
+        .await
+        .unwrap();
+    let (service, token, now) = owner_removal(&removed).await;
     let mut original = removed.reconnect().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while removed.hosts.actor(removed.host).await.is_none() {
