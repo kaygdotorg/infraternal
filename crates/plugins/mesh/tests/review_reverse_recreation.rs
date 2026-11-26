@@ -25,7 +25,7 @@ fn check(fallback: bool, family: &str) {
         .unwrap();
     assert!(
         output.status.success(),
-        "retired TCP socket resumed: stdout={} stderr={}",
+        "retired TCP scenario failed: stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
