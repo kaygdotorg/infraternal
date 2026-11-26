@@ -619,11 +619,14 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
     let host = invitation.0.host_id;
     invitation.wipe();
+    #[cfg(target_os = "linux")]
+    let accepted = install_preflight()?;
+    #[cfg(target_os = "macos")]
     install_preflight()?;
     let join_url = format!("{origin}/remote/join");
     termination::run(|interrupted| async move {
         #[cfg(target_os = "linux")]
-        let install = install::Install::begin(Path::new("/"), 0, &systemctl);
+        let install = install::Install::begin_accepted(accepted, &systemctl);
         #[cfg(target_os = "macos")]
         let install = macos::Install::begin();
         let install = install
@@ -642,23 +645,41 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
                 eprintln!("{error}");
                 Failure::HostFirewall
             })?;
+        // The Linux installer copies the binary while the server issues the
+        // certificate: neither needs the other, and each takes a large part of
+        // the time between the approval and the service start (#580).
+        #[cfg(target_os = "linux")]
+        let mut install = install;
+        #[cfg(target_os = "linux")]
+        let copy = {
+            let pending = install
+                .stage_image(Path::new(RUNNING_IMAGE))
+                .map_err(|error| {
+                    eprintln!("{error}");
+                    Failure::LocalState
+                })?;
+            tokio::task::spawn_blocking(move || pending.copy())
+        };
         println!("UP_STAGE=enrollment");
-        crate::remote::join_with_key(
+        let joined = crate::remote::join_with_key(
             &join_url,
             Path::new(SERVICE_DATA),
             &handoff.invitation,
             &handoff.key_pkcs8,
         )
         .await
-        .map_err(|error| map_remote_failure(&error))?;
+        .map_err(|error| map_remote_failure(&error));
+        // The copy is waited for even after a failed enrollment, so nothing is
+        // still writing when the installer rolls back.
         #[cfg(target_os = "linux")]
-        let image = PathBuf::from(RUNNING_IMAGE);
-        #[cfg(target_os = "macos")]
-        let image = env::current_exe().map_err(|_| Failure::Partial)?;
+        let copied = copy.await;
+        joined?;
         #[cfg(target_os = "linux")]
-        let activation = install.activate(&image);
+        let activation = copied
+            .map_err(io::Error::other)
+            .and_then(|image| install.activate_copied(image?));
         #[cfg(target_os = "macos")]
-        let activation = install.activate(&image, host);
+        let activation = env::current_exe().and_then(|image| install.activate(&image, host));
         activation.map_err(|error| {
             #[cfg(target_os = "macos")]
             eprintln!("{error}");
@@ -1147,12 +1168,15 @@ fn parse_result_marker(output: &[u8]) -> Option<u8> {
 }
 
 /// Check the host before approval and repeat as root before installing anything.
-fn install_preflight() -> Result<(), Failure> {
+/// Refuse a host that cannot take a fresh installation, before anything asks
+/// for an approval or writes. The result lets the Linux installer start without
+/// repeating the pass it just made.
+fn install_preflight() -> Result<Preflighted, Failure> {
     #[cfg(target_os = "linux")]
     let system = install::preflight(Path::new("/"), 0);
     #[cfg(target_os = "macos")]
     let system = macos::preflight();
-    let result = system.and_then(|()| {
+    let result = system.and_then(|accepted| {
         if let Ok(data) = crate::remote::default_data() {
             match fs::symlink_metadata(data.join("identity.json")) {
                 Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "An infraternal agent identity already exists for this user. Manage that installation instead of running infraternal up.")),
@@ -1160,13 +1184,21 @@ fn install_preflight() -> Result<(), Failure> {
                 Err(error) => return Err(error),
             }
         }
-        Ok(())
+        Ok(accepted)
     });
     result.map_err(|error| {
         eprintln!("{error}");
         Failure::InstallConflict
     })
 }
+
+/// What a passed [`install_preflight`] hands the installer: on Linux the proof
+/// it can start from, on a Mac nothing.
+#[cfg(target_os = "linux")]
+type Preflighted = install::Accepted;
+/// See the Linux definition; the Mac installer repeats its own cheap checks.
+#[cfg(target_os = "macos")]
+type Preflighted = ();
 
 /// Exercise the same transaction as enrollment without contacting a server.
 #[cfg(all(test, target_os = "linux"))]

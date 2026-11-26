@@ -44,16 +44,32 @@ mod inspect;
 #[path = "up_journal.rs"]
 mod journal;
 
+/// Proof that the read-only [`preflight`] accepted a namespace.
+///
+/// [`Install::begin_accepted`] takes it instead of running that pass a second
+/// time, so an installer can report a refusal before it sets anything up and
+/// still cannot open the journal without having been accepted.
+pub(super) struct Accepted {
+    /// The namespace root the pass inspected.
+    root: PathBuf,
+    /// The owner the pass expected for the installation.
+    owner: u32,
+}
+
 /// Check every installation destination and its ancestry before the first write.
 /// Existing empty bases must already be 0711: this command never repairs their modes.
-pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
+pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<Accepted> {
     let systemctl = if root == Path::new("/") {
         super::trusted_tool(&super::SYSTEMCTL_CANDIDATES, super::Failure::NoSystemd)
             .map_err(|_| refused("Could not resolve the service manager. Restore systemctl before retrying infraternal up."))?
     } else {
         root.join("systemctl")
     };
-    preflight_with_manager(root, owner, &systemctl)
+    preflight_with_manager(root, owner, &systemctl)?;
+    Ok(Accepted {
+        root: root.to_owned(),
+        owner,
+    })
 }
 
 /// Use the same trusted manager for read-only inspection and later activation.
@@ -195,6 +211,56 @@ struct Replaced {
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 const MAX_HAND_FIREWALL_UNIT_BYTES: u64 = 64 * 1024;
 
+/// A journaled, still empty staging file for the service binary.
+pub(super) struct PendingImage {
+    /// The running image, opened before anything else can replace its pathname.
+    input: fs::File,
+    /// The exclusively created staging inode the installer already owns.
+    output: fs::File,
+    /// Where that inode is, for verification and publication.
+    staging: PathBuf,
+}
+
+/// A staging file that holds a verified, labelled and synced copy of the image.
+/// Only [`PendingImage::copy`] makes one, so nothing else can be published as the binary.
+pub(super) struct VerifiedImage(PathBuf);
+
+impl PendingImage {
+    /// Copy and verify the running image before its public pathname becomes visible.
+    ///
+    /// systemd starts the service from this file. Under `/var/lib` it would
+    /// inherit `var_lib_t`, which `SELinux` refuses as a service entrypoint
+    /// (`203/EXEC`, #401), so the staging inode is labelled `bin_t` first.
+    pub(super) fn copy(mut self) -> io::Result<VerifiedImage> {
+        let read = hash_stream(&mut self.input, Some(&mut self.output))?;
+        self.output
+            .set_permissions(fs::Permissions::from_mode(0o755))?;
+        infraternal_agent::exec_label::executable_label(&self.output).map_err(|_| {
+            refused(
+                "SELinux refused to mark the installed binary executable for systemd. Check the host's SELinux policy has the bin_t type.",
+            )
+        })?;
+        self.output.sync_all()?;
+        if hash_stream(&mut fs::File::open(&self.staging)?, None)? != read {
+            return Err(io::Error::other(
+                "installed binary differs from the running image",
+            ));
+        }
+        // The write handle closes here: a binary open for writing cannot start.
+        Ok(VerifiedImage(self.staging))
+    }
+}
+
+/// Only the privileged owner of an installation may open or recover it.
+fn require_owner(owner: u32) -> io::Result<()> {
+    if nix::unistd::geteuid().as_raw() != owner {
+        return Err(refused(
+            "This infraternal installation needs its privileged owner. Retry sudo infraternal up to validate and recover it.",
+        ));
+    }
+    Ok(())
+}
+
 /// Owns only new install paths until the service is confirmed active.
 pub(super) struct Install {
     /// The namespace root, injectable for root tests without touching the host install.
@@ -225,19 +291,37 @@ pub(super) struct Install {
 
 impl Install {
     /// Repeat read-only preflight, then create the private enrollment layout under rollback.
+    #[cfg(test)]
     pub(super) fn begin(root: &Path, owner: u32, systemctl: &Path) -> io::Result<Self> {
-        if nix::unistd::geteuid().as_raw() != owner {
-            return Err(refused(
-                "This infraternal installation needs its privileged owner. Retry sudo infraternal up to validate and recover it.",
-            ));
-        }
+        require_owner(owner)?;
         preflight_with_manager(root, owner, systemctl)?;
-        let (journal, recovery) = journal::Journal::open(root, owner)?;
+        Self::begin_accepted(
+            Accepted {
+                root: root.to_owned(),
+                owner,
+            },
+            systemctl,
+        )
+    }
+
+    /// Open the journal for a namespace [`preflight`] just accepted, then create
+    /// the private enrollment layout under rollback.
+    ///
+    /// The host is checked again under the journal lock, and once more after an
+    /// unfinished install was recovered: those are the passes that authorize
+    /// writes. Without anything to recover, a further pass would inspect exactly
+    /// what the locked one just did.
+    pub(super) fn begin_accepted(accepted: Accepted, systemctl: &Path) -> io::Result<Self> {
+        let Accepted { root, owner } = accepted;
+        require_owner(owner)?;
+        let (journal, recovery) = journal::Journal::open(&root, owner)?;
         // Recheck under the retained lock: a different install may have finished
         // between the read-only preflight and lock acquisition.
-        check_preflight(root, owner, systemctl, &recovery)?;
+        check_preflight(&root, owner, systemctl, &recovery)?;
+        let unfinished =
+            recovery.registered || !recovery.created.is_empty() || !recovery.replaced.is_empty();
         let mut install = Self {
-            root: root.to_owned(),
+            root,
             owner,
             created: recovery.created,
             replaced: recovery.replaced,
@@ -252,7 +336,14 @@ impl Install {
             host_firewall_installed: false,
         };
         install.rollback()?;
-        check_preflight(root, owner, systemctl, &journal::Snapshot::default())?;
+        if unfinished {
+            check_preflight(
+                &install.root,
+                owner,
+                systemctl,
+                &journal::Snapshot::default(),
+            )?;
+        }
         install.journal.begin()?;
         install.directory("var/lib/infraternal", 0o711, false)?;
         install.directory("var/lib/infraternal/agent", 0o700, true)?;
@@ -574,34 +665,31 @@ impl Install {
         .sync_all()
     }
 
-    /// Copy and verify the running image before its public pathname becomes visible.
+    /// Journal a staging file for the service binary, to be filled by
+    /// [`PendingImage::copy`] and published by [`Install::activate_copied`].
     ///
-    /// systemd starts the service from this file. Under `/var/lib` it would
-    /// inherit `var_lib_t`, which `SELinux` refuses as a service entrypoint
-    /// (`203/EXEC`, #401), so the staging inode is labelled `bin_t` first.
-    fn binary(&mut self, source: &Path) -> io::Result<()> {
-        let mut input = fs::File::open(source)?;
+    /// Only this step needs the installer. The copy can then run on another
+    /// thread while enrollment waits for the server; if the installation is
+    /// abandoned meanwhile, rollback removes the staging file like any other
+    /// and the copy can only write into an unlinked inode.
+    pub(super) fn stage_image(&mut self, source: &Path) -> io::Result<PendingImage> {
+        let input = fs::File::open(source)?;
         if !input.metadata()?.is_file() {
             return Err(refused(
                 "The running image is not a regular file. Retry from an installed infraternal binary.",
             ));
         }
-        let destination = self.root.join(SERVICE_BINARY.trim_start_matches('/'));
-        let (staging, mut output) = self.staging(&destination)?;
-        let read = hash_stream(&mut input, Some(&mut output))?;
-        output.set_permissions(fs::Permissions::from_mode(0o755))?;
-        infraternal_agent::exec_label::executable_label(&output).map_err(|_| {
-            refused(
-                "SELinux refused to mark the installed binary executable for systemd. Check the host's SELinux policy has the bin_t type.",
-            )
-        })?;
-        output.sync_all()?;
-        if hash_stream(&mut fs::File::open(&staging)?, None)? != read {
-            return Err(io::Error::other(
-                "installed binary differs from the running image",
-            ));
-        }
-        self.publish(&staging, &destination)
+        let (staging, output) = self.staging(&self.binary_path())?;
+        Ok(PendingImage {
+            input,
+            output,
+            staging,
+        })
+    }
+
+    /// Where the service's copy of the binary is installed.
+    fn binary_path(&self) -> PathBuf {
+        self.root.join(SERVICE_BINARY.trim_start_matches('/'))
     }
 
     /// Create one symlink exclusively and record its own inode, without following the target.
@@ -651,14 +739,25 @@ impl Install {
         }
     }
 
-    /// Publish the binary, alias and unit, committing only after the service's active check.
+    /// Copy the binary from `source` and activate it in one step.
+    #[cfg(test)]
     pub(super) fn activate(mut self, source: &Path) -> io::Result<()> {
+        self.check_interruption()?;
+        let image = self.stage_image(source)?.copy()?;
+        self.activate_copied(image)
+    }
+
+    /// Publish the copied binary, alias and unit, committing only after the service's active check.
+    pub(super) fn activate_copied(mut self, image: VerifiedImage) -> io::Result<()> {
         self.check_interruption()?;
         #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
         if self.host_firewall_policy.is_some() {
             self.install_host_firewall()?;
         }
-        self.binary(source)?;
+        // Taken by value: publication consumes the staging file.
+        let VerifiedImage(staging) = image;
+        let destination = self.binary_path();
+        self.publish(&staging, &destination)?;
         self.check_interruption()?;
         let path = self
             .directory("usr/local/bin", 0o755, false)?
@@ -989,6 +1088,28 @@ mod tests {
             );
             assert_eq!(fs::read(foreign.join("keep")).unwrap(), b"earlier data");
         }
+    }
+
+    /// The binary copy runs while enrollment waits for the server. An
+    /// installation abandoned meanwhile removes its staging file, and the copy,
+    /// still holding it open, publishes nothing.
+    #[test]
+    fn abandoning_an_install_during_the_binary_copy_leaves_nothing() {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let owner = nix::unistd::geteuid().as_raw();
+        let source = fixture.0.join("source");
+        fs::write(&source, b"fixture executable").unwrap();
+        let mut install = Install::begin(&fixture.0, owner, Path::new("/bin/false")).unwrap();
+        let pending = install.stage_image(&source).unwrap();
+        drop(install);
+        drop(pending.copy());
+        assert!(!fixture.0.join("var").exists());
+        let left = fs::read_dir(&fixture.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".pending"))
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "staging files left behind: {left:?}");
     }
 
     /// Global output selection can precede either long-running host mode.

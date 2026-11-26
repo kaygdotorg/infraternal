@@ -147,3 +147,92 @@ fn symlink_shared_oversized_or_special_trust_files_fail_closed() {
     std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert!(startup.cold_start(&config).is_err());
 }
+
+/// The startup error text of a refused cold start.
+fn refusal(startup: &RemoteStartup, config: &ServerConfig) -> String {
+    match startup.cold_start(config) {
+        Ok(_) => panic!("startup must be refused"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// The J1237 finding (#595): `openssl req` leaves a certificate group or world
+/// readable under the usual umask, and the refusal must say so, naming the
+/// option and the mode without printing the path.
+#[test]
+fn a_refused_startup_names_the_file_and_the_rule_without_its_path() {
+    let (directory, startup, config) = fixture();
+    let certificate = directory.0.join("server.pem");
+    let key = directory.0.join("server.key");
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let message = refusal(&startup, &config);
+    assert_eq!(
+        message,
+        "TLS configuration failed: the --tls-cert file has mode 0644; group and other users \
+         must have no access (chmod go-rwx)"
+    );
+    assert!(!message.contains(directory.0.to_str().unwrap()));
+    std::fs::set_permissions(&certificate, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o640)).unwrap();
+    assert!(refusal(&startup, &config).contains("the --tls-key file has mode 0640"));
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let real = directory.0.join("real.pem");
+    std::fs::rename(&certificate, &real).unwrap();
+    assert!(refusal(&startup, &config).contains("the --tls-cert file does not exist"));
+    std::os::unix::fs::symlink(&real, &certificate).unwrap();
+    assert!(refusal(&startup, &config).contains("the --tls-cert file is a symbolic link"));
+    std::fs::remove_file(&certificate).unwrap();
+    write(&certificate, b"not a certificate");
+    assert!(
+        refusal(&startup, &config).contains("the --tls-cert file does not hold a PEM certificate")
+    );
+    write(&certificate, &[b'a'; 8193]);
+    assert!(refusal(&startup, &config).contains("the --tls-cert file is larger than 8192 bytes"));
+    std::fs::rename(&real, &certificate).unwrap();
+
+    let (other, _) = crate::remote_runtime::tests::server_material();
+    let good_key = std::fs::read(&key).unwrap();
+    write(&key, &other.key.private_key_to_pem_pkcs8().unwrap());
+    assert!(refusal(&startup, &config).contains("the --tls-cert and --tls-key files do not match"));
+    write(&key, &good_key);
+
+    let mut foreign = config.clone();
+    foreign.public_origin = "https://foreign.test:4701".into();
+    let message = refusal(&startup, &foreign);
+    assert!(
+        message.contains("the --tls-cert file failed certificate verification (hostname mismatch)"),
+        "{message}"
+    );
+
+    std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        refusal(&startup, &config).contains("the CA directory (--remote-ca-dir) has mode 0755")
+    );
+    std::fs::set_permissions(&directory.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(startup.cold_start(&config).is_ok());
+}
+
+/// The listener without `--remote-listen` loads the two files itself; its
+/// failure is explained by reading them again.
+#[test]
+fn a_standalone_listener_failure_is_explained() {
+    let (directory, _, _) = fixture();
+    let certificate = directory.0.join("server.pem");
+    let key = directory.0.join("server.key");
+    let explain = |certificate: &Path, key: &Path| {
+        crate::tls_problem::explain_load(certificate, key).to_string()
+    };
+    assert_eq!(
+        explain(&directory.0.join("absent.pem"), &key),
+        "the --tls-cert file does not exist"
+    );
+    assert_eq!(
+        explain(&certificate, &certificate),
+        "the --tls-key file does not hold a PEM private key that can be loaded"
+    );
+    let (other, _) = crate::remote_runtime::tests::server_material();
+    write(&key, &other.key.private_key_to_pem_pkcs8().unwrap());
+    assert!(explain(&certificate, &key).contains("do not match"));
+}

@@ -231,6 +231,57 @@ fn manager(systemctl: &Path, arguments: &[&OsStr]) -> io::Result<String> {
     String::from_utf8(output.stdout).map_err(|_| refused("The service manager returned an unreadable command. Inspect its configuration before retrying infraternal up."))
 }
 
+/// The query for the executables of services: their load state, every command
+/// they run and where bare command names are searched. Unit names follow.
+const UNIT_QUERY: [&str; 9] = [
+    "show",
+    "--no-pager",
+    "--property=LoadState",
+    "--property=ExecStart",
+    "--property=ExecStartPre",
+    "--property=ExecStartPost",
+    "--property=ExecCondition",
+    "--property=ExecSearchPath",
+    // Ends the options, so no unit name can be read as one.
+    "--",
+];
+
+/// Ask the manager what the named services execute.
+fn show(systemctl: &Path, units: &[&OsStr]) -> io::Result<String> {
+    let arguments = UNIT_QUERY
+        .iter()
+        .map(OsStr::new)
+        .chain(units.iter().copied())
+        .collect::<Vec<_>>();
+    manager(systemctl, &arguments)
+}
+
+/// Ask about every service with one manager process, one answer per unit in the order given.
+///
+/// A process per unit made each host scan take 0.3 s on an idle host and several
+/// seconds on a busy one, and `up` scans more than once (#580). The manager
+/// separates the answers with an empty line. `None` means the query failed or
+/// the answers cannot be matched to units one for one (each must carry exactly
+/// one load state); the caller then asks about one unit at a time, which also
+/// finds the unit the manager would not answer for. A command line that itself
+/// holds an empty line can only add answers, so it also ends up there.
+fn show_together(systemctl: &Path, units: &[&OsStr]) -> Option<Vec<String>> {
+    if units.is_empty() {
+        return Some(Vec::new());
+    }
+    let output = show(systemctl, units).ok()?;
+    let answers = output.split("\n\n").map(str::to_owned).collect::<Vec<_>>();
+    let attributable = answers.len() == units.len()
+        && answers.iter().all(|answer| {
+            answer
+                .lines()
+                .filter(|line| line.starts_with("LoadState="))
+                .count()
+                == 1
+        });
+    attributable.then_some(answers)
+}
+
 /// Include generated and transient services as well as the unit files visible on disk.
 fn manager_units(systemctl: &Path, units: &mut BTreeSet<OsString>) -> io::Result<()> {
     for list in ["list-unit-files", "list-units"] {
@@ -510,44 +561,45 @@ pub(super) fn installed_services(
     if root == Path::new("/") {
         manager_units(systemctl, &mut units)?;
     }
-    let default_search = default_search_path();
-    let mut images = KnownImages::new()?;
-    for unit in units {
+    // Templates run nothing themselves, and a unit this run's unfinished install
+    // published is about to be recovered.
+    units.retain(|unit| {
         if unit.as_encoded_bytes().ends_with(b"@.service") {
-            continue;
+            return false;
         }
-        if unit == SERVICE_NAME && recovery.owns(&root.join("etc/systemd/system").join(&unit)) {
-            continue;
+        if unit == SERVICE_NAME && recovery.owns(&root.join("etc/systemd/system").join(unit)) {
+            return false;
         }
         #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
         if unit == HOST_FIREWALL_SERVICE
-            && recovery.owns(&root.join("etc/systemd/system").join(&unit))
+            && recovery.owns(&root.join("etc/systemd/system").join(unit))
         {
-            continue;
+            return false;
         }
+        true
+    });
+    let default_search = default_search_path();
+    let mut images = KnownImages::new()?;
+    // Our own service name is refused below without asking about it.
+    let asked = units
+        .iter()
+        .filter(|unit| *unit != SERVICE_NAME)
+        .map(OsString::as_os_str)
+        .collect::<Vec<_>>();
+    let mut together = show_together(systemctl, &asked).map(Vec::into_iter);
+    for unit in &units {
         if unit == SERVICE_NAME {
             return Err(refused(
                 "An infraternal agent service is already known to systemd. Manage that service instead of running infraternal up.",
             ));
         }
-        let output = manager(
-            systemctl,
-            &[
-                OsStr::new("show"),
-                OsStr::new("--no-pager"),
-                OsStr::new("--property=LoadState"),
-                OsStr::new("--property=ExecStart"),
-                OsStr::new("--property=ExecStartPre"),
-                OsStr::new("--property=ExecStartPost"),
-                OsStr::new("--property=ExecCondition"),
-                OsStr::new("--property=ExecSearchPath"),
-                OsStr::new("--"),
-                &unit,
-            ],
-        );
-        match output {
-            Ok(output) => resolved_service(&unit, &output, &default_search, &mut images)?,
-            Err(_) if unit_mentions_install(root, &unit) => return Err(unresolved(&unit)),
+        let answer = match together.as_mut().and_then(Iterator::next) {
+            Some(answer) => Ok(answer),
+            None => show(systemctl, &[unit]),
+        };
+        match answer {
+            Ok(output) => resolved_service(unit, &output, &default_search, &mut images)?,
+            Err(_) if unit_mentions_install(root, unit) => return Err(unresolved(unit)),
             Err(_) => {}
         }
     }
@@ -1038,6 +1090,77 @@ mod tests {
             result.is_err(),
             std::env::var_os("J198_REVIEW_REFUSE").is_some()
         );
+    }
+
+    /// Scan three planted services through a stand-in manager whose `show` answers
+    /// come from `script`, and return the result with the number of units each
+    /// query named.
+    fn scan_with_manager(script: &str) -> (io::Result<()>, Vec<usize>) {
+        let fixture = crate::restart_binary::fixture::Directory::new();
+        let units = fixture.0.join("etc/systemd/system");
+        fs::create_dir_all(&units).unwrap();
+        for name in ["a.service", "custom.service", "z.service"] {
+            fs::write(units.join(name), b"[Unit]\n").unwrap();
+        }
+        let calls = fixture.0.join("calls");
+        let manager = fixture.0.join("systemctl");
+        crate::test_executable::write(
+            &manager,
+            format!(
+                "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done; shift\necho $# >> '{}'\n{script}\n",
+                calls.display()
+            ),
+            0o700,
+        );
+        let result = installed_services(
+            &fixture.0,
+            &manager,
+            &super::super::journal::Snapshot::default(),
+        );
+        let asked = fs::read_to_string(calls)
+            .unwrap()
+            .lines()
+            .map(|line| line.parse().unwrap())
+            .collect();
+        (result, asked)
+    }
+
+    /// One answer per unit, with the planted install in `custom.service` only.
+    const ANSWERS: &str = "first=1\nfor unit; do [ $first = 1 ] || echo; first=0; echo LoadState=loaded\nif [ \"$unit\" = custom.service ]; then echo 'ExecStart={ path=/opt/infraternal ; argv[]=infraternal server ; }'; else echo 'ExecStart={ path=/usr/bin/true ; argv[]=true ; }'; fi\ndone";
+
+    /// Every unit is asked about in one query, and an answer is still attributed
+    /// to its own unit.
+    #[test]
+    fn one_query_covers_every_unit_and_names_the_installed_one() {
+        let (result, asked) = scan_with_manager(ANSWERS);
+        assert!(result.unwrap_err().to_string().contains("custom.service"));
+        assert_eq!(asked, [3]);
+        let (result, asked) =
+            scan_with_manager(&ANSWERS.replace("/opt/infraternal", "/usr/bin/true"));
+        result.unwrap();
+        assert_eq!(asked, [3]);
+    }
+
+    /// A refused combined query, or answers that cannot be matched to units, fall
+    /// back to one query per unit with the same verdict.
+    #[test]
+    fn unusable_combined_answers_are_asked_again_unit_by_unit() {
+        for broken in [
+            // The manager refuses the combined query.
+            "[ $# = 1 ] || exit 1\n",
+            // It answers with one block too many.
+            "[ $# = 1 ] || printf 'LoadState=loaded\\n\\n'\n",
+            // It answers with nothing at all.
+            "[ $# = 1 ] || exit 0\n",
+        ] {
+            let (result, asked) = scan_with_manager(&format!("{broken}{ANSWERS}"));
+            assert!(
+                result.unwrap_err().to_string().contains("custom.service"),
+                "{broken}"
+            );
+            // The scan stops at the refused unit, the second in name order.
+            assert_eq!(asked, [3, 1, 1], "{broken}");
+        }
     }
 
     /// A byte-identical copy retains CLI identity even when its inode and name change.

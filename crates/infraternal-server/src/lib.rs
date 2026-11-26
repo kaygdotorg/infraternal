@@ -182,6 +182,8 @@ mod terminal_session_prune;
 mod terminal_session_record;
 /// Claims a device's durable input writer row for an attachment on the D379 writer (#562).
 mod terminal_writer_claim;
+/// Names the certificate, key or CA file that refused TLS startup, and the rule it broke (#595).
+mod tls_problem;
 mod web_assets;
 mod websocket;
 mod websocket_input;
@@ -199,6 +201,7 @@ pub use runtime::{
 };
 #[cfg(feature = "remote")]
 pub use runtime::{serve_with_enrollment, serve_with_remote};
+pub use tls_problem::{TlsFault, TlsPart, TlsProblem};
 
 #[cfg(feature = "ssh")]
 pub mod bootstrap_api;
