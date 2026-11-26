@@ -1,5 +1,5 @@
 <!-- J1199 (#260, #580): results of the fair engine and product comparisons on the cross-VM perf pairing, 2026-11-25. -->
-# Fair comparisons, 2026-11-25: results
+# Fair comparisons, 2026-11-25 and 26: results
 
 Method, fixture and caveats: [README.md](README.md). Full tables (every metric, with the A/A floor and the min–max over
 holds): [results/engine-tables.md](results/engine-tables.md), [results/product-tables.md](results/product-tables.md).
@@ -139,7 +139,7 @@ WireGuard mode with `netbird-server` on C (MTU 1280).
 **Idle, memory and setup** (every process the product runs, nodes and control plane; machine context switches/s
 with nothing running: A 462, B 538, C 408)
 
-| row | idle wakeups/s, before / after load | RSS MiB, before / 15 s after load | processes after load (RSS, wakeups/s) | second node start → first packet, s |
+| row | idle wakeups/s, before / after load | RSS MiB, before / 15 s after load | processes after load (RSS, wakeups/s) | second node start → first packet, s (J1199; superseded by C) |
 |---|---|---|---|---|
 | I | 1.6 / 1.0 | 52 / 94 | node A 52 MiB 0.4/s, node B 35 MiB 0.4/s, coordinator fixture 7 MiB 0 | 4.7 (not comparable: fixture compile + apply, no sign-in) |
 | T | 125 / 128 | 159 / 178 | tailscaled 59 + 58 MiB (44 + 39/s), headscale 56 MiB (48/s) | 17.5 (no reachable DERP; see README) |
@@ -158,7 +158,41 @@ What this shows:
    Tailscale's 101 and NetBird's 20.6).
 4. **Idle and memory: infraternal is the lightest product.** 1–2 wakeups/s for both nodes and the coordinator, against
    ~125/s (Tailscale + headscale) and ~65/s (NetBird + server). 52 MiB before load, against 159 and 206 MiB.
-5. Setup time is measured but not comparable across the three; the README says why.
+5. The J1199 setup times above were not comparable across the three (the README says why). Section C replaces them.
+
+## C. Setup time, re-measured (J1237, 2026-11-26)
+
+Second node's start → first ping reply through the tunnel, kernel WireGuard as the method's floor. One hold, `s1`
+(01:56–02:20Z), five runs of each row, interleaved `K T N R`; all 20 runs passed. Same VMs, netns and guard.
+Raw: [results/setup.csv](results/setup.csv).
+
+| row | path | median, s | range, s |
+|---|---|---|---|
+| K | kernel WireGuard, `wg set` (floor) | 0.017 | 0.012–0.028 |
+| N | NetBird 0.82.0, setup key, `netbird-server` on C | 0.44 | 0.33–0.55 |
+| **R** | **infraternal, `infraternal up` against a real server, approval by a scripted owner** | **1.80** | 1.73–1.95 |
+| T | Tailscale 1.104.4, preauth key, headscale 0.29.7 with a reachable TLS relay | 2.07 | 2.03–2.19 |
+
+Inside infraternal's 1.80 s (medians, seconds after the second node's `up` starts):
+
+| step | at, s |
+|---|---|
+| approval code printed | 0.26 |
+| approval answered (the scripted owner opens the page and taps the passkey) | 0.72 |
+| `up` returns (enrolled, units installed, agent started) | 1.73 |
+| first ping reply through the mesh | 1.80 |
+
+1. **Tailscale's 17.5 s was the fixture's.** With its relay reachable over TLS it takes 2.07 s. In all five runs the path
+   sampled right after the first reply was already direct.
+2. **infraternal's 4.7 s measured the test fixture, not the product.** The production path takes 1.80 s here, including
+   an approval step. The other two enrol with a key made in advance and have no approval step. The span from the
+   printed code to the approval answer is 0.45 s (median; 0.45–0.56). Without it infraternal's runs take
+   1.24–1.48 s (median 1.33 s). That is arithmetic on the same runs, not a run with a key-based enrolment, which the
+   product path does not use here. A person's own time to approve would come on top.
+3. **NetBird is the quickest product** (0.44 s), 1.4 s ahead of infraternal and about 0.9 s ahead of infraternal
+   with the approval span removed. Most of infraternal's time is between the approval and `up` returning (about 1.0 s).
+4. The netns guard dropped 33 packets on A and 34 on B over the whole hold (0 on C): something tried an address outside
+   the LAN. The counters are per hold, so the row that did it is not known.
 
 ## Short answers
 
@@ -169,4 +203,5 @@ What this shows:
   WireGuard behaves oddly. Forward at 8 flows the two are level.
 - **infraternal against Tailscale and NetBird (as products):** infraternal is ahead on forward throughput, CPU per
   Gbit, idle wakeups and memory. Tailscale is ahead on receive-bound throughput (+15–25%). NetBird, on kernel
-  WireGuard, is ahead on round-trip latency.
+  WireGuard, is ahead on round-trip latency and on setup time (0.44 s against infraternal's 1.80 s and Tailscale's
+  2.07 s, section C).
