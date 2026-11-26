@@ -397,7 +397,9 @@ async fn refused_uninstall_retires_with_the_install_recorded_as_left() {
 }
 
 /// Give the fixture's host owner a live admin window for the removal service.
-async fn owner_removal(removed: &Removed) -> (crate::remote_removal::Removal, &'static str, i64, String) {
+async fn owner_removal(
+    removed: &Removed,
+) -> (crate::remote_removal::Removal, &'static str, i64, String) {
     let person: String = sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
         .bind(removed.host.as_bytes().as_slice())
         .fetch_one(&removed.pool)
