@@ -1562,7 +1562,8 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
         if let Some(port) = args.remote.relay_port {
             listeners.push(Listener {
                 interface: args.host_firewall_remote_interface.clone(),
-                address: SocketAddr::new(address.ip(), port),
+                // RelayPaths binds IPv4 0.0.0.0, even when the remote TLS listener is IPv6.
+                address: SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port),
                 protocol: Protocol::Udp,
                 sources,
             });

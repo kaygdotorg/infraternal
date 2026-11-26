@@ -79,8 +79,11 @@ keep the leaf they were made with. The server keeps the relay leaf in its CA's
 `active/relay-leaf.pem` (mode 0600, written durably before it is served), 7
 days from `notBefore`, renewed at half-life while the CA is unlocked, so a
 locked cold start still serves the retained leaf. The relay role is opt-in in
-slice 1: the server runs with `--relay-port <udp-port>` (which also opens that
-port in its host firewall policy).
+slice 1: the server runs with `--relay-port <udp-port>`. The persistent host
+firewall rule is written by `infraternal server init --system --relay-port
+<udp-port>`; a direct `infraternal server run` only binds the relay socket and
+does not change firewall state. The relay currently binds IPv4 `0.0.0.0`, so
+init opens the IPv4 UDP port even when `--remote-listen` is IPv6.
 
 A message with the maximum revoked list stays inside one 8 KiB action frame.
 A revoked host beyond the first 128 still reaches nobody, because its peers

@@ -98,6 +98,11 @@ lists `server init` as the first server-setup command. The legacy
 `infraternal server install` path remains hidden from help and only prints
 migration guidance; it does not create or change a service.
 
+`--relay-port` enables the server node's IPv4 UDP relay socket and requires
+`--remote-listen`. `infraternal server init --system --relay-port` writes the
+persistent host-firewall rule for that socket. A direct `infraternal server
+run` binds the socket but does not change firewall state.
+
 `--data` always selects the server data directory when supplied. Without it,
 server commands that read or create server data use the `--data` path recorded
 by an installed system service, including its effective drop-ins. If no system

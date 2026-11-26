@@ -215,6 +215,36 @@ fn remote_listener_flags_become_host_input_rules() {
     assert!(rules.contains("iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7444 accept"));
 }
 
+/// The persistent firewall entry follows the IPv4 relay socket even with an IPv6 TLS listener.
+#[test]
+fn relay_firewall_rule_matches_its_ipv4_listener() {
+    let args = parsed(&[
+        "infraternal",
+        "server",
+        "--remote-listen",
+        "[::]:7444",
+        "--relay-port",
+        "3478",
+        "--host-firewall-allow",
+        "*,*,tcp,22",
+    ]);
+    let policy = crate::host_firewall_policy(&args).expect("valid relay policy flags");
+    let relay = policy
+        .listeners
+        .iter()
+        .find(|listener| listener.address.port() == 3478)
+        .expect("relay UDP listener");
+
+    assert_eq!(
+        relay.protocol,
+        infraternal_plugin_mesh::host_firewall::Protocol::Udp
+    );
+    assert_eq!(
+        relay.address,
+        "0.0.0.0:3478".parse().expect("IPv4 wildcard")
+    );
+}
+
 #[test]
 fn service_dry_run_preserves_remote_listener_and_private_trust_path() {
     let args = parsed(&[
