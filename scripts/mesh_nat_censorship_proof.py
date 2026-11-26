@@ -1041,6 +1041,10 @@ def run_relay_profile(
         row["throughput"] = load
         row["loaded_p99_ms"] = percentile(samples, 0.99)
         row["relay_node_after_load"] = relay_status(relay)
+        row["relay_a_after_load"] = relay_status(members[0])
+        # The route budget a relayed pair runs on (the relay's DATAGRAM size sets it).
+        row["node_a_routes"] = ns(topology.nodes["A"], "ip", "route", "show", "table", "all",
+                                  check=False).splitlines()
         return row
     finally:
         for pinger in pingers:

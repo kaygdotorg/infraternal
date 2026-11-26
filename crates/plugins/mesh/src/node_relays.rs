@@ -502,8 +502,22 @@ impl RelayManager {
                 "port": role.relay.local_addr().ok().map(|address| address.port()),
                 "hosts": role.relay.stats().hosts,
                 "links": role.relay.stats().links,
+                // Counters only, never per-pair records (D401 Q8).
+                "forwarded": role.relay.stats().forwarded,
+                "dropped": role.relay.stats().dropped,
             })),
             "relayed": relayed,
+            // Data-path counters of the relay paths, while they run: what went through a relay,
+            // and what could not (no link yet, or too large for the relay's DATAGRAM size).
+            "paths": state.paths.as_ref().map(|paths| {
+                let carried = paths.running.stats();
+                serde_json::json!({
+                    "sent": carried.sent,
+                    "received": carried.received,
+                    "unlinked": carried.unlinked,
+                    "too_large": carried.too_large,
+                })
+            }),
         })
     }
 }
