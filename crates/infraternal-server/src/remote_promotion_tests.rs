@@ -529,18 +529,29 @@ async fn promotion_on_real_clock() -> (EnrollmentStore, SqlitePool, Uuid, i64) {
 #[tokio::test]
 async fn forget_refuses_abandoned_successor_cleanup_reconnect() {
     let (store, pool, host, now) = promotion_on_real_clock().await;
-    let attempt = Uuid::from_u128(79);
-    enrolled_promotion(&store, host, attempt, now).await;
-    store.abandon_promotion(attempt, now).await.unwrap();
-    assert_eq!(
-        store.admit_successor(&[7; 32], now).await.unwrap().purpose,
-        SuccessorPurpose::Uninstall
-    );
-    sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
+    let person = Uuid::new_v4().to_string();
+    sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES(?,'review owner',1,'fixture')")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET user_id=? WHERE token_hash='s'")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE remote_hosts SET owner_id=? WHERE id=?")
+        .bind(&person)
         .bind(host.as_bytes().as_slice())
         .execute(&pool)
         .await
         .unwrap();
+    let attempt = Uuid::from_u128(79);
+    enrolled_promotion(&store, host, attempt, now).await;
     let token = "promotion-forget-session";
     sqlx::query("UPDATE sessions SET token_hash=? WHERE token_hash='s'")
         .bind(crate::auth::hash(token))
@@ -556,6 +567,18 @@ async fn forget_refuses_abandoned_successor_cleanup_reconnect() {
         store.clone(),
         crate::remote_runtime::RemoteHosts::default(),
         std::path::PathBuf::new(),
+    );
+    let review = service.start(token, host, true, now).await.unwrap();
+    assert_eq!(
+        service
+            .finish_host(token, host, review["review"].as_str().unwrap(), now)
+            .await
+            .unwrap()["state"],
+        "pending"
+    );
+    assert_eq!(
+        store.admit_successor(&[7; 32], now).await.unwrap().purpose,
+        SuccessorPurpose::Uninstall
     );
     assert_eq!(
         service.forget_browser(token, host, now).await.unwrap()["state"],
