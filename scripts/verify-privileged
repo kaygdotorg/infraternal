@@ -212,7 +212,8 @@ mount -t tmpfs -o mode=1777,size=256m tmpfs "$new/var/tmp"
 # instead of looking like a machine that has never been installed.
 mount -t tmpfs -o mode=755,size=1m tmpfs "$new/var/lib"
 mkdir -m 000 "$new/var/lib/infraternal"
-mount -o remount,ro "$new/var/lib"
+# Set the mount's read-only flag without re-parsing tmpfs ownership options.
+mount -o remount,bind,ro "$new/var/lib"
 # Policy fixtures need a trusted parent, so use /run rather than sticky /tmp.
 mkdir -m 700 "$new/run/infraternal-test"
 # Build outputs read through `ut`, a tmpfs dir whose `debug` links to the
@@ -539,6 +540,7 @@ ESCAPES = {
     'write /etc': 'touch /etc/.privileged-escape',
     'read /var/lib/infraternal': 'ls -A /var/lib/infraternal',
     'write /var/lib/infraternal': 'touch /var/lib/infraternal/.privileged-escape',
+    'remount /var/lib writable': 'mount -o remount,bind,rw /var/lib',
     'unmount /var/lib': 'umount -l /var/lib',
     'superblock remount rw /': 'mount -o remount,rw /',
     'bind remount rw /': 'mount -o remount,bind,rw / && touch "$HOME_DIR/.privileged-escape-bindrw"',
