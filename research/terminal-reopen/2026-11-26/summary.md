@@ -2,6 +2,12 @@
 
 J1270 · 2026-11-26 · base `98e6adda1080c9a991345f508efd6eb95c59c098` · [#521](https://git.kayg.org/kayg/infraternal/issues/521)
 
+Prefer an exact-only Snapshot when a fresh, same-size reopen requests
+bytes from before an applied resize. This restored the wrapped and
+alternate screens that today's small and 1 MiB replays left wrong.
+Healthy small reloads already reached the correct frame at the same
+time and spent less CPU with raw replay.
+
 ## Current replay policy
 
 On this base, `ReadFrom` already attempts an exact Snapshot when a retained
@@ -58,7 +64,9 @@ does not provide a denominator for this case. [Corpus counts](https://git.kayg.o
   Ghostty WASM and canvas renderer. The reference uses the real raw bytes
   at their original geometry and applies the recorded Resize at its byte
   offset. The metric stops at the renderer's write callback once all
-  viewport cells and the cursor match that reference. Browser paint and
+  viewport cells and the cursor match that reference. The comparison
+  clips the reusable cell array to the current grid after a resize.
+  The canvas uses the bundled Maple Mono font. Browser paint and
   network clocks come from two runs, and credit in the wire capture is
   refunded on receipt. This measures the first correct canvas draw for a
   ready terminal. [HTML rendering steps](https://html.spec.whatwg.org/multipage/webappapis.html#update-the-rendering)
@@ -97,3 +105,58 @@ three 5 MiB cases already sent identical Snapshot payloads with a
 the existing 1 MiB threshold.
 
 [Raw wire, CPU, serializer and machine-state receipts](https://git.kayg.org/kayg/infraternal/issues/521#issuecomment-106087)
+
+## First correct frame at 50 ms RTT
+
+The browser pass used headless Chromium 149 at its normal frame cadence.
+A correct frame matches the live-resize reference for the visible grid
+and cursor. Each entry is a median of seven measured reloads. “None”
+means all seven finished replay with the wrong viewport and no correct
+frame appeared.
+
+| Surface | Backlog | Forced raw (ms) | Forced exact (ms) | Deployed (ms) |
+|---|---|---:|---:|---:|
+| Logs | Small | 67.5 | 67.5 | 67.6 |
+| Wrapped | Small | None | 67.6 | None |
+| Alternate | Small | None | 67.5 | None |
+| Logs | About 1 MiB | 67.6 | 67.5 | 67.6 |
+| Wrapped | About 1 MiB | None | 67.5 | None |
+| Alternate | About 1 MiB | None | 67.5 | None |
+| Logs | About 5 MiB | 267.5 | 67.6 | 67.5 |
+| Wrapped | About 5 MiB | None | 67.6 | 67.6 |
+| Alternate | About 5 MiB | None | 67.5 | 67.5 |
+
+The exact candidate reached the reference in all 63 resized trials.
+With no resize, all controls matched across the three policies. Raw
+small and 1 MiB controls already reached the correct frame in roughly
+67.6–67.8 ms. The 5 MiB forced-raw controls reached it much later, with
+deployed policy already using the exact path.
+
+Of the 1,200 resize-crossing cuts in the real shell corpus, 376 (31.3%)
+showed a different visible grid or cursor with raw replay. Another
+output write had already arrived in 352 of those 376 mismatches
+(93.6%). A last-event predicate would miss those failures. Fish accounts
+for 121 mismatches in this corpus. Its OSC 133 state is a documented
+serializer refusal, so the exact-only policy cannot promise a repair
+for that shell. [#521 serializer corpus](https://git.kayg.org/kayg/infraternal/issues/521)
+
+[Raw frame timing, corpus oracle, harness and canvas captures](https://git.kayg.org/kayg/infraternal/issues/521#issuecomment-106093)
+
+## Decision for the next slice
+
+Use the byte offset of the last successfully applied change to rows or
+columns to decide whether a fresh viewer at the same size needs an
+exact Snapshot. A replay cursor earlier than that offset crosses
+geometry. Subsequent writes advance the head without clearing that
+condition. When the serializer refuses, use the existing exact-only
+fallback. Retain the existing backlog threshold and the established
+paths for an out-of-ring cursor or a viewer at a different size.
+
+An unconditional Snapshot spends another 0.17–0.26 ms of host CPU and
+4.3–6.1 kB for the small resize fixtures, and the small no-resize
+controls showed no earlier frame for that work. It also gives a fresh
+viewer a bounded history tail of up to 256 rows. Leaving the policy
+as-is preserves the four below-threshold states whose wrapped or
+alternate screen finished wrong. The resize boundary provides a
+conservative trigger. The plain log controls show that some replays
+cross the boundary and still draw correctly.
