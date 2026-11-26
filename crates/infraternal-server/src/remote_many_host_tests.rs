@@ -75,12 +75,7 @@ async fn run_many_host_fixture() {
     // its own `data` and `s` (state) directory, as separate machines would.
     let directories: Vec<Directory> = (0..hosts.max(1)).map(|_| Directory::new()).collect();
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let mut fixture = fixture_at(
-        &directories[0],
-        address,
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut fixture = fixture_at(&directories[0], address, "127.0.0.1:0".parse().unwrap()).await;
 
     // The terminal path resolves the account UUID and preferred OS user, so
     // the owner is shaped like a real passkey user (as the two-process proof).
@@ -131,29 +126,38 @@ async fn run_many_host_fixture() {
                 origin.clone(),
                 fixture.cookie.clone(),
             );
-            match tokio::spawn(async move {
+            let attempt = tokio::spawn(async move {
                 invitation(address, &root, &origin, &cookie, host, digest).await
             })
-            .await
-            {
-                Ok(bytes) => break bytes,
-                Err(_) => {
-                    retries += 1;
-                    assert!(retries < 500, "host {index}: invitation kept failing");
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
+            .await;
+            if let Ok(bytes) = attempt {
+                break bytes;
             }
+            retries += 1;
+            assert!(retries < 500, "host {index}: invitation kept failing");
+            // sleep: a short back-off before asking again; the refusal clears once the other writer commits.
+            tokio::time::sleep(Duration::from_millis(20)).await;
         };
         let spawned = Instant::now();
         let mut child = cli(&binary, directory, true, &origin);
-        child.0.stdin.take().unwrap().write_all(&invitation).unwrap();
+        child
+            .0
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&invitation)
+            .unwrap();
         let identity = data.join("identity.json");
         while !identity.is_file() {
             assert!(
                 child.0.try_wait().unwrap().is_none(),
                 "host {index} exited before enrolling"
             );
-            assert!(spawned.elapsed() < Duration::from_secs(60), "host {index} enrol timeout");
+            assert!(
+                spawned.elapsed() < Duration::from_secs(60),
+                "host {index} enrol timeout"
+            );
+            // sleep: poll for the agent's identity file; it has no event the fixture can wait on.
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         records.push(serde_json::json!({
@@ -182,6 +186,7 @@ async fn run_many_host_fixture() {
     std::fs::rename(&partial, &manifest).unwrap();
 
     while !stop.exists() {
+        // sleep: poll for the driver's stop file; the driver is another process.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     drop(children);
