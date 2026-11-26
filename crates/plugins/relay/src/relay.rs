@@ -709,6 +709,34 @@ impl Relay {
         self.endpoint.local_addr()
     }
 
+    /// Serve `credentials` (a renewed relay leaf) to every new handshake from now on.
+    /// Connections already open keep the leaf they were made with until they end.
+    /// # Errors
+    /// Refuses credentials the TLS stack cannot use; the old leaf keeps serving.
+    pub fn set_credentials(&self, credentials: tls::Credentials) -> io::Result<()> {
+        self.endpoint
+            .set_server_config(Some(tls::server_config(credentials)?));
+        Ok(())
+    }
+
+    /// Ask the admission callback again about every connected host and close each one it
+    /// now refuses, ending its links (D401 Q3: a leaf checked at its handshake can be
+    /// revoked later). Call it whenever what admission reads has changed.
+    pub fn recheck(&self) {
+        let refused: Vec<(HostId, quinn::Connection)> = self
+            .shared
+            .read()
+            .hosts
+            .iter()
+            .filter(|(host, _)| !(self.shared.admission)(**host))
+            .map(|(host, entry)| (*host, entry.connection.clone()))
+            .collect();
+        for (host, connection) in refused {
+            connection.close(quinn::VarInt::from_u32(1), b"not admitted");
+            self.shared.unregister(host, connection.stable_id());
+        }
+    }
+
     /// Current table sizes and cumulative counters.
     #[must_use]
     pub fn stats(&self) -> Stats {
@@ -751,6 +779,7 @@ async fn accept(endpoint: quinn::Endpoint, shared: Arc<Shared>) {
     }
 }
 
+/// Serve one incoming connection: admit it, read its control stream, forward its datagrams.
 async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>, pre_auth: PreAuthPermit) {
     let limit = shared.limits.handshake;
     let Ok(Ok(connection)) = tokio::time::timeout(limit, incoming).await else {
@@ -830,10 +859,23 @@ async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>, pre_auth: PreAuth
             shared.forward(id, datagram);
         }
     };
+    // A host's leaf stops admitting it when it expires, even mid-connection (D401 Q3). One
+    // timer per connection, armed once: an idle relay still has no periodic wakeup.
+    let expiry = async {
+        let left = tls::peer_not_after(&connection).and_then(|not_after| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            u64::try_from(not_after).ok()?.checked_sub(now)
+        });
+        tokio::time::sleep(Duration::from_secs(left.unwrap_or(0))).await;
+    };
     tokio::select! {
         () = writer => {}
         () = control => {}
         () = datagrams => {}
+        () = expiry => {}
     }
     shared.unregister(host, id);
     if owns_session {

@@ -19,7 +19,12 @@ delta.
 Nodes connect to a relay over QUIC using ALPN `infraternal-relay/2` (version 2
 names links by opaque pair tokens, D401 Q8; version 1 named hosts). Both
 directions authenticate certificates issued by the deployment CA. A node
-authenticates the relay's configured DNS name and server purpose. The relay
+authenticates the relay's configured DNS name, server purpose and its relay
+URI: a relay leaf carries exactly one `urn:infraternal:relay:<uuid>` SAN, and a
+leaf without it (such as the server's leg-B leaf) is refused. Leg B refuses any
+server leaf whose DER contains that prefix, before the leaf can raise the
+server-leaf floor, so a relay's key never answers a dial meant for the server
+(D401 Q3). The relay
 accepts a node only when its verified host certificate contains exactly one
 `urn:infraternal:host:<uuid>` URI SAN and its admission callback permits that
 host. A client supplied name never establishes identity. Certificate name or

@@ -78,13 +78,7 @@ fn frame(id: LinkId, payload: &[u8]) -> Bytes {
 }
 
 /// Both clients ask for `pair`; returns the link id after both got the same `Linked` notice.
-async fn linked(
-    a: &Client,
-    an: &mut Notices,
-    b: &Client,
-    bn: &mut Notices,
-    pair: Token,
-) -> LinkId {
+async fn linked(a: &Client, an: &mut Notices, b: &Client, bn: &mut Notices, pair: Token) -> LinkId {
     a.link(pair).await.unwrap();
     b.link(pair).await.unwrap();
     let Notice::Linked { token, id } = notice(an).await else {
@@ -326,6 +320,7 @@ async fn probes_from_an_enrolled_connection_learn_their_source() {
     relay.close().await;
 }
 
+/// Hosts without admission or a host URI, foreign CAs and relays without a relay leaf are refused.
 #[tokio::test]
 async fn identities_without_admission_host_or_purpose_are_refused() {
     let mut ca = Authority::new();
@@ -380,7 +375,87 @@ async fn identities_without_admission_host_or_purpose_are_refused() {
         .await
         .is_err()
     );
+    // A server-purpose leaf with the right name but no relay URI (the server's leg-B kind)
+    // is refused too: only a relay leaf may serve relay connections (D401 Q3).
+    let server_leaf = Relay::start(
+        "127.0.0.1:0".parse().unwrap(),
+        ca.issue(Purpose::Server(NAME)),
+        Limits::default(),
+        everyone(),
+    )
+    .unwrap();
+    let config = tls::client_config(ca.issue(Purpose::Host(host(1)))).unwrap();
+    assert!(
+        Client::connect(
+            &endpoint,
+            config,
+            server_leaf.local_addr().unwrap(),
+            NAME,
+            WAIT
+        )
+        .await
+        .is_err(),
+        "a leaf without the relay URI served a relay connection"
+    );
     assert_eq!(relay.stats().hosts, 0);
     relay.close().await;
     impostor.close().await;
+    server_leaf.close().await;
+}
+
+/// A host revoked after its handshake is closed by `recheck`, and its link ends for the
+/// other end too; a host still admitted keeps its connection (D401 Q3).
+#[tokio::test]
+async fn recheck_closes_a_host_revoked_after_its_handshake() {
+    let mut ca = Authority::new();
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission: Admission = {
+        let revoked = revoked.clone();
+        Arc::new(move |candidate| {
+            candidate != host(2) || !revoked.load(std::sync::atomic::Ordering::SeqCst)
+        })
+    };
+    let relay = relay(&mut ca, admission);
+    let address = relay.local_addr().unwrap();
+    let (a, mut an) = client(&mut ca, address, host(1)).await;
+    let (b, mut bn) = client(&mut ca, address, host(2)).await;
+    let pair = token(1, 2);
+    linked(&a, &mut an, &b, &mut bn, pair).await;
+    relay.recheck();
+    assert_eq!(relay.stats().hosts, 2, "nothing changed, nobody is closed");
+    revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+    relay.recheck();
+    assert_eq!(notice(&mut an).await, Notice::Unlinked { token: pair });
+    assert!(
+        tokio::time::timeout(WAIT, bn.next())
+            .await
+            .unwrap()
+            .is_none(),
+        "the revoked host's connection is closed"
+    );
+    assert_eq!(relay.stats().hosts, 1);
+    relay.close().await;
+}
+
+/// Credentials parsed from the PEM layout the server's leaf files use serve relay
+/// connections; a key that does not match the leaf is refused.
+#[tokio::test]
+async fn credentials_from_pem_serve_and_a_mismatched_key_is_refused() {
+    let mut ca = Authority::new();
+    let (certificate, key) = ca.issue_pem(Purpose::Relay(NAME));
+    let root = ca.pem();
+    let credentials =
+        tls::Credentials::from_pem(&format!("{certificate}{key}"), &[root.clone()]).unwrap();
+    let relay = Relay::start(
+        "127.0.0.1:0".parse().unwrap(),
+        credentials,
+        Limits::default(),
+        everyone(),
+    )
+    .unwrap();
+    let (_client, _notices) = client(&mut ca, relay.local_addr().unwrap(), host(1)).await;
+    let (_, other_key) = ca.issue_pem(Purpose::Relay(NAME));
+    assert!(tls::Credentials::from_pem(&format!("{certificate}{other_key}"), &[root]).is_err());
+    assert!(tls::Credentials::from_pem(&format!("{certificate}{key}"), &[]).is_err());
+    relay.close().await;
 }
