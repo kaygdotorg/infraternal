@@ -1,0 +1,22 @@
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -149,10 +149,17 @@
+         let hub_public = self.hub_public.expect("identity first");
+         while self.peers.len() < n {
+             let index = self.peers.len();
+-            let id = index as u64 + 1;
++            // J1249: a second flooding process offsets its peer ids, and so their mesh addresses.
++            let base: u64 = std::env::var("PEERSIM_ID_BASE").map_or(0, |base| base.parse().unwrap());
++            let id = base + index as u64 + 1;
+             let secret = StaticSecret::from(self.secrets[index]);
+             let bind = match self.mode.as_str() {
+-                "single" => SocketAddr::new(SIM_UNDERLAY.into(), 0),
++                // J1249: the flood generator may sit on another VM, so its address comes from the
++                // environment (a LAN address inside its namespace); unset keeps the veth address.
++                "single" => SocketAddr::new(
++                    std::env::var("PEERSIM_UNDERLAY").map_or(SIM_UNDERLAY, |ip| ip.parse().unwrap()).into(),
++                    0,
++                ),
+                 "spread" => SocketAddr::new(spread_addr(index).into(), 0),
+                 _ => SocketAddr::new(spread_addr(index).into(), KNOWN_PORT),
+             };
