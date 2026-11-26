@@ -1,5 +1,8 @@
 //! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
 use super::*;
+/// A full host counts only the terminals of sockets that still answer (#562).
+#[path = "socket_tests/host_full.rs"]
+mod host_full;
 #[path = "socket_tests/startup_guard.rs"]
 mod startup_guard;
 /// A full account's new page takes over its own longest-hidden tab (#523).
