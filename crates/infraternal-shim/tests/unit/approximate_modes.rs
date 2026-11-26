@@ -90,6 +90,8 @@ const CASES: &[Case] = &[
     Case { name: "scroll region", setup: b"\x1b[3;10r\x1b[10;1H", later: b"a\nb\nc\nd" },
     Case { name: "origin mode", setup: b"\x1b[5;20r\x1b[?6h\x1b[3;4H", later: b"X\x1b[1;1HY" },
     Case { name: "left/right margins", setup: b"\x1b[?69h\x1b[10;40s\x1b[2;1H\x1b[15G", later: b"0123456789012345678901234567890123456789" },
+    Case { name: "status line selected DECSASD", setup: b"\x1b[1$}", later: b"status text\x1b[0$}main" },
+    Case { name: "status line selected under margins", setup: b"\x1b[3;10r\x1b[?6h\x1b[1$}", later: b"status\x1b[0$}main" },
     Case { name: "alternate screen 1049", setup: b"\x1b[5;7H\x1b[?1049hvim", later: b"\x1b[?1049lZ" },
     Case { name: "alternate screen 1047", setup: b"\x1b[?1047hless", later: b"\x1b[?1047lZ" },
     Case { name: "alternate screen 47", setup: b"\x1b[?47hmore", later: b"\x1b[?47lZ" },

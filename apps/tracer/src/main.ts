@@ -6,7 +6,7 @@ import { warmOfflineShell } from "./offline-cache";
 import type { DrawingIdentity } from "./offline-drawing";
 import { forgetAccountWork, sessionNotifications } from "./account-lifetime";
 import { recordSignIn } from "./hints";
-import { mountFaultyTerminal, type FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
+import type { FaultyTerminal } from "../../../packages/ui/src/faulty-terminal";
 import { glitchText } from "../../../packages/ui/src/glitch";
 import { installTooltips } from "../../../packages/ui/src/tooltip";
 import { installFocusRing } from "../../../packages/ui/src/focus-ring";
@@ -139,6 +139,8 @@ let welcomeEffect: ReturnType<typeof glitchText> | undefined;
 let welcomeTimer = 0;
 let foregroundListenerInstalled = false;
 let backdropTimer = 0;
+/** Monotonic counter invalidating an in-flight on-demand backdrop load if sign-in finishes first. */
+let backdropLoadGeneration = 0;
 
 /** True only in builds made with INFRATERNAL_CLUSTERS_PREVIEW=1 (see build.ts); false removes the mockup from the bundle. */
 declare const __CLUSTERS_PREVIEW__: boolean;
@@ -182,6 +184,7 @@ async function start(): Promise<void> {
     new Promise<void>((resolve) => window.setTimeout(resolve, 800)),
   ]).catch(() => undefined);
   if (deviceApprovalLink && "error" in deviceApprovalLink) {
+    delete window.__earlyAuth;
     await fontsReady;
     installTooltips();
     await showDeviceApproval(deviceApprovalLink.kind, undefined, deviceApprovalLink.error);
@@ -190,12 +193,9 @@ async function start(): Promise<void> {
   try {
     const statusRequest = checkStatus();
     startSessionProbe();
-    const [status] = await Promise.all([
-      statusRequest,
-      fontsReady,
-    ]);
+    const status = await statusRequest;
     installTooltips();
-    await showAuthState(status);
+    await showAuthState(status, fontsReady);
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
@@ -228,21 +228,24 @@ function startSessionProbe(): void {
 }
 
 /** Shows the screen for the server's first-run state: setup, sign-in, a device approval, or the terminal of a live session. */
-async function showAuthState(status: AuthStatus): Promise<void> {
+async function showAuthState(status: AuthStatus, fontsReady?: Promise<void>): Promise<void> {
   // Taken here, before any early return, so a probe that was not needed can never answer a later call with a stale "signed out".
   const probe = sessionProbe;
   sessionProbe = undefined;
   if (deviceApprovalComplete) {
+    await fontsReady;
     await showDeviceApprovalSuccess();
     return;
   }
   if (deviceApprovalLink && "code" in deviceApprovalLink) {
     const { code, kind } = deviceApprovalLink;
     if (!isDeviceUserCode(code)) {
+      await fontsReady;
       await showDeviceApproval(kind, code);
       return;
     }
     const session = status.setupRequired ? undefined : await (probe ?? checkSession());
+    await fontsReady;
     if (session) {
       activeUserId = session.user_id;
       await showDeviceApproval(kind, code);
@@ -254,8 +257,10 @@ async function showAuthState(status: AuthStatus): Promise<void> {
   const session = status.setupRequired ? undefined : await (probe ?? checkSession());
   if (session) {
     activeUserId = session.user_id;
+    // `showTerminal` awaits `loadFont` in parallel with its own chunks and styles, so it does not wait on `fontsReady` here.
     await showTerminal(session);
   } else {
+    await fontsReady;
     renderAuth(status.setupRequired, "", status.setupTokenCommand);
   }
 }
@@ -414,18 +419,23 @@ function showWelcome(displayName: string, instant = false): void {
   }, 2600);
 }
 
+/** Loads and mounts the sign-in screen's WebGL backdrop on demand, cancelling if the auth screen closed in the meantime. */
 function startBackdrop(): void {
-  let canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
-  if (!canvas) {
-    canvas = document.createElement("canvas");
-    canvas.id = "faulty-field";
-    canvas.setAttribute("aria-hidden", "true");
-    app.before(canvas);
-  }
-  canvas.style.opacity = "1";
-  canvas.style.transition = "none";
-  backdrop?.destroy();
-  backdrop = mountFaultyTerminal(canvas, authLight());
+  const generation = ++backdropLoadGeneration;
+  void onDemand(() => import("./faulty-backdrop.on-demand")).then(({ mountFaultyTerminal }) => {
+    if (generation !== backdropLoadGeneration || !app.querySelector(".auth-screen")) return;
+    let canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      canvas.id = "faulty-field";
+      canvas.setAttribute("aria-hidden", "true");
+      app.before(canvas);
+    }
+    canvas.style.opacity = "1";
+    canvas.style.transition = "none";
+    backdrop?.destroy();
+    backdrop = mountFaultyTerminal(canvas, authLight());
+  }).catch(() => undefined);
 }
 
 function scheduleBackdrop(): void {
@@ -438,7 +448,9 @@ function scheduleBackdrop(): void {
   }, 600);
 }
 
+/** Cancels any pending or active sign-in backdrop and fades out its canvas (immediately when `instant` is true). */
 function stopBackdrop(instant = false): void {
+  backdropLoadGeneration++;
   window.clearTimeout(backdropTimer);
   backdropTimer = 0;
   const canvas = document.querySelector<HTMLCanvasElement>("#faulty-field");
@@ -526,16 +538,20 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   const useCanvas = (!mockMode || productTestMode) && !probeMode;
   const scrollbackLimit = mockMode ? testScrollbackLimit(query.get("scrollback")) : undefined;
   let screen: import("./core-screen").CoreScreen | undefined;
+  // Start every signed-in module, the terminal engine and the deferred canvas styles in parallel instead of chaining them (#573).
+  const coreScreenPromise = import("./core-screen");
+  const productCanvasPromise = useCanvas ? import("./canvas/product") : undefined;
+  const terminalPromise = import("./terminal");
+  void terminalPromise.then(({ TerminalClient }) => TerminalClient.warmEngine()).catch(() => undefined);
+  const font = initialFont(activeUserId);
+  const fontPromise = loadFont(font);
+  const sansPromise = uiFont === "sans" ? document.fonts.load('450 14px "Geist Sans"') : Promise.resolve();
+  const stylesPromise = deferredStylesReady();
   try {
-    const { mountCoreScreen } = await import("./core-screen");
+    const [{ mountCoreScreen }] = await Promise.all([coreScreenPromise, fontPromise, sansPromise, stylesPromise]);
     // The screen mounts after both its terminal face and its page face are ready. They are separate account choices: a sans page must
     // still load the selected terminal font, and a mono page must not make the terminal inherit a page-only font preview.
-    const font = initialFont(activeUserId);
-    await loadFont(font);
     applyFontVars(font, document.documentElement);
-    if (uiFont === "sans") await document.fonts.load('450 14px "Geist Sans"');
-    // The canvas sheets load behind the first paint (index.html); the screen must not draw before they are in.
-    await deferredStylesReady();
     if (generation !== sessionGeneration) return;
     // The controller stores the account face in the canvas look; `?ui=` overrides this page only and never enters that look.
     document.documentElement.dataset.uiFont = uiFont;
@@ -599,7 +615,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   if (useCanvas) {
     screen.setRecoveryPending(identity?.recovery_pending?.ready_at);
     try {
-      const { mountProductCanvas } = await import("./canvas/product");
+      const { mountProductCanvas } = await productCanvasPromise!;
       const layoutReview = reviewLayout
         ? await import("./canvas/model/layout-review-double").then(({ createLayoutReviewDouble }) => createLayoutReviewDouble(
           activeUserId ?? "account", hostName, query.get("reviewSession") ?? "review-session", query.get("reviewWide") === "1",
@@ -698,7 +714,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
     },
   };
   try {
-    const { TerminalClient } = await import("./terminal");
+    const { TerminalClient } = await terminalPromise;
     const client = await TerminalClient.open({
       host: screen.terminalHost,
       screen: screen.stage,

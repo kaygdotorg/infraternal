@@ -1,6 +1,5 @@
 /** Implements the same-origin passkey ceremonies and browser-only key wrapping contract. */
-import { mnemonicToEntropy, entropyToMnemonic } from "@scure/bip39";
-import { wordlist } from "@scure/bip39/wordlists/english.js";
+import { onDemand } from "./on-demand";
 
 const KEY_CONTEXT = "infraternal/keywrap/v1";
 const encoder = new TextEncoder();
@@ -315,7 +314,7 @@ export async function registerOwner(
 ): Promise<string> {
   const start = await post<AuthStart>("setup-start", { token, username, display_name: displayName });
   const userId = canonicalUuid(start.user_id, "setup user id");
-  const recoveryWords = generateRecoveryWords();
+  const recoveryWords = await generateRecoveryWords();
   const publicKey = creationOptions(start.options.publicKey);
   const prfInput = prfInputFrom(publicKey);
   let prf: Uint8Array | undefined;
@@ -467,16 +466,40 @@ async function unlockWithPasskey(
   }
 }
 
+declare global {
+  interface Window {
+    /** One-shot `/auth/status` and `/auth/session` fetches started by `index.html` while `main.js` downloads (#573). */
+    __earlyAuth?: { status?: Promise<Response>; session?: Promise<Response> };
+  }
+}
+
+/**
+ * Claims an early auth fetch started by `index.html` for `/auth/status` or `/auth/session`, if one is waiting.
+ * Deletes the slot immediately so retries, refreshes and foreground session checks always make a fresh request.
+ * @param action the `/auth/<action>` endpoint name
+ * @param body the JSON request payload; only empty `{}` requests match the early fetch
+ * @param headers extra request headers; any custom header bypasses the early fetch
+ */
+function takeEarlyAuth(action: string, body: unknown, headers: Readonly<Record<string, string>>): Promise<Response> | undefined {
+  if (typeof window === "undefined" || !window.__earlyAuth) return undefined;
+  if (action !== "status" && action !== "session") return undefined;
+  if (Object.keys(headers).length > 0 || typeof body !== "object" || body === null || Object.keys(body).length > 0) return undefined;
+  const early = window.__earlyAuth[action];
+  delete window.__earlyAuth[action];
+  return early;
+}
+
+/** Sends a same-origin JSON POST to `/auth/<action>`, reusing an early startup fetch when available. */
 async function post<Result = unknown>(action: string, body: unknown, headers: Readonly<Record<string, string>> = {}): Promise<Result> {
   let response: Response;
   try {
-    response = await fetch(`/auth/${action}`, {
+    response = await (takeEarlyAuth(action, body, headers) ?? fetch(`/auth/${action}`, {
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
       headers: { "Content-Type": "application/json", ...headers },
       body: JSON.stringify(body),
-    });
+    }));
   } catch {
     throw new AuthError("The infraternal server could not be reached.");
   }
@@ -627,7 +650,8 @@ function credentialProof(credential: PublicKeyCredential): Record<string, unknow
 }
 
 /** Creates recovery words locally; neither entropy nor the mnemonic reaches enrollment. */
-function generateRecoveryWords(): string {
+async function generateRecoveryWords(): Promise<string> {
+  const { entropyToMnemonic, wordlist } = await onDemand(() => import("./bip39.on-demand"));
   const entropy = crypto.getRandomValues(new Uint8Array(32));
   try { return entropyToMnemonic(entropy, wordlist); }
   finally { entropy.fill(0); }
@@ -635,6 +659,7 @@ function generateRecoveryWords(): string {
 
 /** Independent HKDF siblings: only verifier is transmitted; wrap always stays local [D151]. */
 async function recoverySecrets(words: string): Promise<{ verifier: string; wrap: Uint8Array }> {
+  const { mnemonicToEntropy, wordlist } = await onDemand(() => import("./bip39.on-demand"));
   const entropy = mnemonicToEntropy(words, wordlist);
   let authBytes: Uint8Array | undefined;
   try {
@@ -652,7 +677,9 @@ async function recoverySecrets(words: string): Promise<{ verifier: string; wrap:
 /** Stored metadata determines derivation; old envelopes are never silently relabeled. */
 async function unwrapRecoveryDek(words: string, wrap: Wrap, userId: string, version: number): Promise<Uint8Array> {
   if (version !== 1 && version !== 2) throw new AuthError("This recovery key was made by a newer version of infraternal. Update this app and try again.");
-  const material = version === 1 ? mnemonicToEntropy(words, wordlist) : (await recoverySecrets(words)).wrap;
+  const material = version === 1
+    ? await onDemand(() => import("./bip39.on-demand")).then(({ mnemonicToEntropy, wordlist }) => mnemonicToEntropy(words, wordlist))
+    : (await recoverySecrets(words)).wrap;
   try { return await unwrapDek(material, wrap, userId, "recovery"); }
   finally { material.fill(0); }
 }

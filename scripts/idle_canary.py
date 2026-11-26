@@ -1,7 +1,19 @@
-"""Observe Linux task scheduling without sending requests to idle processes."""
+"""Observe Linux task scheduling without sending requests to idle processes.
+
+The D81 check has two parts. First wait, on what the kernel reports, until the
+target has finished the work it already started (`wait_until_idle`). Then count
+every scheduler activation in a fixed window and allow none
+(`assert_process_idle`). A fixed sleep cannot replace the first part: on a
+loaded host, startup work outlives any sleep and its last wakeup lands in the
+window.
+"""
 from dataclasses import dataclass
 from pathlib import Path
 import time
+
+# Programs a process starts, waits for and is woken by exactly once: the init
+# manager probe and the launcher that execs a session shim.
+_ONE_SHOT_PROGRAMS = frozenset({b"systemctl", b"systemd-run"})
 
 
 @dataclass(frozen=True)
@@ -82,8 +94,97 @@ def measure_scheduled_slices(pid, duration_seconds, sample_interval=0.1, on_acti
     return ScheduledSlices(elapsed, per_thread)
 
 
-def assert_process_idle(pid, label, duration_seconds=2.2, on_activation=None):
-    """Require zero scheduled task activations over the requested window."""
+def _thread_states(pid):
+    """Return each live thread's kernel state letter without waking it."""
+    states = {}
+    for task in Path(f"/proc/{pid}/task").iterdir():
+        try:
+            stat = (task / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        # The thread name may contain spaces or parentheses; the state follows the last one.
+        states[int(task.name)] = stat[stat.rfind(")") + 2]
+    return states
+
+
+def _pending_child(pid):
+    """Describe a child whose exit will still wake the process, or return None.
+
+    That is a child that has exited and is not reaped yet, or a one-shot program
+    that is still running. Long-lived children, such as session shims and their
+    shells, do not count: an idle process may keep them.
+    """
+    for task in Path(f"/proc/{pid}/task").iterdir():
+        try:
+            children = (task / "children").read_text().split()
+        except (FileNotFoundError, ProcessLookupError):
+            # The thread exited after readdir. Its children move to a sibling.
+            continue
+        for child in children:
+            try:
+                stat = Path(f"/proc/{child}/stat").read_text()
+                arguments = Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if stat[stat.rfind(")") + 2] == "Z":
+                return f"child {child} has exited and is not reaped"
+            # A script runs as `interpreter path`, so look at the first two arguments.
+            for argument in arguments[:2]:
+                name = argument.rsplit(b"/", 1)[-1]
+                if name in _ONE_SHOT_PROGRAMS:
+                    return f"one-shot child {child} ({name.decode()}) is still running"
+    return None
+
+
+def wait_until_idle(pid, label, quiet_seconds=0.5, timeout_seconds=60.0, sample_interval=0.05):
+    """Block until the process has finished the work it already started.
+
+    Idle means that for `quiet_seconds` without a break no thread was scheduled,
+    every thread was in interruptible sleep (so none was waiting for a CPU or a
+    disk), and no child was about to wake the process. A busy host only makes
+    this take longer. A process that never gets there, for example because a
+    timer fires more often than `quiet_seconds`, fails after `timeout_seconds`.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    previous = _schedstat_slices(pid)
+    quiet_since = time.monotonic()
+    reason = "not observed yet"
+    while True:
+        # sleep: sample the target's kernel state; nothing is sent to it.
+        time.sleep(sample_interval)
+        current = _schedstat_slices(pid)
+        busy = sorted(tid for tid, state in _thread_states(pid).items() if state != "S")
+        pending = _pending_child(pid)
+        now = time.monotonic()
+        if current != previous:
+            ran = sorted(tid for tid in current.keys() | previous.keys()
+                         if current.get(tid) != previous.get(tid))
+            reason = f"threads {ran} were scheduled or came and went"
+        elif busy:
+            reason = f"threads {busy} were runnable or in uninterruptible sleep"
+        elif pending:
+            reason = pending
+        elif now - quiet_since >= quiet_seconds:
+            return
+        if current != previous or busy or pending:
+            quiet_since = now
+        previous = current
+        if now >= deadline:
+            raise AssertionError(
+                f"{label} never went idle for {quiet_seconds} s within "
+                f"{timeout_seconds} s: {reason}"
+            )
+
+
+def assert_process_idle(pid, label, duration_seconds=2.2, on_activation=None,
+                        settle_timeout=60.0):
+    """Require zero scheduled task activations once the process has gone idle (D81).
+
+    Waits for the process with `wait_until_idle`, then observes the window. The
+    window allows no activation at all, so any timer with a period up to
+    `duration_seconds` fails it, whatever the host's load.
+    """
+    wait_until_idle(pid, label, timeout_seconds=settle_timeout)
     measurement = measure_scheduled_slices(pid, duration_seconds, on_activation=on_activation)
     if measurement.total_slices:
         threads = []

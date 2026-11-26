@@ -86,7 +86,10 @@ Definition of Done (it is in every job prompt):
    static builds, cargo-deny or the repository checks, so it never replaces
    `iterate` or `fast` and is never quoted as the gate. The `test` row of
    `fast` and `iterate` runs `cargo test --no-fail-fast` and lists every
-   failing test at its end, so one flaky test cannot hide the others (#509). Set
+   failing test at its end, so one flaky test cannot hide the others (#509). Its
+   test run, after an untimed build, has its own hang timeout
+   (`VERIFY_TEST_TIMEOUT`, 5400 s), and a server auth test that keeps the shared
+   test lock for 900 s stops its binary by name (#596). Set
    `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
    iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
@@ -257,9 +260,14 @@ numbered history, both timestamp arrival orders and altered checksums.
   its 8.3 ms budget; reported). `first-paint-network.spec.ts` adds four
   reported first-paint rows: 4G (9 Mbps, 170 ms) and fast 3G, "sign-in
   visible" and "terminal connected", cold cache, 4x CPU slowdown; they gate
-  once the first-paint fixes of J1069 and J1100 land (#573). The report prints
-  them as a second table; the old rows keep gating until the new ones are
-  stable. `scripts/verify latency` and the nightly run (#447) produce them.
+  once the first-paint fixes of J1069 and J1100 land (#573). `scripts/verify
+  latency` and the nightly run measure them over HTTP/2 by default
+  (`FIRST_PAINT_PROTOCOL=http2`, matching production `ssh.kayg.org`; set
+  `FIRST_PAINT_PROTOCOL=http1` or `both` to compare HTTP/1.1), and the D375
+  report labels each row with the protocol used (`HTTP/2` or `HTTP/1.1`). The
+  report prints them as a second table; the old rows keep gating until the new
+  ones are stable. `scripts/verify latency` and the nightly run (#447) produce
+  them.
   The first-paint row of the phone profile reads the frame that shows the
   sign-in button: Chromium reports no `first-contentful-paint` for that page.
 - **How the rows gate [D375].** Each row gates on its target, except own
@@ -787,7 +795,11 @@ Each test runs in two nested user namespaces:
   build-output view `CARGO_TARGET_DIR=/tmp/ut`), `/run` (64 MiB), `/var/tmp`
   and `/dev/shm` (256 MiB each); a minimal `/dev` (null, zero, full, random,
   urandom, tty, `net/tun`, a private devpts); a tmpfs over the nix daemon
-  socket directory;
+  socket directory. A separate read-only tmpfs hides `/var/lib` and blocks
+  traversal into `/var/lib/infraternal`. Mesh test builds use
+  `INFRATERNAL_TEST_HOST_FIREWALL_ROOT=/run/infraternal-test` for implicit
+  listener policy paths. Tests that supply a policy layout explicitly keep
+  their files and fake loader under their own private root;
 - the inner namespace (`unshare --user --map-root-user --net --mount --pid
   --kill-child`) runs the test. uid 0 there is the caller's uid outside, and
   the kernel locks the inherited mounts, so the test cannot remount `/`
@@ -803,7 +815,8 @@ Each test runs in two nested user namespaces:
 Before any test, the row plants escapes in the same sandbox and fails unless
 every one fails: writes in the home directory, the checkout, the target and
 `/etc`; superblock and bind remounts of `/` read-write; unmounting `/run` and
-`/tmp`; the host user bus; the nix daemon socket; a host pty; a route off
+`/tmp`; opening installed files, writing to or removing the `/var/lib` cover;
+the host user bus; the nix daemon socket; a host pty; a route off
 loopback; the host network and the internet; a uid map onto host root; a file
 left in `/tmp`. These probes are negative checks only. The evidence that they
 are live is J233's manual breakout of the earlier single-level layout (review

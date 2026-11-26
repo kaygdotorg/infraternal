@@ -47,7 +47,7 @@ export async function replacePasskey(token: string, words: string,
   const oldEntropy = mnemonicToEntropy(words, wordlist);
   let nextEntropy: Uint8Array | undefined, dek: Uint8Array | undefined, prf: Uint8Array | undefined, input: Uint8Array | undefined;
   try {
-    const nextWords = auth.generateRecoveryWords();
+    const nextWords = await auth.generateRecoveryWords();
     if (oldEntropy.byteLength !== 32) throw new AuthError("Enter all 24 recovery words.");
     // Authenticate the old envelope before creating anything: replacement must retain the DEK.
     dek = await auth.unwrapRecoveryDek(words, start.old_recovery_wrap, userId, start.old_recovery_wrap_version ?? 1);
@@ -95,7 +95,7 @@ export async function rotateRecoveryWords(userId: string, dataKey: Uint8Array,
   if (dataKey.byteLength !== 32) throw new AuthError("The account key is invalid.");
   const dek = dataKey.slice();
   try {
-    const words = auth.generateRecoveryWords();
+    const words = await auth.generateRecoveryWords();
     const derived = await auth.recoverySecrets(words);
     let recoveryWrap: Wrap;
     try { recoveryWrap = await auth.wrapDek(derived.wrap, dek, userId, "recovery"); }

@@ -141,7 +141,7 @@ fn fidelity_handwritten() {
 /// Replays `count` pseudo-random token sequences (fixed seed, so a case ID
 /// reproduces a failure) through an exact Snapshot. Each case must match or
 /// be refused as unrepresentable, never diverge. `extended` adds the mode,
-/// colour, hyperlink and prompt-mark tokens.
+/// colour, hyperlink, prompt-mark and status-display tokens.
 fn generated(count: usize, extended: bool) {
     let mut tokens = vec![
         "abc",
@@ -192,6 +192,9 @@ fn generated(count: usize, extended: bool) {
             "\x1b]133;A;redraw=1\x07$ prompt",
             "\x1b]133;B\x07input",
             "\x1b]133;C\x07output",
+            "\x1b[1$}",
+            "\x1b[0$}",
+            "\x1b[2$~",
         ]);
     }
     let mut seed = 0x2260_1006_u64;
@@ -628,6 +631,47 @@ fn fidelity_mouse_effective_fields_follow_order_independently_of_booleans() {
         );
         check_replay(&format!("mouse ordering left {case}"), left, None, 80, 24).unwrap();
         check_replay(&format!("mouse ordering right {case}"), right, None, 80, 24).unwrap();
+    }
+}
+
+/// The selected status display (DECSASD, `CSI Ps $ }`) survives an exact
+/// Snapshot (#594).
+///
+/// While the status line is selected the engine drops printed text. A repaint
+/// starts with RIS, which selects the main display again, so without restoring
+/// the selection a viewer printed the program's status text over its screen.
+/// Each case compares a restored terminal with a raw replay of the same bytes,
+/// at once, after the shared probes, after a resize, and after output that goes
+/// on writing and then returns to the main display. The cases cover the state a
+/// dropped print leaves untouched (pending wrap, a pending single shift, the
+/// REP source), the screen switch, both resets, and DECSSDT (`CSI Ps $ ~`),
+/// which the engine does not implement and so keeps no state for.
+#[test]
+fn fidelity_status_display_selection_survives_a_snapshot() {
+    let continuation = b"status\x1b[2b\x1b[0$}main\x1b[2b\x1b[1$}gone\x1b[0$}\r\nZ";
+    for (name, input) in [
+        ("selected-on-a-blank-screen", "\x1b[1$}"),
+        ("selected-after-text", "main\x1b[1$}"),
+        ("selected-with-dropped-text", "main\x1b[1$}dropped\r\nmore"),
+        ("selected-then-main", "a\x1b[1$}b\x1b[0$}c"),
+        ("selected-over-pending-wrap", "\x1b[1;12HX\x1b[1$}"),
+        ("selected-with-single-shift", "x\x1b*0\x1bN\x1b[1$}q"),
+        (
+            "selected-with-wide-rep",
+            "\x1b[1;12HX\x1b[?7l\u{754c}\x1b[1$}",
+        ),
+        ("selected-with-erased-rep", "X\x1b[2J\x1b[1$}"),
+        ("selected-with-insert-mode", "abc\r\x1b[4h\x1b[1$}"),
+        ("selected-on-alternate", "main\x1b[?47halt\x1b[1$}"),
+        ("selected-before-alternate", "\x1b[1$}\x1b[?1049h"),
+        ("full-reset", "\x1b[1$}\x1bcshown"),
+        ("soft-reset", "\x1b[1$}\x1b[!pshown"),
+        ("invalid-selector", "\x1b[2$}shown"),
+        ("status-line-type", "\x1b[2$~shown"),
+        ("status-line-type-selected", "\x1b[2$~\x1b[1$}"),
+    ] {
+        check_replay(name, input.as_bytes(), Some(continuation), 12, 5)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
 }
 

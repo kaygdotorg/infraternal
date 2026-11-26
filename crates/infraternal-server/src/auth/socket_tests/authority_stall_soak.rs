@@ -291,10 +291,11 @@ async fn probe_pool(pool: SqlitePool, until: tokio::time::Instant) -> Vec<u64> {
     waits
 }
 
+/// Terminals type through random store stalls; counts closed sockets and pool waits (see the module documentation).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement for #240; run explicitly on the perf VM"]
 async fn authority_stall_soak() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let secs = setting("SOAK_SECS", 300);
     let terminals = setting("SOAK_TERMINALS", 4);
     let (stall_min, stall_max) = (
@@ -390,10 +391,11 @@ async fn authority_stall_soak() {
     }
 }
 
+/// One terminal's echo round trip with a fast store: what the authority read costs per frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "measurement for #240; run explicitly on the perf VM"]
 async fn authority_fast_read_echo_rtt() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let samples = setting("RTT_SAMPLES", 5000) as usize;
     let f = fixture().await;
     let (address, server, host) = soak_server(&f).await;

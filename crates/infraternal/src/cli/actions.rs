@@ -361,7 +361,7 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
                 [
                     (
                         "host_id".to_owned(),
-                        JsonSchema::string("ID of the retired-unreachable host to forget."),
+                        JsonSchema::string("ID of the revoked host with pending cleanup to forget."),
                     ),
                     (
                         "dry_run".to_owned(),

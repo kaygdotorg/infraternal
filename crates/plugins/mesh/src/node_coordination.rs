@@ -30,6 +30,81 @@ async fn update_listener(
 /// a rotation is open (J273 P3-2). Each probe is a few small calls on an authenticated channel.
 const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The largest peer control reply any mesh coordinator parser accepts.
+const MAX_COORDINATION_REPLY_BYTES: usize = infraternal_plugin_api::channel::MAX_CONTROL_JSON;
+
+/// Decode one bounded reply from a node, before JSON can allocate from it.
+fn parse_coordination_reply<T: serde::de::DeserializeOwned>(reply: &[u8]) -> Option<T> {
+    if reply.len() > MAX_COORDINATION_REPLY_BYTES {
+        return None;
+    }
+    serde_json::from_slice(reply).ok()
+}
+
+/// Deserialize at most `maximum` sequence items, without reserving from an untrusted size hint.
+fn deserialize_bounded_sequence<'de, D, T>(
+    deserializer: D,
+    maximum: usize,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    /// The private visitor that stops a peer list at its protocol count limit.
+    struct BoundedSequence<T> {
+        maximum: usize,
+        marker: std::marker::PhantomData<T>,
+    }
+
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for BoundedSequence<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence with at most {} items", self.maximum)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let capacity = sequence.size_hint().unwrap_or(0).min(self.maximum);
+            let mut items = Vec::with_capacity(capacity);
+            while items.len() < self.maximum {
+                let Some(item) = sequence.next_element()? else {
+                    return Ok(items);
+                };
+                items.push(item);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::invalid_length(
+                    self.maximum.saturating_add(1),
+                    &self,
+                ));
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedSequence {
+        maximum,
+        marker: std::marker::PhantomData,
+    })
+}
+
+/// Bound the coordinator's private LAN candidate list to one address per family.
+fn deserialize_lan<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<std::net::SocketAddr>, D::Error> {
+    deserialize_bounded_sequence(deserializer, crate::candidates::MAX_LAN)
+}
+
+/// Bound one node's advertised routes before building the deserialized vector.
+fn deserialize_advertised<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<crate::policy::networks::Network>, D::Error> {
+    deserialize_bounded_sequence(deserializer, MAX_ADVERTISED_NETWORKS)
+}
+
 /// The authenticated identity and the additive capabilities proved for its reply.
 struct IdentityProbe {
     /// The node identity and values returned by the successful request.
@@ -131,10 +206,10 @@ pub fn parse_routes(reply: &[u8]) -> Option<Vec<crate::policy::networks::Network
     struct Reply {
         #[serde(default)]
         routes: bool,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_advertised")]
         advertised: Vec<crate::policy::networks::Network>,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     (reply.routes && reply.advertised.len() <= MAX_ADVERTISED_NETWORKS).then_some(reply.advertised)
 }
 
@@ -150,7 +225,7 @@ pub fn parse_side_socket(reply: &[u8]) -> Option<bool> {
         #[serde(default)]
         side_port: bool,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.side_socket.then_some(reply.side_port)
 }
 
@@ -166,7 +241,7 @@ pub fn parse_ipv6_state(reply: &[u8]) -> Option<bool> {
         #[serde(default)]
         ipv4_only: bool,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.ipv6_state.then_some(reply.ipv4_only)
 }
 
@@ -180,10 +255,10 @@ pub fn parse_candidates(reply: &[u8]) -> Option<Vec<std::net::SocketAddr>> {
     struct Reply {
         #[serde(default)]
         candidates: bool,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_lan")]
         lan: Vec<std::net::SocketAddr>,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.candidates.then_some(reply.lan)
 }
 
@@ -279,9 +354,7 @@ where
 
 /// Decode an identity reply, refusing an unset key or port.
 fn parse_identity(reply: &[u8]) -> Option<Identity> {
-    serde_json::from_slice::<Option<Identity>>(reply)
-        .ok()
-        .flatten()
+    parse_coordination_reply::<Option<Identity>>(reply)?
         .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
 }
 
@@ -292,7 +365,7 @@ async fn read_hostname(channel: &dyn NodeChannel) -> Option<String> {
         .call("host.facts.read", br#"{"includeLive":false}"#.to_vec())
         .await
         .ok()?;
-    let facts: serde_json::Value = serde_json::from_slice(&reply).ok()?;
+    let facts: serde_json::Value = parse_coordination_reply(&reply)?;
     facts["hostname"].as_str().map(str::to_owned)
 }
 
@@ -368,7 +441,7 @@ pub async fn run(
                         .call("mesh.status", b"{}".to_vec())
                         .await
                         .ok()
-                        .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok())
+                        .and_then(|reply| parse_coordination_reply::<serde_json::Value>(&reply))
                         .and_then(|reply| reply["server_link"]["source_port"].as_u64())
                         .and_then(|port| u16::try_from(port).ok())
                         .filter(|port| *port != 0)
@@ -593,7 +666,7 @@ pub async fn run(
                         .call("mesh.configure", input)
                         .await
                         .ok()
-                        .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok());
+                        .and_then(|reply| parse_coordination_reply::<serde_json::Value>(&reply));
                     #[cfg(feature = "cutoff-measure")]
                     drop(ack);
                     if !reply.as_ref().is_some_and(|reply| {
@@ -780,6 +853,7 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    /// Ensure every server migration has a unique version.
     #[test]
     fn server_migrations_have_unique_versions() {
         let migrations = sqlx::migrate!("../../infraternal-server/migrations");
@@ -791,6 +865,36 @@ mod tests {
                 migration.version
             );
         }
+    }
+
+    /// Refuse peer candidate arrays that exceed their advertised shape.
+    #[test]
+    fn peer_candidate_replies_refuse_more_addresses_than_the_protocol_allows() {
+        let reply = serde_json::json!({
+            "candidates": true,
+            "lan": ["10.0.0.1:51820", "[fd00::1]:51820", "10.0.0.2:51820"]
+        });
+        assert_eq!(parse_candidates(reply.to_string().as_bytes()), None);
+    }
+
+    /// Refuse peer route arrays that exceed the accepted route count.
+    #[test]
+    fn peer_route_replies_refuse_more_than_the_advertised_network_limit() {
+        let advertised: Vec<String> = (0..=MAX_ADVERTISED_NETWORKS)
+            .map(|index| format!("10.0.{index}.0/24"))
+            .collect();
+        let reply = serde_json::json!({"routes": true, "advertised": advertised});
+        assert_eq!(parse_routes(reply.to_string().as_bytes()), None);
+    }
+
+    /// Refuse peer replies before serde reads beyond the `NodeChannel` byte ceiling.
+    #[test]
+    fn peer_reply_parsers_refuse_bytes_over_the_node_channel_limit() {
+        let oversized = vec![b' '; MAX_COORDINATION_REPLY_BYTES + 1];
+        assert_eq!(parse_candidates(&oversized), None);
+        assert_eq!(parse_routes(&oversized), None);
+        assert_eq!(parse_ipv6_state(&oversized), None);
+        assert_eq!(parse_side_socket(&oversized), None);
     }
 
     struct Lease(Arc<AtomicUsize>);

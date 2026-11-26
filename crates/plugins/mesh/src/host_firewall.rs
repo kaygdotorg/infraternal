@@ -1264,6 +1264,8 @@ pub fn clear_role_from_config_at(
 /// # Errors
 /// Returns an error when the file is unsafe, oversized, unreadable, or malformed.
 pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    refuse_live_test_policy(path)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1320,6 +1322,8 @@ pub fn serialize_policy_file(policy: &Policy) -> Result<Vec<u8>, PolicyError> {
 /// # Errors
 /// Returns an error for invalid settings, unsafe paths, or failed file operations.
 pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<(), PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    refuse_live_test_policy(path)?;
     validate_fields(policy)?;
     let Some(parent) = path.parent() else {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
@@ -1758,8 +1762,19 @@ fn reload_systemd(systemctl: &Path, removed_unit: &Path) -> Result<(), PolicyErr
 /// Returns an error when the role files are unsafe or the merged nft update fails.
 pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, PolicyError> {
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(paths) = TEST_POLICY_PATHS.with(|current| current.borrow().clone()) {
-        return set_mesh_listener_at(&paths, None, udp_port);
+    {
+        if let Some(paths) = TEST_POLICY_PATHS.with(|current| current.borrow().clone()) {
+            return set_mesh_listener_at(&paths, None, udp_port);
+        }
+        if let Some(root) = std::env::var_os(TEST_HOST_FIREWALL_ROOT) {
+            let paths = fixture_policy_paths(Path::new(&root))?;
+            return set_mesh_listener_at(&paths, None, udp_port);
+        }
+        // Standalone test builds without configured host policy model an
+        // unenrolled host. The privileged runner must provide its fixture root.
+        if std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_none() {
+            return Ok(None);
+        }
     }
     // Rootless namespace proofs run whole `infraternal agent` processes, which cannot use the
     // thread-local override above. A build with `test-support` (never shipped) maps the fixed
@@ -1770,6 +1785,47 @@ pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, Policy
         return set_mesh_listener_at(&HostFirewallPaths::under(Path::new(&root)), None, udp_port);
     }
     set_mesh_listener_at(&HostFirewallPaths::system(), None, udp_port)
+}
+
+/// The private policy layout shared with fixture subprocesses and worker threads.
+#[cfg(any(test, feature = "test-support"))]
+const TEST_HOST_FIREWALL_ROOT: &str = "INFRATERNAL_TEST_HOST_FIREWALL_ROOT";
+
+/// Refuse to open or modify the installed policy when the fixture runner is active.
+#[cfg(any(test, feature = "test-support"))]
+fn refuse_live_test_policy(path: &Path) -> Result<(), PolicyError> {
+    if path.starts_with("/var/lib/infraternal")
+        && (std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_some()
+            || std::env::var_os(TEST_HOST_FIREWALL_ROOT).is_some())
+    {
+        return Err(PolicyError::Io(io::Error::other(format!(
+            "privileged test refused to access live state at {}; set {TEST_HOST_FIREWALL_ROOT} to a private fixture directory",
+            path.display()
+        ))));
+    }
+    Ok(())
+}
+
+/// Resolve a fixture's alternate root before forming any policy paths.
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_policy_paths(root: &Path) -> Result<HostFirewallPaths, PolicyError> {
+    let invalid_root = || {
+        PolicyError::Io(io::Error::other(format!(
+            "{TEST_HOST_FIREWALL_ROOT} must name an existing private directory: {}",
+            root.display()
+        )))
+    };
+    if !root.is_absolute() || root.starts_with("/var/lib/infraternal") {
+        return Err(invalid_root());
+    }
+    let resolved = root.canonicalize().map_err(|_| invalid_root())?;
+    if resolved == Path::new("/")
+        || resolved.starts_with("/var/lib/infraternal")
+        || !resolved.is_dir()
+    {
+        return Err(invalid_root());
+    }
+    Ok(HostFirewallPaths::under(&resolved))
 }
 
 // Node-level namespace tests drive `set_mesh_listener` through a real mesh node,

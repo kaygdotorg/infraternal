@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
-"""Prove the scheduler canary scopes wakeups to one process and catches a periodic wakeup."""
+"""Prove what the scheduler canary accepts and rejects (D81).
+
+It scopes wakeups to one process, waits out finite work however long it takes,
+and still rejects a periodic wakeup, whether slower or faster than its settle.
+"""
 from concurrent.futures import ThreadPoolExecutor
 import pathlib
 import select
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.dont_write_bytecode = True
@@ -35,8 +40,61 @@ def wait_for_ready(process):
         raise RuntimeError(f"process {process.pid} sent an invalid readiness line")
 
 
+def check_late_one_shot_child(processes, directory):
+    """A target still waiting for a slow one-shot child is not idle yet.
+
+    This is what a loaded host does to a daemon's startup probe: the target
+    sleeps quietly for longer than any settle, then wakes once for the exit.
+    """
+    probe = pathlib.Path(directory) / "systemctl"
+    probe.write_text("#!/bin/sh\n# Stand-in for a slow init manager probe.\nsleep 2\n:\n")
+    probe.chmod(0o700)
+    code = "\n".join(
+        (
+            "import signal, subprocess, sys",
+            "child = subprocess.Popen([sys.argv[1]])",
+            "print('READY', flush=True)",
+            "child.wait()",
+            "while True:",
+            "    signal.pause()",
+        )
+    )
+    waiting = subprocess.Popen(
+        [sys.executable, "-c", code, str(probe)], stdout=subprocess.PIPE, text=True
+    )
+    processes.append(waiting)
+    wait_for_ready(waiting)
+    started = time.monotonic()
+    observed = assert_process_idle(waiting.pid, "slow one-shot child")
+    assert observed.total_slices == 0, observed
+    return time.monotonic() - started - observed.elapsed_seconds
+
+
+def check_fast_timer(processes):
+    """A timer faster than the settle's quiet period never lets the target settle."""
+    code = "\n".join(
+        (
+            "import signal",
+            "signal.signal(signal.SIGALRM, lambda *_: None)",
+            "signal.setitimer(signal.ITIMER_REAL, 0.1, 0.1)",
+            "print('READY', flush=True)",
+            "while True:",
+            "    signal.pause()",
+        )
+    )
+    fast = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    processes.append(fast)
+    wait_for_ready(fast)
+    try:
+        assert_process_idle(fast.pid, "fast timer mutant", settle_timeout=3.0)
+    except AssertionError as error:
+        assert "never went idle" in str(error), error
+        return str(error)
+    raise AssertionError("fast timer mutant passed the idle canary")
+
+
 def main():
-    """Check that a busy sibling is ignored and a periodic target is detected."""
+    """Check the quiet, slow-child, periodic and fast-timer targets."""
     quiet_code = "\n".join(
         (
             "import signal",
@@ -89,6 +147,10 @@ def main():
                 raise AssertionError("periodic wakeup mutant passed the idle canary")
 
         assert quiet_observed.total_slices == 0, quiet_observed
+        with tempfile.TemporaryDirectory(prefix="idle-canary-") as directory:
+            settled_after = check_late_one_shot_child(processes, directory)
+        print(f"slow one-shot child waited out for {settled_after:.3f} s, then 0 slices")
+        print(f"fast timer mutant rejected: {check_fast_timer(processes)}")
         print(
             "process-scoped scheduler canary: quiet sibling=0 slices over "
             f"{quiet_observed.elapsed_seconds:.3f} s; periodic mutant rejected: "

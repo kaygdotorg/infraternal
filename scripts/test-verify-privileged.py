@@ -310,6 +310,7 @@ class IgnoredSelection(unittest.TestCase):
         self.assertIn('--no-default-features', shared)
         self.assertIn('--no-default-features', dns)
         self.assertIn('mesh-dns', dns[dns.index('--features') + 1])
+        self.assertIn('test-support', dns[dns.index('--features') + 1])
 
 
 class RealRootProof(unittest.TestCase):

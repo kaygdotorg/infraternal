@@ -38,10 +38,13 @@ normal night takes about 25 to 40 minutes after the build; the unit gives up at 
 3. On the perf VM, under `perf-run`: fetches exactly that commit (shallow),
    runs `scripts/verify latency` with `INFRATERNAL_LATENCY_BINARY` set (it measures
    the shipped bytes; the profile's own cargo build and the auth-browser functional
-   check are skipped, since the perf VM has no cargo), and deletes its work files.
+   check are skipped, since the perf VM has no cargo) and
+   `FIRST_PAINT_PROTOCOL=http2` by default (matching production `ssh.kayg.org`;
+   `FIRST_PAINT_PROTOCOL=http1` stays selectable, #573), and deletes its work files.
 4. Publishes the night, atomically (see below).
-5. Compares each row with the previous published night and comments on #447 only if
-   a row fails its gate, is missing, or regressed.
+5. Compares each row with the previous published night (within the same transport
+   protocol, when tagged) and comments on #447 only if a row fails its gate, is
+   missing, or regressed.
 
 **Regressed** means more than 10 % worse than the previous night and worse by more than
 0.5 in the row's unit (ms, MB or fps); the floor keeps a 0.6 ms row from tripping on

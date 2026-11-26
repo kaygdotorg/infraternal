@@ -77,7 +77,10 @@ unconfirmed denial, including after restart; it never grants access or invents a
 receipt. Other hosts omit `state`, preserving the existing inventory shape.
 
 Clients retain these status rows and show pending or retired-unreachable in the
-existing host list, without shell, removal or privilege actions. The CLI reports pending for an accepted removal whose cleanup has not completed. See
+existing host list, without shell, removal or privilege actions. In either
+state the owner can confirm Forget immediately (#591), which stops pending
+cleanup, removes the list entry and keeps the audit record. The CLI reports
+pending for an accepted removal whose cleanup has not completed. See
 `docs/operations/login-revocation-backpressure.md` for delivery bounds and the
 operator action when cleanup certificates expire.
 

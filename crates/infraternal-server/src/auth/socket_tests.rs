@@ -1,5 +1,8 @@
 //! Real WebSocket regressions for upgrade reservation, revoked idle sockets and clean Close.
 use super::*;
+/// A full host counts only the terminals of sockets that still answer (#562).
+#[path = "socket_tests/host_full.rs"]
+mod host_full;
 #[path = "socket_tests/startup_guard.rs"]
 mod startup_guard;
 /// A full account's new page takes over its own longest-hidden tab (#523).
@@ -136,7 +139,7 @@ async fn revoked_idle_socket_loses_all_authority() {
 #[tokio::test]
 #[ignore = "release-only measurement without concurrent compilation"]
 async fn socket_authority_latency_at_user_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let mut sockets = Vec::new();
