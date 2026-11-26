@@ -1631,6 +1631,19 @@ impl Store {
         .await
     }
 
+    /// Up to `limit` hosts whose mesh membership was removed or revoked, as canonical UUID
+    /// text, in host order: the relay role refuses their still-valid leaves (D401 Q3).
+    /// # Errors
+    /// Returns a fixed public error, not database input.
+    pub async fn removed_hosts(&self, limit: usize) -> Result<Vec<String>, &'static str> {
+        let limit = i64::try_from(limit).map_err(|_| "Mesh storage unavailable.")?;
+        sqlx::query_scalar("SELECT host FROM mesh_dataplane_removed ORDER BY host LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")
+    }
+
     /// Attach with the independently probed rotation and authority-epoch capabilities.
     ///
     /// A `None` epoch result stays unknown in storage. The inventory maps both unknown and

@@ -45,6 +45,47 @@ refused at either limit before a serving task is spawned. Each TLS handshake
 and control-hello wait has a five-second deadline; the source and global slots
 are released when the host is admitted or the attempt ends.
 
+## Relay list and the relay role (D401 Q2–Q4)
+
+The coordinator sends each node the control action `mesh.relays` on the same
+authenticated channel as its mesh configuration, after a configuration was
+delivered and whenever the list changes. It is a separate action, not new
+`Config` fields, because `Config` and `Chunk` refuse unknown fields and the
+previous release parses the saved `mesh-public.json` strictly. A node that
+refuses the action is not asked again until the coordinator reads its identity
+again. The body is one object:
+
+- `relays`: at most 8 entries of `name` (the relay leaf's DNS name, lowercase
+  host name), `port` (UDP, nonzero) and optional `addresses` (at most 4; empty
+  means the node resolves `name`). The node saves this part in
+  `mesh-relays.json` beside its mesh state and starts from it after a restart,
+  so it keeps its relays while the server is down (D285).
+- `serve`, only for the node that runs the relay role (the server's own node in
+  slice 1): `name`, `port`, `leaf` (relay leaf certificate PEM then PKCS#8 key
+  PEM, at most 3 KiB), `roots` (one or two CA certificates) and `revoked` (at
+  most 128 host UUIDs whose leaves still verify, from the coordinator's removal
+  tombstones). The role's key is held in memory only and never written by the
+  node. The node answers `{"accepted":true,"serving":<port>}` with the UDP port
+  it bound, and the coordinator then lists that relay for every other node. A
+  role whose port cannot be bound answers without `serving` and lists nothing.
+
+The relay role admits a host whose verified leaf chains to `roots` and is not
+in `revoked`. Every new list updates `revoked` and re-checks live connections,
+closing refused ones and their links; each connection also ends when its
+leaf's `notAfter` passes (one timer per connection, armed once). A renewed
+relay leaf is installed for new handshakes without a restart; open connections
+keep the leaf they were made with. The server keeps the relay leaf in its CA's
+`active/relay-leaf.pem` (mode 0600, written durably before it is served), 7
+days from `notBefore`, renewed at half-life while the CA is unlocked, so a
+locked cold start still serves the retained leaf. The relay role is opt-in in
+slice 1: the server runs with `--relay-port <udp-port>` (which also opens that
+port in its host firewall policy).
+
+A message with the maximum revoked list stays inside one 8 KiB action frame.
+A revoked host beyond the first 128 still reaches nobody, because its peers
+dropped its mesh key (D166) and so its pair tokens match nothing; it can hold a
+connection slot until its leaf expires.
+
 ## Wire formats
 
 Control messages have no separate length prefix. The first byte selects one

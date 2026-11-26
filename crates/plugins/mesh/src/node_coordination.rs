@@ -322,6 +322,16 @@ pub async fn run(
     let mut known_ipv4_only = false;
     let mut presence_updates = service.subscribe_presence();
     let mut rotation_updates = service.subscribe_rotation_progress();
+    // The relay list this node last accepted, and what wakes the worker to send a new one:
+    // the server node's relay coming or going, or (on the server's own worker) a new leaf.
+    let mut relays = crate::relay_list::Pushed::default();
+    let mut relay_updates = service.subscribe_server_relay();
+    let mut serve_updates = crate::relay_list::serve_source()
+        .filter(|_| channel.is_server())
+        .map(|source| source.changes.clone());
+    // A restarted infraternal agent has lost its relay role (its key lives in memory only):
+    // send the list again.
+    let mut agent_restarts = channel.agent_restarts();
     let mut listener: ServerListener = None;
     let mut attach_retry: Option<std::time::Duration> = None;
     // Retry an ambiguous probe without weakening the identity request.
@@ -335,6 +345,7 @@ pub async fn run(
     loop {
         if refresh_identity {
             refresh_identity = false;
+            relays.reset();
             let identity = read_identity(channel.as_ref()).await;
             if let Some(probe) = identity {
                 let identity = probe.identity;
@@ -652,6 +663,18 @@ pub async fn run(
         if channel.is_server() {
             service.set_server_configured(installed.is_some());
         }
+        // The relay list follows a delivered configuration, so a node learns its relays from
+        // the same link and only once it is a member (D401 Q2). It is sent only on a change.
+        if binding.is_some() && installed.is_some() {
+            relay_updates.borrow_and_update();
+            if let Some(updates) = serve_updates.as_mut() {
+                updates.borrow_and_update();
+            }
+            crate::relay_list::push(&store, &service, channel.as_ref(), &mut relays).await;
+        } else if channel.is_server() && binding.is_none() {
+            // The server's node left the mesh: its relay is gone for everyone.
+            service.set_server_relay(None);
+        }
         // Consume our completed finalizer's publication before reading durable receipts.
         // Coalesced peer progress is covered by that read; later progress stays unseen.
         rotation_updates.borrow_and_update();
@@ -690,6 +713,9 @@ pub async fn run(
             },
             result=presence_updates.changed()=>if result.is_err() {return;},
             result=rotation_updates.changed()=>if result.is_err() {return;},
+            result=relay_updates.changed()=>if result.is_err() {return;},
+            () = watch_optional(serve_updates.as_mut()) => {},
+            () = watch_optional(agent_restarts.as_mut()) => relays.reset(),
             () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
                 if let Some((node, revision)) = ack_retry
                     && service.finalize_applied(node, revision).await.is_ok()
@@ -709,6 +735,17 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Wait for the next change of an optional watch; forever when there is none or its sender is
+/// gone, so the caller's other select arms wake the worker.
+async fn watch_optional<T>(updates: Option<&mut tokio::sync::watch::Receiver<T>>) {
+    if let Some(updates) = updates
+        && updates.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
 }
 
 /// Sleep for `delay`, or forever when there is no deadline; the caller's other select arms then wake the worker.
@@ -1057,6 +1094,11 @@ mod tests {
                         .hostname
                         .map(|name| format!(r#"{{"hostname":"{name}"}}"#).into_bytes())
                         .ok_or("host facts disabled");
+                }
+                if action == crate::relay_list::ACTION {
+                    // This modelled node predates relay lists (D401): it refuses the action,
+                    // and the worker stops asking until it reads the identity again.
+                    return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
                 }
                 assert_eq!(action, "mesh.configure");
                 if !self.server && self.supports_server_paths() {
