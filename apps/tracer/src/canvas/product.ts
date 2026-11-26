@@ -58,6 +58,7 @@ import { TAKEOVER_COPY, watchTakeover } from "./takeover-notice";
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
 
+/** Startup options for {@link mountProductCanvas}: host identity, account scope, hooks and deferred-style guard. */
 export interface ProductCanvasOptions {
   /** Isolated preview documents never use the production transport. */
   previewStore?: CanvasStore;
@@ -257,18 +258,18 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), forget: (id, name, anchor, returnFocus) => readyRemoval?.forget?.(id, name, anchor, returnFocus), remove: (id, name, anchor, returnFocus, confirmed) => readyRemoval?.remove(id, name, anchor, returnFocus, confirmed) ?? Promise.resolve({ state: "refused" as const, message: "Host removal is still loading. Try again in a moment." }) };
-  // Registry metadata is optional chrome: load it without delaying the first terminal.
+  const offStartup = connection.onWelcome(() => startup.welcomed());
+  const saved = await store.load();
+  offStartup();
+  startup.dispose();
+  startupOver = true;
+  // Registry metadata is optional chrome: load it once the layout and styles are in so it never delays the first terminal (#573).
   void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
     setupPendingHostIds.delete(id);
     sessions.forgetHost(id);
     for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
     canvas.flush();
   })).then((adapter) => { readyRemoval = adapter; });
-  const offStartup = connection.onWelcome(() => startup.welcomed());
-  const saved = await store.load();
-  offStartup();
-  startup.dispose();
-  startupOver = true;
   const offTakeoverWelcome = connection.onWelcome(() => takeover.welcomed());
   /** Ends the takeover toast and its listeners (both teardown paths). */
   const disposeTakeover = (): void => { offTakeoverWelcome(); document.removeEventListener("visibilitychange", onTakeoverVisibility); takeover.dispose(); };
