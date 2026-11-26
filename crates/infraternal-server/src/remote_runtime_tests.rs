@@ -521,6 +521,7 @@ async fn respond(channel: &impl Channel) -> u64 {
     caps
 }
 
+/// Keep the TLS host connected until the actor receives the enrolled UID's open reply.
 #[tokio::test]
 async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
     let (server, host, root, _) = identities();
@@ -533,6 +534,16 @@ async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
             .await
             .unwrap();
         respond(&client.channel).await;
+        let mut receive = Receive::default();
+        let mut transmit = Transmit::default();
+        while let Ok(decoded) = receive.next(&client.channel).await {
+            if let Frame::Ping { nonce, sent_us } = decoded.frame {
+                transmit
+                    .send(&client.channel, 0, &Frame::Pong { nonce, sent_us })
+                    .await
+                    .unwrap();
+            }
+        }
     });
     let connection = remote_tls::accept(listener.accept().await.unwrap().0, &server_config)
         .await
@@ -553,7 +564,12 @@ async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
     .unwrap()
     .unwrap();
     assert_eq!(id, *Uuid::from_u128(7).as_bytes());
-    peer.await.unwrap();
+    // Dropping the peer before the actor reads the result can reset the link
+    // with the reply still in flight, particularly if a probe is unread.
+    peer.abort();
+    if let Err(error) = peer.await {
+        assert!(error.is_cancelled(), "TLS open fixture failed: {error}");
+    }
 }
 
 #[tokio::test]
