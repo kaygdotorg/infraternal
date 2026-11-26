@@ -687,7 +687,7 @@ fn action_status_failure(path: &str, status: StatusCode) -> ActionFailure {
     if path == "/v1/actions/remote.host.forget" && status == StatusCode::CONFLICT {
         ActionFailure::new(
             Exit::NotAllowed,
-            "This host is no longer retired and unreachable, so nothing was forgotten.",
+            "This host no longer has pending cleanup. Refresh the host list.",
         )
     } else {
         status_failure(status)
@@ -774,7 +774,7 @@ fn success_message(action_id: &str) -> &'static str {
         "remote.host.list" => "The server host list was read.",
         "sessions.list" => "The server session list was read.",
         "remote.host.remove" => "The host was removed.",
-        "remote.host.forget" => "The host was forgotten here. The machine itself was not changed.",
+        "remote.host.forget" => "The host was forgotten here.",
         "ssh.start" => "Host setup completed.",
         _ => "The hosted action completed.",
     }
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(failure.exit, Exit::NotAllowed);
     }
 
-    /// A reconnect between review and commit is a host-state refusal, not a sign-in failure.
+    /// Cleanup completing between review and commit gives a host-state refusal.
     #[test]
     fn forget_state_conflict_does_not_blame_the_api_key() {
         let path = "/v1/actions/remote.host.forget";
@@ -923,7 +923,7 @@ mod tests {
         assert_eq!(failure.exit, Exit::NotAllowed);
         assert_eq!(
             failure.message,
-            "This host is no longer retired and unreachable, so nothing was forgotten."
+            "This host no longer has pending cleanup. Refresh the host list."
         );
         assert_eq!(
             super::action_status_failure(path, StatusCode::FORBIDDEN).message,
