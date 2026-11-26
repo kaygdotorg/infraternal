@@ -546,6 +546,8 @@ rust_verify_fast() {
         rust_run_gate "probe release exclusion" python3 scripts/test-runtime-probe-gating.py
         rust_run_gate "nightly fuzz reporter" python3 scripts/test-nightly-fuzz.py
         rust_run_gate "nightly browser suite reporter" python3 scripts/test-nightly-browser-suite.py
+        # The nightly `up` join proof on compute01 (#580): its decisions and root-script invariants, no host.
+        rust_run_gate "nightly up-approval run" python3 scripts/test-nightly-up-approval.py
         rust_run_gate "static builds" rust_static_build_check
     fi
     rust_print_summary
