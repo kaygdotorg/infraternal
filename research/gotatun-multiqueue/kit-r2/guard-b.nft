@@ -1,0 +1,37 @@
+table inet infraternal_mesh {
+	comment "infraternal.mesh.v1"
+	set mesh4 {
+		type ipv4_addr
+		elements = { 10.254.0.1, 10.254.0.2 }
+	}
+
+	set mesh6 {
+		type ipv6_addr
+		elements = { fd5e:b1a9:d9af::1,
+			     fd5e:b1a9:d9af::2 }
+	}
+
+	chain ingress {
+		type filter hook prerouting priority raw - 10; policy accept;
+		iifname "lo" ip saddr 10.254.0.2 accept
+		iifname "lo" ip6 saddr fd5e:b1a9:d9af::2 accept
+		iifname != "infraternal0" ip saddr @mesh4 drop
+		iifname != "infraternal0" ip6 saddr @mesh6 drop
+		ip daddr 10.254.0.2 iifname != { "lo", "infraternal0" } drop
+		ip6 daddr fd5e:b1a9:d9af::2 iifname != { "lo", "infraternal0" } drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter - 10; policy accept;
+		ip daddr 10.254.0.2 iifname != { "lo", "infraternal0" } drop
+		ip6 daddr fd5e:b1a9:d9af::2 iifname != { "lo", "infraternal0" } drop
+		iifname "infraternal0" drop
+		oifname "infraternal0" drop
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ip daddr 10.254.0.2 iifname != { "lo", "infraternal0" } drop
+		ip6 daddr fd5e:b1a9:d9af::2 iifname != { "lo", "infraternal0" } drop
+	}
+}
