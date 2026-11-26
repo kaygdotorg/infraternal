@@ -26,7 +26,7 @@ proxy = ["infraternal-agent/proxy"]
 # Opt-in namespace proof compiles the existing node engine in this test process.
 mesh-transport-proof = ["mesh", "remote", "infraternal-agent/mesh", "infraternal-plugin-mesh/test-support", "infraternal-plugin-remote/test-support"]
 ee = ["infraternal-plugin-mesh?/ee", "infraternal-agent/ee"]
-remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn", "dep:hyper", "dep:hyper-util", "dep:tokio-tungstenite"]
+remote = ["infraternal-shim/ca-handoff", "dep:infraternal-plugin-remote", "infraternal-plugin-remote/server", "infraternal-agent/remote", "dep:quinn", "dep:hyper", "dep:hyper-util", "dep:tokio-tungstenite", "dep:infraternal-link", "infraternal-link/quic"]
 
 ssh = ["dep:infraternal-plugin-ssh", "dep:hyper", "dep:hyper-util", "dep:tokio-openssl", "dep:http-body-util"]
 
@@ -83,6 +83,9 @@ quinn = { workspace = true, optional = true }
 # `/remote/agent` owns its WebSocket so it can cap reads before the host proof
 # (#572); the embedded infraternal agent already links this version.
 tokio-tungstenite = { workspace = true, optional = true }
+# The device link's close codes are shared with the client that reads them
+# (#580); the embedded infraternal agent already links this crate with QUIC.
+infraternal-link = { workspace = true, optional = true }
 
 # Reuse the pinned digest for original migration checksums in generated build data [243].
 [build-dependencies]
