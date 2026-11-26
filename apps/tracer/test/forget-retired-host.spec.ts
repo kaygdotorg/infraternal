@@ -5,8 +5,8 @@ import { tracerEvidencePath } from "./evidence-path";
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }, { width: 375, height: 667 }]) {
   for (const theme of ["ink", "paper"]) {
-    /** The existing pending row gains Forget only after its cleanup certificate expires. */
-    test(`forget retired host ${viewport.width} ${theme}`, async ({ browser }) => {
+    /** The owner can forget immediately, including while cleanup can still be delivered. */
+    test(`forget pending host ${viewport.width} ${theme}`, async ({ browser }) => {
       const context = await browser.newContext({ viewport, hasTouch: viewport.width < 500, isMobile: viewport.width < 500, deviceScaleFactor: 2 });
       const page = await context.newPage();
       try {
@@ -47,21 +47,25 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await page.locator("#palette-input").fill("retired-worker");
         const row = page.locator("#palette-results [role=option]").filter({ hasText: "retired-worker" });
         await expect(row).toContainText("removal pending");
-        await expect(row).toHaveAttribute("data-action", "");
-        state = "retired-unreachable"; push?.();
         await expect(row).toContainText("Forget");
         await expect(row.locator(".result-icon")).toHaveText("×");
-        await expect(row.locator(".result-hint")).toHaveText("unreachable");
+        await expect(row.locator(".result-hint")).toHaveText("removal pending · access revoked");
         await page.locator(".palette").evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))));
         const hintFits = await row.locator(".result-hint").evaluate((el) => el.scrollWidth <= el.clientWidth);
-        expect(hintFits, "the unreachable hint must fit without truncation on phones").toBe(true);
-        const label = await row.locator(".result-label").boundingBox();
-        const icon = await row.locator(".result-icon").boundingBox();
-        expect(Math.abs(label!.y + label!.height / 2 - icon!.y - icon!.height / 2)).toBeLessThanOrEqual(0.5);
+        expect(hintFits, "the pending hint must fit without truncation on phones").toBe(true);
+        const centreOffset = await row.evaluate((element) => {
+          const label = element.querySelector(".result-label")!.getBoundingClientRect();
+          const icon = element.querySelector(".result-icon")!.getBoundingClientRect();
+          return Math.abs(label.y + label.height / 2 - icon.y - icon.height / 2);
+        });
+        expect(centreOffset).toBeLessThanOrEqual(0.5);
         await page.screenshot({ path: tracerEvidencePath("forget-host", `${viewport.width}-${theme}-row.png`) });
         await row.click();
         await expect(page.getByText("Forget retired-worker?", { exact: true })).toBeVisible();
-        await expect(page.getByText("Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it.", { exact: true })).toBeVisible();
+        const guidance = page.locator(".ui-confirm-tip-detail");
+        for (const words of ["stops automatic cleanup", "stop and remove its service unit", "agent files", "identity key"]) {
+          await expect(guidance).toContainText(words);
+        }
         expect(forgotten).toBe(false);
         const confirmation = page.locator(".ui-confirm-tip");
         await expect(confirmation).toHaveAttribute("data-open", "true");
@@ -93,15 +97,17 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await page.locator("#palette-input").fill("retired-worker");
         await expect(row).toHaveCount(0);
         // The same inventory row remains status-only when the server withholds owner actions.
-        state = "retired-unreachable";
+        state = "pending";
         await page.route("**/remote/hosts/actions", (route) => route.fulfill({ status: 403, body: "" }));
         push = undefined;
         await page.reload();
         await expect.poll(() => Boolean(push), { timeout: 20000 }).toBe(true);
         await page.keyboard.press("Control+Shift+K");
         await page.locator("#palette-input").fill("retired-worker");
+        await expect(row).toContainText("removal pending");
+        await expect(row).toHaveAttribute("data-action", "");
+        state = "retired-unreachable"; push?.();
         await expect(row).toContainText("retired-unreachable");
-        await expect(row).not.toContainText("Forget");
         await expect(row).toHaveAttribute("data-action", "");
       } finally { await context.close(); }
     });

@@ -2,7 +2,7 @@
  * Registry-labelled host removal for both machine details and the palette [D16, D168]. The server
  * dry-runs it, then removes it inside the 15-minute admin window, with no passkey of its own (D339).
  * Pending cleanup keeps both the host row and the manual uninstall copy action available.
- * D369 Forget cancels an unreachable retirement here, in that same window, without touching the machine.
+ * Forget stops pending cleanup for a revoked host within the same admin window (D369, #591).
  * Different hosts are removed in parallel (the server admits eight at once); the same host is never worked on twice, and
  * removals that find the window closed share one passkey prompt (#519).
  */
@@ -133,7 +133,7 @@ export async function createHostRemoval(core: CoreScreen, removed: (id: string) 
   const toasted = new WeakSet<Error>();
   return {
     label: () => label,
-    /** Forget an unreachable retirement here without sending anything to the machine. */
+    /** Forget a revoked host after the owner confirms the remaining cleanup is theirs. */
     forget(id: string, name: string, anchor: HTMLElement | null, returnFocus?: () => void): void {
       if (!label || !isCanonicalUuid(id)) return;
       /** Said aloud like a removal's refusals (#486): a silent no-op looks like a broken button. */

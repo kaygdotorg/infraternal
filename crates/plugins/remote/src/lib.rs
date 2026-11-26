@@ -77,13 +77,13 @@ pub const REMOVE: ActionDef = ActionDef {
     api_scope: Some("hosts:write"),
     fresh_passkey: false,
 };
-/// Forget only an owner's retired-unreachable host, keeping audit and machine state (D369).
+/// Forget an owner's revoked host with pending cleanup, keeping its audit record (D369, #591).
 /// Like removal, hosts:write calls require a dry run and no additional passkey tap.
 pub const FORGET: ActionDef = ActionDef {
     id: "remote.host.forget",
-    summary: "Forget a retired-unreachable host without changing the machine.",
+    summary: "Forget a revoked host whose cleanup is still pending.",
     instructions: &[
-        "Select an owned retired-unreachable host using its ID from the server inventory.",
+        "Select an owned host with pending cleanup using its ID from the server inventory.",
         "Run with dry_run first, then confirm with the review token to forget the host.",
         "Forget removes the list entry and pending cleanup, keeps the audit record, and does not touch the machine or uninstall infraternal from it.",
     ],

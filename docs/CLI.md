@@ -262,9 +262,10 @@ remote setup failure detail. `hosts remove <id> --dry-run` shows what would be
 removed and changes nothing. `hosts remove <id>` first shows that same dry run, asks
 `Type yes to confirm`, and only then removes the host and uninstalls its
 infraternal agent (D28). `--yes` skips the question for scripts; `--json` and
-pipes need it. `hosts forget <id>` is for a host that was retired and cannot be
-reached: it drops the list entry and its pending cleanup, keeps the audit record
-and does not touch the machine. It has the same `--dry-run` and `--yes`. Inside its `hosts:write` scope the key needs no further passkey tap
+pipes need it. The owner can use `hosts forget <id>` as soon as a host loses
+access and shows pending cleanup. This drops the list entry, stops pending
+cleanup and keeps the audit record. The dry run explains how to clean up any
+remaining installation on the host. This command also supports `--dry-run` and `--yes`. Inside its `hosts:write` scope the key needs no further passkey tap
 (D333); the tap was the key's approval, and every call is audited. Reads are
 counted per key and minute rather than logged one row per call.
 
