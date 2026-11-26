@@ -810,7 +810,7 @@ Each test runs in two nested user namespaces:
 Before any test, the row plants escapes in the same sandbox and fails unless
 every one fails: writes in the home directory, the checkout, the target and
 `/etc`; superblock and bind remounts of `/` read-write; unmounting `/run` and
-`/tmp`; reading, writing or exposing the covered `/var/lib/infraternal`;
+`/tmp`; opening installed files, writing to or removing the `/var/lib` cover;
 the host user bus; the nix daemon socket; a host pty; a route off
 loopback; the host network and the internet; a uid map onto host root; a file
 left in `/tmp`. These probes are negative checks only. The evidence that they
