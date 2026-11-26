@@ -21,6 +21,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The coordinator-to-node action that carries a [`RelayList`].
 pub const ACTION: &str = "mesh.relays";
@@ -170,20 +171,23 @@ fn valid_host(host: &str) -> bool {
 
 /// The node's file for the last relay list it accepted, beside its other mesh state.
 pub const FILE: &str = "mesh-relays.json";
+/// A saved relay list is an action-shaped record, so loading and saving share its frame bound.
+const MAX_FILE_BYTES: u64 = infraternal_plugin_api::MAX_ACTION_BYTES as u64;
+/// Unique pending names keep concurrent saves from truncating or following one another's files.
+static NEXT_PENDING: AtomicU64 = AtomicU64::new(0);
 
 /// Save the public part of `list` in `directory`, atomically: a temporary file, fsync, rename.
 /// # Errors
 /// Storage failures; the previous file stays.
 pub fn save(directory: &std::path::Path, list: &RelayList) -> std::io::Result<()> {
     use std::io::Write as _;
-    let bytes = serde_json::to_vec(&list.public()).map_err(std::io::Error::other)?;
-    let pending = directory.join(format!(".{FILE}.pending"));
+    let public = list.public();
+    let bytes = serde_json::to_vec(&public).map_err(std::io::Error::other)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    let (pending, mut file) = create_pending(directory)?;
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&pending)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
         std::fs::rename(&pending, directory.join(FILE))?;
@@ -195,16 +199,80 @@ pub fn save(directory: &std::path::Path, list: &RelayList) -> std::io::Result<()
     result
 }
 
+/// Create an owned, private pending file without replacing another writer's file.
+/// # Errors
+/// Returns the first filesystem error other than a pending-name collision.
+fn create_pending(
+    directory: &std::path::Path,
+) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    for _ in 0..32 {
+        let sequence = NEXT_PENDING.fetch_add(1, Ordering::Relaxed);
+        let pending = directory.join(format!(".{FILE}.{}.{sequence}.pending", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&pending)
+        {
+            Ok(file) => {
+                if let Err(error) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&pending);
+                    return Err(error);
+                }
+                return Ok((pending, file));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::ErrorKind::AlreadyExists.into())
+}
+
 /// The relay list saved in `directory`, or an empty one when there is none or it is unreadable
 /// (a node without a saved list simply has no relays until the coordinator sends one).
 #[must_use]
 pub fn load(directory: &std::path::Path) -> RelayList {
-    std::fs::read(directory.join(FILE))
+    read_saved(directory.join(FILE).as_path())
         .ok()
         .and_then(|bytes| serde_json::from_slice::<RelayList>(&bytes).ok())
         .filter(RelayList::valid)
         .map(|list| list.public())
         .unwrap_or_default()
+}
+
+/// Read one owned regular file without following links, and stop at the action-frame limit.
+/// # Errors
+/// Refuses links, special files, unowned or multiply-linked files, oversized input and I/O errors.
+fn read_saved(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != nix::unistd::Uid::effective().as_raw()
+        || metadata.nlink() != 1
+        || metadata.len() > MAX_FILE_BYTES
+    {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    // Older releases created this public cache with the process umask. Keep it readable across
+    // upgrade, but tighten its mode as soon as we have opened the owned file without following links.
+    if metadata.mode() & 0o7777 != 0o600 {
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    let capacity = usize::try_from(metadata.len()).map_err(|_| std::io::ErrorKind::InvalidData)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    Ok(bytes)
 }
 
 /// What one coordinator worker last sent its node, so it sends `mesh.relays` only on a change.
@@ -444,6 +512,115 @@ mod tests {
         };
         save(&directory, &listed).unwrap();
         assert_eq!(load(&directory), listed);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// The relay list file is private even when the process umask is permissive.
+    #[test]
+    fn saved_relay_list_has_private_mode() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory =
+            std::env::temp_dir().join(format!("relay-list-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        save(&directory, &RelayList::default()).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(directory.join(FILE))
+                .unwrap()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// A pre-existing pending symlink cannot redirect a save or truncate its target.
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_follow_a_pending_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory =
+            std::env::temp_dir().join(format!("relay-list-pending-{}", std::process::id()));
+        let target = std::env::temp_dir().join(format!("relay-list-target-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&target, b"keep this file").unwrap();
+        symlink(&target, directory.join(format!(".{FILE}.pending"))).unwrap();
+        let sequence = NEXT_PENDING.load(Ordering::Relaxed);
+        symlink(
+            &target,
+            directory.join(format!(".{FILE}.{}.{sequence}.pending", std::process::id())),
+        )
+        .unwrap();
+
+        save(&directory, &RelayList::default()).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep this file");
+        std::fs::remove_dir_all(&directory).unwrap();
+        std::fs::remove_file(target).unwrap();
+    }
+
+    /// Oversized files and symlinks are ignored instead of being decoded as saved relay state.
+    #[cfg(unix)]
+    #[test]
+    fn load_refuses_oversized_files_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let directory =
+            std::env::temp_dir().join(format!("relay-list-load-{}", std::process::id()));
+        let target =
+            std::env::temp_dir().join(format!("relay-list-load-target-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join(FILE),
+            vec![b' '; usize::try_from(MAX_FILE_BYTES).unwrap() + 1],
+        )
+        .unwrap();
+        assert_eq!(load(&directory), RelayList::default());
+
+        let target_list = RelayList {
+            relays: vec![RelayEntry {
+                name: "relay.example.org".into(),
+                port: 3478,
+                addresses: vec!["8.8.8.8".parse().unwrap()],
+            }],
+            serve: None,
+        };
+        std::fs::write(&target, serde_json::to_vec(&target_list).unwrap()).unwrap();
+        std::fs::remove_file(directory.join(FILE)).unwrap();
+        symlink(&target, directory.join(FILE)).unwrap();
+        assert_eq!(load(&directory), RelayList::default());
+
+        std::fs::remove_dir_all(&directory).unwrap();
+        std::fs::remove_file(target).unwrap();
+    }
+
+    /// Loading a legacy umask-created cache preserves it while tightening its file mode.
+    #[cfg(unix)]
+    #[test]
+    fn loading_legacy_relay_list_secures_its_mode() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let directory =
+            std::env::temp_dir().join(format!("relay-list-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let list = RelayList {
+            relays: vec![RelayEntry {
+                name: "relay.example.org".into(),
+                port: 3478,
+                addresses: vec!["8.8.8.8".parse().unwrap()],
+            }],
+            serve: None,
+        };
+        save(&directory, &list).unwrap();
+        std::fs::set_permissions(directory.join(FILE), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        assert_eq!(load(&directory), list);
+        assert_eq!(
+            std::fs::metadata(directory.join(FILE)).unwrap().mode() & 0o777,
+            0o600
+        );
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
