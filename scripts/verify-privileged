@@ -18,8 +18,8 @@ What the sandbox contains, and what it does not:
 - Each test binary runs in two nested user namespaces. The outer one builds
   the mounts: the host filesystem bind-mounted read-only (recursively) and
   `pivot_root`ed with the old root detached; size-capped tmpfs at /tmp, /run,
-  /var/tmp and /dev/shm; a minimal /dev with a private devpts; a tmpfs over
-  the nix daemon socket. The inner one (new user, net, mount and PID
+    /var/tmp and /dev/shm; a minimal /dev with a private devpts; a tmpfs over
+    the nix daemon socket and a read-only cover over /var/lib. The inner one (new user, net, mount and PID
   namespaces, `--kill-child`) runs the test. Mounts are locked against nested
   namespaces, so the test's uid 0 (the caller's uid outside) cannot undo them.
   The network namespace has only loopback.
@@ -117,7 +117,7 @@ PACKAGE_NO_DEFAULT_FEATURES = {'infraternal-plugin-mesh'}
 # Targets that need a feature their package's shared set leaves off. The DNS
 # resolver has feature-specific config fields that other fixtures do not set.
 TARGET_FEATURES = {
-    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,mesh-dns',
+    ('infraternal-plugin-mesh', 'test:dns'): 'agent,server,test-support,mesh-dns',
     # Its IPv4-only DNS rows resolve a peer's name through the mesh resolver (#578, J1142). Its kernel
     # rows also need nft, which only test-support builds trust inside the sandbox.
     ('infraternal-plugin-mesh', 'test:ipv6_disabled'): 'agent,server,test-support,mesh-dns',
@@ -207,6 +207,14 @@ mount -t tmpfs -o mode=1777,size=256m tmpfs "$new/dev/shm"
 # Fresh /run and /var/tmp: tests may add named netns under /run/netns.
 mount -t tmpfs -o mode=755,size=64m tmpfs "$new/run"
 mount -t tmpfs -o mode=1777,size=256m tmpfs "$new/var/tmp"
+# Hide persistent host data, even when the real install is absent. The
+# inaccessible placeholder makes opening a hard-coded state path fail
+# instead of looking like a machine that has never been installed.
+mount -t tmpfs -o mode=755,size=1m tmpfs "$new/var/lib"
+mkdir -m 000 "$new/var/lib/infraternal"
+mount -o remount,ro "$new/var/lib"
+# Policy fixtures need a trusted parent, so use /run rather than sticky /tmp.
+mkdir -m 700 "$new/run/infraternal-test"
 # Build outputs read through `ut`, a tmpfs dir whose `debug` links to the
 # read-only target: tests can make scratch dirs there and still find examples.
 mkdir -p "$new/tmp/ut"
@@ -475,6 +483,7 @@ def sandbox_test_environment(root):
         'LANG': 'C.UTF-8',
         'PYTHONPATH': str(root / 'scripts'),
         'INFRATERNAL_TEST_STATE_ROOT': '/tmp/st',
+        'INFRATERNAL_TEST_HOST_FIREWALL_ROOT': '/run/infraternal-test',
         'INFRATERNA_DNS_TEST_PARENT_NETNS': os.readlink('/proc/self/ns/net'),
     }
     verified = [path for path in FIREWALL_TOOL_PATHS if root_owned_executable(path)]
@@ -528,6 +537,9 @@ ESCAPES = {
     'write in the checkout': 'touch "$CHECKOUT/.privileged-escape"',
     'write in the build target': 'touch "$TARGET_DIR/.privileged-escape"',
     'write /etc': 'touch /etc/.privileged-escape',
+    'read /var/lib/infraternal': 'ls -A /var/lib/infraternal',
+    'write /var/lib/infraternal': 'touch /var/lib/infraternal/.privileged-escape',
+    'unmount /var/lib': 'umount -l /var/lib',
     'superblock remount rw /': 'mount -o remount,rw /',
     'bind remount rw /': 'mount -o remount,bind,rw / && touch "$HOME_DIR/.privileged-escape-bindrw"',
     'unmount /run': 'umount /run',
@@ -555,7 +567,10 @@ def self_check(scratch, target, checkout, scope):
     marker = f'privileged-persist-{uuid.uuid4().hex}'
     outside = subprocess.run(['ip', '-4', 'route', 'get', '1.1.1.1'], capture_output=True, text=True).stdout
     address = re.search(r'\bsrc (\S+)', outside)
-    probes = ['set +e']
+    probes = ['mountpoint -q /var/lib && test "$(stat -f -c %T /var/lib)" = tmpfs && '
+              'test -d /var/lib/infraternal && test ! -L /var/lib/infraternal || '
+              '{ echo "privileged integration: /var/lib/infraternal fixture cover is missing" >&2; exit 1; }',
+              'set +e']
     for label, probe in ESCAPES.items():
         probes.append(f'if ( {probe} ) >/dev/null 2>&1; then echo "ESCAPED: {label}"; else echo "contained: {label}"; fi')
     probes.append(f'touch /tmp/{marker} && echo "contained: wrote only to the sandbox tmpfs"')

@@ -790,7 +790,11 @@ Each test runs in two nested user namespaces:
   build-output view `CARGO_TARGET_DIR=/tmp/ut`), `/run` (64 MiB), `/var/tmp`
   and `/dev/shm` (256 MiB each); a minimal `/dev` (null, zero, full, random,
   urandom, tty, `net/tun`, a private devpts); a tmpfs over the nix daemon
-  socket directory;
+  socket directory. A separate read-only tmpfs hides `/var/lib` and blocks
+  traversal into `/var/lib/infraternal`. Mesh test builds use
+  `INFRATERNAL_TEST_HOST_FIREWALL_ROOT=/run/infraternal-test` for implicit
+  listener policy paths. Tests that supply a policy layout explicitly keep
+  their files and fake loader under their own private root;
 - the inner namespace (`unshare --user --map-root-user --net --mount --pid
   --kill-child`) runs the test. uid 0 there is the caller's uid outside, and
   the kernel locks the inherited mounts, so the test cannot remount `/`
@@ -806,7 +810,8 @@ Each test runs in two nested user namespaces:
 Before any test, the row plants escapes in the same sandbox and fails unless
 every one fails: writes in the home directory, the checkout, the target and
 `/etc`; superblock and bind remounts of `/` read-write; unmounting `/run` and
-`/tmp`; the host user bus; the nix daemon socket; a host pty; a route off
+`/tmp`; reading, writing or exposing the covered `/var/lib/infraternal`;
+the host user bus; the nix daemon socket; a host pty; a route off
 loopback; the host network and the internet; a uid map onto host root; a file
 left in `/tmp`. These probes are negative checks only. The evidence that they
 are live is J233's manual breakout of the earlier single-level layout (review
