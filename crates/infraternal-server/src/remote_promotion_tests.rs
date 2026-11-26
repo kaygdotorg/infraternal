@@ -534,11 +534,13 @@ async fn forget_refuses_abandoned_successor_cleanup_reconnect() {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES(?,'review owner',1,'fixture')")
-        .bind(&person)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,name,owner,recovery_hash) VALUES(?,'review owner',1,'fixture')",
+    )
+    .bind(&person)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("UPDATE sessions SET user_id=? WHERE token_hash='s'")
         .bind(&person)
         .execute(&pool)

@@ -460,7 +460,13 @@ async fn forget_stops_an_admitted_cleanup_before_its_next_step() {
 
     let fingerprint = openssl::sha::sha256(&removed.identity.certificate.to_der().unwrap());
     assert!(removed.store.admit(&fingerprint, now).await.is_err());
-    assert!(removed.store.admit_cleanup(&fingerprint, now).await.is_err());
+    assert!(
+        removed
+            .store
+            .admit_cleanup(&fingerprint, now)
+            .await
+            .is_err()
+    );
 
     // The first cleanup call preceded Forget. Its late reply must never
     // cause a new uninstall call on the already admitted connection.
