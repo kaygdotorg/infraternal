@@ -55,7 +55,7 @@ fn only_advertising_peers_are_opted_in_while_the_switch_is_on() {
     assert_eq!(opted(policy, true), [Some(false), Some(false)]);
 }
 
-/// A WireGuard data datagram of `len` bytes: the message type and zeroes.
+/// A `WireGuard` data datagram of `len` bytes: the message type and zeroes.
 fn data(len: usize) -> Packet {
     let mut bytes = vec![0_u8; len];
     bytes[0] = 4;
