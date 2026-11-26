@@ -1370,6 +1370,7 @@ impl Node {
         }
         Ok(())
     }
+    /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
     ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
