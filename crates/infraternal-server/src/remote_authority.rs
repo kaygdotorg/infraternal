@@ -261,7 +261,9 @@ impl EnrollmentStore {
         answer: Option<(&'static str, &[&'static str])>,
         report: Option<&crate::access_report::AccessReport>,
     ) -> Result<(), EnrollmentError> {
-        let mut transaction = self.0.begin().await?;
+        // Take the write lock up front: without an `answer` the first statement is a read, and
+        // SQLite refuses to upgrade a deferred transaction's stale snapshot (#562).
+        let mut transaction = infraternal_plugin_api::storage::begin_immediate(&self.0).await?;
         // Like the receipt below, only this person's unconfirmed cleanup may
         // record an answer; a foreign or duplicate one changes nothing.
         if let Some((host_cleanup, retained)) = answer {
@@ -818,6 +820,108 @@ pub(crate) mod tests {
                 .await,
             Err(EnrollmentError::Denied)
         ));
+    }
+
+    /// A removal receipt is recorded while connected hosts keep writing (#562). Reading before
+    /// writing in a deferred transaction makes SQLite refuse the write with
+    /// `SQLITE_BUSY_SNAPSHOT` once another writer has committed in between, without waiting
+    /// the busy timeout out, so the receipt was lost and the host asked again.
+    #[cfg(all(feature = "remote", feature = "ssh"))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn removal_receipts_beside_other_writers_all_commit() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        const CONFIRMERS: usize = 4;
+        const PER_TASK: usize = 25;
+        let directory = std::env::temp_dir().join(format!("receipt-{}", Uuid::new_v4().simple()));
+        let pool = crate::runtime::test_open_database(&directory)
+            .await
+            .unwrap();
+        let (store, pool, busy_host) = enrolled_with_pool(pool).await;
+        // The person who owns the hosts being removed: the receipt's cleanup rows name them,
+        // and retiring a host rewrites its row to its owner.
+        let person = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, name, owner, recovery_hash, username, display_name) VALUES (?, 'person', 0, 'test', 'person', 'Person')")
+            .bind(person.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        let hosts: Vec<Uuid> = (0..CONFIRMERS * PER_TASK).map(|_| Uuid::new_v4()).collect();
+        for host in &hosts {
+            sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, ?, 'rootless', 1002, 100)")
+                .bind(host.as_bytes().as_slice())
+                .bind(person.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO remote_login_cleanup(host_id, person_id) VALUES (?, ?)")
+                .bind(host.as_bytes().as_slice())
+                .bind(person.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        // Connected hosts: small autocommit writes, as their reports are.
+        let stop = Arc::new(AtomicBool::new(false));
+        let writers: Vec<_> = (0..2)
+            .map(|writer| {
+                let (pool, stop) = (pool.clone(), stop.clone());
+                tokio::spawn(async move {
+                    let mut turn = 0_u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        turn += 1;
+                        sqlx::query("UPDATE remote_hosts SET hostname=? WHERE id=?")
+                            .bind(format!("busy-{writer}-{turn}"))
+                            .bind(busy_host.as_bytes().as_slice())
+                            .execute(&pool)
+                            .await
+                            .unwrap();
+                        // sleep: leave the write lock free between reports, as separate hosts do.
+                        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                    }
+                })
+            })
+            .collect();
+        let confirmers: Vec<_> = hosts
+            .chunks(PER_TASK)
+            .map(|chunk| {
+                let (store, chunk) = (store.clone(), chunk.to_vec());
+                tokio::spawn(async move {
+                    let mut lost = Vec::new();
+                    for host in chunk {
+                        if let Err(error) = store.confirm_login_cleanup(host, person).await {
+                            lost.push(error.to_string());
+                        }
+                    }
+                    lost
+                })
+            })
+            .collect();
+        let mut lost = Vec::new();
+        for confirmer in confirmers {
+            lost.extend(confirmer.await.unwrap());
+        }
+        stop.store(true, Ordering::Relaxed);
+        for writer in writers {
+            writer.await.unwrap();
+        }
+        let confirmed: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM remote_login_cleanup WHERE confirmed=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(
+            lost.is_empty(),
+            "{} of {} receipts were lost: {:?}",
+            lost.len(),
+            hosts.len(),
+            lost.first()
+        );
+        assert_eq!(confirmed, i64::try_from(hosts.len()).unwrap());
     }
 
     /// A pre-existing invitation cannot revive a pending-removed identity or be consumed.
