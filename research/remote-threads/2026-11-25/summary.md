@@ -74,7 +74,15 @@ key p99 11.84 ms, reattach p99 229 ms).
    another writer committed, still exists in the code. It is just much less likely when the HTTP
    handler does not wait behind 200 links' traffic on the same thread. `BEGIN IMMEDIATE` remains the
    fix.
-5. **Per-packet authority checks** (`AuthorityGuard::cancelled` / `permits`, 0.57% of the old
+5. **Profile, shipped runtime, 200 × 2** (`perf record -e cpu-clock -F 499 -g`, a separate run,
+   `perf/`): the three `tokio-rt-worker` threads have 8.45, 8.40 and 8.38% of all samples (25.4%
+   together; J1220's one thread had 22.9%), and the agents and shims have 62%. Inside the workers the
+   profile stays flat. The top symbols are quinn's `ConnectionDriver::poll` (0.62%),
+   `embedded::run_actor` (0.51%), `clock_gettime` (0.43%), tokio `Notified::poll` (0.42%) and
+   `AuthorityGuard::cancelled` / `permits` (0.36 + 0.23%). The kernel takes 7.3% (UDP, nftables,
+   conntrack, scheduling). No lock or single task stands out, so nothing serialises the links
+   behind one owner.
+6. **Per-packet authority checks** (`AuthorityGuard::cancelled` / `permits`, 0.57% of the old
    thread's samples) are not worth touching in auth code for that share. Unchanged.
 
 ## Not changed, for the owner
@@ -95,7 +103,9 @@ key p99 11.84 ms, reattach p99 229 ms).
 
 ## Files
 
-- `raw/*.raw`: the driver's full output per point (the last line is the JSON); `results.csv`.
+- `raw/{production,current}*.raw`: the driver's full output per point (the last line is the JSON); `results.csv`.
+  `raw/profile-production-h200-t2.raw` is the profiled run (not in the table: perf slows it).
+- `perf/srv-*.txt`: flat profile by command, PID, DSO and symbol (the workers).
 - `measure.py`, `matrix.sh`, `run-all.sh`, `profile.sh`, `table.py`.
 - To rerun, build the CLI and the server test with `--features remote` as in J1057's #562
   comment, copy them with `scripts/` and `crates/infraternal/tests/profile` to the perf VM, then run

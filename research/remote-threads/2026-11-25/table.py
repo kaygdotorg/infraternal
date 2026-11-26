@@ -1,6 +1,6 @@
 """Turn the driver's per-point JSON (raw/*.raw, last line) into results.csv and a Markdown table.
 
-Usage: python3 table.py raw/*.raw > results.md   (writes results.csv beside this file)
+Usage: python3 table.py raw/production*.raw raw/current*.raw > results.md   (writes results.csv beside this file)
 One row per run: runtime and round from the file name, then server CPU, the busiest server
 thread, wakeups, RSS and the latency rows the D375 table asks for (J1246, #562).
 """
