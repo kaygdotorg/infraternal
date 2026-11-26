@@ -63,12 +63,12 @@ unchanged. Relayed is still far below direct at this round trip (§4).
 
 ## 3. Relayed against direct
 
-`perf.md` beside this file: latency through the relay is the path's own (0 ms
-added on this topology); relayed goodput is 70 Mbit/s with one flow and 193 with
-eight, against 0.23–0.41 and 1.9–3.7 Gbit/s direct, at about five times the CPU
-per Gbit; a node holding a relayed pair wakes about 12 times a second while
-idle; a restarted relay has the pair back about 4 s after it serves again.
-Measured on dev-02 (the perf VM's lock was held by another job all evening).
+`perf.md` beside this file (perf VM, `perf-run`): the relay adds under a
+millisecond of round trip on this topology; relayed goodput is 0.145 Gbit/s with
+one flow and 0.313 with eight, against 0.720 and 2.725 direct, at 5–8 times the
+CPU per Gbit on each node plus about 1.5 s per Gbit on the relay; a node holding
+a relayed pair wakes about 11 times a second while idle; a restarted relay has
+the pair back about 4 s after it serves again.
 
 ## 4. Open for slice 1b
 
