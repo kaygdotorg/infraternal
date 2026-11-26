@@ -774,7 +774,7 @@ fn success_message(action_id: &str) -> &'static str {
         "remote.host.list" => "The server host list was read.",
         "sessions.list" => "The server session list was read.",
         "remote.host.remove" => "The host was removed.",
-        "remote.host.forget" => "The host was forgotten here. The machine itself was not changed.",
+        "remote.host.forget" => "The host was forgotten here.",
         "ssh.start" => "Host setup completed.",
         _ => "The hosted action completed.",
     }

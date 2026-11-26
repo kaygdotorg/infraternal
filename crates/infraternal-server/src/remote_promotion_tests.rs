@@ -584,6 +584,15 @@ async fn forget_refuses_abandoned_successor_cleanup_reconnect() {
         service.forget_browser(token, host, now).await.unwrap()["state"],
         "forgotten"
     );
+    let history: (String, String, bool) = sqlx::query_as(
+        "SELECT p.state,p.cleanup,c.revoked_at IS NOT NULL FROM remote_host_promotions p
+         JOIN remote_certificates c ON c.fingerprint=p.successor_fingerprint WHERE p.attempt=?",
+    )
+    .bind(attempt.as_bytes().as_slice())
+    .fetch_one(&store.0)
+    .await
+    .unwrap();
+    assert_eq!(history, ("abandoned".to_owned(), "none".to_owned(), true));
     assert!(
         crate::remote_guard::AuthorityGuard::admit_transport(store, [7; 32])
             .await

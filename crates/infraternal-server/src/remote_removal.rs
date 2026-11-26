@@ -398,7 +398,7 @@ impl Removal {
         let (name, _) = Self::forget_record(&mut tx, person, host).await?;
         let name = display_name(&name);
         Ok(
-            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops cleanup retries. The audit record stays. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
+            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops cleanup retries. Cleanup already sent to the machine may still finish. The audit record stays. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
         )
     }
 
@@ -524,6 +524,23 @@ impl Removal {
             .bind(entry.host.as_bytes().as_slice())
             .execute(&mut *tx)
             .await?;
+        // A successor can deliver its own cleanup after ordinary removal
+        // tombstones the host. Forget ends that delivery as well, preserving
+        // the promotion and certificate records without claiming a receipt.
+        sqlx::query(crate::enrollment::promotion::ABANDON_WHERE_HOST)
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE remote_host_promotions SET cleanup='none' WHERE host_id=? AND cleanup IN ('uninstall','retire')")
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE remote_certificates SET revoked_at=COALESCE(revoked_at,?) WHERE host_id=? AND role='successor'")
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
         // Retirement's trigger creates a cleanup obligation. Forget deliberately cancels it,
         // along with the uninstall outbox and unfinished-bootstrap intent, after recording history.
         for statement in [
@@ -547,7 +564,7 @@ impl Removal {
         let _fence = self
             .store
             .1
-            .quiesce(entry.host)
+            .quiesce_forget(entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         tx.commit().await?;
@@ -555,7 +572,7 @@ impl Removal {
         self.store.publish_revoked_authority().await;
         self.store.2.publish();
         Ok(
-            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here. The machine itself was not changed.",display_name(&name))}),
+            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here.",display_name(&name))}),
         )
     }
 

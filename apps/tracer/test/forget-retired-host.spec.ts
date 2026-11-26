@@ -22,7 +22,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
           expect(route.request().postDataJSON()).toEqual({ host_id: id });
           forgotten = true;
           state = "";
-          await route.fulfill({ json: { host_id: id, state: "forgotten", message: "Host forgotten. The machine itself was not changed." } });
+          await route.fulfill({ json: { host_id: id, state: "forgotten", message: "Host forgotten." } });
           notifyInventory();
         });
         await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
@@ -79,7 +79,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await row.click();
         await expect(page.getByText("Forget retired-worker?", { exact: true })).toBeVisible();
         const guidance = page.locator(".ui-confirm-tip-detail");
-        for (const words of ["stops cleanup retries", "stop and remove its service unit", "agent files", "identity key"]) {
+        for (const words of ["stops cleanup retries", "Cleanup already sent to the machine may still finish", "stop and remove its service unit", "agent files", "identity key"]) {
           await expect(guidance).toContainText(words);
         }
         expect(forgotten).toBe(false);
