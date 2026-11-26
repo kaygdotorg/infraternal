@@ -2,9 +2,13 @@
 //!
 //! Any node with a server-purpose identity can run it (D313 Q3). It never holds
 //! a mesh key: it sees only the 4-byte link id and opaque ciphertext. A link
-//! forms only when both hosts asked for each other; the relay then hands both
+//! forms only when two different hosts asked for the same opaque pair token
+//! (D401 Q8: requests never name the other host); the relay then hands both
 //! the same id and forwards each frame unchanged to the other end, so
-//! forwarding is one table read and one `send_datagram` with no copy.
+//! forwarding is one table read and one `send_datagram` with no copy. A token
+//! has at most two requesters; a third is ignored, so nobody can join a pair
+//! that is already waiting or linked. The relay keeps counters only, never a
+//! per-pair log.
 //!
 //! Everything is bounded: pre-authentication handshakes, hosts, requests per
 //! host, the control writer queue, per-connection QUIC buffers (see `tls`) and
@@ -17,7 +21,7 @@
 use crate::{
     probe::{self, ProbeKey},
     tls,
-    wire::{self, HostId, LinkId, Notice, Request},
+    wire::{self, HostId, LinkId, Notice, Request, Token},
 };
 use quinn::{AsyncUdpSocket, UdpPoller, udp};
 use std::{
@@ -171,10 +175,12 @@ fn canonical_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// One connected, admitted host: its connection, notice queue, the tokens it asked for and
+/// its share of the forwarding budget.
 struct Host {
     connection: quinn::Connection,
     notices: mpsc::Sender<Notice>,
-    wants: HashSet<HostId>,
+    wants: HashSet<Token>,
     datagrams: Arc<QueueBudget>,
 }
 
@@ -276,23 +282,27 @@ fn queue_forward_datagram(
     }))
 }
 
+/// A formed link: the two hosts (and the connections they had when it formed) and the pair's
+/// forwarding budget. `Table::pairs` maps the pair's token to it.
 struct Link {
     ends: [(HostId, quinn::Connection); 2],
     datagrams: Arc<QueueBudget>,
 }
 
+/// Every table of the relay, behind one lock.
+///
+/// Invariants: `requesters[t]` holds one or two different hosts, each of which has `t` in its
+/// `wants`; `pairs[t]` exists exactly while `links` holds a link for `t`, and that link's two
+/// ends are `requesters[t]`.
 #[derive(Default)]
 struct Table {
     hosts: HashMap<HostId, Host>,
     links: HashMap<LinkId, Link>,
-    pairs: HashMap<(HostId, HostId), LinkId>,
-    retired_datagrams: HashMap<(HostId, HostId), Weak<QueueBudget>>,
+    requesters: HashMap<Token, Vec<HostId>>,
+    pairs: HashMap<Token, LinkId>,
+    retired_datagrams: HashMap<Token, Weak<QueueBudget>>,
     retired_host_datagrams: HashMap<HostId, Weak<QueueBudget>>,
     next: u32,
-}
-
-fn pair(a: HostId, b: HostId) -> (HostId, HostId) {
-    if a <= b { (a, b) } else { (b, a) }
 }
 
 impl Table {
@@ -311,7 +321,8 @@ impl Table {
         }
     }
 
-    fn datagrams_for_pair(&mut self, key: (HostId, HostId)) -> Arc<QueueBudget> {
+    /// The forwarding budget for the pair named `key`, reusing one old datagrams still hold.
+    fn datagrams_for_pair(&mut self, key: Token) -> Arc<QueueBudget> {
         self.retired_datagrams
             .remove(&key)
             .and_then(|budget| budget.upgrade())
@@ -339,7 +350,7 @@ impl Table {
     }
 
     /// Retain only a weak lookup while old QUIC datagrams still own this pair's budget.
-    fn retire_datagrams(&mut self, key: (HostId, HostId), budget: &Arc<QueueBudget>) {
+    fn retire_datagrams(&mut self, key: Token, budget: &Arc<QueueBudget>) {
         if Arc::strong_count(budget) <= 1 {
             return;
         }
@@ -350,54 +361,74 @@ impl Table {
         }
     }
 
-    /// Remove the link between two hosts, telling each end that is still current.
-    fn unlink(&mut self, a: HostId, b: HostId) {
-        let key = pair(a, b);
-        let Some(id) = self.pairs.remove(&key) else {
+    /// Record that `host` asks for `token`. Returns false when two other hosts already hold
+    /// it: a token names one pair, so a third requester is never let in.
+    fn add_requester(&mut self, host: HostId, token: Token) -> bool {
+        let requesters = self.requesters.entry(token).or_default();
+        if requesters.contains(&host) {
+            return true;
+        }
+        if requesters.len() >= 2 {
+            return false;
+        }
+        requesters.push(host);
+        true
+    }
+
+    /// Withdraw `host`'s request for `token` and end the token's link, telling each end that
+    /// is still current. The other requester stays waiting for a new partner request.
+    fn unlink(&mut self, host: HostId, token: Token) {
+        if let Some(requesters) = self.requesters.get_mut(&token) {
+            requesters.retain(|requester| *requester != host);
+            if requesters.is_empty() {
+                self.requesters.remove(&token);
+            }
+        }
+        let Some(id) = self.pairs.remove(&token) else {
             return;
         };
         if let Some(link) = self.links.remove(&id) {
-            self.retire_datagrams(key, &link.datagrams);
-            for (index, (host, connection)) in link.ends.iter().enumerate() {
-                let peer = link.ends[1 - index].0;
+            self.retire_datagrams(token, &link.datagrams);
+            for (host, connection) in &link.ends {
                 if let Some(entry) = self.current(*host, connection.stable_id()) {
-                    notify(entry, Notice::Unlinked { peer });
+                    notify(entry, Notice::Unlinked { token });
                 }
             }
         }
     }
 
-    fn try_link(&mut self, a: HostId, b: HostId) {
-        if a == b || self.pairs.contains_key(&pair(a, b)) {
+    /// Form the link for `token` when two different connected hosts asked for it.
+    fn try_link(&mut self, token: Token) {
+        if self.pairs.contains_key(&token) {
             return;
         }
+        let Some(&[a, b]) = self.requesters.get(&token).map(Vec::as_slice) else {
+            return;
+        };
         let (Some(first), Some(second)) = (self.hosts.get(&a), self.hosts.get(&b)) else {
             return;
         };
-        if !first.wants.contains(&b) || !second.wants.contains(&a) {
-            return;
-        }
         let ends = [
             (a, first.connection.clone()),
             (b, second.connection.clone()),
         ];
-        let datagrams = self.datagrams_for_pair(pair(a, b));
+        let datagrams = self.datagrams_for_pair(token);
         let id = self.allocate();
-        self.pairs.insert(pair(a, b), id);
+        self.pairs.insert(token, id);
         self.links.insert(id, Link { ends, datagrams });
-        if let Some(entry) = self.hosts.get(&a) {
-            notify(entry, Notice::Linked { peer: b, id });
-        }
-        if let Some(entry) = self.hosts.get(&b) {
-            notify(entry, Notice::Linked { peer: a, id });
+        for host in [a, b] {
+            if let Some(entry) = self.hosts.get(&host) {
+                notify(entry, Notice::Linked { token, id });
+            }
         }
     }
 
+    /// Forget a host: retire its budget and end every link its tokens formed.
     fn remove_host(&mut self, host: HostId) {
         if let Some(entry) = self.hosts.remove(&host) {
             self.retire_host_datagrams(host, &entry.datagrams);
-            for peer in entry.wants {
-                self.unlink(host, peer);
+            for token in entry.wants {
+                self.unlink(host, token);
             }
         }
     }
@@ -470,6 +501,7 @@ impl Shared {
         true
     }
 
+    /// Apply one control request from `host`'s current connection; false ends that connection.
     fn request(&self, host: HostId, connection: usize, request: Request) -> bool {
         let mut table = self.write();
         let Some(entry) = table.hosts.get_mut(&host) else {
@@ -479,18 +511,26 @@ impl Shared {
             return false;
         }
         match request {
-            Request::Link(peer) => {
-                if !entry.wants.contains(&peer)
-                    && entry.wants.len() >= self.limits.requests_per_host
-                {
+            Request::Link(token) => {
+                if entry.wants.contains(&token) {
+                    return true;
+                }
+                if entry.wants.len() >= self.limits.requests_per_host {
                     return false;
                 }
-                entry.wants.insert(peer);
-                table.try_link(host, peer);
+                // A token two other hosts already hold is not this host's pair: the request
+                // is ignored (not an error, so a stray token cannot end the connection).
+                if table.add_requester(host, token) {
+                    if let Some(entry) = table.hosts.get_mut(&host) {
+                        entry.wants.insert(token);
+                    }
+                    table.try_link(token);
+                }
             }
-            Request::Unlink(peer) => {
-                entry.wants.remove(&peer);
-                table.unlink(host, peer);
+            Request::Unlink(token) => {
+                if entry.wants.remove(&token) {
+                    table.unlink(host, token);
+                }
             }
         }
         true
@@ -863,9 +903,10 @@ mod datagram_budget_tests {
         assert_eq!(third_host.queued_units.load(Ordering::Relaxed), 0);
     }
 
+    /// A pair that links again keeps the budget its old, still-queued datagrams hold.
     #[test]
     fn relinking_same_pair_keeps_its_cap_while_old_datagrams_remain_queued() {
-        let pair = (HostId([1; 16]), HostId([2; 16]));
+        let pair = Token([1; 16]);
         let mut table = Table::default();
         let first = table.datagrams_for_pair(pair);
         let held = first

@@ -16,7 +16,8 @@ delta.
 
 ## Relay identity and connection
 
-Nodes connect to a relay over QUIC using ALPN `infraternal-relay/1`. Both
+Nodes connect to a relay over QUIC using ALPN `infraternal-relay/2` (version 2
+names links by opaque pair tokens, D401 Q8; version 1 named hosts). Both
 directions authenticate certificates issued by the deployment CA. A node
 authenticates the relay's configured DNS name and server purpose. The relay
 accepts a node only when its verified host certificate contains exactly one
@@ -25,7 +26,7 @@ host. A client supplied name never establishes identity. Certificate name or
 purpose checks are not relaxed.
 
 After connecting, the node opens one bidirectional QUIC stream and writes the
-four-byte hello `IFR1`. This stream carries link requests and notices. Mesh
+four-byte hello `IFR2`. This stream carries link requests and notices. Mesh
 packets use QUIC DATAGRAM frames on the same connection. A reconnect replaces
 the previous connection for that host and ends its links; both peers must
 request their links again. Queued DATAGRAM reservations from an older
@@ -48,17 +49,28 @@ control stream. The largest message is 21 bytes.
 
 | Direction | Kind | Body | Total |
 | --- | --- | --- | ---: |
-| Node → relay | `0x01` Link | 16-byte host UUID | 17 bytes |
-| Node → relay | `0x02` Unlink | 16-byte host UUID | 17 bytes |
-| Relay → node | `0x81` Linked | 16-byte peer UUID, nonzero 32-bit big-endian link ID | 21 bytes |
-| Relay → node | `0x82` Unlinked | 16-byte peer UUID | 17 bytes |
+| Node → relay | `0x01` Link | 16-byte pair token | 17 bytes |
+| Node → relay | `0x02` Unlink | 16-byte pair token | 17 bytes |
+| Relay → node | `0x81` Linked | 16-byte pair token, nonzero 32-bit big-endian link ID | 21 bytes |
+| Relay → node | `0x82` Unlinked | 16-byte pair token | 17 bytes |
 
-A relay creates a link only after both authenticated hosts request each other.
-It assigns the same nonzero ID at both ends. A sender may forward only on a
+Requests never name the other host (D401 Q8). Both ends of a pair compute the
+same token: the first 16 bytes of HMAC-SHA256 keyed with the pair's X25519
+static-static secret (one end's mesh private key with the other's mesh public
+key) over the label `infraternal relay pair token v1\0` followed by the relay's
+certificate DNS name. Only the two ends know the secret, the token is one-way,
+and it differs per relay, so two relays carrying one pair see unrelated values.
+A peer key whose shared secret is all zero is refused. The relay still learns
+which two of its connections it joins; that is accepted (D401 Q8).
+
+A relay creates a link only after two different authenticated hosts request
+the same token. A token has at most two requesters; a further request for it
+is ignored without closing the connection, so nobody joins a pair that is
+waiting or linked. It assigns the same nonzero ID at both ends. A sender may forward only on a
 link whose ID belongs to its connection; unknown IDs and IDs belonging to
 another host are dropped. An Unlinked notice means the peer withdrew or left;
 the surviving request remains pending. A node can withdraw its own request
-with Unlink.
+with Unlink. Relays keep counters only, never a per-pair log.
 
 Each QUIC DATAGRAM begins with a four-byte big-endian nonzero link ID. The
 remainder is forwarded unchanged as opaque WireGuard ciphertext. The relay

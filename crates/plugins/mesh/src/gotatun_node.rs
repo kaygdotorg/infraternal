@@ -569,7 +569,7 @@ impl Engine {
 
     /// Test seam (#265 J618): judge one packet with the live filter, exactly as the packet
     /// path would, so a namespace test can see which grants are published right now.
-    #[cfg(feature = "test-support")]
+    #[cfg(all(test, feature = "test-support"))]
     pub(crate) fn check_packet(&self, packet: &mut [u8], direction: Direction) -> bool {
         self.filter.check(packet, direction)
     }

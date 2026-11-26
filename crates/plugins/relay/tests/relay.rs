@@ -1,4 +1,4 @@
-//! Real quinn relay on loopback: mutual links, unchanged forwarding, refusals, replacement and probes [313].
+//! Real quinn relay on loopback: token links, unchanged forwarding, refusals, replacement and probes [313, D401].
 #![cfg(feature = "test-support")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,15 +9,21 @@ use infraternal_plugin_relay::{
     relay::{Admission, Limits, Relay},
     testing::{Authority, Purpose},
     tls,
-    wire::{HostId, LinkId, Notice},
+    wire::{HostId, LinkId, Notice, Token},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 const NAME: &str = "relay-1.mesh.test";
 const WAIT: Duration = Duration::from_secs(5);
 
+/// A host id made of one repeated byte.
 fn host(byte: u8) -> HostId {
     HostId([byte; 16])
+}
+
+/// The token the pair of hosts `a` and `b` would derive; any value both ends share works.
+fn token(a: u8, b: u8) -> Token {
+    Token([a.min(b) << 4 | a.max(b); 16])
 }
 
 fn everyone() -> Admission {
@@ -71,23 +77,25 @@ fn frame(id: LinkId, payload: &[u8]) -> Bytes {
     out.freeze()
 }
 
+/// Both clients ask for `pair`; returns the link id after both got the same `Linked` notice.
 async fn linked(
     a: &Client,
     an: &mut Notices,
     b: &Client,
     bn: &mut Notices,
-    ids: (HostId, HostId),
+    pair: Token,
 ) -> LinkId {
-    a.link(ids.1).await.unwrap();
-    b.link(ids.0).await.unwrap();
-    let Notice::Linked { peer, id } = notice(an).await else {
+    a.link(pair).await.unwrap();
+    b.link(pair).await.unwrap();
+    let Notice::Linked { token, id } = notice(an).await else {
         panic!("a not linked");
     };
-    assert_eq!(peer, ids.1);
-    assert_eq!(notice(bn).await, Notice::Linked { peer: ids.0, id });
+    assert_eq!(token, pair);
+    assert_eq!(notice(bn).await, Notice::Linked { token: pair, id });
     id
 }
 
+/// Two hosts with one token exchange datagrams unchanged; a third host cannot join or inject.
 #[tokio::test]
 async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
     let mut ca = Authority::new();
@@ -96,7 +104,7 @@ async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
     let (a, mut an) = client(&mut ca, address, host(1)).await;
     let (b, mut bn) = client(&mut ca, address, host(2)).await;
     let (c, mut cn) = client(&mut ca, address, host(3)).await;
-    let id = linked(&a, &mut an, &b, &mut bn, (host(1), host(2))).await;
+    let id = linked(&a, &mut an, &b, &mut bn, token(1, 2)).await;
 
     a.connection().send_datagram(frame(id, &[])).unwrap();
     assert!(
@@ -122,9 +130,11 @@ async fn linked_hosts_exchange_unchanged_datagrams_and_others_cannot_inject() {
         assert_eq!(got, frame(id, &payload), "b to a, {size} bytes");
     }
 
-    // C asks for A, but A never asked for C: no link, and C's guess of the
+    // C asks for a token A never asked for, and for the A-B token itself
+    // (which two hosts already hold): no link either way, and C's guess of the
     // A-B id is dropped rather than delivered to either end.
-    c.link(host(1)).await.unwrap();
+    c.link(token(1, 3)).await.unwrap();
+    c.link(token(1, 2)).await.unwrap();
     c.connection()
         .send_datagram(frame(id, b"injected"))
         .unwrap();
@@ -217,6 +227,7 @@ async fn stalled_control_hello_times_out_and_releases_its_permit() {
     relay.close().await;
 }
 
+/// Unlink, a replacing connection and a disconnect each end the link for the other end.
 #[tokio::test]
 async fn unlink_and_disconnect_end_the_link_for_the_other_end() {
     let mut ca = Authority::new();
@@ -224,14 +235,15 @@ async fn unlink_and_disconnect_end_the_link_for_the_other_end() {
     let address = relay.local_addr().unwrap();
     let (a, mut an) = client(&mut ca, address, host(1)).await;
     let (b, mut bn) = client(&mut ca, address, host(2)).await;
-    let id = linked(&a, &mut an, &b, &mut bn, (host(1), host(2))).await;
-    a.unlink(host(2)).await.unwrap();
-    assert_eq!(notice(&mut bn).await, Notice::Unlinked { peer: host(1) });
-    assert_eq!(notice(&mut an).await, Notice::Unlinked { peer: host(2) });
+    let pair = token(1, 2);
+    let id = linked(&a, &mut an, &b, &mut bn, pair).await;
+    a.unlink(pair).await.unwrap();
+    assert_eq!(notice(&mut bn).await, Notice::Unlinked { token: pair });
+    assert_eq!(notice(&mut an).await, Notice::Unlinked { token: pair });
     b.connection().send_datagram(frame(id, b"late")).unwrap();
 
     // B's request is still pending: A asking again links with a fresh id.
-    a.link(host(2)).await.unwrap();
+    a.link(pair).await.unwrap();
     let Notice::Linked { id: second, .. } = notice(&mut an).await else {
         panic!("not relinked");
     };
@@ -239,14 +251,14 @@ async fn unlink_and_disconnect_end_the_link_for_the_other_end() {
     assert_eq!(
         notice(&mut bn).await,
         Notice::Linked {
-            peer: host(1),
+            token: pair,
             id: second
         }
     );
 
     // A replacement connection for B ends the old link; B's new request relinks.
     let (b2, mut b2n) = client(&mut ca, address, host(2)).await;
-    assert_eq!(notice(&mut an).await, Notice::Unlinked { peer: host(2) });
+    assert_eq!(notice(&mut an).await, Notice::Unlinked { token: pair });
     assert!(
         tokio::time::timeout(WAIT, bn.next())
             .await
@@ -254,20 +266,20 @@ async fn unlink_and_disconnect_end_the_link_for_the_other_end() {
             .is_none(),
         "old B closed"
     );
-    b2.link(host(1)).await.unwrap();
+    b2.link(pair).await.unwrap();
     let Notice::Linked { id: third, .. } = notice(&mut b2n).await else {
         panic!("replacement not linked");
     };
     assert_eq!(
         notice(&mut an).await,
         Notice::Linked {
-            peer: host(2),
+            token: pair,
             id: third
         }
     );
 
     b2.close();
-    assert_eq!(notice(&mut an).await, Notice::Unlinked { peer: host(2) });
+    assert_eq!(notice(&mut an).await, Notice::Unlinked { token: pair });
     relay.close().await;
     assert!(
         tokio::time::timeout(WAIT, an.next())

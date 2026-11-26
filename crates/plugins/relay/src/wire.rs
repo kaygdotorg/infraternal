@@ -7,10 +7,15 @@
 //! `WireGuard` ciphertext packet; the relay forwards the frame unchanged, so the
 //! same id names the link at both ends and forwarding never copies bytes.
 //!
-//! Hosts are named by the UUID in their verified certificate (the
-//! `urn:infraternal:host:<uuid>` SAN that enrollment issues). Names a client
-//! sends are only requests: the relay links two hosts only when each asked for
-//! the other, so one enrolled host cannot reach a pair that did not ask for it.
+//! A connected host is named by the UUID in its verified certificate (the
+//! `urn:infraternal:host:<uuid>` SAN that enrollment issues), and only for
+//! admission. Link requests never name a host (D401 Q8): each end of a pair
+//! asks for the same opaque 16-byte [`Token`], which only the two ends can
+//! compute. The relay links two different hosts that asked for the same token,
+//! so it learns which two connections it joins but not, from the request, who
+//! the other end is; and an enrolled host that does not hold the pair's secret
+//! cannot ask for a pair's token. The derivation lives in `token`, so this codec
+//! stays free of crypto (the fuzz target builds it alone).
 
 use std::fmt;
 
@@ -79,6 +84,26 @@ impl fmt::Debug for HostId {
     }
 }
 
+/// The opaque name both ends of a pair use for their link on one relay (D401 Q8).
+///
+/// It is derived from a secret only the two ends share and from the relay's
+/// name (`token::pair_token`), so a relay sees a random-looking value that differs
+/// on every relay and says nothing about the hosts behind it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Token(pub [u8; 16]);
+
+impl fmt::Debug for Token {
+    /// Short hex form for logs and test failures; the token is not a secret
+    /// (the relay sees it) but it is a pair's name, so only 4 bytes are shown.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Token({:02x}{:02x}{:02x}{:02x}…)",
+            self.0[0], self.0[1], self.0[2], self.0[3]
+        )
+    }
+}
+
 /// Relay-assigned link id; zero is never assigned, so it can mark "no link".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkId(pub u32);
@@ -86,19 +111,19 @@ pub struct LinkId(pub u32);
 /// Client to relay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request {
-    /// Ask to exchange datagrams with this host.
-    Link(HostId),
-    /// Withdraw a request or tear down the link with this host.
-    Unlink(HostId),
+    /// Ask to exchange datagrams with whichever other host asks for the same token.
+    Link(Token),
+    /// Withdraw the request for this token, or tear down its link.
+    Unlink(Token),
 }
 
 /// Relay to client.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notice {
-    /// Both hosts asked; datagrams with this id now reach the peer.
-    Linked { peer: HostId, id: LinkId },
-    /// The link ended (the peer withdrew or left); the request stays pending.
-    Unlinked { peer: HostId },
+    /// Both hosts asked for `token`; datagrams with this id now reach the other one.
+    Linked { token: Token, id: LinkId },
+    /// The link for `token` ended (the other host withdrew or left); the request stays pending.
+    Unlinked { token: Token },
 }
 
 /// Body length that follows a request kind byte, or `None` for an unknown kind.
@@ -121,23 +146,23 @@ impl Request {
     /// Encode as kind byte plus body.
     #[must_use]
     pub fn encode(self) -> [u8; 17] {
-        let (kind, host) = match self {
-            Self::Link(host) => (LINK, host),
-            Self::Unlink(host) => (UNLINK, host),
+        let (kind, token) = match self {
+            Self::Link(token) => (LINK, token),
+            Self::Unlink(token) => (UNLINK, token),
         };
         let mut out = [0; 17];
         out[0] = kind;
-        out[1..].copy_from_slice(&host.0);
+        out[1..].copy_from_slice(&token.0);
         out
     }
 
     /// Decode a body whose kind and length came from [`request_len`].
     #[must_use]
     pub fn decode(kind: u8, body: &[u8]) -> Option<Self> {
-        let host = HostId(body.try_into().ok()?);
+        let token = Token(body.try_into().ok()?);
         match kind {
-            LINK => Some(Self::Link(host)),
-            UNLINK => Some(Self::Unlink(host)),
+            LINK => Some(Self::Link(token)),
+            UNLINK => Some(Self::Unlink(token)),
             _ => None,
         }
     }
@@ -149,15 +174,15 @@ impl Notice {
     pub fn encode(self) -> ([u8; MAX_MESSAGE], usize) {
         let mut out = [0; MAX_MESSAGE];
         match self {
-            Self::Linked { peer, id } => {
+            Self::Linked { token, id } => {
                 out[0] = LINKED;
-                out[1..17].copy_from_slice(&peer.0);
+                out[1..17].copy_from_slice(&token.0);
                 out[17..21].copy_from_slice(&id.0.to_be_bytes());
                 (out, 21)
             }
-            Self::Unlinked { peer } => {
+            Self::Unlinked { token } => {
                 out[0] = UNLINKED;
-                out[1..17].copy_from_slice(&peer.0);
+                out[1..17].copy_from_slice(&token.0);
                 (out, 17)
             }
         }
@@ -170,14 +195,14 @@ impl Notice {
         match (kind, body.len()) {
             (LINKED, 20) => {
                 let id = u32::from_be_bytes(body[16..20].try_into().ok()?);
-                let peer = HostId(body[..16].try_into().ok()?);
+                let token = Token(body[..16].try_into().ok()?);
                 (id != 0).then_some(Self::Linked {
-                    peer,
+                    token,
                     id: LinkId(id),
                 })
             }
             (UNLINKED, 16) => Some(Self::Unlinked {
-                peer: HostId(body.try_into().ok()?),
+                token: Token(body.try_into().ok()?),
             }),
             _ => None,
         }
@@ -216,20 +241,21 @@ mod tests {
         assert_eq!(HostId::from_uri(&format!("urn:other:host:{text}")), None);
     }
 
+    /// Every control message survives encode and decode with its token.
     #[test]
     fn requests_and_notices_round_trip() {
-        let host = HostId([7; 16]);
-        for request in [Request::Link(host), Request::Unlink(host)] {
+        let token = Token([7; 16]);
+        for request in [Request::Link(token), Request::Unlink(token)] {
             let bytes = request.encode();
             assert_eq!(request_len(bytes[0]), Some(bytes.len() - 1));
             assert_eq!(Request::decode(bytes[0], &bytes[1..]), Some(request));
         }
         for notice in [
             Notice::Linked {
-                peer: host,
+                token,
                 id: LinkId(0x0102_0304),
             },
-            Notice::Unlinked { peer: host },
+            Notice::Unlinked { token },
         ] {
             let (bytes, len) = notice.encode();
             assert_eq!(notice_len(bytes[0]), Some(len - 1));

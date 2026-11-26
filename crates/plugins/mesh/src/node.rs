@@ -1486,6 +1486,18 @@ impl Node {
         }
     }
 
+    /// This node's mesh key as a relay [`PairSecret`](crate::relay_path::PairSecret): the
+    /// secret both ends of a relayed pair derive their opaque link tokens from (D401 Q8).
+    /// Read from the node's saved private key; the key itself never leaves the secret.
+    /// # Errors
+    /// Fails when the node has no saved key yet (it has never been brought up).
+    #[cfg(feature = "relay")]
+    pub fn relay_pair_secret(&self) -> io::Result<crate::relay_path::PairSecret> {
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let key = store.read_private_key()?.ok_or(io::ErrorKind::NotFound)?;
+        crate::relay_path::PairSecret::from_private(&key)
+    }
+
     /// Return a callback for learned endpoints reported by the `GotaTun` worker.
     ///
     /// The callback only updates installed peers and leaves relay budgets active. It runs route

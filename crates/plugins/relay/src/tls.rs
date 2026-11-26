@@ -10,10 +10,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use std::{io, sync::Arc, time::Duration};
 
 /// Relay connections negotiate only this protocol; leg-B connections use their own.
-pub const ALPN: &[u8] = b"infraternal-relay/1";
+/// Version 2 names links by opaque pair tokens instead of host ids (D401 Q8); a version-1
+/// build never reaches a version-2 relay, so neither misreads the other's requests.
+pub const ALPN: &[u8] = b"infraternal-relay/2";
 
-/// First bytes a client writes on its control stream: protocol version 1.
-pub const HELLO: [u8; 4] = *b"IFR1";
+/// First bytes a client writes on its control stream: protocol version 2.
+pub const HELLO: [u8; 4] = *b"IFR2";
 
 /// Keep-alive interval. With [`IDLE`] it bounds how long a silent relay loss
 /// goes unnoticed (#220 design: three seconds without authenticated receive).

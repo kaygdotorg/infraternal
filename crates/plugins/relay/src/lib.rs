@@ -16,5 +16,8 @@ pub mod relay;
 pub mod testing;
 #[cfg(feature = "runtime")]
 pub mod tls;
+/// The opaque pair tokens that name a relayed pair's link (D401 Q8).
+#[cfg(feature = "runtime")]
+pub mod token;
 #[cfg(feature = "runtime")]
 pub mod wire;
