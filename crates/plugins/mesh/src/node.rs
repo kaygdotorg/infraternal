@@ -1061,17 +1061,16 @@ impl Node {
             node.owned = true;
             node.kernel_owner = kernel_proof.clone();
             let identity = Device::identity_at(link.ifindex);
-            // A process can stop after marking the interface but before setting
-            // its key. With no saved configuration there are no retained mesh
-            // sessions to preserve; remove that incomplete owned startup only,
-            // by the index the proof read.
-            let incomplete = state.config.is_none()
-                && (identity
+            // A process can stop after marking the interface but before setting its key and
+            // binding its port. Such a link carries no session, whether or not a configuration
+            // from before a reboot is still saved, and no restart could adopt it. Remove that
+            // incomplete owned startup, by the index the proof read, so `up` starts afresh.
+            let incomplete = identity
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                || identity
                     .as_ref()
-                    .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
-                    || identity
-                        .as_ref()
-                        .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0));
+                    .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0);
             if incomplete {
                 Device::delete_ifindex(link.ifindex)?;
                 node.owned = false;
@@ -1083,9 +1082,6 @@ impl Node {
                 return Ok(node);
             }
             let (public_key, mut port) = identity?;
-            if public_key.0 == [0; 32] || port == 0 {
-                return Err(io::ErrorKind::NotConnected.into());
-            }
             port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
