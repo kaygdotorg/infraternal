@@ -43,9 +43,14 @@ const MAX_UDP_PAYLOAD: u16 = 1472;
 const CLIENT_DATAGRAM_RECEIVE: usize = 512 * 1024;
 /// Node-side send buffer; callers retain the existing congestion allowance.
 const CLIENT_DATAGRAM_SEND: usize = 256 * 1024;
-/// Relay-side receive buffer; its reader forwards promptly, so a deep queue
-/// would add latency without improving delivery.
-const SERVER_DATAGRAM_RECEIVE: usize = 8 * 1024;
+/// Relay-side receive buffer. Its reader forwards promptly, but a TCP sender
+/// inside the tunnel sends its window in bursts, and quinn drops the oldest
+/// DATAGRAM when this buffer is full, unseen by the relay's counters. At 8 KiB
+/// (five full packets) a relayed pair at a 34 ms round trip ran at 1.7 Mbit/s
+/// against 270-570 Mbit/s direct (J1254, J536b's matrix): every burst lost its
+/// tail and TCP never grew past about 8.5 KB in flight. 64 KiB took the same
+/// pair to 67-77 Mbit/s; 256 KiB added nothing (46.7 Mbit/s in one run).
+const SERVER_DATAGRAM_RECEIVE: usize = 64 * 1024;
 /// Relay-side send ceiling. Shared queue budgets bound aggregate retained data.
 const SERVER_DATAGRAM_SEND: usize = 128 * 1024;
 

@@ -126,8 +126,11 @@ link ID and sends the ciphertext to its local kernel WireGuard socket. The
 frame parser rejects a zero link ID and a header-only DATAGRAM; WireGuard
 validates the non-empty packet.
 QUIC DATAGRAM delivery is unreliable and unordered, matching the inner
-WireGuard datagram semantics. The relay-side receive queue is bounded to 8
-KiB per connection and its Quinn send queue to 128 KiB per connection. A
+WireGuard datagram semantics. The relay-side receive queue is bounded to 64
+KiB per connection and its Quinn send queue to 128 KiB per connection. Quinn
+drops the oldest DATAGRAM when the receive queue is full, which the relay's
+counters do not see; at 8 KiB that cut every TCP burst short and held a
+relayed pair at a 34 ms round trip to 1.7 Mbit/s (J1254). A
 separate forwarding budget bounds accepted DATAGRAM storage to 256 KiB per
 linked pair, 4 MiB per source host across all its pairs, and 64 MiB across the
 relay. Each frame is charged in 1 KiB units after adding 128 bytes for
@@ -141,8 +144,9 @@ does not block the control stream. A single source host can therefore use at
 most one sixteenth of the global forwarding budget, leaving the remaining
 quota available to other hosts.
 
-At the 4,096-host limit, the configured relay receive queues total at most 32
-MiB and the global forwarding budget accounts for at most another 64 MiB of
+At the 4,096-host limit, the configured relay receive queues total at most 256
+MiB (only if every host bursts at once; a queue is empty while its reader
+keeps up) and the global forwarding budget accounts for at most another 64 MiB of
 queued DATAGRAM storage. The 128 KiB per-connection send setting is a local
 ceiling; the shared global, per-host and per-pair reservations bound aggregate
 queued payloads. These figures bound DATAGRAM buffering, not fixed connection,
