@@ -1,0 +1,10 @@
+hold,row,setup_first_s,setup_second_s,pre_machine_ctxt_s_a,pre_rss_mib_a,pre_machine_ctxt_s_b,pre_rss_mib_b,pre_wakeups_s,pre_procs,post_machine_ctxt_s_a,post_rss_mib_a,post_machine_ctxt_s_b,post_rss_mib_b,post_wakeups_s,post_procs
+r2,G.a,4.486,0.109,451.9,15.6,451.4,21.1,0.1,a:gotatun-g=15MiB/0.0w b:gotatun-g=21MiB/0.1w,451.6,32.8,442.1,37.4,0.0,a:gotatun-g=32MiB/0.0w b:gotatun-g=37MiB/0.0w
+r2,G.b,4.532,0.123,446.8,14.5,462.1,19.3,0.5,a:gotatun-g=14MiB/0.2w b:gotatun-g=19MiB/0.2w,442.9,36.9,468.9,31.8,0.0,a:gotatun-g=36MiB/0.0w b:gotatun-g=31MiB/0.0w
+r2,Gc,4.565,0.125,448.0,15.9,479.4,20.4,0.2,a:gotatun-l3=15MiB/0.0w b:gotatun-l3=20MiB/0.2w,438.6,47.4,472.5,31.0,0.0,a:gotatun-l3=47MiB/0.0w b:gotatun-l3=30MiB/0.0w
+r2,K,4.336,0.025,469.3,0.0,493.4,0.0,0,,443.3,0.0,464.6,0.0,0,
+r2,Lc.a,4.514,0.117,434.3,15.9,445.2,18.3,0.1,a:gotatun-l3=15MiB/0.0w b:gotatun-l3=18MiB/0.1w,463.6,64.6,445.5,38.4,0.2,a:gotatun-l3=64MiB/0.1w b:gotatun-l3=38MiB/0.1w
+r2,Lc.b,4.589,0.129,462.3,18.6,490.3,20.4,0.5,a:gotatun-l3=18MiB/0.2w b:gotatun-l3=20MiB/0.2w,450.6,36.4,470.2,26.6,0.9,a:gotatun-l3=36MiB/0.5w b:gotatun-l3=26MiB/0.4w
+r2,Lg,4.573,0.111,444.5,15.8,450.6,21.0,0.2,a:gotatun-l3=15MiB/0.1w b:gotatun-l3=21MiB/0.1w,447.6,45.8,433.1,32.6,0.2,a:gotatun-l3=45MiB/0.1w b:gotatun-l3=32MiB/0.1w
+r2,Lw,4.522,0.129,460.4,16.3,461.8,20.9,0.3,a:gotatun-l3=16MiB/0.0w b:gotatun-l3=20MiB/0.3w,455.8,40.8,472.5,27.7,0.0,a:gotatun-l3=40MiB/0.0w b:gotatun-l3=27MiB/0.0w
+r2,X,,,446.7,0.0,452.3,0.0,0,,,,,,0,

@@ -1,0 +1,63 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 86K of event 'cycles:P'
+# Event count (approx.): 160077879941
+#
+# Overhead  Command          Shared Object             Symbol
+# ........  ...............  ........................  .............................................................................................................................................................................................................
+#
+     7.63%  tokio-rt-worker  gotatun-g                 [.] ring_core_0_17_14__chacha20_poly1305_open_avx2
+     3.74%  gotatun-crypto-  gotatun-g                 [.] ring_core_0_17_14__chacha20_poly1305_open_avx2
+     3.10%  tokio-rt-worker  [kernel.kallsyms]         [k] rep_movs_alternative
+     2.85%  tokio-rt-worker  [kernel.kallsyms]         [k] clear_page_rep
+     2.46%  tokio-rt-worker  gotatun-g                 [.] memcpy
+     2.07%  tokio-rt-worker  gotatun-g                 [.] _RNCNvXs_NtNtCsjvkbftZlgSw_7gotatun3tun16tun_async_deviceNtB6_9TunDeviceNtB8_6IpSend9send_many0Cs3N4ecN4iU8j_7gotatun
+     2.00%  swapper          [kernel.kallsyms]         [k] pv_native_safe_halt
+     1.90%  tokio-rt-worker  [kernel.kallsyms]         [k] nft_do_chain
+     1.88%  tokio-rt-worker  gotatun-g                 [.] _RNCNCINvMsb_NtCsjvkbftZlgSw_7gotatun6deviceINtBa_11DeviceStateTNtNtNtBc_3udp6socket16UdpSocketFactoryNtNtNtBc_3tun16tun_async_device9TunDeviceB1B_EE15handle_incomingNtNtB1F_6buffer14BufferedIpSendNtNt
+     1.40%  tokio-rt-worker  gotatun-g                 [.] _RNCINvMs0_NtNtCsjvkbftZlgSw_7gotatun6device15parallel_cryptoINtB8_18OrderedCompletionsNtB8_18IncomingCompletionE18complete_run_innerNCNCINvMsb_Ba_INtBa_11DeviceStateTNtNtNtBc_3udp6socket16UdpSocketFac
+     1.36%  tokio-rt-worker  [kernel.kallsyms]         [k] native_write_msr
+     0.98%  iperf3           [kernel.kallsyms]         [k] rep_movs_alternative
+     0.96%  tokio-rt-worker  gotatun-g                 [.] _RNCNvXs0_NtNtNtNtCsjvkbftZlgSw_7gotatun3udp6socket5linux3groNtBb_9UdpSocketNtBd_7UdpRecv14recv_many_from0Cs3N4ecN4iU8j_7gotatun
+     0.88%  tokio-rt-worker  gotatun-g                 [.] _RNvMNtCs6QMltaeZCom_32ip_network_table_deps_treebitmap11tree_bitmapINtB2_10TreeBitmapINtNtCshUCiHv8I5f8_5alloc4sync3ArcINtNtNtCslfjT98jzCkS_5tokio4sync5mutex5MutexNtNtNtCsjvkbftZlgSw_7gotatun6device10
+     0.79%  tokio-rt-worker  gotatun-g                 [.] _RNvNtNtNtCsjvkbftZlgSw_7gotatun3tun16tun_async_device3gso15packet_metadata
+     0.75%  swapper          [kernel.kallsyms]         [k] nft_do_chain
+     0.71%  swapper          [kernel.kallsyms]         [k] clear_page_rep
+     0.60%  tokio-rt-worker  [kernel.kallsyms]         [k] pvclock_clocksource_read_nowd
+     0.50%  tokio-rt-worker  gotatun-g                 [.] _mi_malloc_generic
+     0.48%  tokio-rt-worker  [kernel.kallsyms]         [k] _copy_to_iter
+     0.48%  tokio-rt-worker  [kernel.kallsyms]         [k] __list_del_entry_valid_or_report
+     0.46%  tokio-rt-worker  [kernel.kallsyms]         [k] __put_user_nocheck_4
+     0.44%  tokio-rt-worker  [kernel.kallsyms]         [k] fib_table_lookup
+     0.42%  tokio-rt-worker  [kernel.kallsyms]         [k] put_cmsg
+     0.39%  tokio-rt-worker  [kernel.kallsyms]         [k] udpv6_recvmsg
+     0.38%  tokio-rt-worker  gotatun-g                 [.] mi_malloc_aligned
+     0.38%  tokio-rt-worker  gotatun-g                 [.] _RNCNvNtCsjvkbftZlgSw_7gotatun6device32lock_peer_state_while_completing0Cs3N4ecN4iU8j_7gotatun
+     0.37%  swapper          [kernel.kallsyms]         [k] pvclock_clocksource_read_nowd
+     0.37%  tokio-rt-worker  [kernel.kallsyms]         [k] __skb_datagram_iter
+     0.36%  tokio-rt-worker  [kernel.kallsyms]         [k] __fib_validate_source
+     0.36%  tokio-rt-worker  [kernel.kallsyms]         [k] udp4_lib_lookup2
+     0.36%  tokio-rt-worker  [kernel.kallsyms]         [k] virtqueue_add_split
+     0.35%  tokio-rt-worker  gotatun-g                 [.] _RNCNCINvMsb_NtCsjvkbftZlgSw_7gotatun6deviceINtBa_11DeviceStateTNtNtNtBc_3udp6socket16UdpSocketFactoryNtNtNtBc_3tun16tun_async_device9TunDeviceB1B_EE15handle_outgoingINtNtB1F_6buffer14BufferedIpRecvB1B
+     0.35%  tokio-rt-worker  [kernel.kallsyms]         [k] iowrite16
+     0.34%  swapper          [kernel.kallsyms]         [k] native_write_msr
+     0.34%  tokio-rt-worker  gotatun-g                 [.] mi_free
+     0.33%  tokio-rt-worker  gotatun-g                 [.] _RINvNtNtNtCslfjT98jzCkS_5tokio7runtime4task3raw4pollINtNtNtB6_8blocking4task12BlockingTaskNCNvMNtNtNtB6_9scheduler12multi_thread6workerNtB1v_6Launch6launch0ENtNtBT_8schedule16BlockingScheduleEB8_
+     0.33%  tokio-rt-worker  [vdso]                    [.] __vdso_clock_gettime
+     0.33%  tokio-rt-worker  [kernel.kallsyms]         [k] ____sys_recvmsg
+     0.32%  tokio-rt-worker  [kernel.kallsyms]         [k] copy_iovec_from_user
+     0.32%  tokio-rt-worker  [kernel.kallsyms]         [k] __netif_receive_skb_core.constprop.0
+     0.32%  tokio-rt-worker  [kernel.kallsyms]         [k] __sock_recv_timestamp
+     0.32%  tokio-rt-worker  [kernel.kallsyms]         [k] nft_meta_get_eval
+     0.31%  swapper          [kernel.kallsyms]         [k] psi_group_change
+     0.30%  tokio-rt-worker  [kernel.kallsyms]         [k] __raw_callee_save___pv_queued_spin_unlock
+     0.30%  tokio-rt-worker  gotatun-g                 [.] _RNvMs6_Cs7FU8f3tmABQ_14gotatun_packetINtB5_6PacketNtNtB5_2ip2IpE13try_into_ipvx
+     0.30%  tokio-rt-worker  gotatun-g                 [.] _RNvMs0_NtCsjvkbftZlgSw_7gotatun6deviceNtB5_12PacketLookup10peer_by_ip
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

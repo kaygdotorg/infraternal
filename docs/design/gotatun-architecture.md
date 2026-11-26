@@ -225,6 +225,14 @@ Each cut declares one primary target before its hold. Keep a latency cut only if
   close 39% of the gap to kernel WG. They fail the keep rule, so neither candidate merged:
   - CUBIC p99 regresses, because each outer flow gets its own `fq` allowance.
   - The forward receiver spends 20% more CPU per Gbit.
+- **Round 2 (J1239, 2026-11-26):**
+  - The forward queue is the sender's socket write memory. `fq` limits each outer flow to 100 GSO
+    packets, so every lane adds megabytes.
+  - The extra CPU comes from halved receive batches per lane (69% more TUN writes).
+  - Neither a per-device send budget (which moved the queue into the engine's FIFO: 52–58 ms p99)
+    nor grouping TUN runs by flow (−12% writes, the same CPU) fixed it, so lanes still fail the
+    keep rule.
+  - Recommendation: rank 2 first.
 
 Do not spend an R4b hold repeating TUN/UDP offload work already present. NUMA is a later host-scale study, not a four-vCPU VM cut. Busy polling, SPSC rings and ECN/L4S stay conditional on the stage or path evidence stated above.
 
