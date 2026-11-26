@@ -4,6 +4,7 @@
 
 use std::{path::PathBuf, process::Command};
 
+/// Run the two-node retired TCP scenario for one firewall backend and IP family.
 fn check(fallback: bool, family: &str) {
     let target = PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
     let fixture = std::env::var_os("MESH_REVIEW_FIXTURE")
