@@ -28,10 +28,6 @@ def run(binary, state, functional=False, seed=20):
         # Functional mode is the build-host correctness gate. Resource and
         # scheduler measurements stay in performance mode on the pinned VM.
         if not functional:
-            # Manager detection launches a one-shot child. Exclude its startup
-            # reap from the steady-state canary, while retaining the >1s window
-            # that detects periodic maintenance (no threshold is relaxed).
-            time.sleep(0.25)
             idle = rss(client.child.pid)
             idle_agent = assert_process_idle(client.child.pid, 'idle infraternal agent')
             assert idle < 15 * 1024

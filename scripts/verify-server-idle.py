@@ -37,8 +37,7 @@ try:
         time.sleep(.05)
     else:
         raise AssertionError('server did not publish its private setup socket')
-    # Fence startup; the observation sends no health/auth/terminal requests.
-    time.sleep(1)
+    # The canary waits for startup to finish; it sends no health/auth/terminal requests.
     m = assert_process_idle(p.pid, 'long-running server', args.seconds)
     assert p.poll() is None, 'server exited during observation'
     print(f'fresh long-running server: {m.total_slices} scheduler activations / {m.elapsed_seconds:.3f}s; machine={os.uname().machine}; cores={os.cpu_count()}; load={os.getloadavg()}')
