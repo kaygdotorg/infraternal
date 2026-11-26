@@ -65,6 +65,19 @@ fn flow_start(c: &mut Criterion) {
             };
         }
         for_each_hasher!(cand,);
+        // J1227: the product-shaped symmetric function (final seeded mix), fast and quality.
+        {
+            let state = foldhash::fast::RandomState::default();
+            g.bench_function("foldhash_fast+symmetric_mixed", |b| {
+                b.iter(|| {
+                    let mut acc = 0usize;
+                    for f in &flows {
+                        acc = acc.wrapping_add(start_symmetric_mixed(&state, black_box(*f)));
+                    }
+                    acc
+                })
+            });
+        }
         g.bench_function("manual_fold(no hasher)", |b| {
             let secret = 0x9E37_79B9_7F4A_7C15u64;
             b.iter(|| {
@@ -296,6 +309,44 @@ fn allowed_ips(c: &mut Criterion) {
                 acc
             })
         });
+        // J1227: the real hybrid (hash of host routes in front of the trie, same routes as above:
+        // n host routes plus a /24 behind every tenth peer), three query mixes.
+        let mut hybrid: HybridTable<usize, foldhash::fast::RandomState> = HybridTable::new();
+        for i in 0..n {
+            hybrid.insert(IpAddr::V4(mesh_v4(i + 1)), 32, i as usize);
+        }
+        for i in (0..n).step_by(10) {
+            hybrid.insert(IpAddr::V4(std::net::Ipv4Addr::new(172, (i % 200) as u8, 0, 0)), 24, i as usize);
+        }
+        // The subnet-route stream: addresses behind a gateway peer (hash miss, then trie hit), and
+        // a 90/10 stream (nine host hits per subnet destination).
+        let subnet: Vec<IpAddr> = (0..STREAM)
+            .map(|_| {
+                let i = ((rng.next() % u64::from(n.div_ceil(10))) as u32) * 10;
+                IpAddr::V4(std::net::Ipv4Addr::new(172, (i % 200) as u8, 0, (rng.next() % 250) as u8 + 1))
+            })
+            .collect();
+        let mixed: Vec<IpAddr> = (0..STREAM).map(|i| if i % 10 == 9 { subnet[i] } else { stream[i] }).collect();
+        for (label, s) in [("hit", &stream), ("subnet_miss_then_trie", &subnet), ("90_10", &mixed)] {
+            g.bench_function(format!("trie_only/{label}"), |b| {
+                b.iter(|| {
+                    let mut acc = 0usize;
+                    for a in s {
+                        acc = acc.wrapping_add(*trie.longest_match(black_box(*a)).unwrap().1);
+                    }
+                    acc
+                })
+            });
+            g.bench_function(format!("hybrid_foldhash/{label}"), |b| {
+                b.iter(|| {
+                    let mut acc = 0usize;
+                    for a in s {
+                        acc = acc.wrapping_add(*hybrid.find(black_box(*a)).unwrap());
+                    }
+                    acc
+                })
+            });
+        }
         g.finish();
     }
     let _ = std::hint::black_box(std::hash::RandomState::new().hash_one(1u8));

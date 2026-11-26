@@ -1,0 +1,13 @@
+a88ad0be939e0a191f14d9d854c9f189c98938c6fc444271ee74440149428e8b  hot_paths
+ba7090a1647ec535ce02939117b2f6768b39c8281c94861b3797099a042bb39d  quality
+735b476ac7e42fd4bc3acf0765907ee655b599ca128dcc53efde31dbbe7f3c17  symmetric_quality
+6.12.113+deb13-amd64
+Model name:                              AMD Ryzen 7 3700X 8-Core Processor
+L2 cache:                                3 MiB (6 instances)
+L3 cache:                                96 MiB (6 instances)
+ 20:29:21 up 2 days, 14:56,  0 users,  load average: 0.31, 0.68, 0.70
+cpu  7640029 71453 6371097 117606709 73384 0 4988136 1623 0 0
+ 20:34:46 up 2 days, 15:01,  0 users,  load average: 0.97, 0.92, 0.81
+cpu  7671721 71453 6371274 117769778 73463 0 4988266 1624 0 0
+ 20:40:20 up 2 days, 15:07,  0 users,  load average: 1.01, 1.00, 0.90
+cpu  7704386 71453 6371797 117936806 73549 0 4988434 1624 0 0

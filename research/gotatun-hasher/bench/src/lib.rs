@@ -116,6 +116,76 @@ pub fn start_symmetric<S: BuildHasher>(state: &S, key: FlowKey) -> usize {
     ((h ^ (h >> 32)) % FLOW_SLOTS) as usize
 }
 
+/// J1227 (#260): the symmetric slot function with a final seeded mix. Each endpoint (address and
+/// port) is hashed on its own, the two results are added (commutative, so both packet directions
+/// give one slot with no `canonical()`), and the protocol is added before one more seeded hash of
+/// the sum. The last hash is what [`start_symmetric`] lacks: without it the slots obey the
+/// seed-independent relation `h(A,p1,B,q1) + h(A,p2,B,q2) == h(A,p1,B,q2) + h(A,p2,B,q1)`
+/// (see [`symmetric_sum`] and the `relation` test), because the sum of per-endpoint hashes is
+/// additive in the two endpoints.
+pub fn start_symmetric_mixed<S: BuildHasher>(state: &S, key: FlowKey) -> usize {
+    (state.hash_one(symmetric_sum(state, key)) % FLOW_SLOTS) as usize
+}
+
+/// The 64-bit value before any reduction in [`start_symmetric_mixed`]: the endpoint hashes added
+/// to the protocol. It is symmetric by construction and additive in the endpoints.
+pub fn symmetric_sum<S: BuildHasher>(state: &S, key: FlowKey) -> u64 {
+    let a = state.hash_one((key.source, key.source_port));
+    let b = state.hash_one((key.destination, key.destination_port));
+    a.wrapping_add(b).wrapping_add(u64::from(key.protocol))
+}
+
+/// The allowed-IPs table with a hash table of host routes (`/32`, `/128`) in front of the trie
+/// (J1227, #260). A host route is the longest possible match for its own address, so a hit in the
+/// hash is always the trie's answer; a miss falls through to the trie, which holds only routes
+/// shorter than a host. Host routes live in the hash table alone (never duplicated in the trie),
+/// so insert, replace and remove each touch exactly one structure. Mirrors the prototype in the
+/// GotaTun fork patch (`patches/gotatun-j1227-host-routes.patch`).
+pub struct HybridTable<D, S> {
+    hosts: std::collections::HashMap<IpAddr, D, S>,
+    trie: ip_network_table::IpNetworkTable<D>,
+}
+
+impl<D, S: BuildHasher + Default> HybridTable<D, S> {
+    /// An empty table with a freshly seeded hasher.
+    pub fn new() -> Self {
+        Self { hosts: Default::default(), trie: ip_network_table::IpNetworkTable::new() }
+    }
+
+    /// Add or replace a route; the old value of the same network is returned.
+    pub fn insert(&mut self, ip: IpAddr, prefix: u8, data: D) -> Option<D> {
+        let net = ip_network::IpNetwork::new_truncate(ip, prefix).expect("valid prefix");
+        let full = match ip {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix == full { self.hosts.insert(net.network_address(), data) } else { self.trie.insert(net, data) }
+    }
+
+    /// The value of the longest route that contains `ip`.
+    #[inline]
+    pub fn find(&self, ip: IpAddr) -> Option<&D> {
+        if !self.hosts.is_empty() {
+            if let Some(d) = self.hosts.get(&ip) {
+                return Some(d);
+            }
+        }
+        self.trie.longest_match(ip).map(|(_, d)| d)
+    }
+
+    /// Drop every route whose value matches `predicate`.
+    pub fn remove(&mut self, predicate: &dyn Fn(&D) -> bool) {
+        self.hosts.retain(|_, v| !predicate(v));
+        self.trie.retain(|_, v| !predicate(v));
+    }
+}
+
+impl<D, S: BuildHasher + Default> Default for HybridTable<D, S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// No hasher at all: fold the tuple's raw words into 64 bits with two multiplies and a secret
 /// (per-process random) multiplier. Symmetric in the two endpoints. IPv4 fast path, IPv6 folds
 /// the 128-bit address halves.
