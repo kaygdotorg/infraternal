@@ -210,7 +210,10 @@ budgets (#220, D313 Q1).
 ## Slice-1 path and failover rules
 
 The node's relay manager starts one set of relay paths for the listed relays
-with its enrolled host leaf. After each accepted complete configuration, every
+with its enrolled host leaf, once the first pair needs a relay, so a node
+whose pairs all go direct holds no relay connection and pays no keep-alive
+(the slow-keep-alive home relay of D401 Q5 follows in slice 1b). After each
+accepted complete configuration, every
 peer this node may exchange packets with, new or changed, gets one deadline
 5.5 s later (one WireGuard handshake attempt plus a margin). A pair with no
 handshake since its configuration was installed is relayed and records the

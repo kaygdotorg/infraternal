@@ -10,14 +10,17 @@
 //!   renewed leaf is swapped in for new handshakes without a restart. The key stays in
 //!   memory only: the role lives as long as the coordinator keeps sending it.
 //! - **The relay paths** (D401 Q2, D285): one [`RelayPaths`] for the listed relays, keyed by
-//!   the relays' names and addresses and the host leaf. After a complete configuration,
+//!   the relays' names and addresses and the host leaf, started only once a pair needs a relay
+//!   (see [`begin_paths`]), so a node whose pairs all go direct holds no relay connection.
+//!   After a complete configuration,
 //!   every peer this node may exchange packets with gets one deadline [`GRACE`] after its
 //!   configuration was installed. A pair with no `WireGuard` handshake since then is relayed
 //!   ([`relay_path::direct_failed`]) and records why. This is the slice-1 backstop: the
 //!   hard-NAT prediction (D401 Q6) and fast failover (Q7) build on it.
 //!
-//! Idle cost (D81): no timer runs for a pair after its one deadline; the relay paths keep one
-//! QUIC connection per listed relay with its keep-alive (see `tls::KEEP_ALIVE`).
+//! Idle cost (D81): no timer runs for a pair after its one deadline, and no relay connection
+//! exists until a pair is relayed; from then on the relay paths keep one QUIC connection per
+//! listed relay with its keep-alive (see `tls::KEEP_ALIVE`).
 
 use super::Owner;
 use crate::{
@@ -161,6 +164,17 @@ struct State {
     starting: bool,
     /// Bumped by every start; a start that finishes after a newer one began closes its own.
     paths_generation: u64,
+    /// A first start is running, so pairs failing at the same deadline start it only once.
+    paths_starting: bool,
+}
+
+/// Clears [`State::paths_starting`] when a start ends, whichever way it ends.
+struct Starting(Arc<Mutex<State>>);
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        lock(&self.0).paths_starting = false;
+    }
 }
 
 /// The node's relay role and relay paths.
@@ -371,113 +385,12 @@ impl RelayManager {
         }
     }
 
-    /// Start (or replace) the relay paths for the current list, in the background: names
+    /// Start (or replace) the relay paths in the background, when they are needed: names
     /// resolve and the host leaf is read there, never under the plugin lock.
     fn start_paths(&self) {
-        let Some(credentials) = CREDENTIALS.get().cloned().or_else(test_credentials) else {
-            return;
-        };
-        let (relays, generation) = {
-            let mut state = lock(&self.state);
-            if !std::mem::take(&mut state.starting) && state.paths.is_some() {
-                return;
-            }
-            state.paths_generation += 1;
-            (state.relays.clone(), state.paths_generation)
-        };
-        let owner = self.owner.clone();
-        let state = self.state.clone();
-        self.spawn(async move {
-            let old = lock(&state).paths.take();
-            if let Some(old) = old
-                && let Ok(old) = Arc::try_unwrap(old.running)
-            {
-                old.close().await;
-            }
-            if relays.is_empty() {
-                return;
-            }
-            let specs = resolve(&relays).await;
-            if specs.is_empty() {
-                tracing::warn!("relay: no listed relay resolved to an IPv4 address");
-                return;
-            }
-            let Ok(credentials) = credentials().map(HostLeaf::credentials) else {
-                return;
-            };
-            let started = {
-                let mut owner = lock(&owner);
-                let Ok(node) = owner.node() else {
-                    return;
-                };
-                let (Ok(secret), Some(port)) = (node.relay_pair_secret(), node.listen_port())
-                else {
-                    return;
-                };
-                let probes = node.direct_probes();
-                let (events, queue) = tokio::sync::mpsc::channel(256);
-                RelayPaths::start(secret, port, specs.clone(), credentials, events)
-                    .map(|paths| match probes {
-                        Some((probes, Some(answers))) => paths.with_direct_probes(probes, answers),
-                        _ => paths,
-                    })
-                    .map(|paths| (paths, queue))
-            };
-            let Ok((paths, mut queue)) = started else {
-                tracing::warn!("relay: the relay paths could not start");
-                return;
-            };
-            // A newer start began meanwhile: it owns the paths, so these close again.
-            let superseded = lock(&state).paths_generation != generation;
-            if superseded {
-                paths.close().await;
-                return;
-            }
-            let rejudge: Vec<(NodeId, u64, Duration, bool)> = {
-                let mut locked = lock(&state);
-                locked.paths = Some(Paths {
-                    running: Arc::new(paths),
-                    relays,
-                    specs,
-                });
-                // Pairs the replaced paths relayed move to the new ones at once (their
-                // handshakes went through the old relay, so they prove nothing about the
-                // direct path). Every other pair is judged at the rest of its own deadline,
-                // which covers pairs whose deadline passed while no paths ran.
-                let now = SystemTime::now();
-                locked
-                    .pairs
-                    .iter_mut()
-                    .map(|(node, pair)| {
-                        let relayed = pair.relayed.take().is_some();
-                        let waited = now.duration_since(pair.installed).unwrap_or_default();
-                        let wait = if relayed {
-                            Duration::ZERO
-                        } else {
-                            GRACE.saturating_sub(waited)
-                        };
-                        (*node, pair.generation, wait, relayed)
-                    })
-                    .collect()
-            };
-            for (node, pair_generation, wait, relayed) in rejudge {
-                let owner = owner.clone();
-                let state = state.clone();
-                spawn(async move {
-                    // sleep: the rest of this pair's one deadline (D81: nothing repeats).
-                    tokio::time::sleep(wait).await;
-                    judge(&owner, &state, node, pair_generation, relayed).await;
-                });
-            }
-            let events_state = state.clone();
-            spawn(async move {
-                while let Some(event) = queue.recv().await {
-                    if let Event::Active { peer, relay } = event {
-                        lock(&events_state).active.insert(peer, relay);
-                    }
-                }
-            });
-        });
+        if let Some(start) = begin_paths(&self.state) {
+            self.spawn(run_paths(self.owner.clone(), self.state.clone(), start));
+        }
     }
 
     /// A complete configuration was accepted: release removed peers and give every new or
@@ -595,6 +508,147 @@ impl RelayManager {
     }
 }
 
+/// What one start of the relay paths runs with.
+struct PathsStart {
+    relays: Vec<RelayEntry>,
+    generation: u64,
+    credentials: CredentialSource,
+}
+
+/// Whether the relay paths should start now, and with what.
+///
+/// They start only once some pair needs a relay (a pair marked relayed), and are replaced
+/// when the list changed while they run. A node whose pairs all go direct never connects to
+/// a relay, so it pays no keep-alive wakeups (D81); the first relayed pair waits one QUIC
+/// handshake more after its 5.5 s deadline. The slow-keep-alive home relay (D401 Q5) replaces
+/// this in slice 1b.
+fn begin_paths(state: &Arc<Mutex<State>>) -> Option<PathsStart> {
+    let credentials = CREDENTIALS.get().cloned().or_else(test_credentials)?;
+    let mut state = lock(state);
+    let wanted = state.pairs.values().any(|pair| pair.relayed.is_some());
+    let replace = std::mem::take(&mut state.starting) && state.paths.is_some();
+    let first =
+        state.paths.is_none() && !state.paths_starting && wanted && !state.relays.is_empty();
+    if !replace && !first {
+        return None;
+    }
+    state.paths_starting = true;
+    state.paths_generation += 1;
+    Some(PathsStart {
+        relays: state.relays.clone(),
+        generation: state.paths_generation,
+        credentials,
+    })
+}
+
+/// Start the relay paths now if [`begin_paths`] says so, from inside a relay task. A plain
+/// function on purpose: `run_paths` spawns `judge`, and `judge` calling `run_paths` directly
+/// would make the two futures contain each other's types.
+fn start_paths_now(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>) {
+    if let Some(start) = begin_paths(&state) {
+        spawn(run_paths(owner, state, start));
+    }
+}
+
+/// Start the relay paths for `start.relays`, replacing running ones, then move every pair
+/// that wants a relay onto them.
+async fn run_paths(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>, start: PathsStart) {
+    let PathsStart {
+        relays,
+        generation,
+        credentials,
+    } = start;
+    let _starting = Starting(state.clone());
+    let old = lock(&state).paths.take();
+    if let Some(old) = old
+        && let Ok(old) = Arc::try_unwrap(old.running)
+    {
+        old.close().await;
+    }
+    if relays.is_empty() {
+        return;
+    }
+    let specs = resolve(&relays).await;
+    if specs.is_empty() {
+        tracing::warn!("relay: no listed relay resolved to an IPv4 address");
+        return;
+    }
+    let Ok(credentials) = credentials().map(HostLeaf::credentials) else {
+        return;
+    };
+    let started = {
+        let mut owner = lock(&owner);
+        let Ok(node) = owner.node() else {
+            return;
+        };
+        let (Ok(secret), Some(port)) = (node.relay_pair_secret(), node.listen_port()) else {
+            return;
+        };
+        let probes = node.direct_probes();
+        let (events, queue) = tokio::sync::mpsc::channel(256);
+        RelayPaths::start(secret, port, specs.clone(), credentials, events)
+            .map(|paths| match probes {
+                Some((probes, Some(answers))) => paths.with_direct_probes(probes, answers),
+                _ => paths,
+            })
+            .map(|paths| (paths, queue))
+    };
+    let Ok((paths, mut queue)) = started else {
+        tracing::warn!("relay: the relay paths could not start");
+        return;
+    };
+    // A newer start began meanwhile: it owns the paths, so these close again.
+    let superseded = lock(&state).paths_generation != generation;
+    if superseded {
+        paths.close().await;
+        return;
+    }
+    let rejudge: Vec<(NodeId, u64, Duration, bool)> = {
+        let mut locked = lock(&state);
+        locked.paths = Some(Paths {
+            running: Arc::new(paths),
+            relays,
+            specs,
+        });
+        // Pairs the replaced paths relayed move to the new ones at once (their
+        // handshakes went through the old relay, so they prove nothing about the
+        // direct path). Every other pair is judged at the rest of its own deadline,
+        // which covers pairs whose deadline passed while no paths ran.
+        let now = SystemTime::now();
+        locked
+            .pairs
+            .iter_mut()
+            .map(|(node, pair)| {
+                let relayed = pair.relayed.take().is_some();
+                let waited = now.duration_since(pair.installed).unwrap_or_default();
+                let wait = if relayed {
+                    Duration::ZERO
+                } else {
+                    GRACE.saturating_sub(waited)
+                };
+                (*node, pair.generation, wait, relayed)
+            })
+            .collect()
+    };
+    for (node, pair_generation, wait, relayed) in rejudge {
+        let owner = owner.clone();
+        let state = state.clone();
+        spawn(async move {
+            // sleep: the rest of this pair's one deadline (D81: nothing repeats).
+            tokio::time::sleep(wait).await;
+            judge(&owner, &state, node, pair_generation, relayed).await;
+        });
+    }
+    let events_state = state.clone();
+    spawn(async move {
+        while let Some(event) = queue.recv().await {
+            if let Event::Active { peer, relay } = event {
+                lock(&events_state).active.insert(peer, relay);
+            }
+        }
+    });
+}
+
 /// Resolve each listed relay to its first IPv4 address (the relay path is IPv4-only).
 async fn resolve(relays: &[RelayEntry]) -> Vec<RelaySpec> {
     let mut specs = Vec::with_capacity(relays.len());
@@ -642,10 +696,10 @@ async fn judge(
         if pair.relayed.is_some() {
             return;
         }
-        let Some(paths) = state.paths.as_ref().map(|paths| paths.running.clone()) else {
-            return;
-        };
-        (pair.clone(), paths)
+        (
+            pair.clone(),
+            state.paths.as_ref().map(|paths| paths.running.clone()),
+        )
     };
     let failed = relayed || {
         let mut owner = lock(owner);
@@ -660,6 +714,19 @@ async fn judge(
     if !failed {
         return;
     }
+    let Some(paths) = paths else {
+        // No relay connection yet: this pair is the first that needs one. Mark it, start the
+        // paths, and they relay it as soon as they run (see `run_paths`).
+        if let Some(entry) = lock(state)
+            .pairs
+            .get_mut(&node)
+            .filter(|entry| entry.generation == generation)
+        {
+            entry.relayed = Some(Reason::NoHandshake);
+        }
+        start_paths_now(owner.clone(), state.clone());
+        return;
+    };
     let mut updater = OwnerUpdater(owner.clone());
     match paths
         .relay_with_endpoint(&mut updater, label(node), &pair.peer)
