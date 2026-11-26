@@ -193,6 +193,20 @@ fn serialize(t: *const vt.Terminal, w: *Writer, tail: usize) SnapshotError!void 
         }
     }
     try w.print("\x1b[4{c}", .{@as(u8, if (t.modes.get(.insert)) 'h' else 'l')});
+    // Last: from here on the viewer drops printed text, and every print the
+    // repaint needs is above.
+    try statusDisplay(w, t);
+}
+
+/// Selects the status line (DECSASD, `CSI 1 $ }`) when the program has it
+/// selected, so the viewer goes on dropping the program's status text instead
+/// of printing it on the main display (#594). The main display needs no bytes:
+/// the repaint's RIS selected it. The status line type (DECSSDT) has nothing to
+/// restore: the pinned engine does not implement it.
+///
+/// Callers must write this after their last print.
+fn statusDisplay(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
+    if (t.status_display == .status_line) try w.writeAll("\x1b[1$}");
 }
 
 /// The first history row of `screen` that the export paints, at most `tail`
@@ -904,6 +918,9 @@ pub fn compare(a_handle: c.Terminal, b_handle: c.Terminal, strict: bool) callcon
         }
     }
     if (a.screens.active_key != b.screens.active_key) return 3000003;
+    // The selected status display decides whether the next printed text
+    // reaches the screen at all, so it is visible state (#594).
+    if (a.status_display != b.status_display) return 3000004;
     inline for (@typeInfo(vt.modes.Mode).@"enum".field_values) |value| {
         const mode: vt.modes.Mode = @fromBackingInt(@intCast(value));
         const tag = vt.modes.ModeTag.fromMode(mode);
@@ -1025,7 +1042,8 @@ fn cursorLinkEqual(a: ?*@import("terminal/hyperlink.zig").Hyperlink, b: ?*@impor
 pub fn approximate(handle: c.Terminal, buf: [*]u8, len: usize) callconv(lib.calling_conv) usize {
     const t = c.zigTerminal(handle) orelse return 0;
     // The tail is bounded: about 60 modes of at most 8 bytes, a 10-entry
-    // Kitty stack, charsets, margins and one cursor position.
+    // Kitty stack, charsets, the status display, margins and one cursor
+    // position.
     var tail_buf: [1024]u8 = undefined;
     var tail = Writer.fixed(&tail_buf);
     approximateModes(&tail, t) catch return 0;
@@ -1117,9 +1135,9 @@ fn approximateBaseline(t: *const vt.Terminal, mode: vt.modes.Mode) bool {
 /// shell pays a few bytes, not a mode list, and a viewer's configured defaults
 /// stand; (2) the effective mouse event and format, which depend on the order
 /// the program set them; (3) modifyOtherKeys and shift capture; (4) an
-/// explicit cursor shape; (5) the active screen's Kitty stack; (6) charsets;
-/// (7) margins, origin mode and the cursor again, last, because DECSTBM and
-/// origin mode both move the cursor.
+/// explicit cursor shape; (5) the active screen's Kitty stack; (6) charsets and
+/// the selected status display; (7) margins, origin mode and the cursor again,
+/// last, because DECSTBM and origin mode both move the cursor.
 ///
 /// Skipped modes: the screen switches 47/1047/1049 and 1048 (written by
 /// `approximateScreen` before painting; their side effects would clear or
@@ -1156,6 +1174,8 @@ fn approximateModes(w: *Writer, t: *const vt.Terminal) SnapshotError!void {
     if (!t.cursor.is_default) try cursorShape(w, t, screen);
     if (kittyKeyboardSet(screen)) try kittyKeyboard(w, screen);
     if (!charsetEqual(screen.charset, vt.Screen.CharsetState{})) try charset(w, screen.charset);
+    // Every cell is painted by now; nothing after this prints.
+    try statusDisplay(w, t);
     const r = t.scrolling_region;
     const origin = t.modes.get(.origin);
     const side_margins = t.modes.get(.enable_left_and_right_margin);

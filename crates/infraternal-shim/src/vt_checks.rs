@@ -262,6 +262,15 @@ mod found {
         }
     }
 
+    /// A Snapshot keeps the selected status display (DECSASD), under which
+    /// the engine drops printed text. A viewer that lost the selection printed
+    /// the further output (#594). The committed seed `status-display-selected`
+    /// is the same defect behind a resize.
+    #[test]
+    fn snapshot_continues_with_the_status_display_selected() {
+        super::verify_vt_stream_sample(b"\x50\x01\x00\x1bc\x1b[1$}\xfe\xfe\x50P");
+    }
+
     /// A reflow that shrinks 81 columns to 40 leaves wrapped rows on a
     /// terminal that never printed a character, so its REP source is empty.
     /// Repainting a wrapped edge prints a stand-in glyph, which would give
