@@ -2592,8 +2592,8 @@ mod tests {
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(4096);
-        let mut config =
-            one_peer_config(Some("198.51.100.1:10254".parse().expect("fixture value")));
+        let (_sink, endpoint) = black_hole();
+        let mut config = one_peer_config(Some(endpoint));
         let template = config.peers.remove(&NodeId(1)).expect("template peer");
         for n in 1..=u64::from(count) {
             let mut peer = template.clone();
@@ -2707,8 +2707,17 @@ mod tests {
         );
     }
 
-    /// A configuration with `count` installed peers that have an endpoint and never handshake.
-    fn many_peer_config(count: u32) -> Config {
+    /// A loopback address that takes datagrams and never answers: a peer that is switched off.
+    /// Test endpoints must stay on this host (network hygiene, 2026-11-22), and a closed port
+    /// would answer with ICMP errors instead of silence. Keep the socket for the test's length.
+    fn black_hole() -> (std::net::UdpSocket, SocketAddr) {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("sink socket");
+        let address = socket.local_addr().expect("sink address");
+        (socket, address)
+    }
+
+    /// A configuration with `count` installed peers at `endpoint` that never handshake.
+    fn many_peer_config(count: u32, endpoint: SocketAddr) -> Config {
         let mut config = one_peer_config(None);
         let template = config.peers[&NodeId(1)].clone();
         config.peers.clear();
@@ -2763,13 +2772,169 @@ mod tests {
                     u16::from(low),
                 ),
             };
-            policy.peer.endpoint = Some(SocketAddr::from((
-                [192, 0, 2, 1],
-                20_000 + u16::try_from(index % 30_000).expect("below 30000"),
-            )));
+            policy.peer.endpoint = Some(endpoint);
             config.peers.insert(NodeId(10 + u64::from(index)), policy);
         }
         config
+    }
+
+    /// The voluntary context switches of every thread of this process named `name`: how often
+    /// those threads blocked and were woken again.
+    fn wakeups_of(name: &str) -> u64 {
+        std::fs::read_dir("/proc/self/task")
+            .expect("tasks")
+            .flatten()
+            .filter(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|comm| comm.trim_end() == name)
+            })
+            .filter_map(|task| std::fs::read_to_string(task.path().join("status")).ok())
+            .flat_map(|status| {
+                status
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+                    .filter_map(|value| value.trim().parse::<u64>().ok())
+                    .collect::<Vec<_>>()
+            })
+            .sum()
+    }
+
+    /// D81 for offline peers (#260 J1253): once the engine has given up on every peer, the
+    /// node's worker and engine threads do not wake at all, however many peers there are.
+    ///
+    /// The engine's attempt time is shortened so the settle takes seconds; the window is longer
+    /// than any periodic scan the worker has had. The threads carry their own name, so other
+    /// tests in this process do not count. A socket pair stands in for the TUN, and the peers'
+    /// endpoint is a loopback socket nothing reads.
+    #[test]
+    fn an_idle_node_with_offline_peers_never_wakes() {
+        use super::{
+            EndpointRefreshSignal, Health, LinuxPacketIo, PacketFilter, PendingDevice,
+            RouteEndpointUpdater, RuntimeInfo, RuntimeState, WorkerCommand, bind_udp, build_device,
+            run_worker,
+        };
+        use gotatun::{noise::TimerParams, x25519::StaticSecret};
+        use nix::sys::socket::{AddressFamily, SockFlag, SockType, socketpair};
+        use std::{
+            sync::{Arc, mpsc as sync},
+            time::Duration,
+        };
+        const THREADS: &str = "j1253-idle";
+        const PEERS: u32 = 200;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name(THREADS)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (sink, endpoint) = black_hole();
+        let (kernel, device) = socketpair(
+            AddressFamily::Unix,
+            SockType::SeqPacket,
+            None,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+        )
+        .expect("TUN stand-in");
+        let (commands, worker) = runtime.block_on(async {
+            let private_key = StaticSecret::from([7; 32]);
+            let health = Arc::new(Health::default());
+            let config = many_peer_config(PEERS, endpoint);
+            let filter = Arc::new(
+                PacketFilter::new(
+                    &config,
+                    infraternal_mesh::proxy_ports::MeshProxyIngress::default(),
+                )
+                .expect("compile filter"),
+            );
+            let tun = LinuxPacketIo::new(
+                crate::gotatun_tun::LinuxTun::from_fd(device, true, Arc::clone(&health.refused))
+                    .expect("TUN stand-in registers"),
+                filter,
+            );
+            let (factory, port) = bind_udp(
+                Request {
+                    port: 0,
+                    allow_fallback: true,
+                },
+                private_key.clone(),
+            )
+            .await
+            .expect("engine socket");
+            let mut peers = peers_for_config(&config).expect("peers");
+            for peer in &mut peers {
+                peer.danger_timer_params = Some(TimerParams {
+                    rekey_timeout: Duration::from_millis(300)..=Duration::from_millis(300),
+                    rekey_attempt_time: Duration::from_secs(2),
+                    ..TimerParams::default()
+                });
+            }
+            let device = build_device(
+                factory.clone(),
+                private_key.clone(),
+                port,
+                peers,
+                admitted_peer_keys(&config),
+                tun.clone(),
+            )
+            .await
+            .expect("device");
+            let state = RuntimeState {
+                tun: Some(tun),
+                device: Some(Arc::new(device)),
+                handshakes: tokio::task::JoinSet::new(),
+                pending: Some(PendingDevice {
+                    factory,
+                    private_key,
+                }),
+                config: Some(config),
+                info: RuntimeInfo {
+                    interface: "test-tun".to_owned(),
+                    port,
+                    thp_disabled: true,
+                    offloads_enabled: true,
+                    probes: None,
+                },
+                health,
+                restart_at: None,
+                walks: crate::candidate_walks::Walks::default(),
+                relayed: BTreeMap::new(),
+            };
+            let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+            let updater: RouteEndpointUpdater = Arc::new(|_| Ok(()));
+            let worker = tokio::spawn(run_worker(
+                receiver,
+                state,
+                Arc::new(EndpointRefreshSignal::default()),
+                updater,
+                Arc::default(),
+            ));
+            (commands, worker)
+        });
+        // sleep: every attempt gives up after 2 s; the rest lets the start-up work finish.
+        std::thread::sleep(Duration::from_secs(5));
+        sink.set_nonblocking(true).expect("sink mode");
+        let mut buffer = [0_u8; 256];
+        // The sink's buffer keeps only the first initiations; that some arrived shows the
+        // attempts really ran.
+        let mut initiations = 0_u32;
+        while sink.recv(&mut buffer).is_ok() {
+            initiations += 1;
+        }
+        assert!(initiations > 0, "the peers were tried");
+        let before = wakeups_of(THREADS);
+        // sleep: the idle window under test, longer than the 15 s scan the worker used to run.
+        std::thread::sleep(Duration::from_secs(16));
+        let woken = wakeups_of(THREADS) - before;
+        assert_eq!(woken, 0, "an idle node woke {woken} times in 16 s");
+        assert_eq!(sink.recv(&mut buffer).ok(), None, "nothing more was sent");
+        drop(kernel);
+        let (reply, stopped) = sync::sync_channel(1);
+        commands
+            .send(WorkerCommand::Stop(reply))
+            .map_err(|_| "worker ended")
+            .expect("stop");
+        runtime.block_on(worker).expect("worker");
+        stopped.recv().expect("stop reply");
     }
 
     /// Hand-run measurement (#260 J1077 finding 3, J1113): what the node's worker costs an
@@ -2838,7 +3003,8 @@ mod tests {
         )
         .expect("TUN stand-in");
         let health = Arc::new(Health::default());
-        let config = many_peer_config(count);
+        let (_sink, endpoint) = black_hole();
+        let config = many_peer_config(count, endpoint);
         let filter = Arc::new(
             PacketFilter::new(
                 &config,
