@@ -1,14 +1,25 @@
 <!-- Does GotaTun's receive-side loss control latch after overload? Confirm or refute with TCP (#260, J1241). -->
-# GotaTun loss-control "overload latch": refuted
+# GotaTun loss-control "overload latch": no latch, but a real UDP overload collapse
 
-**Job:** J1241 · **Question:** J1234 finding 4 (`research/many-peer-hub/2026-11-25/summary.md` on branch `j1234-many-peer-hub`):
-after 100 UDP senders overload a hub, the receive-side CoDel controller "stays in that state", and later 390 Mbit/s steps
-lose 35-94%. Does that happen with TCP, and can the controller stay in a drop state after load falls?
+**Job:** J1241 · **Question:** J1234 finding 4 (`research/many-peer-hub/2026-11-25/summary.md` on branch
+`j1234-many-peer-hub`): after 100 UDP senders overload a hub, the receive-side CoDel controller "stays in that state",
+and later 390 Mbit/s steps lose 35-94%. Does that happen with TCP, and can the controller stay in a drop state after
+load falls?
 
-**Verdict: no latch.** In every run here, TCP or UDP, AQM on or off, the traffic after the overload was delivered in
-full from the first phase (started 1 s after the overload ended). No product change and no fork change.
+## Verdict
 
-## 1. The state machine has no state that outlives the congestion
+1. **No latch.** The controller cannot stay in a drop state after load falls. In every run here, TCP or UDP, the traffic
+   after an overload arrived in full, and the engine counted no drop and no CE mark in any later step.
+2. **TCP does not collapse.** Under a 100-flow TCP overload on the perf VM the hub delivered more with the AQM than
+   without it.
+3. **J1234's collapse during the overload is real, and the AQM causes it.** With J1234's own harness, 100 open-loop UDP
+   senders get 161 Mbit/s of 2.4 Gbit/s through, and the engine's counters show CoDel dropping 92.6% of the packets it
+   judged. It lasts exactly as long as the overload.
+4. **J1234's lossy 390 Mbit/s rows did not reproduce.** Cause unknown.
+
+No product change and no fork change: there is no latch to fix, and bounding the drop rate is a design choice (D397).
+
+## 1. The state machine
 
 `gotatun/src/aqm.rs` at the fork pin `a0be34f8` (`Codel::should_signal`, one `Codel` per peer):
 
@@ -18,90 +29,99 @@ full from the first phase (started 1 s after the overload ended). No product cha
 | A gap between above-target observations longer than the interval (10 ms), or a drain seen by age or by receive stamp | deadline, signal count, owed signals |
 | An age that is negative or over 1 s | everything |
 
-The signal count, which sets the drop rate, is therefore never carried across a silence longer than 10 ms. There is no
-timer and no hysteresis. The only thing kept after a drain is byte credit for frames of 256 bytes or less, and credit can
-only exempt a packet, never drop one. A drop state persists only while the sojourn stays at 1 ms or more, which means
-packets really are still waiting.
+The signal count, which sets the drop rate, is never carried across a silence longer than 10 ms. There is no timer and no
+hysteresis. The only thing kept after a drain is byte credit for frames of 256 bytes or less, which can only exempt a
+packet. A drop state persists only while the sojourn stays at 1 ms or more.
 
-## 2. Why J1234's rows looked like a latch
+**While it does stay there, nothing bounds the drop rate.** Signals are spaced `interval / sqrt(count)` apart and `count`
+rises with each one, so after `t` seconds of unbroken above-target sojourn the rate is about `t / (2 * interval^2)`:
+about 5,000 signals per second per peer after 1 s, growing. A sender that reacts to loss slows down and the episode
+ends. A sender that does not is, after a fraction of a second, losing nearly every bulk packet.
 
-Re-read from the committed raw rows (`raw/out-*/rows-*.csv`, 130 `send_*` rows):
+## 2. Overload and recovery, perf VM (quiet, under `perf-run --root`)
 
-- **The lossy 390 Mbit/s step needs no overload before it.** At 10 peers (r2, r3) the steps before it are clean (the
-  hub carried 2.08 Gbit/s with no loss) and `send_10_400mbit` still loses 35.0%. At 100 peers it loses 34.5% and 35.1%.
-  r1, with the older driver, loses nothing at 10 and 100 peers.
-- **It tracks the load generator's CPU.** The simulator spin-paces on the one CPU it shares with its sink. Clean 390
-  Mbit/s rows use 8.01 s of simulator CPU (median); every lossy one uses 8.68-9.90 s, while the **hub** uses less CPU
-  than in a clean row (2.2-4.4 s against about 5.7 s).
-- **Part of the loss is in front of the hub.** At 1,000 peers (r2) the hub's `Udp.InDatagrams` is 409,717 in the lossy
-  row against 762,198 in the clean row of the same offered rate.
-- **The AQM-off comparison was not like for like.** The `aqmoff` run repeated only the `send_100_*` steps. There is no
-  AQM-off row for `send_10_400mbit`.
+Set-up (`harness/run.py`, `harness/matrix.sh`): two network namespaces joined by a veth with no default route; the
+GotaTun CLI of fork `a0be34f8` as the hub, pinned to one CPU; 100 kernel WireGuard interfaces as peers, one `iperf3`
+client each; 10 s phases. Raw rows: `perf-vm/matrix.csv`, `perf-vm/single-flow.csv`.
 
-The most likely cause is the harness (simulator and sink competing for one CPU). That is an inference from these
-counters; the exact drop point inside that harness was not instrumented here.
+| Phase (delivered Mbit/s) | TCP, AQM default | TCP, AQM off | TCP with ECN, default | UDP, default | UDP, off |
+|---|---|---|---|---|---|
+| 10 flows x 39 Mbit/s | 390 | 390 | 390 | 390 | 390 |
+| 100 flows, overload | 1406 | 807 | 936 | 1773 (27% lost) | 1850 (24% lost) |
+| 10 x 39, 1 s after | **390** | 390 | **390** | **390 (0% lost)** | 390 |
+| 10 x 39, after 5 s more idle | 390 | 390 | 390 | 390 | 390 |
+| 1 flow (UDP: 600 offered) | 2641 | 3770 | 3530 | 600 | 600 |
+| 10 x 39, after 10 s more idle | 390 | 390 | 390 | 390 | 390 |
 
-What is real in J1234: during the **max** step, 100 open-loop UDP senders never slow down, so the sojourn never falls
-below target and the controller keeps dropping for as long as the overload lasts. It drops after decryption, so the
-drops do not relieve the hub.
+Engine counters (`perf-vm/*.aqm.txt`): drops or marks stop within 0.4 s of the overload clients exiting and stay at zero
+through all later phases.
 
-## 3. Measured: overload, then recovery
+The 2641 single-flow cell is not an AQM cost: that phase had no drop and no mark. Three repeats each of "fresh engine"
+and "after overload" (`single-flow.csv`), delivered Mbit/s, median (min-max):
 
-Set-up (`harness/run.py`): two network namespaces joined by a veth with no default route; the GotaTun CLI of fork
-`a0be34f8` as the hub, pinned to **one** CPU; 100 kernel WireGuard interfaces as peers, each with its own `iperf3`
-client; phases of 8 s. Host: compute01, a shared build VM at load 20-32, run as a root proof. **Absolute throughput from
-this host is noisy and is not a performance number**; the pass/fail question (does the paced load come back in full?) is
-not sensitive to it.
-
-TCP, three interleaved repeats per mode (`compute01-repeats.jsonl`), delivered Mbit/s, median (min-max):
-
-| Phase | AQM default (ECN mode, Not-ECT traffic, so it drops) | AQM off |
+| | AQM default | AQM off |
 |---|---|---|
-| 10 flows x 39 Mbit/s before | 390.5 (390.5-390.5) | 390.5 (390.4-390.5) |
-| 100 unpaced flows (overload) | 567 (499-647) | 671 (387-679) |
-| 10 x 39 Mbit/s, 1 s after | **390.4 (390.4-390.5)** | 390.5 (390.4-390.5) |
-| 1 unpaced flow, after | 1751 (1361-1844) | 1928 (1207-2057) |
-| 1 unpaced flow, fresh engine | 1983 (1864-2286) | 1281 (1068-1377) |
+| Single flow, fresh engine | 3482 (2579-3540) | 3575 (3161-3607) |
+| Single flow, after overload | 3666 (3253-3712) | 3607 (2704-3780) |
+| The 100-flow TCP overload before it | **1513 (1439-1633)** | 1020 (940-1242) |
 
-The single-flow rows overlap and swap order between modes; they show no after-overload penalty and support no other
-claim.
+The low values (2579, 2704) occur in both modes, with the hub CPU not full.
 
-UDP, 100 x 30 Mbit/s offered as the overload, then 10 x 39 Mbit/s:
+Three more repeats on compute01, a loaded build VM (`compute01-repeats.jsonl`; noisy, not performance numbers), agree on
+recovery: 390.4-390.5 Mbit/s 1 s after the TCP overload in all six runs.
 
-| Run | Paced loss 1 s after | Paced loss 5 s after (after post1) |
-|---|---|---|
-| AQM default, run 1 | 0.00% | 0.00% |
-| AQM default, run 2 | 0.00% | 0.27% |
-| AQM off | 0.00% | 0.00% |
+## 3. J1234's own harness, same perf VM
 
-The engine's own counters (`GOTATUN_AQM_STATS_MS=500`, `tcp-overload.aqm.txt`, `udp-overload.aqm.txt`) show the same
-thing from inside: drops stop within one 0.5 s sample of the end of the overload and the mean sojourn returns from tens
-of milliseconds to 0.03-0.2 ms (one UDP sample reads 0.7 ms).
+Built from J1234's `hub-bench.patch` on `de6f9dce6` (fork pin `e87fef91`) and its `peersim`; run by its `run.py`.
+`harness/j1234-recheck.sh` (10 and 1,000 peers, 1 and 10 senders, 3 s idle windows) and `harness/j1234-recheck2.sh`
+(1,000 peers, 1, 10 and 100 senders, J1234's defaults). Rows: `j1234-harness/send-rows.csv`.
 
-During the UDP overload both modes lose most of the offered load (56-67% by the clients' count). Many `iperf3` UDP
-clients lost their control connection and never reported, so these runs cannot rank AQM on against off during UDP
-overload.
+1,000 peers, 100 senders, unpaced step:
+
+| Run | Offered | Delivered | Loss | Hub CPU (of about 22 cpu-s) |
+|---|---|---|---|---|
+| AQM as shipped, counters off | 2404 | 161 | 93.3% | 13.5 |
+| AQM as shipped, counters on | 2400 | 162 | 93.3% | 13.5 |
+| AQM off | 1853 | 1853 | 0.0% | 16.9 |
+
+From the counters of the second run (`stats-n1000.aqm.txt`): 1,961,256 of 2,119,050 judged packets dropped (92.6%). The
+share per 0.5 s sample climbs 23%, 73%, 84%, 89%, 92% and settles at 97%, and the mean sojourn per sample stays near
+23 ms after the first. That fits an episode that never ends (the counters log means and maxima, not the minimum). The
+next step (975.6 Mbit/s) has **no drop at all**.
+
+- **Dropping does not relieve this overload.** The drop happens after decryption, the senders are open loop, and the
+  standing delay does not move.
+- **The AQM-on and AQM-off rows do not carry the same load.** The simulator and the sink share one CPU. When the hub
+  drops, the sink idles and the simulator sends faster (2.4 against 1.85 Gbit/s). The AQM-off row never overloaded the
+  hub, so "off delivers 1.8 Gbit/s" overstates the gap. The 93% drop share under AQM is measured and does not depend on
+  that comparison. The extra offered load may be what keeps the delay pinned.
+- **The same traffic through kernel peers did not collapse** (section 2, UDP: 27% lost with the AQM against 24%
+  without, about 5% dropped by CoDel). The counters there show a median sojourn of about 29 ms too; the likely
+  difference is that bursty senders let the delay dip below target and reset the count. That was not isolated.
+- **The 10-sender unpaced step loses about half in both modes** (47.6% and 55.3% with the AQM, 49.3% without, in the
+  second script; 0% in the first). With the counters on, that step shows no AQM drop. It is not this controller.
+- **`send_10_400mbit` lost nothing** in all seven runs here (four with the AQM, three without; 10 and 1,000 peers).
+  J1234's r2 and r3 saw 35% at 10 and 100 peers and 93-95% at 1,000. Not reproduced, and 100 peers was not rerun; cause
+  unknown.
 
 ## 4. Limits
 
-- Not a rerun of J1234's own simulator. It uses real kernel WireGuard peers and TCP, which is what the question asked.
-- 100 peers, not 4,096. The controller is per peer and the state machine above does not depend on the peer count.
-- One veth, no netem: round trips are well under a millisecond.
-- The numbers are from a loaded build VM. `harness/matrix.sh` repeats the matrix on the perf VM.
+- 100 peers in section 2 and one hub CPU; no netem, so round trips are well under a millisecond.
+- No run mixed an unresponsive UDP overload with TCP peers. The controller is per peer but the UDP socket queue is
+  shared, so TCP peers behind such a flood would see the same sojourn. Whether they are starved is **not measured**.
 
 ## 5. Recommended follow-ups
 
-1. Correct J1234 finding 4 before anyone acts on it.
-2. If the many-peer harness is used again for loss figures, give the sink its own CPU, record what the simulator really
-   sent, and run every step in both AQM modes.
-3. Open question for a separate job: whether drop-based signalling should apply to unresponsive UDP at a CPU-bound hub,
-   where a drop after decryption saves little. That is a design question (D397), not a bug found here.
+1. Correct J1234 finding 4: not a latch; a collapse that lasts while open-loop senders overload the hub.
+2. A design job (owner's choice, D397) on bounding the drop share when drops do not shorten the delay, for example a
+   cap on `count`. First measure the mixed UDP-flood-plus-TCP case, with equal offered load in both AQM modes.
+3. In the many-peer harness, give the sink its own CPU so the offered load does not depend on what the hub drops.
 
 ## Reproduce
 
 ```sh
-# gotatun-cli from the fork pin; static iperf3 and wg from nixpkgs pkgsStatic. Root, build VM or perf VM only.
-perf-run --root -- harness/matrix.sh /home/claude/j1241/out/m1      # perf VM: binaries in bin/ beside the script
-python3 harness/run.py --hub BIN/gotatun --iperf BIN/iperf3 --wg BIN/wg --out DIR --tag t --proto tcp \
-  --flows 100 --secs 8 --hub-cpus 0 --server-cpus 2 --client-cpus 3-7 --phases base,overload,post1,single
+# gotatun-cli from the fork pin; static iperf3 and wg from nixpkgs pkgsStatic; binaries in bin/ beside the script.
+perf-run --root -- harness/matrix.sh OUTDIR
+perf-run --root -- harness/single.sh OUTDIR
+perf-run --root -- harness/j1234-recheck2.sh OUTDIR     # binaries and run.py in j34/ beside the script
 ```
