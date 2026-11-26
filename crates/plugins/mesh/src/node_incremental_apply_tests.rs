@@ -435,6 +435,12 @@ fn random_snapshot_sequences_converge_to_a_full_apply() {
                 &mut node,
                 &snapshot(identity.public_key, &keys, &peers, version),
             );
+            let installed: BTreeSet<_> = node.installed_peer_keys().unwrap().into_iter().collect();
+            assert_eq!(
+                installed,
+                node.counters().unwrap().into_keys().collect(),
+                "key inventory at seed {seed} step {step}: {change}"
+            );
             assert_matches_full_apply(&mut node, &format!("seed {seed} step {step}: {change}"));
         }
         node.down().unwrap();
