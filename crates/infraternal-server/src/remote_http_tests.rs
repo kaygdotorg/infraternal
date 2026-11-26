@@ -787,6 +787,111 @@ async fn enrollment_api_at_1000_hosts() {
     );
 }
 
+/// Adding hosts while other hosts are connected and writing must never answer 503 (#562).
+///
+/// A deferred transaction that reads (session, owner) and only then writes is refused by
+/// SQLite with `SQLITE_BUSY_SNAPSHOT` when another writer committed in between, and the busy
+/// timeout cannot wait that out. This drives the real router on the production file database
+/// (WAL, eight connections) with concurrent invitations while "connected hosts" commit.
+#[cfg(feature = "ssh")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_invitations_beside_other_writers_all_succeed() {
+    // The router admits eight owner requests at once; stay below that so a refusal is storage.
+    const CONCURRENT: usize = 6;
+    const PER_TASK: usize = 25;
+    const KEY_DIGEST: [u8; 32] = [7; 32];
+    let directory = std::env::temp_dir().join(format!("invite-{}", Uuid::new_v4().simple()));
+    let pool = crate::runtime::test_open_database(&directory)
+        .await
+        .unwrap();
+    let (_, pool, busy_host) = crate::enrollment::authority::tests::enrolled_with_pool(pool).await;
+    let auth = Auth::new(
+        pool.clone(),
+        "auth.example.test",
+        "https://auth.example.test",
+    )
+    .await
+    .unwrap();
+    let token = session(&pool).await;
+    let material = crate::ca::tests::test_material();
+    let app = router(
+        auth,
+        pool.clone(),
+        Arc::new(Signer(material.clone())),
+        EnrollmentEndpoint {
+            ca_der: material.issuer().to_der().unwrap(),
+            endpoint: "127.0.0.1:4443".parse().unwrap(),
+            server_name: "localhost".into(),
+        },
+    );
+    // Already connected hosts: small autocommit writes, as their reports are.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writers: Vec<_> = (0..2)
+        .map(|writer| {
+            let (pool, stop) = (pool.clone(), stop.clone());
+            tokio::spawn(async move {
+                let mut turn = 0_u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    turn += 1;
+                    sqlx::query("UPDATE remote_hosts SET hostname=? WHERE id=?")
+                        .bind(format!("busy-{writer}-{turn}"))
+                        .bind(busy_host.as_bytes().as_slice())
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    // sleep: leave the write lock free between reports, as separate hosts do.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+        })
+        .collect();
+    let adds: Vec<_> = (0..CONCURRENT)
+        .map(|_| {
+            let (app, token) = (app.clone(), token.clone());
+            tokio::spawn(async move {
+                let mut refused = Vec::new();
+                for _ in 0..PER_TASK {
+                    let response = request(
+                        &app,
+                        "/remote/invitations",
+                        json!({"host_id":Uuid::new_v4(),"mode":"rootless","execution_uid":1002,
+                               "expected_key_digest":KEY_DIGEST}),
+                        Some(&token),
+                        "https://auth.example.test",
+                    )
+                    .await;
+                    if response.status() != StatusCode::OK {
+                        refused.push(response.status());
+                    }
+                }
+                refused
+            })
+        })
+        .collect();
+    let mut refused = Vec::new();
+    for add in adds {
+        refused.extend(add.await.unwrap());
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for writer in writers {
+        writer.await.unwrap();
+    }
+    let published: i64 = sqlx::query_scalar("SELECT count(*) FROM remote_join_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    std::fs::remove_dir_all(&directory).unwrap();
+    let total = CONCURRENT * PER_TASK;
+    assert!(
+        refused.is_empty(),
+        "{} of {total} invitations were refused: {refused:?}",
+        refused.len()
+    );
+    // Every success published its own host's receipt, plus the fixture's enrolled host.
+    assert_eq!(published, i64::try_from(total + 1).unwrap());
+}
+
 #[path = "remote_revocation_http_tests.rs"]
 mod revocation;
 

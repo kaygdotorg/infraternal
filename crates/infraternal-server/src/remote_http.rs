@@ -429,14 +429,18 @@ async fn issue_invitation(
     };
     // Drop rolls back every unpublished write on error or cancellation. The
     // invitation is assembled before commit, so certificate conversion cannot
-    // strand a new host record either. A key's check may renew it, so that path
-    // takes the writer up front and keeps it through host creation.
-    let mut transaction = if session.is_some() {
-        api.pool.begin().await
-    } else {
-        api.pool.begin_with("BEGIN IMMEDIATE").await
-    }
-    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    // strand a new host record either.
+    //
+    // Both authorities take SQLite's writer up front. This transaction reads
+    // (the owner, a key's expiry) before it writes, and SQLite refuses to
+    // upgrade such a deferred transaction with `SQLITE_BUSY_SNAPSHOT` once any
+    // other writer has committed; the busy timeout cannot wait that out, so
+    // adding a host beside connected hosts answered 503 (#562). `BEGIN
+    // IMMEDIATE` queues for the writer instead. The helper keeps the begin safe
+    // when the request's own deadline cancels it.
+    let mut transaction = infraternal_plugin_api::storage::begin_immediate(&api.pool)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let (person_id, session_hash) = match (authority, session) {
         (_, Some((person_id, session_hash))) => (person_id, Some(session_hash)),
         (IssueAuthority::Session(_), None) => return Err(StatusCode::UNAUTHORIZED),

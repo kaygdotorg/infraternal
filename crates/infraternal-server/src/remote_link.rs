@@ -314,6 +314,16 @@ impl QuicLink {
             stream_id,
         })
     }
+    /// The QUIC stream that carries terminal writer `stream`, opening it for an
+    /// `AttachTerm` frame when the link has none yet.
+    ///
+    /// A new stream takes one of the link's terminal places, is bound to its writer
+    /// (and marked primed on a standby link) before any terminal frame, and gets a
+    /// pump that delivers the agent's frames to the host actor.
+    ///
+    /// # Errors
+    /// `InvalidData` for any other first frame, `WouldBlock` when the link is closed
+    /// or full, or the transport error from opening and binding the stream.
     async fn terminal_channel(
         &self,
         stream: u32,
@@ -361,7 +371,12 @@ impl QuicLink {
 
         let mut pumps = self.pumps.lock().await;
         while pumps.try_join_next().is_some() {}
-        if pumps.len() > infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
+        // Live terminals are bounded by the reservation above. A replaced
+        // terminal's pump has been told to stop but may not have run yet, so
+        // this backstop allows a full link of those beside a full link of live
+        // ones. Counting them against the terminal bound itself refused the
+        // first replacement on a full link and dropped the host link (#562).
+        if pumps.len() > 2 * infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         {

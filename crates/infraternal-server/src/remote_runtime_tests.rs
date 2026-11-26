@@ -636,6 +636,10 @@ pub(crate) fn server_material() -> (Identity, crate::ca::CaMaterial) {
     (server, material)
 }
 
+/// Replacing terminals on a link at the per-host stream bound (D214, #562).
+#[path = "remote_attach_bound_tests.rs"]
+mod attach_bound;
+
 #[path = "remote_revocation_tests.rs"]
 pub(crate) mod revocation;
 
