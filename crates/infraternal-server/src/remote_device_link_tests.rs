@@ -751,3 +751,31 @@ async fn the_joined_certificate_is_the_stored_one() {
     .unwrap();
     assert_eq!(stored, ("p256".to_owned(), None));
 }
+
+/// A device removed between its admission and its signal's registration is
+/// refused by the second ledger read; it does not keep a link for a recheck
+/// period (J1242 F2).
+#[tokio::test]
+async fn a_removal_between_admission_and_registration_is_caught() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let leaf: &CertificateDer<'_> = &joined.identity.chain[0];
+    let digest = ring::digest::digest(&ring::digest::SHA256, leaf.as_ref());
+    let fingerprint: [u8; 32] = digest.as_ref().try_into().unwrap();
+    let authority = crate::remote_device_link::admit(&server.store, &fingerprint)
+        .await
+        .unwrap();
+    // The removal lands in the gap: no signal is registered yet, so nothing
+    // is cut; only the ledger knows.
+    sqlx::query("UPDATE remote_hosts SET revoked_at=? WHERE id=?")
+        .bind(unix_now())
+        .bind(joined.host_id.as_bytes().as_slice())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    assert!(
+        crate::remote_device_link::watch_admitted(&server.store, &authority, &fingerprint)
+            .await
+            .is_err()
+    );
+}
