@@ -474,6 +474,19 @@ impl WebSocketState {
         Some(account)
     }
 
+    /// Ask every socket of the account to prove its browser still answers, so that a socket
+    /// whose browser is gone releases the terminals it holds (#562).
+    fn challenge_account_sockets(&self, user: &str) {
+        let account = self
+            .users
+            .lock()
+            .ok()
+            .and_then(|users| users.get(user).and_then(std::sync::Weak::upgrade));
+        if let Some(account) = account {
+            account.challenge_all();
+        }
+    }
+
     /// Reserve per-user capacity before Hello. When the account is full, the new page takes over the socket of the
     /// account's longest-hidden tab (owner decision B, #523); `None` only when no tab of the account is hidden or the
     /// taken-over socket did not free its slot in time.
@@ -2516,6 +2529,10 @@ where
                 // A full link refuses at once with its own plain sentence (#562);
                 // every other failure keeps the generic one.
                 let refusal = if matches!(attached, Ok(Err(AgentError::StreamLimit))) {
+                    // Some of those terminals may belong to a browser that is gone. Ask every
+                    // socket of the account to answer; the browser's retry finds the places
+                    // the silent ones gave up.
+                    state.challenge_account_sockets(user_id);
                     HOST_STREAM_LIMIT
                 } else {
                     AGENT_CONNECTION_REFUSED

@@ -43,7 +43,11 @@ use tokio_tungstenite::{
 };
 use tower::ServiceExt;
 
-pub(crate) static SERIAL: Mutex<()> = Mutex::const_new(());
+/// The lock type behind [`SERIAL`] and the watch on its holder.
+#[path = "serial_lock.rs"]
+mod serial_lock;
+/// Auth tests that share process-wide budgets take turns here; a test that keeps its turn too long stops the run (#596).
+pub(crate) static SERIAL: serial_lock::SerialLock = serial_lock::SerialLock::new();
 
 /// Model a committed account revocation without disclosing authority data.
 pub(crate) fn publish_revocation(auth: &Auth, user: &str) {
@@ -775,10 +779,11 @@ async fn recovery_username_identity_is_additive_and_ambiguous_forms_fail() {
     assert!(body["ready_at"].as_i64().is_some());
 }
 
+/// Times the recovery delay decision with 50 stored sessions, with and without a live one.
 #[tokio::test]
 #[ignore = "release-only recovery measurement at 50 live sessions; run without concurrent compilation"]
 async fn recovery_session_delay_latency_at_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let f = fixture().await;
     sqlx::query("UPDATE sessions SET expires=?")
         .bind(NOW + 200 * DAY)
@@ -2950,7 +2955,7 @@ async fn account_identity_migration_backfills_legacy_users() {
 #[tokio::test]
 #[ignore = "run --release --ignored --nocapture without concurrent builds"]
 async fn discoverable_latency_at_pending_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let mut f = fixture().await;
     let second = Software::new();
     bind_tap(&f.auth, &f.session, json!({"kind":"passkey.add"}), NOW).await;
@@ -3391,10 +3396,11 @@ async fn aaguid_migration_preserves_legacy_credentials_and_sessions() {
     assert!(row.get::<Option<String>, _>("passkey_id").is_none());
 }
 
+/// Times the session list, with passkey provider names, for 50 signed-in devices.
 #[tokio::test]
 #[ignore = "local auth session scale measurement; run without concurrent builds"]
 async fn provider_session_latency_at_50_devices() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let f = fixture().await;
     let key: String = sqlx::query_scalar("SELECT id FROM passkeys WHERE user_id=?")
         .bind(&f.user)
@@ -3672,10 +3678,11 @@ async fn fixture_v2() -> Fixture {
     f
 }
 
+/// Times the three recovery verifier paths (delayed start, live start, resume) with 50 stored sessions.
 #[tokio::test]
 #[ignore = "release-only v2 diagnostic at 50 live session rows; record host load separately"]
 async fn recovery_verifier_latency_at_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let f = fixture_v2().await;
     let verifier = recovery_verifier(&f.words);
     sqlx::query("UPDATE sessions SET expires=?")
@@ -4081,7 +4088,7 @@ async fn session_slides_keep_the_wal_bounded() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "Measurement only: run on the pinned performance VM"]
 async fn review_sqlx_retention_session_commit_latency() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     for mixed in [false, true] {
         for limit in [-1_i64, 8_388_608, 8_388_608, -1] {
             let (pool, path) = disk_pool("review-retention").await;

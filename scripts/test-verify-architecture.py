@@ -75,7 +75,8 @@ def main():
     # --no-fail-fast, keep cargo's exit code, and list the failing tests at the end.
     result = subprocess.run(
         ["bash", "-c",
-         'source "$1"; cargo() { printf "ARGS %s\\n" "$*"; '
+         'source "$1"; timeout() { shift 2; "$@"; }; cargo() { printf "ARGS %s\\n" "$*"; '
+         '[[ " $* " != *" --no-run "* ]] || return 0; '
          'printf "test a::b ... FAILED\\nerror: test failed, to rerun pass `-p x`\\n"; return 101; }; '
          'rust_test_workspace',
          "verify-test-row", str(ROOT / "scripts/verify.d/rust.sh")],
@@ -86,6 +87,26 @@ def main():
     summary = result.stdout.split("--- failing tests", 1)[-1]
     assert "test a::b ... FAILED" in summary, result.stdout
     print("test row: --no-fail-fast, exit code kept, failures summarised PASS")
+
+    # A test run that never ends must fail the row and name what was still running (#596).
+    # The build stays outside the bound; only the run is given to `timeout`.
+    result = subprocess.run(
+        ["bash", "-c",
+         'source "$1"; cargo() { printf "ARGS %s\\n" "$*"; }; '
+         'timeout() { printf "BOUND %s\\n" "$*"; '
+         'printf "test s::done has been running for over 60 seconds\\ntest s::done ... ok\\n'
+         'test s::stuck has been running for over 60 seconds\\n"; return 124; }; '
+         'VERIFY_TEST_TIMEOUT=7 rust_test_workspace',
+         "verify-test-timeout", str(ROOT / "scripts/verify.d/rust.sh")],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode == 124, result.stdout + result.stderr
+    build, run = result.stdout.split("BOUND ", 1)
+    assert "--no-run" in build, result.stdout
+    assert run.startswith("--kill-after=30 7 cargo test --workspace"), result.stdout
+    unfinished = result.stdout.split("Slow tests with no result:", 1)[1]
+    assert "s::stuck" in unfinished and "s::done" not in unfinished, result.stdout
+    print("test row: hang bound on the run only, stuck test named PASS")
 
 
 if __name__ == "__main__":

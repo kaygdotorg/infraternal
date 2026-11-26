@@ -21,8 +21,9 @@ const SERIAL_GAP: Duration = Duration::from_millis(26);
 const RESPONSE_FLOOR: Duration = Duration::from_millis(250);
 // Covers the peer's acknowledgement delay on top of one retransmission [D300].
 const HOST_MARGIN: Duration = Duration::from_millis(75);
-// Bounds dead-host detection on slow or jittery paths; also the startup grace.
-const RESPONSE_CEILING: Duration = Duration::from_secs(2);
+/// The longest reply allowance a route gets. It bounds dead-host detection on slow or jittery
+/// paths and is the startup grace; the browser socket's answer to a challenge is sized from it.
+pub(crate) const RESPONSE_CEILING: Duration = Duration::from_secs(2);
 
 /// Which reply allowance and miss policy a route follows.
 #[derive(Clone, Copy, PartialEq, Eq)]

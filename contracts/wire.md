@@ -552,7 +552,14 @@ frames, not muxed `Ping` frames (#317). The payload is 16 bytes: `nonce` then
 answers with the control Pong that echoes it, without running page code, so a
 visible idle page does no liveness work of its own. A Pong of any other length
 is ignored. Hidden suspension (above) covers these frames too: a hidden page
-gets no probe of any kind. The browser sends muxed `Ping` only on demand: when
+gets no liveness probe of any kind. The one exception is a full host (#562):
+when an attach is refused because the host already carries its bound of
+terminals, the server sends each socket of that account, hidden or not, one
+WebSocket Ping with an empty payload. A socket from which nothing at all
+arrives within 4 s is ended as idle, which releases its terminals; the viewer's
+resume capability is unaffected. A socket that answered is not asked again for
+30 s. The browser answers without page code, so a viewer needs no change. The
+browser sends muxed `Ping` only on demand: when
 the page becomes visible, gains focus, is shown again from the page cache or
 comes back online, and on its first input after a quiet second. A fully
 answered route keeps no client timer. An on-demand probe has the allowance

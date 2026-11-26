@@ -25,6 +25,18 @@
         }
       } catch (e) { /* storage may be blocked: keep the defaults */ }
     </script>
+    <!-- Start the two independent first-screen auth checks before any stylesheet so they run immediately
+         while CSS, fonts and scripts download (#573). Each promise is taken once by `src/auth.ts` (`takeEarlyAuth`). -->
+    <script>
+      (function () {
+        var opt = { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "Content-Type": "application/json" }, body: "{}" };
+        var status = fetch("/auth/status", opt);
+        var session = fetch("/auth/session", opt);
+        status.catch(function () {});
+        session.catch(function () {});
+        window.__earlyAuth = { status: status, session: session };
+      })();
+    </script>
     <title>infraternal</title>
     <!-- App icons (owner-supplied, 2026-11-14): the tab follows the system scheme; the home-screen icon is the dark variant. -->
     <link rel="icon" href="./icons/light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)" />
