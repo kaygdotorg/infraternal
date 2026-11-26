@@ -18,15 +18,33 @@ A=root@calternal-perf-01-backup01.vpn.kayg.org      # node A, 10.70.3.196 in j99
 B=root@infraternal-perf-01-backup01.vpn.kayg.org    # node B, 10.70.3.197 in j99 (6 vCPU)
 C=root@calternal-perf-02-backup01.vpn.kayg.org      # control planes only, 10.70.3.198
 A_IP=10.70.3.196 B_IP=10.70.3.197 C_IP=10.70.3.198
-R=/root/j1199
-on() { local h=$1; shift; ssh -o BatchMode=yes -o ServerAliveInterval=15 "$h" "$@"; }
+# J1237: FB_JOB / FB_ROOT let a later job reuse the kit under its own name and staging directory;
+# SETUP_ONLY=1 stops each row after the setup time is recorded (no load windows), HS_TLS=0 turns
+# headscale's TLS (and so the reachable Tailscale relay) off again.
+JOB=${FB_JOB:-j1199}
+RP_NAME=${RP_NAME:-mesh.j99.test}
+BUN=${BUN:-/nix/store/0gk371kgjyv7s0az07hxjrl8g9k0pf3m-bun-1.4.4/bin/bun}   # on B (J1197's recipe for the perf VM)
+PW_BROWSERS=${PW_BROWSERS:-/home/claude/nightly-latency/browsers}
+R=${FB_ROOT:-/root/$JOB}
+export HS_TLS=${HS_TLS:-1}
+on() { local h=$1; shift; ssh -o BatchMode=yes -o ServerAliveInterval=15 "$h" "FB_JOB=$JOB FB_ROOT=$R HS_TLS=$HS_TLS $*"; }
 side() { local h=$1; shift; on "$h" $R/side.sh "$@"; }
 take_all() { on $B $R/lock.sh take "$1" && on $A $R/lock.sh take "$1" && on $C $R/lock.sh take "$1"; }
 release_all() { for h in $A $B $C; do on "$h" $R/lock.sh release || true; done; }
-ns_all_up() { side $B nsup $B_IP iperf && side $A nsup $A_IP && side $C nsup $C_IP; }
+ns_all_up() { side $B nsup $B_IP $([[ ${SETUP_ONLY:-0} == 1 ]] || echo iperf) && side $A nsup $A_IP && side $C nsup $C_IP; }
 ns_all_down() { for h in $A $B $C; do side "$h" nsdown || true; done; }
 log() { echo "[$(date -u +%T)] $*"; }
 
+# wait_join <host> <label>: the node's `infraternal up` finished and said "ready" (R rows).
+wait_join() {
+    local i
+    for i in $(seq 1 240); do
+        on "$1" "grep -q '\"ok\": true' $R/run/join.$2.json" 2> /dev/null && return 0
+        on "$1" "grep -q '\"ok\": false' $R/run/join.$2.json" 2> /dev/null && { echo "join $2 failed" >&2; return 1; }
+        sleep 1
+    done
+    echo "join $2 timed out" >&2; return 1
+}
 # engine_up <letter>: bring the row up; sets PEER. Control planes (T, N) start on C first; the
 # setup clock starts when the first node process starts (control plane already running).
 engine_up() {
@@ -56,10 +74,31 @@ engine_up() {
                 on $C "cat $R/run/setup-key" | on $h "umask 077; mkdir -p $R/run; cat > $R/run/setup-key" || return 1
             done
             on $C "rm -f $R/run/setup-key"
+            if [[ $e == T && $HS_TLS == 1 ]]; then
+                for h in $B $A; do on $C "cat $R/run/hs-cert.pem" | on $h "cat > $R/run/hs-cert.pem" || return 1; done
+            fi
             side $B up $node > /dev/null || return 1
             PEER=$(on $B cat $R/run/peer)
             side $A reachbg $PEER
             side $A up $node > /dev/null || return 1 ;;
+        R)
+            # J1237: the production join path. B joins first (the scripted owner's browser lives there), then A
+            # joins while a poller on A waits for the first packet to B's mesh address; A is the second node.
+            local web=https://$RP_NAME rpenv="RP_SERVER_IP=$C_IP RP_NAME=$RP_NAME BUN=$BUN PLAYWRIGHT_BROWSERS_PATH=$PW_BROWSERS RP_LIBS=$R/libs/usr/lib/x86_64-linux-gnu RP_FONTCONFIG=$R/libs/fonts.conf"
+            on $C "$rpenv $R/rp.sh server $C_IP" > /dev/null || return 1
+            for h in $A $B; do on $C "cat $R/run/srv-cert.pem" | on $h "cat > $R/run/srv-cert.pem" || return 1; done
+            on $C "cat $R/run/setup-token" | on $B "umask 077; cat > $R/run/setup-token" || return 1
+            on $C "rm -f $R/run/setup-token"
+            on $B "$rpenv $R/rp.sh approver $web $B_IP 9911" > /dev/null || return 1
+            on $B "$rpenv $R/rp.sh join b $web $B_IP:9911" > /dev/null
+            wait_join $B b || return 1
+            PEER=$(on $B "ip netns exec j99 ip -4 -o addr show dev infraternal0 | awk '{print \$4}' | cut -d/ -f1")
+            [[ -n $PEER ]] || return 1
+            side $A reachbg $PEER
+            on $A "$rpenv $R/rp.sh join a $web $B_IP:9911" > /dev/null
+            wait_join $A a || return 1
+            on $A "cp $R/run/up.start.a $R/run/started.node"; on $B "cp $R/run/up.start.b $R/run/started.node"
+            for h in $A $B; do on $h "cd $R/run && for f in up.start up.code up.approved up.end; do echo \$f \$(cat \$f.* 2>/dev/null | tr '\n' ' '); done; cat approve.*.json 2>/dev/null" > "$ev/$row.$h.rp-stamps" 2>&1; done ;;
         *) return 2 ;;
     esac
     REACH=$(side $A waitreach) || return 1
@@ -69,7 +108,7 @@ engine_down() { for h in $A $B $C; do side "$h" down > /dev/null 2>&1; done; }
 psnap_all() { for h in $A $B $C; do on $h "python3 -I $R/psnap.py $1" & done; wait; }
 
 hold=$1; shift
-ev=$HOME/.cache/codex-scratch/j1199/evidence/raw/$hold
+ev=$HOME/.cache/codex-scratch/$JOB/evidence/raw/$hold
 mkdir -p "$ev"
 fail=0
 cleanup() { ns_all_down > /dev/null 2>&1; release_all > /dev/null 2>&1; log "released"; }
@@ -111,6 +150,15 @@ for row in "$@"; do
     s_a=$(on $A "cat $R/run/started.node") s_b=$(on $B "cat $R/run/started.node")
     setup=$(python3 -c 'import sys; print(round(float(sys.argv[3]) - min(float(sys.argv[1]), float(sys.argv[2])), 3))' "$s_a" "$s_b" "$REACH")
     echo "$setup" > "$ev/$row.setup"
+    # J1237: the same stamps, measured from the SECOND node's start (the later of the two; for the
+    # product rows that is the node that finds its peer already enrolled).
+    setup2=$(python3 -c 'import sys; print(round(float(sys.argv[3]) - max(float(sys.argv[1]), float(sys.argv[2])), 3))' "$s_a" "$s_b" "$REACH")
+    echo "$setup2" > "$ev/$row.setup2"
+    if [[ ${SETUP_ONLY:-0} == 1 ]]; then
+        for h in $A $B; do on $h "$R/side.sh paths" > "$ev/$row.paths.$h" 2>&1; done
+        log "$row setup ${setup}s (first node) ${setup2}s (second node)"
+        engine_down; continue
+    fi
     # Guard table: the product row captures it, every engine row runs behind the same table.
     for h in $A $B; do
         case $e in
