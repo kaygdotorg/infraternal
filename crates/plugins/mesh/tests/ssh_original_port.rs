@@ -116,6 +116,7 @@ fn configuration() -> Config {
     }
 }
 
+/// Count translated SYNs at the input hook after the chosen firewall admits them.
 fn check(mut firewall: Firewall) {
     command("ip", &["link", "set", "lo", "up"]);
     command(
@@ -149,8 +150,16 @@ fn check(mut firewall: Firewall) {
             "nodad",
         ],
     );
+    // The observer has only one rule. Reading its inline counter also works
+    // on hosts where the named-counter lookup in this combined-family table fails.
     nft(
-        "create table inet ssh_port_test { chain nat { type nat hook prerouting priority dstnat; policy accept; ip daddr 10.254.3.2 tcp dport 22 dnat ip to 10.254.3.2:22022; ip6 daddr fd00:3::2 tcp dport 22 dnat ip6 to [fd00:3::2]:22022; }\n counter delivered {}\n chain observe { type filter hook input priority 0; policy accept; tcp dport 22022 tcp flags & syn == syn counter name delivered; }\n}\n",
+        "create table inet ssh_port_test
+         add chain inet ssh_port_test nat { type nat hook prerouting priority dstnat; policy accept; }
+         add rule inet ssh_port_test nat ip daddr 10.254.3.2 tcp dport 22 dnat ip to 10.254.3.2:22022
+         add rule inet ssh_port_test nat ip6 daddr fd00:3::2 tcp dport 22 dnat ip6 to [fd00:3::2]:22022
+         add chain inet ssh_port_test observe { type filter hook input priority 0; policy accept; }
+         add rule inet ssh_port_test observe tcp dport 22022 tcp flags & syn == syn counter
+         ",
     );
     let mut config = configuration();
     let mut observations = Vec::new();
@@ -176,14 +185,7 @@ fn check(mut firewall: Firewall) {
         // those netlink/socket calls and observes both address-family paths.
         let counters: serde_json::Value = serde_json::from_str(&command(
             "/usr/sbin/nft",
-            &[
-                "-j",
-                "list",
-                "counter",
-                "inet",
-                "ssh_port_test",
-                "delivered",
-            ],
+            &["-j", "list", "chain", "inet", "ssh_port_test", "observe"],
         ))
         .unwrap();
         observations.push(
@@ -191,7 +193,9 @@ fn check(mut firewall: Firewall) {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find_map(|entry| entry["counter"]["packets"].as_u64())
+                .filter_map(|entry| entry["rule"]["expr"].as_array())
+                .flatten()
+                .find_map(|expression| expression["counter"]["packets"].as_u64())
                 .unwrap(),
         );
     }
