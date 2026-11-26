@@ -2,11 +2,16 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Control-host driver of the mixed flood-plus-TCP measurement (#260, J1249). Speaks ssh only.
 
-    drive.py --out DIR --bin BINDIR --load GBIT --cells MODE:SCENARIO:REP[,...] [--window 20]
+    drive.py --out DIR --bin BINDIR --plan FILE [--window 20] [--tag NAME]
 
 Takes every perf and build lock on the three perf VMs (`research/fair-bench/kit/lock.sh`), stages
-the agent and binaries, runs the cells in the order given and writes one `DIR/<n>-<cell>.json` per
+the agent and binaries, and runs the plan's cells in order, writing one `DIR/<n>-<cell>.json` per
 cell with every raw counter. Locks and namespaces are released on every way out.
+
+The plan is a text file with one cell per line, `LOAD:MODE:SCENARIO:REP` (LOAD is the flood's
+payload rate in Gbit/s), ending with the line `END`. Lines may be appended while the hold runs, so a
+calibration cell can decide the load of the cells after it; a hold without new lines for 20 minutes
+ends by itself.
 
 Modes (the engine's environment): `default` (the shipped AQM), `off`, `cap<N>` (the scratch
 build's signal-count cap). Scenarios: `tcp` (10 bulk TCP peers and one idle peer, all probed),
@@ -138,8 +143,37 @@ def take_locks(tag):
     """Take every perf and build lock, VM by VM (may wait a long time for other jobs)."""
     for role, (host, _) in HOSTS.items():
         log(f"waiting for the locks on {role}")
-        done = ssh(host, f"echo $$ > {REMOTE}/take.pid; FB_JOB=j1249 exec {REMOTE}/lock.sh take {tag}")
+        command = f"echo $$ > {REMOTE}/take.pid; FB_JOB=j1249 exec {REMOTE}/lock.sh take {tag}"
+        while True:
+            done = subprocess.run([*SSH, host, command], capture_output=True)
+            if not done.returncode:
+                break
+            message = done.stderr.decode().strip()
+            # The lock script gives up after an hour of another job's marker: queue again.
+            if "other hold still present" not in message:
+                raise RuntimeError(f"locks on {role}: {message}")
+            log(role, message)
         log(role, done.stdout.decode().strip())
+
+
+def planned(plan, nodes):
+    """The plan's cells as they appear, keeping the agents alive while waiting for more."""
+    taken, waiting_since = 0, time.time()
+    while time.time() - waiting_since < 1200:
+        lines = [line.strip() for line in plan.read_text().split("\n")[:-1] if line.strip()]
+        if taken < len(lines):
+            if lines[taken] == "END":
+                return
+            load, mode, scenario, rep = lines[taken].split(":")
+            taken += 1
+            yield float(load), mode, scenario, int(rep)
+            waiting_since = time.time()
+            continue
+        for node in nodes.values():
+            node.call("info")
+        # sleep: wait for the next plan line.
+        time.sleep(10)
+    log("no new plan line for 20 minutes, ending the hold")
 
 
 def release_locks():
@@ -209,15 +243,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, type=pathlib.Path)
     ap.add_argument("--bin", required=True, type=pathlib.Path)
-    ap.add_argument("--load", required=True, type=float, help="flood payload rate, Gbit/s")
-    ap.add_argument("--cells", required=True)
+    ap.add_argument("--plan", required=True, type=pathlib.Path)
     ap.add_argument("--window", type=int, default=20)
     ap.add_argument("--tag", default="matrix")
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    cells = [item.split(":") for item in args.cells.split(",")]
-    for item in cells:
-        engine_env(item[0])
     kit = pathlib.Path(__file__).resolve().parent
     nodes = {}
 
@@ -244,17 +274,19 @@ def main():
         keys = {"hub": nodes["hub"].call("hub_keys")["public"],
                 "tcp": nodes["tcp"].call("tcp_keys", count=TCP_PEERS)["peers"],
                 "flood": nodes["flood"].call("sim_keys", instances=SIMS)["peers"]}
-        for number, (mode, scenario, rep) in enumerate(cells):
-            name = f"{number:02d}-{scenario}-{mode}-r{rep}"
+        for number, (load, mode, scenario, rep) in enumerate(planned(args.plan, nodes)):
+            name = f"{number:02d}-{scenario}-{mode}-l{load}-r{rep}"
             try:
-                cell = run_cell(nodes, keys, mode, scenario, args.load, args.window)
-            except RuntimeError as error:
+                cell = run_cell(nodes, keys, mode, scenario, load, args.window)
+            except (RuntimeError, SystemExit) as error:
+                if isinstance(error, SystemExit) and not str(error).startswith("unknown"):
+                    raise
                 log(name, "FAILED", error)
                 failed += 1
                 if any(node.process.poll() is not None for node in nodes.values()):
                     raise
                 continue
-            cell["rep"] = int(rep)
+            cell["rep"] = rep
             cell["info_after"] = {role: node.call("info") for role, node in nodes.items()}
             (args.out / f"{name}.json").write_text(json.dumps(cell))
             log(name, "done")
