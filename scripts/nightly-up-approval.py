@@ -111,9 +111,10 @@ python3 scripts/root-slot-hold --keep-fd 9 nix develop -c bash -c '
     mkdir -m 700 -p "$scratch" && export TMPDIR=$scratch
     cd apps/tracer && bun install --frozen-lockfile && bun run build
     bun x playwright install chromium
-    cd ../.. && cargo build --locked --release --package infraternal
+    cd ../.. && cargo build --locked --package infraternal
 ' > "$work/build.log" 2>&1 || { tail -40 "$work/build.log" | cat -v >&2; exit 1; }
-binary=$CARGO_TARGET_DIR/release/infraternal
+# The debug binary: apps/tracer/real/up-approval.spec.ts asserts INFRATERNAL_BIN is $CARGO_TARGET_DIR/debug/infraternal.
+binary=$CARGO_TARGET_DIR/debug/infraternal
 [[ -x $binary ]] || { echo "no release binary at $binary" >&2; exit 1; }
 [[ -d $work/src/apps/tracer/dist ]] || { echo "no tracer dist in $work/src" >&2; exit 1; }
 echo "built $commit as root: $(stat -c '%s' "$binary") bytes"
