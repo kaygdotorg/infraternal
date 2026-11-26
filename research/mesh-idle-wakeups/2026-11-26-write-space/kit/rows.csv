@@ -1,0 +1,29 @@
+hold,row,setup_first_s,setup_second_s,pre_machine_ctxt_s_a,pre_rss_mib_a,pre_machine_ctxt_s_b,pre_rss_mib_b,pre_wakeups_s,pre_procs,post_machine_ctxt_s_a,post_rss_mib_a,post_machine_ctxt_s_b,post_rss_mib_b,post_wakeups_s,post_procs
+m1,H.1,6.871,4.633,422.0,30.1,431.4,21.1,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=22MiB/0.5w b:infraternal=21MiB/0.7w,431.7,42.1,662.5,41.0,0.3,a:coordinator_fix=7MiB/0.0w a:infraternal=34MiB/0.0w b:infraternal=40MiB/0.3w
+m1,H.2,6.981,4.719,438.5,30.7,421.6,20.8,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.5w b:infraternal=20MiB/0.6w,441.0,40.0,431.4,45.5,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.1w b:infraternal=45MiB/0.4w
+m1,I.1,6.915,4.67,440.7,31.7,419.7,20.8,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.5w b:infraternal=20MiB/0.7w,426.2,40.6,430.8,43.2,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=33MiB/0.1w b:infraternal=43MiB/0.3w
+m1,I.2,6.959,4.711,427.5,33.3,447.5,21.3,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.5w b:infraternal=21MiB/0.6w,433.0,39.2,443.9,44.7,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=31MiB/0.2w b:infraternal=44MiB/0.4w
+m1,X,,,428.2,0.0,421.3,0.0,0,,,,,,0,
+m2,H.1,6.903,4.642,439.0,30.6,431.2,21.0,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.5w b:infraternal=21MiB/0.7w,421.3,38.6,426.2,42.4,0.4,a:coordinator_fix=7MiB/0.0w a:infraternal=31MiB/0.1w b:infraternal=42MiB/0.3w
+m2,H.2,6.852,4.595,440.0,29.1,448.2,21.2,1.2,a:coordinator_fix=5MiB/0.0w a:infraternal=23MiB/0.5w b:infraternal=21MiB/0.7w,431.1,41.6,418.3,44.2,0.4,a:coordinator_fix=7MiB/0.0w a:infraternal=34MiB/0.1w b:infraternal=44MiB/0.3w
+m2,I.1,6.787,4.551,451.5,31.3,441.3,21.1,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.5w b:infraternal=21MiB/0.6w,446.7,41.1,442.0,43.7,0.4,a:coordinator_fix=7MiB/0.0w a:infraternal=33MiB/0.1w b:infraternal=43MiB/0.3w
+m2,I.2,6.843,4.598,443.3,34.0,437.2,21.2,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=26MiB/0.5w b:infraternal=21MiB/0.6w,442.2,42.5,425.6,42.9,0.4,a:coordinator_fix=7MiB/0.0w a:infraternal=35MiB/0.1w b:infraternal=42MiB/0.3w
+m2,X,,,444.8,0.0,424.7,0.0,0,,,,,,0,
+m3,H.1,6.851,4.614,441.2,33.3,438.4,20.6,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.5w b:infraternal=20MiB/0.6w,425.7,37.6,417.7,36.5,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=30MiB/0.3w b:infraternal=36MiB/0.1w
+m3,H.2,6.975,4.746,436.2,31.5,457.5,20.7,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.5w b:infraternal=20MiB/0.6w,477.8,36.5,480.9,37.0,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=29MiB/0.4w b:infraternal=37MiB/0.9w
+m3,H.3,6.772,4.53,442.6,30.2,1110.5,21.1,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=22MiB/0.5w b:infraternal=21MiB/0.6w,440.7,37.6,478.7,34.6,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=30MiB/0.7w b:infraternal=34MiB/0.6w
+m3,H.4,6.873,4.612,441.1,29.3,435.2,20.9,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=21MiB/0.4w b:infraternal=20MiB/0.7w,448.5,42.2,453.2,36.1,0.9,a:coordinator_fix=7MiB/0.0w a:infraternal=34MiB/0.3w b:infraternal=36MiB/0.6w
+m3,I.1,6.911,4.655,429.9,31.1,433.7,21.2,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.6w b:infraternal=21MiB/0.6w,452.1,40.0,439.3,37.5,0.8,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.4w b:infraternal=37MiB/0.4w
+m3,I.2,6.867,4.634,419.9,31.7,473.8,21.3,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.6w b:infraternal=21MiB/0.6w,446.1,39.2,8438.0,37.4,0.8,a:coordinator_fix=7MiB/0.0w a:infraternal=31MiB/0.4w b:infraternal=37MiB/0.4w
+m3,I.3,6.943,4.698,433.7,31.1,510.7,21.3,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.6w b:infraternal=21MiB/0.6w,448.0,40.3,464.2,35.8,0.7,a:coordinator_fix=7MiB/0.0w a:infraternal=32MiB/0.6w b:infraternal=35MiB/0.1w
+m3,I.4,6.951,4.71,422.7,33.5,471.5,21.2,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=26MiB/0.6w b:infraternal=21MiB/0.6w,443.0,36.2,1737.7,39.5,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=28MiB/0.5w b:infraternal=39MiB/0.8w
+m3,X,,,435.0,0.0,427.0,0.0,0,,,,,,0,
+m4,H.1,7.039,4.758,441.4,31.7,431.7,20.7,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.6w b:infraternal=20MiB/0.6w,432.8,45.9,425.5,31.4,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=38MiB/0.7w b:infraternal=31MiB/0.4w
+m4,H.2,6.795,4.542,440.6,31.4,434.0,20.7,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.5w b:infraternal=20MiB/0.6w,432.2,46.3,422.8,30.2,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=38MiB/0.3w b:infraternal=30MiB/0.2w
+m4,H.3,7.064,4.778,428.5,30.6,486.2,21.0,0.7,a:coordinator_fix=5MiB/0.0w a:infraternal=25MiB/0.5w b:infraternal=21MiB/0.2w,428.1,48.2,427.4,30.5,0.7,a:coordinator_fix=5MiB/0.0w a:infraternal=42MiB/0.3w b:infraternal=30MiB/0.4w
+m4,H.4,6.799,4.566,462.8,32.2,506.9,20.8,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=24MiB/0.5w b:infraternal=20MiB/0.6w,424.5,46.0,491.2,29.8,0.6,a:coordinator_fix=7MiB/0.0w a:infraternal=38MiB/0.3w b:infraternal=29MiB/0.3w
+m4,I.1,6.987,4.662,455.6,30.9,508.6,21.3,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.6w b:infraternal=21MiB/0.6w,432.7,44.5,462.4,30.5,1.3,a:coordinator_fix=7MiB/0.0w a:infraternal=37MiB/0.9w b:infraternal=30MiB/0.4w
+m4,I.2,6.891,4.622,433.0,31.0,508.2,21.1,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=23MiB/0.6w b:infraternal=21MiB/0.6w,431.2,46.2,422.7,29.9,1.0,a:coordinator_fix=7MiB/0.0w a:infraternal=38MiB/0.8w b:infraternal=29MiB/0.2w
+m4,I.3,6.969,4.711,442.1,34.2,443.3,21.2,1.2,a:coordinator_fix=7MiB/0.0w a:infraternal=26MiB/0.5w b:infraternal=21MiB/0.6w,432.2,46.6,444.8,29.8,0.4,a:coordinator_fix=7MiB/0.0w a:infraternal=39MiB/0.3w b:infraternal=29MiB/0.1w
+m4,I.4,6.871,4.606,450.3,33.1,456.3,21.1,1.1,a:coordinator_fix=7MiB/0.0w a:infraternal=25MiB/0.5w b:infraternal=21MiB/0.6w,435.0,50.0,488.2,30.7,0.5,a:coordinator_fix=7MiB/0.0w a:infraternal=42MiB/0.3w b:infraternal=30MiB/0.2w
+m4,X,,,454.9,0.0,490.3,0.0,0,,,,,,0,
