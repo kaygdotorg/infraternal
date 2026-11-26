@@ -13,6 +13,8 @@ Scenarios (t = 0 is the end of the snapshot apply for `offline`, of the cold sto
   silently, like a host that is switched off);
 - `connected`: N peers dial in, then stay silent but keep answering (J1234's passive peers);
 - `keepalive`: as `connected`, and every peer sends an empty keepalive every 25 s;
+- `afterload`: as `connected`, then every peer sends data to a sink on the hub for 6 s, and t = 0
+  is the end of that traffic (J1234's `after_load` windows);
 - `realistic`: N peers dial in and run their own WireGuard timers with a 25 s persistent
   keepalive, as real clients do.
 
@@ -49,7 +51,7 @@ def main():
     ap.add_argument("--sim", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--peers", type=int, required=True)
-    ap.add_argument("--scenario", required=True, choices=["offline", "connected", "keepalive", "realistic"])
+    ap.add_argument("--scenario", required=True, choices=["offline", "connected", "keepalive", "realistic", "afterload"])
     ap.add_argument("--secs", type=int, default=300)
     ap.add_argument("--window", type=int, default=10)
     ap.add_argument("--candidates", type=int, default=0, help="further dead addresses per offline peer")
@@ -152,6 +154,14 @@ def main():
             emit({"step": "connected", "established": res["established"], "wall_ms": res["wall_ms"]})
             if args.scenario == "keepalive":
                 sim.cmd("keepalive 25")
+            if args.scenario == "afterload":
+                sink = subprocess.Popen(["ip", "netns", "exec", NS_HUB, "taskset", "-c", args.sim_cpu,
+                                         *shlex.split(args.sim), "sink", "5601", "10.254.1.1"],
+                                        stdout=subprocess.DEVNULL)
+                children.append(type("Child", (), {"proc": sink})())
+                time.sleep(10)
+                res = sim.cmd(f"send {n} 6 1252 100", 120)
+                emit({"step": "sent", "datagrams": res["sent"]})
         if args.trace:
             emit({"step": "trace_until_start", "events": hub.cmd("trace")["events"]})
 
@@ -162,9 +172,12 @@ def main():
             recorder = None
             if args.perf and t in perf_at:
                 data = os.path.join(args.out, f"perf-{name}-t{t}.data")
+                # Filter on the hub's own thread ids: a host may run a real agent whose threads
+                # carry the same names.
+                only = " || ".join(f"pid=={tid}" for tid in os.listdir(f"/proc/{pid}/task"))
                 recorder = subprocess.Popen(
                     [args.perf, "record", "-q", "-a", "-e", "sched:sched_waking",
-                     "--filter", 'comm ~ "infraternal-mes*"', "--call-graph", "fp", "-o", data,
+                     "--filter", only, "--call-graph", "fp", "-o", data,
                      "--", "sleep", str(args.window)], stderr=subprocess.DEVNULL)
             s0, c0, n0, t0 = thread_switches(pid), cpu_s(pid), snmp(pid), time.monotonic()
             if sim:
