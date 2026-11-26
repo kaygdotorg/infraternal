@@ -25,10 +25,11 @@
 //! the coordinator configured for an installed peer, or that `GotaTun` confirmed from a peer's
 //! authenticated traffic. Each one may spend its own share of the reserve per window (see
 //! [`reserve_share`]: the reserve divided by the number of known endpoints, at least one), and
-//! those key agreements skip the source and network budgets. Past its share, or once the
-//! reserve is spent, a known endpoint is held to the same budgets as any other source. A
-//! refused key agreement at a known endpoint (a spoofed source or a stale key: the real peer's
-//! key is installed) uses up that endpoint's share for the rest of the window. Replacing an
+//! those key agreements skip the source and network budgets. Confirmed endpoints have first
+//! claim on one agreement each, up to the size of the reserve. Configured-only endpoints share
+//! the remaining capacity. Past its share, or once the reserve is spent, a known endpoint is
+//! held to the same budgets as any other source. A refused key agreement at a known endpoint
+//! uses up that endpoint's share for the rest of the window. Replacing an
 //! endpoint list keeps each endpoint's count, and an endpoint new to the lists starts the window
 //! spent, so a list change never refills a share before the window ends (J754, #483): a member
 //! that roams its own endpoint four times a second cannot renew a spoofer's shares. One exception
@@ -63,7 +64,7 @@
 //!   unspoofed known endpoint's initiation (J735's floods: 18 of 18). Spoofing a peer's own
 //!   exact address and port does: the peer then falls back to the unknown share like a new
 //!   join. With more known endpoints every share is one, and a flood that spoofs at least
-//!   [`RESERVED_BUDGET`] other known endpoints in the same second, and also spends the unknown
+//!   [`RESERVED_BUDGET`] other eligible known endpoints in the same second, and also spends the unknown
 //!   share, leaves an unspoofed known endpoint only the unknown-endpoint chance below.
 //! - A peer at an endpoint the node does not know yet (a new join, or a NAT rebinding the
 //!   coordinator has not published) is admitted only if its initiation arrives before the flood
@@ -351,6 +352,14 @@ enum Charge {
     },
 }
 
+/// The reserve counter for an exact endpoint and whether its session confirmed that address.
+struct ReserveSlot {
+    /// Index into the current endpoint counters.
+    index: usize,
+    /// Whether authenticated traffic from an installed peer confirmed the exact address.
+    confirmed: bool,
+}
+
 /// The key agreements spent in the current one-second window.
 ///
 /// Invariants: `reserved` never exceeds [`RESERVED_BUDGET`] and `unknown` never exceeds
@@ -365,6 +374,9 @@ struct Budget {
     window_start: Option<Instant>,
     /// Key agreements spent this window from the reserve, by known endpoints within their share.
     reserved: u32,
+    /// Reserve agreements charged to configured-only endpoints this window, including any
+    /// whose endpoint later acquired a session. A list update never refills this allowance.
+    configured_only: u32,
     /// Key agreements spent this window from the unknown share, by every other source.
     unknown: u32,
     sources: HashMap<SourceKey, Spend>,
@@ -379,16 +391,15 @@ struct Budget {
 impl Budget {
     /// Spend one key agreement for `source` at `now`, or say which budget is used up.
     ///
-    /// `known` is the source's slot when it is exactly a known peer endpoint, and `share` the
-    /// current [`reserve_share`]. A known endpoint within its share spends from the reserve and
-    /// skips the source and network budgets;
-    /// every other initiation, a known endpoint past its share included, is held to its source's
-    /// and network's budgets and to [`UNKNOWN_SOURCE_BUDGET`].
+    /// A known endpoint within its share spends from the reserve and skips the source and
+    /// network budgets. Configured-only endpoints can collectively use at most
+    /// `configured_limit` of the reserve. Every other initiation uses the ordinary budgets.
     fn spend(
         &mut self,
         source: SocketAddr,
-        known: Option<usize>,
+        known: Option<ReserveSlot>,
         share: u8,
+        configured_limit: u32,
         now: Instant,
     ) -> Result<Charge, Refusal> {
         if self
@@ -397,19 +408,22 @@ impl Budget {
         {
             self.window_start = Some(now);
             self.reserved = 0;
+            self.configured_only = 0;
             self.unknown = 0;
             self.sources.clear();
             self.networks.clear();
             self.endpoints.fill(0);
         }
         if let Some(slot) = known
-            && let Some(spent) = self.endpoints.get_mut(slot)
+            && let Some(spent) = self.endpoints.get_mut(slot.index)
             && *spent < share
             && self.reserved < RESERVED_BUDGET
+            && (slot.confirmed || self.configured_only < configured_limit)
         {
             *spent += 1;
             self.reserved += 1;
-            return Ok(Charge::Reserve(slot));
+            self.configured_only += u32::from(!slot.confirmed);
+            return Ok(Charge::Reserve(slot.index));
         }
         let source = SourceKey::of(source);
         let spent = self.sources.get(&source).copied().unwrap_or_default();
@@ -498,7 +512,7 @@ impl<'a> Cursor<'a> {
 /// never hands out reserve the window had not already granted. A count missing from `counts`
 /// (it is shorter than `old`'s slots only if a caller broke the layout) also counts as new. One
 /// pass over each list, because every list is sorted (a merge-join, not a lookup per key).
-fn carried_counts(old: Lists<'_>, counts: &[u8], new: Lists<'_>, share: u8) -> Vec<u8> {
+fn carried_counts(old: Lists<'_>, counts: &[u8], new: Lists<'_>) -> Vec<u8> {
     let mut carried = Vec::with_capacity(new.configured.len() + new.confirmed.len());
     for list in [new.configured, new.confirmed] {
         let mut configured = Cursor::new(old.configured);
@@ -512,7 +526,7 @@ fn carried_counts(old: Lists<'_>, counts: &[u8], new: Lists<'_>, share: u8) -> V
                         .map(|index| old.configured.len() + index)
                 })
                 .and_then(|slot| counts.get(slot).copied())
-                .unwrap_or(share)
+                .unwrap_or(u8::MAX)
         }));
     }
     carried
@@ -646,6 +660,9 @@ pub(crate) struct PeerAdmission {
     /// The [`reserve_share`] for the current lists, worked out when a list changes so the
     /// receive path does no division.
     share: u8,
+    /// How much of the reserve configured-only endpoints may spend after leaving one slot for
+    /// every confirmed endpoint, up to the full reserve.
+    configured_limit: u32,
     /// Spent before every key agreement. A plain mutex: it is held for one map update and
     /// never across an `.await`.
     budget: Mutex<Budget>,
@@ -672,6 +689,7 @@ impl PeerAdmission {
             confirmed_endpoints: Vec::new(),
             sources: Arc::default(),
             share: reserve_share(0),
+            configured_limit: RESERVED_BUDGET,
             budget: Mutex::default(),
             probes: None,
             #[cfg(test)]
@@ -748,6 +766,8 @@ impl PeerAdmission {
             confirmed: &self.confirmed_endpoints,
         };
         self.share = reserve_share(distinct_endpoints(current));
+        let confirmed = u32::try_from(current.confirmed.len()).unwrap_or(u32::MAX);
+        self.configured_limit = RESERVED_BUDGET.saturating_sub(confirmed);
         let budget = self
             .budget
             .get_mut()
@@ -759,7 +779,6 @@ impl PeerAdmission {
             },
             &budget.endpoints,
             current,
-            self.share,
         );
     }
 
@@ -782,17 +801,18 @@ impl PeerAdmission {
     /// Slots index the per-endpoint reserve counters in [`Budget`]. A confirmed endpoint that is
     /// also configured always resolves to its configured slot, so its confirmed slot is a spare
     /// byte that is never spent and does not count toward the share.
-    fn known_slot(&self, source: SocketAddr) -> Option<usize> {
+    fn known_slot(&self, source: SocketAddr) -> Option<ReserveSlot> {
         let key = endpoint_key(source);
-        self.configured_endpoints
+        let confirmed = self.confirmed_endpoints.binary_search(&key).ok();
+        let index = self
+            .configured_endpoints
             .binary_search(&key)
             .ok()
-            .or_else(|| {
-                self.confirmed_endpoints
-                    .binary_search(&key)
-                    .ok()
-                    .map(|index| self.configured_endpoints.len() + index)
-            })
+            .or_else(|| confirmed.map(|index| self.configured_endpoints.len() + index))?;
+        Some(ReserveSlot {
+            index,
+            confirmed: confirmed.is_some(),
+        })
     }
 
     /// The watch the receive task and the node worker share (see [`SourceWatch`]).
@@ -846,7 +866,7 @@ impl PeerAdmission {
             .budget
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .spend(source, known, self.share, now)?;
+            .spend(source, known, self.share, self.configured_limit, now)?;
         #[cfg(test)]
         self.key_agreements
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1716,6 +1736,42 @@ mod tests {
             Ok(()),
             "the next window gives A its share"
         );
+    }
+
+    /// A full window of configured-only endpoints cannot use the slots held for confirmed ones.
+    #[test]
+    fn confirmed_endpoints_have_first_claim_on_the_reserve() {
+        use super::{Charge, RESERVED_BUDGET};
+
+        let mut admission = PeerAdmission::new(StaticSecret::from(NODE));
+        let configured: Vec<_> = (0..RESERVED_BUDGET)
+            .map(|index| own_network(20, index))
+            .collect();
+        let confirmed: Vec<_> = (0..RESERVED_BUDGET)
+            .map(|index| own_network(21, index))
+            .collect();
+        admission.set_configured_endpoints(configured.iter().chain(&confirmed).copied());
+        admission.set_confirmed_endpoints(confirmed.iter().copied());
+        let now = Instant::now();
+        let mut budget = admission.budget.lock().expect("budget lock");
+        let mut spend = |address| {
+            budget.spend(
+                address,
+                admission.known_slot(address),
+                admission.share,
+                admission.configured_limit,
+                now,
+            )
+        };
+        for address in configured {
+            assert!(matches!(spend(address), Ok(Charge::Shared { .. })));
+        }
+        for address in confirmed {
+            assert!(matches!(spend(address), Ok(Charge::Reserve(_))));
+        }
+        assert_eq!(budget.reserved, RESERVED_BUDGET);
+        assert_eq!(budget.unknown, UNKNOWN_SOURCE_BUDGET);
+        assert_eq!(budget.reserved + budget.unknown, NODE_BUDGET);
     }
 
     /// J778 (#483): the confirmed-endpoint feed both workers use goes through the setter, so a
