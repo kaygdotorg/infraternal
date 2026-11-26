@@ -23,10 +23,10 @@
 #   side.sh paths                  record how the peers are connected (direct or relayed)
 #   side.sh down                   stop the current engine, keep the netns
 set -euo pipefail
-R=/root/j1199
+R=${FB_ROOT:-/root/j1199}   # J1237: FB_ROOT lets another job stage its own copy
 BIN=$R/bin
-NS=j99
-RUN=$R/run
+NS=${FB_NS:-j99}
+RUN=${RP_RUN:-$R/run}
 C_IP=10.70.3.198
 nsx() { ip netns exec "$NS" "$@"; }
 wait_for() { local t=$1; shift; local end=$((SECONDS + t)); until "$@" >/dev/null 2>&1; do ((SECONDS < end)) || return 1; sleep 0.1; done; }
@@ -182,9 +182,25 @@ ix_serve_watch() { # after node A connected, B's agent pid is known
 up_hsctl() {
     stamp ctl
     mkdir -p "$RUN/hs"; chmod 700 "$RUN/hs"
+    # J1237: Tailscale clients reach a DERP relay only over TLS, so headscale (control plane and
+    # its embedded DERP/STUN server) serves HTTPS with a throwaway self-signed certificate for
+    # the LAN address C_IP only (no public name, no ACME). The public part is copied to the nodes,
+    # which trust exactly it (hs-cert.pem, via SSL_CERT_FILE of tailscaled and `tailscale up`).
+    # HS_TLS=0 restores J1199's plain-HTTP control plane.
+    local scheme=http tls=
+    if [[ ${HS_TLS:-1} == 1 ]]; then
+        scheme=https
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
+            -keyout "$RUN/hs/tls.key" -out "$RUN/hs-cert.pem" -subj "/CN=$C_IP" \
+            -addext "subjectAltName=IP:$C_IP" -addext "basicConstraints=critical,CA:TRUE" 2> /dev/null
+        chmod 600 "$RUN/hs/tls.key"
+        tls="tls_cert_path: $RUN/hs-cert.pem
+tls_key_path: $RUN/hs/tls.key"
+    fi
     cat > "$RUN/hs/config.yaml" <<YAML
-server_url: http://$C_IP:8080
+server_url: $scheme://$C_IP:8080
 listen_addr: $C_IP:8080
+$tls
 metrics_listen_addr: 127.0.0.1:9099
 grpc_listen_addr: 127.0.0.1:50443
 grpc_allow_insecure: false
@@ -246,10 +262,12 @@ up_ts() {
     stamp node
     mkdir -p "$RUN/ts"
     test -s "$RUN/setup-key" || { echo "no auth key" >&2; exit 1; }
-    bg tsd unshare -m --propagation private sh -c 'mount -t tmpfs j99-nodbus /run/dbus && exec "$@"' isolated "$BIN/tailscaled" --tun=tailscale0 --statedir="$RUN/ts" --socket="$RUN/ts/sock" \
+    local ca=; [[ -s $RUN/hs-cert.pem ]] && ca="SSL_CERT_FILE=$RUN/hs-cert.pem"
+    bg tsd unshare -m --propagation private sh -c 'mount -t tmpfs j99-nodbus /run/dbus && exec "$@"' isolated env $ca "$BIN/tailscaled" --tun=tailscale0 --statedir="$RUN/ts" --socket="$RUN/ts/sock" \
         --port=41641 --no-logs-no-support
     wait_for 30 test -S "$RUN/ts/sock" || { tail -c 800 "$RUN/tsd.err" >&2; exit 1; }
-    nsx "$BIN/tailscale" --socket="$RUN/ts/sock" up --login-server="http://$C_IP:8080" --auth-key="file:$RUN/setup-key" \
+    local scheme=http; [[ -s $RUN/hs-cert.pem ]] && scheme=https
+    nsx env $ca "$BIN/tailscale" --socket="$RUN/ts/sock" up --login-server="$scheme://$C_IP:8080" --auth-key="file:$RUN/setup-key" \
         --hostname="j99-$(hostname -s)" --accept-dns=false --accept-routes=false --timeout=60s > "$RUN/tsup.log" 2>&1 \
         || { tail -c 800 "$RUN/tsup.log" >&2; exit 1; }
     rm -f "$RUN/setup-key"
