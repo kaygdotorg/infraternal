@@ -29,6 +29,8 @@ fn random_keys(n: usize, seed: u64) -> Vec<FlowKey> {
         .collect()
 }
 
+/// A tuple and its reverse must land in one slot under every symmetric candidate, for random v4
+/// and v6 tuples and the edge shapes, over several seeds: replies depend on it.
 #[test]
 fn symmetric_hash_puts_both_directions_in_one_slot() {
     for seed in 0..8u64 {

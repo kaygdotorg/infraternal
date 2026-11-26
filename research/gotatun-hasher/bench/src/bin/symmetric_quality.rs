@@ -17,6 +17,8 @@ use std::net::{IpAddr, Ipv4Addr};
 /// A candidate: given a seed, the slot function.
 type Make = Box<dyn Fn(u64) -> Box<dyn Fn(FlowKey) -> usize>>;
 
+/// The slot functions under comparison, by report label: the two canonical-tuple references first,
+/// then the symmetric candidates. Each entry builds a slot function from a seed.
 fn candidates() -> Vec<(&'static str, Make)> {
     vec![
         ("canonical + sip13 random key (reference, PRF)", Box::new(|seed| {
@@ -64,11 +66,13 @@ fn flow_sets() -> Vec<(&'static str, Vec<FlowKey>)> {
     vec![("seq ports, v4", seq), ("one dst port, ports +1", one_port), ("v6", v6), ("many source hosts", many_hosts)]
 }
 
+/// The value at quantile `p` (0.0 to 1.0) of `v`; sorts `v` in place.
 fn pct(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     v[((v.len() - 1) as f64 * p).round() as usize]
 }
 
+/// Run the three measurements over every candidate and print them as markdown tables.
 fn main() {
     let seeds = 2000u64;
     let sets = flow_sets();
