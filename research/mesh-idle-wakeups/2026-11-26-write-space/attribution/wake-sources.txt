@@ -1,0 +1,27 @@
+== perf-connected-4096-attr-base-t20
+total 669
+    610  91.2%  socket write space (a sent datagram was freed)
+     28   4.2%  eventfd write (tokio unpark)
+     13   1.9%  timerfd (timer task deadline)
+     12   1.8%  futex (thread hand-off)
+      5   0.7%  hrtimer (sleep/timeout)
+      1   0.1%  TUN readable
+== perf-connected-4096-attr-base-t40
+total 564
+    535  94.9%  socket write space (a sent datagram was freed)
+     15   2.7%  eventfd write (tokio unpark)
+      8   1.4%  timerfd (timer task deadline)
+      5   0.9%  futex (thread hand-off)
+      1   0.2%  hrtimer (sleep/timeout)
+== perf-connected-4096-attr-head-t20
+total 46
+     22  47.8%  eventfd write (tokio unpark)
+     10  21.7%  timerfd (timer task deadline)
+      9  19.6%  futex (thread hand-off)
+      4   8.7%  hrtimer (sleep/timeout)
+      1   2.2%  TUN readable
+== perf-connected-4096-attr-head-t40
+total 40
+     27  67.5%  eventfd write (tokio unpark)
+      8  20.0%  timerfd (timer task deadline)
+      5  12.5%  futex (thread hand-off)
