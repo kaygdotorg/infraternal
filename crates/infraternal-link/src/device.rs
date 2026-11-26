@@ -16,7 +16,9 @@
 //!    sends this device's Hello and waits for the server's.
 //! 3. Hold the [`DeviceLink`]; [`DeviceLink::ping`] measures the round trip,
 //!    and [`DeviceLink::closed`] resolves when the server or the network ends
-//!    it. Redial (with backoff, `crate::supervisor`) when it does.
+//!    it. Redial (with backoff, `crate::supervisor`) when it does, and read
+//!    [`close`] before telling the person anything: only one code means the
+//!    device was revoked.
 //!
 //! The wire is the same as a host's: raw protocol frames on a native QUIC
 //! control stream (stream id 0), a version-1 Hello from each side first.
@@ -33,6 +35,32 @@ pub const REPLY_DEADLINE: Duration = Duration::from_secs(5);
 /// The capability bits a slice-1 device offers in its Hello: none. A device
 /// takes no writer bindings, renewals over the link, or native lanes yet.
 pub const DEVICE_CAPS: u64 = 0;
+
+/// The QUIC application close codes the server ends a device link with, and
+/// what each one asks of the device. [`DeviceLink::closed`] reports the code as
+/// `ConnectionError::ApplicationClosed`.
+///
+/// Only [`close::REVOKED`] says the device lost its place. Any other end (one
+/// of the other codes, a code not listed here, or a lost connection) must never
+/// make a client forget its enrollment. The reverse does not hold: a device
+/// removed while it was away is refused at its next dial without this code, so
+/// its absence does not prove the device is still enrolled.
+pub mod close {
+    /// The device sent something a device link does not serve, or the server
+    /// holds as many device links as it can.
+    pub const REFUSED: u32 = 0x10;
+    /// The server's ledger answered that this device or its certificate is
+    /// revoked or removed. A redial with the same certificate is refused.
+    pub const REVOKED: u32 = 0x11;
+    /// The certificate's validity ended.
+    pub const EXPIRED: u32 = 0x12;
+    /// The same device opened a newer link.
+    pub const REPLACED: u32 = 0x13;
+    /// The server could not check the device just now: its database stalled or
+    /// failed, or it had no room to watch one more link. This says nothing
+    /// about the device. Redial with backoff.
+    pub const UNAVAILABLE: u32 = 0x14;
+}
 
 /// The control stream of one QUIC connection, as a [`Channel`] for the frame
 /// codec. Reads and writes each take their own lock, so a reader waiting for

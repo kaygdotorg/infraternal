@@ -12,12 +12,15 @@
 //! Every socket is on 127.0.0.1; nothing leaves the host.
 use super::*;
 use crate::{
-    remote_device_link::{EXPIRED, REFUSED, REPLACED, REVOKED},
+    remote_device_link::NotAdmitted,
     remote_runtime::{RemoteHosts, RemoteListeners},
 };
 use infraternal_agent::remote_tls::Identity;
 use infraternal_link::{
-    device::DeviceLink,
+    device::{
+        DeviceLink,
+        close::{EXPIRED, REFUSED, REPLACED, REVOKED, UNAVAILABLE},
+    },
     identity::{IdentitySigner, SoftwareP256},
     join::{JoinError, Joined},
     server_leaf_floor::ServerLeafFloor,
@@ -773,9 +776,235 @@ async fn a_removal_between_admission_and_registration_is_caught() {
         .execute(&server.pool)
         .await
         .unwrap();
-    assert!(
+    assert_eq!(
         crate::remote_device_link::watch_admitted(&server.store, &authority, &fingerprint)
             .await
-            .is_err()
+            .err(),
+        Some(NotAdmitted::Refused)
     );
+}
+
+/// What the device's reconnect loop saw, in order.
+#[derive(Debug, PartialEq, Eq)]
+enum Seen {
+    /// A link was opened and answered a Ping.
+    Held,
+    /// The held link ended; the server's close code, if it sent one.
+    Ended(Option<u64>),
+}
+
+/// The next thing the device saw, within a bound well past every deadline.
+async fn next_seen(seen: &mut tokio::sync::mpsc::UnboundedReceiver<Seen>) -> Seen {
+    tokio::time::timeout(Duration::from_secs(20), seen.recv())
+        .await
+        .expect("the device saw nothing for 20 s")
+        .expect("the device's reconnect loop is gone")
+}
+
+/// A ledger read that stalls past its deadline closes the link as
+/// UNAVAILABLE, never as REVOKED, and the device's own reconnect loop gets its
+/// link back once the store answers again.
+#[tokio::test]
+async fn a_stalled_ledger_closes_unavailable_and_the_device_redials() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let (events, mut seen) = tokio::sync::mpsc::unbounded_channel();
+    let device = infraternal_link::supervisor::run(|up| {
+        let (endpoint, floor, events) = (&endpoint, &floor, events.clone());
+        async move {
+            let mut link = open_link(endpoint, address, floor).await?;
+            link.ping().await?;
+            up.send_replace(true);
+            let _ = events.send(Seen::Held);
+            let _ = events.send(Seen::Ended(match link.closed().await {
+                quinn::ConnectionError::ApplicationClosed(close) => {
+                    Some(close.error_code.into_inner())
+                }
+                _ => None,
+            }));
+            Ok(())
+        }
+    });
+    let script = async {
+        assert_eq!(next_seen(&mut seen).await, Seen::Held);
+        // The fixture's pool has one connection: holding it stalls every read.
+        let stalled = server.pool.acquire().await.unwrap();
+        assert_eq!(
+            next_seen(&mut seen).await,
+            Seen::Ended(Some(UNAVAILABLE.into()))
+        );
+        drop(stalled);
+        assert_eq!(next_seen(&mut seen).await, Seen::Held);
+        assert!(server.listeners.diagnostic_devices.holds(joined.host_id));
+    };
+    tokio::select! {
+        result = device => panic!("the reconnect loop returned: {result:?}"),
+        () = script => {}
+    }
+}
+
+/// A ledger read that fails (here its table is missing) is not an answer about
+/// the device: UNAVAILABLE, and the same certificate links again afterwards.
+#[tokio::test]
+async fn a_failing_ledger_is_not_a_revocation() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let link = open_link(&endpoint, address, &floor).await.unwrap();
+    sqlx::query("ALTER TABLE remote_certificates RENAME TO remote_certificates_away")
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    assert_eq!(close_code(&link).await, Some(UNAVAILABLE.into()));
+    sqlx::query("ALTER TABLE remote_certificates_away RENAME TO remote_certificates")
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    open_link(&endpoint, address, &floor)
+        .await
+        .unwrap()
+        .ping()
+        .await
+        .unwrap();
+}
+
+/// A server with no room to watch one more device says so; it does not tell
+/// the device it was revoked.
+#[tokio::test]
+async fn a_full_signal_list_is_not_a_revocation() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let _others: Vec<_> = (0..10_000u128)
+        .map(|other| {
+            server
+                .store
+                .1
+                .register(
+                    Uuid::from_u128(1 << 100 | other),
+                    crate::remote_device_link::DEVICE_EPOCH_UID,
+                )
+                .unwrap()
+        })
+        .collect();
+    // The server closes before its Hello, so the dial itself may succeed.
+    let connection = infraternal_link::quic::connect(&endpoint, address, "localhost", &floor)
+        .await
+        .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(10), connection.closed())
+        .await
+        .unwrap();
+    assert!(
+        matches!(&closed, quinn::ConnectionError::ApplicationClosed(close)
+            if close.error_code.into_inner() == u64::from(UNAVAILABLE)),
+        "{closed:?}"
+    );
+}
+
+/// A stall during the admission's second ledger read is UNAVAILABLE too.
+#[tokio::test]
+async fn a_stalled_admission_is_unavailable_not_refused() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let leaf: &CertificateDer<'_> = &joined.identity.chain[0];
+    let digest = ring::digest::digest(&ring::digest::SHA256, leaf.as_ref());
+    let fingerprint: [u8; 32] = digest.as_ref().try_into().unwrap();
+    let authority = crate::remote_device_link::admit(&server.store, &fingerprint)
+        .await
+        .unwrap();
+    let _stalled = server.pool.acquire().await.unwrap();
+    assert_eq!(
+        crate::remote_device_link::watch_admitted(&server.store, &authority, &fingerprint)
+            .await
+            .err(),
+        Some(NotAdmitted::Unavailable)
+    );
+}
+
+/// Take the fixture's only database connection and wait until the held link's
+/// recheck is stuck behind it.
+async fn stall_rechecks(server: &DeviceServer) -> sqlx::pool::PoolConnection<sqlx::Sqlite> {
+    let connection = server.pool.acquire().await.unwrap();
+    // sleep: two recheck periods, so a recheck is in flight and waiting for the connection.
+    tokio::time::sleep(crate::remote_device_link::RECHECK * 2).await;
+    connection
+}
+
+/// Pings are answered while a recheck waits for the ledger.
+#[tokio::test]
+async fn a_stalled_recheck_does_not_delay_pings() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let mut link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    for _ in 0..5 {
+        let round_trip = link.ping().await.unwrap();
+        assert!(round_trip < Duration::from_secs(1), "{round_trip:?}");
+    }
+}
+
+/// A removal's cut closes the link at once while a recheck waits for the
+/// ledger.
+#[tokio::test]
+async fn a_removal_closes_the_link_during_a_stalled_recheck() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    let link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    // Every removal cuts before it commits, and the commit needs the store.
+    let removed = Instant::now();
+    let _cut = server.store.1.cut(joined.host_id).unwrap();
+    assert_eq!(close_code(&link).await, Some(REVOKED.into()));
+    let latency = removed.elapsed();
+    assert!(latency < Duration::from_secs(1), "closed in {latency:?}");
+    eprintln!("removal during a stalled recheck, to link close: {latency:?}");
+}
+
+/// The certificate's `notAfter` closes the link on time while a recheck waits
+/// for the ledger.
+#[tokio::test]
+async fn expiry_closes_the_link_during_a_stalled_recheck() {
+    let server = device_server().await;
+    let (joined, _) = server.joined_device().await;
+    let address = joined.quic_address().await.unwrap();
+    let endpoint = device_endpoint(&joined);
+    let floor = ServerLeafFloor::default();
+    // As in the expiry test: move the whole seven-day window to end soon, but
+    // late enough to stall a recheck first and well before its 5 s deadline.
+    let fingerprint =
+        ring::digest::digest(&ring::digest::SHA256, joined.identity.chain[0].as_ref());
+    let ends = unix_now() + 3;
+    sqlx::query("UPDATE remote_certificates SET not_before=?, not_after=? WHERE fingerprint=?")
+        .bind(ends - 604_800)
+        .bind(ends)
+        .bind(fingerprint.as_ref())
+        .execute(&server.pool)
+        .await
+        .unwrap();
+    let link = open_link(&endpoint, address, &floor).await.unwrap();
+    let _stalled = stall_rechecks(&server).await;
+    assert_eq!(close_code(&link).await, Some(EXPIRED.into()));
+    assert!(unix_now() >= ends);
+    let late = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .saturating_sub(Duration::from_secs(ends.try_into().unwrap()));
+    assert!(
+        late < Duration::from_secs(1),
+        "closed {late:?} after notAfter"
+    );
+    eprintln!("expiry during a stalled recheck, close after notAfter: {late:?}");
 }
