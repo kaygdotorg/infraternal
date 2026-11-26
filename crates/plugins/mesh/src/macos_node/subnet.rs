@@ -11,14 +11,16 @@
 //! on the utun, so the kernel removes them with it on stop, down or a crash; no journal is needed.
 use super::{Config, MacUtun, RuntimeState, installed_peers};
 use crate::{
-    macos_subnet_routes::{Skip, plan_networks, table_network},
-    policy::networks::Network,
-    subnet_routes::RouteState,
+    macos_subnet_routes::{MAX_NETWORKS, plan_networks, table_network},
+    policy::{model::PublicKey, networks::Network},
+    subnet_routes::{
+        EXTRA_ROUTE_LIMIT, RouteState, holds_endpoint_sentence, matching_endpoints, route_targets,
+    },
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
 
@@ -54,41 +56,162 @@ impl NetworkStatus {
 type Wanted = Vec<(Network, Option<u16>)>;
 
 impl RuntimeState {
-    /// Bring the utun's subnet routes in line with the applied snapshot and publish the outcome.
-    ///
-    /// Runs after every applied snapshot and when the worker starts. A Mac without wanted or
-    /// installed networks does nothing at all, so a mesh without subnet routes never asks the
-    /// helper (an older helper would not know the request).
+    /// Apply subnet routes after a snapshot, reusing authenticated endpoints for peers that
+    /// kept their sessions.
     pub(super) async fn sync_networks(&mut self) {
+        self.reconcile_networks(None).await;
+    }
+
+    /// Reconcile the utun's routes only when a snapshot or a matching endpoint IP changed.
+    /// Root mode and the helper both see only prefixes the tunnel is allowed to carry. A
+    /// withdrawn prefix is removed first, so even a partial add leaves the endpoint outside it.
+    /// Snapshots pass `None` and read the engine only if there are routes to reconcile.
+    pub(super) async fn reconcile_networks(
+        &mut self,
+        confirmed: Option<&[(PublicKey, SocketAddr)]>,
+    ) -> bool {
         let Some(config) = self.config.as_ref() else {
-            return;
+            return false;
         };
         let wanted = self.wanted_networks(config);
         if wanted.is_empty() && self.networks.is_empty() {
+            self.admitted_networks.clear();
+            self.subnet_exceptions.clear();
             self.network_status.clear();
-            return;
+            return false;
         }
         let Some(utun) = self.utun.clone() else {
-            return;
+            return false;
         };
+        let snapshot = confirmed.is_none();
+        let fresh;
+        let confirmed = if let Some(endpoints) = confirmed {
+            endpoints
+        } else {
+            fresh = self.confirmed_peer_endpoints().await;
+            &fresh
+        };
+        let confirmed: BTreeMap<_, _> = confirmed.iter().copied().collect();
         let own = config.addresses.ipv4;
-        let endpoints = self.underlay_endpoints(config).await;
-        let installed = self.networks.clone();
+        let effective: Vec<_> = installed_peers(config)
+            .filter_map(|policy| {
+                let peer = &policy.peer;
+                confirmed
+                    .get(&crate::candidate_walks::active_peer_key(peer))
+                    .copied()
+                    .or(peer.endpoint)
+                    .map(|endpoint| endpoint.ip().to_canonical())
+            })
+            .collect();
+        let matched = matching_endpoints(&wanted.iter().map(|(network, _)| *network), effective);
+        if !snapshot && matched == self.subnet_exceptions {
+            return false;
+        }
+        let configured = installed_peers(config).filter_map(|policy| {
+            policy
+                .peer
+                .endpoint
+                .map(|endpoint| endpoint.ip().to_canonical())
+        });
+        let wanted_mtus: BTreeMap<_, _> = wanted.into_iter().collect();
+        self.admitted_networks
+            .retain(|network| wanted_mtus.contains_key(network));
         let user_mode = crate::macos_helper::user_mode();
+        let mut states = BTreeMap::new();
+        let mut eligible = Vec::new();
+        let guarded: Vec<_> = configured.chain(matched.iter().copied()).collect();
+        for &network in wanted_mtus.keys() {
+            if !self.admitted_networks.contains(&network)
+                && let Some(endpoint) = crate::subnet_routes::holds_endpoint(network, &guarded)
+            {
+                states.insert(
+                    network,
+                    RouteState::Skipped(holds_endpoint_sentence(endpoint, "this Mac")),
+                );
+            } else if user_mode && !crate::macos_subnet_routes::is_private(network) {
+                states.insert(
+                    network,
+                    RouteState::Skipped(crate::macos_subnet_routes::Skip::NotPrivate.sentence()),
+                );
+            } else {
+                eligible.push(network);
+            }
+        }
+        let limit = if user_mode {
+            MAX_NETWORKS
+        } else {
+            eligible.len() + EXTRA_ROUTE_LIMIT
+        };
+        let (targets, skipped) = route_targets(&eligible, &matched, limit);
+        states.extend(skipped);
+        let parts: Wanted = targets
+            .iter()
+            .flat_map(|(network, parts)| {
+                parts
+                    .iter()
+                    .map(|part| (*part, wanted_mtus.get(network).copied().flatten()))
+            })
+            .collect();
+        let installed = self.networks.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             if user_mode {
-                sync_through_helper(&utun, &wanted, &installed, &endpoints)
+                sync_through_helper(&utun, &parts, &installed)
             } else {
-                sync_as_root(utun.name(), own, &wanted, &installed, &endpoints)
+                sync_as_root(utun.name(), own, &parts, &installed)
             }
         })
         .await;
-        let Ok((installed, states)) = outcome else {
+        let Ok((installed, outcomes)) = outcome else {
             tracing::warn!("mesh subnet route update could not finish");
-            return;
+            return true;
         };
+        if self.networks != installed && self.subnet_exceptions != matched {
+            // The connected socket pool can cache the source it selected before the hole.
+            self.udp.underlay_changed();
+        }
         self.networks = installed;
+        for (network, parts) in targets {
+            let state = parts
+                .iter()
+                .find_map(|part| match outcomes.get(part) {
+                    Some(RouteState::Installed) => None,
+                    Some(state) => Some(state.clone()),
+                    None => Some(RouteState::Failed(format!("no route result for {part}"))),
+                })
+                .unwrap_or(RouteState::Installed);
+            if matches!(state, RouteState::Installed) {
+                self.admitted_networks.insert(network);
+            }
+            states.insert(network, state);
+        }
+        // A failed removal can leave an old broader prefix in place, even when there
+        // were no replacement prefixes (an excluded /32). Keep it visible and retry on
+        // the next endpoint scan.
+        for part in self.networks.keys() {
+            if let Some(endpoint) = matched.range(part.address()..).next()
+                && part.contains(*endpoint)
+            {
+                for network in wanted_mtus
+                    .keys()
+                    .filter(|network| network.contains(*endpoint))
+                {
+                    states.insert(
+                        *network,
+                        RouteState::Failed(format!(
+                            "could not exclude underlay endpoint {endpoint}"
+                        )),
+                    );
+                }
+            }
+        }
+        if states
+            .values()
+            .all(|state| !matches!(state, RouteState::Failed(_)))
+        {
+            self.subnet_exceptions = matched;
+        }
         self.network_status.publish(states);
+        true
     }
 
     /// The networks of the applied snapshot, each with its router peer's path MTU (root mode
@@ -114,30 +237,11 @@ impl RuntimeState {
         wanted
     }
 
-    /// Every underlay address the mesh sends to: the configured endpoints and the addresses the
-    /// engine uses now (it may have roamed to a candidate). A network holding one of them is
-    /// never routed into the utun.
-    async fn underlay_endpoints(&self, config: &Config) -> Vec<IpAddr> {
-        let mut endpoints: Vec<IpAddr> = installed_peers(config)
-            .filter_map(|policy| policy.peer.endpoint.map(|endpoint| endpoint.ip()))
-            .collect();
-        if let Some(device) = self.device.as_ref() {
-            endpoints.extend(
-                device
-                    .read(async |read| read.peers().await)
-                    .await
-                    .into_iter()
-                    .filter_map(|peer| peer.peer.endpoint.map(|endpoint| endpoint.ip())),
-            );
-        }
-        endpoints.sort_unstable();
-        endpoints.dedup();
-        endpoints
-    }
-
     /// Take every subnet route off the utun before it closes (root mode runs `route` itself;
     /// in user mode the routes go with the utun) and clear the published status.
     pub(super) fn remove_networks(&mut self) {
+        self.subnet_exceptions.clear();
+        self.admitted_networks.clear();
         let networks = std::mem::take(&mut self.networks);
         if !crate::macos_helper::user_mode()
             && let Some(utun) = self.utun.as_ref()
@@ -164,7 +268,6 @@ fn sync_as_root(
     own: std::net::Ipv4Addr,
     wanted: &Wanted,
     installed: &BTreeMap<Network, Option<u16>>,
-    endpoints: &[IpAddr],
 ) -> (
     BTreeMap<Network, Option<u16>>,
     BTreeMap<Network, RouteState>,
@@ -192,20 +295,21 @@ fn sync_as_root(
         &table,
         &local,
         &[],
-        endpoints,
+        &[],
         false,
     );
     let mut now = installed.clone();
     let mut states = BTreeMap::new();
     for network in &plan.remove {
-        match network_route(interface, *network, "delete", None) {
-            Ok(()) => {
-                now.remove(network);
-            }
-            Err(error) => {
-                tracing::warn!(%network, error = %error, "mesh subnet route could not be removed");
-            }
+        if let Err(error) = network_route(interface, *network, "delete", None) {
+            tracing::warn!(%network, %error, "mesh subnet route could not be removed");
+            let failed = networks
+                .iter()
+                .map(|network| (*network, RouteState::Failed(error.to_string())))
+                .collect();
+            return (now, failed);
         }
+        now.remove(network);
     }
     for (network, skip) in &plan.skipped {
         states.insert(*network, RouteState::Skipped(skip.sentence()));
@@ -239,32 +343,18 @@ fn sync_as_root(
     (now, states)
 }
 
-/// User mode: leave out what only the agent can judge (a peer's underlay address, public space
-/// the helper would refuse), then ask the helper to make the utun's networks exactly the rest.
+/// User mode: ask the helper to put the already checked prefixes on this utun.
 fn sync_through_helper(
     utun: &MacUtun,
     wanted: &Wanted,
     installed: &BTreeMap<Network, Option<u16>>,
-    endpoints: &[IpAddr],
 ) -> (
     BTreeMap<Network, Option<u16>>,
     BTreeMap<Network, RouteState>,
 ) {
     use std::os::fd::AsFd;
     let mut states = BTreeMap::new();
-    let mut asked = Vec::new();
-    for (network, _) in wanted {
-        if let Some(address) = endpoints.iter().find(|address| network.contains(**address)) {
-            states.insert(
-                *network,
-                RouteState::Skipped(Skip::HoldsEndpoint(*address).sentence()),
-            );
-        } else if !crate::macos_subnet_routes::is_private(*network) {
-            states.insert(*network, RouteState::Skipped(Skip::NotPrivate.sentence()));
-        } else {
-            asked.push(*network);
-        }
-    }
+    let asked: Vec<_> = wanted.iter().map(|(network, _)| *network).collect();
     if asked.is_empty() && installed.is_empty() {
         return (BTreeMap::new(), states);
     }

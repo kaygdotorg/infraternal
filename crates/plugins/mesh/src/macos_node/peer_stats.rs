@@ -6,6 +6,7 @@
 //! is one `peers()` read of the device and no blocking work.
 
 use super::{CounterMap, Counters, RuntimeState};
+use crate::policy::model::PublicKey;
 use std::{
     io,
     net::SocketAddr,
@@ -22,18 +23,34 @@ impl RuntimeState {
     /// routes has no path to vouch for. With no device the list is emptied. The shared feed
     /// takes the guard's write lock only on a change. The worker calls it when the engine reports
     /// a changed confirmed endpoint and after commands that change the peers.
-    pub(super) async fn admit_confirmed_endpoints(&mut self) {
-        let endpoints: Vec<SocketAddr> = match self.device.as_ref() {
-            Some(device) => device
-                .read(async |read| read.peers().await)
-                .await
-                .into_iter()
-                .filter(|peer| !peer.peer.allowed_ips.is_empty())
-                .filter_map(|peer| peer.stats.confirmed_endpoint)
-                .collect(),
-            None => Vec::new(),
+    pub(super) async fn admit_confirmed_endpoints(&mut self) -> Vec<(PublicKey, SocketAddr)> {
+        let endpoints = self.confirmed_peer_endpoints().await;
+        self.confirmed_feed
+            .offer(
+                &self.admission,
+                endpoints.iter().map(|(_, endpoint)| *endpoint),
+            )
+            .await;
+        endpoints
+    }
+
+    /// One authenticated address per active installed key, shared by admission and subnet routing.
+    pub(super) async fn confirmed_peer_endpoints(&self) -> Vec<(PublicKey, SocketAddr)> {
+        let Some(device) = self.device.as_ref() else {
+            return Vec::new();
         };
-        self.confirmed_feed.offer(&self.admission, endpoints).await;
+        device
+            .read(async |read| read.peers().await)
+            .await
+            .into_iter()
+            .filter(|peer| !peer.peer.allowed_ips.is_empty())
+            .filter_map(|peer| {
+                let key = PublicKey(*peer.peer.public_key.as_bytes());
+                peer.stats
+                    .confirmed_endpoint
+                    .map(|endpoint| (key, endpoint))
+            })
+            .collect()
     }
 
     /// Read every installed peer's handshake time, byte counts and endpoint.
