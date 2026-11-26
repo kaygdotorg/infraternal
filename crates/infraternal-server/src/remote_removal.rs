@@ -391,7 +391,7 @@ impl Removal {
         let (name, _) = Self::forget_record(&mut tx, person, host).await?;
         let name = display_name(&name);
         Ok(
-            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops automatic cleanup. The audit record stays. If anything remains, sign in to the machine and uninstall the infraternal agent the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
+            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops cleanup retries. The audit record stays. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
         )
     }
 

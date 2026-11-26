@@ -51,19 +51,33 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await expect(row.locator(".result-icon")).toHaveText("×");
         await expect(row.locator(".result-hint")).toHaveText("removal pending · access revoked");
         await page.locator(".palette").evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))));
-        const hintFits = await row.locator(".result-hint").evaluate((el) => el.scrollWidth <= el.clientWidth);
-        expect(hintFits, "the pending hint must fit without truncation on phones").toBe(true);
-        const centreOffset = await row.evaluate((element) => {
-          const label = element.querySelector(".result-label")!.getBoundingClientRect();
-          const icon = element.querySelector(".result-icon")!.getBoundingClientRect();
-          return Math.abs(label.y + label.height / 2 - icon.y - icon.height / 2);
+        const layout = await row.evaluate((element) => {
+          const label = element.querySelector(".result-label") as HTMLElement;
+          const icon = element.querySelector(".result-icon") as HTMLElement;
+          const hint = element.querySelector(".result-hint") as HTMLElement;
+          const labelBox = label.getBoundingClientRect();
+          const iconBox = icon.getBoundingClientRect();
+          const hintBox = hint.getBoundingClientRect();
+          return {
+            labelFits: label.scrollWidth <= label.clientWidth,
+            hintFits: hint.scrollWidth <= hint.clientWidth,
+            centreOffset: Math.abs(labelBox.y + labelBox.height / 2 - iconBox.y - iconBox.height / 2),
+            hintLeftOffset: Math.abs(labelBox.x - hintBox.x),
+            hintUnderLabel: hintBox.y >= labelBox.bottom,
+          };
         });
-        expect(centreOffset).toBeLessThanOrEqual(0.5);
+        expect(layout.labelFits, "the Forget action and host name must fit").toBe(true);
+        expect(layout.hintFits, "the pending hint must fit").toBe(true);
+        expect(layout.centreOffset).toBeLessThanOrEqual(0.5);
+        if (viewport.width < 500) {
+          expect(layout.hintUnderLabel).toBe(true);
+          expect(layout.hintLeftOffset).toBeLessThanOrEqual(0.5);
+        }
         await page.screenshot({ path: tracerEvidencePath("forget-host", `${viewport.width}-${theme}-row.png`) });
         await row.click();
         await expect(page.getByText("Forget retired-worker?", { exact: true })).toBeVisible();
         const guidance = page.locator(".ui-confirm-tip-detail");
-        for (const words of ["stops automatic cleanup", "stop and remove its service unit", "agent files", "identity key"]) {
+        for (const words of ["stops cleanup retries", "stop and remove its service unit", "agent files", "identity key"]) {
           await expect(guidance).toContainText(words);
         }
         expect(forgotten).toBe(false);
