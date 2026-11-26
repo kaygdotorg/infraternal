@@ -7,7 +7,10 @@ the host namespace), starts the hub (the production Node, as the ignored test
 count through the measurement steps below, and appends one CSV row per measurement.
 Everything it creates is removed in a `finally`/signal handler.
 
-usage: run.py --hub TESTBIN --sim PEERSIM --out DIR --peers N [--repeat-tag TAG]
+Snapshot applies are ordinary revisions under one authority epoch; `--epoch-per-apply` gives
+each its own epoch (tag suffix `-epoch`).
+
+usage: run.py --hub TESTBIN --sim PEERSIM --out DIR --peers N [--tag TAG] [--epoch-per-apply]
 
 CPU layout (the perf slice owns cpus 1-3): hub cpus 1,2; peer simulator and sink cpu 3.
 """
@@ -149,6 +152,9 @@ def main():
     ap.add_argument("--load-secs", type=int, default=10)
     ap.add_argument("--mode", default="single", choices=["single", "spread", "known"],
                     help="peer source addresses: all behind one address, one /24 each, or one /24 each and told to the hub as endpoints")
+    ap.add_argument("--epoch-per-apply", action="store_true",
+                    help="give every snapshot apply a new authority epoch (the rare authority-replacement path) "
+                         "instead of ordinary revisions under one epoch")
     ap.add_argument("--hub-env", action="append", default=[], metavar="KEY=VALUE",
                     help="extra environment for the hub (for example GOTATUN_AQM=off); repeatable")
     ap.add_argument("--ks", default="1,10,100", help="concurrent sender counts")
@@ -158,6 +164,11 @@ def main():
     n = args.peers
     if args.mode != "single":
         args.tag = f"{args.tag}-{args.mode}"
+    if args.epoch_per_apply:
+        args.tag = f"{args.tag}-epoch"
+    # The option alone decides the epoch mode, so a stray variable in the caller's environment
+    # cannot change it without the tag saying so.
+    args.hub_env.append(f"HUB_EPOCH_PER_APPLY={int(args.epoch_per_apply)}")
     os.makedirs(args.out, exist_ok=True)
     work = tempfile.mkdtemp(prefix="j1234.", dir="/tmp")
     os.chmod(work, 0o700)
