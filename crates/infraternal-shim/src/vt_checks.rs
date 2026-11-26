@@ -14,11 +14,13 @@
 //! - **a snapshot continues the stream** (when the input's flag bit asks):
 //!   a fresh terminal of the same size fed the snapshot, then the same
 //!   further output as the original, ends with the same snapshot as the
-//!   original. A failure is told apart by cutting the carry off the snapshot
-//!   and replaying again: when that makes the two agree, the carry is at
-//!   fault (`CARRY-CLASS`); otherwise the repaint is (`REPAINT-CLASS`). The
-//!   two classes have different owners, and a known gap in one must not hide
-//!   a regression in the other.
+//!   original, except that hyperlinks the program opened without an id may
+//!   be numbered differently as long as the same characters share a link
+//!   (the `links` module). A failure is told apart by cutting the carry off
+//!   the snapshot and replaying again: when that makes the two agree, the
+//!   carry is at fault (`CARRY-CLASS`); otherwise the repaint is
+//!   (`REPAINT-CLASS`). The two classes have different owners, and a known
+//!   gap in one must not hide a regression in the other.
 //!
 //! The native engine's own code is not coverage-instrumented; the carry
 //! parser and the snapshot framing around it are.
@@ -27,6 +29,8 @@
 
 use crate::{frame::MAX_FRAME, terminal::Terminal};
 use std::fmt::Write as _;
+
+mod links;
 
 /// One run of output, then the size both terminals change to after it (none for the last run).
 type Segment<'a> = (&'a [u8], Option<(u16, u16)>);
@@ -97,17 +101,18 @@ pub fn verify_vt_stream_sample(data: &[u8]) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let carry_len = whole.carry_len();
+    let repaint_len = snapshot.len() - whole.carry_len();
+    let viewer_input = links::mark_restored(&snapshot, repaint_len);
     whole.process(last);
     let Ok(original) = whole.snapshot() else {
         return;
     };
-    let Some(rebuilt) = replay(&snapshot, size_now, last) else {
+    let Some(rebuilt) = replay(&viewer_input, size_now, last) else {
         return;
     };
-    if original != rebuilt {
-        let repaint = &snapshot[..snapshot.len() - carry_len];
-        let carry_at_fault = replay(repaint, size_now, last).as_deref() == Some(&original[..]);
+    if !links::same_screen(&original, &rebuilt) {
+        let carry_at_fault = replay(&viewer_input[..repaint_len], size_now, last)
+            .is_some_and(|bare| links::same_screen(&original, &bare));
         let class = if carry_at_fault {
             "CARRY-CLASS"
         } else {
@@ -315,5 +320,103 @@ mod classifier {
         let snapshot = terminal.snapshot().unwrap();
         assert_eq!(terminal.carry_len(), 4);
         assert!(snapshot.ends_with(b"\x1b[1;"));
+    }
+}
+
+/// The continuation check ignores how a restored viewer numbers links, and
+/// nothing else about them (#594).
+#[cfg(test)]
+mod link_groups {
+    use super::{links, replay, verify_vt_stream_sample};
+    use crate::terminal::Terminal;
+
+    /// Whether a viewer restored from the snapshot taken after `prefix`, then
+    /// fed `suffix`, passes the check against the original. `damage` edits what
+    /// the viewer is fed, standing in for a painter that restores links wrongly.
+    fn continues(prefix: &str, suffix: &str, damage: impl Fn(String) -> String) -> bool {
+        let mut original = Terminal::new(81, 21).unwrap();
+        original.process(b"\x1bc");
+        original.process(prefix.as_bytes());
+        let snapshot = original.snapshot().unwrap();
+        let fed = links::mark_restored(&snapshot, snapshot.len() - original.carry_len());
+        let fed = String::from_utf8(fed).unwrap();
+        let damaged = damage(fed);
+        original.process(suffix.as_bytes());
+        let viewer = replay(damaged.as_bytes(), (81, 21), suffix.as_bytes()).unwrap();
+        links::same_screen(&original.snapshot().unwrap(), &viewer)
+    }
+
+    /// Two links to one URI, opened without ids and closed, on two rows.
+    const TWO: &str = "\x1b]8;;u\x1b\\A\x1b]8;;\x1b\\\r\n\x1b]8;;u\x1b\\B\x1b]8;;\x1b\\";
+    /// One link spanning two rows.
+    const ONE: &str = "\x1b]8;;u\x1b\\A\r\nB\x1b]8;;\x1b\\";
+
+    /// A link opened after the restore gets a smaller number in the viewer
+    /// than in the original, and may get the number a restored link had. The
+    /// bytes differ; the grouping does not. The same holds for a link left
+    /// open across the cut.
+    #[test]
+    fn a_renumbered_link_is_not_a_divergence() {
+        let suffix = "\r\n\x1b]8;;u\x1b\\C\x1b]8;;\x1b\\";
+        for prefix in [TWO, ONE, "\x1b]8;;u\x1b\\A"] {
+            assert!(continues(prefix, suffix, |fed| fed), "{prefix:?}");
+            let mut input = format!("\x50\x01\x00\x1bc{prefix}").into_bytes();
+            input.extend_from_slice(b"\xfe\xfe\x50");
+            input.extend_from_slice(suffix.as_bytes());
+            verify_vt_stream_sample(&input);
+        }
+        let mut original = Terminal::new(81, 21).unwrap();
+        original.process(format!("\x1bc{TWO}").as_bytes());
+        let mut viewer = Terminal::new(81, 21).unwrap();
+        viewer.process(&original.snapshot().unwrap());
+        original.process(suffix.as_bytes());
+        viewer.process(suffix.as_bytes());
+        assert_ne!(original.snapshot().unwrap(), viewer.snapshot().unwrap());
+    }
+
+    /// Each kind of wrong restore is still reported.
+    #[test]
+    fn a_wrong_restore_is_a_divergence() {
+        let second = "\x1b]8;id=infraternal-restored-1;u\x1b\\";
+        let first = "\x1b]8;id=infraternal-restored-0;u\x1b\\";
+        // Two links merged into one.
+        assert!(!continues(TWO, "", |fed| {
+            assert!(fed.contains(second));
+            fed.replace(second, first)
+        }));
+        // One link split: everything painted after the first row's letter gets
+        // another id. All later openings change, because the repaint ends by
+        // printing the last cell again to restore the repeat character.
+        assert!(!continues(ONE, "", |fed| {
+            let (head, tail) = fed.split_once('A').unwrap();
+            assert!(tail.contains(first));
+            format!("{head}A{}", tail.replace(first, second))
+        }));
+        // A link lost, and a link pointing elsewhere.
+        assert!(!continues(TWO, "", |fed| fed.replace(second, "")));
+        assert!(!continues(TWO, "", |fed| {
+            fed.replace(second, &second.replace(";u", ";v"))
+        }));
+        // An id the program chose must come back exactly.
+        let chosen = "\x1b]8;id=mine;u\x1b\\A";
+        assert!(continues(chosen, "B", |fed| fed));
+        assert!(!continues(chosen, "B", |fed| {
+            assert!(fed.contains("id=mine;"));
+            fed.replace("id=mine;", "id=yours;")
+        }));
+    }
+
+    /// Only the repaint is renamed: unfinished input must reach the viewer as
+    /// the program wrote it.
+    #[test]
+    fn marking_leaves_the_carry_alone() {
+        let opening = b"\x1b]8;id=infraternal-implicit-0;u\x1b\\";
+        let snapshot = [&opening[..], opening].concat();
+        let marked = links::mark_restored(&snapshot, opening.len());
+        assert_eq!(&marked[opening.len()..], opening);
+        assert_eq!(
+            &marked[..opening.len()],
+            b"\x1b]8;id=infraternal-restored-0;u\x1b\\"
+        );
     }
 }
