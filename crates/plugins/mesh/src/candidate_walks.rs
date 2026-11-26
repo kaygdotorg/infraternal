@@ -8,8 +8,8 @@
 //! 2. asks [`Walks::prepare`] whether anything needs the engine's counters, and reads them only
 //!    then, as [`Observed`];
 //! 3. installs each address [`Walks::start`] and [`Walks::step`] return, and sends a handshake
-//!    there with `GotaTun`'s `rehandshake` (fork `1f646d4`), which sends even over a live session
-//!    and keeps that session until the new one is up;
+//!    there with `GotaTun`'s `rehandshake_all` (fork `1f646d4`, J1253), which sends even over
+//!    a live session and keeps that session until the new one is up;
 //! 4. reports an address it could not install ([`Walks::abandon`], [`Walks::install_failed`]).
 //!
 //! The walk itself, one peer's [`Rotation`], lives in [`crate::candidates`].
@@ -169,8 +169,9 @@ pub(crate) fn kept_address(
     (relay == Some(at) || listed || confirmed).then_some(at)
 }
 
-/// How long a worker's handshake task waits for the session it asked for; `GotaTun`'s own wait
-/// has no deadline. One `WireGuard` handshake attempt is 5 s, after which the peer's timers retry.
+/// How long a worker's handshake task may take: a relay handshake waits for its session
+/// (`GotaTun`'s own wait has no deadline; one `WireGuard` attempt is 5 s, after which the peer's
+/// timers retry), and a bulk send is bounded by the same time.
 pub(crate) const HANDSHAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The wall clock in Unix seconds, the unit of the engine's handshake times.

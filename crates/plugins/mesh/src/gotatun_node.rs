@@ -1262,7 +1262,7 @@ impl RuntimeState {
     /// A relayed peer gets no walk while the engine sends to its relay (J699 P3-1, [`on_relay`]).
     ///
     /// Each walk that starts running begins with a real handshake on its address
-    /// ([`Self::rehandshake`]); a walk that starts finished sends nothing.
+    /// ([`Self::rehandshake_all`]); a walk that starts finished sends nothing.
     ///
     /// Cost: at most one counter read per applied snapshot, on the worker after the apply reply;
     /// [`Self::engine_addresses`] adds one before the apply when the snapshot changes any
@@ -1309,6 +1309,7 @@ impl RuntimeState {
         // first candidate, which a re-installed peer already has. Anything else is moved there,
         // or the walk's first tick would read the engine's address as the peer having roamed.
         // Then the walk's address gets a real handshake, so a working one answers at once.
+        let mut moved = Vec::with_capacity(started.len());
         for walk in started {
             if walk.engine_at != Some(walk.address)
                 && self.set_endpoint(walk.key, walk.address).await.is_err()
@@ -1317,8 +1318,9 @@ impl RuntimeState {
                 self.walks.abandon(walk.key);
                 continue;
             }
-            let _ = self.rehandshake(walk.key);
+            moved.push(walk.key);
         }
+        let _ = self.rehandshake_all(moved);
     }
 
     /// Each peer's send and recent confirmed endpoints before `next` is applied, by device key,
@@ -1363,14 +1365,16 @@ impl RuntimeState {
         let moves = self
             .walks
             .step(std::time::Instant::now(), &observed(&counters));
+        let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
             if self.set_endpoint(key, endpoint).await.is_ok() {
-                let _ = self.rehandshake(key);
+                installed.push(key);
             } else {
                 // The engine still holds the old address; the walk's next step tries again.
                 self.walks.install_failed(key);
             }
         }
+        let _ = self.rehandshake_all(installed);
     }
 
     /// Prepare a peer for relayed traffic while preserving any session it already established.
@@ -1430,41 +1434,44 @@ impl RuntimeState {
     /// or an initiation is already in flight, without waiting for it. Only the relay path uses it.
     #[cfg(feature = "relay")]
     fn initiate(&mut self, key: PublicKey) -> io::Result<()> {
-        self.spawn_handshake(key, false)
-    }
-
-    /// Send a new handshake initiation to `key`'s current address now, even over a live session,
-    /// without waiting for it (#515, J604).
-    ///
-    /// A new address on a peer sends nothing by itself: the engine only uses it for the next
-    /// packet, and an idle peer has none for up to a keepalive interval. Behind a filtering NAT
-    /// that first packet is what opens this side for the peer's replies, so a changed or walked
-    /// address starts a handshake at once. `initiate` cannot do it: the engine's forced
-    /// handshake sends nothing while the session is younger than two minutes, which is exactly
-    /// the rebind case (J587's finding). The engine's `rehandshake` sends the initiation its
-    /// rekey retry would send, and keeps the session carrying data until the new one is up, so
-    /// a working session is never dropped. An unanswered initiation is retried by the engine's
-    /// own rekey timer, to wherever the endpoint is by then; nothing new is scheduled here.
-    fn rehandshake(&mut self, key: PublicKey) -> io::Result<()> {
-        self.spawn_handshake(key, true)
-    }
-
-    /// The body of `initiate` (`fresh` false, relay only) and [`Self::rehandshake`].
-    fn spawn_handshake(&mut self, key: PublicKey, fresh: bool) -> io::Result<()> {
         let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
         let key = X25519PublicKey::from(key.0);
         // GotaTun sends the initiation, then waits for the session without holding its device
         // lock. Wait in a task: callers of this serialized loop block their own threads, and
         // the relay shim that must deliver the response may run on one of them.
         self.handshakes.spawn(async move {
-            let wait = async {
-                if fresh {
-                    device.rehandshake(&key).await
-                } else {
-                    device.force_handshake(&key).await
-                }
-            };
-            let _ = tokio::time::timeout(HANDSHAKE_WAIT, wait).await;
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.force_handshake(&key)).await;
+        });
+        Ok(())
+    }
+
+    /// Send a new handshake initiation to each of `keys` at its current address now, even over a
+    /// live session, without waiting for any answer (#515, J604; #260, J1253).
+    ///
+    /// A new address on a peer sends nothing by itself: the engine only uses it for the next
+    /// packet, and an idle peer has none for up to a keepalive interval. Behind a filtering NAT
+    /// that first packet is what opens this side for the peer's replies, so a changed or walked
+    /// address starts a handshake at once. `initiate` cannot do it: the engine's forced
+    /// handshake sends nothing while the session is younger than two minutes, which is exactly
+    /// the rebind case (J587's finding). The engine's `rehandshake_all` sends the initiation its
+    /// rekey retry would send, and keeps each session carrying data until the new one is up, so
+    /// a working session is never dropped. An unanswered initiation is retried by the engine's
+    /// own rekey timer, to wherever the endpoint is by then; nothing new is scheduled here.
+    ///
+    /// One task sends them all: a waiting task and deadline per peer woke an idle node hundreds
+    /// of times a second while it walked thousands of unreachable peers (J1253, D81). The task
+    /// only keeps this serialized loop free while the sends queue.
+    fn rehandshake_all(&mut self, keys: Vec<PublicKey>) -> io::Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let device = Arc::clone(self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?);
+        let keys: Vec<_> = keys
+            .into_iter()
+            .map(|key| X25519PublicKey::from(key.0))
+            .collect();
+        self.handshakes.spawn(async move {
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake_all(&keys)).await;
         });
         Ok(())
     }
@@ -1596,7 +1603,7 @@ impl RuntimeState {
             .collect::<io::Result<Vec<_>>>()?;
         let changed: Vec<_> = changed_policies.into_iter().flatten().collect();
         // Peers that keep their access but get a new first address: tell them at once
-        // (`rehandshake`, which sends even over the live session the old address carried). A peer
+        // (`rehandshake_all`, which sends even over the live session the old address carried). A peer
         // with candidates gets that handshake when its new walk starts (`refresh_walks`).
         let readdressed: Vec<PublicKey> = config
             .peers
@@ -1660,9 +1667,7 @@ impl RuntimeState {
         guard.set_configured_endpoints(configured_endpoints);
         drop(guard);
         self.config = Some(config);
-        for key in readdressed {
-            let _ = self.rehandshake(key);
-        }
+        let _ = self.rehandshake_all(readdressed);
         Ok(self.info.clone())
     }
 

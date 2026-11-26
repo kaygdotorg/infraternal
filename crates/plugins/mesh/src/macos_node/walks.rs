@@ -2,8 +2,8 @@
 //! direct-path candidate walks (#515, J704).
 //!
 //! Linux and macOS both run `GotaTun`, so the Mac drives the same walk bookkeeping as Linux
-//! ([`crate::candidate_walks`]) with the same engine call: after moving a peer's address it sends
-//! a handshake there with `Device::rehandshake`, which sends even over a live
+//! ([`crate::candidate_walks`]) with the same engine call: after moving peers' addresses it sends
+//! handshakes there with `Device::rehandshake_all`, which sends even over a live
 //! session and keeps that session carrying data until the new one is up.
 //!
 //! That only works if a snapshot leaves the sessions of unchanged peers alone. The Mac used to
@@ -393,7 +393,7 @@ impl RuntimeState {
     /// [`crate::candidate_walks::Walks::start`], with this device's counters and addresses.
     ///
     /// Each walk that starts running is moved to its address if the engine is elsewhere, then
-    /// gets a real handshake there ([`Self::rehandshake`]); a walk that starts finished sends
+    /// gets a real handshake there ([`Self::rehandshake_all`]); a walk that starts finished sends
     /// nothing, and a working peer that the snapshot left unchanged is never walked again.
     async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, EngineEndpoint>) {
         let Some(config) = self.config.as_ref() else {
@@ -422,6 +422,7 @@ impl RuntimeState {
             before,
             std::time::Instant::now(),
         );
+        let mut moved = Vec::with_capacity(started.len());
         for walk in started {
             if walk.engine_at != Some(walk.address)
                 && self.set_endpoint(walk.key, walk.address).await.is_err()
@@ -430,8 +431,9 @@ impl RuntimeState {
                 self.walks.abandon(walk.key);
                 continue;
             }
-            self.rehandshake(walk.key);
+            moved.push(walk.key);
         }
+        self.rehandshake_all(moved);
     }
 
     /// Where the engine sends each peer's packets before `next` is applied, by device key, for
@@ -473,14 +475,16 @@ impl RuntimeState {
         let moves = self
             .walks
             .step(std::time::Instant::now(), &observed(&counters));
+        let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
             if self.set_endpoint(key, endpoint).await.is_ok() {
-                self.rehandshake(key);
+                installed.push(key);
             } else {
                 // The engine still holds the old address; the walk's next step tries again.
                 self.walks.install_failed(key);
             }
         }
+        self.rehandshake_all(installed);
     }
 
     /// Point the peer whose key owns its host routes at `endpoint`, a walk's next candidate.
@@ -518,19 +522,25 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("WireGuard peer endpoint could not be installed."))
     }
 
-    /// Send a new handshake initiation to `key`'s current address now, even over a live session,
-    /// without waiting for it (#515, J604 on Linux, J704 here).
+    /// Send a new handshake initiation to each of `keys` at its current address now, even over a
+    /// live session, without waiting for any answer (#515, J604 on Linux, J704 here; J1253).
     ///
-    /// `GotaTun` sends the initiation, then waits for the session; that wait runs in a task with a
-    /// deadline, so the worker never blocks on a peer. An unanswered initiation is retried by the
-    /// engine's own rekey timer; nothing new is scheduled here.
-    pub(super) fn rehandshake(&mut self, key: PublicKey) {
+    /// One task with a deadline sends them all, so the worker never blocks on the sends. An
+    /// unanswered initiation is retried by the engine's own rekey timer; nothing new is
+    /// scheduled here.
+    pub(super) fn rehandshake_all(&mut self, keys: Vec<PublicKey>) {
+        if keys.is_empty() {
+            return;
+        }
         let Some(device) = self.device.as_ref().map(Arc::clone) else {
             return;
         };
-        let key = X25519PublicKey::from(key.0);
+        let keys: Vec<_> = keys
+            .into_iter()
+            .map(|key| X25519PublicKey::from(key.0))
+            .collect();
         self.handshakes.spawn(async move {
-            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake(&key)).await;
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake_all(&keys)).await;
         });
     }
 }
