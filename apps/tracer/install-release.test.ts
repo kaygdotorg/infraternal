@@ -174,9 +174,9 @@ test("resolves and verifies a signed stable channel pointer", async () => {
   expect(resolved.state).toBe("verified");
   if (resolved.state !== "verified") return;
   expect(resolved.version).toBe("1.2.3");
-  expect(resolved.binaryUrl).toBe("https://builds.infraternal.com/releases/1.2.3/infraternal");
-  expect(resolved.sumsUrl).toBe("https://builds.infraternal.com/releases/1.2.3/SHA256SUMS");
-  expect(resolved.signatureUrl).toBe("https://builds.infraternal.com/releases/1.2.3/SHA256SUMS.sig");
+  expect(resolved.binaryUrl).toBe("https://infraternal.com/releases/1.2.3/infraternal");
+  expect(resolved.sumsUrl).toBe("https://infraternal.com/releases/1.2.3/SHA256SUMS");
+  expect(resolved.signatureUrl).toBe("https://infraternal.com/releases/1.2.3/SHA256SUMS.sig");
   expect(requested).not.toContain("/releases/channels/edge.json");
 });
 
@@ -195,7 +195,7 @@ test("resolves and verifies a signed edge channel pointer when explicitly reques
   expect(resolved.state).toBe("verified");
   if (resolved.state !== "verified") return;
   expect(resolved.version).toBe(version);
-  expect(resolved.binaryUrl).toBe(`https://builds.infraternal.com/releases/${version}/infraternal`);
+  expect(resolved.binaryUrl).toBe(`https://infraternal.com/releases/${version}/infraternal`);
 });
 
 test("empty stable channel reports empty and never falls back to edge", async () => {

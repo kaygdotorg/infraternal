@@ -84,7 +84,7 @@ test("the install page resolves releases dynamically without hardcoded versions,
     await buildSite({ out: site });
     const landing = await readFile(join(site, "index.html"), "utf8");
     const html = await readFile(join(site, "install", "index.html"), "utf8");
-    expect(html).toContain('data-install-page data-origin="https://builds.infraternal.com" data-site-origin="https://infraternal.com"');
+    expect(html).toContain('data-install-page data-site-origin="https://infraternal.com"');
     // Both landing and /install/ advertise the installer URL on Pages, and that exact file is built into the site output.
     for (const pageHtml of [landing, html]) {
       const match = /curl -fsSL (https:\/\/[^\s<]+) \| sh/.exec(pageHtml);
@@ -94,6 +94,9 @@ test("the install page resolves releases dynamically without hardcoded versions,
       const published = await readFile(join(site, advertised.pathname.replace(/^\/+/, "")), "utf8");
       expect(published).toContain("ssh-keygen -Y verify");
     }
+    expect(JSON.parse(await readFile(join(site, "_routes.json"), "utf8"))).toEqual({
+      version: 1, include: ["/releases/*"], exclude: ["/releases/"],
+    });
     expect(html).toContain('href="/allowed_signers"');
     const publishedSigners = await readFile(join(site, "allowed_signers"), "utf8");
     expect(publishedSigners).toContain('namespaces="infraternal-release"');

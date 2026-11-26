@@ -2,7 +2,8 @@
 # Signed releases
 
 Stable releases use the workspace `x.y.z` version in `Cargo.toml`. Edge releases
-use `edge-YYYYMMDDTHHMMSSZ`, stamped from UTC at build time [226]. The public bucket
+use `edge-YYYYMMDDTHHMMSSZ`, stamped from UTC at build time [226]. The Pages Function serves the
+`infraternal-builds` bucket at `https://infraternal.com/releases/…` [401]. The bucket
 contains `releases/<version>/infraternal-{x86_64,aarch64}-musl` (the add-host
 payloads, without a `server` command), the initial-shell
 `infraternal-{x86_64,aarch64}-session-musl` images, the x86_64 server image
@@ -48,6 +49,45 @@ carry the same stamped identity.
 The build marks the binaries as release builds: missing public releases and
 verification failures cannot enable the development fallback.
 
+## Deploy the release route (D401)
+
+1. In the existing Pages project for `infraternal.com`, open **Settings →
+   Bindings**. Add an **R2 bucket** binding named `RELEASES` pointing to
+   `infraternal-builds` in **Production**. Add the same binding in **Preview**
+   if that environment will be used to smoke-test public downloads. The
+   signer keeps its separate `BUILDS` binding to the same bucket.
+2. Build the site from the reviewed commit. Run Wrangler from `apps/website`
+   so it bundles the adjacent `functions/` directory. Use the existing Pages
+   project name and its configured production branch. Supply the Pages-scoped
+   credentials through the environment.
+
+   ```sh
+   # From the repository root, with the existing production values set.
+   (cd apps/tracer && bun install --frozen-lockfile && bun run site ../website/site-dist)
+   (cd apps/website && npx wrangler pages deploy site-dist \
+       --project-name "$PAGES_PROJECT" --branch "$PAGES_PRODUCTION_BRANCH")
+   ```
+
+   The build writes `_routes.json`, which sends `/releases/*` to the Function
+   and preserves the static `/releases/` page. The Function uses the bucket's
+   existing keys. Channel pointers and the index bypass the edge cache and
+   carry `Cache-Control: no-store`. Complete versioned downloads can be cached
+   for one year. Do not configure a zone cache rule that overrides the
+   metadata responses' cache policy.
+3. Smoke-test `/releases/`, `/releases/channels/edge.json` and
+   `/install/?channel=edge` on `infraternal.com`. Check a signed version with
+   `scripts/release/verify VERSION`. Check that `HEAD` on its binary returns the
+   length and ETag, `Range: bytes=0-15` returns `206`, and `If-None-Match`
+   with that ETag returns `304`.
+4. Publish and apply the first release with the new defaults while the old
+   custom domain still works, so already-running binaries can fetch the
+   cutover build. Once managed consumers run that release, disconnect
+   `builds.infraternal.com` from **R2 → infraternal-builds → Settings → Custom
+   Domains**. Remove the old DNS record if it remains, and remove the bucket
+   CORS policy used to let the install page fetch from that domain. Keep the
+   bucket, its objects, the S3 publication endpoint, and the signer. The old
+   hostname has no redirect or fallback after retirement.
+
 ## The macOS binary (#483)
 
 A release can also carry `infraternal-aarch64-darwin`. That is the
@@ -80,7 +120,7 @@ People install it by hand for now, which the one-command join (D311) will
 replace:
 
 ```sh
-v=<version>; b=https://builds.infraternal.com/releases/$v
+v=<version>; b=https://infraternal.com/releases/$v
 curl -fsSLO "$b/SHA256SUMS" -O "$b/SHA256SUMS.sig" -O "$b/infraternal-aarch64-darwin"
 ssh-keygen -Y verify -f allowed_signers -I release@infraternal.com -n infraternal-release -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 --ignore-missing -c SHA256SUMS
@@ -516,7 +556,7 @@ Production today: root, data `/var/lib/infraternal`, unit
    image is `infraternal`; `infraternal-x86_64-musl` in the same release is the
    add-host payload, which has no `server` command, so never use it here:
    ```sh
-   v=<version>; b=https://builds.infraternal.com/releases/$v
+   v=<version>; b=https://infraternal.com/releases/$v
    sudo install -d -m 700 /root/releases/$v && cd /root/releases/$v
    for f in SHA256SUMS SHA256SUMS.sig VERSION infraternal infraternal-web.tar; do
      sudo curl -fsSLo "$f" "$b/$f"

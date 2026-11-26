@@ -69,7 +69,7 @@ impl ReleasePayload {
             cache,
             version: infraternal_plugin_api::VERSION.into(),
             development: env!("INFRATERNAL_RELEASE_BUILD") != "1",
-            origin: "https://builds.infraternal.com".into(),
+            origin: "https://infraternal.com".into(),
             lock: Mutex::new(()),
             progress: tokio::sync::watch::channel(0).0,
             #[cfg(test)]

@@ -20,10 +20,7 @@
 /** A release channel name supported by the release bucket and updater. */
 export type ReleaseChannel = "stable" | "edge";
 
-/** The default public release origin holding channel pointers and signed release files (D223). */
-export const DEFAULT_RELEASE_ORIGIN = "https://builds.infraternal.com";
-
-/** The default public site origin serving `/install.sh` and `/allowed_signers` (Pages, never the R2 release bucket). */
+/** The public origin for installation scripts, trust anchors and signed release files (D401). */
 export const DEFAULT_SITE_ORIGIN = "https://infraternal.com";
 
 /** The OpenSSH signature namespace every release signature must bind to (`apps/release-signer/src/index.js`). */
@@ -90,7 +87,7 @@ export type ResolvedRelease =
 
 /** Inputs to {@link resolveChannelRelease}. */
 export interface ResolveChannelOptions {
-  /** Base URL of the release bucket (defaults to {@link DEFAULT_RELEASE_ORIGIN}). */
+  /** Origin serving the release files (defaults to {@link DEFAULT_SITE_ORIGIN}). */
   origin?: string;
   /** The channel to resolve (`stable` by default; `edge` only when explicitly requested). */
   channel: ReleaseChannel;
@@ -460,7 +457,7 @@ async function fetchBounded(
  * its signature, checksums, and signed `VERSION` file before returning download URLs.
  */
 export async function resolveChannelRelease(options: ResolveChannelOptions): Promise<ResolvedRelease> {
-  const origin = (options.origin ?? DEFAULT_RELEASE_ORIGIN).replace(/\/+$/, "");
+  const origin = (options.origin ?? DEFAULT_SITE_ORIGIN).replace(/\/+$/, "");
   const fetchFn = options.fetchFn ?? fetch;
   try {
     const trustedKeys = parseAllowedSigners(options.allowedSigners);

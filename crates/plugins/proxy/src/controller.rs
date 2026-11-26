@@ -27,7 +27,8 @@ use std::{
 };
 use url::Url;
 
-const DEFAULT_COMPONENT_MIRROR: &str = "https://builds.infraternal.com/releases/";
+/// Public release root for archives and manifests (D401).
+const DEFAULT_COMPONENT_MIRROR: &str = "https://infraternal.com/releases/";
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 const PRIVATE_PING_TIMEOUT: Duration = Duration::from_secs(10);

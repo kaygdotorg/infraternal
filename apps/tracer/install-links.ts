@@ -2,12 +2,11 @@
 /**
  * Browser entrypoint for `/install/` (`/docs/install-links.js`, lazy-imported by `doc.js` only on the install page).
  *
- * Reads the requested channel from `location.search` (`stable` by default; `edge` only when `?channel=edge` is set),
+ * Reads release files from the page’s own origin. Reads the requested channel from `location.search` (`stable` by default; `edge` only when `?channel=edge` is set),
  * updates the curl one-liner, and resolves the signed channel pointer against the embedded `release/allowed_signers`
  * trust anchors before populating any download link. Refuses unverified releases and never falls back from stable to edge.
  */
 import {
-  DEFAULT_RELEASE_ORIGIN,
   DEFAULT_SITE_ORIGIN,
   installCommandFor,
   resolveChannelRelease,
@@ -61,7 +60,7 @@ export async function enhanceInstallPage(
   root: HTMLElement,
   options?: { search?: string; allowedSigners?: string; fetchFn?: typeof fetch },
 ): Promise<void> {
-  const origin = root.dataset.origin || DEFAULT_RELEASE_ORIGIN;
+  const origin = window.location.origin;
   const siteOrigin = root.dataset.siteOrigin || DEFAULT_SITE_ORIGIN;
   const channel = selectChannel(options?.search ?? window.location.search);
   const allowedSigners = options?.allowedSigners ?? __INFRATERNAL_ALLOWED_SIGNERS__;

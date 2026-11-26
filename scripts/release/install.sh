@@ -16,7 +16,7 @@ set -eu
 
 channel="stable"
 output="./infraternal"
-origin="${INFRATERNAL_RELEASE_ORIGIN:-https://builds.infraternal.com}"
+origin="${INFRATERNAL_RELEASE_ORIGIN:-https://infraternal.com}"
 
 usage() {
   printf 'usage: install.sh [--channel stable|edge] [--output PATH]\n' >&2
