@@ -90,7 +90,15 @@ async fn run_many_host_fixture() {
         .unwrap();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'owner',1,'unused',?,'Owner')")
         .bind(&owner)
-        .bind(account)
+        .bind(&account)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    // This fixture inserts its owner directly instead of going through signup,
+    // so seed only the account it will open under D235's explicit login policy.
+    sqlx::query("INSERT INTO login_rules(subject,account_kind,account,host_id,created_at) VALUES (?,'named',?,NULL,unixepoch())")
+        .bind(&owner)
+        .bind(&account)
         .execute(&fixture.pool)
         .await
         .unwrap();
