@@ -104,8 +104,8 @@ await Bun.write(`${dist}/chunks.json`, JSON.stringify(classifyChunks(outputs), n
 // A device that has signed in before also gets the code of the screen it is about to open, so the terminal does not wait for the session answer.
 /** The files every visit needs at once: the entry and its static imports. */
 const firstScreen = staticClosure(outputs, entryName);
-/** The extra files a device that has signed in before needs next: the core screen and the terminal. */
-const returningVisit = returningVisitChunks(outputs, ["src/core-screen.ts", "src/terminal.ts"], firstScreen);
+/** The extra files a device that has signed in before needs next: the core screen, the product canvas and the terminal. */
+const returningVisit = returningVisitChunks(outputs, ["src/core-screen.ts", "src/canvas/product.ts", "src/terminal.ts"], firstScreen);
 /** The terminal engine's wasm, which the bundler copied under a content-hashed name (src/engine-wasm.ts): preloaded for a returning device, like the terminal's code. */
 const engineFiles = build.outputs.filter((output) => output.kind === "asset" && output.path.endsWith(".wasm")).map((output) => output.path.split("/").at(-1)!);
 if (engineFiles.length !== 1) throw new Error(`expected one engine wasm in the build, found ${engineFiles.length}`);

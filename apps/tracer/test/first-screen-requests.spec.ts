@@ -30,6 +30,25 @@ test("the first-run check and the session check are both in flight before either
   await expect(page.locator("#login-passkey")).toBeVisible();
 });
 
+test("the first-run and session checks start before the entry script finishes loading", async ({ page }) => {
+  await page.context().request.post("/__mock/reset");
+  let entryReleased = false;
+  await page.route(/\/main\.[0-9a-f]{10}\.js$/, async (route) => {
+    // sleep: hold main.js so the test proves auth checks left index.html before the entry script arrived.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    entryReleased = true;
+    await route.continue();
+  });
+  const asked: string[] = [];
+  await page.route("**/auth/status", async (route) => { asked.push("status"); await route.fulfill({ json: { setup_required: false } }); });
+  await page.route("**/auth/session", async (route) => { asked.push("session"); await route.fulfill({ status: 401, json: {} }); });
+  await page.goto("/", { waitUntil: "commit" });
+  await expect.poll(() => asked.length).toBe(2);
+  expect(asked).toEqual(["status", "session"]);
+  expect(entryReleased).toBe(false);
+  await expect(page.locator("#login-passkey")).toBeVisible();
+});
+
 test("a session answer asked for early is dropped when the server needs first-run setup", async ({ page }) => {
   await page.context().request.post("/__mock/reset");
   await page.route("**/auth/status", (route) => route.fulfill({ json: { setup_required: true } }));

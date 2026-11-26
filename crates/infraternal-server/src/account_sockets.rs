@@ -6,13 +6,21 @@
 //! oldest hidden tab.** That tab is told why and pauses; it connects again when the person comes back to it. Only
 //! when no tab of the account is hidden does the new page hear that the account has too many open connections.
 //!
+//! A second rule uses the same list. A **host** can be full too: its link carries a bounded number of terminals, and a
+//! socket whose browser vanished without closing it keeps its share until the server notices. A page that last said it
+//! was hidden gets no liveness probes (#317), so nothing would notice. When an attach is refused for a full host, every
+//! socket of the account is asked to answer once ([`AccountSockets::challenge_all`]); the transport ends the ones that
+//! stay silent, which releases their terminals (#562). Nothing is asked while no host is full, so idle pages stay
+//! asleep, and a socket that answered is left alone for a while however often the refused page retries.
+//!
 //! How it fits together:
 //!  - [`AccountSockets`] is one account's semaphore of socket slots plus the list of its admitted viewers. The
 //!    WebSocket state keeps a weak entry per account, so an account with no sockets costs nothing.
 //!  - [`AccountSlot`] is what an admitted socket holds for its whole life: the slot permit and its [`Viewer`].
 //!    Dropping it (after the socket's teardown has marked its connection row inactive) frees the slot.
 //!  - [`Viewer`] is the part the socket's reader and loop share: whether the page says it is hidden, since when,
-//!    and the signal that asks the socket to end because another tab took it over.
+//!    the signal that asks the socket to end because another tab took it over, and the one that asks it to prove it
+//!    is still there.
 //!  - [`AccountSockets::take_over_hidden`] picks the viewer hidden the longest, signals it, and waits a bounded time
 //!    for its slot.
 //!
@@ -59,6 +67,9 @@ pub(crate) struct Viewer {
     /// Signalled once to ask the socket to end with the takeover reason. `Notify` keeps the signal if the loop is not
     /// waiting at that moment, so it is never lost.
     taken_over: Notify,
+    /// Signalled to ask the socket to prove its browser still answers. Signals that arrive while one proof is running
+    /// merge into a single further proof.
+    challenged: Notify,
 }
 
 /// The slot an admitted socket holds until it ends. Keep it alive until after the socket's teardown, so the slot is
@@ -115,6 +126,18 @@ impl AccountSockets {
         victim.claim().then_some(victim)
     }
 
+    /// Asks every live socket of the account to prove its browser still answers. Returns at once: the sockets' own
+    /// transports send the probe and end a socket that stays silent.
+    pub(crate) fn challenge_all(&self) {
+        let Ok(mut viewers) = self.viewers.lock() else {
+            return;
+        };
+        viewers.retain(|viewer| viewer.strong_count() != 0);
+        for viewer in viewers.iter().filter_map(Weak::upgrade) {
+            viewer.challenged.notify_one();
+        }
+    }
+
     /// Registers a fresh viewer for a socket that got `permit`.
     fn admit(self: &Arc<Self>, permit: OwnedSemaphorePermit) -> Option<AccountSlot> {
         let viewer = Arc::new(Viewer::default());
@@ -156,6 +179,11 @@ impl Viewer {
     /// Resolves once another tab of the account has taken this socket over; the socket loop then ends the socket.
     pub(crate) async fn taken_over(&self) {
         self.taken_over.notified().await;
+    }
+
+    /// Resolves when the socket is asked to prove its browser still answers; the socket's transport then probes it.
+    pub(crate) async fn challenged(&self) {
+        self.challenged.notified().await;
     }
 }
 
