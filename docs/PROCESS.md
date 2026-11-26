@@ -86,7 +86,10 @@ Definition of Done (it is in every job prompt):
    static builds, cargo-deny or the repository checks, so it never replaces
    `iterate` or `fast` and is never quoted as the gate. The `test` row of
    `fast` and `iterate` runs `cargo test --no-fail-fast` and lists every
-   failing test at its end, so one flaky test cannot hide the others (#509). Set
+   failing test at its end, so one flaky test cannot hide the others (#509). Its
+   test run, after an untimed build, has its own hang timeout
+   (`VERIFY_TEST_TIMEOUT`, 5400 s), and a server auth test that keeps the shared
+   test lock for 900 s stops its binary by name (#596). Set
    `VERIFY_QUICK_BASE` to compare against another ref. Between commits,
    iterate with `scripts/verify iterate` (#204): the
    same fmt, VT fmt, clippy, tests, cargo-deny, plugin compile-out,
@@ -257,9 +260,14 @@ numbered history, both timestamp arrival orders and altered checksums.
   its 8.3 ms budget; reported). `first-paint-network.spec.ts` adds four
   reported first-paint rows: 4G (9 Mbps, 170 ms) and fast 3G, "sign-in
   visible" and "terminal connected", cold cache, 4x CPU slowdown; they gate
-  once the first-paint fixes of J1069 and J1100 land (#573). The report prints
-  them as a second table; the old rows keep gating until the new ones are
-  stable. `scripts/verify latency` and the nightly run (#447) produce them.
+  once the first-paint fixes of J1069 and J1100 land (#573). `scripts/verify
+  latency` and the nightly run measure them over HTTP/2 by default
+  (`FIRST_PAINT_PROTOCOL=http2`, matching production `ssh.kayg.org`; set
+  `FIRST_PAINT_PROTOCOL=http1` or `both` to compare HTTP/1.1), and the D375
+  report labels each row with the protocol used (`HTTP/2` or `HTTP/1.1`). The
+  report prints them as a second table; the old rows keep gating until the new
+  ones are stable. `scripts/verify latency` and the nightly run (#447) produce
+  them.
   The first-paint row of the phone profile reads the frame that shows the
   sign-in button: Chromium reports no `first-contentful-paint` for that page.
 - **How the rows gate [D375].** Each row gates on its target, except own

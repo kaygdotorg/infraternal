@@ -148,6 +148,11 @@ under `fuzz/corpus/<target>/`. Each hook's unit test replays them, so
 | `vt_stream_snapshot` | PTY output in any pieces gives the same snapshot; snapshots fit a frame; a snapshot continues the stream. A continuation failure is labelled `CARRY-CLASS` (cutting the carry off the snapshot makes it pass: the carry observer is at fault) or `REPAINT-CLASS` (the repaint itself) |
 | `ssh_packet_read` | The SSH packet reader with its 256-byte read-ahead (#538): sealed packets survive a key change; hostile bytes end in an error without consuming a sequence number |
 
+The J1261 round-two target `mesh_coordination_json` covers authenticated node
+replies for LAN candidates, subnet routes, IPv6 state and side-socket state,
+including the reply-byte and collection-count limits. Its inputs need no
+feature flags or captured peer data.
+
 Build hosts without a nightly toolchain can run them with the pinned stable
 compiler from the dev shell and cargo-fuzz from nixpkgs. `RUSTC_BOOTSTRAP=1`
 lets stable accept the coverage flags, and no sanitizer is needed for these

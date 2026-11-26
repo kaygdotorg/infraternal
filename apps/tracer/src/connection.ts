@@ -39,19 +39,16 @@ export class ActionRefused extends Error {
   constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }) { super(message); this.name = "ActionRefused"; }
 }
 /**
- * The server keeps a writer row for every stream that ever attached on a connection and allows 32. A closed window
- * frees no row, so a page that opens and closes windows for hours would hit the cap. Before that, the connection
- * starts a fresh one (see `openStream`); the open streams re-attach from the start, as a reload would.
- */
-const WRITER_ROTATE_AT = 28;
-/**
- * Terminals one socket carries. The server accepts 32 attachments per socket and refuses the rest, so a page with more
- * windows than that must not put them on one socket: with 54 windows on one, every connect attached 32 and failed the
- * rest, the connection rotated, and the page reconnected about once a second, re-attaching and re-painting every
- * window each time (165 sockets in three minutes, 270 ms of main-thread CPU per second at idle). Fewer than the cap
- * leaves room for the rotation above.
+ * Terminals one socket carries under the D214 browser pooling policy. This
+ * also leaves headroom on older servers that admit 32 live streams.
  */
 export const STREAMS_PER_SOCKET = 28;
+/**
+ * The server keeps a writer row for every terminal that attached on a connection. A closed window frees no row.
+ * Rotate at the pool size to leave room for older servers that retain up to 32 writers. Open streams reattach
+ * on the fresh connection (see `openStream`).
+ */
+const WRITER_ROTATE_AT = STREAMS_PER_SOCKET;
 /** Reconnect pauses: the first retry is quick (a dropped mobile link), repeats double up to the ceiling. */
 const RECONNECT_FIRST_MS = 50;
 const RECONNECT_CEILING_MS = 5000;
