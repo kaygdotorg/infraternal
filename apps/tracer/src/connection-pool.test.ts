@@ -1,4 +1,4 @@
-/** The pool that spreads terminals over sockets (the server takes 32 per socket): where each terminal goes, and when a socket is reused. */
+/** Where the D214 pool puts each terminal and when it reuses a socket. */
 import { expect, test } from "bun:test";
 import { ConnectionPool, MuxConnection, STREAMS_PER_SOCKET } from "./connection";
 
