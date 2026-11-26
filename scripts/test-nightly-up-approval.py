@@ -135,6 +135,11 @@ class RootScriptTests(unittest.TestCase):
         self.assertIn('kill -KILL -- "-$group"', script)
         self.assertIn('ps -o pgid= -p "$group"', script)
 
+    def test_cleanup_also_sweeps_processes_started_from_the_run_folder(self):
+        # Terminal shims set their own process groups, so the group kill alone leaves them running.
+        self.assertIn('readlink -- "$proc/exe"', nightly.ROOT_SCRIPT)
+        self.assertIn('case $exe in "$work"/*)', nightly.ROOT_SCRIPT)
+
     def test_build_is_held_through_the_shared_slot_as_root(self):
         self.assertIn("scripts/root-slot-hold --keep-fd 9 nix develop", nightly.ROOT_SCRIPT)
 

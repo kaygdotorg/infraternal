@@ -85,6 +85,14 @@ cleanup() {
         sleep 2
         kill -KILL -- "-$group" 2>/dev/null || true
     fi
+    # The agent starts terminal shims in their own process groups (setsid), so the group kill misses them
+    # (J1257: a shim survived the first passing run). Kill by PID every process whose executable lives in this
+    # run's folder; that path is root's own build, so nothing else can match it.
+    local proc exe
+    for proc in /proc/[0-9]*; do
+        exe=$(readlink -- "$proc/exe" 2>/dev/null) || continue
+        case $exe in "$work"/*) kill -KILL -- "${proc#/proc/}" 2>/dev/null || true ;; esac
+    done
     rm -rf -- "$work"
 }
 trap cleanup EXIT
