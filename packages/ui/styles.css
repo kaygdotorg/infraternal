@@ -557,9 +557,11 @@
 .ui-window-title { display: inline-flex; min-width: 0; overflow: hidden; }
 .ui-window-user { color: var(--ui-text-secondary); font-weight: var(--fw-secondary); }
 .ui-window-host { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* The title gives way before the actions do, and the session name before the host: it shrinks a hundred times faster. */
+/* The title gives way before the actions do, and the session name before the host: flex-shrink 100000 keeps
+   .ui-window-title from losing even a fraction of a pixel (which triggers ellipsis on monospace text) while
+   the session still has width to yield (TASTE §4). */
 .ui-window-title { flex: 0 1 auto; }
-.ui-window-session { flex: 0 100 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-3); font-weight: var(--fw-secondary); }
+.ui-window-session { flex: 0 100000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--fg-3); font-weight: var(--fw-secondary); }
 /* In a narrow header the login goes first (it is the quietest part of the name). */
 .ui-window-head { container-type: inline-size; }
 @container (max-width: 35rem) { .ui-window-user { display: none; } }
