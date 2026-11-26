@@ -246,20 +246,11 @@ impl Terminal {
             if byte != 0x1b && byte < 0x80 && self.pending.is_empty() {
                 continue;
             }
-            // ESC, and a C1 introducer inside a sequence, start a fresh
-            // sequence. The old prefix is dead weight, except inside a
-            // control string, whose payload the terminator still needs.
-            let c1_introducer =
-                self.carry.in_sequence() && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f);
-            let restart = (byte == 0x1b || c1_introducer) && !self.carry.in_string();
+            let restart = self.carry.advance(byte);
             if restart {
-                self.pending.clear();
-                self.carry_overflow = false;
-            }
-            if self.carry.advance(byte) {
-                // The byte cut a UTF-8 character short and starts afresh; the
-                // engine already printed a replacement for the abandoned
-                // bytes, which the carry must not repeat.
+                // The engine is done with the earlier bytes: it replaced a cut
+                // short character, ran a string that ends here, or abandoned a
+                // sequence. The carry must not repeat any of them (#594).
                 self.pending.clear();
                 self.carry_overflow = false;
             }
@@ -278,7 +269,7 @@ impl Terminal {
             // inside a sequence; replayed at ground it would be a stray byte.
             // A restart therefore carries its 7-bit form, ESC plus the byte
             // minus 0x40, which leaves the engine in the same state.
-            if restart && c1_introducer {
+            if restart && matches!(byte, 0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f) {
                 self.pending.extend_from_slice(&[0x1b, byte - 0x40]);
                 continue;
             }

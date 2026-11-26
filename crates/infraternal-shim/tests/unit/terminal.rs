@@ -428,6 +428,57 @@ fn carry_keeps_c0_payload_of_strings_only() {
     assert_eq!(terminal.pending, b"\x1b_a\nb");
 }
 
+/// #594: the engine ends a control string at the ESC that follows it and runs
+/// it there, so only what comes from that ESC on is unfinished. Keeping the
+/// string made a viewer run it a second time, and let a run of strings without
+/// a `\` grow the carry for ever.
+#[test]
+fn carry_drops_a_string_the_engine_ran_at_the_next_escape() {
+    let mut terminal = reset_terminal(20, 3).unwrap();
+    for (output, carried) in [
+        (&b"\x1b]8;;http://a\x1b"[..], &b"\x1b"[..]),
+        (b"P1$qm\x1b", b"\x1b"),
+        (b"_apc\x1b[1;", b"\x1b[1;"),
+        (b"m\x1b]0;one\x1b]0;two\x1bP", b"\x1bP"),
+        // A C1 introducer ends a SOS, PM or APC string too, and starts anew.
+        (b"\x1b\\\x1b_apc\x9dosc", b"\x1b]osc"),
+        // The same bytes inside the string they continue stay where they are:
+        // payload of an OSC or DCS data, or more of an APC.
+        (b"\x07\x1b]0;\xc2\x9d", b"\x1b]0;\xc2\x9d"),
+        (b"\x07\x1b_a\x9fb", b"\x1b_a\x9fb"),
+    ] {
+        terminal.process(output);
+        assert_eq!(terminal.pending, carried, "after {}", output.escape_ascii());
+    }
+}
+
+/// #594: a viewer rebuilt while the next string is unfinished keeps the link
+/// the engine opened at the ESC, under the same implicit id, and a snapshot
+/// taken between the ESC and the `\` of a terminator resumes on the `\`.
+#[test]
+fn a_viewer_does_not_open_an_already_opened_link_again() {
+    for (prefix, suffix) in [
+        (
+            &b"\x1b]8;;http://a\x1b\\A\x1b]8;;http://b\x1bP1$"[..],
+            &b"r\x1b\\B"[..],
+        ),
+        (b"\x1b]8;;http://a\x1b\\A\x1b]8;;http://b\x1b", b"\\B"),
+    ] {
+        let mut original = reset_terminal(20, 3).unwrap();
+        original.process(prefix);
+        let mut viewer = reset_terminal(20, 3).unwrap();
+        viewer.process(&original.snapshot().unwrap());
+        original.process(suffix);
+        viewer.process(suffix);
+        assert_eq!(
+            original.snapshot().unwrap(),
+            viewer.snapshot().unwrap(),
+            "{}",
+            prefix.escape_ascii()
+        );
+    }
+}
+
 /// #561: bytes of a UTF-8 character the engine already replaced must leave
 /// the carry, or a viewer prints the replacement character a second time.
 #[test]

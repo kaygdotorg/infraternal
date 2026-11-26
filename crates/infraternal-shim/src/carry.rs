@@ -24,8 +24,12 @@
 //!   those bytes.
 //!
 //! The shadow never produces output. It only answers "is the engine at
-//! ground now", and "is it inside a string" (strings keep their prefix when
-//! another ESC arrives, so the terminator can still dispatch them).
+//! ground now", and, byte by byte, "does the engine start over here". The
+//! carry holds nothing older than that last start. A control string does not
+//! survive it: the engine ends an OSC, DCS or APC string at the ESC that
+//! follows it and runs it right there, without waiting for the `\` of the
+//! terminator. A carry that kept the string made the viewer run it again, and
+//! an OSC 8 then opened a second link under a new implicit id (#594).
 //!
 //! The UTF-8 tables are Bjoern Hoehrmann's DFA decoder (MIT licensed,
 //! <http://bjoern.hoehrmann.de/utf-8/decoder/dfa>), the same tables the engine
@@ -118,29 +122,6 @@ impl Carry {
         self.state == State::Ground && self.utf8 == ACCEPT
     }
 
-    /// True when the engine is inside an escape sequence (not merely half
-    /// way through a UTF-8 character). A C1 introducer starts a new sequence
-    /// only here.
-    pub(crate) fn in_sequence(self) -> bool {
-        self.state != State::Ground
-    }
-
-    /// True when the engine is inside a control string (OSC, DCS, SOS, PM or
-    /// APC). A later ESC or C1 introducer does not discard the carry then: the
-    /// string's payload is still needed when its terminator dispatches it.
-    pub(crate) fn in_string(self) -> bool {
-        matches!(
-            self.state,
-            State::Osc
-                | State::SosPmApc
-                | State::DcsEntry
-                | State::DcsParam
-                | State::DcsIntermediate
-                | State::DcsIgnore
-                | State::DcsPassthrough
-        )
-    }
-
     /// True when the engine treats a C0 byte inside the current sequence as
     /// payload to keep (DCS data, APC strings). Anywhere else a C0 byte is
     /// executed or ignored on the spot, so the carry must not repeat it.
@@ -150,17 +131,34 @@ impl Carry {
 
     /// Follows the engine through one more output byte.
     ///
-    /// Returns true when the byte cut short a half-decoded UTF-8 character
-    /// and was then read again as the start of something new. The engine has
-    /// already printed a replacement character for the abandoned bytes, so a
-    /// carry that still held them would print it a second time: the caller
-    /// must drop everything before this byte.
+    /// Returns true when the engine is done with everything before this byte,
+    /// which may itself begin something new. The caller must then drop what it
+    /// carried so far, or a viewer would repeat what the engine already did:
+    ///
+    /// - the byte cut short a half-decoded UTF-8 character and was read again;
+    ///   the engine has already printed a replacement character for the
+    ///   abandoned bytes;
+    /// - ESC arrived inside a sequence. A control string ends there and runs,
+    ///   and any other sequence is abandoned (#594);
+    /// - a C1 introducer arrived inside a sequence and was obeyed. Where a
+    ///   string takes it as payload, or a SOS, PM or APC string just carries
+    ///   on, the byte belongs to that string and this returns false.
     pub(crate) fn advance(&mut self, byte: u8) -> bool {
         if self.state == State::Ground {
-            self.ground(byte)
-        } else {
-            self.state = Self::next(self.state, byte);
-            false
+            return self.ground(byte);
+        }
+        let before = self.state;
+        self.state = Self::next(before, byte);
+        // The states whose content a repeated or literal C1 byte leaves alone.
+        let string_continues = self.state == before
+            && matches!(
+                before,
+                State::Osc | State::DcsIgnore | State::DcsPassthrough | State::SosPmApc
+            );
+        match byte {
+            0x1b => true,
+            0x90 | 0x98 | 0x9b | 0x9d | 0x9e | 0x9f => !string_continues,
+            _ => false,
         }
     }
 
