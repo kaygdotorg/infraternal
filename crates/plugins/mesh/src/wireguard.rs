@@ -2821,14 +2821,20 @@ impl RoutePrefix {
     }
 }
 
+/// Cache at most a D393 scale snapshot (4,096 peers and the local address) and as many prefixes.
+const ROUTE_VALIDATION_CACHE_LIMIT: usize = 4096 + 1;
+
 /// The addresses and foreign prefixes that were checked together on the last successful dump.
 ///
 /// This records validation only, so it stays sound even if apply fails later. Each check rereads
 /// the live routes. A new foreign prefix is checked against all proposed addresses even when a
 /// snapshot keeps every peer, so an underlay change can still cause the same refusal as a full scan.
+/// Larger snapshots use a full scan. Prefixes past the cache limit also get a full scan.
 #[derive(Default)]
 pub(crate) struct RouteValidation {
+    /// Address pairs validated together against every stored prefix.
     addresses: HashSet<Addresses>,
+    /// A bounded set of prefixes witnessed in the last successful live dump.
     prefixes: HashSet<RoutePrefix>,
 }
 
@@ -2836,6 +2842,7 @@ impl RouteValidation {
     /// Refuse overlap against the current foreign routes, reusing successful address checks.
     pub(crate) fn check(&mut self, addresses: &[Addresses]) -> io::Result<()> {
         let owned = index()?;
+        let cache_addresses = addresses.len() <= ROUTE_VALIDATION_CACHE_LIMIT;
         let mut prefixes = HashSet::new();
         let changed = std::cell::OnceCell::new();
         let mut validation: io::Result<()> = Ok(());
@@ -2847,21 +2854,24 @@ impl RouteValidation {
                     let Some(prefix) = RoutePrefix::from_route(reply, owned)? else {
                         return Ok(());
                     };
-                    let candidates: &[Addresses] = if self.prefixes.contains(&prefix) {
-                        changed.get_or_init(|| {
+                    let candidates: &[Addresses] =
+                        if cache_addresses && self.prefixes.contains(&prefix) {
+                            changed.get_or_init(|| {
+                                addresses
+                                    .iter()
+                                    .copied()
+                                    .filter(|address| !self.addresses.contains(address))
+                                    .collect::<Vec<_>>()
+                            })
+                        } else {
                             addresses
-                                .iter()
-                                .copied()
-                                .filter(|address| !self.addresses.contains(address))
-                                .collect::<Vec<_>>()
-                        })
-                    } else {
-                        addresses
-                    };
+                        };
                     if candidates.iter().any(|address| prefix.covers(*address)) {
                         return Err(io::ErrorKind::AddrInUse.into());
                     }
-                    prefixes.insert(prefix);
+                    if cache_addresses && prefixes.len() < ROUTE_VALIDATION_CACHE_LIMIT {
+                        prefixes.insert(prefix);
+                    }
                     Ok(())
                 })();
             }
@@ -2870,7 +2880,9 @@ impl RouteValidation {
         validation?;
         self.prefixes = prefixes;
         self.addresses.clear();
-        self.addresses.extend(addresses.iter().copied());
+        if !self.prefixes.is_empty() {
+            self.addresses.extend(addresses.iter().copied());
+        }
         Ok(())
     }
 }
