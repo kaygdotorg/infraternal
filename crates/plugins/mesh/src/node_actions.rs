@@ -932,6 +932,13 @@ impl AgentPlugin for MeshNodePlugin {
         }
     }
     fn call(&mut self, action: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        // Taken before a configuration chunk is applied: a handshake that completes while
+        // the snapshot is applied is then newer than the time its peers were installed.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let started = std::time::SystemTime::now();
+        // The engine's counters as the configuration was applied, for the relay deadlines.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let mut relay_counters = None;
         let request = parse_action(action, input)?;
         // Proxy callbacks update this node's firewall, so release the Mesh owner lock before
         // notifying the sibling component to preserve one-way lock ordering.
@@ -1161,6 +1168,15 @@ impl AgentPlugin for MeshNodePlugin {
                     peer_page(node.config(), counters, page.cursor.as_ref(), page.presence)?
                 }
             };
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            if action == "mesh.configure"
+                && self
+                    .relays
+                    .as_ref()
+                    .is_some_and(relays::RelayManager::has_relays)
+            {
+                relay_counters = node.counters().ok();
+            }
             let observed_config = matches!(
                 action,
                 "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
@@ -1184,7 +1200,7 @@ impl AgentPlugin for MeshNodePlugin {
         if action == "mesh.configure"
             && let (Some(relays), Some((config, _))) = (&self.relays, &observed_config)
         {
-            relays.configured(config.as_ref());
+            relays.configured(config.as_ref(), started, relay_counters.as_ref());
         }
         if let Some((config, userspace_filter)) = observed_config
             && let Some(observer) = &self.configuration_observer

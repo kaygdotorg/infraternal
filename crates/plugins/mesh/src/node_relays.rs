@@ -423,18 +423,33 @@ impl RelayManager {
         }
     }
 
+    /// Whether any relay is listed, so a configuration needs relay deadlines at all.
+    pub(super) fn has_relays(&self) -> bool {
+        !lock(&self.state).relays.is_empty()
+    }
+
     /// A complete configuration was accepted: release removed peers and give every new or
     /// changed peer its one relay deadline.
     ///
-    /// What counts as changed: for a relayed pair only its keys (they name its pair tokens),
-    /// so the candidates and endpoint the coordinator republishes whenever it sees a NAT
-    /// mapping move do not drop a working relay; for any other pair any change, since a new
-    /// address may fail or work. A node with no relay listed sets no deadline at all.
-    pub(super) fn configured(&self, config: Option<&Config>) {
+    /// `started` is when the chunk that completed it began to apply, so a handshake made
+    /// while it applied counts as proof of the direct path; `counters` are the engine's
+    /// counters read then. What counts as changed: for a relayed pair only its keys (they
+    /// name its pair tokens), so the candidates and endpoint the coordinator republishes
+    /// whenever it sees a NAT mapping move do not drop a working relay. For any other pair a
+    /// change restarts its deadline unless it still has a live session (an idle direct pair
+    /// shows no new handshake for up to two minutes, which is no failure). A node with no
+    /// relay listed sets no deadline at all.
+    pub(super) fn configured(
+        &self,
+        config: Option<&Config>,
+        started: SystemTime,
+        counters: Option<&EngineCounters>,
+    ) {
         let Some(config) = config else {
             return;
         };
-        let now = SystemTime::now();
+        let now = started;
+        let current = SystemTime::now();
         let mut due = Vec::new();
         let mut released = Vec::new();
         let relays_listed;
@@ -461,6 +476,11 @@ impl RelayManager {
                     same_keys
                 } else {
                     **peer == pair.peer
+                        || same_keys
+                            && live_session(
+                                counters.and_then(|counters| counters.get(&active_key(peer))),
+                                current,
+                            )
                 };
                 if keep {
                     pair.peer = (*peer).clone();
@@ -569,6 +589,25 @@ impl RelayManager {
             }),
         })
     }
+}
+
+/// How long a `WireGuard` session stays usable after its handshake (`REJECT_AFTER_TIME`). A
+/// changed pair whose session is younger than this still has its direct path.
+const SESSION: Duration = Duration::from_secs(180);
+
+/// The engine's per-peer counters, by the key the peer's sessions use.
+pub(super) type EngineCounters =
+    BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>;
+
+/// Whether `counters` show a session with the peer younger than [`SESSION`] at `now`.
+fn live_session(counters: Option<&crate::wireguard::Counters>, now: SystemTime) -> bool {
+    counters
+        .filter(|counters| counters.handshake_secs != 0)
+        .and_then(|counters| {
+            std::time::UNIX_EPOCH.checked_add(Duration::from_secs(counters.handshake_secs))
+        })
+        .and_then(|handshake| now.duration_since(handshake).ok())
+        .is_some_and(|age| age < SESSION)
 }
 
 /// What one start of the relay paths runs with.
@@ -831,6 +870,26 @@ mod tests {
         assert_eq!(label(NodeId(7)), label(NodeId(7)));
         assert_ne!(label(NodeId(7)), label(NodeId(8)));
         assert_eq!(label(NodeId(1)).0[15], 1);
+    }
+
+    /// A session counts as live only while its handshake is younger than 180 s; no handshake,
+    /// no counters or a clock before the handshake never count.
+    #[test]
+    fn a_live_session_is_a_handshake_younger_than_three_minutes() {
+        let at = |secs| {
+            std::time::UNIX_EPOCH
+                .checked_add(Duration::from_secs(secs))
+                .unwrap_or(std::time::UNIX_EPOCH)
+        };
+        let counters = |handshake_secs| crate::wireguard::Counters {
+            handshake_secs,
+            ..crate::wireguard::Counters::default()
+        };
+        assert!(live_session(Some(&counters(1_000)), at(1_100)));
+        assert!(!live_session(Some(&counters(1_000)), at(1_180)));
+        assert!(!live_session(Some(&counters(0)), at(100)));
+        assert!(!live_session(None, at(100)));
+        assert!(!live_session(Some(&counters(1_000)), at(900)));
     }
 
     /// The relay reason reads as the end of "because ...".
