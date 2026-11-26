@@ -5211,3 +5211,12 @@ access (#341 B19).
      - **Decision:** `infraternal server update status | check [VERSION] | apply [VERSION] | rollback | cancel | history | settings --quiet-minutes N` runs the same `release.update.*` actions inside the running server, over its private control socket (`<data>/restart/control.sock`). The kernel's peer credentials decide who may: root, or the account the server runs as. Such a caller needs **no fresh passkey** for apply, rollback, cancel or check VERSION. The owner's reasoning, as recorded on #211: root on the server machine can already replace the binary, so a passkey adds nothing there.
      - **Unchanged:** from any other device (the web app, a remote CLI) the rule stays the owner with a fresh passkey tap. Updates stay signed (D184) and warm (D217): the CLI asks the same switch, trial and D295 undo that the quiet-window update uses.
      - **Direction (owner, 2026-11-22; not built yet):** once the server becomes untrusted, with the canvas detached into the client and a shared client core, the server must not get root on every node or peer by default. The server may still update itself through root on its own machine, but it needs a passkey to unlock connections. The GUI and automatic updates do not need that passkey.
+
+401. **Release files share the website origin (owner, 2026-11-26, #211;
+     amends D223 and the release origins in D184, D186, D220 and D225):**
+     - **Decision, as recorded on #211:** “serve every release file from
+       infraternal.com/releases/... through a Pages Function with an R2
+       binding; retire builds.infraternal.com; no back-compat”.
+     - The Function reads existing `releases/…` keys in `infraternal-builds`.
+       The install page reads channel pointers from its own origin.
+       Release signing and verification continue under D184 and D224.
