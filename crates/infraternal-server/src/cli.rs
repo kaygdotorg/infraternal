@@ -521,11 +521,15 @@ fn server_input_fields() -> Vec<(String, JsonSchema)> {
         ),
         (
             "tls_cert".to_owned(),
-            JsonSchema::string("File with the TLS certificate chain (PEM)."),
+            JsonSchema::string(
+                "File with the TLS certificate chain (PEM). With --remote-listen, only this account may read it (mode 0600, no symbolic link).",
+            ),
         ),
         (
             "tls_key".to_owned(),
-            JsonSchema::string("File with the TLS private key (PEM)."),
+            JsonSchema::string(
+                "File with the TLS private key (PEM). With --remote-listen, only this account may read it (mode 0600, no symbolic link).",
+            ),
         ),
         (
             "behind_proxy".to_owned(),

@@ -182,9 +182,9 @@ pub enum ServerError {
     /// Passkey/authentication initialization failed.
     #[error("auth initialization failed")]
     Auth(#[source] auth::Error),
-    /// The configured certificate or private key could not be loaded.
-    #[error("TLS configuration failed")]
-    TlsConfiguration,
+    /// A certificate, private key or CA file could not be used; the payload names it and the rule it broke.
+    #[error("TLS configuration failed: {0}")]
+    TlsConfiguration(crate::TlsProblem),
     /// The configured web root is missing or is not a directory.
     #[error("web root is unavailable")]
     WebRoot,
@@ -357,8 +357,13 @@ async fn serve_inner(
     // listener exit. Never infer elapsed credit from wall time or downtime.
     let server = async {
         if let Some(tls) = config.tls {
-            let tls_config = OpenSSLConfig::from_pem_file(tls.certificate, tls.private_key)
-                .map_err(|_| ServerError::TlsConfiguration)?;
+            let tls_config = OpenSSLConfig::from_pem_file(&tls.certificate, &tls.private_key)
+                .map_err(|_| {
+                    ServerError::TlsConfiguration(crate::tls_problem::explain_load(
+                        &tls.certificate,
+                        &tls.private_key,
+                    ))
+                })?;
             let listener = bind_listener_with_retry(config.listen, std::net::TcpListener::bind)
                 .await
                 .map_err(ServerError::Listener)?;
@@ -512,7 +517,7 @@ fn ca_router(
     configuration
         .with_runtime(auth.clone(), pool.clone(), hosts, store)
         .map(|authority| crate::ca_http::router(auth.clone(), authority, clock_health))
-        .map_err(|_| ServerError::TlsConfiguration)
+        .map_err(crate::TlsPart::CaAdministration.failed())
 }
 
 /// Build the optional plugin adapter and retain listener ownership for the serving lifetime.
@@ -580,7 +585,9 @@ async fn remote_router(
                         name,
                     })
             });
-        let identity = remote.identity.ok_or(ServerError::TlsConfiguration)?;
+        let identity = remote
+            .identity
+            .ok_or_else(|| crate::TlsPart::HostCertificate.error(crate::TlsFault::NotConfigured))?;
         let mut listeners = crate::remote_runtime::RemoteListeners::start_with_recovery(
             remote.enrollment.endpoint.endpoint,
             &identity,
