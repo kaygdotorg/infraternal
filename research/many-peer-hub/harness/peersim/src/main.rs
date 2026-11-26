@@ -13,7 +13,9 @@
 //!   append one JSON line per command to `out`. Commands (one per line):
 //!   `identity <hex>` (hub public key), `connect <n> <handshakes-per-s|0>`,
 //!   `keepalive <seconds|0>` (each connected peer sends an empty keepalive at that interval,
-//!   with a random phase), `send <k> <secs> <payload-bytes> <total-mbit|0>`, `storm`, `probe <peer>
+//!   with a random phase), `realistic <seconds>` (from the next `connect` on, peers behave like
+//!   real clients: a persistent keepalive of that interval and `Tunn::update_timers` on every
+//!   peer four times a second, J1253), `send <k> <secs> <payload-bytes> <total-mbit|0>`, `storm`, `probe <peer>
 //!   <secs>` (one 1 kHz numbered datagram stream from one peer), `exit`.
 //!   `mode` picks the peers' source addresses: `single` (all share 10.220.0.2, a whole site behind one
 //!   NAT), `spread` (each peer its own /24 inside 10.64.0.0/12, ephemeral port) or `known` (as `spread`,
@@ -141,6 +143,10 @@ struct Sim {
     mode: String,
     wire_tx: u64,
     wire_rx: u64,
+    /// The persistent keepalive realistic peers use; `None` keeps the passive peers of J1234.
+    realistic: Option<u16>,
+    /// When `run_timers` last ran.
+    last_timers: Instant,
 }
 
 impl Sim {
@@ -161,7 +167,7 @@ impl Sim {
                 .registry()
                 .register(&mut socket, Token(index), Interest::READABLE)
                 .unwrap();
-            let tunn = Tunn::new(secret, hub_public, None, None, u32::try_from(index).unwrap(), None).unwrap();
+            let tunn = Tunn::new(secret, hub_public, None, self.realistic, u32::try_from(index).unwrap(), None).unwrap();
             self.peers.push(Peer {
                 id,
                 tunn,
@@ -235,9 +241,29 @@ impl Sim {
         count
     }
 
+    /// Run every connected peer's own `WireGuard` timers, at most four times a second, when the
+    /// peers are `realistic` (they then keepalive, rekey and retry as a real client does).
+    fn run_timers(&mut self) {
+        if self.realistic.is_none() || self.last_timers.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.last_timers = Instant::now();
+        for index in 0..self.peers.len() {
+            let peer = &mut self.peers[index];
+            if peer.started.is_none() {
+                continue;
+            }
+            if let TunnResult::WriteToNetwork(packet) = peer.tunn.update_timers(&mut self.buf) {
+                let _ = peer.socket.send_to(packet, self.hub);
+                self.wire_tx += 1;
+            }
+        }
+    }
+
     /// Send keepalives that are due, and retry handshakes unanswered for 5 s (WireGuard's
     /// `REKEY_TIMEOUT`, plus up to 1 s of jitter so retries do not stay in lockstep).
     fn housekeeping(&mut self) {
+        self.run_timers();
         let now = Instant::now();
         for index in 0..self.peers.len() {
             let peer = &mut self.peers[index];
@@ -299,6 +325,8 @@ fn run_sim(keys_path: &str, fifo: &str, out_path: &str, hub_ip: &str, hub_port: 
         rx: vec![0; 4096],
         rng: Xor(0x9e37_79b9_7f4a_7c15 ^ std::process::id() as u64),
         keepalive: None,
+        realistic: None,
+        last_timers: Instant::now(),
         mode: mode.to_owned(),
         wire_tx: 0,
         wire_rx: 0,
@@ -384,6 +412,9 @@ fn run_sim(keys_path: &str, fifo: &str, out_path: &str, hub_ip: &str, hub_port: 
                 } else {
                     sim.keepalive = None;
                 }
+            }
+            "realistic" => {
+                sim.realistic = Some(number(1) as u16).filter(|seconds| *seconds > 0);
             }
             "hold" => {
                 // Keep serving replies and keepalives for a number of seconds (idle windows).
