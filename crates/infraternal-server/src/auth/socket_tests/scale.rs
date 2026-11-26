@@ -4,7 +4,6 @@ use super::*;
 /// Assemble every inventory page and keep the shared socket usable at headroom scale.
 #[tokio::test]
 async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
-    let _guard = SERIAL.lock().await;
     // The auth unit fixture has one connection. A long inventory transaction
     // would monopolize it and park the independent authority watchdog. Use a
     // real disk-backed eight-connection pool, matching the deployed runtime.
@@ -24,6 +23,10 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
         .await
         .unwrap();
     let (auth, token) = empty_with_pool(pool).await;
+    // Enrollment uses the shared recovery verifier, and socket construction
+    // registers services for release control. Keep those steps serialized.
+    let guard = SERIAL.lock().await;
+    let lock_started = Instant::now();
     let f = fixture_with_bootstrap(auth, token).await;
     // Migrations and enrollment use real acquisition deadlines. Starting the
     // frozen-clock guard before them charges all setup to its 90-second bound;
@@ -33,6 +36,13 @@ async fn review_mesh_headroom_snapshot_does_not_close_shared_socket() {
     let clock = FrozenSocketTime::new().await;
     // Inventory correctness is independent of loaded-host authority-read latency.
     let (f, address, server) = socket_fixture_from_fixture(f, Some(Duration::from_secs(2))).await;
+    // The inventory and the socket now belong to this test's database, listener
+    // and runtime. Bulk inserts and paging can run alongside the other auth tests.
+    drop(guard);
+    println!(
+        "mesh_headroom_auth_lock_hold_ms={}",
+        lock_started.elapsed().as_millis()
+    );
     clock.progress();
     // Retain the author's measured design-point ratios: three named grants per node.
     sqlx::query("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO mesh_nodes(id,name,public_key,last_seen,last_rtt_us) SELECT i,printf('node-%05d',i),CAST(printf('%032d',i) AS BLOB),unixepoch(),1000 FROM n")
