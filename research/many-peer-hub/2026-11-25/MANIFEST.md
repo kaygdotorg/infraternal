@@ -21,3 +21,25 @@ c7d251a1625225f67e22bef99d77663ae192a5b8c935d23e13d6f1bf10e2296d  bin/peersim
   `hubtest` and the cold-storm / apply / memory / throughput rows are comparable with r2 and r3.
 - Holds (each one `perf-run --root`): r1 spread (17:24 UTC), aqmoff spread N=1000,4096 (`--hub-env GOTATUN_AQM=off --ks 100`),
   r2 spread (19:42 UTC), r3 spread, then single and known N=1000,4096 (21:00 UTC, `all.sh r1 single|known 1000 4096`).
+
+# Raw receipts moved out of the repository (J1244)
+
+The repository artifact size gate (`scripts/verify.d/evidence-size.py`) forbids `.log` files and any file over
+200,000 bytes. These 55 files were removed from the tree in the commit that adds this section. They are packed in one
+archive, attached to #260:
+
+- Archive: `many-peer-hub-2026-11-25-raw-receipts.tar.gz` (49,506 bytes), 55 entries
+- sha256: `b8f32e8cf72430defa75b54ee5fdffd0f0ad72e1f85b61f094aef2d1fe2e9514`
+- Link: https://git.kayg.org/attachments/fd8a3316-721a-484a-9e2e-5911d27a138e (comment on #260)
+- Listing: `tar -tzf many-peer-hub-2026-11-25-raw-receipts.tar.gz`; extract with `tar -xzf` into an empty directory.
+
+Paths inside the archive are relative to this directory (`research/many-peer-hub/2026-11-25/`):
+
+- 54 `.log` files: `raw/out-aqmoff-spread/` (6), `raw/out-r1-known/` (6), `raw/out-r1-single/` (6),
+  `raw/out-r1-spread/` (12), `raw/out-r2-spread/` (12), `raw/out-r3-spread/` (12). These are the `run-*.log`,
+  `stages-*.log` and `hub-stderr-*.log` files of each hold.
+- `results.csv` (218,345 bytes, over the 200,000-byte limit): the combined table of all holds. `summary.md` cites it.
+
+Files that stay in the repository: every `pivot-*.md`, `summary.md`, `MANIFEST.md`, the `profile/` text, the `.jsonl`
+and per-hold `.csv` receipts, the `nft-*.txt` rulesets and the `raw/pr/` snapshots. `summary.md` still cites
+`results.csv`; that file is in the archive only.
