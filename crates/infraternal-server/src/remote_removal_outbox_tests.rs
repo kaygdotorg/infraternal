@@ -465,11 +465,11 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
     let publishing =
         tokio::spawn(async move { service.finish_host(token, host, &review, now).await });
     // A broken early-revoke path asks on the old link. Give it a durable
-    // reply, so the regression cannot pass merely because the host is quiet.
+    // reply and keep the link alive through publication. Dropping it with the
+    // reply in flight could hide the early revoke this branch is meant to expose.
     if let Some((id, action, _)) = try_next_call(&mut original, Duration::from_secs(2)).await {
         answer_receipt(&mut original, id, &action).await;
     }
-    drop(original);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let committed: bool = sqlx::query_scalar(
@@ -491,6 +491,7 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
         !removed.ledger().await.0,
         "early revoke retired the uninstall outbox before reconnect"
     );
+    drop(original);
     let report = crate::access_report::AccessReport {
         accounts: vec![crate::access_report::AccountReport {
             account: "fixture".to_owned(),
