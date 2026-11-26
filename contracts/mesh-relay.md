@@ -208,6 +208,16 @@ budgets (#220, D313 Q1).
 
 ## Slice-1 path and failover rules
 
+The node's relay manager starts one set of relay paths for the listed relays
+with its enrolled host leaf. After each accepted complete configuration, every
+peer this node may exchange packets with, new or changed, gets one deadline
+5.5 s later (one WireGuard handshake attempt plus a margin). A pair with no
+handshake since its configuration was installed is relayed and records the
+reason ("no direct handshake within 5 seconds"); `mesh status` shows it as
+"via <relay>, because <reason>". No timer repeats for a pair. When the relay
+list changes, the paths are replaced and pairs that were relayed move to the
+new paths at once.
+
 The caller requests relay service for a peer after its direct WireGuard
 handshake grace period. In this slice, `direct_failed` compares the kernel's
 last handshake time (seconds and nanoseconds) with the endpoint-install time

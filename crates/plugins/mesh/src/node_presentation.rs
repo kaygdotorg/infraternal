@@ -268,6 +268,7 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     if let Some(detail) = value["proxy_containment"]["detail"].as_str() {
         rows.push(("Proxy", detail.to_owned()));
     }
+    render_relays(&value["relay"], &mut rows);
     let guard_missing = render_kernel_guard(&value, &mut rows)?;
     let (mut tone, mut message) = engine_health(&value, &mut rows)?.unwrap_or((tone, message));
     if state == "On" && guard_missing {
@@ -281,6 +282,51 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         next: next.into_iter().map(str::to_owned).collect(),
         data: value,
     })
+}
+
+/// Add the relay rows (D401): the relay this machine serves, the relays it knows, and each
+/// relayed pair as "via <relay>, because <reason>" (D285). Absent on builds without relays.
+fn render_relays(relay: &Value, rows: &mut Vec<(&str, String)>) {
+    if let Some(serving) = relay.get("serving").filter(|serving| !serving.is_null()) {
+        let port = serving["port"]
+            .as_u64()
+            .map_or_else(|| "a UDP port".to_owned(), |port| format!("UDP {port}"));
+        rows.push((
+            "Relay",
+            format!(
+                "serving as {} on {port}; {}, {}",
+                serving["name"].as_str().unwrap_or("this machine"),
+                plural(
+                    serving["hosts"].as_u64().unwrap_or(0),
+                    "machine connected",
+                    "machines connected"
+                ),
+                plural(
+                    serving["links"].as_u64().unwrap_or(0),
+                    "pair carried",
+                    "pairs carried"
+                ),
+            ),
+        ));
+    }
+    let names: Vec<&str> = relay["relays"]
+        .as_array()
+        .map(|relays| {
+            relays
+                .iter()
+                .filter_map(|relay| relay["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !names.is_empty() {
+        rows.push(("Relays", names.join(", ")));
+    }
+    for pair in relay["relayed"].as_array().into_iter().flatten() {
+        let peer = pair["peer"].as_str().unwrap_or("a peer");
+        let via = pair["via"].as_str().unwrap_or("a relay (connecting)");
+        let because = pair["because"].as_str().unwrap_or("its direct path failed");
+        rows.push(("Relayed", format!("{peer}: via {via}, because {because}")));
+    }
 }
 
 /// Add the kernel guard's exact gaps and tool result to the status rows.
@@ -550,7 +596,7 @@ fn peers_at(value: &Value, width: usize, now: u64) -> Result<Presented, PluginEr
     // went unanswered, say so instead of asking for more.
     let next = match waiting.first() {
         Some(peer) if !more && peer.unanswered => vec![format!(
-            "{} has not answered anything sent to it. A firewall or NAT between the two machines may block direct UDP, and there is no relay to fall back on yet.",
+            "{} has not answered anything sent to it. A firewall or NAT between the two machines may block direct UDP; the pair moves to a relay when the server lists one.",
             peer.label
         )],
         Some(peer) if !more => vec![format!(

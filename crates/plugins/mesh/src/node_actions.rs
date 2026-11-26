@@ -123,8 +123,29 @@ pub const ACTIONS: &[ActionDef] = &[
         ],
     ),
 ];
+/// The node's relay manager: the relay role and the relay paths (D401).
+#[cfg(all(feature = "relay", target_os = "linux"))]
+#[path = "node_relays.rs"]
+mod relays;
+#[cfg(all(feature = "relay", target_os = "linux"))]
+pub use relays::{
+    CredentialSource as RelayCredentialSource, HostLeaf as RelayHostLeaf,
+    set_credentials as set_relay_credentials,
+};
+
 /// The control actions an infraternal agent registers for its Mesh node.
 const CONTROL_ACTIONS: &[ActionDef] = &[
+    action(
+        "mesh.relays",
+        "Take the relay list, and the relay role when given",
+        r#"{"type":"object"}"#,
+        r#"{"type":"object","properties":{"accepted":{"type":"boolean"},"serving":{"type":"integer","minimum":1,"maximum":65535}},"required":["accepted"],"additionalProperties":false}"#,
+        Effect::Write,
+        &[
+            "The authenticated coordinator sends the relays this node may use (D401 Q2).",
+            "The server's own node also gets the relay role and answers with its bound port.",
+        ],
+    ),
     action(
         "mesh.identity",
         "Read enabled Mesh identity",
@@ -286,6 +307,9 @@ pub struct MeshNodePlugin {
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
+    /// The relay role and relay paths (D401); only on a Linux node built with relays.
+    #[cfg(all(feature = "relay", target_os = "linux"))]
+    relays: Option<relays::RelayManager>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
@@ -410,12 +434,20 @@ impl MeshNodePlugin {
     /// Bind one process-owned component to its validated public-state directory.
     #[must_use]
     pub fn new(path: &std::path::Path) -> Self {
+        let owner = Arc::new(Mutex::new(Owner {
+            node: None,
+            path: Some(path.to_owned()),
+            restore_failed: false,
+        }));
         Self {
-            owner: Arc::new(Mutex::new(Owner {
-                node: None,
-                path: Some(path.to_owned()),
-                restore_failed: false,
-            })),
+            // The relay paths start from the list saved last, so a restart with the server
+            // down still knows its relays (D285, D401 Q2).
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: Some(relays::RelayManager::new(
+                owner.clone(),
+                &crate::relay_list::load(path),
+            )),
+            owner,
             changed: AtomicBool::new(false),
             ensure_failed: false,
             configure_failed: false,
@@ -441,6 +473,8 @@ impl MeshNodePlugin {
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: None,
             dump: None,
         }
     }
@@ -492,6 +526,8 @@ impl Default for MeshNodePlugin {
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: None,
             dump: None,
         }
     }
@@ -617,6 +653,8 @@ pub enum Request {
     Status,
     Configure(Box<Chunk>),
     Peers(Page),
+    /// The coordinator's relay list, already checked against its bounds (D401 Q2).
+    Relays(Box<crate::relay_list::RelayList>),
 }
 /// Parse the same bounded strict object accepted by the authenticated dispatcher.
 /// # Errors
@@ -665,6 +703,13 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
             })
         }
         "mesh.configure" => Ok(Request::Configure(Box::new(parse(input)?))),
+        "mesh.relays" => {
+            let list: crate::relay_list::RelayList = parse(input)?;
+            if !list.valid() {
+                return Err(PluginError::Rejected);
+            }
+            Ok(Request::Relays(Box::new(list)))
+        }
         "mesh.peers" => Ok(Request::Peers(parse(input)?)),
         _ => Err(PluginError::UnknownAction),
     }
@@ -892,6 +937,7 @@ impl AgentPlugin for MeshNodePlugin {
         // notifying the sibling component to preserve one-way lock ordering.
         let (result, observed_config) = {
             let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
+            let owner_path = owner.path.clone();
             let node = owner.node()?;
             let result = match request {
                 Request::Identity {
@@ -1025,6 +1071,28 @@ impl AgentPlugin for MeshNodePlugin {
                         "enforcement": access_enforcement(node),
                         "kernel_guard": kernel_guard_status(node),
                     });
+                    #[cfg(all(feature = "relay", target_os = "linux"))]
+                    if let Some(relays) = &self.relays {
+                        let mut relay = relays.status();
+                        // Name each relayed peer the way `mesh peers` does.
+                        for pair in relay["relayed"].as_array_mut().into_iter().flatten() {
+                            let peer_id = pair["node"].as_u64().map(crate::policy::model::NodeId);
+                            #[cfg(feature = "mesh-dns")]
+                            let name = peer_id.and_then(|peer_id| {
+                                node.config()
+                                    .and_then(|config| config.peer_names.get(&peer_id).cloned())
+                            });
+                            #[cfg(not(feature = "mesh-dns"))]
+                            let name: Option<String> = None;
+                            pair["peer"] = json!(name.unwrap_or_else(|| {
+                                peer_id.map_or_else(
+                                    || "a peer".to_owned(),
+                                    |peer_id| format!("node {}", peer_id.0),
+                                )
+                            }));
+                        }
+                        status["relay"] = relay;
+                    }
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -1046,6 +1114,26 @@ impl AgentPlugin for MeshNodePlugin {
                         reply["ipv4_only"] = json!(true);
                     }
                     reply
+                }
+                Request::Relays(list) => {
+                    // The public part is saved first, so the node keeps its relays across a
+                    // restart even if starting them fails now (D285). The role's key is not.
+                    if let Some(path) = owner_path.as_deref()
+                        && let Err(error) = crate::relay_list::save(path, &list)
+                    {
+                        tracing::warn!(%error, "mesh: could not save the relay list");
+                    }
+                    #[cfg(all(feature = "relay", target_os = "linux"))]
+                    let serving = self
+                        .relays
+                        .as_ref()
+                        .and_then(|relays| relays.set_list(&list));
+                    #[cfg(not(all(feature = "relay", target_os = "linux")))]
+                    let serving: Option<u16> = None;
+                    json!(crate::relay_list::RelaysReply {
+                        accepted: true,
+                        serving,
+                    })
                 }
                 Request::Peers(page) => {
                     if page.cursor.as_ref().is_some_and(|cursor| {
@@ -1090,6 +1178,13 @@ impl AgentPlugin for MeshNodePlugin {
             "mesh.up" | "mesh.down" | "mesh.rotation.commit" | "mesh.rotation.finish"
         ) {
             self.changed.store(true, Ordering::Release);
+        }
+        // A complete configuration gives every new or changed peer its relay deadline.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if action == "mesh.configure"
+            && let (Some(relays), Some((config, _))) = (&self.relays, &observed_config)
+        {
+            relays.configured(config.as_ref());
         }
         if let Some((config, userspace_filter)) = observed_config
             && let Some(observer) = &self.configuration_observer
