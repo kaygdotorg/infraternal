@@ -386,8 +386,11 @@ impl Engine {
     /// so the addresses, the routes a person added and open flows survive an infraternal agent
     /// restart. `adopt` names the live link that the caller proved is this installation's
     /// (`Node::restore`); it is reattached only while it still has that index and owner. With no
-    /// `adopt`, any marked link refuses the start. A new TUN becomes persistent only once it is
-    /// marked and the engine is up, so a failed start leaves no interface behind.
+    /// `adopt`, any marked link refuses the start.
+    ///
+    /// A new TUN is not persistent when this returns. The caller gets its handle and makes it
+    /// persistent after it saves the node's startup state; a start that stops before then,
+    /// by error or by process exit, takes the link with it.
     /// # Errors
     /// Reports TUN registration, UDP bind, runtime or device initialization failures, and
     /// `AlreadyExists` for a link this start may not take, including one another process holds.
@@ -400,7 +403,7 @@ impl Engine {
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
         underlay_announce: Arc<UnderlayAnnounce>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, LinuxTun)> {
         crate::packet_filter::warn_about_sysctl_gaps();
         let filter = Arc::new(match config.as_ref() {
             Some(config) => PacketFilter::new(config, proxy_ingress.clone())?,
@@ -452,7 +455,7 @@ impl Engine {
                 worker_health
                     .tx_queue_len
                     .store(tx_queue_len, Ordering::Relaxed);
-                if info_tx.send(Ok(info.clone())).is_err() {
+                if info_tx.send(Ok((info.clone(), tun.tun.clone()))).is_err() {
                     if let Some(device) = device.and_then(Arc::into_inner) {
                         runtime.block_on(device.stop());
                     }
@@ -478,20 +481,23 @@ impl Engine {
                     underlay_announce,
                 ));
             })?;
-        let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
-            Ok(info) => info,
+        let (info, tun) = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
+            Ok(started) => started,
             Err(error) => {
                 let _ = join.join();
                 return Err(error);
             }
         };
-        Ok(Self {
-            commands,
-            join: Some(join),
-            info,
-            health,
-            filter,
-        })
+        Ok((
+            Self {
+                commands,
+                join: Some(join),
+                info,
+                health,
+                filter,
+            },
+            tun,
+        ))
     }
 
     /// Whether the engine is running, how often it was rebuilt, and what it dropped.
@@ -743,6 +749,8 @@ async fn initialize(
         Some(code) if code == nix::libc::EBUSY => io::Error::from(io::ErrorKind::AlreadyExists),
         _ => error,
     })?;
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("created")?;
     // The check above and the attach are two steps: confirm the attached link is still the
     // proven one, or a fresh one under this name.
     let attached = crate::wireguard::Device::active_link();
@@ -766,12 +774,16 @@ async fn initialize(
     if adopt.is_none() {
         crate::wireguard::Device::mark_tun(local_public_key)?;
     }
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("marked")?;
     crate::wireguard::Device::activate_tun(tun.owned_ifindex()?, mtu)?;
     // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
     // length it really has goes to `mesh status`.
     let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
         .or_else(|_| crate::wireguard::Device::tx_queue_len())
         .unwrap_or(0);
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("activated")?;
     let tun = LinuxPacketIo::new(tun, filter);
     let (factory, port) = bind_udp(requested_port, private_key.clone()).await?;
     let peers = config
@@ -810,8 +822,6 @@ async fn initialize(
         offloads_enabled,
         probes,
     };
-    // Marked and running: from here the interface outlives this process (D332).
-    tun.tun.persist()?;
     Ok(Started {
         tx_queue_len,
         tun,

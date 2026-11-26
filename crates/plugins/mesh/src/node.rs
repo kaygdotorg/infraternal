@@ -1790,9 +1790,11 @@ impl Node {
                 }
             }
             EngineKind::GotaTun => {
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("recorded")?;
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
                 let route_endpoint_updater = self.route_endpoint_updater();
-                let engine = Engine::start(
+                let (engine, tun) = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
                     listen_port,
@@ -1802,14 +1804,14 @@ impl Node {
                     route_endpoint_updater,
                     Arc::clone(&self.underlay_announce),
                 )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("bound")?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
                     || !thp_disabled
                     || !offloads_enabled
                 {
-                    let mut engine = engine;
-                    let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 if let Some(store) = &self.store {
@@ -1818,32 +1820,32 @@ impl Node {
                     } else {
                         crate::listen_port::DEFAULT_PORT
                     };
-                    if let Err(error) = store.record_listen_port(saved) {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
+                    store.record_listen_port(saved)?;
                 }
-                let route_repair = match RouteRepairWorker::start(
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("port-recorded")?;
+                let route_repair = RouteRepairWorker::start(
                     Arc::clone(&self.peer_route_state),
                     Arc::clone(&self.underlay_announce),
-                ) {
-                    Ok(worker) => worker,
-                    Err(error) => {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
-                };
+                )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("route-listening")?;
+                self.save(self.config.as_ref(), true)?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("saved")?;
+                // Commit point (D332): the interface outlives this process only from here, when
+                // the saved state holds both the enabled choice and the proof that lets the next
+                // start take the link back. Every earlier stop or error drops the last queue
+                // descriptor and the kernel removes the link, so no start leaves one behind that
+                // the next start has to refuse. A node without a store can never prove a link,
+                // so its link stays transient. An adopted link is already persistent.
+                if self.store.is_some() && adopt.is_none() {
+                    tun.persist()?;
+                }
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("persisted")?;
                 self.owned = true;
                 self.gotatun = Some(engine);
-                if let Err(error) = self.save(self.config.as_ref(), true) {
-                    if let Some(mut engine) = self.gotatun.take() {
-                        let _ = engine.stop();
-                    }
-                    self.owned = false;
-                    return Err(error);
-                }
                 self.enabled = true;
                 self.route_repair = Some(route_repair);
                 let identity = Identity {
@@ -1861,6 +1863,8 @@ impl Node {
                 self.identity = Some(identity.clone());
                 // The host input table admits exactly the port this socket bound (D386).
                 self.firewall.set_listen_port(Some(identity.port))?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("listening")?;
                 Ok(identity)
             }
         }
@@ -4277,3 +4281,8 @@ mod route_repair_tests;
 #[cfg(test)]
 #[path = "node_live_route_tests.rs"]
 mod live_route_tests;
+
+/// Stops or fails a Linux `GotaTun` start after each step and checks that the next one works.
+#[cfg(test)]
+#[path = "node_startup_crash_tests.rs"]
+pub(crate) mod startup_crash_tests;
