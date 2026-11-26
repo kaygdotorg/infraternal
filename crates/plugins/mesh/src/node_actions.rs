@@ -1131,16 +1131,15 @@ impl AgentPlugin for MeshNodePlugin {
                         tracing::warn!(%error, "mesh: could not save the relay list");
                     }
                     #[cfg(all(feature = "relay", target_os = "linux"))]
-                    let serving = self
+                    let (accepted, serving) = self
                         .relays
                         .as_ref()
-                        .and_then(|relays| relays.set_list(&list));
+                        .map_or((true, None), |relays| relays.set_list(&list));
+                    #[cfg(not(all(feature = "relay", target_os = "linux")))]
+                    let accepted = true;
                     #[cfg(not(all(feature = "relay", target_os = "linux")))]
                     let serving: Option<u16> = None;
-                    json!(crate::relay_list::RelaysReply {
-                        accepted: true,
-                        serving,
-                    })
+                    json!(crate::relay_list::RelaysReply { accepted, serving })
                 }
                 Request::Peers(page) => {
                     if page.cursor.as_ref().is_some_and(|cursor| {
@@ -1613,6 +1612,49 @@ mod tests {
 
         assert_eq!(status["public_key"], json!(vec![7; 32]));
         assert!(status.get("private_key").is_none());
+    }
+
+    /// A rejected renewed relay leaf is reported so the coordinator retries it.
+    #[cfg(all(feature = "test-support", feature = "relay", target_os = "linux"))]
+    #[test]
+    fn a_failed_relay_leaf_update_is_not_acknowledged() {
+        use crate::relay_list::{RelayList, ServeRelay};
+        use infraternal_plugin_relay::testing::{Authority, Purpose};
+
+        const NAME: &str = "relay.example.org";
+        let directory = crate::node_state::tests::Directory::new();
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        let mut ca = Authority::new();
+        let (leaf, key) = ca.issue_pem(Purpose::Relay(NAME));
+        let role = ServeRelay {
+            name: NAME.into(),
+            port: 0,
+            leaf: format!("{leaf}{key}"),
+            roots: vec![ca.pem()],
+            revoked: Vec::new(),
+        };
+        let mut list = RelayList {
+            relays: Vec::new(),
+            serve: Some(role.clone()),
+        };
+        let started: serde_json::Value = serde_json::from_slice(
+            &plugin
+                .call("mesh.relays", &serde_json::to_vec(&list).unwrap())
+                .expect("start relay role"),
+        )
+        .unwrap();
+        assert!(started["accepted"].as_bool().unwrap());
+        assert!(started["serving"].as_u64().is_some());
+
+        list.serve.as_mut().unwrap().leaf = "not a relay certificate".into();
+        let renewed: serde_json::Value = serde_json::from_slice(
+            &plugin
+                .call("mesh.relays", &serde_json::to_vec(&list).unwrap())
+                .expect("reply to failed renewal"),
+        )
+        .unwrap();
+        assert!(!renewed["accepted"].as_bool().unwrap());
+        assert!(renewed["serving"].as_u64().is_some());
     }
 
     /// An inactive rootless mesh can be read without kernel setup or persisted Mesh state.

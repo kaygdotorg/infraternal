@@ -29,13 +29,10 @@ pub const ACTION: &str = "mesh.relays";
 pub const MAX_RELAYS: usize = 8;
 /// Most addresses one relay lists.
 pub const MAX_ADDRESSES: usize = 4;
-/// Most revoked hosts one relay role is told about. A revoked host past this many still
-/// reaches nobody, because its peers dropped its mesh key (D166), so its
-/// pair tokens no longer match anything; it could only hold a connection slot until its leaf
-/// expires (7 days at most).
-///
-/// 128 keeps the whole message (38 bytes per host, plus about 1.5 KiB of leaf and root) inside
-/// one 8 KiB action frame (`MAX_ACTION_BYTES`).
+/// Most recent revoked hosts considered for a relay list. A revoked host past this many still
+/// reaches nobody, because its peers dropped its mesh key (D166); older entries also age out
+/// after the seven-day leaf lifetime. The encoder trims the oldest entries again when the
+/// certificates make the action exceed its frame budget.
 pub const MAX_REVOKED: usize = 128;
 /// Largest relay leaf (certificate and key PEM) or CA root PEM accepted.
 const MAX_PEM: usize = 3 * 1024;
@@ -145,6 +142,8 @@ impl RelayList {
                     && serve.revoked.len() <= MAX_REVOKED
                     && serve.revoked.iter().all(|host| valid_host(host))
             })
+            && serde_json::to_vec(self)
+                .is_ok_and(|bytes| bytes.len() <= infraternal_plugin_api::MAX_ACTION_BYTES)
     }
 
     /// The same list without the relay role, which is what a node saves and shows.
@@ -350,7 +349,7 @@ pub(crate) async fn push(
     if pushed.unsupported {
         return;
     }
-    let list = if channel.is_server() {
+    let mut list = if channel.is_server() {
         let Some(source) = serve_source() else {
             return;
         };
@@ -377,7 +376,7 @@ pub(crate) async fn push(
     if pushed.sent.as_ref() == Some(&list) {
         return;
     }
-    let Ok(input) = serde_json::to_vec(&list) else {
+    let Some(input) = action_input(&mut list) else {
         return;
     };
     match channel.call(ACTION, input).await {
@@ -404,6 +403,19 @@ pub(crate) async fn push(
             pushed.unsupported = !channel.is_server();
         }
         Err(_) => {}
+    }
+}
+
+/// Encode one relay list inside the action frame, trimming its oldest revocations as needed.
+/// # Errors
+/// Returns `None` if the remaining fields are invalid or cannot fit without dropping certificates.
+fn action_input(list: &mut RelayList) -> Option<Vec<u8>> {
+    loop {
+        let input = serde_json::to_vec(list).ok()?;
+        if input.len() <= infraternal_plugin_api::MAX_ACTION_BYTES {
+            return list.valid().then_some(input);
+        }
+        list.serve.as_mut()?.revoked.pop()?;
     }
 }
 
@@ -486,6 +498,22 @@ mod tests {
             }
             .valid()
         );
+    }
+
+    /// Even individually bounded PEM fields cannot make an action larger than its frame.
+    #[test]
+    fn a_relay_list_must_fit_the_action_frame() {
+        let oversized = RelayList {
+            relays: Vec::new(),
+            serve: Some(ServeRelay {
+                name: "relay.example.org".into(),
+                port: 443,
+                leaf: "l".repeat(MAX_PEM),
+                roots: vec!["r".repeat(MAX_PEM); MAX_ROOTS],
+                revoked: Vec::new(),
+            }),
+        };
+        assert!(!oversized.valid(), "a list over 8 KiB must be refused");
     }
 
     /// The role's key stays out of `Debug` and the saved file; the public list round-trips.
@@ -761,5 +789,35 @@ mod push_tests {
         pushed.reset();
         push(&store, &service, &older, &mut pushed).await;
         assert_eq!(older.sent().len(), 2);
+    }
+
+    /// The server keeps newest revocations while trimming the oldest to fit an 8 KiB action.
+    #[test]
+    fn large_relay_certificates_trim_old_revocations_to_fit() {
+        let revoked = (0..MAX_REVOKED)
+            .map(|host| format!("00000000-0000-0000-0000-{host:012x}"))
+            .collect::<Vec<_>>();
+        let mut list = RelayList {
+            relays: Vec::new(),
+            serve: Some(ServeRelay {
+                name: "relay.example.org".into(),
+                port: 443,
+                leaf: "l".repeat(1_800),
+                roots: vec!["r".repeat(1_800); 2],
+                revoked: revoked.clone(),
+            }),
+        };
+
+        let input =
+            action_input(&mut list).expect("the certificate fields fit without all revocations");
+        let decoded: RelayList = serde_json::from_slice(&input).unwrap();
+        let kept = &decoded.serve.as_ref().unwrap().revoked;
+        assert!(input.len() <= infraternal_plugin_api::MAX_ACTION_BYTES);
+        assert!(!kept.is_empty() && kept.len() < revoked.len());
+        assert_eq!(
+            kept,
+            &revoked[..kept.len()],
+            "the newest entries remain first"
+        );
     }
 }

@@ -141,6 +141,7 @@ struct Role {
     name: String,
     port: u16,
     leaf: String,
+    roots: Vec<String>,
 }
 
 /// The running relay paths and what they were started for.
@@ -298,14 +299,20 @@ impl RelayManager {
 
     /// Take a new list from the coordinator: run, renew or stop the relay role, and restart the
     /// relay paths when the relays changed. Returns the UDP port the relay role serves on.
-    pub(super) fn set_list(&self, list: &RelayList) -> Option<u16> {
-        let serving = self.set_role(list);
+    pub(super) fn set_list(&self, list: &RelayList) -> (bool, Option<u16>) {
+        let (accepted, serving) = self.set_role(list);
         let mut state = lock(&self.state);
         // Pairs installed while no relay was listed had no deadline; they get one now.
         let first_relays = state.relays.is_empty() && !list.relays.is_empty();
         if state.relays != list.relays {
             state.relays.clone_from(&list.relays);
             state.starting = true;
+            if list.relays.is_empty() {
+                for pair in state.pairs.values_mut() {
+                    pair.relayed = None;
+                }
+                state.active.clear();
+            }
         }
         let pending: Vec<(NodeId, u64, Duration)> = if first_relays {
             let now = SystemTime::now();
@@ -326,7 +333,7 @@ impl RelayManager {
         for (node, generation, wait) in pending {
             self.deadline(node, generation, wait);
         }
-        serving
+        (accepted, serving)
     }
 
     /// Judge `node` once, `wait` from now (D81: one timer per installed peer, never repeated).
@@ -341,12 +348,12 @@ impl RelayManager {
     }
 
     /// Run the relay role `list.serve` asks for, if any, and return its bound port.
-    fn set_role(&self, list: &RelayList) -> Option<u16> {
+    fn set_role(&self, list: &RelayList) -> (bool, Option<u16>) {
         let Some(serve) = &list.serve else {
             if let Some(role) = lock(&self.state).role.take() {
                 self.spawn(role.relay.close());
             }
-            return None;
+            return (true, None);
         };
         let revoked: HashSet<HostId> = serve
             .revoked
@@ -358,13 +365,16 @@ impl RelayManager {
             && role.name == serve.name
             && role.port == serve.port
         {
-            if role.leaf != serve.leaf {
-                // A renewed leaf: new handshakes get it, open connections keep theirs.
+            let mut accepted = true;
+            if role.leaf != serve.leaf || role.roots != serve.roots {
+                // A renewed leaf or CA set: new handshakes get it, open connections keep theirs.
                 let renewed = Credentials::from_pem(&serve.leaf, &serve.roots)
                     .and_then(|credentials| role.relay.set_credentials(credentials));
                 if renewed.is_ok() {
                     role.leaf.clone_from(&serve.leaf);
+                    role.roots.clone_from(&serve.roots);
                 } else {
+                    accepted = false;
                     tracing::warn!("relay: a renewed relay leaf was refused; keeping the old one");
                 }
             }
@@ -373,14 +383,17 @@ impl RelayManager {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = revoked;
             role.relay.recheck();
-            return role.relay.local_addr().ok().map(|address| address.port());
+            return (
+                accepted,
+                role.relay.local_addr().ok().map(|address| address.port()),
+            );
         }
         if let Some(old) = state.role.take() {
             self.spawn(old.relay.close());
         }
         let Ok(credentials) = Credentials::from_pem(&serve.leaf, &serve.roots) else {
             tracing::warn!("relay: the relay leaf was refused; not serving");
-            return None;
+            return (false, None);
         };
         let revoked = Arc::new(RwLock::new(revoked));
         let admission: Admission = {
@@ -392,7 +405,10 @@ impl RelayManager {
                     .contains(&host)
             })
         };
-        let runtime = self.handle()?;
+        let Some(runtime) = self.handle() else {
+            tracing::warn!("relay: no runtime; not serving");
+            return (false, None);
+        };
         let _entered = runtime.enter();
         let listen = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), serve.port);
         match Relay::start(listen, credentials, Limits::default(), admission) {
@@ -405,12 +421,13 @@ impl RelayManager {
                     name: serve.name.clone(),
                     port: serve.port,
                     leaf: serve.leaf.clone(),
+                    roots: serve.roots.clone(),
                 });
-                port
+                (true, port)
             }
             Err(error) => {
                 tracing::warn!(port = serve.port, %error, "relay: could not bind the relay port");
-                None
+                (true, None)
             }
         }
     }
@@ -899,5 +916,72 @@ mod tests {
             Reason::NoHandshake.sentence(),
             "no direct handshake within 5 seconds"
         );
+    }
+
+    /// Updating only the CA roots changes which host leaves the live relay accepts.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn a_relay_role_reloads_changed_ca_roots() {
+        use infraternal_plugin_relay::{
+            client::Client,
+            testing::{Authority, Purpose},
+            tls,
+            wire::HostId,
+        };
+
+        const NAME: &str = "relay.example.org";
+        let mut first_ca = Authority::new();
+        let (leaf, key) = first_ca.issue_pem(Purpose::Relay(NAME));
+        let first_root = first_ca.pem();
+        let mut second_ca = Authority::new();
+        let second_root = second_ca.pem();
+        let owner = Arc::new(Mutex::new(Owner {
+            node: None,
+            path: None,
+            restore_failed: false,
+        }));
+        let manager = RelayManager::new(owner, &RelayList::default());
+        let mut list = RelayList {
+            relays: Vec::new(),
+            serve: Some(crate::relay_list::ServeRelay {
+                name: NAME.into(),
+                port: 0,
+                leaf: format!("{leaf}{key}"),
+                roots: vec![first_root.clone()],
+                revoked: Vec::new(),
+            }),
+        };
+        manager.set_role(&list);
+        list.serve.as_mut().unwrap().roots.push(second_root);
+        manager.set_role(&list);
+        let address = lock(&manager.state)
+            .role
+            .as_ref()
+            .expect("the relay role remains running")
+            .relay
+            .local_addr()
+            .unwrap();
+
+        let mut host = second_ca.issue(Purpose::Host(HostId([2; 16])));
+        host.roots = first_ca.issue(Purpose::Host(HostId([3; 16]))).roots;
+        let config = tls::client_config(host).unwrap();
+        let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        let (client, _notices) =
+            Client::connect(&endpoint, config, address, NAME, Duration::from_secs(5))
+                .await
+                .expect("the relay accepts a leaf from the newly trusted CA");
+        assert_eq!(
+            lock(&manager.state)
+                .role
+                .as_ref()
+                .expect("the relay role remains running")
+                .relay
+                .stats()
+                .hosts,
+            1
+        );
+        client
+            .connection()
+            .close(quinn::VarInt::from_u32(0), b"test finished");
     }
 }
