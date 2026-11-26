@@ -2581,7 +2581,9 @@ async fn process_command(
             }
             if !send_attach(connection, stream_id, session_id, last_out_seq, last_in_seq).await {
                 let _ = reply.send(Err(AgentError::Unavailable));
-                return false;
+                // Only this terminal is refused when the rest of the link still works;
+                // the browser attaches it again after its usual backoff (#562).
+                return contain_terminal_failure(connection, stream_id).await;
             }
             routes.insert(stream_id, attachment_id);
             attachments.insert(
@@ -2641,7 +2643,18 @@ async fn process_command(
             {
                 return false;
             }
-            reattach(connection, attachment).await
+            if reattach(connection, attachment).await {
+                return true;
+            }
+            let stream_id = attachment.stream_id;
+            if !contain_terminal_failure(connection, stream_id).await {
+                return false;
+            }
+            // Dropping the route ends its output, which closes this one browser stream
+            // so it attaches again from its delivered offsets.
+            attachments.remove(&attachment_id);
+            routes.remove(&stream_id);
+            true
         }
         Command::Reply {
             attachment_id,
@@ -3600,6 +3613,12 @@ fn share_payload(wire: &Bytes, payload: &[u8]) -> Option<Bytes> {
     (end <= wire.len()).then(|| wire.slice(start..end))
 }
 
+/// Write one frame to the host within one second, saying whether the link can go on being used.
+///
+/// `false` means the caller must treat the link as lost. A control frame is handed to the owned
+/// control lane when the link has one. On a QUIC link a frame that would open a terminal stream
+/// fails at once if the agent has granted none, and a terminal's `Close` that cannot be written
+/// retires that stream and still counts as delivered (#562).
 async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &Frame<'_>) -> bool {
     #[cfg(feature = "remote")]
     if stream_id == CONTROL_STREAM
@@ -3639,17 +3658,53 @@ async fn write_frame(connection: &mut AgentConnection, stream_id: u32, frame: &F
     if encode_muxed_frame_into(stream_id, frame, encode).is_err() {
         return false;
     }
-    matches!(
+    let delivered = matches!(
         tokio::time::timeout(Duration::from_secs(1), async {
             match peer {
                 Peer::Local { writer, .. } => writer.write_all(encode).await,
+                // The actor never waits for the agent to grant a stream (#562).
                 #[cfg(feature = "remote")]
-                Peer::Remote(link) => link.write(stream_id, frame, encode).await,
+                Peer::Remote(link) => {
+                    link.write_without_waiting_for_a_stream(stream_id, frame, encode)
+                        .await
+                }
             }
         })
         .await,
         Ok(Ok(()))
+    );
+    // A terminal's Close that cannot be written (the agent stopped reading that stream) is
+    // delivered by retiring the stream, which ends the terminal on the host just as well.
+    delivered
+        || (matches!(frame, Frame::Close { .. })
+            && contain_terminal_failure(connection, stream_id).await)
+}
+
+/// After a failed write on one terminal's stream, retire that stream alone when the rest of
+/// the host link still works (#562).
+///
+/// Returns `false` when nothing can be contained, so the caller must treat the link as lost:
+/// the control stream, a local or single-stream peer, or a remote link that is closed or no
+/// longer authorized.
+#[cfg_attr(
+    not(feature = "remote"),
+    expect(
+        clippy::unused_async,
+        reason = "Keep the async signature identical when remote hosts are compiled out."
     )
+)]
+async fn contain_terminal_failure(connection: &mut AgentConnection, stream_id: u32) -> bool {
+    #[cfg(feature = "remote")]
+    if stream_id != CONTROL_STREAM
+        && let Peer::Remote(link) = &connection.peer
+        && link.survives_terminal_failure()
+    {
+        link.retire_writer(stream_id).await;
+        return true;
+    }
+    #[cfg(not(feature = "remote"))]
+    let _ = (connection, stream_id);
+    false
 }
 
 #[cfg_attr(test, track_caller)]
