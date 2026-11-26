@@ -2413,6 +2413,103 @@ mod tests {
         assert!(factory.bind_side(&main, &wrong).await.is_err());
     }
 
+    /// The event bits of every epoll registration, in this process, of the file behind
+    /// `socket`: one per registered descriptor, read from `/proc/self/fdinfo`.
+    fn epoll_registrations(socket: &impl std::os::fd::AsFd) -> Vec<u32> {
+        use std::os::fd::AsRawFd;
+        let name = |fd: i32| std::fs::read_link(format!("/proc/self/fd/{fd}")).ok();
+        let wanted = name(socket.as_fd().as_raw_fd()).expect("the socket's own name");
+        // tokio holds more than one descriptor of its epoll instance, and each one lists every
+        // registration: keyed by registered descriptor, they count once.
+        let mut found = BTreeMap::new();
+        for entry in std::fs::read_dir("/proc/self/fd").expect("descriptor list") {
+            let Some(fd) = entry
+                .ok()
+                .and_then(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if name(fd).is_none_or(|link| link.as_os_str() != "anon_inode:[eventpoll]") {
+                continue;
+            }
+            // Another test may close its descriptor between the two reads.
+            let Ok(info) = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")) else {
+                continue;
+            };
+            // One line per registration: `tfd: <fd> events: <hex> ...`.
+            for line in info.lines() {
+                let mut words = line.split_whitespace();
+                if words.next() != Some("tfd:") {
+                    continue;
+                }
+                let target: i32 = words.next().and_then(|fd| fd.parse().ok()).expect("tfd");
+                assert_eq!(words.next(), Some("events:"), "fdinfo format: {line}");
+                let events =
+                    u32::from_str_radix(words.next().expect("events"), 16).expect("hex events");
+                if name(target).as_ref() == Some(&wanted) {
+                    found.insert(target, events);
+                }
+            }
+        }
+        found.into_values().collect()
+    }
+
+    /// The mesh sockets are registered with the runtime for readability only (#260, J1255, D81).
+    ///
+    /// A write registration turns every datagram the kernel frees into a wakeup of the parked
+    /// engine worker: 82-94% of an idle hub's wakeups (J1253). The engine watches writability
+    /// only while a send is blocked. This pins that for the main and the side socket, so an
+    /// engine pin that brings the write registration back fails here.
+    #[tokio::test]
+    async fn mesh_sockets_are_registered_for_readability_only() {
+        use gotatun::{
+            udp::{UdpSend, UdpTransportFactory, UdpTransportFactoryParams},
+            x25519::StaticSecret,
+        };
+        /// `EPOLLIN` and `EPOLLOUT` of the Linux epoll ABI, as `fdinfo` prints them.
+        const EPOLL_IN: u32 = 0x001;
+        const EPOLL_OUT: u32 = 0x004;
+        let (mut factory, port) = super::bind_udp(
+            Request {
+                port: 0,
+                allow_fallback: true,
+            },
+            StaticSecret::from([5; 32]),
+        )
+        .await
+        .expect("bound engine socket");
+        let params = UdpTransportFactoryParams {
+            addr: None,
+            port,
+            fwmark: None,
+        };
+        let (main, _receiver) = factory.bind(&params).await.expect("main sockets");
+        let (side, _side_receiver) = factory
+            .bind_side(&main, &params)
+            .await
+            .expect("side socket binds")
+            .expect("the engine factory has a second socket");
+        for (label, socket) in [("main", &main), ("side", &side)] {
+            // A send that does not block must not add a writability watch either.
+            let sink = std::net::UdpSocket::bind("127.0.0.1:0").expect("loopback sink");
+            let pool = gotatun::packet::PacketBufPool::<64>::new(1);
+            let mut packet = pool.get();
+            packet.truncate(1);
+            socket
+                .send_to(packet, sink.local_addr().expect("sink address"))
+                .await
+                .expect("send");
+            let masks = epoll_registrations(socket);
+            assert_eq!(masks.len(), 1, "{label}: one registration: {masks:x?}");
+            assert_ne!(masks[0] & EPOLL_IN, 0, "{label} reads: {masks:x?}");
+            assert_eq!(
+                masks[0] & EPOLL_OUT,
+                0,
+                "{label} socket is watched for writability: {masks:x?}"
+            );
+        }
+    }
+
     /// A packet burst uses one wakeup until the worker starts its refresh.
     #[test]
     fn review_endpoint_refresh_coalesces_a_packet_burst() {

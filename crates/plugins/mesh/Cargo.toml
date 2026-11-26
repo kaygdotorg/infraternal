@@ -104,7 +104,11 @@ url = { workspace = true, optional = true }
 # A device backs off retries to peers only keepalives wait for, signals
 # confirmed-endpoint changes and sends many initiations without waiting
 # (#260, J1253, D81).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "0853f42bc28f09beeac547c26bbe37f07107be5c", default-features = false, features = ["device", "ring"], optional = true }
+# On Linux the UDP sockets are registered with tokio for readability only; a send
+# watches writability only while it is blocked on a full send buffer. Before, the
+# kernel's write-space report after every datagram sent woke the parked engine
+# worker: 82-94% of an idle hub's wakeups (#260, J1255, D81).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "28c9195fa260ff1187f7d072f4b5747f3a5cb820", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

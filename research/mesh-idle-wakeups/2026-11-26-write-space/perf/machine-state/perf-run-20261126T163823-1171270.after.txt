@@ -1,0 +1,25 @@
+== machine state: after (2026-11-26T16:50:31+01:00) ==
+host: infraternal-perf-01-backup01  kernel: 6.12.113+deb13-amd64
+loadavg: 0.05 0.05 0.01 1/232 1172398
+-- memory --
+MemTotal:       12185064 kB
+MemFree:         8151940 kB
+MemAvailable:   11462308 kB
+Cached:          2980944 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+-- cpu governor/freq --
+not visible (VM: no cpufreq)
+model name	: AMD Ryzen 7 3700X 8-Core Processor
+cpu MHz		: 3593.248
+model name	: AMD Ryzen 7 3700X 8-Core Processor
+cpu MHz		: 3593.248
+-- steal (cumulative jiffies) -- steal=1775 total=180929869
+-- 1s CPU sample, processes >0.5% (top, 2nd iteration) --
+    367 root      20   0  195644 135740 133916 S   1.0   1.1   0:29.06 systemd-journal
+-- quiet: no process >5% CPU --
+-- run summary --
+command: env HOME=/home/claude /home/claude/j1255/perf-repeat.sh /home/claude/j1255/out/repeat
+cold: 0  exit: 0
+wall: 725.275s
+steal during run: 1 of 434998 jiffies (all cpus)
