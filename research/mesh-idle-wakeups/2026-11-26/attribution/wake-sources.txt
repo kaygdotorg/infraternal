@@ -1,0 +1,23 @@
+== connected 4096, variant like-base (grid off, batching off), 10 s from t=20
+total 442
+    407  92.1%  socket write space (a sent datagram was freed)
+     11   2.5%  futex (thread hand-off)
+     11   2.5%  eventfd write (tokio unpark)
+     10   2.3%  timerfd (timer task deadline)
+      2   0.5%  hrtimer (sleep/timeout)
+      1   0.2%  TUN readable
+== first engine (pin a0be34f), connected-4096-p-t10
+total 171
+    140  81.9%  socket write space (a sent datagram was freed)
+     11   6.4%  timerfd (timer task deadline)
+     10   5.8%  futex (thread hand-off)
+      7   4.1%  eventfd write (tokio unpark)
+      3   1.8%  hrtimer (sleep/timeout)
+== first engine (pin a0be34f), offline-4096-p-t20
+total 2316
+   2183  94.3%  socket write space (a sent datagram was freed)
+    104   4.5%  eventfd write (tokio unpark)
+     13   0.6%  futex (thread hand-off)
+     11   0.5%  timerfd (timer task deadline)
+      4   0.2%  hrtimer (sleep/timeout)
+      1   0.0%  TUN readable

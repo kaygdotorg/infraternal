@@ -2,8 +2,8 @@
 //! direct-path candidate walks (#515, J704).
 //!
 //! Linux and macOS both run `GotaTun`, so the Mac drives the same walk bookkeeping as Linux
-//! ([`crate::candidate_walks`]) with the same engine call: after moving a peer's address it sends
-//! a handshake there with `Device::rehandshake`, which sends even over a live
+//! ([`crate::candidate_walks`]) with the same engine call: after moving peers' addresses it sends
+//! handshakes there with `Device::rehandshake_all`, which sends even over a live
 //! session and keeps that session carrying data until the new one is up.
 //!
 //! That only works if a snapshot leaves the sessions of unchanged peers alone. The Mac used to
@@ -22,7 +22,7 @@
 
 use super::{
     CounterMap, GotaDevice, RuntimeState, WireGuardPeer, WorkerCommand, X25519PublicKey,
-    installed_keys, installed_peers, peer_for_policy, peer_stats, peers_for_config,
+    installed_keys, installed_peers, peer_for_policy, peers_for_config,
     underlay::UnderlayAnnouncer,
 };
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
     },
     dataplane::{Config, Peer, PeerPolicy},
     policy::model::PublicKey,
+    underlay_announce::{CoalescedSchedule, confirmed_changed},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -39,16 +40,17 @@ use std::{
     net::SocketAddr,
     sync::Arc,
 };
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::{sync::mpsc::UnboundedReceiver, time::Instant};
 
 /// Run the Mac worker: apply queued commands one at a time, step candidate walks when one is
 /// due, and reap finished handshake tasks. It stops cleanly when told to or when its queue
 /// closes.
 ///
 /// A walk reads the counters only after the reply to an apply has been sent, so a snapshot's
-/// caller never waits on it. Between commands it also scans the device's confirmed endpoints
-/// every [`peer_stats::CONFIRMED_ENDPOINT_SCAN`] for the admission guard, as the Linux worker
-/// does (J736, #483).
+/// caller never waits on it. Between commands it also hands the device's confirmed endpoints to
+/// the admission guard, as the Linux worker does (J736, #483): when the engine reports a change
+/// and after a command that changes the peers, at most every 250 ms, and never on a timer, so
+/// an idle node costs no wakeup for it (D81, #260 J1253).
 ///
 /// Every walk reads its peers through [`installed_peers`], the same filter
 /// [`peers_for_config`] installs with, so a peer without network access is never walked.
@@ -63,18 +65,34 @@ pub(super) async fn run_worker(
         state.utun.as_ref().map(super::MacUtun::name),
         mac_connected_sends_enabled(),
     );
-    let mut confirmed_scan = tokio::time::interval(peer_stats::CONFIRMED_ENDPOINT_SCAN);
-    confirmed_scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut confirmed_scan = CoalescedSchedule::default();
+    confirmed_scan.arm(Instant::now());
     // A restored configuration may carry subnet routes and candidates; no session predates it.
     state.sync_networks().await;
     state.refresh_walks(&BTreeMap::new()).await;
     loop {
         let next_walk = state.walks.next_due();
+        let confirmed = state
+            .device
+            .as_ref()
+            .map(|device| device.confirmed_endpoint_changes());
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else {
                     break;
                 };
+                // A command that changes the peers or the device changes what the guard
+                // should hold, whether or not any endpoint moved.
+                if !confirmed_scan.is_armed()
+                    && matches!(
+                        command,
+                        WorkerCommand::Apply { .. }
+                            | WorkerCommand::ReplaceAuthority { .. }
+                            | WorkerCommand::SetPrivateKey { .. }
+                    )
+                {
+                    confirmed_scan.arm(Instant::now());
+                }
                 match command {
                     WorkerCommand::Apply {
                         config,
@@ -133,8 +151,13 @@ pub(super) async fn run_worker(
                     }
                 }
             }
-            _ = confirmed_scan.tick() => {
+            () = confirmed_changed(confirmed), if !confirmed_scan.is_armed() => {
+                confirmed_scan.arm(Instant::now());
+            }
+            () = confirmed_scan.wait() => {
+                confirmed_scan.start();
                 state.admit_confirmed_endpoints().await;
+                confirmed_scan.finish(Instant::now());
             }
             () = announcement_due(announcer.as_mut()) => {
                 if let Some(device) = &state.device
@@ -370,7 +393,7 @@ impl RuntimeState {
     /// [`crate::candidate_walks::Walks::start`], with this device's counters and addresses.
     ///
     /// Each walk that starts running is moved to its address if the engine is elsewhere, then
-    /// gets a real handshake there ([`Self::rehandshake`]); a walk that starts finished sends
+    /// gets a real handshake there ([`Self::rehandshake_all`]); a walk that starts finished sends
     /// nothing, and a working peer that the snapshot left unchanged is never walked again.
     async fn refresh_walks(&mut self, before: &BTreeMap<PublicKey, EngineEndpoint>) {
         let Some(config) = self.config.as_ref() else {
@@ -399,6 +422,7 @@ impl RuntimeState {
             before,
             std::time::Instant::now(),
         );
+        let mut moved = Vec::with_capacity(started.len());
         for walk in started {
             if walk.engine_at != Some(walk.address)
                 && self.set_endpoint(walk.key, walk.address).await.is_err()
@@ -407,8 +431,9 @@ impl RuntimeState {
                 self.walks.abandon(walk.key);
                 continue;
             }
-            self.rehandshake(walk.key);
+            moved.push(walk.key);
         }
+        self.rehandshake_all(moved);
     }
 
     /// Where the engine sends each peer's packets before `next` is applied, by device key, for
@@ -450,14 +475,16 @@ impl RuntimeState {
         let moves = self
             .walks
             .step(std::time::Instant::now(), &observed(&counters));
+        let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
             if self.set_endpoint(key, endpoint).await.is_ok() {
-                self.rehandshake(key);
+                installed.push(key);
             } else {
                 // The engine still holds the old address; the walk's next step tries again.
                 self.walks.install_failed(key);
             }
         }
+        self.rehandshake_all(installed);
     }
 
     /// Point the peer whose key owns its host routes at `endpoint`, a walk's next candidate.
@@ -495,19 +522,25 @@ impl RuntimeState {
             .map_err(|_| io::Error::other("WireGuard peer endpoint could not be installed."))
     }
 
-    /// Send a new handshake initiation to `key`'s current address now, even over a live session,
-    /// without waiting for it (#515, J604 on Linux, J704 here).
+    /// Send a new handshake initiation to each of `keys` at its current address now, even over a
+    /// live session, without waiting for any answer (#515, J604 on Linux, J704 here; J1253).
     ///
-    /// `GotaTun` sends the initiation, then waits for the session; that wait runs in a task with a
-    /// deadline, so the worker never blocks on a peer. An unanswered initiation is retried by the
-    /// engine's own rekey timer; nothing new is scheduled here.
-    pub(super) fn rehandshake(&mut self, key: PublicKey) {
+    /// One task with a deadline sends them all, so the worker never blocks on the sends. An
+    /// unanswered initiation is retried by the engine's own rekey timer; nothing new is
+    /// scheduled here.
+    pub(super) fn rehandshake_all(&mut self, keys: Vec<PublicKey>) {
+        if keys.is_empty() {
+            return;
+        }
         let Some(device) = self.device.as_ref().map(Arc::clone) else {
             return;
         };
-        let key = X25519PublicKey::from(key.0);
+        let keys: Vec<_> = keys
+            .into_iter()
+            .map(|key| X25519PublicKey::from(key.0))
+            .collect();
         self.handshakes.spawn(async move {
-            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake(&key)).await;
+            let _ = tokio::time::timeout(HANDSHAKE_WAIT, device.rehandshake_all(&keys)).await;
         });
     }
 }

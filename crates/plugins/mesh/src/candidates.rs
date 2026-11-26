@@ -266,7 +266,7 @@ pub struct Seen {
 /// already sends to a working address.
 ///
 /// The node sends a handshake to the walk's address when the walk starts and at every step, and
-/// the engine sends it even over a live session (`GotaTun`'s `rehandshake`, J604). So each
+/// the engine sends it even over a live session (`GotaTun`'s `rehandshake_all`, J604, J1253). So each
 /// address is really tried, and an address that works answers within one round trip, while the
 /// live session keeps carrying data until the new one is up.
 ///

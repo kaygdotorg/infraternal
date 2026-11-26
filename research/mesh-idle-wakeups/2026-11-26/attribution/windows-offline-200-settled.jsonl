@@ -1,0 +1,4 @@
+{"step": "applied", "peers": 200, "scenario": "offline", "apply_ms": 36.864}
+{"step": "window", "t": 0, "at_s": 0.0, "secs": 60.0, "wakeups_per_s": 2.5, "threads": {"hubexp": 0.02, "infraternal-mes": 2.45, "mesh-route-repa": 0.03}, "cpu_pct": 0.15, "udp_out": 800, "udp_in": 0}
+{"step": "window", "t": 60, "at_s": 60.0, "secs": 60.0, "wakeups_per_s": 0.56, "threads": {"infraternal-mes": 0.53, "mesh-route-repa": 0.03}, "cpu_pct": 0.067, "udp_out": 200, "udp_in": 0}
+{"step": "window", "t": 120, "at_s": 120.0, "secs": 60.0, "wakeups_per_s": 0.03, "threads": {"mesh-route-repa": 0.03}, "cpu_pct": 0.0, "udp_out": 0, "udp_in": 0}

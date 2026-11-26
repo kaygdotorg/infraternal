@@ -1709,7 +1709,7 @@ struct RuntimeState {
     utun: Option<MacUtun>,
     /// Shared only with handshake tasks, which `stop` ends before stopping the device.
     device: Option<Arc<GotaDevice>>,
-    /// Running `rehandshake` waits ([`walks`]).
+    /// Running handshake sends ([`walks`]).
     handshakes: tokio::task::JoinSet<()>,
     /// Each peer's direct-path candidate walk (#515).
     walks: crate::candidate_walks::Walks,
@@ -2019,9 +2019,7 @@ impl RuntimeState {
         utun.filter.publish_policy(policy);
         let readdressed = walks::readdressed(old_config.as_ref(), &config);
         self.config = Some(config);
-        for key in readdressed {
-            self.rehandshake(key);
-        }
+        self.rehandshake_all(readdressed);
         Ok(RuntimeInfo {
             interface,
             port: self.port,

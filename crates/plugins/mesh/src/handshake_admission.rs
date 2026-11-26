@@ -540,11 +540,13 @@ fn distinct_endpoints(lists: Lists<'_>) -> usize {
 /// a private copy of the confirmed list ([`Self::snapshot`]) and, per datagram, compares the
 /// source with the previous one first and with the list second: no lock and no allocation. A
 /// source in the list wakes nobody, which is every datagram of a steady mesh. An idle node
-/// receives nothing from a new source, so it scans only on the worker's slow fallback.
+/// receives nothing from a new source, so it never scans.
 ///
 /// The list is exactly what [`ConfirmedEndpointFeed`] last wrote into the guard; the guard
 /// publishes it from [`PeerAdmission::set_confirmed_endpoints`]. A wake is a hint, never state:
-/// a spurious one costs one scan, and a missed one is covered by the worker's fallback scan.
+/// a spurious one costs one scan, and the engine's own confirmed-endpoint signal
+/// (`Device::confirmed_endpoint_changes`) covers every change this path cannot see, such as a
+/// peer moving to an address another peer already confirmed (#260 J1253).
 #[derive(Debug, Default)]
 pub(crate) struct SourceWatch {
     /// Bumped when `confirmed` is replaced, so a receiver reloads its copy once per change.

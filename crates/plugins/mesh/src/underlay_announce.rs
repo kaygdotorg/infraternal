@@ -9,6 +9,9 @@
 //!
 //! The schedule debounces changes for 25 ms, sends at most one announcement per 250 ms, keeps
 //! the trailing edge, and arms no timer while the underlay is quiet (D81).
+//!
+//! The workers' endpoint scans share the schedule, and wake on [`confirmed_changed`] instead of
+//! a timer (#260, J1253).
 
 use std::{
     sync::{
@@ -192,6 +195,16 @@ impl Drop for AnnouncementWaiter {
         if self.schedule.is_armed() {
             self.announce.wake.notify.notify_one();
         }
+    }
+}
+
+/// Wait until the engine reports a changed confirmed endpoint
+/// (`Device::confirmed_endpoint_changes`, passed in as `changes`); forever while no engine
+/// runs. Cancel-safe: a change reported while nobody waits is seen by the next wait.
+pub(crate) async fn confirmed_changed(changes: Option<Arc<Notify>>) {
+    match changes {
+        Some(changes) => changes.notified().await,
+        None => std::future::pending().await,
     }
 }
 
