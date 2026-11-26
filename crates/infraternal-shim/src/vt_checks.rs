@@ -246,6 +246,22 @@ mod found {
         }
     }
 
+    /// An OSC 8 that an ESC ended, followed by a sequence still unfinished at
+    /// the cut. The engine opened the link at that ESC, taking the next
+    /// implicit id, so a carry that still held the OSC made the viewer open
+    /// it a second time under another id (#594). The first input is the
+    /// minimal form; the fuzzer's is the committed seed
+    /// `implicit-link-after-ended-string`.
+    #[test]
+    fn snapshot_does_not_replay_a_link_the_engine_already_opened() {
+        for unfinished in [&b"P"[..], b"P1$r", b"_x", b"]0;title", b"[1;"] {
+            let mut input = b"\x50\x01\x00\x1b]8;;http://a\x1b\\A\x1b]8;;http://b\x1b".to_vec();
+            input.extend_from_slice(unfinished);
+            input.extend_from_slice(b"\xfe\xfe\x50\x1b\\B");
+            super::verify_vt_stream_sample(&input);
+        }
+    }
+
     /// A reflow that shrinks 81 columns to 40 leaves wrapped rows on a
     /// terminal that never printed a character, so its REP source is empty.
     /// Repainting a wrapped edge prints a stand-in glyph, which would give

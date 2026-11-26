@@ -73,14 +73,68 @@ fn string_payload_keeps_its_high_bytes() {
     assert!(run(b"\x1b_x\x9cb\x1b\\").at_ground());
 }
 
-/// Strings are reported as strings, and only data strings keep their C0 bytes.
+/// Only data strings keep their C0 bytes.
 #[test]
-fn strings_report_themselves_and_keep_their_c0_bytes() {
-    assert!(run(b"\x1b]0;a").in_string());
+fn only_data_strings_keep_their_c0_bytes() {
     assert!(run(b"\x1bP1p").keeps_c0());
     assert!(run(b"\x1b_x").keeps_c0());
-    assert!(!run(b"\x1b[1").in_string());
+    assert!(!run(b"\x1b]0;a").keeps_c0());
     assert!(!run(b"\x1b[1").keeps_c0());
+}
+
+/// The engine runs a string at the ESC that ends it, so ESC always starts
+/// over, whatever it interrupts (#594).
+#[test]
+fn an_escape_starts_over_inside_every_sequence() {
+    for prefix in [
+        &b"\x1b"[..],
+        b"\x1b(",
+        b"\x1b[1;",
+        b"\x1b]0;title",
+        b"\x1bP",
+        b"\x1bP1;",
+        b"\x1bP1$",
+        b"\x1bP:",
+        b"\x1bP1$qm",
+        b"\x1b_apc",
+        b"\x1b^pm",
+        b"\x1bXsos",
+    ] {
+        let mut carry = run(prefix);
+        assert!(carry.advance(0x1b), "{prefix:?}");
+        assert!(!carry.at_ground(), "{prefix:?}");
+    }
+}
+
+/// A C1 introducer starts over only where the engine obeys it.
+#[test]
+fn a_c1_introducer_starts_over_unless_the_string_goes_on() {
+    for introducer in [0x90, 0x98, 0x9b, 0x9d, 0x9e, 0x9f] {
+        // OSC and DCS data take it as payload.
+        for prefix in [&b"\x1b]0;a"[..], b"\x1bP1p", b"\x1bP:"] {
+            assert!(
+                !run(prefix).advance(introducer),
+                "{prefix:?} {introducer:#x}"
+            );
+        }
+        // A CSI, an escape and a DCS header are interrupted by it.
+        for prefix in [&b"\x1b"[..], b"\x1b[1", b"\x1bP1"] {
+            assert!(
+                run(prefix).advance(introducer),
+                "{prefix:?} {introducer:#x}"
+            );
+        }
+        // In SOS, PM and APC the three string introducers change nothing.
+        let apc_goes_on = matches!(introducer, 0x98 | 0x9e | 0x9f);
+        assert_eq!(
+            run(b"\x1b_x").advance(introducer),
+            !apc_goes_on,
+            "APC {introducer:#x}"
+        );
+    }
+    // Ordinary payload never starts anything over.
+    assert!(!run(b"\x1b]0;a").advance(b'b'));
+    assert!(!run(b"\x1b[1").advance(b';'));
 }
 
 /// Broken UTF-8 resolves the way the engine's decoder does.
