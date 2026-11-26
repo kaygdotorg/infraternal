@@ -94,11 +94,10 @@ async fn run_many_host_fixture() {
         .execute(&fixture.pool)
         .await
         .unwrap();
-    // This fixture inserts its owner directly instead of going through signup,
-    // so seed only the account it will open under D235's explicit login policy.
-    sqlx::query("INSERT INTO login_rules(subject,account_kind,account,host_id,created_at) VALUES (?,'named',?,NULL,unixepoch())")
+    // Signup gives a new owner D235's starter rule. This fixture inserts its
+    // owner directly, so mirror that row instead of relying on a host default.
+    sqlx::query("INSERT INTO login_rules(subject,account_kind,account,host_id,created_at) VALUES (?,'any',NULL,NULL,unixepoch())")
         .bind(&owner)
-        .bind(&account)
         .execute(&fixture.pool)
         .await
         .unwrap();
