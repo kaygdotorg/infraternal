@@ -30,6 +30,7 @@
 use crate::{frame::MAX_FRAME, terminal::Terminal};
 use std::fmt::Write as _;
 
+/// Compares hyperlink grouping between the original's snapshot and a viewer's.
 mod links;
 
 /// One run of output, then the size both terminals change to after it (none for the last run).
