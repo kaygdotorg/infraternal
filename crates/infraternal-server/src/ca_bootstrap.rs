@@ -99,6 +99,7 @@ impl BootstrapRuntime {
                 source: self.source.clone(),
                 directory,
                 name: self.config.name.clone(),
+                relay: None,
             },
             identity.certificate,
         );

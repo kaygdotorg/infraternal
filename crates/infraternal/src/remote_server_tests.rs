@@ -246,6 +246,7 @@ fn service_dry_run_preserves_remote_listener_and_private_trust_path() {
     assert!(unit.contains("KillMode=process"));
 }
 
+/// A missing CA directory refuses before any database or listener exists.
 #[tokio::test]
 async fn missing_ca_refuses_before_database_or_listener_creation() {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -269,7 +270,8 @@ async fn missing_ca_refuses_before_database_or_listener_creation() {
             config,
             Options {
                 remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
-                remote_ca_dir: Some(directory.join("ca"))
+                remote_ca_dir: Some(directory.join("ca")),
+                relay_port: None,
             }
         ))
         .await
@@ -314,6 +316,7 @@ fn independent_review_remote_operator_commands_accept_json_output() {
     );
 }
 
+/// A failed cold start still closes the inherited handoff stdin.
 #[test]
 fn failed_cold_configuration_still_disposes_handoff_stdin() {
     use std::process::{Command, Stdio};
@@ -342,6 +345,7 @@ fn failed_cold_configuration_still_disposes_handoff_stdin() {
                     Options {
                         remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
                         remote_ca_dir: Some(directory.join("ca")),
+                        relay_port: None,
                     }
                 ))
                 .is_err()

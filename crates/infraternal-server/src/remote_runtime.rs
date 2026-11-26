@@ -1164,6 +1164,15 @@ impl RemoteListeners {
         self.endpoint.local_addr()
     }
 
+    /// Run `task` for the listeners' lifetime; dropping the listeners aborts it (the server
+    /// node's relay leaf rotation, D401, lives here).
+    pub(crate) fn keep_task(
+        &mut self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.tasks.spawn(task);
+    }
+
     /// Keep the served leaf fresh for the listeners' lifetime (#559): start
     /// the `server_leaf` rotation task, which reissues the leaf while the CA
     /// is unlocked and installs each durable new leaf here. `current` is the
@@ -1181,7 +1190,7 @@ impl RemoteListeners {
         };
         self.tasks.spawn(crate::server_leaf::run(
             rotation,
-            current,
+            Some(current),
             move |identity| swap.install(identity),
         ));
     }
