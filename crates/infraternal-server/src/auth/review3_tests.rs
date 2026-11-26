@@ -988,7 +988,7 @@ async fn review4_open_reply_and_revocation_preserve_authority() {
 #[tokio::test]
 #[ignore = "release-only connect scale measurement; run without concurrent builds"]
 async fn review4_slow_open_at_user_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     for revoke in [false, true] {
         let (f, addr, server, mut peer) = review3_socket().await;
         let mut receive = BytesMut::new();

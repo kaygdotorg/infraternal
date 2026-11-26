@@ -139,7 +139,7 @@ async fn revoked_idle_socket_loses_all_authority() {
 #[tokio::test]
 #[ignore = "release-only measurement without concurrent compilation"]
 async fn socket_authority_latency_at_user_capacity() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let (f, address, server) = socket_fixture().await;
     let cookie = format!("__Host-infraternal={}", f.session);
     let mut sockets = Vec::new();

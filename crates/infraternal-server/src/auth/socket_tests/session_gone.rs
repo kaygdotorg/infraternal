@@ -300,7 +300,9 @@ async fn enroll_remote_host(
 }
 
 /// Read browser frames until `stream` receives its `Close`, answering control
-/// pings and ignoring unrelated session-snapshot events along the way.
+/// pings and ignoring unrelated session-snapshot events along the way. The wait
+/// is bounded: the server keeps pinging a healthy socket, so a `Close` that was
+/// lost on the way would otherwise leave this loop running forever (#596).
 #[cfg(feature = "remote")]
 async fn read_stream_close<S>(socket: &mut S, stream: u32) -> (u16, String)
 where
@@ -308,23 +310,29 @@ where
         + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
-    loop {
-        let wire = read_client_frame(socket).await;
-        let decoded = decode_muxed_frame(&wire).unwrap();
-        match decoded.frame {
-            Frame::Ping { nonce, sent_us } if decoded.stream_id == 0 => {
-                client_ws_send(socket, 0, &Frame::Pong { nonce, sent_us }).await;
+    let close = async {
+        loop {
+            let wire = read_client_frame(socket).await;
+            let decoded = decode_muxed_frame(&wire).unwrap();
+            match decoded.frame {
+                Frame::Ping { nonce, sent_us } if decoded.stream_id == 0 => {
+                    client_ws_send(socket, 0, &Frame::Pong { nonce, sent_us }).await;
+                }
+                Frame::Close { code, reason } if decoded.stream_id == stream => {
+                    return (code, reason.to_owned());
+                }
+                Frame::Ack { .. } | Frame::Event { .. } => {}
+                other => panic!(
+                    "unexpected frame on stream {} while waiting for stream {stream} close: {other:?}",
+                    decoded.stream_id
+                ),
             }
-            Frame::Close { code, reason } if decoded.stream_id == stream => {
-                return (code, reason.to_owned());
-            }
-            Frame::Ack { .. } | Frame::Event { .. } => {}
-            other => panic!(
-                "unexpected frame on stream {} while waiting for stream {stream} close: {other:?}",
-                decoded.stream_id
-            ),
         }
-    }
+    };
+    // Only a hang bound, far above the milliseconds a loopback close takes.
+    tokio::time::timeout(Duration::from_secs(30), close)
+        .await
+        .unwrap_or_else(|_| panic!("stream {stream} received no Close within 30 s"))
 }
 
 /// End-to-end socket regression for #588 (J1224 follow-up): a browser opens a
@@ -400,8 +408,12 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
     // Wire-faithful remote host peer over real mTLS: serves `terminal.open`,
     // accepts two concurrent attachments to the same session, reports 4404 on
     // the first immediately, and sends a second 4404 once released by the test.
+    // Like a real host it then stays connected and keeps answering probes until
+    // the test stops it. Hanging up after the second close, with a probe still
+    // unread, could reset the link before the server had read that close; the
+    // browser then saw "reconnecting" and waited forever (#596).
     let remote_session = uuid::Uuid::new_v4();
-    let (release_second, wait_second) = tokio::sync::oneshot::channel::<()>();
+    let (release_second, mut wait_second) = tokio::sync::oneshot::channel::<()>();
     let peer = tokio::spawn(async move {
         let connection = remote_tls::dial(remote_addr, "localhost", &client_tls)
             .await
@@ -422,9 +434,26 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
             .unwrap();
         let _ = receive.next(&connection.channel).await.unwrap();
 
+        let gone = Frame::Close {
+            code: CLOSE_SESSION_GONE,
+            reason: SESSION_GONE_REASON,
+        };
         let mut attached_streams = Vec::new();
+        let mut released = false;
         loop {
-            let decoded = receive.next(&connection.channel).await.unwrap();
+            // `Receive::next` keeps a partly read frame across cancellation.
+            let decoded = tokio::select! {
+                decoded = receive.next(&connection.channel) => decoded.unwrap(),
+                release = &mut wait_second, if !released => {
+                    release.unwrap();
+                    released = true;
+                    transmit
+                        .send(&connection.channel, attached_streams[1], &gone)
+                        .await
+                        .unwrap();
+                    continue;
+                }
+            };
             let stream_id = decoded.stream_id;
             match decoded.frame {
                 Frame::Ping { nonce, sent_us } => {
@@ -457,27 +486,15 @@ async fn remote_session_reported_gone_closes_row_once_and_prunes() {
                     assert_eq!(session_id, remote_session.as_bytes());
                     attached_streams.push(stream_id);
                     if attached_streams.len() == 2 {
-                        let gone = Frame::Close {
-                            code: CLOSE_SESSION_GONE,
-                            reason: SESSION_GONE_REASON,
-                        };
                         transmit
                             .send(&connection.channel, attached_streams[0], &gone)
                             .await
                             .unwrap();
-                        let _ = wait_second.await;
-                        transmit
-                            .send(&connection.channel, attached_streams[1], &gone)
-                            .await
-                            .unwrap();
-                        break;
                     }
                 }
                 _ => {}
             }
         }
-        // Keep the mTLS link open until the test tears the peer down.
-        let _ = receive.next(&connection.channel).await;
     });
 
     tokio::time::timeout(Duration::from_secs(5), async {
