@@ -645,23 +645,41 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
                 eprintln!("{error}");
                 Failure::HostFirewall
             })?;
+        // The Linux installer copies the binary while the server issues the
+        // certificate: neither needs the other, and each takes a large part of
+        // the time between the approval and the service start (#580).
+        #[cfg(target_os = "linux")]
+        let mut install = install;
+        #[cfg(target_os = "linux")]
+        let copy = {
+            let pending = install
+                .stage_image(Path::new(RUNNING_IMAGE))
+                .map_err(|error| {
+                    eprintln!("{error}");
+                    Failure::LocalState
+                })?;
+            tokio::task::spawn_blocking(move || pending.copy())
+        };
         println!("UP_STAGE=enrollment");
-        crate::remote::join_with_key(
+        let joined = crate::remote::join_with_key(
             &join_url,
             Path::new(SERVICE_DATA),
             &handoff.invitation,
             &handoff.key_pkcs8,
         )
         .await
-        .map_err(|error| map_remote_failure(&error))?;
+        .map_err(|error| map_remote_failure(&error));
+        // The copy is waited for even after a failed enrollment, so nothing is
+        // still writing when the installer rolls back.
         #[cfg(target_os = "linux")]
-        let image = PathBuf::from(RUNNING_IMAGE);
-        #[cfg(target_os = "macos")]
-        let image = env::current_exe().map_err(|_| Failure::Partial)?;
+        let copied = copy.await;
+        joined?;
         #[cfg(target_os = "linux")]
-        let activation = install.activate(&image);
+        let activation = copied
+            .map_err(io::Error::other)
+            .and_then(|image| install.activate_copied(image?));
         #[cfg(target_os = "macos")]
-        let activation = install.activate(&image, host);
+        let activation = env::current_exe().and_then(|image| install.activate(&image, host));
         activation.map_err(|error| {
             #[cfg(target_os = "macos")]
             eprintln!("{error}");
