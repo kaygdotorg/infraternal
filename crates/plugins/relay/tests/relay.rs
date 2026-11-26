@@ -12,6 +12,7 @@ use infraternal_plugin_relay::{
     wire::{HostId, LinkId, Notice, Token},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::io::AsyncWriteExt as _;
 
 const NAME: &str = "relay-1.mesh.test";
 const WAIT: Duration = Duration::from_secs(5);
@@ -434,6 +435,37 @@ async fn recheck_closes_a_host_revoked_after_its_handshake() {
         "the revoked host's connection is closed"
     );
     assert_eq!(relay.stats().hosts, 1);
+    relay.close().await;
+}
+
+/// A host revoked while the control hello is pending must not register afterward (D401 Q3).
+#[tokio::test]
+async fn revocation_during_control_hello_must_refuse_host() {
+    let mut ca = Authority::new();
+    let revoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let admission: Admission = {
+        let revoked = revoked.clone();
+        Arc::new(move |candidate| {
+            candidate != host(2) || !revoked.load(std::sync::atomic::Ordering::SeqCst)
+        })
+    };
+    let relay = relay(&mut ca, admission);
+    let address = relay.local_addr().unwrap();
+    let (_endpoint, connection) = stalled_client(&mut ca, address, host(2))
+        .await
+        .expect("the host completes TLS before revocation");
+    let (mut hello, _notices) = connection.open_bi().await.unwrap();
+    // sleep: let serve accept the stream and wait for its IFR2 bytes.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+    relay.recheck();
+    hello.write_all(b"IFR2").await.unwrap();
+
+    tokio::time::timeout(WAIT, connection.closed())
+        .await
+        .expect("the newly revoked host is closed");
+    assert_eq!(relay.stats().hosts, 0, "revoked host was registered");
     relay.close().await;
 }
 

@@ -472,6 +472,10 @@ impl Shared {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Add an admitted host after rechecking its leaf under the host-table lock.
+    ///
+    /// Keeping this check in the insertion critical section prevents `recheck()` from missing a
+    /// host that became revoked while it was opening its control stream.
     fn register(
         &self,
         host: HostId,
@@ -479,6 +483,12 @@ impl Shared {
         notices: mpsc::Sender<Notice>,
     ) -> bool {
         let mut table = self.write();
+        // The TLS admission check happens before the client sends its control hello. Recheck
+        // under the table lock so `recheck()` cannot miss a host that is still opening that
+        // stream and then have `register()` admit it after revocation.
+        if !(self.admission)(host) {
+            return false;
+        }
         if let Some(previous) = table.hosts.get(&host) {
             previous.connection.close(
                 quinn::VarInt::from_u32(3),
