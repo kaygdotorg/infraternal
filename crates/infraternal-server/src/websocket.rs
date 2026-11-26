@@ -108,8 +108,9 @@ const MAX_RESUME_ROWS: i64 = 4096;
 /// account's new sockets (#572 finding 4). 64 is four times the live limit: a person whose 16 tabs all drop and
 /// reconnect several times inside the 120 s window still resumes each of them. The global cap stays the backstop.
 const MAX_USER_RESUME_ROWS: i64 = 64;
-// Reject further AttachTerm requests on a socket at this bound.
-pub(super) const MAX_ATTACHMENTS: usize = 32;
+/// Bound the stream and writer metadata held by one browser socket. A socket
+/// can carry a full host's terminal streams within this limit (D214, #562).
+pub(super) const MAX_ATTACHMENTS: usize = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
@@ -979,6 +980,12 @@ async fn run_socket(
                             && !plugins.owns_stream(decoded.stream_id)
                             && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
                             && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                            // The browser may already have sent Credit and Resize behind
+                            // this attach. Retire the stream so those frames spare its siblings.
+                            if matches!(decoded.frame, Frame::AttachTerm { .. })
+                                && ended.insert(decoded.stream_id).is_err() {
+                                break;
+                            }
                             if while_authorized(&state, &user_id, &session_token, true,
                                 send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)
                             ).await.is_err() { break; }

@@ -3,6 +3,25 @@
 //! socket (#569).
 use super::*;
 
+/// A refused terminal's follow-up frames leave other streams alone. The socket
+/// tracks at most 128 retired IDs and reclaims each place on the browser's Close.
+#[test]
+fn retired_streams_are_bounded_at_socket_capacity() {
+    let mut ended = EndedStreams::default();
+    for stream in (1..=255).step_by(2) {
+        ended.insert(stream).unwrap();
+    }
+    assert!(ended.insert(257).is_err());
+    assert!(ended.absorbs(1, &Frame::Credit { bytes: 16 }).unwrap());
+    assert!(!ended.absorbs(257, &Frame::Credit { bytes: 16 }).unwrap());
+    assert!(
+        ended
+            .absorbs(1, &Frame::Close { code: 1000, reason: "" })
+            .unwrap()
+    );
+    ended.insert(257).unwrap();
+}
+
 /// The upgrade permit and the row check enforce one limit.
 #[test]
 fn connection_limit_constants_agree() {

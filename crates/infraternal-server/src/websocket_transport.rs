@@ -26,8 +26,8 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-// One attach plus its credit per admitted window. Payload admission also has a
-// byte bound: a client cannot turn these small-frame slots into 64 full-size frames.
+/// Space for one attach plus its credit per admitted window. The reader also
+/// charges payload bytes against the fixed socket budget before enqueueing.
 const INPUT_SLOTS: usize = MAX_ATTACHMENTS * 2;
 const CONTROL_SLOTS: usize = 128;
 // Ready replies plus one probe remain below the framing buffer and yield after a bounded turn.

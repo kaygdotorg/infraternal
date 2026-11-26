@@ -58,6 +58,7 @@ async fn second_device_does_not_inherit_first_device_input_ack() {
     );
 }
 
+/// All 128 writer rows are usable and retained cursors remain usable at capacity.
 #[tokio::test]
 async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
     let (pool, user, session) = database().await;
@@ -97,7 +98,7 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
             .unwrap(),
         (high, first)
     );
-    for stream in (3..=63).step_by(2) {
+    for stream in (3..=255).step_by(2) {
         owned_writer(
             &pool,
             &user,
@@ -110,9 +111,15 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
         .unwrap();
     }
     assert!(
-        owned_writer(&pool, &user, &connection.connection_id, 65, &session, None)
+        owned_writer(&pool, &user, &connection.connection_id, 257, &session, None)
             .await
             .is_err()
+    );
+    assert_eq!(
+        owned_writer(&pool, &user, &connection.connection_id, 1, &session, None)
+            .await
+            .unwrap(),
+        (high, first)
     );
     sqlx::query("DELETE FROM websocket_connections WHERE connection_id=?")
         .bind(connection.connection_id.as_slice())
@@ -134,15 +141,16 @@ async fn writer_ownership_capacity_unsigned_offsets_and_identity_reuse() {
     );
 }
 
-/// Measure SQLite authority lookups at one user's full 16 × 32 attachment capacity.
+/// Measure SQLite authority lookups at one user's full connection and writer capacity.
 #[tokio::test]
 #[ignore = "release-only scale measurement; run without concurrent builds"]
 async fn writer_admission_at_user_capacity() {
     let (pool, user, session) = database().await;
     let mut connections = Vec::new();
-    for _ in 0..16 {
+    for _ in 0..MAX_USER_CONNECTIONS {
         let connection = new_connection(&pool, &user, 0, None, None).await.unwrap();
-        for stream in (1..=63).step_by(2) {
+        for index in 0..MAX_ATTACHMENTS {
+            let stream = 2 * u32::try_from(index).unwrap() + 1;
             owned_writer(
                 &pool,
                 &user,
@@ -170,7 +178,9 @@ async fn writer_admission_at_user_capacity() {
     let p50 = samples[samples.len() / 2].as_micros();
     let p99 = samples[(samples.len() * 99).div_ceil(100) - 1].as_micros();
     println!(
-        "writer authority: connections=16 writers=512 n={} p50_us={p50} p99_us={p99} SQLite=memory arch={} load={}",
+        "writer authority: connections={} writers={} n={} p50_us={p50} p99_us={p99} SQLite=memory arch={} load={}",
+        connections.len(),
+        connections.len() * MAX_ATTACHMENTS,
         samples.len(),
         std::env::consts::ARCH,
         std::fs::read_to_string("/proc/loadavg").unwrap().trim()
