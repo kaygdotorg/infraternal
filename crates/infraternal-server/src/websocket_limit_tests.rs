@@ -16,7 +16,13 @@ fn retired_streams_are_bounded_at_socket_capacity() {
     assert!(!ended.absorbs(257, &Frame::Credit { bytes: 16 }).unwrap());
     assert!(
         ended
-            .absorbs(1, &Frame::Close { code: 1000, reason: "" })
+            .absorbs(
+                1,
+                &Frame::Close {
+                    code: 1000,
+                    reason: ""
+                }
+            )
             .unwrap()
     );
     ended.insert(257).unwrap();
