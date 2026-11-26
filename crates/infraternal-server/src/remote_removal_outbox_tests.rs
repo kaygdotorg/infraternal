@@ -397,7 +397,7 @@ async fn refused_uninstall_retires_with_the_install_recorded_as_left() {
 }
 
 /// Give the fixture's host owner a live admin window for the removal service.
-async fn owner_removal(removed: &Removed) -> (crate::remote_removal::Removal, &'static str, i64) {
+async fn owner_removal(removed: &Removed) -> (crate::remote_removal::Removal, &'static str, i64, String) {
     let person: String = sqlx::query_scalar("SELECT owner_id FROM remote_hosts WHERE id=?")
         .bind(removed.host.as_bytes().as_slice())
         .fetch_one(&removed.pool)
@@ -438,14 +438,14 @@ async fn owner_removal(removed: &Removed) -> (crate::remote_removal::Removal, &'
         removed.hosts.clone(),
         std::path::PathBuf::new(),
     );
-    (service, token, now)
+    (service, token, now, person)
 }
 
 /// Forget must stop delivery after acknowledgement of the first cleanup step.
 #[tokio::test]
 async fn forget_stops_an_admitted_cleanup_before_its_next_step() {
     let removed = removed().await;
-    let (service, token, now) = owner_removal(&removed).await;
+    let (service, token, now, _) = owner_removal(&removed).await;
     let mut socket = removed.reconnect().await;
     let (call_id, action, _) = next_call(&mut socket).await;
     assert_eq!(action, "terminal.login.revoke");
@@ -488,7 +488,7 @@ async fn connected_publish_keeps_uninstall_pending_until_reconnect() {
         .execute(&removed.pool)
         .await
         .unwrap();
-    let (service, token, now) = owner_removal(&removed).await;
+    let (service, token, now, person) = owner_removal(&removed).await;
     let mut original = removed.reconnect().await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while removed.hosts.actor(removed.host).await.is_none() {
