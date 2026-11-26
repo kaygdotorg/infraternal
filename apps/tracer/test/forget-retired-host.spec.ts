@@ -15,13 +15,15 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         let state = "pending";
         let forgotten = false;
         let push: (() => void) | undefined;
+        /** Signal a new inventory snapshot on whichever socket is current after a reload. */
+        const notifyInventory = () => push?.();
         await page.route("**/remote/hosts/actions", (route) => route.fulfill({ json: { id: "remote.host.remove", label: "Remove host" } }));
         await page.route("**/remote/hosts/forget", async (route) => {
           expect(route.request().postDataJSON()).toEqual({ host_id: id });
           forgotten = true;
           state = "";
           await route.fulfill({ json: { host_id: id, state: "forgotten", message: "Host forgotten. The machine itself was not changed." } });
-          push?.();
+          notifyInventory();
         });
         await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, (socket) => {
           const server = socket.connectToServer();
@@ -120,7 +122,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
         await page.locator("#palette-input").fill("retired-worker");
         await expect(row).toContainText("removal pending");
         await expect(row).toHaveAttribute("data-action", "");
-        state = "retired-unreachable"; push?.();
+        state = "retired-unreachable";
+        notifyInventory();
         await expect(row).toContainText("retired-unreachable");
         await expect(row).toHaveAttribute("data-action", "");
       } finally { await context.close(); }
