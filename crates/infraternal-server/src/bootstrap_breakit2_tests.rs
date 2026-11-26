@@ -1348,8 +1348,7 @@ async fn diagnostic_canary_output(actor: &EmbeddedAgent, session: [u8; 16]) -> R
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
             | TerminalOutput::LinkDoubt
-            | TerminalOutput::Recovered
-            | TerminalOutput::RouteExpired => {}
+            | TerminalOutput::Recovered => {}
         }
     }
     println!("DIAG breakit2 canary_stream_ended=true marker_found=false");

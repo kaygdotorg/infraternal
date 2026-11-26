@@ -104,8 +104,8 @@ impl EarlyTerminal {
             | TerminalOutput::Reconnecting
             | TerminalOutput::LinkDoubt
             | TerminalOutput::Recovered => {}
-            TerminalOutput::Closed { .. } | TerminalOutput::RouteExpired => {
-                panic!("the original early session closed or expired during handover")
+            TerminalOutput::Closed { .. } => {
+                panic!("the original early session closed during handover")
             }
         }
     }
