@@ -577,6 +577,7 @@ pub fn peer_fingerprint(connection: &quinn::Connection) -> io::Result<[u8; 32]> 
     ))
 }
 /// Open a terminal stream and bind its server-assigned writer before any terminal frame.
+/// Waits for the peer to grant a stream when it has none free.
 /// # Errors
 /// Refuses reserved/odd ids, connection failure or a bounded binding write deadline.
 pub async fn open_bound(connection: &BindingConnection, writer_id: u32) -> io::Result<BoundStream> {
@@ -584,30 +585,66 @@ pub async fn open_bound(connection: &BindingConnection, writer_id: u32) -> io::R
         return Err(denied());
     }
     tokio::time::timeout(BINDING_DEADLINE, async {
-        let (mut send, receive) = connection.0.open_bi().await.map_err(|_| denied())?;
-        // Server→host terminal input is interactive; host→server bulk is priority0.
-        send.set_priority(100).map_err(|_| denied())?;
-        let json = serde_json::to_vec(&serde_json::json!({"writer_id":writer_id}))
-            .map_err(|_| denied())?;
-        let mut bytes = Vec::new();
-        infraternal_protocol::encode_frame_into(
-            &infraternal_protocol::Frame::Call {
-                call_id: 0,
-                action_id: "transport.bind",
-                input_json: &json,
-            },
-            &mut bytes,
-        )
-        .map_err(|_| denied())?;
-        send.write_all(&bytes).await.map_err(|_| denied())?;
-        Ok(BoundStream {
-            writer_id,
-            send,
-            receive,
-        })
+        let (send, receive) = connection.0.open_bi().await.map_err(|_| denied())?;
+        bind(send, receive, writer_id).await
     })
     .await
     .map_err(|_| denied())?
+}
+
+/// Like [`open_bound`], but never waits for the peer to grant a stream: for a caller that
+/// serves other terminals on the same task and so must not sit behind this one (#562).
+///
+/// An infraternal agent announces the streams it has freed in batches, so a link can be out
+/// of streams for a while, or until more terminals close.
+/// # Errors
+/// `WouldBlock` when the peer has granted no free stream; nothing was sent, so the link and
+/// its other streams are untouched. Otherwise the refusals of [`open_bound`].
+pub async fn open_bound_if_available(
+    connection: &BindingConnection,
+    writer_id: u32,
+) -> io::Result<BoundStream> {
+    if writer_id == 0 || writer_id & 1 != 0 {
+        return Err(denied());
+    }
+    // One poll of the opener decides: it takes a granted stream at once or has none. Dropping
+    // it unfinished uses no stream id and puts nothing on the wire.
+    let (send, receive) = tokio::select! {
+        biased;
+        opened = connection.0.open_bi() => opened.map_err(|_| denied())?,
+        () = std::future::ready(()) => return Err(io::ErrorKind::WouldBlock.into()),
+    };
+    tokio::time::timeout(BINDING_DEADLINE, bind(send, receive, writer_id))
+        .await
+        .map_err(|_| denied())?
+}
+
+/// Write the binding frame that names `writer_id` as the first bytes of a new stream.
+async fn bind(
+    mut send: quinn::SendStream,
+    receive: quinn::RecvStream,
+    writer_id: u32,
+) -> io::Result<BoundStream> {
+    // Server→host terminal input is interactive; host→server bulk is priority0.
+    send.set_priority(100).map_err(|_| denied())?;
+    let json =
+        serde_json::to_vec(&serde_json::json!({"writer_id":writer_id})).map_err(|_| denied())?;
+    let mut bytes = Vec::new();
+    infraternal_protocol::encode_frame_into(
+        &infraternal_protocol::Frame::Call {
+            call_id: 0,
+            action_id: "transport.bind",
+            input_json: &json,
+        },
+        &mut bytes,
+    )
+    .map_err(|_| denied())?;
+    send.write_all(&bytes).await.map_err(|_| denied())?;
+    Ok(BoundStream {
+        writer_id,
+        send,
+        receive,
+    })
 }
 
 /// Validate the first binding frame; public for parser fuzzing, grants no host authority.

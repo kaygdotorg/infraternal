@@ -161,6 +161,17 @@ pub(crate) struct QuicLink {
     delivery_validation: Mutex<()>,
 }
 
+/// What a write that needs a new terminal stream does when the infraternal agent has granted
+/// none that is free (#562).
+#[derive(Clone, Copy)]
+enum StreamOpen {
+    /// Wait for the agent to grant one. For writes that own their task and deadline.
+    Wait,
+    /// Fail at once with `WouldBlock`. For the host actor, which serves every terminal of the
+    /// link on one task and must not hold them all while one waits.
+    IfAvailable,
+}
+
 // Native delivery retains channel identity so queued old frames cannot affect
 // a rebound durable writer. The two existing queues remain bounded.
 struct Packet {
@@ -319,19 +330,30 @@ impl QuicLink {
     ///
     /// A new stream takes one of the link's terminal places, is bound to its writer
     /// (and marked primed on a standby link) before any terminal frame, and gets a
-    /// pump that delivers the agent's frames to the host actor.
+    /// pump that delivers the agent's frames to the host actor. `open` says whether
+    /// to wait when the agent has granted no free stream.
     ///
     /// # Errors
     /// `InvalidData` for any other first frame, `WouldBlock` when the link is closed
-    /// or full, or the transport error from opening and binding the stream.
+    /// or full (or, with [`StreamOpen::IfAvailable`], when no stream is free or
+    /// another open is in progress), or the transport error from opening and binding
+    /// the stream.
     async fn terminal_channel(
         &self,
         stream: u32,
         frame: &Frame<'_>,
         primed: bool,
+        open: StreamOpen,
     ) -> io::Result<Arc<NativeChannel>> {
         #[cfg(not(any(test, feature = "native-streams")))]
-        let _opening = self.terminal_open.lock().await;
+        let _opening = match open {
+            StreamOpen::Wait => self.terminal_open.lock().await,
+            // The holder may be waiting for a stream, which this caller must not.
+            StreamOpen::IfAvailable => self
+                .terminal_open
+                .try_lock()
+                .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?,
+        };
         let existing = self.streams().terminal.get(&stream).cloned();
         if let Some(channel) = existing {
             return Ok(channel);
@@ -351,7 +373,12 @@ impl QuicLink {
             .reserve(stream, 0, 0)
             .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
         let binding = self.binding()?;
-        let bound = remote_quic::open_bound(&binding, stream).await?;
+        let bound = match open {
+            StreamOpen::Wait => remote_quic::open_bound(&binding, stream).await?,
+            StreamOpen::IfAvailable => {
+                remote_quic::open_bound_if_available(&binding, stream).await?
+            }
+        };
         let channel = Arc::new(NativeChannel::terminal(bound)?);
         if primed {
             // Standby intent precedes Attach on this bound stream, including
@@ -632,14 +659,62 @@ impl RemoteLink {
     }
     /// Write under current transport authority. A cleanup-only reconnect may
     /// send greeting/liveness and the fixed refusal action, never grant work.
+    /// A frame that opens a terminal stream waits until the agent grants one.
     pub(crate) async fn write(
         &self,
         stream: u32,
         frame: &Frame<'_>,
         muxed: &[u8],
     ) -> io::Result<()> {
+        self.write_guarded(stream, frame, muxed, StreamOpen::Wait)
+            .await
+    }
+
+    /// [`Self::write`] for the host actor: a frame that would open a terminal stream fails
+    /// with `WouldBlock` at once when the agent has granted none that is free, so one
+    /// terminal never holds up the others (#562).
+    ///
+    /// # Errors
+    /// As [`Self::write`], plus that refusal.
+    pub(crate) async fn write_without_waiting_for_a_stream(
+        &self,
+        stream: u32,
+        frame: &Frame<'_>,
+        muxed: &[u8],
+    ) -> io::Result<()> {
+        self.write_guarded(stream, frame, muxed, StreamOpen::IfAvailable)
+            .await
+    }
+
+    /// Whether a failed write on a terminal stream left the rest of the host link usable, so
+    /// only that terminal has to go (#562).
+    ///
+    /// True only for a QUIC link that is still open and still authorized: its terminals each
+    /// have their own stream, and the control stream's liveness probes judge the link itself.
+    /// The other transports carry every terminal on one byte stream, where a failed write can
+    /// leave half a frame behind, so the link must be replaced.
+    pub(crate) fn survives_terminal_failure(&self) -> bool {
+        let LinkTransport::Quic(link) = &self.transport else {
+            return false;
+        };
+        link.connection.close_reason().is_none()
+            && !link.streams().closed
+            && self
+                .authority
+                .as_ref()
+                .is_none_or(crate::remote_guard::AuthorityGuard::permits)
+    }
+
+    /// The authority checks shared by every muxed write, then the transport write.
+    async fn write_guarded(
+        &self,
+        stream: u32,
+        frame: &Frame<'_>,
+        muxed: &[u8],
+        open: StreamOpen,
+    ) -> io::Result<()> {
         let Some(authority) = &self.authority else {
-            return self.write_transport(stream, frame, muxed).await;
+            return self.write_transport(stream, frame, muxed, open).await;
         };
         if !authority.permits() {
             self.retire();
@@ -688,7 +763,7 @@ impl RemoteLink {
                 self.retire();
                 Err(io::ErrorKind::PermissionDenied.into())
             },
-            result = self.write_transport(stream, frame, muxed) => result,
+            result = self.write_transport(stream, frame, muxed, open) => result,
         }
     }
 
@@ -1193,7 +1268,8 @@ impl RemoteLink {
             }
             // Promotion removed incomplete shadow owners. Only Attach may
             // establish their replacement; data cannot invent a writer binding.
-            self.write_transport(stream, &decoded.frame, encoded).await
+            self.write_transport(stream, &decoded.frame, encoded, StreamOpen::Wait)
+                .await
         };
         let Some(authority) = &self.authority else {
             return write.await;
@@ -1270,6 +1346,7 @@ impl RemoteLink {
         stream: u32,
         frame: &Frame<'_>,
         muxed: &[u8],
+        open: StreamOpen,
     ) -> io::Result<()> {
         if self.greeting_sent && stream == 0 && matches!(frame, Frame::Hello { version: 1, .. }) {
             return Ok(());
@@ -1298,7 +1375,8 @@ impl RemoteLink {
                         }
                         return Ok(());
                     }
-                    link.terminal_channel(stream, frame, self.primed()).await?
+                    link.terminal_channel(stream, frame, self.primed(), open)
+                        .await?
                 };
                 let result = Transmit::default()
                     .send(channel.as_ref(), stream, frame)
