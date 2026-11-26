@@ -44,16 +44,32 @@ mod inspect;
 #[path = "up_journal.rs"]
 mod journal;
 
+/// Proof that the read-only [`preflight`] accepted a namespace.
+///
+/// [`Install::begin_accepted`] takes it instead of running that pass a second
+/// time, so an installer can report a refusal before it sets anything up and
+/// still cannot open the journal without having been accepted.
+pub(super) struct Accepted {
+    /// The namespace root the pass inspected.
+    root: PathBuf,
+    /// The owner the pass expected for the installation.
+    owner: u32,
+}
+
 /// Check every installation destination and its ancestry before the first write.
 /// Existing empty bases must already be 0711: this command never repairs their modes.
-pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<()> {
+pub(super) fn preflight(root: &Path, owner: u32) -> io::Result<Accepted> {
     let systemctl = if root == Path::new("/") {
         super::trusted_tool(&super::SYSTEMCTL_CANDIDATES, super::Failure::NoSystemd)
             .map_err(|_| refused("Could not resolve the service manager. Restore systemctl before retrying infraternal up."))?
     } else {
         root.join("systemctl")
     };
-    preflight_with_manager(root, owner, &systemctl)
+    preflight_with_manager(root, owner, &systemctl)?;
+    Ok(Accepted {
+        root: root.to_owned(),
+        owner,
+    })
 }
 
 /// Use the same trusted manager for read-only inspection and later activation.
@@ -195,6 +211,16 @@ struct Replaced {
 #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
 const MAX_HAND_FIREWALL_UNIT_BYTES: u64 = 64 * 1024;
 
+/// Only the privileged owner of an installation may open or recover it.
+fn require_owner(owner: u32) -> io::Result<()> {
+    if nix::unistd::geteuid().as_raw() != owner {
+        return Err(refused(
+            "This infraternal installation needs its privileged owner. Retry sudo infraternal up to validate and recover it.",
+        ));
+    }
+    Ok(())
+}
+
 /// Owns only new install paths until the service is confirmed active.
 pub(super) struct Install {
     /// The namespace root, injectable for root tests without touching the host install.
@@ -225,19 +251,37 @@ pub(super) struct Install {
 
 impl Install {
     /// Repeat read-only preflight, then create the private enrollment layout under rollback.
+    #[cfg(test)]
     pub(super) fn begin(root: &Path, owner: u32, systemctl: &Path) -> io::Result<Self> {
-        if nix::unistd::geteuid().as_raw() != owner {
-            return Err(refused(
-                "This infraternal installation needs its privileged owner. Retry sudo infraternal up to validate and recover it.",
-            ));
-        }
+        require_owner(owner)?;
         preflight_with_manager(root, owner, systemctl)?;
-        let (journal, recovery) = journal::Journal::open(root, owner)?;
+        Self::begin_accepted(
+            Accepted {
+                root: root.to_owned(),
+                owner,
+            },
+            systemctl,
+        )
+    }
+
+    /// Open the journal for a namespace [`preflight`] just accepted, then create
+    /// the private enrollment layout under rollback.
+    ///
+    /// The host is checked again under the journal lock, and once more after an
+    /// unfinished install was recovered: those are the passes that authorize
+    /// writes. Without anything to recover, a further pass would inspect exactly
+    /// what the locked one just did.
+    pub(super) fn begin_accepted(accepted: Accepted, systemctl: &Path) -> io::Result<Self> {
+        let Accepted { root, owner } = accepted;
+        require_owner(owner)?;
+        let (journal, recovery) = journal::Journal::open(&root, owner)?;
         // Recheck under the retained lock: a different install may have finished
         // between the read-only preflight and lock acquisition.
-        check_preflight(root, owner, systemctl, &recovery)?;
+        check_preflight(&root, owner, systemctl, &recovery)?;
+        let unfinished =
+            recovery.registered || !recovery.created.is_empty() || !recovery.replaced.is_empty();
         let mut install = Self {
-            root: root.to_owned(),
+            root,
             owner,
             created: recovery.created,
             replaced: recovery.replaced,
@@ -252,7 +296,14 @@ impl Install {
             host_firewall_installed: false,
         };
         install.rollback()?;
-        check_preflight(root, owner, systemctl, &journal::Snapshot::default())?;
+        if unfinished {
+            check_preflight(
+                &install.root,
+                owner,
+                systemctl,
+                &journal::Snapshot::default(),
+            )?;
+        }
         install.journal.begin()?;
         install.directory("var/lib/infraternal", 0o711, false)?;
         install.directory("var/lib/infraternal/agent", 0o700, true)?;
