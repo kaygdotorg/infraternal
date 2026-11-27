@@ -102,3 +102,26 @@ The harness initially rejected the aarch64 wording `statically linked`
 after Cargo had already exited successfully. I checked the saved artifact
 with `readelf -lW`, updated the check to accept both static ELF forms, and
 retained the original control timing.
+
+[Static build evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107167)
+
+## Cache sharing boundary
+
+Jobs under the same Unix account can share a compiler store and daemon
+while keeping independent Cargo targets. Use a shared store only for
+jobs trusted to write one another's executable compiler outputs.
+The job's directory mode and a Kache trust-domain label address accidental
+overlap under a shared UID. Separate Unix identities provide the write
+boundary for different trust domains. This trial uses a dedicated store,
+socket, configuration and XDG cache root. It leaves shared hardlink restores
+off, so test and build targets do not share mutable inodes through the cache.
+
+The trial's cache lives on the home volume and the target lives on
+`/mnt/build`. Cross-volume restores copy bytes. The 8 GiB blob limit
+covers cache blobs. The allocated footprint also includes bookkeeping
+and logs. Use measured free space and allocation for capacity planning
+alongside the configured blob limit.
+
+These runs exercise Cargo inside `nix develop`. The [J1306 notes](kache-2026-11-27.md#nix-package-builds)
+describe the separate sandboxed Nix release package.
+[Upstream storage and sharing settings](https://ninja.kunobi.com/docs/kache/getting-started/configuration)
