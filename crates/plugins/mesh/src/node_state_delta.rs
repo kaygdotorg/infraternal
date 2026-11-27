@@ -352,8 +352,8 @@ fn decode_frame<T: serde::de::DeserializeOwned>(frame: &[u8]) -> io::Result<(usi
 
 /// Truncate the existing SHA-256 primitive for detection of storage corruption.
 fn checksum(body: &[u8]) -> u64 {
-    let [a, b, c, d, e, f, g, h, ..] = openssl::sha::sha256(body);
-    u64::from_be_bytes([a, b, c, d, e, f, g, h])
+    let digest = openssl::sha::sha256(body);
+    u64::from_be_bytes(std::array::from_fn(|index| digest[index]))
 }
 
 /// Publish a compacted checkpoint before returning its new file identity.

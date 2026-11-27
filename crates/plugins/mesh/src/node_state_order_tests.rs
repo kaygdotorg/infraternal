@@ -382,11 +382,11 @@ fn journal_is_fenced_by_legacy_and_independent_full_writes() {
     next.version += 2;
     next.peers.clear();
     other.save(&state).expect("authoritative full write");
-    let mut stale = old.clone();
-    stale.version += 1;
+    let mut obsolete = old.clone();
+    obsolete.version += 1;
     assert!(
         writer
-            .save_peer_revision(&old, &stale, state.backend)
+            .save_peer_revision(&old, &obsolete, state.backend)
             .is_err()
     );
     let (_, restored) = Store::open(&directory.0).expect("restore the full write");
