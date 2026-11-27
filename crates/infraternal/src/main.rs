@@ -1946,9 +1946,15 @@ fn confirm_server_setup(
     if !io::stdin().is_terminal() {
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
-    print!(
-        "Create and start the {scope} server service on {listen} with data in {data_dir}? [y/N] ",
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let description = format!("Listen on  {listen}\nData       {data_dir}");
+    let panel = infraternal_plugin_api::present::panel(
+        &description,
+        0,
+        options.usable_width(),
+        options.terminal,
     );
+    print!("Start the {scope} server service?\n\n{panel}\nStart [y/N] ");
     io::stdout()
         .flush()
         .map_err(|_| "the confirmation prompt could not be displayed".to_owned())?;
@@ -2024,11 +2030,19 @@ fn install_server(
                 "infraternal status"
             });
             if install_args.dry_run {
+                result = result
+                    .with_text_message("Preview server setup")
+                    .with_text_next(vec![
+                        "Review the plan, then repeat this command without --dry-run.".to_owned(),
+                    ]);
                 // The unit file is data for a person to read and copy: the generic renderer
                 // would reflow its lines into prose and break it.
                 result = result.with_body(plan);
-            } else if !moved_text.is_empty() {
-                result = result.with_body(moved_text);
+            } else {
+                result = result.with_text_message("Installed and enabled the server service.");
+                if !moved_text.is_empty() {
+                    result = result.with_body(moved_text);
+                }
             }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
