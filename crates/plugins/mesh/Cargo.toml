@@ -19,6 +19,7 @@ agent = [
     "infraternal-mesh-node/engine",
     "dep:ipnetwork",
     "dep:security-framework",
+    "dep:ring",
     "dep:tracing",
     "dep:infraternal-linux-tun",
     "tokio/rt-multi-thread",
@@ -120,6 +121,7 @@ gotatun = { workspace = true, optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+ring = { workspace = true, optional = true }
 security-framework = { version = "3.7.0", optional = true }
 libc = { version = "0.2", optional = true }
 

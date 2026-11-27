@@ -11,6 +11,8 @@ pub mod candidates;
 pub mod dataplane;
 /// Describe the resolver state a host reports.
 pub mod dns_state;
+/// Bind saved mesh state to a coordinator and an enrolled public identity.
+pub mod enrolment;
 /// Resolve a preferred listener port and whether fallback is allowed.
 pub mod listen_port;
 /// Render public mesh status, peers and routes.

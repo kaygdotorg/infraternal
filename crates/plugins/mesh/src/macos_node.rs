@@ -24,6 +24,7 @@ use nix::{
     },
     unistd::{read, write},
 };
+use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -119,7 +120,8 @@ impl RotationKey {
     /// Reports an unavailable random source or an invalid X25519 key.
     fn generate() -> io::Result<(Self, crate::policy::model::PublicKey)> {
         let mut private = Zeroizing::new([0_u8; 32]);
-        openssl::rand::rand_bytes(&mut *private)
+        SystemRandom::new()
+            .fill(&mut *private)
             .map_err(|_| io::Error::other("System random generator unavailable."))?;
         Self::from_private(&private[..])
     }

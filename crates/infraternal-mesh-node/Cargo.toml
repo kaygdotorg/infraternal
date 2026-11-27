@@ -23,6 +23,7 @@ infraternal-mesh = { version = "0.1.0", path = "../infraternal-mesh" }
 infraternal-plugin-api.workspace = true
 bytes = { workspace = true, optional = true }
 foldhash = { version = "0.2", optional = true }
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"], optional = true }
