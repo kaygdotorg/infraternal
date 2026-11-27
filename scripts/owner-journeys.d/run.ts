@@ -82,7 +82,12 @@ export async function signIn(label: string, width: number, height: number) {
 /** Allocates a shell and runs the probe, keys and sidebar confirmation for just that session. */
 export async function shellJourney(page: Page, label: string, machine?: string) {
   const shell = await step(`${label}-open-shell`, page, () => openShell(page, machine));
-  if (!shell) return;
+  if (!shell) {
+    for (const next of ["shell-output", "shell-keys", "sidebar-end"]) {
+      await skip(`${label}-${next}`, "The fresh shell did not open");
+    }
+    return;
+  }
   // A shell's frame is already selected by the palette. The focused input belongs to that newly opened frame.
   const handle = await step(`${label}-shell-focus`, page, async () => {
     const card = page.locator(".ui-window[data-kind=terminal][data-active]");

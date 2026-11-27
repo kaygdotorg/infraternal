@@ -88,13 +88,18 @@ export async function openShell(page: Page, name?: string) {
   const row = name
     ? rows.filter({ has: page.getByText(`Open shell on ${name}`, { exact: true }) })
     : page.locator('#palette-results [data-action="canvas:open:embedded"]');
+  await row.waitFor({ timeout: 20_000 });
   const cards = page.locator(".ui-window[data-kind=terminal][data-window-id]");
   const previous = new Set(await cards.evaluateAll((elements) => elements.map((element) => element.getAttribute("data-window-id"))));
   observed.arm();
   await row.click({ timeout: 20_000 });
   const receipt = observed.receipt;
   await until(() => receipt.open, "The server did not answer the fresh-shell request");
-  if (!receipt.id) throw new Error(receipt.open);
+  if (!receipt.id) {
+    const message = page.locator(".ui-window[data-active] .cl-sx-strip[data-result=refused] .cl-sx-strip-text");
+    const text = await message.innerText({ timeout: 4_000 }).catch(() => receipt.open);
+    throw new Error(text);
+  }
   return { observed, receipt, previous };
 }
 
