@@ -17,6 +17,11 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// Public revision journal used by the Linux node.
+#[cfg(target_os = "linux")]
+#[path = "node_state_delta.rs"]
+mod delta;
+
 /// Bound public snapshots consistently with the macOS node's state reader.
 #[cfg(target_os = "linux")]
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
@@ -76,6 +81,12 @@ pub struct Store {
     // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
     // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
     authority_path: PathBuf,
+    /// Compacted checkpoint and appended revisions selected by the public snapshot.
+    #[cfg(target_os = "linux")]
+    delta_path: PathBuf,
+    /// The journal position last checked under the Store writer lock.
+    #[cfg(target_os = "linux")]
+    delta_cursor: Mutex<Option<delta::Cursor>>,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
@@ -368,7 +379,16 @@ impl Store {
         let authority_path = parent.join(AUTHORITY_FILE);
         sweep_private_temporaries(&key_path, &directory_lease)?;
         sweep_rotation_temporaries(&rotation_path, &directory_lease)?;
-        let state = read_state(&path, &authority_path)?.unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let delta_path = parent.join("mesh-public.journal");
+        #[cfg(target_os = "linux")]
+        let (state, cursor) = {
+            let _writer = lock_mesh_store_writer(parent, &directory_lease)?;
+            read_journaled_state(&path, &authority_path, &delta_path)?
+        };
+        #[cfg(target_os = "macos")]
+        let state = read_legacy_state(&path, &authority_path)?;
+        let state = state.unwrap_or_default();
         if state
             .config
             .as_ref()
@@ -403,6 +423,10 @@ impl Store {
                 listen_port_path,
                 key_path,
                 authority_path,
+                #[cfg(target_os = "linux")]
+                delta_path,
+                #[cfg(target_os = "linux")]
+                delta_cursor: Mutex::new(cursor),
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -1099,6 +1123,79 @@ impl Store {
     pub(crate) fn save_full_snapshot(&self, state: &State, expected: &Config) -> io::Result<()> {
         self.save_checked(state, Some(expected))
     }
+    /// Commit an ordinary stable revision, writing only changed peer policies and names where a
+    /// durable base exists. Whole snapshots still own version rewinds and authority transitions.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn save_peer_revision(
+        &self,
+        previous: &Config,
+        next: &Config,
+        backend: Option<crate::firewall::Backend>,
+    ) -> io::Result<()> {
+        let state = || State {
+            enabled: true,
+            config: Some(next.clone()),
+            authority_reset_pending: false,
+            backend,
+        };
+        #[cfg(feature = "cutoff-measure")]
+        let diff = crate::cutoff_measure::Stage::new(next.node, next.version, "journal_delta_diff");
+        let change = delta::Delta::between(previous, next);
+        #[cfg(feature = "cutoff-measure")]
+        drop(diff);
+        let Some(change) = change else {
+            return self.save(&state());
+        };
+        #[cfg(feature = "cutoff-measure")]
+        let _write =
+            crate::cutoff_measure::Stage::new(next.node, next.version, "journal_delta_write");
+        let writer = lock_mesh_store_writer(
+            self.path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
+        let mut cursor = self.delta_cursor.lock().map_err(|_| io::ErrorKind::Other)?;
+        if let Some(active) = cursor.as_mut()
+            && let Some(file) = delta::open(&self.delta_path, true)?
+            && active.matches(&self.path, &file, previous.version, backend)?
+        {
+            return active.append(file, &self.delta_path, &change, next.peers.len(), state);
+        }
+
+        // Another Store, an old binary or recovery may have written while this handle was open.
+        // Recheck the exact accepted base before trusting a cursor from that file.
+        let (disk, loaded) =
+            read_journaled_state(&self.path, &self.authority_path, &self.delta_path)?;
+        let Some(disk) = disk else {
+            drop(cursor);
+            drop(writer);
+            return self.save(&state());
+        };
+        if disk.enabled
+            && !disk.authority_reset_pending
+            && disk.config.as_ref() == Some(next)
+            && disk.backend == backend
+        {
+            *cursor = loaded;
+            return Ok(());
+        }
+        if !disk.enabled || disk.authority_reset_pending || disk.config.as_ref() != Some(previous) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if disk.backend != backend {
+            drop(cursor);
+            drop(writer);
+            return self.save(&state());
+        }
+        let active = if let Some(mut active) = loaded {
+            let file = delta::open(&self.delta_path, true)?.ok_or(io::ErrorKind::InvalidData)?;
+            active.append(file, &self.delta_path, &change, next.peers.len(), state)?;
+            active
+        } else {
+            delta::start(&self.path, &self.delta_path, &state())?
+        };
+        *cursor = Some(active);
+        Ok(())
+    }
     /// Validate revision ownership under the directory lock before replacing the public file.
     /// # Errors
     /// Reports a stale revision, a mismatched base, or a durable write failure.
@@ -1123,7 +1220,12 @@ impl Store {
         let previous = if state.config.is_none() && full_snapshot_base.is_none() {
             None
         } else {
-            read_state(&self.path, &self.authority_path)?
+            #[cfg(target_os = "linux")]
+            let previous =
+                read_journaled_state(&self.path, &self.authority_path, &self.delta_path)?.0;
+            #[cfg(target_os = "macos")]
+            let previous = read_legacy_state(&self.path, &self.authority_path)?;
+            previous
         };
         if let Some(expected) = full_snapshot_base {
             let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -1409,7 +1511,8 @@ fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
 /// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
 /// # Errors
 /// Reports an unsafe or unreadable snapshot file.
-fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
+#[cfg(target_os = "macos")]
+fn read_legacy_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
     let Some(mut state) = read_public::<State>(path)? else {
         return Ok(None);
     };
@@ -1419,6 +1522,31 @@ fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
         read_authority(authority_path),
     );
     Ok(Some(state))
+}
+
+/// Restore the journal selected by a legacy snapshot, or read its safe fallback. The caller
+/// holds the writer lock so neither file can transition while the two are being matched.
+#[cfg(target_os = "linux")]
+fn read_journaled_state(
+    path: &Path,
+    authority_path: &Path,
+    journal_path: &Path,
+) -> io::Result<(Option<State>, Option<delta::Cursor>)> {
+    let Some((mut state, token)) = delta::read_anchor(path)? else {
+        return Ok((None, None));
+    };
+    if let Some(token) = token
+        && let Some(journal) = delta::open(journal_path, false)?
+        && let Some((state, cursor)) = delta::replay(path, journal, token)?
+    {
+        return Ok((Some(state), Some(cursor)));
+    }
+    merge_authority(
+        state.config.as_mut(),
+        &mut state.authority_reset_pending,
+        read_authority(authority_path),
+    );
+    Ok((Some(state), None))
 }
 
 /// Read an owned public state file without following links.

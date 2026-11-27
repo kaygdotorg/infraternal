@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+infraternal-mesh = { path = "../infraternal-mesh", version = "0.1.0" }
 nix = { workspace = true, features = ["time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

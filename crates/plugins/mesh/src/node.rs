@@ -1372,6 +1372,27 @@ impl Node {
         }
         Ok(())
     }
+    /// Persist a stable apply using the prior accepted configuration as the journal base.
+    fn save_applied_revision(
+        &self,
+        config: &Config,
+        snapshot_base: Option<&Config>,
+        changed_routes: bool,
+    ) -> io::Result<()> {
+        if snapshot_base.is_none()
+            && self.authority_reset == AuthorityResetState::Stable
+            && self.engine_kind == EngineKind::GotaTun
+            && let (Some(store), Some(previous)) = (&self.store, &self.config)
+        {
+            // The access-only path cannot change the route inventory. A topology change
+            // still persists the reduced inventory after the kernel cleanup.
+            if changed_routes {
+                store.record_routes(&self.routes)?;
+            }
+            return store.save_peer_revision(previous, config, self.firewall.backend());
+        }
+        self.save_with_snapshot_base(Some(config), true, snapshot_base)
+    }
     /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
@@ -3825,7 +3846,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
-            if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+            if let Err(error) = self.save_applied_revision(&config, snapshot_base, false) {
                 restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
@@ -3943,9 +3964,9 @@ impl Node {
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
             #[cfg(feature = "test-support")]
             let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
-                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+                .and_then(|()| self.save_applied_revision(&config, snapshot_base, true));
             #[cfg(not(feature = "test-support"))]
-            let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
+            let saved = self.save_applied_revision(&config, snapshot_base, true);
             if saved.is_err() {
                 self.routes = recorded;
             }
