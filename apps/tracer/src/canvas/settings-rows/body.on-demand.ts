@@ -104,7 +104,7 @@ export function renderGroup(cx: Ctx, pane: HTMLElement, windowId: string, { comp
         if (gone) return;
         row.dispose();
         mine.delete(def.id);
-        const line = note("This could not be read just now.");
+        const line = note("Couldn't load this setting.");
         const retry = el("button", "ui-button");
         retry.type = "button";
         retry.dataset.button = "primary";

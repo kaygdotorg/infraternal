@@ -42,7 +42,7 @@ When Infraternal sees tmux or Zellij start automatically in a new terminal, it a
 | ✗ | Keeps tmux or Zellij as it is, and does not ask again on this host. |
 | ? | Opens this page. |
 
-### Offer To Switch
+### Offer to switch
 
 > [!FACTS]
 > On by default. Asks once per host when tmux or Zellij starts by itself in a new terminal. Turn it off for everyone, or for one host.
