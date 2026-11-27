@@ -37,7 +37,7 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
 export function confirmHostForget(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
     title: `Forget ${name}?`,
-    effect: "Forgetting removes this host from the list and stops cleanup retries. Cleanup already sent to the machine may still finish. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key.",
+    effect: "Removes this host from the list and stops uninstall retries. If the infraternal agent is still installed on it, uninstall it on the machine itself.",
     named: true,
     tone: "danger",
     confirmLabel: "Forget",
