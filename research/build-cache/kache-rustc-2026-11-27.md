@@ -123,6 +123,9 @@ configured budget. The home volume fell below the host's shared 25 GiB
 build-slot floor. Collecting only the private cache at a 5 GiB cap left
 4,814,858,154 registered bytes and about 29.9 GiB free. Any subsequent
 warm comparison starts from that reduced store, with the 5 GiB cap.
+When shared home headroom later fell below the floor again, the inactive
+store was temporarily parked on the job's build volume. That recovered
+about 4.5 GiB without discarding the retained entries.
 
 The first runtime fixture used `unshare --map-current-user`. It preserved
 the invoking UID, but the unmapped host root UID appeared as 65534 on
@@ -131,9 +134,15 @@ therefore failed even in the control. Those results cannot qualify the
 wrapper. A preflight verified a temporary loopback-only network and mount
 namespace that retains the original UID mapping. Its launcher drops to
 the build account before executing any checkout code and mounts a
-private `/run` to isolate the host system bus. The invalid runtimes
-were stopped by their own recorded process IDs. Their statuses serve
-as fixture diagnostics.
+private `/run` to isolate the host system bus. The first host-UID
+execution exposed more fixture assumptions in the control. It omitted
+`XDG_RUNTIME_DIR` and the systemd presence marker, and a redundant
+nested temp directory exceeded the socket path limit in two daemon
+tests. The next fixture uses one short private `TMPDIR`, an owner-only
+`XDG_RUNTIME_DIR` and an empty `/run/systemd/system` on the private
+mount. Each arm runs in a fresh namespace. I stopped the invalid
+runtimes by their recorded process IDs. Their statuses serve as
+fixture diagnostics.
 
 [Test-build and fixture evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107336)
 
