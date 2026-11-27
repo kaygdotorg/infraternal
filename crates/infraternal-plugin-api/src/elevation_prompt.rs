@@ -497,7 +497,7 @@ mod tests {
             let mut buffer = Vec::new();
             let wrote = prompt.write_to(&mut buffer, options).unwrap();
             assert!(!wrote);
-            assert!(buffer.is_empty());
+            assert_eq!(buffer, b"");
         }
     }
 
