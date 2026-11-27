@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use std::process::Command;
 
 /// Direct-path budgets must also fit the relay's additional framing on narrow and normal paths.
-#[cfg(feature = "relay")]
+/// Needs the relay crate's disposable CA, so it runs where `test-support` is on (the
+/// privileged-integration row); shipping builds now enable `relay` alone.
+#[cfg(all(feature = "relay", feature = "test-support"))]
 #[tokio::test]
 async fn narrow_path_mesh_budget_fits_relay_datagram() {
     use infraternal_plugin_relay::{

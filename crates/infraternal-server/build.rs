@@ -8,6 +8,7 @@ mod migrations;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Track the directory so additions and removals invalidate this build script.
     println!("cargo:rerun-if-changed=migrations");
+    println!("cargo:rerun-if-changed=build_support");
     // Track each existing file too, so edits to migration contents rebuild both
     // the compact list and any `sqlx::migrate!` expansion in this crate.
     for entry in fs::read_dir("migrations")? {

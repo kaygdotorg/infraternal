@@ -74,7 +74,7 @@ pub(super) fn write_snapshot_routes(
         state.written.clear();
         return Ok(None);
     }
-    let mut writer = Device::peer_route_writer()?;
+    let mut writer = Device::peer_route_writer(state.underlay.clone())?;
     let ifindex = writer.ifindex();
     // Only a generation that already counts every announced change may vouch for an old
     // budget: a caller that changes the underlay and applies a snapshot right after must see
@@ -172,7 +172,12 @@ pub(super) fn update_live_peer_endpoints(
         Option<std::net::SocketAddr>,
     )],
 ) -> io::Result<usize> {
-    let candidates = claim_live_route_rechecks(&mut lock_route_state(state), endpoints);
+    let candidates = {
+        let mut state = lock_route_state(state);
+        let candidates = claim_live_route_rechecks(&mut state, endpoints);
+        state.sync_client_routes(false);
+        candidates
+    };
     if candidates.is_empty() {
         return Ok(0);
     }
@@ -209,8 +214,23 @@ fn claim_live_route_rechecks(
         let desired = (*endpoint).filter(|endpoint| {
             Some(*endpoint) != configured && is_direct_learned_endpoint(*endpoint)
         });
-        if state.live_endpoints.get(key).copied() == desired {
+        let previous = state.live_endpoints.get(key).copied();
+        if previous == desired {
             continue;
+        }
+        let before = previous
+            .or(configured)
+            .map(|endpoint| endpoint.ip().to_canonical());
+        let after = desired
+            .or(configured)
+            .map(|endpoint| endpoint.ip().to_canonical());
+        if before != after
+            && state.client_routes.wanted.iter().any(|network| {
+                before.is_some_and(|ip| network.contains(ip))
+                    || after.is_some_and(|ip| network.contains(ip))
+            })
+        {
+            state.client_routes.dirty = true;
         }
         match desired {
             Some(endpoint) => state.live_endpoints.insert(*key, endpoint),
@@ -291,7 +311,7 @@ fn write_live_route_budgets(
         ));
     };
     let routes: Vec<_> = route_peers.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
-    let ipv6 = match Device::replace_peer_routes_on(&link, &routes) {
+    let ipv6 = match Device::replace_peer_routes_on(&link, &routes, state.underlay.clone()) {
         Ok(ipv6) => ipv6,
         Err(error) => {
             // A partial batch leaves unknown kernel budgets: rewrite these peers next time.
@@ -316,4 +336,80 @@ fn write_live_route_budgets(
         );
     }
     Ok(route_peers.len())
+}
+
+impl PeerRouteState {
+    /// Apply subnet exceptions before resolving the new endpoint's route budget. Snapshot and
+    /// live callers share this lock, so a late endpoint scan cannot restore a withdrawn route.
+    pub(super) fn sync_client_routes(&mut self, snapshot: bool) {
+        use crate::subnet_routes::{
+            EXTRA_ROUTE_LIMIT, RouteState, matching_endpoints, route_targets,
+        };
+        let client = &self.client_routes;
+        let Some(source) = client.source else {
+            return;
+        };
+        if !snapshot && (!client.dirty || self.link.is_none()) {
+            return;
+        }
+        let endpoints = matching_endpoints(
+            &client.wanted.iter().copied(),
+            self.peers
+                .values()
+                .filter(|peer| !self.overrides.contains_key(&peer.key))
+                .filter_map(|peer| {
+                    self.live_endpoints
+                        .get(&peer.key)
+                        .copied()
+                        .or(peer.endpoint)
+                        .map(|endpoint| endpoint.ip().to_canonical())
+                }),
+        );
+        if !snapshot
+            && endpoints == client.exceptions
+            && client
+                .states
+                .values()
+                .all(|state| !matches!(state, RouteState::Failed(_)))
+        {
+            self.client_routes.dirty = false;
+            return;
+        }
+        let (targets, mut states) = route_targets(
+            &client.wanted,
+            &endpoints,
+            client.wanted.len() + EXTRA_ROUTE_LIMIT,
+        );
+        states.extend(client.refused.clone());
+        let proven = if snapshot { None } else { self.link };
+        let client = &mut self.client_routes;
+        client.dirty = true;
+        match Device::sync_network_routes(&targets, source, proven, self.underlay.as_deref()) {
+            Ok(result) => {
+                if result
+                    .values()
+                    .all(|state| !matches!(state, RouteState::Failed(_)))
+                {
+                    client.exceptions = endpoints;
+                    client.dirty = false;
+                }
+                client
+                    .admitted
+                    .extend(result.iter().filter_map(|(network, state)| {
+                        matches!(state, RouteState::Installed).then_some(*network)
+                    }));
+                states.extend(result);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "mesh subnet routes could not be reconciled");
+                states.extend(
+                    client
+                        .wanted
+                        .iter()
+                        .map(|network| (*network, RouteState::Failed(error.to_string()))),
+                );
+            }
+        }
+        client.states = states;
+    }
 }

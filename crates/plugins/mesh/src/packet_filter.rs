@@ -1571,7 +1571,8 @@ impl FlowEntry {
 }
 
 /// The fixed-size tuple used by the conntrack table and indexed in both directions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Hash, PartialOrd, Ord))]
 struct FlowKey {
     source: IpAddr,
     destination: IpAddr,
@@ -1590,11 +1591,6 @@ impl FlowKey {
             destination_port: self.source_port,
             protocol: self.protocol,
         }
-    }
-
-    /// Choose one direction-independent tuple so both packet directions share one shard.
-    fn canonical(self) -> Self {
-        self.min(self.reverse())
     }
 }
 
@@ -2130,10 +2126,17 @@ fn flow_hash_state() -> &'static FlowHashState {
     STATE.get_or_init(FlowHashState::default)
 }
 
-/// Index a tuple inside its peer's fixed-size table in either packet direction.
+/// Index a tuple in either direction by summing the seeded endpoint hashes and protocol.
 fn flow_start(key: FlowKey) -> usize {
-    let tuple_hash = flow_hash_state().hash_one(key.canonical());
-    usize::try_from(tuple_hash % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
+    let state = flow_hash_state();
+    let source = state.hash_one((key.source, key.source_port));
+    let destination = state.hash_one((key.destination, key.destination_port));
+    let sum = source
+        .wrapping_add(destination)
+        .wrapping_add(u64::from(key.protocol));
+    // The commutative sum keeps replies in the same slot. Mix again so related endpoint
+    // pairs do not keep the sum's additive structure in the slot index.
+    usize::try_from(state.hash_one(sum) % FLOW_SLOTS_PER_PEER_HASH).unwrap_or_default()
 }
 
 /// Index one fragment identity inside its peer's fixed-size table.

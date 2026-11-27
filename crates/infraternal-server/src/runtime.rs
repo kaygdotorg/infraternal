@@ -583,6 +583,7 @@ async fn remote_router(
                         source: administration.memory_source(),
                         directory,
                         name,
+                        relay: None,
                     })
             });
         let identity = remote
@@ -601,6 +602,14 @@ async fn remote_router(
         .map_err(ServerError::Listener)?;
         if let Some(rotation) = rotation {
             listeners.rotate_server_leaf(rotation, identity.certificate);
+        }
+        // The server's node serves the relay role when asked to (D402 Q4); the task lives
+        // with the listeners.
+        #[cfg(feature = "mesh")]
+        if let Some(administration) = remote.ca_administration.as_ref()
+            && let Some(task) = crate::relay_role::start(administration, &remote.roots)
+        {
+            listeners.keep_task(task);
         }
         Some(listeners)
     } else {
@@ -2275,7 +2284,7 @@ mod tests {
     /// Forget requires hosts:write and a reviewed dry run; its audit commits with the tombstone.
     #[cfg(feature = "remote")]
     #[tokio::test]
-    async fn forget_retired_host_api_enforces_scope_review_and_audit() {
+    async fn forget_pending_host_api_enforces_scope_review_and_audit() {
         let data_dir = temp_dir();
         let (agent_socket, _agent_peer) = tokio::net::UnixStream::pair().expect("socketpair");
         let (app, _) = router_with_agent(
@@ -2295,7 +2304,7 @@ mod tests {
             .await
             .unwrap();
         sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(zeroblob(32),?1,zeroblob(32),zeroblob(32),?2,?3,(SELECT execution_uid FROM remote_hosts WHERE id=?1))")
-            .bind(host.as_bytes().as_slice()).bind(now-604_800).bind(now).execute(&pool).await.unwrap();
+            .bind(host.as_bytes().as_slice()).bind(now - 604_800 + 3600).bind(now + 3600).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO remote_login_cleanup(host_id,person_id) VALUES(?,'owner')")
             .bind(host.as_bytes().as_slice())
             .execute(&pool)
@@ -2330,10 +2339,8 @@ mod tests {
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
         assert!(host_is_live(&pool, host).await);
-        // A reviewed target can change before commit: a new valid certificate makes it pending again.
-        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=? WHERE host_id=?")
-            .bind(now - 604_800 + 3600)
-            .bind(now + 3600)
+        // A reviewed target can finish cleanup before commit, making it ineligible.
+        sqlx::query("UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=?")
             .bind(host.as_bytes().as_slice())
             .execute(&pool)
             .await
@@ -2352,9 +2359,7 @@ mod tests {
             forgotten, 0,
             "a state conflict must not record a successful Forget"
         );
-        sqlx::query("UPDATE remote_certificates SET not_before=?,not_after=? WHERE host_id=?")
-            .bind(now - 604_800)
-            .bind(now)
+        sqlx::query("UPDATE remote_login_cleanup SET confirmed=0 WHERE host_id=?")
             .bind(host.as_bytes().as_slice())
             .execute(&pool)
             .await
@@ -2367,6 +2372,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::OK);
+        let effect = review["effect"].as_str().expect("manual cleanup guidance");
+        for item in ["service unit", "agent files", "identity key"] {
+            assert!(effect.contains(item), "dry run must name {item}");
+        }
         let input = serde_json::json!({"host_id":host,"dry_run":false,"review_token":review["review_token"]});
         let (status, result) = post_key_action(&app, token, action, input.clone()).await;
         assert_eq!(status, axum::http::StatusCode::OK);

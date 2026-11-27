@@ -72,6 +72,17 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("MISSING", table)
 
+    def test_remote_idle_is_reported_even_above_budget(self):
+        """Both D81 configurations stay advisory independently of the latency rows."""
+        for key, label, sources, budget in targets.REMOTE_IDLE_ROWS:
+            with self.subTest(key=key):
+                metric = targets.row_line(key, source="release-server", n=5, value=300,
+                                          unit="activations/min", target=budget, report_only=True)
+                table, passed = targets.report(full_log() + "\n" + metric)
+                self.assertTrue(passed, table)
+                self.assertIn(f"| {label} | 300.00 (n=5) | {budget} | {sources} | REPORT |", table)
+                self.assertIn("MISSING (reported)", table)
+
     def test_missing_row_fails(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_idle_agent_rss" not in line)
         table, passed = targets.report(log)
@@ -204,6 +215,26 @@ class ReportTests(unittest.TestCase):
     def test_unknown_row_is_refused(self):
         with self.assertRaises(ValueError):
             targets.row_line("made_up", source="t", n=1, value=1, unit="ms", target=1)
+
+    def test_protocol_tag_labels_first_paint_rows(self):
+        """Rows carrying `protocol=` / `wire=` show HTTP/2 or HTTP/1.1 in the D375 report table (#573)."""
+        self.assertEqual(targets.protocol_label({"protocol": "http2", "wire": "h2"}), "HTTP/2")
+        self.assertEqual(targets.protocol_label({"protocol": "http1", "wire": "http/1.1"}), "HTTP/1.1")
+        self.assertEqual(targets.protocol_label({"wire": "h2"}), "HTTP/2")
+        self.assertEqual(targets.protocol_label({"protocol": "http3"}), "http3")
+        self.assertIsNone(targets.protocol_label({}))
+
+        base = "\n".join(line for line in full_log().splitlines() if "d375_first_paint_4g_" not in line)
+        h2 = targets.row_line("first_paint_4g_signin", source="real-server-tracer-production-build",
+                              display="60hz", n=5, value=503.3, unit="ms", target=targets.FIRST_PAINT_MS,
+                              report_only=True, extra="p50_ms=498.60 protocol=http2 wire=h2")
+        h1 = targets.row_line("first_paint_4g_connected", source="real-server-tracer-production-build",
+                              display="60hz", n=5, value=1731.5, unit="ms", target=targets.FIRST_PAINT_MS,
+                              report_only=True, extra="p50_ms=1704.90 protocol=http1 wire=http/1.1")
+        table, passed = targets.report("\n".join([base, h2, h1]))
+        self.assertTrue(passed, table)
+        self.assertIn("| First paint, 4G 9 Mbps/170 ms: sign-in visible (HTTP/2) |", table)
+        self.assertIn("| First paint, 4G 9 Mbps/170 ms: terminal connected (HTTP/1.1) |", table)
 
 
 class TypeScriptCopyTests(unittest.TestCase):

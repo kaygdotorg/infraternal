@@ -91,15 +91,18 @@ verify_latency_steps() {
     local failed=0
     export CARGO_TARGET_DIR="$target_dir"
     export TRACER_TEST_PORT="${TRACER_TEST_PORT:-4621}"
+    # Production (ssh.kayg.org) serves HTTP/2; default first-paint-network.spec.ts to http2
+    # while keeping FIRST_PAINT_PROTOCOL=http1 (or both) selectable (#573).
+    local first_paint_protocol="${FIRST_PAINT_PROTOCOL:-http2}"
     mkdir -p "$CARGO_TARGET_DIR"
 
     report_environment() {
         local rtt="${INFRATERNAL_TEST_RTT:-300}"
         local jitter=30
         [[ "$rtt" == 0 ]] && jitter=0
-        printf 'ENVIRONMENT phase=%s machine=%s arch=%s cores=%s load=%s tracer_test_port=%s rtt_ms=%s jitter_ms=%s\n' \
+        printf 'ENVIRONMENT phase=%s machine=%s arch=%s cores=%s load=%s tracer_test_port=%s rtt_ms=%s jitter_ms=%s first_paint_protocol=%s\n' \
             "$1" "$(uname -n)" "$(uname -m)" "$(getconf _NPROCESSORS_ONLN)" "$(cut -d' ' -f1-3 /proc/loadavg)" \
-            "$TRACER_TEST_PORT" "$rtt" "$jitter"
+            "$TRACER_TEST_PORT" "$rtt" "$jitter" "$first_paint_protocol"
     }
 
     report_environment setup
@@ -157,6 +160,9 @@ verify_latency_steps() {
     # is the binary measured above; RTT is the profile's own. The bridge delays in user space, so no network
     # setting on the machine changes.
     local real_binary="${INFRATERNAL_LATENCY_BINARY:-$CARGO_TARGET_DIR/$native_target/release/infraternal}"
+    # D81 remote-enabled scheduling is an advisory measurement, even if its fixture cannot run.
+    "${script_dir}/verify-remote-server-idle" --binary "$real_binary" ||
+        printf 'Remote-enabled server idle measurement unavailable (D81, #602)\n' >&2
     local one_way=$(( ${INFRATERNAL_TEST_RTT:-300} / 2 ))
     (
         cd -- "$repo_dir/apps/tracer" &&
@@ -173,6 +179,7 @@ verify_latency_steps() {
     (
         cd -- "$repo_dir/apps/tracer" &&
             INFRATERNAL_BIN="$real_binary" REAL_ONE_WAY_MS="$one_way" \
+                FIRST_PAINT_PROTOCOL="$first_paint_protocol" \
                 bun x playwright test -c playwright.real.config.ts real/realistic-typing.spec.ts real/first-paint-network.spec.ts
     ) || failed=1
     report_environment finish

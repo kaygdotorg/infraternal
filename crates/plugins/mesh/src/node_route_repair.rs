@@ -310,7 +310,7 @@ fn repair_target(
         }
         // EEXIST leaves the written budget alone. A real addition or failed write makes the
         // next live refresh recheck this peer's budget, including its authenticated endpoint.
-        match Device::repair_peer_route(link, peer, address, mtu) {
+        match Device::repair_peer_route(link, peer, address, mtu, accepted.underlay.as_deref()) {
             Ok(written) => changed |= written,
             Err(error) => {
                 tracing::warn!(%address, error = %error, "mesh peer route repair failed");

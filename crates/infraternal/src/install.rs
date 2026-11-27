@@ -1011,6 +1011,10 @@ fn render_unit(
         command.push(OsString::from("--remote-ca-dir"));
         command.push(absolute(directory)?.into_os_string());
     }
+    if let Some(port) = args.remote.relay_port {
+        command.push(OsString::from("--relay-port"));
+        command.push(OsString::from(port.to_string()));
+    }
     if args.behind_proxy {
         command.push(OsString::from("--behind-proxy"));
         for proxy in &args.trusted_proxies {

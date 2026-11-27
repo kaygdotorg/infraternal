@@ -13,13 +13,18 @@ use nix::{
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
+
+/// Kernel-side suppression of route additions sent by this node.
+#[path = "wireguard_route_filter.rs"]
+mod route_filter;
+use route_filter::RouteQueue;
 
 /// A node-local ephemeral secret. It cannot be serialized, cloned or debug printed.
 pub struct Key(Zeroizing<Vec<u8>>);
@@ -509,30 +514,34 @@ impl Device {
     /// machine already sends elsewhere, such as its own LAN. Per-network install errors are reported,
     /// not returned, so one bad network does not hold up the others.
     ///
-    /// A network that holds an underlay address of a mesh peer (`endpoints`: its configured endpoint,
-    /// walk candidates and learned endpoints) is left out too, reported as [`RouteState::Skipped`], and
-    /// a route we installed for it earlier is removed. The mesh's UDP socket carries no firewall mark
-    /// and is not bound to the link, so with such a route the kernel would send the tunnel's own
-    /// packets back into the tunnel. Leaving the network out (as a Mac does, D197 M3) keeps the
-    /// plain main-table design; a mark plus a policy rule would instead take over the machine's
-    /// routing rules, which also belong to Docker, VPNs and the administrator.
+    /// The caller supplies the allowed prefixes for each approved network, with exact endpoint
+    /// exclusions already applied. Remove obsolete prefixes first so a failed write cannot
+    /// leave the broader tunnel route covering an excluded address.
     ///
     /// [`RouteState::Overlaps`]: crate::subnet_routes::RouteState::Overlaps
-    /// [`RouteState::Skipped`]: crate::subnet_routes::RouteState::Skipped
     /// # Errors
-    /// A missing mesh link or a failed route dump.
+    /// A missing mesh link, a failed route dump, or a failed removal.
     pub(crate) fn sync_network_routes(
-        networks: &[crate::policy::networks::Network],
+        networks: &crate::subnet_routes::RouteTargets,
         source: std::net::Ipv4Addr,
-        endpoints: &[std::net::IpAddr],
+        proven: Option<ActiveLink>,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<BTreeMap<crate::policy::networks::Network, crate::subnet_routes::RouteState>>
     {
         use crate::{policy::networks::Network, subnet_routes::RouteState};
-        let index = Self::active_link()?
-            .ok_or(io::ErrorKind::NotConnected)?
-            .ifindex;
+        let index = match proven {
+            Some(link) => {
+                Self::verify_repair_link(&link)?;
+                link.ifindex
+            }
+            None => {
+                Self::active_link()?
+                    .ok_or(io::ErrorKind::NotConnected)?
+                    .ifindex
+            }
+        };
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
-        let mut ours = BTreeSet::<Network>::new();
+        let mut ours = BTreeMap::<Network, bool>::new();
         let mut foreign = Vec::new();
         let dump = vec![2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         for reply in socket.request(26, 0x300, &dump)? {
@@ -543,10 +552,10 @@ impl Device {
             let mut destination = std::net::Ipv4Addr::UNSPECIFIED;
             let mut interface = None;
             let mut table = u32::from(header[4]);
-            let mut preferred_source = false;
+            let mut preferred_source = None;
             for field in netlink::attributes(&reply[12..])? {
                 match field.kind {
-                    RTA_PREFSRC => preferred_source = true,
+                    RTA_PREFSRC => preferred_source = Some(field.payload),
                     1 if field.payload.len() == 4 => {
                         destination = std::net::Ipv4Addr::new(
                             field.payload[0],
@@ -567,35 +576,52 @@ impl Device {
                 continue;
             };
             if interface == Some(index) {
-                if header[5] == RTPROT_INFRATERNAL && preferred_source {
-                    ours.insert(network);
+                if header[5] == RTPROT_INFRATERNAL
+                    && let Some(preferred) = preferred_source
+                {
+                    ours.insert(network, preferred == source.octets());
                 }
             } else {
                 foreign.push(network);
             }
         }
-        let (routable, mut states) = crate::subnet_routes::split_by_underlay(networks, endpoints);
-        for network in &routable {
-            if let Some(other) = foreign.iter().find(|other| other.overlaps(*network)) {
+        let mut states = BTreeMap::new();
+        let mut allowed = BTreeMap::new();
+        for (network, parts) in networks {
+            if let Some(other) = foreign
+                .iter()
+                .find(|other| parts.iter().any(|part| other.overlaps(*part)))
+            {
                 states.insert(*network, RouteState::Overlaps(*other));
-                continue;
+            } else {
+                allowed.extend(parts.iter().map(|part| (*part, *network)));
+                states.insert(*network, RouteState::Installed);
             }
-            let payload = network_route_payload(*network, index, source)?;
-            let state = match socket.request(24, 4 | 0x100 | 0x400, &payload) {
-                Ok(_) => RouteState::Installed,
-                Err(error) => RouteState::Failed(error.to_string()),
-            };
-            states.insert(*network, state);
         }
-        for network in ours {
-            if matches!(states.get(&network), Some(RouteState::Installed)) {
+        for (&network, &same_source) in &ours {
+            if same_source && allowed.contains_key(&network) {
                 continue;
             }
-            let payload = network_route_payload(network, index, source)?;
+            let payload = network_route_payload(network, index, None)?;
             if let Err(error) = socket.request(25, 4, &payload)
                 && !matches!(error.raw_os_error(), Some(2 | 3))
             {
                 return Err(error);
+            }
+        }
+        if let Some(underlay) = underlay
+            && allowed.keys().any(|part| ours.get(part) != Some(&true))
+        {
+            underlay.ignore_route_adds(&socket);
+        }
+        for (part, network) in allowed {
+            if ours.get(&part) == Some(&true) {
+                continue;
+            }
+            let payload = network_route_payload(part, index, Some(source))?;
+            // Create exclusively: another route may have appeared since the dump.
+            if let Err(error) = socket.request(24, 4 | 0x200 | 0x400, &payload) {
+                states.insert(network, RouteState::Failed(error.to_string()));
             }
         }
         Ok(states)
@@ -604,52 +630,9 @@ impl Device {
     /// # Errors
     /// Reports malformed route dumps or an existing route covering a proposed address.
     pub fn check_routes(addresses: &[Addresses]) -> io::Result<()> {
-        let owned = index()?;
-        let payload = vec![0; 12];
-        for reply in Socket::open(SockProtocol::NetlinkRoute)?.request(26, 0x300, &payload)? {
-            let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
-            if header[1] == 0 {
-                continue;
-            }
-            let mut interface = None;
-            let mut destination = None;
-            for field in netlink::attributes(&reply[12..])? {
-                match field.kind {
-                    1 => destination = Some(field.payload),
-                    4 => interface = Some(netlink::u32_at(field.payload, 0)?),
-                    _ => {}
-                }
-            }
-            if interface == Some(owned) {
-                continue;
-            }
-            let destination = destination.ok_or(io::ErrorKind::InvalidData)?;
-            let conflict = match header[0] {
-                2 if header[1] <= 32 && destination.len() == 4 => {
-                    let network =
-                        u32::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
-                    let mask = u32::MAX << (32 - header[1]);
-                    addresses
-                        .iter()
-                        .any(|address| u32::from(address.ipv4) & mask == network & mask)
-                }
-                10 if header[1] <= 128 && destination.len() == 16 => {
-                    let network =
-                        u128::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
-                    let mask = u128::MAX << (128 - header[1]);
-                    addresses
-                        .iter()
-                        .any(|address| u128::from(address.ipv6) & mask == network & mask)
-                }
-                2 | 10 => return Err(io::ErrorKind::InvalidData.into()),
-                _ => false,
-            };
-            if conflict {
-                return Err(io::ErrorKind::AddrInUse.into());
-            }
-        }
-        Ok(())
+        RouteValidation::default().check(addresses)
     }
+
     /// Install local /32+/128 addresses while the link meets IPv6's minimum MTU, then apply the
     /// safe fallback until the node can derive a route-specific packet ceiling.
     ///
@@ -820,7 +803,7 @@ impl Device {
     /// # Errors
     /// Returns route-netlink errors.
     pub fn routes(peers: &[Peer], remove: bool) -> io::Result<()> {
-        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove)
+        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove, None)
     }
 
     /// Install peer routes using live relay MTUs where one is active, otherwise the direct route.
@@ -830,6 +813,7 @@ impl Device {
         peers: &[Peer],
         overrides: &BTreeMap<PublicKey, u16>,
         remove: bool,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<()> {
         if peers.is_empty() {
             return Ok(());
@@ -843,6 +827,9 @@ impl Device {
         // An IPv6-off link takes no IPv6 routes (#578). Removal still tries both families: the
         // kernel already dropped any IPv6 route there, and a missing route is tolerated below.
         let mut ipv6 = remove || ipv6_enabled_on(&mut socket, index)?;
+        if !remove && let Some(underlay) = underlay {
+            underlay.ignore_route_adds(&socket);
+        }
         for peer in peers {
             let mtu = (!remove).then(|| {
                 overrides
@@ -905,12 +892,13 @@ impl Device {
     pub(crate) fn replace_peer_routes_on(
         link: &ActiveLink,
         routes: &[(&Peer, u16)],
+        underlay: Option<std::sync::Arc<UnderlayWatch>>,
     ) -> io::Result<bool> {
         if routes.is_empty() {
             return Ok(true);
         }
         Self::verify_repair_link(link)?;
-        let mut writer = PeerRouteWriter::open(link.ifindex)?;
+        let mut writer = PeerRouteWriter::open(link.ifindex, underlay)?;
         for (peer, mtu) in routes {
             writer.replace(peer, *mtu)?;
         }
@@ -923,11 +911,13 @@ impl Device {
     /// batch uses the same index (a name-only lookup per write could follow a substituted link).
     /// # Errors
     /// Reports a missing marked link, or a socket or link-read error.
-    pub(crate) fn peer_route_writer() -> io::Result<PeerRouteWriter> {
+    pub(crate) fn peer_route_writer(
+        underlay: Option<std::sync::Arc<UnderlayWatch>>,
+    ) -> io::Result<PeerRouteWriter> {
         let index = Self::active_link()?
             .ok_or(io::ErrorKind::NotConnected)?
             .ifindex;
-        PeerRouteWriter::open(index)
+        PeerRouteWriter::open(index, underlay)
     }
 
     /// Re-add one missing route only when no route already occupies its destination, and say
@@ -944,6 +934,7 @@ impl Device {
         peer: &Peer,
         address: IpAddr,
         mtu: u16,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<bool> {
         Self::verify_repair_link(link)?;
         let (family, prefix, destination) = match address {
@@ -961,6 +952,9 @@ impl Device {
         // to repair, and the kernel would refuse the write anyway (#578).
         if family == 10 && !ipv6_enabled_on(&mut socket, link.ifindex)? {
             return Ok(false);
+        }
+        if let Some(underlay) = underlay {
+            underlay.ignore_route_adds(&socket);
         }
         match socket.request(24, 4 | 0x200 | 0x400, &payload) {
             Ok(_) => Ok(true),
@@ -1344,7 +1338,7 @@ pub(crate) struct UnderlayWatch {
     watched: std::sync::atomic::AtomicBool,
     /// A duplicate of the running listener's socket, which shares its receive queue, so
     /// [`UnderlayWatch::settled_generation`] can see whether notifications are still waiting.
-    queue: std::sync::Mutex<Option<OwnedFd>>,
+    queue: std::sync::Mutex<Option<RouteQueue>>,
     /// Whether the listener is between taking a notification off its socket and counting it,
     /// or is inside the quiet period after lost notifications, which it counts only at the end.
     reading: std::sync::atomic::AtomicBool,
@@ -1386,8 +1380,7 @@ impl UnderlayWatch {
     /// socket, then the listener is not reading, then the generation is read. A listener that
     /// takes a notification sets `reading` before its `recv` and clears it only after counting,
     /// so a notification that left the queue before the first check is counted by the time the
-    /// second one sees `reading` clear. The check never blocks: a busy listener (it also reads
-    /// the echoes of our own route writes) only costs the caller fresh lookups.
+    /// second one sees `reading` clear. A busy listener only costs the caller fresh lookups.
     pub(crate) fn settled_generation(&self) -> Option<u64> {
         {
             let queue = self
@@ -1395,7 +1388,7 @@ impl UnderlayWatch {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let queue = queue.as_ref()?;
-            let mut waiting = [PollFd::new(queue.as_fd(), PollFlags::POLLIN)];
+            let mut waiting = [PollFd::new(queue.fd.as_fd(), PollFlags::POLLIN)];
             if !matches!(poll(&mut waiting, PollTimeout::ZERO), Ok(0)) {
                 return None;
             }
@@ -1412,7 +1405,21 @@ impl UnderlayWatch {
         *self
             .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = queue;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = queue.map(RouteQueue::new);
+    }
+
+    /// Suppress additions from a bound request socket before it starts writing. If the kernel
+    /// or sandbox refuses the filter, keep using the listener and handle echoes as usual.
+    fn ignore_route_adds(&self, writer: &Socket) {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = queue.as_mut()
+            && let Err(error) = queue.ignore_adds_from(writer.as_fd())
+        {
+            tracing::debug!(%error, "mesh route notification filter unavailable");
+        }
     }
 
     /// Mark whether the listener holds notifications it has not counted yet.
@@ -1428,8 +1435,8 @@ impl UnderlayWatch {
 /// endpoint to an [`UnderlayAnnounce`](crate::gotatun_node::UnderlayAnnounce).
 ///
 /// This is the node's only route-netlink subscription (#483 J633 P1): the endpoint announce
-/// reads the same notifications as the route repair and the MTU watch, so the kernel copies
-/// each notification once, including the echo of our own peer-route writes.
+/// reads the same queue as the route repair and the MTU watch. A socket filter keeps echoes
+/// of the node's own route additions out of that queue.
 pub(crate) struct RouteMonitor {
     /// The route multicast socket subscribed in the node's network namespace.
     fd: OwnedFd,
@@ -2171,7 +2178,7 @@ fn interface_ip(family: u8, bytes: &[u8]) -> Option<IpAddr> {
 fn network_route_payload(
     network: crate::policy::networks::Network,
     interface_index: u32,
-    source: std::net::Ipv4Addr,
+    source: Option<std::net::Ipv4Addr>,
 ) -> io::Result<Vec<u8>> {
     let std::net::IpAddr::V4(destination) = network.address() else {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -2192,7 +2199,9 @@ fn network_route_payload(
     ];
     attribute(&mut payload, 1, &destination.octets())?;
     attribute(&mut payload, 4, &interface_index.to_ne_bytes())?;
-    attribute(&mut payload, 7, &source.octets())?;
+    if let Some(source) = source {
+        attribute(&mut payload, RTA_PREFSRC, &source.octets())?;
+    }
     Ok(payload)
 }
 
@@ -2206,6 +2215,8 @@ fn network_route_payload(
 pub(crate) struct PeerRouteWriter {
     /// The route-netlink socket every write of the batch uses.
     socket: Socket,
+    /// Registers the socket with the listener on the first write, if the batch writes anything.
+    underlay: Option<std::sync::Arc<UnderlayWatch>>,
     /// The link index every route of the batch goes to.
     ifindex: u32,
     /// Whether the link carries IPv6, as last observed by this writer.
@@ -2216,11 +2227,12 @@ impl PeerRouteWriter {
     /// Open a writer for link `ifindex` and read whether that link carries IPv6.
     /// # Errors
     /// Reports a socket error or an unreadable link.
-    fn open(ifindex: u32) -> io::Result<Self> {
+    fn open(ifindex: u32, underlay: Option<std::sync::Arc<UnderlayWatch>>) -> io::Result<Self> {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         let ipv6 = ipv6_enabled_on(&mut socket, ifindex)?;
         Ok(Self {
             socket,
+            underlay,
             ifindex,
             ipv6,
         })
@@ -2248,6 +2260,9 @@ impl PeerRouteWriter {
     /// # Errors
     /// Returns route-netlink errors; IPv6 being turned off during the write is not one.
     pub(crate) fn replace(&mut self, peer: &Peer, mtu: u16) -> io::Result<()> {
+        if let Some(underlay) = self.underlay.take() {
+            underlay.ignore_route_adds(&self.socket);
+        }
         for (family, prefix, address) in [
             (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
             (10, 128, peer.addresses.ipv6.octets().to_vec()),
@@ -2395,6 +2410,8 @@ fn mesh_peer_route_destination(payload: &[u8], interface_index: u32) -> io::Resu
             1 => destination = Some(field.payload),
             4 => route_interface = Some(netlink::u32_at(field.payload, 0)?),
             15 => table = netlink::u32_at(field.payload, 0)?,
+            // A subnet fragment can be /32 too. It is never a peer host route.
+            RTA_PREFSRC => return Ok(None),
             _ => {}
         }
     }
@@ -2672,14 +2689,7 @@ fn set_link_mtu(index: u32, mtu: u32) -> io::Result<()> {
 /// # Errors
 /// Reports an unreachable endpoint, a missing egress link, or malformed kernel replies.
 pub(crate) fn route_mtu_on(socket: &mut Socket, endpoint: SocketAddr) -> io::Result<u32> {
-    let (family, prefix, address) = match endpoint.ip() {
-        IpAddr::V4(address) => (2_u8, 32_u8, address.octets().to_vec()),
-        IpAddr::V6(address) => (10_u8, 128_u8, address.octets().to_vec()),
-    };
-    let mut request = vec![family, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    attribute(&mut request, 1, &address)?;
-    let replies = socket.request(26, 4, &request)?;
-    let reply = replies.first().ok_or(io::ErrorKind::NotFound)?;
+    let reply = route_to(socket, endpoint.ip())?;
     let mut output_index = None;
     let mut route_mtu = None;
     for field in netlink::attributes(reply.get(12..).ok_or(io::ErrorKind::InvalidData)?)? {
@@ -2699,6 +2709,38 @@ pub(crate) fn route_mtu_on(socket: &mut Socket, endpoint: SocketAddr) -> io::Res
     Ok(route_mtu
         .filter(|mtu| *mtu > 0)
         .map_or(link_mtu, |mtu| mtu.min(link_mtu)))
+}
+
+/// The route the kernel currently uses for this destination, including its resolved next hop.
+fn route_to(socket: &mut Socket, address: IpAddr) -> io::Result<Zeroizing<Vec<u8>>> {
+    let (family, prefix, address) = match address {
+        IpAddr::V4(address) => (2_u8, 32_u8, address.octets().to_vec()),
+        IpAddr::V6(address) => (10_u8, 128_u8, address.octets().to_vec()),
+    };
+    let mut request = vec![family, prefix, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    attribute(&mut request, 1, &address)?;
+    socket
+        .request(RTM_GETROUTE, 4, &request)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::ErrorKind::NotFound.into())
+}
+
+/// Check whether a prospective direct endpoint would send this tunnel's packets into itself.
+/// # Errors
+/// Reports a failed route lookup or a missing mesh link.
+pub(crate) fn is_tunnel_endpoint(address: IpAddr) -> io::Result<bool> {
+    let index = Device::active_link()?
+        .ok_or(io::ErrorKind::NotConnected)?
+        .ifindex;
+    let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
+    let reply = route_to(&mut socket, address.to_canonical())?;
+    for field in netlink::attributes(reply.get(12..).ok_or(io::ErrorKind::InvalidData)?)? {
+        if field.kind == RTA_OIF {
+            return Ok(netlink::u32_at(field.payload, 0)? == index);
+        }
+    }
+    Ok(false)
 }
 
 /// Read one link's MTU on a fresh route-netlink socket.
@@ -2804,6 +2846,132 @@ fn tx_queue_len_of(index: u32) -> io::Result<u32> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
         .and_then(|field| netlink::u32_at(field.payload, 0))
 }
+/// A foreign route's address test, independent of table, interface and other route metadata.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum RoutePrefix {
+    V4 { network: u32, mask: u32 },
+    V6 { network: u128, mask: u128 },
+}
+
+impl RoutePrefix {
+    /// Decode a non-default route outside the mesh interface, preserving route dump errors.
+    fn from_route(reply: &[u8], owned: u32) -> io::Result<Option<Self>> {
+        let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+        let bits = header[1];
+        if bits == 0 {
+            return Ok(None);
+        }
+        let mut interface = None;
+        let mut destination = None;
+        for field in netlink::attributes(&reply[12..])? {
+            match field.kind {
+                1 => destination = Some(field.payload),
+                4 => interface = Some(netlink::u32_at(field.payload, 0)?),
+                _ => {}
+            }
+        }
+        if interface == Some(owned) {
+            return Ok(None);
+        }
+        let destination = destination.ok_or(io::ErrorKind::InvalidData)?;
+        match header[0] {
+            2 if bits <= 32 && destination.len() == 4 => {
+                let mask = u32::MAX << (32 - bits);
+                let address = u32::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
+                Ok(Some(Self::V4 {
+                    network: address & mask,
+                    mask,
+                }))
+            }
+            10 if bits <= 128 && destination.len() == 16 => {
+                let mask = u128::MAX << (128 - bits);
+                let address =
+                    u128::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
+                Ok(Some(Self::V6 {
+                    network: address & mask,
+                    mask,
+                }))
+            }
+            2 | 10 => Err(io::ErrorKind::InvalidData.into()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Report whether this route covers the proposed address of its own IP family.
+    fn covers(self, address: Addresses) -> bool {
+        match self {
+            Self::V4 { network, mask } => u32::from(address.ipv4) & mask == network,
+            Self::V6 { network, mask } => u128::from(address.ipv6) & mask == network,
+        }
+    }
+}
+
+/// Cache at most a D393 scale snapshot (4,096 peers and the local address) and as many prefixes.
+const ROUTE_VALIDATION_CACHE_LIMIT: usize = 4096 + 1;
+
+/// The addresses and foreign prefixes that were checked together on the last successful dump.
+///
+/// This records validation only, so it stays sound even if apply fails later. Each check rereads
+/// the live routes. A new foreign prefix is checked against all proposed addresses even when a
+/// snapshot keeps every peer, so an underlay change can still cause the same refusal as a full scan.
+/// Larger snapshots use a full scan. Prefixes past the cache limit also get a full scan.
+#[derive(Default)]
+pub(crate) struct RouteValidation {
+    /// Address pairs validated together against every stored prefix.
+    addresses: HashSet<Addresses>,
+    /// A bounded set of prefixes witnessed in the last successful live dump.
+    prefixes: HashSet<RoutePrefix>,
+}
+
+impl RouteValidation {
+    /// Refuse overlap against the current foreign routes, reusing successful address checks.
+    pub(crate) fn check(&mut self, addresses: &[Addresses]) -> io::Result<()> {
+        let owned = index()?;
+        let cache_addresses = addresses.len() <= ROUTE_VALIDATION_CACHE_LIMIT;
+        let mut prefixes = HashSet::new();
+        let changed = std::cell::OnceCell::new();
+        let mut validation: io::Result<()> = Ok(());
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(26, 0x300, &[0; 12], |reply| {
+            // Keep the first route error in reply order, but finish the dump. As with
+            // a collected dump, a netlink framing error or interruption takes precedence.
+            if validation.is_ok() {
+                validation = (|| {
+                    let Some(prefix) = RoutePrefix::from_route(reply, owned)? else {
+                        return Ok(());
+                    };
+                    let candidates: &[Addresses] =
+                        if cache_addresses && self.prefixes.contains(&prefix) {
+                            changed.get_or_init(|| {
+                                addresses
+                                    .iter()
+                                    .copied()
+                                    .filter(|address| !self.addresses.contains(address))
+                                    .collect::<Vec<_>>()
+                            })
+                        } else {
+                            addresses
+                        };
+                    if candidates.iter().any(|address| prefix.covers(*address)) {
+                        return Err(io::ErrorKind::AddrInUse.into());
+                    }
+                    if cache_addresses && prefixes.len() < ROUTE_VALIDATION_CACHE_LIMIT {
+                        prefixes.insert(prefix);
+                    }
+                    Ok(())
+                })();
+            }
+            Ok(())
+        })?;
+        validation?;
+        self.prefixes = prefixes;
+        self.addresses.clear();
+        if !self.prefixes.is_empty() {
+            self.addresses.extend(addresses.iter().copied());
+        }
+        Ok(())
+    }
+}
+
 fn index() -> io::Result<u32> {
     Ok(nix::net::if_::if_nametoindex(INTERFACE)?)
 }
@@ -4055,6 +4223,85 @@ mod endpoint_announce_tests {
         assert!(
             listener.announce.take_for_test(),
             "an address change lost in the overflow was not announced"
+        );
+    }
+
+    /// Acknowledged writes from both peer route batches leave the listener socket unreadable.
+    /// Another process can still change or remove the same tagged route, and an underlay change
+    /// still reaches the underlay watch and endpoint announcer.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_filters_only_route_additions_from_the_mesh_writer() {
+        let mut listener = namespace();
+        let underlay = Arc::clone(&listener.monitor.underlay);
+        underlay.set_watched(true);
+        let generation = underlay.generation();
+        let peer = Peer {
+            key: PublicKey([1; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.88.0.2".parse().unwrap(),
+                ipv6: "fd88::2".parse().unwrap(),
+            },
+            endpoint: None,
+            candidates: Vec::new(),
+            ipv4_only: false,
+            side_port: false,
+        };
+        for mtu in [1232, 1408] {
+            let mut writer = PeerRouteWriter::open(
+                listener.monitor.interface_index,
+                Some(Arc::clone(&underlay)),
+            )
+            .unwrap();
+            assert!(writer.writes_ipv6_for(&peer));
+            writer.replace(&peer, mtu).unwrap();
+            // The kernel multicasts before acknowledging each write. No reader has drained the
+            // socket, so a zero-time poll proves the notifications never made it readable.
+            assert_eq!(underlay.settled_generation(), generation, "own MTU {mtu}");
+        }
+
+        ip(&[
+            "route",
+            "replace",
+            "10.88.0.2/32",
+            "dev",
+            "m0",
+            "proto",
+            "250",
+            "mtu",
+            "1280",
+        ]);
+        assert_eq!(underlay.settled_generation(), None, "foreign mesh change");
+        ip(&[
+            "-6",
+            "route",
+            "del",
+            "fd88::2/128",
+            "dev",
+            "m0",
+            "proto",
+            "250",
+        ]);
+        let wake = listener
+            .monitor
+            .wait_for_deleted_peer_route(
+                listener.cancel.as_fd(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(
+            matches!(wake, RouteWake::Deleted(address) if address == IpAddr::V6(peer.addresses.ipv6))
+        );
+
+        ip(&["route", "add", "10.89.0.0/24", "dev", "d0", "proto", "250"]);
+        assert_eq!(underlay.settled_generation(), None, "underlay route queued");
+        listener.pump();
+        assert_ne!(underlay.settled_generation(), generation);
+        assert!(
+            listener.announce.take_for_test(),
+            "underlay change announced"
         );
     }
 

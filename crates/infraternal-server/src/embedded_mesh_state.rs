@@ -15,6 +15,7 @@ use std::{
 /// snapshot. The private key stays last so a copy publishes the identity after its public state.
 const MESH_FILES: &[&str] = &[
     "mesh-public.json",
+    "mesh-public.journal",
     "mesh-routes.json",
     "mesh-interface.json",
     "mesh-key-rotation.bin",

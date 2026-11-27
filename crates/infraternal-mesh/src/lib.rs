@@ -31,3 +31,6 @@ pub mod discovery;
 pub mod path_choice;
 
 pub mod cli;
+
+/// Shared framing for offline Linux mesh status.
+pub mod public_journal;

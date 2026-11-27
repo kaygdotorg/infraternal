@@ -222,8 +222,9 @@ fn start(
             source,
             directory: directory.to_owned(),
             name: "server.example.test".into(),
+            relay: None,
         },
-        current,
+        Some(current),
         move |identity| {
             let durable = load(&on_disk).unwrap();
             assert_eq!(
@@ -319,8 +320,9 @@ async fn a_leaf_that_cannot_be_stored_is_never_served() {
             source,
             directory: directory.0.clone(),
             name: "server.example.test".into(),
+            relay: None,
         },
-        retained.certificate,
+        Some(retained.certificate),
         move |_| {
             report.send(()).unwrap();
             Ok(())
@@ -329,5 +331,88 @@ async fn a_leaf_that_cannot_be_stored_is_never_served() {
     // sleep: the failed attempt happens at once; give a wrong serve time to show.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(served.try_recv().is_err());
+    task.abort();
+}
+
+/// A relay leaf (D402 Q3) verifies for the server purpose and its name like the leg-B leaf,
+/// carries exactly one relay URI with its id, lasts 7 days, and is stored in its own file:
+/// publishing it leaves the leg-B leaf untouched and `load_relay` reads it back.
+#[test]
+fn relay_leaf_is_its_own_seven_day_key_with_one_relay_uri() {
+    let directory = Directory::new();
+    let material = crate::ca::tests::test_material();
+    let at = now();
+    let server = issue(&material, "server.example.test", None, at).unwrap();
+    publish(&directory.0, &server).unwrap();
+    assert!(load_relay(&directory.0).unwrap().is_none());
+    let id = uuid::Uuid::new_v4();
+    let relay = issue_relay(&material, "server.example.test", id, None, at).unwrap();
+    let start = seconds(relay.certificate.not_before()).unwrap();
+    let end = seconds(relay.certificate.not_after()).unwrap();
+    assert_eq!(end - start, RELAY_LIFETIME);
+    assert!(verifies(
+        material.issuer(),
+        &relay.certificate,
+        "server.example.test",
+        at
+    ));
+    assert_eq!(relay_id(&relay.certificate), Some(id));
+    assert_eq!(relay_id(&server.certificate), None);
+    assert!(
+        !relay.key.public_eq(&server.key),
+        "the relay has its own key"
+    );
+    publish_relay(&directory.0, &relay).unwrap();
+    let (loaded, loaded_id) = load_relay(&directory.0).unwrap().unwrap();
+    assert_eq!(loaded_id, id);
+    assert_eq!(
+        loaded.certificate.to_der().unwrap(),
+        relay.certificate.to_der().unwrap()
+    );
+    assert_eq!(
+        load(&directory.0).unwrap().certificate.to_der().unwrap(),
+        server.certificate.to_der().unwrap(),
+        "the relay leaf must not replace the leg-B leaf"
+    );
+}
+
+/// A relay leaf never issued before is issued at the first unlock and only then: a locked
+/// CA signs nothing, and the first served leaf is durable and carries the relay URI.
+#[tokio::test]
+async fn a_first_relay_leaf_waits_for_the_unlock() {
+    let directory = Directory::new();
+    let material = crate::ca::tests::test_material();
+    let source = Arc::new(MemoryCaSource::cold_start(material.issuer().clone()));
+    let id = uuid::Uuid::new_v4();
+    let (report, mut served) = tokio::sync::mpsc::unbounded_channel::<X509>();
+    let on_disk = directory.0.clone();
+    let task = tokio::spawn(run(
+        Rotation {
+            source: source.clone(),
+            directory: directory.0.clone(),
+            name: "server.example.test".into(),
+            relay: Some(id),
+        },
+        None,
+        move |identity| {
+            let (durable, _) = load_relay(&on_disk).unwrap().unwrap();
+            assert_eq!(
+                durable.certificate.to_der().unwrap(),
+                identity.certificate.to_der().unwrap(),
+                "a relay leaf is durable before it is served"
+            );
+            report.send(identity.certificate.clone()).unwrap();
+            Ok(())
+        },
+    ));
+    // sleep: a locked server must stay quiet; give the task time to act wrongly.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        served.try_recv().is_err(),
+        "a locked CA cannot sign a relay leaf"
+    );
+    source.install(material).unwrap();
+    let first = next_served(&mut served).await;
+    assert_eq!(relay_id(&first), Some(id));
     task.abort();
 }

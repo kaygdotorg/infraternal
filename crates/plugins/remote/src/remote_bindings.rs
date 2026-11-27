@@ -996,6 +996,7 @@ mod tests {
         assert_eq!((&reply[..length], from), (&b"reply-4"[..], primary));
     }
 
+    /// A mesh round trip preserves the logical peer and replays outstanding input.
     #[tokio::test]
     async fn peer_route_preserves_the_logical_tuple_and_replays_on_return() {
         let bindings = Bindings::new(bound("127.0.0.1:0"));
@@ -1008,6 +1009,9 @@ mod tests {
         // Independent ports model an enrolled source rewritten by NAT.
         let mesh = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
         let physical = mesh.local_addr().unwrap();
+        // Queue an earlier datagram on the enrolled socket so the receive loop
+        // must skip it even when no other test is sending datagrams.
+        mesh.send_to(b"earlier-output", logical).await.unwrap();
         let peer = bindings.route_peer(logical, physical).unwrap();
         mesh.send_to(b"move", destination).await.unwrap();
         let (meta, _) = receive(&bindings).await;
@@ -1030,11 +1034,20 @@ mod tests {
         enrolled.send_to(b"return", primary).await.unwrap();
         let (meta, _) = receive(&bindings).await;
         assert_eq!(meta.addr, logical);
-        let (n, source) = tokio::select! {
-            received = enrolled.recv_from(&mut bytes) => received.unwrap(),
+        // Keep polling bindings to drive replay and bound the wait with
+        // receive's timeout. Check the source once the expected payload arrives.
+        let source = tokio::select! {
+            source = async {
+                loop {
+                    let (n, source) = enrolled.recv_from(&mut bytes).await.unwrap();
+                    if &bytes[..n] == b"outstanding-input" {
+                        break source;
+                    }
+                }
+            } => source,
             _ = receive(&bindings) => panic!("no peer sent another datagram"),
         };
-        assert_eq!((&bytes[..n], source), (&b"outstanding-input"[..], primary));
+        assert_eq!(source, primary);
         let foreign = tokio::net::UdpSocket::bind("127.0.0.4:0").await.unwrap();
         foreign.send_to(b"wrong-port", destination).await.unwrap();
         let (meta, _) = receive(&bindings).await;

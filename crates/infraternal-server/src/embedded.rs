@@ -242,22 +242,49 @@ impl AttachmentHandle {
         if std::time::Instant::now() >= expires {
             return false;
         }
-        let (completed, fence) = oneshot::channel();
-        let published = async {
-            self.0
-                .input
-                .send(ForwardInput::Fence(completed))
-                .await
-                .map_err(|_| ())?;
-            fence.await.map_err(|_| ())
-        };
         if !matches!(
-            tokio::time::timeout_at(expires.into(), published).await,
+            tokio::time::timeout_at(expires.into(), self.publish_queued_input()).await,
             Ok(Ok(()))
         ) {
             return false;
         }
         self.reply(query_seq, bytes, expires)
+    }
+    /// Wait until the input forwarder has put every preceding frame in the
+    /// host command FIFO. The caller can then enqueue work behind those frames.
+    pub(crate) async fn publish_queued_input(&self) -> Result<(), AgentError> {
+        let (completed, fence) = oneshot::channel();
+        self.0
+            .input
+            .send(ForwardInput::Fence(completed))
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        fence.await.map_err(|_| AgentError::Unavailable)
+    }
+    /// Tells the host actor whether this attachment's viewer is hidden (page hidden or the window
+    /// off the canvas). A parked attachment is sent no 25 ms route probes, so its shim sleeps; the
+    /// first show starts a fresh lease at once [#562, D265, D300]. Queued like any command, never
+    /// dropped: a lost "shown" notice would leave a visible terminal unprobed.
+    pub async fn set_parked(&self, parked: bool) -> Result<(), AgentError> {
+        self.0
+            .commands
+            .send(Command::Park {
+                attachment_id: self.0.id,
+                parked,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)
+    }
+
+    /// Rebind only after the browser consumer admits the transition under its authority gate.
+    pub async fn reconnect(&self) -> Result<(), AgentError> {
+        self.0
+            .commands
+            .send(Command::Reconnect {
+                attachment_id: self.0.id,
+            })
+            .await
+            .map_err(|_| AgentError::Unavailable)
     }
 }
 

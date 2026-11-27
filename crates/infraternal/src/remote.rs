@@ -1119,6 +1119,23 @@ async fn direct_endpoint(
     .next()
 }
 
+/// The enrolled host leaf, its key and the deployment CA from `data`, for relay connections.
+/// Read-only: it never migrates the stored identity.
+#[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+fn relay_host_leaf(
+    data: &Path,
+) -> io::Result<infraternal_plugin_mesh::node_actions::RelayHostLeaf> {
+    let (stored, _) = load_snapshot(data)?;
+    let key_der = decode_candidate_key(&stored.key_der)?;
+    // The key file holds PKCS#8; re-encode through OpenSSL so a malformed one is refused here.
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    Ok(infraternal_plugin_mesh::node_actions::RelayHostLeaf {
+        certificate: B64.decode(&stored.certificate_der).map_err(|_| refused())?,
+        key: Zeroizing::new(key.private_key_to_pkcs8().map_err(|_| refused())?),
+        roots: vec![B64.decode(&stored.ca_der).map_err(|_| refused())?],
+    })
+}
+
 /// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
@@ -1153,6 +1170,15 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         .public_eq(&key)
     {
         return Err(Failure::IdentityMismatch.error(io::ErrorKind::PermissionDenied));
+    }
+    // The mesh node presents this host leaf to relays (D402 Q3), read fresh at each start of
+    // its relay paths so a renewed leaf is picked up.
+    #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+    {
+        let data = data.to_owned();
+        infraternal_plugin_mesh::node_actions::set_relay_credentials(std::sync::Arc::new(
+            move || relay_host_leaf(&data),
+        ));
     }
     let identity = RemoteIdentity {
         host_id: stored.host_id,
