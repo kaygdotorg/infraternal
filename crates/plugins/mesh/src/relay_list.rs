@@ -663,7 +663,7 @@ mod tests {
 #[cfg(all(test, feature = "server"))]
 mod push_tests {
     //! The coordinator side: the server's node gets the role, the others get its relay.
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use infraternal_plugin_api::{PluginOperation, node_channel::NodeChannel};
     use std::sync::{Arc, Mutex};

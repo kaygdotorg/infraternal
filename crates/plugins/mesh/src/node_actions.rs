@@ -1529,7 +1529,7 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 /// Node action checks that need a Linux kernel or network namespace.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     /// Embedded infraternal agents have no tracing subscriber; repeated restore failures still reach stderr once.
     #[test]
     #[cfg(target_os = "linux")]

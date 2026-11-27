@@ -2736,6 +2736,7 @@ mod review_j375_tests {
 /// Relay path credential renewal stays independent from connection and shim tests.
 #[cfg(all(test, feature = "test-support"))]
 mod relay_identity_refresh_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
     use infraternal_plugin_relay::{
         relay::{Admission, Limits, Relay},

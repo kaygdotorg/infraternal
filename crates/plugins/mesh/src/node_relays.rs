@@ -948,6 +948,7 @@ fn spawn(future: impl std::future::Future<Output = ()> + Send + 'static) {
 #[cfg(test)]
 mod tests {
     //! Labels and reasons; the role and paths run in the namespace proof and relay tests.
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
 
     /// A pair fixture for manager state transitions that do not need a live data plane.
@@ -1096,6 +1097,7 @@ mod tests {
 /// Mesh-down path cleanup is tested without starting a `WireGuard` device or relay socket.
 #[cfg(test)]
 mod mesh_down_review_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
 
     /// The `mesh.down` action clears relay pairs along with the node's mesh interface.
