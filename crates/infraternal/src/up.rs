@@ -274,8 +274,8 @@ impl Failure {
         }
     }
 
-    /// Return the status checked by the helper exit-code tests.
-    #[cfg(all(test, target_os = "linux"))]
+    /// Return the status used by the macOS install handoff and the Linux tests.
+    #[cfg(any(test, target_os = "macos"))]
     const fn exit_code(self) -> u8 {
         self.exit().code()
     }
