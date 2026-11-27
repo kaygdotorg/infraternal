@@ -232,9 +232,16 @@ async function lifecycle(h: Harness, page: Page, host: HostFixture, platform: "l
     }
     const joined = await h.step(`${phase}-up-approve`, page, () => joinHost(page, host, platform, () => h.screenshot(page, `${phase}-approval.png`)));
     if (!joined) return h.skip(`${phase}-joined-host-checks`, "Fresh up or passkey approval failed");
-    for (const operation of ["status", "mesh-status"]) {
-      await h.step(`${phase}-${operation}`, undefined, () => cli(host.driver, operation));
-    }
+    await h.step(`${phase}-status`, undefined, async () => {
+      const output = await cli(host.driver, "status");
+      if (/not (?:installed|running|found)|no (?:infraternal|installation)/i.test(output)) throw new Error(output);
+      return output;
+    });
+    await h.step(`${phase}-mesh-status`, undefined, async () => {
+      const output = await cli(host.driver, "mesh-status");
+      if (!/Mesh is on/i.test(output)) throw new Error(output);
+      return output;
+    });
     await h.shellJourney(page, `${phase}-joined`, host.name);
     const offline = await h.step(`${phase}-offline-for-remove`, undefined, () => cli(host.driver, "offline"));
     if (!offline) return h.skip(`${phase}-remove-forget`, "Could not stop the fixture's service for the offline flow");

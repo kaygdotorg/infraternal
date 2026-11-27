@@ -58,7 +58,10 @@ function observeShell(page: Page) {
           if (frame.ok && typeof value.session_id === "string") receipt.id = value.session_id;
         }
         if (stream !== activeStream) return;
-        if (frame.type === "Close") receipt.ended = true;
+        if (frame.type === "Event" && frame.subId === 0) {
+          const notice = JSON.parse(new TextDecoder().decode(frame.eventJson));
+          if (notice.type === "terminal.exited" && notice.session_id === receipt.id) receipt.ended = true;
+        }
         if (frame.type === "Output" && marker) {
           // Keep only an overlap between chunks. The receipt contains no host output.
           tail += new TextDecoder().decode(frame.bytes);
