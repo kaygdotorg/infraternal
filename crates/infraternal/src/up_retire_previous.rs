@@ -8,8 +8,12 @@ use std::{
 };
 
 /// Inspect only this Unix account. Root cannot guess who owns the user install.
-pub(super) fn inspect() -> Option<Retirement> {
-    if nix::unistd::Uid::effective().is_root() || !io::stdin().is_terminal() {
+pub(super) fn inspect(json_output: bool) -> Option<Retirement> {
+    if !may_inspect(
+        json_output,
+        nix::unistd::Uid::effective().is_root(),
+        io::stdin().is_terminal(),
+    ) {
         return None;
     }
     let output = Command::new("/bin/sh")
@@ -22,6 +26,25 @@ pub(super) fn inspect() -> Option<Retirement> {
         return None;
     }
     Retirement::parse(&output.stdout).ok()
+}
+
+/// Terminal input is needed for interactive consent from the original user.
+fn may_inspect(json_output: bool, root: bool, terminal_input: bool) -> bool {
+    !json_output && !root && terminal_input
+}
+
+#[cfg(test)]
+mod tests {
+    //! Check the conditions for collecting interactive retirement consent.
+
+    /// JSON mode makes no retirement offer even with a terminal on stdin.
+    #[test]
+    fn json_mode_skips_retirement_even_with_a_terminal() {
+        assert!(!super::may_inspect(true, false, true));
+        assert!(super::may_inspect(false, false, true));
+        assert!(!super::may_inspect(false, true, true));
+        assert!(!super::may_inspect(false, false, false));
+    }
 }
 
 /// Ask the approval server to verify this exact earlier host and key.

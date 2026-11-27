@@ -442,7 +442,7 @@ pub(crate) fn run(
         return fail(json_output, failure);
     }
     #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
-    let old = retire_previous::inspect();
+    let old = retire_previous::inspect(json_output);
     #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
     let retirement_hint = old.as_ref().map(retire_previous::preference);
     #[cfg(not(all(target_os = "linux", feature = "plugin-ssh")))]
