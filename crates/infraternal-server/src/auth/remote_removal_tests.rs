@@ -831,7 +831,7 @@ async fn joined_mac(f: &Fixture, key: &[u8], now: i64) -> (Uuid, [u8; 32]) {
         .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
     sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?,?,zeroblob(32),?,?,?,501)")
         .bind(fingerprint.as_slice()).bind(host.as_bytes().as_slice()).bind(key)
-        .bind(now-3600).bind(now+3600).execute(&f.auth.pool).await.unwrap();
+        .bind(now - 604_800 + 3600).bind(now + 3600).execute(&f.auth.pool).await.unwrap();
     (host, fingerprint)
 }
 
