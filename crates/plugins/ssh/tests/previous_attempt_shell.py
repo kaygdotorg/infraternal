@@ -2087,6 +2087,52 @@ manager=dropin_manager'''
         self.assertEqual(self.service_state(), (False, False))
         self.assertFalse(Path(f'{self.base}.bootstrap-taking-{TAKEOVER}').exists())
 
+    def retirement_prelude(self):
+        """Supply an isolated service manager and a fixed enrollment response."""
+        return '\n' + RETIREMENT + r"""
+wanted=default.target
+retired_manager() {
+ if [ "$1" = show ] && [ "$3" = FragmentPath ]; then printf '%s\n' "$unit"; else mock_manager "$@"; fi
+}
+retirement_identity() { printf '%064d localhost\n' 0; }
+runtime_helper() { helper=retirement_identity; }
+manager=retired_manager
+"""
+
+    def test_retirement_refuses_an_unapproved_owner_before_runtime_inspection(self):
+        """A valid layout under another enrollment is insufficient to inspect its runtime."""
+        self.make_takeover_fixture()
+        prelude = self.retirement_prelude()
+        no_runtime = prelude + '\nruntime_helper() { exit 76; }\n'
+        marker = self.run_shell(no_runtime + '\nretirement_candidate')
+        self.assertEqual(marker.returncode, 0, marker.stderr)
+        self.assertEqual(marker.stdout.decode(), f'{HOST} {self.identity}\n')
+        refused = self.run_shell(no_runtime + f'\nretirement_record "{NEW_HOST}" "{self.identity}"')
+        self.assertEqual(refused.returncode, 75, refused.stdout + refused.stderr)
+        changed = self.run_shell(no_runtime + f'\nretirement_record "{HOST}" "0:0"')
+        self.assertEqual(changed.returncode, 75, changed.stdout + changed.stderr)
+        self.assertEqual(self.run_shell(prelude + f'\nretirement_record "{HOST}"').returncode, 0)
+
+    def test_retirement_accepts_self_disable_but_refuses_a_newly_live_install(self):
+        """A bind to the reviewed identity survives the service retiring itself."""
+        self.make_takeover_fixture()
+        prelude = self.retirement_prelude()
+        proof = self.run_shell(prelude + f'\nretirement_record "{HOST}"')
+        self.assertEqual(proof.returncode, 0, proof.stderr)
+        reviewed = proof.stdout.decode().strip()
+        idle = reviewed.replace(' live ready\n', ' idle ready\n', 1)
+        self.assertNotEqual(idle, reviewed)
+        refused = self.run_shell(prelude + f'\nset_aside_retired_install "{idle}"')
+        self.assertEqual(refused.returncode, 75, refused.stderr)
+        self.assertEqual(self.mutating_calls(), [])
+
+        self.manager_active.unlink()
+        self.unit.with_name('default.target.wants').joinpath(self.unit.name).unlink()
+        done = self.run_shell(prelude + f'\nset_aside_retired_install "{reviewed}"\nfinish_retired_install')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(self.base.exists())
+        self.assertFalse(self.unit.exists())
+
     def test_retirement_rechecks_the_exact_paths_and_only_retires_that_install(self):
         """A matching finished setup can retire its own unit and files, never a changed or foreign path."""
         self.make_takeover_fixture()
@@ -2096,16 +2142,7 @@ manager=dropin_manager'''
         wanted = self.unit.parent / 'default.target.wants/infraternal-agent.service'
         # The runtime proof and manager unit path are the only external reads
         # in this fixture. The setup guard and all moved paths are real.
-        bindings = r"""
-wanted=default.target
-retired_manager() {
- if [ "$1" = show ] && [ "$3" = FragmentPath ]; then printf '%s\n' "$unit"; else mock_manager "$@"; fi
-}
-retirement_identity() { printf '%064d localhost\n' 0; }
-runtime_helper() { helper=retirement_identity; }
-manager=retired_manager
-"""
-        prelude = '\n' + RETIREMENT + bindings
+        prelude = self.retirement_prelude()
         self.manager_log.unlink(missing_ok=True)
         snapshot = self.found_install()
         proof = self.run_shell(prelude + '\nretirement_record')

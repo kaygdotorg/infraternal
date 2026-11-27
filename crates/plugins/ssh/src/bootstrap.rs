@@ -269,6 +269,16 @@ pub trait Backend: Send + Sync {
         Box::pin(async { Ok(Vec::new()) })
     }
 
+    /// Authorize the marker and execution uid before running the earlier install's runtime helper.
+    fn owns_retired_install_marker<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+        _uid: u32,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// Whether the infraternal agent of an earlier setup's journal (`host`) is
     /// connected to this server now. Its leftovers are then in use, never offered
     /// for cleanup (#305, J257). Backends without host links have none.
@@ -2242,21 +2252,29 @@ impl Bootstrap {
         let mut matched = None;
         for uid in candidates {
             let as_user = (check.uid == 0 && uid != 0).then_some(uid);
-            let Some(old) =
-                previous_attempt::Retirement::inspect(session.as_ref(), mode, as_user).await
+            let Some(candidate) =
+                previous_attempt::Retirement::candidate(session.as_ref(), mode, as_user).await
             else {
                 continue;
             };
-            if expected.is_none_or(|id| id == old.installed.host)
-                && self
+            if expected.is_some_and(|id| id != candidate.host)
+                || !self
                     .backend
-                    .owns_retired_install(
-                        &batch.authority,
-                        old.installed.host,
-                        uid,
-                        old.enrolled.digest,
-                    )
+                    .owns_retired_install_marker(&batch.authority, candidate.host, uid)
                     .await?
+            {
+                continue;
+            }
+            let Some(old) =
+                previous_attempt::Retirement::inspect(session.as_ref(), mode, as_user, &candidate)
+                    .await
+            else {
+                continue;
+            };
+            if self
+                .backend
+                .owns_retired_install(&batch.authority, candidate.host, uid, old.enrolled.digest)
+                .await?
             {
                 matched = Some((old, uid, as_user));
                 break;

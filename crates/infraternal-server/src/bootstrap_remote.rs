@@ -815,6 +815,24 @@ impl Backend for RemoteBackend {
         })
     }
 
+    /// A host marker can authorize runtime inspection only for this owner's retired enrollment.
+    fn owns_retired_install_marker<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+        uid: u32,
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.issuer
+                .store()
+                .retired_bootstrap_key(&authority.owner, host, uid)
+                .await
+                .map(|key| key.is_some())
+                .map_err(|_| unavailable())
+        })
+    }
+
     /// Only this owner's removed host rows can lead to an alternate-scope check.
     fn retired_install_uids<'a>(&'a self, authority: &'a Authority) -> Operation<'a, Vec<u32>> {
         Box::pin(async move {

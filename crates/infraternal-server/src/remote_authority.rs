@@ -154,6 +154,18 @@ impl EnrollmentStore {
         uid: u32,
         digest: &[u8; 32],
     ) -> Result<bool, EnrollmentError> {
+        let key = self.retired_bootstrap_key(owner, host, uid).await?;
+        Ok(key.is_some_and(|key| openssl::sha::sha256(&key) == *digest))
+    }
+
+    /// Look up a retired enrollment by owner, host, and Unix account before runtime inspection.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_key(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+    ) -> Result<Option<[u8; 32]>, EnrollmentError> {
         let key: Option<Vec<u8>> = sqlx::query_scalar(
             "SELECT c.public_key FROM remote_hosts h
              JOIN remote_certificates c ON c.host_id=h.id
@@ -170,7 +182,7 @@ impl EnrollmentStore {
         .bind(i64::from(uid))
         .fetch_optional(&self.0)
         .await?;
-        Ok(key.is_some_and(|key| key.len() == 32 && openssl::sha::sha256(&key) == *digest))
+        Ok(key.and_then(|key| key.try_into().ok()))
     }
 
     /// Admit a pending or retired host only for retained cleanup, never new work.

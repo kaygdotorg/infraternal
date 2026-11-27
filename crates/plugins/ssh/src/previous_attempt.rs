@@ -658,6 +658,14 @@ impl FinishedInstall {
 /// Fixed inspection and retirement actions for one exact finished install.
 const RETIREMENT: &str = include_str!("previous_retirement.sh");
 
+/// Marker and directory identity from an account's data-only retirement probe.
+pub(crate) struct RetirementCandidate {
+    /// The install's host id, to check against the owner's retired enrollment.
+    pub(crate) host: uuid::Uuid,
+    /// Device and inode to check again before inspecting the runtime.
+    identity: String,
+}
+
 /// An install and its exact receipt, read over the current authenticated SSH connection.
 #[derive(Clone)]
 pub struct Retirement {
@@ -672,15 +680,53 @@ pub struct Retirement {
 }
 
 impl Retirement {
-    /// Look only in the requested scope, using the existing setup ownership checks.
+    /// Find the host marker without asking the account's service manager or runtime helper.
+    pub(crate) async fn candidate(
+        session: &dyn SshSession,
+        mode: InstallMode,
+        as_user: Option<u32>,
+    ) -> Option<RetirementCandidate> {
+        let script = Self::as_account(
+            Self::script(
+                mode,
+                uuid::Uuid::nil(),
+                uuid::Uuid::nil(),
+                "retirement_candidate",
+            ),
+            as_user,
+        );
+        let output = session.run(&script, Input::Empty).await.ok()?;
+        let record = std::str::from_utf8(&output.stdout)
+            .ok()?
+            .strip_suffix('\n')?;
+        let (host, identity) = record.split_once(' ')?;
+        Some(RetirementCandidate {
+            host: canonical_id(host).ok()?,
+            identity: parse_identity(identity).ok()?,
+        })
+    }
+
+    /// Inspect the same marker and inode after the server authorizes the host and execution uid.
     pub(crate) async fn inspect(
         session: &dyn SshSession,
         mode: InstallMode,
         as_user: Option<u32>,
+        candidate: &RetirementCandidate,
     ) -> Option<Self> {
-        let script = Self::as_account(Self::inspection_script(mode), as_user);
+        let action = format!(
+            "retirement_record {} {}",
+            candidate.host.simple(),
+            candidate.identity,
+        );
+        let script = Self::as_account(
+            Self::script(mode, candidate.host, uuid::Uuid::nil(), &action),
+            as_user,
+        );
         let output = session.run(&script, Input::Empty).await.ok()?;
-        Self::parse(&output.stdout).ok()
+        let retirement = Self::parse(&output.stdout).ok()?;
+        (retirement.installed.host == candidate.host
+            && retirement.installed.identity == candidate.identity)
+            .then_some(retirement)
     }
 
     /// Inspect an install as its Unix account, without changing its files.
@@ -778,20 +824,23 @@ impl Retirement {
         Self::script(mode, self.installed.host, token, &body)
     }
 
-    /// A root SSH login drops to the known original uid before reading its
-    /// files, running its helper or calling its user service manager.
+    /// Drop to the candidate uid before reading its home, without opening a
+    /// login session or inheriting supplementary groups from root.
     fn as_account(script: String, uid: Option<u32>) -> String {
         let Some(uid) = uid else {
             return script;
         };
         format!(
             "set -eu; [ \"$(id -u)\" = 0 ]; \
-             account=$(getent passwd {uid} | cut -d: -f1); \
-             [ -n \"$account\" ]; \
-             for runuser in /usr/sbin/runuser /usr/bin/runuser /run/current-system/sw/bin/runuser; do \
-               if [ -x \"$runuser\" ]; then exec \"$runuser\" -u \"$account\" -- /bin/sh -c {}; fi; \
+             account=$(getent passwd {uid}); \
+             gid=$(printf '%s\\n' \"$account\" | cut -d: -f4); \
+             case \"$gid\" in ''|*[!0-9]*) exit 71;; esac; \
+             for setpriv in /usr/bin/setpriv /bin/setpriv /run/current-system/sw/bin/setpriv; do \
+               if [ -x \"$setpriv\" ]; then exec \"$setpriv\" --reuid {uid} --regid \"$gid\" --clear-groups --no-new-privs --reset-env -- /bin/sh -c {}; fi; \
              done; exit 71",
-            crate::transport::shell_quote(&script)
+            crate::transport::shell_quote(&format!(
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin; export PATH\n{script}"
+            ))
         )
     }
 
