@@ -264,6 +264,7 @@ fn update_relay_route_mtu(
         std::slice::from_ref(&route_peer),
         &state.overrides,
         false,
+        state.underlay.as_deref(),
     );
     if result.is_err() {
         match previous {
@@ -1528,7 +1529,7 @@ impl Node {
         if remove {
             // Removal writes every peer: the record no longer describes any of them.
             state.forget_written();
-            return Device::routes_with_mtu_overrides(peers, &state.overrides, true);
+            return Device::routes_with_mtu_overrides(peers, &state.overrides, true, None);
         }
         // Only routes that differ from the record are written (#260 J1240). The installed set
         // moves to `peers` only once they are in place, so a failure leaves relay callbacks
@@ -2714,7 +2715,7 @@ impl Node {
         if !state.client_routes.states.is_empty()
             && let Some(config) = self.config.as_ref()
             && let Err(error) =
-                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None)
+                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None, None)
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");

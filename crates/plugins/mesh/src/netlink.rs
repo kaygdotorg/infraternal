@@ -21,7 +21,7 @@ use nix::sys::socket::{
 use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    os::fd::{AsRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
 };
 
 /// Size in bytes of a netlink message header.
@@ -314,6 +314,13 @@ pub struct Socket {
     wire: zeroize::Zeroizing<Vec<u8>>,
     buffer: zeroize::Zeroizing<Vec<u8>>,
 }
+impl AsFd for Socket {
+    /// Borrow the bound socket, for matching its port ID in the route listener.
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
 impl Socket {
     /// Opens and binds a raw netlink socket for `protocol` (for example route
     /// or generic netlink) in the calling thread's network namespace.
