@@ -158,6 +158,17 @@ use a later timestamp. Independent branch changes must work in either arrival
 order. Regression tests exercise real SQLite with the shipping migrator flags,
 numbered history, both timestamp arrival orders and altered checksums.
 
+A migration that edits `sqlite_schema` must preserve every column's storage
+position. Capture the old column names and ordinals before the edit. After
+`PRAGMA writable_schema = RESET`, compare those ordinals with the new schema
+and check the SQLite storage class of each existing column using `typeof()`
+and a table scan (`NOT INDEXED`). Put both checks in the migration transaction,
+with named failing constraints so the error identifies the table or layout
+problem without exposing row values. Exercise the production-schema fixture
+and the other column order in a separate synthetic fixture. The guard for
+`20261125055624_device_host_mode.sql` is added by the embedder for both runners
+because the original file and its checksum are already in deployment history.
+
 ## 4. Integrate all the time, and dogfood at once
 
 - Small, frequent merges to `dev`. The gate runs on the merge result every
