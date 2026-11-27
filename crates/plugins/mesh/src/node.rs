@@ -3632,7 +3632,19 @@ impl Node {
                 }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
-                self.save_with_snapshot_base(Some(&config), true, snapshot_base)?;
+                let saved = self.save_applied_revision(&config, snapshot_base, false);
+                if self.engine_kind == EngineKind::GotaTun
+                    && snapshot_base.is_none()
+                    && saved
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                {
+                    // A failed endpoint apply can leave durable intent ahead of runtime.
+                    // Keep the full writer's revision checks for that recovery case.
+                    self.save(Some(&config), true)?;
+                } else {
+                    saved?;
+                }
                 if snapshot_base.is_some() {
                     self.authority_reset = AuthorityResetState::Stable;
                 }

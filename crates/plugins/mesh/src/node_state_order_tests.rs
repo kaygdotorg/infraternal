@@ -243,7 +243,9 @@ fn journal_peer(id: u8, word: u64) -> crate::dataplane::PeerPolicy {
                 ipv4: std::net::Ipv4Addr::new(10, 0, 0, id),
                 ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(id)),
             },
-            endpoint: None,
+            endpoint: word
+                .is_multiple_of(3)
+                .then(|| std::net::SocketAddr::from(([127, 0, 0, 1], 30_000 + u16::from(id)))),
             candidates: Vec::new(),
             ipv4_only: false,
             side_port: false,
