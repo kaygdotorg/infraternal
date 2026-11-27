@@ -234,12 +234,12 @@ async function lifecycle(h: Harness, page: Page, host: HostFixture, platform: "l
     if (!joined) return h.skip(`${phase}-joined-host-checks`, "Fresh up or passkey approval failed");
     await h.step(`${phase}-status`, undefined, async () => {
       const output = await cli(host.driver, "status");
-      if (/not (?:installed|running|found)|no (?:infraternal|installation)/i.test(output)) throw new Error(output);
+      if (!/infraternal agent is running on this machine/i.test(output)) throw new Error(output);
       return output;
     });
     await h.step(`${phase}-mesh-status`, undefined, async () => {
       const output = await cli(host.driver, "mesh-status");
-      if (!/Mesh is on/i.test(output)) throw new Error(output);
+      if (!/Mesh is on|Mesh system service is running/i.test(output)) throw new Error(output);
       return output;
     });
     await h.shellJourney(page, `${phase}-joined`, host.name);

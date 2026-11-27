@@ -155,7 +155,14 @@ export async function endShell(page: Page, id: string) {
   async function ask() {
     await row.focus();
     await page.keyboard.press("ContextMenu");
-    await page.locator(".ui-window-menu-item", { hasText: "End session" }).click();
+    const options = page.locator(".ui-window-menu-item:visible");
+    await options.first().waitFor();
+    const end = options.filter({ hasText: "End session" });
+    if (!await end.isVisible()) {
+      const labels = (await options.allTextContents()).map((label) => label.trim()).join(", ");
+      throw new Error(`Sidebar offered ${labels}; End session was missing`);
+    }
+    await end.click();
     return page.locator(".ui-row-ask");
   }
   const first = await ask();
