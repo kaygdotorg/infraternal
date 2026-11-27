@@ -2230,3 +2230,25 @@ fn an_unknown_refusal_reason_reads_as_could_not_start_a_shell() {
         AgentError::Rejected
     );
 }
+
+/// A fresh lease on the same host transport never accepts a delayed old Pong.
+#[tokio::test(start_paused = true)]
+async fn j1264_fresh_host_lease_keeps_nonce_sequence_and_rejects_stale_pong() {
+    let mut liveness = Liveness::host_link();
+    let mut doubted = vec![17];
+    let old_probe = liveness.ping();
+
+    fresh_host_lease(&mut liveness, &mut doubted);
+
+    assert!(doubted.is_empty());
+    let new_probe = liveness.ping();
+    assert!(
+        new_probe.0 > old_probe.0,
+        "host probe ids must not be reused"
+    );
+    assert!(
+        !liveness.pong(old_probe.0, old_probe.1),
+        "a delayed Pong from before the lease restart must be ignored"
+    );
+    assert!(liveness.pong(new_probe.0, new_probe.1));
+}

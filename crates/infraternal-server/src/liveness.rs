@@ -23,6 +23,8 @@ const HOST_MARGIN: Duration = Duration::from_millis(75);
 /// The longest reply allowance a route gets. It bounds dead-host detection on slow or jittery
 /// paths and is the startup grace; the browser socket's answer to a challenge is sized from it.
 pub(crate) const RESPONSE_CEILING: Duration = Duration::from_secs(2);
+/// Keep two ceiling allowances at the 25 ms cadence plus boundary replies correlated.
+const ISSUED_PROBE_LIMIT: usize = 164;
 
 /// Which reply allowance and miss policy a liveness lease follows.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -104,6 +106,7 @@ impl Liveness {
 
     /// Restart monitoring on the same transport without reusing a prior probe ID.
     /// Clearing issued requests disarms the lease; the clock and counter survive.
+    /// Host-link restarts also clear the previous link's doubt and pinned state.
     pub(crate) fn restart(&mut self) {
         self.answered = Instant::now();
         self.acked = 0;
@@ -111,6 +114,10 @@ impl Liveness {
         self.srtt = None;
         self.rttvar = Duration::ZERO;
         self.issued.clear();
+        if let Allowance::HostLink { doubt, pinned } = &mut self.allowance {
+            *doubt = false;
+            *pinned = false;
+        }
     }
 
     /// Startup pipelines samples; a sampled route waits for its actual answer.
@@ -168,9 +175,9 @@ impl Liveness {
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .max(self.sent.saturating_add(1));
-        // Two ceiling allowances admit at most 160 ticks; bound retained
-        // correlation regardless. Eviction cannot renew readiness.
-        if self.issued.len() == 128 {
+        // Two ceiling allowances span 160 ticks; the extra entries cover timer
+        // boundary probes without keeping correlations beyond a bounded window.
+        if self.issued.len() >= ISSUED_PROBE_LIMIT {
             self.issued.pop_front();
         }
         self.issued.push_back(self.sent);
@@ -540,6 +547,50 @@ mod tests {
         );
         assert_eq!(route.response_deadline(), deadline);
         assert!(route.pong(fresh.0, fresh.1));
+    }
+
+    /// A host-link restart clears its prior doubt episode without resetting the nonce sequence.
+    #[tokio::test(start_paused = true)]
+    async fn j1264_restarting_host_monitoring_resets_doubt_and_pin_state() {
+        let mut route = Liveness::host_link();
+        route.allowance = Allowance::HostLink {
+            doubt: true,
+            pinned: true,
+        };
+        let previous_nonce = route.ping().0;
+
+        route.restart();
+
+        assert!(!route.doubtful());
+        assert!(matches!(
+            route.allowance,
+            Allowance::HostLink {
+                doubt: false,
+                pinned: false
+            }
+        ));
+        assert!(route.ping().0 > previous_nonce);
+    }
+
+    /// The oldest issued probe stays correlated through two full response ceilings.
+    #[tokio::test(start_paused = true)]
+    async fn j1264_oldest_host_probe_remains_correlated_through_two_response_ceilings() {
+        let mut route = Liveness::host_link();
+        let first = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(first.0, first.1));
+        // Model a slow path at the ceiling, where a reply may remain valid for four seconds.
+        route.budget = RESPONSE_CEILING;
+
+        let oldest = route.ping();
+        for _ in 1..=160 {
+            tokio::time::advance(TICK).await;
+            route.ping();
+        }
+        assert!(
+            route.pong(oldest.0, oldest.1),
+            "a reply inside the two-ceiling retirement allowance stays issued"
+        );
     }
 
     #[tokio::test(start_paused = true)]

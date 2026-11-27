@@ -1416,6 +1416,92 @@ impl RemoteLink {
     }
 }
 
+/// Focused regressions for terminal stream closure delivery under host queue pressure.
+#[cfg(test)]
+mod pump_regression_tests {
+    use super::*;
+
+    /// A QUIC terminal EOF waits for room and then delivers its synthetic close frame.
+    #[tokio::test]
+    async fn j1264_pump_delivers_synthetic_close_after_the_host_queue_drains() {
+        let (link, _control, _listener, _endpoint, peer) =
+            crate::remote_runtime::tests::native_link_pair().await;
+        let hello = Frame::Hello {
+            version: 1,
+            caps: remote_quic::REMOTE_WRITER_BINDING,
+            client_info: "pump regression",
+        };
+        let binding = remote_quic::negotiate_binding(&peer, &hello).unwrap();
+        let LinkTransport::Quic(quic) = &link.transport else {
+            unreachable!("native fixture creates a QUIC link");
+        };
+        let control_source = quic
+            .streams()
+            .terminal
+            .get(&0)
+            .expect("the control stream is registered")
+            .clone();
+        for _ in 0..32 {
+            quic.output
+                .try_send(Packet {
+                    bytes: Bytes::from_static(b"queued host packet"),
+                    source: control_source.clone(),
+                })
+                .expect("the bounded host queue has 32 slots");
+        }
+
+        let session_id = [3; 16];
+        let attach = Frame::AttachTerm {
+            session_id: &session_id,
+            last_out_seq: 0,
+            last_in_seq: 0,
+        };
+        let (server_stream, client_stream) = tokio::join!(
+            quic.terminal_channel(42, &attach, false, StreamOpen::Wait),
+            remote_quic::accept_bound(&binding),
+        );
+        let _server_stream = server_stream.unwrap();
+        let mut client_stream = client_stream.unwrap();
+        client_stream.send.finish().unwrap();
+
+        let pump_finished_while_full = {
+            let mut pumps = quic.pumps.lock().await;
+            tokio::time::timeout(Duration::from_millis(100), pumps.join_next())
+                .await
+                .is_ok()
+        };
+
+        let mut incoming = quic.incoming.lock().await;
+        for _ in 0..32 {
+            incoming
+                .bulk
+                .recv()
+                .await
+                .expect("queued host packets remain available to the actor");
+        }
+        let packet = tokio::time::timeout(Duration::from_secs(1), incoming.bulk.recv())
+            .await
+            .expect("the released slot lets the pump finish its close")
+            .expect("the synthetic terminal close is delivered");
+        assert!(
+            !pump_finished_while_full,
+            "the terminal pump must wait while its reliable close has no queue slot"
+        );
+        let decoded = infraternal_protocol::decode_muxed_frame(&packet.bytes).unwrap();
+        assert_eq!(decoded.stream_id, 42);
+        assert!(matches!(
+            decoded.frame,
+            Frame::Close {
+                code: 1013,
+                reason: "remote stream unavailable"
+            }
+        ));
+        drop(incoming);
+        let mut pumps = quic.pumps.lock().await;
+        while pumps.try_join_next().is_some() {}
+    }
+}
+
 fn peer_caps(prefix: &[u8]) -> u64 {
     match infraternal_protocol::decode_muxed_frame(prefix) {
         Ok(infraternal_protocol::DecodedMuxedFrame {
@@ -1635,10 +1721,15 @@ async fn pump(
                 )
                 .is_ok()
                 {
-                    let _ = output.try_send(Packet {
-                        bytes: Bytes::from(bytes),
-                        source: channel.clone(),
-                    });
+                    // Stream death is otherwise invisible on a live host link. Wait for the
+                    // bounded actor queue so its writer-local Close handling can retire this
+                    // terminal instead of losing the only notification of EOF or reset.
+                    let _ = output
+                        .send(Packet {
+                            bytes: Bytes::from(bytes),
+                            source: channel.clone(),
+                        })
+                        .await;
                 }
             }
             return;

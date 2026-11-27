@@ -261,31 +261,6 @@ impl AttachmentHandle {
             .map_err(|_| AgentError::Unavailable)?;
         fence.await.map_err(|_| AgentError::Unavailable)
     }
-    /// Tells the host actor whether this attachment's viewer is hidden (page hidden or the window
-    /// off the canvas). A parked attachment is sent no 25 ms route probes, so its shim sleeps; the
-    /// first show starts a fresh lease at once [#562, D265, D300]. Queued like any command, never
-    /// dropped: a lost "shown" notice would leave a visible terminal unprobed.
-    pub async fn set_parked(&self, parked: bool) -> Result<(), AgentError> {
-        self.0
-            .commands
-            .send(Command::Park {
-                attachment_id: self.0.id,
-                parked,
-            })
-            .await
-            .map_err(|_| AgentError::Unavailable)
-    }
-
-    /// Rebind only after the browser consumer admits the transition under its authority gate.
-    pub async fn reconnect(&self) -> Result<(), AgentError> {
-        self.0
-            .commands
-            .send(Command::Reconnect {
-                attachment_id: self.0.id,
-            })
-            .await
-            .map_err(|_| AgentError::Unavailable)
-    }
 }
 
 impl Drop for AttachmentHandleInner {
@@ -3617,10 +3592,10 @@ fn connection_lost(
     tokio::spawn(cleanup_connection(connection));
 }
 
-/// A new or promoted host link starts a fresh lease with no doubt episode: a
-/// doubt raised on an earlier link never confirms windows on this one [#234].
+/// A new or promoted host link restarts the lease without reusing correlation IDs;
+/// a doubt raised earlier never confirms windows on the current link [#234].
 fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
-    *liveness = Liveness::host_link();
+    liveness.restart();
     doubted.clear();
 }
 
