@@ -3,6 +3,7 @@
 import { devices, expect, test, type Locator, type Page } from "playwright/test";
 import { tracerEvidencePath } from "../test/evidence-path";
 import { enrol, request, windows } from "./layout-devices";
+import { watchLayout } from "./layout-observer";
 import { startRealServer, type RealServer } from "./server";
 
 /** Reads the shell and job PIDs from their output and verifies that both processes exist on the fixture host. */
@@ -57,7 +58,7 @@ for (const way of ["mouse", "keyboard", "touch"] as const) {
       ignoreHTTPSErrors: true, reducedMotion: "reduce",
     });
     try {
-      const page = await context.newPage();
+      const page = watchLayout(await context.newPage());
       await enrol(page, server);
       const pids = await startJob(page, server);
       const session = page.locator('#tree .bm-leaf[data-id^="s:"]');
