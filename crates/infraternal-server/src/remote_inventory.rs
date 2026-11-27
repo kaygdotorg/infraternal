@@ -48,7 +48,7 @@ impl Source {
         let has_more = loop {
             // Same authority predicate as websocket::terminal_actor. Require a
             // binary UUID so every admitted row has a canonical cursor.
-            let after = cursor.as_ref().map(|id| id.as_slice());
+            let after = cursor.as_ref().map(<[u8; 16]>::as_slice);
             let rows = sqlx::query(
                 "SELECT h.id,COALESCE(b.address,''),COALESCE(b.os,h.reported_os),h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND typeof(h.id)='blob' AND length(h.id)=16 AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
                 .bind(account).bind(after).bind(after).fetch_all(&self.pool).await
