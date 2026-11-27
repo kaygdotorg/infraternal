@@ -962,6 +962,7 @@ fn waiting_for_server_configuration(bytes: &[u8]) -> bool {
 }
 
 /// Count saved peers in either the snapshot or the selected journal's last complete record.
+#[cfg(feature = "mesh")]
 fn saved_peer_count(dir: &Path, anchor: &[u8]) -> Option<usize> {
     use infraternal_mesh::public_journal;
     use std::io::Read;
@@ -1011,7 +1012,14 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         match fs::read(dir.join("mesh-public.json")) {
             Ok(bytes) => {
                 found = true;
-                peers = saved_peer_count(&dir, &bytes);
+                #[cfg(feature = "mesh")]
+                {
+                    peers = saved_peer_count(&dir, &bytes);
+                }
+                #[cfg(not(feature = "mesh"))]
+                {
+                    peers = peer_count(&bytes);
+                }
                 waiting = waiting_for_server_configuration(&bytes);
                 break;
             }
