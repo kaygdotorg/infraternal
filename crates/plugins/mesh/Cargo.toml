@@ -108,8 +108,10 @@ url = { workspace = true, optional = true }
 # watches writability only while it is blocked on a full send buffer. Before, the
 # kernel's write-space report after every datagram sent woke the parked engine
 # worker: 82-94% of an idle hub's wakeups (#260, J1255, D81).
-# Retry the first unanswered active handshake in the next admission window (#260, J1265).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "77f6b9d641173a9589e0bdaf2196728815018155", default-features = false, features = ["device", "ring"], optional = true }
+# Retry the first unanswered active handshake in the next admission window, and
+# clear a peer's confirmed endpoint when its last session expires, resets, or
+# rotates keys (#260, J1265).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "a2d1912742cddf204e0a4a703264ed6ef80202d6", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
