@@ -60,6 +60,24 @@ pub fn build(registry: &ActionRegistry) -> Command {
     root
 }
 
+/// Use plain-language common labels while keeping the registered descriptions and options.
+pub fn build_for_terminal(registry: &ActionRegistry) -> Command {
+    use std::io::{self, IsTerminal as _};
+
+    let color = super::output::RenderOptions::detect(io::stdout().is_terminal()).color;
+    build(registry)
+        .color(if color {
+            clap::ColorChoice::Auto
+        } else {
+            clap::ColorChoice::Never
+        })
+        .about("Check this machine's status, join a server or set up a server.")
+        .mut_arg("json", |arg| arg.help("Print JSON for scripts."))
+        .mut_arg("server_override", |arg| {
+            arg.help("Choose a server you've signed in to.")
+        })
+}
+
 /// Find the deepest selected subcommand and return its path and input matches.
 #[must_use]
 pub fn selected(matches: &ArgMatches) -> SelectedCommand<'_> {

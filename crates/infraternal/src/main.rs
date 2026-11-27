@@ -313,7 +313,12 @@ fn run_invocation() -> ExitCode {
         }
     };
     let requested_json = requested_json_early();
-    let matches = match cli::command_tree::build(&registry).try_get_matches() {
+    let tree = if requested_json {
+        cli::command_tree::build(&registry)
+    } else {
+        cli::command_tree::build_for_terminal(&registry)
+    };
+    let matches = match tree.try_get_matches() {
         Ok(matches) => matches,
         Err(error) => return parse_failure(&registry, &error, requested_json),
     };
