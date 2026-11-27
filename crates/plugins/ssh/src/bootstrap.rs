@@ -1559,6 +1559,7 @@ impl Bootstrap {
                     batch, target, attempt, started, &session, &check, &remains, resources,
                 ))
                 .await?
+                .map(|plan| (session.clone(), plan))
             } else {
                 None
             };
@@ -1859,7 +1860,7 @@ impl Bootstrap {
                     None,
                 )?;
             }
-            resources.retire_after_commit = retire_in_other_scope.map(|plan| (session, plan));
+            resources.retire_after_commit = retire_in_other_scope;
             Ok(())
         })
     }
