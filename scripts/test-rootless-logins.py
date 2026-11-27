@@ -14,6 +14,7 @@ from agent_fixture import Binary, cleanup, control, detach, select_terminal, ter
 
 
 def main():
+    """Open the enrolled account in the real daemon and verify the live shell identity."""
     assert os.geteuid() != 0, 'this fixture must run without root'
     binary = Path(sys.argv[1]).resolve()
     root = Path.home() / '.cache' / ('rl7r' + str(os.getpid()))
@@ -30,15 +31,22 @@ def main():
     state.mkdir(mode=0o700)
     client = None
     person = uuid.uuid4()
-    values = dict(person=str(person), account=pwd.getpwuid(os.geteuid()).pw_name,
-                  uid=os.geteuid(), cols=80, rows=24)
+    account = pwd.getpwuid(os.geteuid()).pw_name
+    values = dict(person=str(person), account=account, uid=os.geteuid(), cols=80, rows=24)
+    enrolled = values | dict(account=None, grant=dict(accounts=[account]))
     try:
         client = Binary(binary, state)
         assert control(client, 1, 'terminal.login.prepare', values)['prepared']
-        opened = control(client, 2, 'terminal.open', values)
+        opened = control(client, 2, 'terminal.open', enrolled)
+        assert opened['account'] == account
+        assert opened['requested_account'] is None
         assert not opened['fallback']
+        if sys.platform == 'darwin':
+            assert not list((state / 'infraternal-login-locks').glob('*.terminal'))
         select_terminal(client, opened['session_id'])
         terminal_marker(client, 'rootless-ready')
+        client.input(b'whoami\n')
+        client.until(b'\r\n' + os.fsencode(account) + b'\r\n')
         client.input(b'exit\n')
         client.wait_event('terminal.exited')
         detach(client)

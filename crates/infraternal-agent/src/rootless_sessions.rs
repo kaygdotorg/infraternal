@@ -79,7 +79,9 @@ pub(crate) async fn reserve(
         .0
 }
 
-/// Carry one person's fence through durable reservation, spawn and readiness.
+/// Hold the person's launch fence through readiness on either platform.
+/// Linux reserves durable ownership. A macOS user-mode shell inherits its
+/// existing GUI login and uses the ordinary shim launch without that record.
 #[cold]
 pub(crate) async fn launch(
     exe: &Path,
@@ -91,8 +93,16 @@ pub(crate) async fn launch(
     rows: u16,
 ) -> io::Result<Session> {
     let person_guard = crate::logins::rootless_launch_guard(state, person).await?;
-    sessions::launch_rootless_person(exe, state, manager, uid, cols, rows, person, person_guard)
-        .await
+    #[cfg(target_os = "macos")]
+    {
+        let _person_guard = person_guard;
+        sessions::launch(exe, state, manager, uid, cols, rows).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        sessions::launch_rootless_person(exe, state, manager, uid, cols, rows, person, person_guard)
+            .await
+    }
 }
 
 /// Clean up the person's shells (each stop step hang-bounded), then await

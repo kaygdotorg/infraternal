@@ -1010,6 +1010,7 @@ pub async fn launch_with_login(
 }
 
 /// Launch an attributed shell, transferring its person fence to the durable reservation.
+#[cfg(target_os = "linux")]
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
     state: &Path,
@@ -1086,8 +1087,8 @@ async fn launch_configured(
         }
         None => None,
     };
-    // Durable rootless person records belong to inherited host logins, which
-    // are Linux-only (D247); a macOS person shell comes from the root agent.
+    // D247 reserves durable person records on Linux. A user-mode Mac keeps
+    // the person fence outside this ordinary launch instead.
     #[cfg(target_os = "macos")]
     if person.is_some() {
         return Err(io::ErrorKind::Unsupported.into());
