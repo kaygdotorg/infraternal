@@ -404,7 +404,9 @@ private struct ContentView: View {
                 }
             }
             .navigationTitle("Infraternal")
+            .navigationBarTitleDisplayMode(.inline)
         }
+        .fontDesign(.monospaced)
         .task { await model.loadExistingProfile() }
     }
 }
