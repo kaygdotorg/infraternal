@@ -536,7 +536,7 @@ pub struct MeshService {
     server_configured: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
     // Rotation drivers sleep until a deadline and wake only when a peer applies a view.
     rotation_updates: tokio::sync::watch::Sender<u64>,
-    // The relay the server's own node serves, once it reported a bound port (D401 Q2, Q4).
+    // The relay the server's own node serves, once it reported a bound port (D402 Q2, Q4).
     server_relay: std::sync::Arc<tokio::sync::watch::Sender<Option<crate::relay_list::RelayEntry>>>,
     /// One admitted receipt finalizer per service; waiting workers remain cancelable.
     receipt_finalizer: std::sync::Arc<tokio::sync::Semaphore>,
@@ -686,7 +686,7 @@ impl MeshService {
     }
 
     /// Record the relay the server's own node serves (`None` once it stopped), so every other
-    /// node's worker pushes it in that node's relay list (D401 Q2). Watchers wake only on a change.
+    /// node's worker pushes it in that node's relay list (D402 Q2). Watchers wake only on a change.
     pub fn set_server_relay(&self, relay: Option<crate::relay_list::RelayEntry>) {
         self.server_relay.send_if_modified(|current| {
             let changed = *current != relay;

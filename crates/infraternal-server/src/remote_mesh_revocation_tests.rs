@@ -47,7 +47,7 @@ impl NodeChannel for PeerChannel {
                 return Err("host facts disabled");
             }
             if action == "mesh.relays" {
-                // A node that predates relay lists (D401) refuses them.
+                // A node that predates relay lists (D402) refuses them.
                 return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
             }
             assert_eq!(action, "mesh.configure");

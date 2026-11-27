@@ -1,6 +1,6 @@
 -- add mesh dataplane removal time.
 -- Keep the most recent host-removal tombstones in relay lists, while dropping entries whose
--- host leaves have expired. This prevents permanent historical rows starving new revocations [D401].
+-- host leaves have expired. This prevents permanent historical rows starving new revocations [D402].
 ALTER TABLE mesh_dataplane_removed
     ADD COLUMN removed_at INTEGER NOT NULL DEFAULT 0 CHECK (removed_at >= 0);
 

@@ -1534,7 +1534,7 @@ impl Node {
     }
 
     /// This node's mesh key as a relay [`PairSecret`](crate::relay_path::PairSecret): the
-    /// secret both ends of a relayed pair derive their opaque link tokens from (D401 Q8).
+    /// secret both ends of a relayed pair derive their opaque link tokens from (D402 Q8).
     /// Read from the node's saved private key; the key itself never leaves the secret.
     /// # Errors
     /// Fails when the node has no saved key yet (it has never been brought up).

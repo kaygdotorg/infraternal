@@ -50,7 +50,7 @@
 //! is sustained and steady, so an idle pair is never woken (D81). A peer that has never
 //! answered a direct probe (an older node) is not judged: silence is not a slow path.
 //!
-//! Link requests name a pair by an opaque token, never by host (D401 Q8): both ends derive
+//! Link requests name a pair by an opaque token, never by host (D402 Q8): both ends derive
 //! it from their static-static X25519 secret and the relay's name ([`PairSecret`],
 //! [`infraternal_plugin_relay::token::pair_token`]), so a relay cannot tell from a request
 //! who the other end is, and
@@ -161,7 +161,7 @@ pub fn direct_failed(
 /// A peer's mesh public key, the key its pair tokens come from.
 pub type PeerKey = crate::policy::model::PublicKey;
 
-/// This node's static mesh secret, held only to derive relay pair tokens (D401 Q8).
+/// This node's static mesh secret, held only to derive relay pair tokens (D402 Q8).
 ///
 /// The pair secret is X25519(this node's static key, the peer's public key), the same value
 /// at both ends and unknown to everyone else, relays included. It never leaves this type:
@@ -332,7 +332,7 @@ struct Peer {
     host: HostId,
     /// The peer's mesh public key when it was added; the lower key starts relayed sessions.
     key: PeerKey,
-    /// The pair's token on each relay, by relay index (D401 Q8).
+    /// The pair's token on each relay, by relay index (D402 Q8).
     tokens: Vec<Token>,
     /// Moves the peer to the shim once a relay link is active (see `settle`).
     prepare_handshake: Arc<dyn Fn() -> io::Result<()> + Send + Sync>,

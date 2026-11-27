@@ -1,4 +1,4 @@
-# Relay manager slice 1: relayed against direct, measured (J1254, D401 Q9, D167)
+# Relay manager slice 1: relayed against direct, measured (J1254, D402 Q9, D167)
 
 Driver: `research/relay-manager/relay_perf.py`. Each profile runs in its own
 rootless namespace (J536b's topology, about 30 ms round trip on the public core):
@@ -38,7 +38,7 @@ with eight; relayed 0.070 and 0.193; added RTT 0.0 ms; idle wakeups 12.4 / 13.0
 
 - **Latency** through the relay is the path's own: on this topology it adds
   under a millisecond. A relay far from both ends adds its detour; that is what
-  the home-relay choice (D401 Q5) is for.
+  the home-relay choice (D402 Q5) is for.
 - **Throughput** is the open problem: relayed is 5 times slower than direct with
   one flow and 9 times with eight, and costs 5–8 times the CPU per Gbit on each
   node plus about 1.5 s per Gbit on the relay. The receive-queue fix
@@ -49,11 +49,11 @@ with eight; relayed 0.070 and 0.193; added RTT 0.0 ms; idle wakeups 12.4 / 13.0
 - **Idle cost**: a node with no relayed pair holds no relay connection and adds
   nothing (D81). A node with a relayed pair wakes about 11 times a second while
   idle: the 1 s QUIC keep-alive and the relay paths' 1 s route-MTU poll per
-  connection, each waking the relay runtime. D401 Q5's slow keep-alive home
+  connection, each waking the relay runtime. D402 Q5's slow keep-alive home
   relay and an event-driven MTU watch are the slice 1b fix.
 - **Failover** to a restarted relay takes about 4 s (QUIC reconnect with
-  back-off, a new link, a new WireGuard session). D401 Q7's fast failover
+  back-off, a new link, a new WireGuard session). D402 Q7's fast failover
   between two relays is slice 1b and needs a second relay to fail over to.
-- **Loopback shim against an in-process hand-off** (D401 Q10) was not measured:
+- **Loopback shim against an in-process hand-off** (D402 Q10) was not measured:
   the in-process hand-off does not exist yet. The shim's share is part of the
   CPU per Gbit above.

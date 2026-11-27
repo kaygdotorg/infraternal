@@ -603,7 +603,7 @@ async fn remote_router(
         if let Some(rotation) = rotation {
             listeners.rotate_server_leaf(rotation, identity.certificate);
         }
-        // The server's node serves the relay role when asked to (D401 Q4); the task lives
+        // The server's node serves the relay role when asked to (D402 Q4); the task lives
         // with the listeners.
         #[cfg(feature = "mesh")]
         if let Some(administration) = remote.ca_administration.as_ref()

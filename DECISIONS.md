@@ -5212,7 +5212,7 @@ access (#341 B19).
      - **Unchanged:** from any other device (the web app, a remote CLI) the rule stays the owner with a fresh passkey tap. Updates stay signed (D184) and warm (D217): the CLI asks the same switch, trial and D295 undo that the quiet-window update uses.
      - **Direction (owner, 2026-11-22; not built yet):** once the server becomes untrusted, with the canvas detached into the client and a shared client core, the server must not get root on every node or peer by default. The server may still update itself through root on its own machine, but it needs a passkey to unlock connections. The GUI and automatic updates do not need that passkey.
 
-401. **The relay manager, slice 1: the QUIC relay as a role, pushed relay lists, one home relay, predicted hard pairs and fast failover (owner, 2026-11-25 and 2026-11-26, #580, #483; answers the J1212 grill in `docs/design/relay-manager-grill.md`; amends D391's transport order, extends D163, D197, D285 and D313):**
+402. **The relay manager, slice 1: the QUIC relay as a role, pushed relay lists, one home relay, predicted hard pairs and fast failover (owner, 2026-11-25 and 2026-11-26, #580, #483; answers the J1212 grill in `docs/design/relay-manager-grill.md`; amends D391's transport order, extends D163, D197, D285 and D313):**
      - **Context:** the relay service, its client and the node's relay paths
        are built and reviewed, but no shipped node relays (J1206): nothing
        gives nodes a relay list or credentials, chooses relays, or starts the

@@ -3,7 +3,7 @@
 //! Any node with a server-purpose identity can run it (D313 Q3). It never holds
 //! a mesh key: it sees only the 4-byte link id and opaque ciphertext. A link
 //! forms only when two different hosts asked for the same opaque pair token
-//! (D401 Q8: requests never name the other host); the relay then hands both
+//! (D402 Q8: requests never name the other host); the relay then hands both
 //! the same id and forwards each frame unchanged to the other end, so
 //! forwarding is one table read and one `send_datagram` with no copy. A token
 //! has at most two requesters; a third is ignored, so nobody can join a pair
@@ -730,7 +730,7 @@ impl Relay {
     }
 
     /// Ask the admission callback again about every connected host and close each one it
-    /// now refuses, ending its links (D401 Q3: a leaf checked at its handshake can be
+    /// now refuses, ending its links (D402 Q3: a leaf checked at its handshake can be
     /// revoked later). Call it whenever what admission reads has changed.
     pub fn recheck(&self) {
         let refused: Vec<(HostId, quinn::Connection)> = self
@@ -869,7 +869,7 @@ async fn serve(incoming: quinn::Incoming, shared: Arc<Shared>, pre_auth: PreAuth
             shared.forward(id, datagram);
         }
     };
-    // A host's leaf stops admitting it when it expires, even mid-connection (D401 Q3). One
+    // A host's leaf stops admitting it when it expires, even mid-connection (D402 Q3). One
     // timer per connection, armed once: an idle relay still has no periodic wakeup.
     let expiry = async {
         let left = tls::peer_not_after(&connection).and_then(|not_after| {

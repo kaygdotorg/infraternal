@@ -3,7 +3,7 @@
 use clap::Args;
 use std::{net::SocketAddr, path::PathBuf};
 
-/// Server command-line options for remote serving: leg B and the relay role (D401).
+/// Server command-line options for remote serving: leg B and the relay role (D402).
 #[derive(Debug, Default, Args)]
 pub(crate) struct Options {
     /// Advertised server IP and port for dial-out QUIC and TCP/TLS hosts.
@@ -13,7 +13,7 @@ pub(crate) struct Options {
     /// Private directory containing retained public issuer.pem (XDG default).
     #[arg(long, global = true, requires = "remote_listen")]
     pub remote_ca_dir: Option<PathBuf>,
-    /// UDP port on which the server's own node runs the mesh relay (D401). Off when absent.
+    /// UDP port on which the server's own node runs the mesh relay (D402). Off when absent.
     #[arg(long, global = true, requires = "remote_listen")]
     pub relay_port: Option<u16>,
 }
@@ -49,7 +49,7 @@ pub(crate) async fn serve(
 ) -> Result<Outcome, infraternal_server::ServerError> {
     #[cfg(feature = "remote")]
     {
-        // The relay role runs on the server's own node, with a leaf this server keeps (D401).
+        // The relay role runs on the server's own node, with a leaf this server keeps (D402).
         #[cfg(feature = "plugin-mesh")]
         if let Some(port) = options.relay_port {
             infraternal_server::relay_role::enable(port);

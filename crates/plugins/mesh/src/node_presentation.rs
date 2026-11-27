@@ -284,7 +284,7 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     })
 }
 
-/// Add the relay rows (D401): the relay this machine serves, the relays it knows, and each
+/// Add the relay rows (D402): the relay this machine serves, the relays it knows, and each
 /// relayed pair as "via <relay>, because <reason>" (D285). Absent on builds without relays.
 fn render_relays(relay: &Value, rows: &mut Vec<(&str, String)>) {
     if let Some(serving) = relay.get("serving").filter(|serving| !serving.is_null()) {

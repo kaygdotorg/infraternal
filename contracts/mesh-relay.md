@@ -9,7 +9,7 @@ engine or path selector.
 The relay runtime lives behind build features: `infraternal-plugin-relay/runtime`
 contains the service and client, `infraternal-mesh/relay` contains the bounded
 peer-socket discovery book, and `infraternal-plugin-mesh/relay` contains the
-seam C shim and the node's relay manager. Since D401 slice 1 the Linux
+seam C shim and the node's relay manager. Since D402 slice 1 the Linux
 infraternal agent builds the mesh plugin with `relay`, so every shipped Linux
 node can relay a pair and serve the relay role. The relay CLI declarations can be compiled without the
 runtime. The D243 release check records this slice's static shipping-image
@@ -18,14 +18,14 @@ delta.
 ## Relay identity and connection
 
 Nodes connect to a relay over QUIC using ALPN `infraternal-relay/2` (version 2
-names links by opaque pair tokens, D401 Q8; version 1 named hosts). Both
+names links by opaque pair tokens, D402 Q8; version 1 named hosts). Both
 directions authenticate certificates issued by the deployment CA. A node
 authenticates the relay's configured DNS name, server purpose and its relay
 URI: a relay leaf carries exactly one `urn:infraternal:relay:<uuid>` SAN, and a
 leaf without it (such as the server's leg-B leaf) is refused. Leg B refuses any
 server leaf whose DER contains that prefix, before the leaf can raise the
 server-leaf floor, so a relay's key never answers a dial meant for the server
-(D401 Q3). The relay
+(D402 Q3). The relay
 accepts a node only when its verified host certificate contains exactly one
 `urn:infraternal:host:<uuid>` URI SAN and its admission callback permits that
 host. A client supplied name never establishes identity. Certificate name or
@@ -46,7 +46,7 @@ refused at either limit before a serving task is spawned. Each TLS handshake
 and control-hello wait has a five-second deadline; the source and global slots
 are released when the host is admitted or the attempt ends.
 
-## Relay list and the relay role (D401 Q2–Q4)
+## Relay list and the relay role (D402 Q2–Q4)
 
 The coordinator sends each node the control action `mesh.relays` on the same
 authenticated channel as its mesh configuration, after a configuration was
@@ -104,14 +104,14 @@ control stream. The largest message is 21 bytes.
 | Relay → node | `0x81` Linked | 16-byte pair token, nonzero 32-bit big-endian link ID | 21 bytes |
 | Relay → node | `0x82` Unlinked | 16-byte pair token | 17 bytes |
 
-Requests never name the other host (D401 Q8). Both ends of a pair compute the
+Requests never name the other host (D402 Q8). Both ends of a pair compute the
 same token: the first 16 bytes of HMAC-SHA256 keyed with the pair's X25519
 static-static secret (one end's mesh private key with the other's mesh public
 key) over the label `infraternal relay pair token v1\0` followed by the relay's
 certificate DNS name. Only the two ends know the secret, the token is one-way,
 and it differs per relay, so two relays carrying one pair see unrelated values.
 A peer key whose shared secret is all zero is refused. The relay still learns
-which two of its connections it joins; that is accepted (D401 Q8).
+which two of its connections it joins; that is accepted (D402 Q8).
 
 A relay creates a link only after two different authenticated hosts request
 the same token. A token has at most two requesters; a further request for it
@@ -219,7 +219,7 @@ budgets (#220, D313 Q1).
 The node's relay manager starts one set of relay paths for the listed relays
 with its enrolled host leaf, once the first pair needs a relay, so a node
 whose pairs all go direct holds no relay connection and pays no keep-alive
-(the slow-keep-alive home relay of D401 Q5 follows in slice 1b). After each
+(the slow-keep-alive home relay of D402 Q5 follows in slice 1b). After each
 accepted complete configuration, every
 peer this node may exchange packets with, new or changed, gets one deadline
 5.5 s later (one WireGuard handshake attempt plus a margin). A pair with no

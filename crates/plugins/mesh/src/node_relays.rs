@@ -1,22 +1,22 @@
-//! The node's relay manager: the relay role it may serve and the relay paths its pairs use (D401).
+//! The node's relay manager: the relay role it may serve and the relay paths its pairs use (D402).
 //!
 //! It is a child of `node_actions` so it can reach the node through the same owner lock,
 //! briefly and never across an `.await`. Two independent parts:
 //!
-//! - **The relay role** ([`RelayManager::set_list`] with a `serve` part, D401 Q3/Q4): a QUIC
+//! - **The relay role** ([`RelayManager::set_list`] with a `serve` part, D402 Q3/Q4): a QUIC
 //!   relay on the given UDP port with the relay leaf the coordinator handed over. Admission
 //!   is "a host leaf from the deployment CA, not revoked"; every new list re-checks live
 //!   connections, and each connection also ends when its leaf expires (`relay::Relay`). A
 //!   renewed leaf is swapped in for new handshakes without a restart. The key stays in
 //!   memory only: the role lives as long as the coordinator keeps sending it.
-//! - **The relay paths** (D401 Q2, D285): one [`RelayPaths`] for the listed relays, keyed by
+//! - **The relay paths** (D402 Q2, D285): one [`RelayPaths`] for the listed relays, keyed by
 //!   the relays' names and addresses and the host leaf, started only once a pair needs a relay
 //!   (see [`begin_paths`]), so a node whose pairs all go direct holds no relay connection.
 //!   After a complete configuration,
 //!   every peer this node may exchange packets with gets one deadline [`GRACE`] after its
 //!   configuration was installed. A pair with no `WireGuard` handshake since then is relayed
 //!   ([`relay_path::direct_failed`]) and records why. This is the slice-1 backstop: the
-//!   hard-NAT prediction (D401 Q6) and fast failover (Q7) build on it.
+//!   hard-NAT prediction (D402 Q6) and fast failover (Q7) build on it.
 //!
 //! Idle cost (D81): no timer runs for a pair after its one deadline, and no relay connection
 //! exists until a pair is relayed; from then on the relay paths keep one QUIC connection per
@@ -634,7 +634,7 @@ impl RelayManager {
                 "port": role.relay.local_addr().ok().map(|address| address.port()),
                 "hosts": role.relay.stats().hosts,
                 "links": role.relay.stats().links,
-                // Counters only, never per-pair records (D401 Q8).
+                // Counters only, never per-pair records (D402 Q8).
                 "forwarded": role.relay.stats().forwarded,
                 "dropped": role.relay.stats().dropped,
             })),
@@ -685,7 +685,7 @@ struct PathsStart {
 /// They start only once some pair needs a relay (a pair marked relayed), and are replaced
 /// when the list changed while they run. A node whose pairs all go direct never connects to
 /// a relay, so it pays no keep-alive wakeups (D81); the first relayed pair waits one QUIC
-/// handshake more after its 5.5 s deadline. The slow-keep-alive home relay (D401 Q5) replaces
+/// handshake more after its 5.5 s deadline. The slow-keep-alive home relay (D402 Q5) replaces
 /// this in slice 1b.
 fn begin_paths(state: &Arc<Mutex<State>>) -> Option<PathsStart> {
     let credentials = CREDENTIALS.get().cloned().or_else(test_credentials)?;

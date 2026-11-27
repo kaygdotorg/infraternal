@@ -29,7 +29,7 @@
 //!   write starts from the older durable value.
 //! - The check runs after chain, name and expiry verification, never instead
 //!   of them. It adds ordering, not trust.
-//! - A relay leaf is never the server (D401 Q3). Relay leaves are
+//! - A relay leaf is never the server (D402 Q3). Relay leaves are
 //!   server-purpose too and may name the same host, so a relay's key could
 //!   otherwise answer a dial meant for the server. Every relay leaf carries a
 //!   `urn:infraternal:relay:<uuid>` URI SAN, and `admit` refuses any leaf
@@ -133,7 +133,7 @@ impl ServerLeafFloor {
     }
 }
 
-/// The URI SAN prefix that marks a relay leaf (D401 Q3).
+/// The URI SAN prefix that marks a relay leaf (D402 Q3).
 const RELAY_URI: &[u8] = b"urn:infraternal:relay:";
 
 /// Whether the certificate's DER contains the relay URI prefix anywhere. A URI SAN is stored
@@ -351,7 +351,7 @@ mod tests {
     }
 
     /// A leaf carrying the relay URI is refused before its time is read, so it never raises
-    /// the floor; the same skeleton without it is admitted (D401 Q3).
+    /// the floor; the same skeleton without it is admitted (D402 Q3).
     #[test]
     fn a_relay_leaf_is_never_admitted_as_the_server() {
         let floor = ServerLeafFloor::default();

@@ -1558,7 +1558,7 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
             protocol: Protocol::Udp,
             sources: sources.clone(),
         });
-        // The server node's relay answers the same hosts on its own UDP port (D401).
+        // The server node's relay answers the same hosts on its own UDP port (D402).
         if let Some(port) = args.remote.relay_port {
             listeners.push(Listener {
                 interface: args.host_firewall_remote_interface.clone(),

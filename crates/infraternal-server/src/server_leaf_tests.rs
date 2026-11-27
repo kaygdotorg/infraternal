@@ -334,7 +334,7 @@ async fn a_leaf_that_cannot_be_stored_is_never_served() {
     task.abort();
 }
 
-/// A relay leaf (D401 Q3) verifies for the server purpose and its name like the leg-B leaf,
+/// A relay leaf (D402 Q3) verifies for the server purpose and its name like the leg-B leaf,
 /// carries exactly one relay URI with its id, lasts 7 days, and is stored in its own file:
 /// publishing it leaves the leg-B leaf untouched and `load_relay` reads it back.
 #[test]

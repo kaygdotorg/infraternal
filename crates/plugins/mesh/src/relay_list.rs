@@ -1,4 +1,4 @@
-//! The relay list the coordinator pushes to every node, and the relay role it gives the server's node (D401 Q2–Q4).
+//! The relay list the coordinator pushes to every node, and the relay role it gives the server's node (D402 Q2–Q4).
 //!
 //! Both travel in one action, [`ACTION`] (`mesh.relays`), on the same authenticated
 //! coordinator channel as the mesh configuration. It is a separate action rather than new
@@ -10,7 +10,7 @@
 //! - Every node gets [`RelayList::relays`]: the relays it may use, in the coordinator's
 //!   order. The node keeps the list in its own file ([`save`], [`load`]), so after a restart
 //!   with the server down it still knows its relays (D285).
-//! - Only the server's own node gets [`RelayList::serve`] (slice 1, D401 Q4): run the relay
+//! - Only the server's own node gets [`RelayList::serve`] (slice 1, D402 Q4): run the relay
 //!   role with this relay leaf, on this port, refusing these revoked hosts. The relay is a
 //!   role of the one binary, not part of the server process; the same message can name any
 //!   node later. The node answers with the port it bound ([`RelaysReply::serving`]), and the
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The coordinator-to-node action that carries a [`RelayList`].
 pub const ACTION: &str = "mesh.relays";
-/// Most relays one list names. D401 Q9 keeps a node on at most four relays at once.
+/// Most relays one list names. D402 Q9 keeps a node on at most four relays at once.
 pub const MAX_RELAYS: usize = 8;
 /// Most addresses one relay lists.
 pub const MAX_ADDRESSES: usize = 4;
@@ -64,7 +64,7 @@ pub struct RelayEntry {
     pub addresses: Vec<IpAddr>,
 }
 
-/// The relay role a node runs (D401 Q3, Q4). It holds the relay leaf's private key, so it is
+/// The relay role a node runs (D402 Q3, Q4). It holds the relay leaf's private key, so it is
 /// never written to disk by the node and its `Debug` output hides the key.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

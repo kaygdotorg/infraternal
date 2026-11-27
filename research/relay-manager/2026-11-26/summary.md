@@ -1,4 +1,4 @@
-# Relay manager slice 1: what the relay changes (J1254, D401, #580)
+# Relay manager slice 1: what the relay changes (J1254, D402, #580)
 
 Branch `j1254-relay-manager-1`. Raw receipts (JSON reports, logs) are outside the
 checkout under `~/.cache/codex-scratch/j1254/evidence/` on hd01.
@@ -25,9 +25,9 @@ so the Mbit/s are indicative only):
 Every relayed pair records "no direct handshake within 5 seconds". Three of the
 five profiles that had no path now connect; none of the 13 that go direct opens a
 relay connection (their nodes hold no QUIC connection and pay no keep-alive).
-UDP-blocked and TCP-only networks need the TLS 443 transport (D401 Q1: next
+UDP-blocked and TCP-only networks need the TLS 443 transport (D402 Q1: next
 slice). Every relayed pair waits the 5.5 s backstop plus one QUIC handshake; the
-hard-NAT prediction (D401 Q6) is slice 1b.
+hard-NAT prediction (D402 Q6) is slice 1b.
 
 Two bugs this matrix found on the way, both fixed on the branch: the deadline
 compared the handshake with a time taken after the snapshot applied, so a direct

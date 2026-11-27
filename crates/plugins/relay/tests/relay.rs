@@ -1,4 +1,4 @@
-//! Real quinn relay on loopback: token links, unchanged forwarding, refusals, replacement and probes [313, D401].
+//! Real quinn relay on loopback: token links, unchanged forwarding, refusals, replacement and probes [313, D402].
 #![cfg(feature = "test-support")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -376,7 +376,7 @@ async fn identities_without_admission_host_or_purpose_are_refused() {
         .is_err()
     );
     // A server-purpose leaf with the right name but no relay URI (the server's leg-B kind)
-    // is refused too: only a relay leaf may serve relay connections (D401 Q3).
+    // is refused too: only a relay leaf may serve relay connections (D402 Q3).
     let server_leaf = Relay::start(
         "127.0.0.1:0".parse().unwrap(),
         ca.issue(Purpose::Server(NAME)),
@@ -404,7 +404,7 @@ async fn identities_without_admission_host_or_purpose_are_refused() {
 }
 
 /// A host revoked after its handshake is closed by `recheck`, and its link ends for the
-/// other end too; a host still admitted keeps its connection (D401 Q3).
+/// other end too; a host still admitted keeps its connection (D402 Q3).
 #[tokio::test]
 async fn recheck_closes_a_host_revoked_after_its_handshake() {
     let mut ca = Authority::new();
@@ -437,7 +437,7 @@ async fn recheck_closes_a_host_revoked_after_its_handshake() {
     relay.close().await;
 }
 
-/// A host revoked while the control hello is pending must not register afterward (D401 Q3).
+/// A host revoked while the control hello is pending must not register afterward (D402 Q3).
 #[tokio::test]
 async fn revocation_during_control_hello_must_refuse_host() {
     let mut ca = Authority::new();

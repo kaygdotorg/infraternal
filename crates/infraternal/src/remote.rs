@@ -1171,7 +1171,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     {
         return Err(Failure::IdentityMismatch.error(io::ErrorKind::PermissionDenied));
     }
-    // The mesh node presents this host leaf to relays (D401 Q3), read fresh at each start of
+    // The mesh node presents this host leaf to relays (D402 Q3), read fresh at each start of
     // its relay paths so a renewed leaf is picked up.
     #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
     {

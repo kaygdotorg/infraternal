@@ -2,7 +2,7 @@
 //!
 //! Both ends authenticate with certificates from the deployment CA: a relay
 //! presents a relay leaf (server purpose, its DNS name and exactly one
-//! `urn:infraternal:relay:<uuid>` SAN, D401 Q3), a node its enrolled host leaf
+//! `urn:infraternal:relay:<uuid>` SAN, D402 Q3), a node its enrolled host leaf
 //! (client purpose, `urn:infraternal:host:<uuid>` SAN). Name and purpose checks
 //! are never relaxed. The relay URI keeps the two server-purpose roles apart:
 //! a node dialing a relay refuses a leaf without it (so the server's leg-B leaf
@@ -18,7 +18,7 @@ use rustls::{
 use std::{io, sync::Arc, time::Duration};
 
 /// Relay connections negotiate only this protocol; leg-B connections use their own.
-/// Version 2 names links by opaque pair tokens instead of host ids (D401 Q8); a version-1
+/// Version 2 names links by opaque pair tokens instead of host ids (D402 Q8); a version-1
 /// build never reaches a version-2 relay, so neither misreads the other's requests.
 pub const ALPN: &[u8] = b"infraternal-relay/2";
 

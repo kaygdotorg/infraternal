@@ -245,7 +245,7 @@ impl CertificateAuthority {
         self.sign_server_leaf(name, None, key, start, end)
     }
 
-    /// Issue a relay leaf (D401 Q3): the same server-purpose leaf as [`Self::sign_server`]
+    /// Issue a relay leaf (D402 Q3): the same server-purpose leaf as [`Self::sign_server`]
     /// plus one `urn:infraternal:relay:<relay>` URI SAN. Relay clients accept only a leaf
     /// with that URI, and leg B refuses any leaf with it, so one key never serves both roles.
     /// # Errors

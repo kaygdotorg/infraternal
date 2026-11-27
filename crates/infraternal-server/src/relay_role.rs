@@ -1,4 +1,4 @@
-//! The relay role of the server's own node, slice 1 (D401 Q3, Q4).
+//! The relay role of the server's own node, slice 1 (D402 Q3, Q4).
 //!
 //! The relay is a role of the one binary, not part of the server process: the server's
 //! embedded infraternal agent runs it, like any node could. What the server adds is what only

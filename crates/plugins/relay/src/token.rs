@@ -1,4 +1,4 @@
-//! The pair tokens that name a relayed pair's link on one relay (D401 Q8).
+//! The pair tokens that name a relayed pair's link on one relay (D402 Q8).
 //!
 //! Both ends of a pair compute the same token from a secret only they share; the
 //! relay matches two requests for it without learning who asked (see `wire`).

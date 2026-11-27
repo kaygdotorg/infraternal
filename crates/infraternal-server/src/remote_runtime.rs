@@ -1170,7 +1170,7 @@ impl RemoteListeners {
     }
 
     /// Run `task` for the listeners' lifetime; dropping the listeners aborts it (the server
-    /// node's relay leaf rotation, D401, lives here).
+    /// node's relay leaf rotation, D402, lives here).
     pub(crate) fn keep_task(
         &mut self,
         task: impl std::future::Future<Output = ()> + Send + 'static,

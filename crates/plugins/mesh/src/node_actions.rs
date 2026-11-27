@@ -123,7 +123,7 @@ pub const ACTIONS: &[ActionDef] = &[
         ],
     ),
 ];
-/// The node's relay manager: the relay role and the relay paths (D401).
+/// The node's relay manager: the relay role and the relay paths (D402).
 #[cfg(all(feature = "relay", target_os = "linux"))]
 #[path = "node_relays.rs"]
 mod relays;
@@ -142,7 +142,7 @@ const CONTROL_ACTIONS: &[ActionDef] = &[
         r#"{"type":"object","properties":{"accepted":{"type":"boolean"},"serving":{"type":"integer","minimum":1,"maximum":65535}},"required":["accepted"],"additionalProperties":false}"#,
         Effect::Write,
         &[
-            "The authenticated coordinator sends the relays this node may use (D401 Q2).",
+            "The authenticated coordinator sends the relays this node may use (D402 Q2).",
             "The server's own node also gets the relay role and answers with its bound port.",
         ],
     ),
@@ -307,7 +307,7 @@ pub struct MeshNodePlugin {
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
-    /// The relay role and relay paths (D401); only on a Linux node built with relays.
+    /// The relay role and relay paths (D402); only on a Linux node built with relays.
     #[cfg(all(feature = "relay", target_os = "linux"))]
     relays: Option<relays::RelayManager>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
@@ -441,7 +441,7 @@ impl MeshNodePlugin {
         }));
         Self {
             // The relay paths start from the list saved last, so a restart with the server
-            // down still knows its relays (D285, D401 Q2).
+            // down still knows its relays (D285, D402 Q2).
             #[cfg(all(feature = "relay", target_os = "linux"))]
             relays: Some(relays::RelayManager::new(
                 owner.clone(),
@@ -653,7 +653,7 @@ pub enum Request {
     Status,
     Configure(Box<Chunk>),
     Peers(Page),
-    /// The coordinator's relay list, already checked against its bounds (D401 Q2).
+    /// The coordinator's relay list, already checked against its bounds (D402 Q2).
     Relays(Box<crate::relay_list::RelayList>),
 }
 /// Parse the same bounded strict object accepted by the authenticated dispatcher.

@@ -30,7 +30,7 @@ pub struct Authority {
 pub enum Purpose<'a> {
     /// An enrolled host: client purpose, one host URI.
     Host(HostId),
-    /// A relay: server purpose, this DNS name and a relay URI (D401 Q3).
+    /// A relay: server purpose, this DNS name and a relay URI (D402 Q3).
     Relay(&'a str),
     /// A plain server leaf (the leg-B kind): server purpose, this DNS name, no relay URI.
     Server(&'a str),

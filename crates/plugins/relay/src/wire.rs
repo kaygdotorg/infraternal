@@ -9,7 +9,7 @@
 //!
 //! A connected host is named by the UUID in its verified certificate (the
 //! `urn:infraternal:host:<uuid>` SAN that enrollment issues), and only for
-//! admission. Link requests never name a host (D401 Q8): each end of a pair
+//! admission. Link requests never name a host (D402 Q8): each end of a pair
 //! asks for the same opaque 16-byte [`Token`], which only the two ends can
 //! compute. The relay links two different hosts that asked for the same token,
 //! so it learns which two connections it joins but not, from the request, who
@@ -84,7 +84,7 @@ impl fmt::Debug for HostId {
     }
 }
 
-/// The opaque name both ends of a pair use for their link on one relay (D401 Q8).
+/// The opaque name both ends of a pair use for their link on one relay (D402 Q8).
 ///
 /// It is derived from a secret only the two ends share and from the relay's
 /// name (`token::pair_token`), so a relay sees a random-looking value that differs

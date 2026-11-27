@@ -31,7 +31,7 @@
 //! `remote.pem` and `remote.key` instead; [`load`] reads those until the first
 //! rotation replaces them.
 //!
-//! The same machinery keeps the server node's **relay leaf** (D401 Q3, Q4) in
+//! The same machinery keeps the server node's **relay leaf** (D402 Q3, Q4) in
 //! `active/relay-leaf.pem`: a server-purpose leaf for the same name plus one
 //! `urn:infraternal:relay:<uuid>` URI SAN, valid [`RELAY_LIFETIME`] and
 //! renewed at half-life while the CA is unlocked, like host leaves (D133). It
@@ -75,7 +75,7 @@ const FILE: &str = "remote-leaf.pem";
 /// The relay leaf file, beside the leg-B leaf in the CA's `active` directory.
 const RELAY_FILE: &str = "relay-leaf.pem";
 /// How long one relay leaf is valid: 7 days from `notBefore`, renewed at half of it, the
-/// same rule as host leaves (D401 Q3, D133).
+/// same rule as host leaves (D402 Q3, D133).
 pub(crate) const RELAY_LIFETIME: i64 = 7 * 86_400;
 /// Certificate file written by servers bootstrapped before #559.
 const LEGACY_CERTIFICATE: &str = "remote.pem";
@@ -105,7 +105,7 @@ pub(crate) fn issue(
 }
 
 /// Issue a fresh relay key and relay leaf for `name` with relay id `relay`, by the same
-/// ordering rules as [`issue`] and [`RELAY_LIFETIME`] (D401 Q3). The rotation task issues
+/// ordering rules as [`issue`] and [`RELAY_LIFETIME`] (D402 Q3). The rotation task issues
 /// through [`Rotation::relay`]; this direct form is for tests.
 /// # Errors
 /// The refusals of [`issue`].
@@ -243,7 +243,7 @@ pub(crate) fn publish(directory: &Path, identity: &Identity) -> Result<(), CaErr
     Ok(())
 }
 
-/// Write `identity` as the relay leaf of `directory`, durably and atomically (D401 Q3).
+/// Write `identity` as the relay leaf of `directory`, durably and atomically (D402 Q3).
 /// # Errors
 /// Refuses an unsafe directory or any storage failure; the previous relay leaf stays.
 pub(crate) fn publish_relay(directory: &Path, identity: &Identity) -> Result<(), CaError> {

@@ -51,7 +51,7 @@ both nodes while Access still denies the pair (the steady state of a long-lived 
 opens the pair and measures, so its numbers are comparable with the candidates model. A rebind
 gets no help: the new mapping reaches the peer only through the server's next observation.
 
-The relay model (D401)
+The relay model (D402)
 ----------------------
 `--model relay` is the candidates model plus the relay manager's first slice. A third real node
 sits on the public core and serves the relay role, exactly as the server's own node does: it
@@ -1256,7 +1256,7 @@ def main() -> None:
     parser.add_argument("--model", choices=("production", "candidates", "product", "relay"), default="production",
                         help="what the coordinator publishes: production's local port, the measured candidates "
                              "model, the shipped candidate code with the server's own node (#515), or "
-                             "candidates with a relay node (D401)")
+                             "candidates with a relay node (D402)")
     parser.add_argument("--relay-fixture", help="absolute path of the relay_fixture example (--model relay)")
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()

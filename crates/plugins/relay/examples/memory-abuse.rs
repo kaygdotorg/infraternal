@@ -129,7 +129,7 @@ async fn run_driver() -> Result<(), Box<dyn Error>> {
     for index in 0..PAIRS {
         let a = index * 2;
         let b = a + 1;
-        // Each pair shares one opaque token (D401 Q8); its first host's id is unique per pair.
+        // Each pair shares one opaque token (D402 Q8); its first host's id is unique per pair.
         let pair = Token(clients[a].0.0);
         clients[a].1.link(pair).await?;
         clients[b].1.link(pair).await?;

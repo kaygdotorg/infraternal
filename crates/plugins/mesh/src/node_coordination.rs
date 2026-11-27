@@ -737,7 +737,7 @@ pub async fn run(
             service.set_server_configured(installed.is_some());
         }
         // The relay list follows a delivered configuration, so a node learns its relays from
-        // the same link and only once it is a member (D401 Q2). It is sent only on a change.
+        // the same link and only once it is a member (D402 Q2). It is sent only on a change.
         if binding.is_some() && installed.is_some() {
             relay_updates.borrow_and_update();
             if let Some(updates) = serve_updates.as_mut() {
@@ -1200,7 +1200,7 @@ mod tests {
                         .ok_or("host facts disabled");
                 }
                 if action == crate::relay_list::ACTION {
-                    // This modelled node predates relay lists (D401): it refuses the action,
+                    // This modelled node predates relay lists (D402): it refuses the action,
                     // and the worker stops asking until it reads the identity again.
                     return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
                 }

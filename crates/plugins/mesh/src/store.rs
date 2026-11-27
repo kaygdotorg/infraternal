@@ -1632,7 +1632,7 @@ impl Store {
     }
 
     /// Up to `limit` recently removed hosts, newest first, as canonical UUID text. Old
-    /// tombstones leave the relay list after the seven-day host-leaf lifetime (D401 Q3).
+    /// tombstones leave the relay list after the seven-day host-leaf lifetime (D402 Q3).
     /// # Errors
     /// Returns a fixed public error, not database input.
     pub async fn removed_hosts(&self, limit: usize) -> Result<Vec<String>, &'static str> {

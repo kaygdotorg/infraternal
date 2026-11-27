@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Relay manager slice 1 measurements (D401, J1254): relayed against direct, on one machine.
+"""Relay manager slice 1 measurements (D402, J1254): relayed against direct, on one machine.
 
 What it measures
 ----------------
