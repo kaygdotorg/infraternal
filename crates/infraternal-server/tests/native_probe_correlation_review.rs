@@ -1,4 +1,4 @@
-//! Native route correlation and healthy-socket scheduling regressions [D265, #199].
+//! Native host-link correlation and healthy-socket scheduling regressions [D265, D300, #562].
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 
 // Exercise the shipping implementation rather than a second liveness model.
@@ -9,7 +9,7 @@ use std::time::Duration;
 
 #[tokio::test(start_paused = true)]
 async fn unissued_native_probe_reply_cannot_extend_readiness() {
-    let mut route = liveness::Liveness::new();
+    let mut route = liveness::Liveness::host_link();
     let (nonce, stamp) = route.ping();
     tokio::time::advance(Duration::from_millis(1)).await;
     route.pong(nonce, stamp);
