@@ -46,6 +46,30 @@ test("a throttled layout startup counts down and retries", async ({ page }, info
   expect(sessionRequests).toBe(2);
 });
 
+/** The first visit seeds the public offline shell and a worker-controlled reload only trims it. */
+test("a controlled layout reload skips duplicate offline warming", async ({ page }) => {
+  await page.addInitScript(() => {
+    const post = ServiceWorker.prototype.postMessage;
+    ServiceWorker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
+      if (message && typeof message === "object" && "type" in message && message.type === "cache-drawing-assets"
+        && "paths" in message && Array.isArray(message.paths)) {
+        document.documentElement.dataset.offlineWarm = "warmNavigation" in message && message.warmNavigation === false
+          ? `trim-${message.paths.length}` : "seed";
+      }
+      return Reflect.apply(post, this, [message, ...args]);
+    };
+  });
+  await page.goto("/?mock=1&proto=product&fresh=1");
+  await expect(page.locator(".cl-viewport")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-offline-warm", "seed");
+  await page.waitForFunction(async () => Boolean(
+    navigator.serviceWorker.controller && await (await caches.open("infraternal-drawing-v1")).match("/"),
+  ));
+  await page.reload();
+  await expect(page.locator(".cl-viewport")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-offline-warm", "trim-0");
+});
+
 /** Access failures must not expose a guessed form or browser exception details. */
 test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }, info) => {
   await page.context().request.post("/__mock/reset");
