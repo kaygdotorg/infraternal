@@ -580,7 +580,9 @@ pub(crate) fn run(server_input: &str, requested: &[&str], json_output: bool) -> 
                     "scopes": scopes,
                     "stored": true,
                 }),
-            ),
+            )
+            .with_text_message(format!("Signed in to {origin}."))
+            .with_body(format!("Device  {device}\nAccess  {}", scopes.join(", "))),
             json_output,
             Exit::Ok,
         ),
@@ -612,12 +614,16 @@ async fn run_flow(
             "expires_in_seconds": approval.lifetime.as_secs(),
         }),
     )
-    .with_body(format!(
-        "Open this link and approve with your passkey:\n{link}\n\nCode: {}\nDevice: {device}\nScopes: {}",
+    .with_text_message("Open the link to approve sign-in with your passkey.")
+    .with_panel(format!(
+        "{link}\n\nCode    {}\nDevice  {device}\nAccess  {}",
         approval.user_code,
         scopes.join(", "),
     ))
-    .with_next_step("Keep this command running while you review and approve the device.");
+    .with_next_step("Keep this command running while you review and approve the device.")
+    .with_text_next(vec![
+        "Keep this terminal open until sign-in finishes.".to_owned(),
+    ]);
     // Progress does not mark the command's final result, so Ctrl-C can still emit D303's 130 result.
     print_progress(&progress, json_output, false);
 
