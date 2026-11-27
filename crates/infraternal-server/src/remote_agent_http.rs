@@ -289,7 +289,7 @@ async fn admit<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         "tls",
         remote_tls::accept_over(WebSocketCarrier::new(socket).into_carrier(), &tls).await,
     )?;
-    let authority = trace_test_phase(
+    let authority = match trace_test_phase(
         "host-ledger",
         tokio::time::timeout(
             HANDSHAKE,
@@ -297,7 +297,15 @@ async fn admit<S: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         )
         .await
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?,
-    )?;
+    ) {
+        Ok(authority) => authority,
+        Err(error) => {
+            if crate::remote_accept::retired(&api.store, &connection.peer_fingerprint).await {
+                return crate::remote_link::send_retirement(&connection.channel).await;
+            }
+            return Err(error);
+        }
+    };
     // The peer holds an enrolled host key: from here it may send full frames.
     lift.lift();
     let link = trace_test_phase(

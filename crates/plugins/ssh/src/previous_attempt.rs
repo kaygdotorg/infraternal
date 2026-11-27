@@ -655,6 +655,214 @@ impl FinishedInstall {
     }
 }
 
+/// Fixed inspection and retirement actions for one exact finished install.
+const RETIREMENT: &str = include_str!("previous_retirement.sh");
+
+/// Marker and directory identity from an account's data-only retirement probe.
+pub(crate) struct RetirementCandidate {
+    /// The install's host id, to check against the owner's retired enrollment.
+    pub(crate) host: uuid::Uuid,
+    /// Device and inode to check again before inspecting the runtime.
+    identity: String,
+}
+
+/// An install and its exact receipt, read over the current authenticated SSH connection.
+#[derive(Clone)]
+pub struct Retirement {
+    /// Record consumed by the existing rollback transaction.
+    pub installed: FinishedInstall,
+    /// Enrollment key to compare against the earlier host's server record.
+    pub enrolled: Enrolled,
+    /// Complete record rechecked under the host's setup lock before stopping anything.
+    receipt: String,
+    /// Unit, launcher and data paths to show before consent.
+    paths: Vec<String>,
+}
+
+impl Retirement {
+    /// Find the host marker without asking the account's service manager or runtime helper.
+    pub(crate) async fn candidate(
+        session: &dyn SshSession,
+        mode: InstallMode,
+        as_user: Option<u32>,
+    ) -> Option<RetirementCandidate> {
+        let script = Self::as_account(
+            Self::script(
+                mode,
+                uuid::Uuid::nil(),
+                uuid::Uuid::nil(),
+                "retirement_candidate",
+            ),
+            as_user,
+        );
+        let output = session.run(&script, Input::Empty).await.ok()?;
+        let record = std::str::from_utf8(&output.stdout)
+            .ok()?
+            .strip_suffix('\n')?;
+        let (host, identity) = record.split_once(' ')?;
+        Some(RetirementCandidate {
+            host: canonical_id(host).ok()?,
+            identity: parse_identity(identity).ok()?,
+        })
+    }
+
+    /// Inspect the same marker and inode after the server authorizes the host and execution uid.
+    pub(crate) async fn inspect(
+        session: &dyn SshSession,
+        mode: InstallMode,
+        as_user: Option<u32>,
+        candidate: &RetirementCandidate,
+    ) -> Option<Self> {
+        let action = format!(
+            "retirement_record {} {}",
+            candidate.host.simple(),
+            candidate.identity,
+        );
+        let script = Self::as_account(
+            Self::script(mode, candidate.host, uuid::Uuid::nil(), &action),
+            as_user,
+        );
+        let output = session.run(&script, Input::Empty).await.ok()?;
+        let retirement = Self::parse(&output.stdout).ok()?;
+        (retirement.installed.host == candidate.host
+            && retirement.installed.identity == candidate.identity)
+            .then_some(retirement)
+    }
+
+    /// Inspect an install as its Unix account, without changing its files.
+    #[must_use]
+    pub fn inspection_script(mode: InstallMode) -> String {
+        Self::script(
+            mode,
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            "retirement_record",
+        )
+    }
+
+    /// Parse the host record and a bounded list of absolute, printable paths.
+    ///
+    /// # Errors
+    /// Refuses an incomplete or malformed proof.
+    pub fn parse(output: &[u8]) -> Result<Self, Failure> {
+        let receipt = std::str::from_utf8(output).map_err(|_| refused())?;
+        let mut lines = receipt.strip_suffix('\n').ok_or_else(refused)?.lines();
+        let install = lines
+            .next()
+            .and_then(|line| line.strip_prefix("INFRATERNAL_SETUP_INSTALLED "))
+            .ok_or_else(refused)?;
+        let installed = parse_installed(install)?;
+        if installed.takeover != Takeover::Ready || !installed.terminals.is_empty() {
+            return Err(refused());
+        }
+        let (digest, server) = lines
+            .next()
+            .and_then(|line| line.split_once(' '))
+            .ok_or_else(refused)?;
+        let enrolled = parse_enrolled(digest, server)?.ok_or_else(refused)?;
+        let paths: Vec<_> = lines.collect();
+        if paths.len() != 5
+            || !paths.iter().enumerate().all(|(index, path)| {
+                (index >= 3 && *path == "-")
+                    || (path.starts_with('/')
+                        && path.len() <= 512
+                        && !path.chars().any(char::is_control))
+            })
+        {
+            return Err(refused());
+        }
+        Ok(Self {
+            installed,
+            enrolled,
+            receipt: receipt.trim_end_matches('\n').to_owned(),
+            paths: paths
+                .into_iter()
+                .filter(|path| *path != "-")
+                .map(str::to_owned)
+                .collect(),
+        })
+    }
+
+    /// Paths that can be removed. A same-scope add uses the existing command alias.
+    #[must_use]
+    pub fn review_paths(&self, different_scope: bool) -> Vec<String> {
+        self.paths
+            .iter()
+            .filter(|path| different_scope || !path.ends_with("/infra"))
+            .cloned()
+            .collect()
+    }
+
+    /// Move the proven old install out of the way with the existing durable rollback.
+    /// A different scope retires its copy immediately because the new install is ready.
+    pub(crate) async fn execute(
+        &self,
+        session: &dyn SshSession,
+        mode: InstallMode,
+        token: uuid::Uuid,
+        finish: bool,
+        as_user: Option<u32>,
+    ) -> Result<(), Failure> {
+        let script = Self::as_account(self.execution_script(mode, token, finish), as_user);
+        session.run(&script, Input::Empty).await.map_err(classify)?;
+        Ok(())
+    }
+
+    /// Recheck this exact path list and key under the lock before stopping the service.
+    /// If the new install is already active in another scope, retire the set-aside copy too.
+    #[must_use]
+    pub fn execution_script(&self, mode: InstallMode, token: uuid::Uuid, finish: bool) -> String {
+        let action = if finish {
+            "\nfinish_retired_install"
+        } else {
+            ""
+        };
+        let body = format!(
+            "set_aside_retired_install {}{action}",
+            crate::transport::shell_quote(&self.receipt)
+        );
+        Self::script(mode, self.installed.host, token, &body)
+    }
+
+    /// Drop to the candidate uid before reading its home, without opening a
+    /// login session or inheriting supplementary groups from root.
+    fn as_account(script: String, uid: Option<u32>) -> String {
+        let Some(uid) = uid else {
+            return script;
+        };
+        format!(
+            "set -eu; [ \"$(id -u)\" = 0 ]; \
+             account=$(getent passwd {uid}); \
+             gid=$(printf '%s\\n' \"$account\" | cut -d: -f4); \
+             case \"$gid\" in ''|*[!0-9]*) exit 71;; esac; \
+             for setpriv in /usr/bin/setpriv /bin/setpriv /run/current-system/sw/bin/setpriv; do \
+               if [ -x \"$setpriv\" ]; then exec \"$setpriv\" --reuid {uid} --regid \"$gid\" --clear-groups --no-new-privs --reset-env -- /bin/sh -c {}; fi; \
+             done; exit 71",
+            crate::transport::shell_quote(&format!(
+                "PATH=/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin; export PATH\n{script}"
+            ))
+        )
+    }
+
+    /// Use the same ownership, service and filesystem checks as Take over.
+    fn script(mode: InstallMode, host: uuid::Uuid, token: uuid::Uuid, action: &str) -> String {
+        let user_runtime = if mode == InstallMode::Rootless {
+            r#"runtime="/run/user/$(id -u)"
+if [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ]; then
+  XDG_RUNTIME_DIR="$runtime"; export XDG_RUNTIME_DIR
+fi"#
+        } else {
+            ""
+        };
+        let body = format!(
+            "{user_runtime}\n{}\n{}\n{INSPECT}\n{RETIREMENT}\n{action}\n",
+            crate::install::SETUP_LOCK,
+            crate::install::RUNTIME_CLEANUP
+        );
+        Installation::script_for(mode, host, token, &body)
+    }
+}
+
 /// Decode the check's record after its fixed check lines: clear, a refusal, a
 /// running setup, a set-aside install, or an earlier attempt to recover.
 fn parse(bytes: &[u8]) -> Result<Option<PreviousAttempt>, Failure> {
@@ -1651,7 +1859,7 @@ mod tests {
         let offer = previous
             .stuck_failure(false)
             .with_terminal_confirmation(challenge);
-        assert_eq!(offer.terminal_confirmation(), Some(challenge));
+        assert_eq!(offer.review_confirmation(), Some(challenge));
         let shown = serde_json::to_value(&offer).unwrap();
         assert_eq!(shown["closes"]["terminals"][0]["program"], "bash");
         assert_eq!(shown["closes"]["close_challenge"], challenge.to_string());
@@ -1677,7 +1885,7 @@ mod tests {
             plain
                 .stuck_failure(false)
                 .with_terminal_confirmation(challenge)
-                .terminal_confirmation()
+                .review_confirmation()
                 .is_none()
         );
     }

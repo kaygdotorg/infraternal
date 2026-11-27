@@ -217,8 +217,7 @@ async fn ipv6_wildcard_listener_reuses_binding_and_preserves_ipv4_discovery() {
 #[tokio::test]
 async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usable() {
     let (server, node, root, _) = identities();
-    let (store, _pool, host_id, fingerprint) =
-        super::revocation::admitted_store(&node, &root).await;
+    let (store, pool, host_id, fingerprint) = super::revocation::admitted_store(&node, &root).await;
     let hosts = RemoteHosts::default();
     let primary = RemoteListeners::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -329,7 +328,7 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
     }
 
     // The certificate retains the same TLS settings after durable revocation,
-    // but it must never receive an application Hello or register an actor.
+    // but the only application reply it may receive is final retirement.
     let additional = hosts
         .listen("127.0.0.3".parse().unwrap())
         .await
@@ -340,6 +339,7 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
         .revoke("owner", host_id, now().unwrap())
         .await
         .unwrap();
+    crate::enrollment::authority::tests::finish_fixture_cleanup(&pool, host_id).await;
     assert!(store.admit(&fingerprint, now().unwrap()).await.is_err());
     tokio::time::timeout(Duration::from_secs(3), async {
         while hosts.actor(host_id).await.is_some() {
@@ -368,8 +368,9 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
                     .await
                     .expect("revoked identity's leased TLS channel was not retired");
             assert!(
-                denied.is_err(),
-                "revoked certificate received application bytes on leased TLS"
+                matches!(denied, Ok(frame) if frame.stream_id == 0
+                    && matches!(frame.frame, Frame::Close { code: infraternal_protocol::CLOSE_INSTALL_RETIRED, .. })),
+                "revoked certificate must receive only the final retirement reply on leased TLS"
             );
         }
     }

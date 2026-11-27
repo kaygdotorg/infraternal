@@ -1569,6 +1569,7 @@ async fn run_channel_inner<const SESSION_ONLY: bool>(
             // authenticated peer. Established idle channels have no timer.
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 let hello = receive.next(socket).await?;
+                infraternal_link::supervisor::check_retirement(hello.stream_id, &hello.frame)?;
                 if hello.stream_id != 0 || !matches!(hello.frame, Frame::Hello { version: 1, caps, .. } if socket.native_stream_id().is_none() || caps & infraternal_plugin_api::channel::REMOTE_WRITER_BINDING != 0) {
                     return Err(sessions::invalid("remote control Hello required"));
                 }

@@ -51,6 +51,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
+    case "retire_previous_install": return "Earlier infraternal installation";
     case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
     case "unproven_files": return "Setup found files it didn't create";
     case "no_account": return "Couldn't find that account on this host";
@@ -162,7 +163,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "join-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "unlock" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "join-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "retire-install" | "unlock" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -293,6 +294,17 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       happened: failure.setup_lock ? setupLockLine(failure.setup_lock, true) : failure.message,
       next: failure.setup_lock ? "Wait for it to finish, then try again. A setup that stopped releases the lock within 3 minutes." : "Another setup for this host hasn't finished. Wait for it, or try again in a moment.",
       fix: "retry",
+      tone: "info",
+    };
+    case "retire_previous_install": return {
+      title: failure.retirement && !failure.retirement.install ? `Check for an earlier installation on ${name}?` : `Retire the earlier installation on ${name}?`,
+      happened: failure.retirement && !failure.retirement.install
+        ? "Administrator access is needed to check the system installation. If it belongs to you, you can review its files before deciding."
+        : failure.retirement?.different_scope
+          ? "Once the new installation connects, infraternal will stop and disable the earlier service and remove the paths below."
+          : "Infraternal will stop and disable the earlier service. The files are kept until the new installation connects.",
+      next: "",
+      fix: failure.retirement ? "retire-install" : "none",
       tone: "info",
     };
     // #394: a finished install for a host id this server doesn't know, or files at the setup location that
