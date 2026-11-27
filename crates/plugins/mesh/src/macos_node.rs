@@ -24,6 +24,7 @@ use nix::{
     },
     unistd::{read, write},
 };
+use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -119,7 +120,8 @@ impl RotationKey {
     /// Reports an unavailable random source or an invalid X25519 key.
     fn generate() -> io::Result<(Self, crate::policy::model::PublicKey)> {
         let mut private = Zeroizing::new([0_u8; 32]);
-        openssl::rand::rand_bytes(&mut *private)
+        SystemRandom::new()
+            .fill(&mut *private)
             .map_err(|_| io::Error::other("System random generator unavailable."))?;
         Self::from_private(&private[..])
     }
@@ -239,22 +241,9 @@ fn installed_keys(peers: &[WireGuardPeer]) -> BTreeSet<crate::policy::model::Pub
         .collect()
 }
 
-/// Peer statistics use the same public shape as the Linux kernel adapter.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Counters {
-    #[serde(default)]
-    pub persistent_keepalive_secs: u16,
-    pub handshake_secs: u64,
-    #[cfg(feature = "relay")]
-    #[serde(skip)]
-    pub handshake_nanos: u32,
-    pub received_bytes: u64,
-    pub sent_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<std::net::SocketAddr>,
-}
-
-type CounterMap = BTreeMap<crate::policy::model::PublicKey, Counters>;
+use infraternal_mesh_node::peer_stats::CounterMap;
+/// Peer counters exposed by the Mac node.
+pub use infraternal_mesh_node::peer_stats::Counters;
 
 /// One utun control socket and the interface name the kernel gave it.
 pub(crate) struct OpenUtun {
@@ -815,8 +804,10 @@ fn authority_path(path: &Path) -> PathBuf {
 fn encode_public_state(
     state: &SavedState,
 ) -> io::Result<(Vec<u8>, crate::node_state::AuthorityRecord)> {
-    let (config, authority) =
-        crate::node_state::split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let (config, authority) = infraternal_mesh_node::node_state::split_authority(
+        state.config.as_ref(),
+        state.authority_reset_pending,
+    );
     let mut legacy = state.clone();
     legacy.config = config;
     legacy.authority_reset_pending = false;

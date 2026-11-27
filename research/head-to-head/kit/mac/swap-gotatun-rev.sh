@@ -5,8 +5,8 @@
 #
 #   swap-gotatun-rev.sh <checkout-copy> <rev>
 #
-# 1. Replaces `rev = "..."` on the one `gotatun = ` line of crates/plugins/mesh/Cargo.toml and
-#    checks that exactly that one line changed.
+# 1. Finds the pinned dependency in the workspace manifest or the older plugin manifest,
+#    replaces its revision, and checks that exactly that one line changed.
 # 2. Lets cargo re-resolve Cargo.lock (`cargo metadata`; $CARGO overrides the binary, for tests).
 # 3. Checks that the lock changed ONLY in the three packages from the pinned GotaTun fork.
 #    Upstream extracted gotatun-crypto and gotatun-packet in 0.10.3. Their source must move with
@@ -17,7 +17,10 @@
 set -euo pipefail
 SRC=${1:?checkout copy}; REV=${2:?gotatun rev}
 [[ $REV =~ ^[0-9a-f]{7,40}$ ]] || { echo "gotatun rev must be 7-40 hex digits: $REV" >&2; exit 2; }
-TOML=$SRC/crates/plugins/mesh/Cargo.toml
+TOML=$SRC/Cargo.toml
+if [[ ! -f "$TOML" ]] || ! grep -q '^gotatun = .*rev = "' "$TOML"; then
+  TOML=$SRC/crates/plugins/mesh/Cargo.toml
+fi
 sed -E "/^gotatun = /s/rev = \"[0-9a-f]+\"/rev = \"$REV\"/" "$TOML" > "$TOML.new"
 changed=$(diff "$TOML" "$TOML.new" | grep -c '^>' || true)
 [ "$changed" = 1 ] || { echo "expected exactly one changed line in $TOML, got $changed" >&2; rm -f "$TOML.new"; exit 2; }

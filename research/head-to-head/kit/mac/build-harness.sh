@@ -11,7 +11,7 @@
 # `mac_bench_device` test, the product's own Mac data path with one static peer) and copies it to
 # $KIT_HOME/bin/<name>. Without a GotaTun rev it is the PIN: the GotaTun that the checkout's
 # Cargo.toml and Cargo.lock name, built with `--locked`. With a rev it is a CANDIDATE: the same
-# checkout with only the `gotatun` rev in crates/plugins/mesh/Cargo.toml replaced (any rev of the
+# checkout with only the pinned `gotatun` rev replaced (any rev of the
 # same GotaTun fork that cargo can fetch), built in a throw-away copy, so pin and candidate differ
 # in nothing but the GotaTun source. Typical pair:
 #
@@ -28,7 +28,6 @@ J=${KIT_HOME:-/Users/Shared/h2h-mac}
 BIN=$J/bin; mkdir -p "$BIN"
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../.." && pwd)
-MESH_TOML=crates/plugins/mesh/Cargo.toml
 case ${1:?harness|j421net|daemons} in
   daemons)
     # tailscale, tailscaled and netbird from the source tags pinned in pins.txt (sha256 checked),

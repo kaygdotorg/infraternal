@@ -176,7 +176,7 @@ pub fn valid_lan(reported: &[SocketAddr]) -> Vec<SocketAddr> {
 /// A UDP socket that is only connected, never written to, asks the kernel for the route's
 /// source address; no packet leaves the machine. The destinations are documentation addresses
 /// (RFC 5737, RFC 3849), so the answer follows the default route whatever the network is.
-#[cfg(feature = "agent")]
+#[cfg(feature = "engine")]
 #[must_use]
 pub fn lan_addresses(port: u16, exclude: &[IpAddr]) -> Vec<SocketAddr> {
     use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};

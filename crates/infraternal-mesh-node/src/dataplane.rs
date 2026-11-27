@@ -332,7 +332,7 @@ impl Config {
 /// policy. Nodes use this check to update that metadata without rebuilding peers or losing their
 /// existing handshakes.
 #[must_use]
-pub(crate) fn same_runtime_content(left: &Config, right: &Config) -> bool {
+pub fn same_runtime_content(left: &Config, right: &Config) -> bool {
     let mut normalized = left.clone();
     normalized
         .rotation_operation
@@ -414,11 +414,13 @@ pub struct Chunk {
 /// Public so examples and fixtures build configs with the same value the product uses.
 pub const DEFAULT_DNS_SUFFIX: &str = "internal";
 
+/// Supply the default suffix when the coordinator omits its DNS setting.
 #[cfg(feature = "mesh-dns")]
 fn default_dns_suffix() -> String {
     DEFAULT_DNS_SUFFIX.to_owned()
 }
 
+/// Keep the default suffix out of snapshots for older readers.
 #[cfg(feature = "mesh-dns")]
 #[allow(clippy::ptr_arg)]
 fn is_default_dns_suffix(suffix: &String) -> bool {
@@ -438,6 +440,7 @@ pub struct AccessUpdate {
 
 // Deriving a struct decoder also accepts positional arrays. Range entries are
 // objects on this boundary; forwarding MapAccess preserves duplicate-field refusal.
+/// Read access updates while enforcing the action payload bound.
 fn deserialize_access_updates<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<AccessUpdate>, D::Error> {
