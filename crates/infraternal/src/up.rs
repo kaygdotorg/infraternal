@@ -44,6 +44,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use crate::trusted_program::{ToolError, trusted_program};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 #[cfg(all(
     target_os = "linux",
     any(feature = "plugin-mesh", feature = "plugin-server")
@@ -447,6 +448,7 @@ pub(crate) fn run(
         Err(failure) => return fail(json_output, failure),
     };
     invitation.wipe();
+    system_elevation_prompt().print_to_stderr(json_output);
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
     }
@@ -1101,6 +1103,32 @@ fn take_bytes(
     let value = bytes.get(*offset..end).ok_or(Failure::Permission)?;
     *offset = end;
     Ok(Zeroizing::new(value.to_vec()))
+}
+
+/// Select the elevation explanation matching what this platform's `up` actually installs.
+const fn system_elevation_prompt() -> ElevationPrompt {
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: true,
+        }
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(feature = "plugin-mesh", feature = "plugin-server"))
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: false,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ElevationPrompt::MacosSystemInstall
+    }
 }
 
 /// The one sudo invocation: a root-owned sudo runs this binary's hidden helper.
@@ -2088,5 +2116,17 @@ mod tests {
         let start = lines.iter().position(|line| line.starts_with("ExecStart="));
         assert!(relabel.is_some(), "{unit}");
         assert!(relabel < start, "{unit}");
+    }
+
+    /// #616: `infraternal up` selects the Linux system install elevation prompt
+    /// matching whether this build includes the host input firewall.
+    #[test]
+    fn system_elevation_prompt_matches_linux_features() {
+        assert_eq!(
+            super::system_elevation_prompt(),
+            super::ElevationPrompt::LinuxSystemInstall {
+                host_firewall: cfg!(any(feature = "plugin-mesh", feature = "plugin-server")),
+            }
+        );
     }
 }

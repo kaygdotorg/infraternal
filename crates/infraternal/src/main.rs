@@ -547,8 +547,12 @@ fn run_mesh_service(
                 Exit::Failed,
             );
         };
-        let result =
-            infraternal_plugin_mesh::macos_service::control(operation, system_service, &executable);
+        let result = infraternal_plugin_mesh::macos_service::control(
+            operation,
+            system_service,
+            &executable,
+            json_output,
+        );
         if system_service {
             return report_mesh_service_system_result(&command, result, json_output);
         }
