@@ -23,6 +23,7 @@ async function typeLine(page: Page, line: string): Promise<void> {
   await page.keyboard.press("Enter");
 }
 
+/** The real server instance started per test and disposed afterwards. */
 let server: RealServer;
 test.beforeEach(async () => { server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4679) }); });
 test.afterEach(async () => { await server.dispose(); });

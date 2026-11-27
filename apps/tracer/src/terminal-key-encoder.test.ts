@@ -12,9 +12,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Ghostty, Key, KeyAction, KeyEncoderOption, Mods } from "../vendor/ghostty-web";
 
+/** Directory containing the built vendored ghostty-web artifacts. */
 const VENDOR_DIR = resolve(import.meta.dir, "../vendor/ghostty-web/dist");
+/** Path to the checked-in libghostty-vt WebAssembly binary. */
 const WASM_PATH = resolve(VENDOR_DIR, "ghostty-vt.wasm");
+/** Path to the checked-in ghostty-web ESM wrapper. */
 const JS_PATH = resolve(VENDOR_DIR, "ghostty-web.js");
+/** Shared UTF-8 decoder for comparing encoded escape sequences. */
 const decoder = new TextDecoder();
 
 /** Loads the vendored Ghostty WASM engine once for this file. */

@@ -9,6 +9,7 @@
  */
 import { expect, test, type Browser, type BrowserContext, type Page } from "playwright/test";
 
+/** Base URL of the tracer test double served behind the latency proxy. */
 const baseURL = `http://localhost:${Number(process.env.TRACER_TEST_PORT ?? "4173")}`;
 
 /** Opens a desktop tracer session against the mock server with the requested `platform` string. */
