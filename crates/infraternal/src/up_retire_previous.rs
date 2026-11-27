@@ -33,20 +33,6 @@ fn may_inspect(json_output: bool, root: bool, terminal_input: bool) -> bool {
     !json_output && !root && terminal_input
 }
 
-#[cfg(test)]
-mod tests {
-    //! Check the conditions for collecting interactive retirement consent.
-
-    /// JSON mode makes no retirement offer even with a terminal on stdin.
-    #[test]
-    fn json_mode_skips_retirement_even_with_a_terminal() {
-        assert!(!super::may_inspect(true, false, true));
-        assert!(super::may_inspect(false, false, true));
-        assert!(!super::may_inspect(false, true, true));
-        assert!(!super::may_inspect(false, false, false));
-    }
-}
-
 /// Ask the approval server to verify this exact earlier host and key.
 pub(super) fn preference(plan: &Retirement) -> String {
     format!(
@@ -92,5 +78,19 @@ pub(super) fn finish(plan: &Retirement) {
         eprintln!(
             "The new service is active. Retirement of the earlier installation did not finish."
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Check the conditions for collecting interactive retirement consent.
+
+    /// JSON mode makes no retirement offer even with a terminal on stdin.
+    #[test]
+    fn json_mode_skips_retirement_even_with_a_terminal() {
+        assert!(!super::may_inspect(true, false, true));
+        assert!(super::may_inspect(false, false, true));
+        assert!(!super::may_inspect(false, true, true));
+        assert!(!super::may_inspect(false, false, false));
     }
 }
