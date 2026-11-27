@@ -1,0 +1,240 @@
+# Role: updates ghostty-web's KeyEncoder TypeScript binding to the libghostty-vt 1.0.2 C API (ghostty_key_encoder_set, option/key enum values, and GhosttyString UTF-8 ABI/lifetime).
+diff --git a/lib/ghostty.ts b/lib/ghostty.ts
+index 7af7ed2..9abe2fa 100644
+--- a/lib/ghostty.ts
++++ b/lib/ghostty.ts
+@@ -174,10 +174,14 @@ export class KeyEncoder {
+ 
+   setOption(option: KeyEncoderOption, value: boolean | number): void {
+     const valuePtr = this.exports.ghostty_wasm_alloc_u8();
+-    const view = new DataView(this.exports.memory.buffer);
+-    view.setUint8(valuePtr, typeof value === 'boolean' ? (value ? 1 : 0) : value);
+-    this.exports.ghostty_key_encoder_setopt(this.encoder, option, valuePtr);
+-    this.exports.ghostty_wasm_free_u8(valuePtr);
++    try {
++      const view = new DataView(this.exports.memory.buffer);
++      view.setUint8(valuePtr, typeof value === 'boolean' ? (value ? 1 : 0) : value);
++      const result = this.exports.ghostty_key_encoder_set(this.encoder, option, valuePtr);
++      if (result !== 0) throw new Error(`Failed to set key encoder option ${option}: ${result}`);
++    } finally {
++      this.exports.ghostty_wasm_free_u8(valuePtr);
++    }
+   }
+ 
+   setKittyFlags(flags: KittyKeyFlags): void {
+@@ -187,52 +191,66 @@ export class KeyEncoder {
+   encode(event: KeyEvent): Uint8Array {
+     const eventPtrPtr = this.exports.ghostty_wasm_alloc_opaque();
+     const createResult = this.exports.ghostty_key_event_new(0, eventPtrPtr);
+-    if (createResult !== 0) throw new Error(`Failed to create key event: ${createResult}`);
++    if (createResult !== 0) {
++      this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
++      throw new Error(`Failed to create key event: ${createResult}`);
++    }
+ 
+-    const view = new DataView(this.exports.memory.buffer);
+-    const eventPtr = view.getUint32(eventPtrPtr, true);
++    const eventPtr = new DataView(this.exports.memory.buffer).getUint32(eventPtrPtr, true);
+     this.exports.ghostty_wasm_free_opaque(eventPtrPtr);
+ 
+-    this.exports.ghostty_key_event_set_action(eventPtr, event.action);
+-    this.exports.ghostty_key_event_set_key(eventPtr, event.key);
+-    this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
+-
+-    if (event.utf8) {
+-      const encoder = new TextEncoder();
+-      const utf8Bytes = encoder.encode(event.utf8);
+-      const utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Bytes.length);
+-      new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
+-      this.exports.ghostty_key_event_set_utf8(eventPtr, utf8Ptr, utf8Bytes.length);
+-      this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Bytes.length);
+-    }
+-
++    let utf8Ptr = 0;
++    let utf8Len = 0;
++    let strPtr = 0;
+     const bufferSize = 32;
+-    const bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
+-    const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+-
+-    const encodeResult = this.exports.ghostty_key_encoder_encode(
+-      this.encoder,
+-      eventPtr,
+-      bufPtr,
+-      bufferSize,
+-      writtenPtr
+-    );
++    let bufPtr = 0;
++    let writtenPtr = 0;
+ 
+-    if (encodeResult !== 0) {
+-      this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
+-      this.exports.ghostty_wasm_free_usize(writtenPtr);
+-      this.exports.ghostty_key_event_free(eventPtr);
+-      throw new Error(`Failed to encode key: ${encodeResult}`);
+-    }
++    try {
++      this.exports.ghostty_key_event_set_action(eventPtr, event.action);
++      this.exports.ghostty_key_event_set_key(eventPtr, event.key);
++      this.exports.ghostty_key_event_set_mods(eventPtr, event.mods);
++
++      if (event.utf8) {
++        const encoder = new TextEncoder();
++        const utf8Bytes = encoder.encode(event.utf8);
++        utf8Len = utf8Bytes.length;
++        utf8Ptr = this.exports.ghostty_wasm_alloc_u8_array(utf8Len);
++        new Uint8Array(this.exports.memory.buffer).set(utf8Bytes, utf8Ptr);
++        // libghostty-vt 1.0.2 takes GhosttyString { ptr: *const u8, len: usize } by pointer
++        // in wasm32 and borrows the bytes until the key event is freed.
++        strPtr = this.exports.ghostty_wasm_alloc_u8_array(8);
++        const strView = new DataView(this.exports.memory.buffer);
++        strView.setUint32(strPtr, utf8Ptr, true);
++        strView.setUint32(strPtr + 4, utf8Len, true);
++        const utf8Result = this.exports.ghostty_key_event_set_utf8(eventPtr, strPtr);
++        if (utf8Result !== 0) throw new Error(`Failed to set key event utf8: ${utf8Result}`);
++      }
+ 
+-    const bytesWritten = view.getUint32(writtenPtr, true);
+-    const encoded = new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
++      bufPtr = this.exports.ghostty_wasm_alloc_u8_array(bufferSize);
++      writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+ 
+-    this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
+-    this.exports.ghostty_wasm_free_usize(writtenPtr);
+-    this.exports.ghostty_key_event_free(eventPtr);
++      const encodeResult = this.exports.ghostty_key_encoder_encode(
++        this.encoder,
++        eventPtr,
++        bufPtr,
++        bufferSize,
++        writtenPtr
++      );
+ 
+-    return encoded;
++      if (encodeResult !== 0) {
++        throw new Error(`Failed to encode key: ${encodeResult}`);
++      }
++
++      const bytesWritten = new DataView(this.exports.memory.buffer).getUint32(writtenPtr, true);
++      return new Uint8Array(this.exports.memory.buffer, bufPtr, bytesWritten).slice();
++    } finally {
++      if (bufPtr) this.exports.ghostty_wasm_free_u8_array(bufPtr, bufferSize);
++      if (writtenPtr) this.exports.ghostty_wasm_free_usize(writtenPtr);
++      this.exports.ghostty_key_event_free(eventPtr);
++      if (strPtr) this.exports.ghostty_wasm_free_u8_array(strPtr, 8);
++      if (utf8Ptr) this.exports.ghostty_wasm_free_u8_array(utf8Ptr, utf8Len);
++    }
+   }
+ 
+   dispose(): void {
+diff --git a/lib/types.ts b/lib/types.ts
+index 2205f8f..a9e1326 100644
+--- a/lib/types.ts
++++ b/lib/types.ts
+@@ -106,12 +106,12 @@ export enum KittyKeyFlags {
+  * Key encoder options
+  */
+ export enum KeyEncoderOption {
+-  CURSOR_KEY_APPLICATION = 0, // DEC mode 1
+-  KEYPAD_KEY_APPLICATION = 1, // DEC mode 66
+-  IGNORE_KEYPAD_WITH_NUMLOCK = 2, // DEC mode 1035
+-  ALT_ESC_PREFIX = 3, // DEC mode 1036
+-  MODIFY_OTHER_KEYS_STATE_2 = 4, // xterm modifyOtherKeys
+-  KITTY_KEYBOARD_FLAGS = 5, // Kitty protocol flags
++  CURSOR_KEY_APPLICATION = 1, // DEC mode 1 (0 is GHOSTTY_KEY_ENCODER_OPT_INVALID in libghostty-vt 1.0.2)
++  KEYPAD_KEY_APPLICATION = 2, // DEC mode 66
++  IGNORE_KEYPAD_WITH_NUMLOCK = 3, // DEC mode 1035
++  ALT_ESC_PREFIX = 4, // DEC mode 1036
++  MODIFY_OTHER_KEYS_STATE_2 = 5, // xterm modifyOtherKeys
++  KITTY_KEYBOARD_FLAGS = 6, // Kitty protocol flags
+ }
+ 
+ /**
+@@ -288,39 +288,40 @@ export enum Key {
+   F23 = 143,
+   F24 = 144,
+   F25 = 145,
+-  FN_LOCK = 146,
+-  PRINT_SCREEN = 147,
+-  SCROLL_LOCK = 148,
+-  PAUSE = 149,
++  FN = 146,
++  FN_LOCK = 147,
++  PRINT_SCREEN = 148,
++  SCROLL_LOCK = 149,
++  PAUSE = 150,
+ 
+   // Media Keys
+-  BROWSER_BACK = 150,
+-  BROWSER_FAVORITES = 151,
+-  BROWSER_FORWARD = 152,
+-  BROWSER_HOME = 153,
+-  BROWSER_REFRESH = 154,
+-  BROWSER_SEARCH = 155,
+-  BROWSER_STOP = 156,
+-  EJECT = 157,
+-  LAUNCH_APP_1 = 158,
+-  LAUNCH_APP_2 = 159,
+-  LAUNCH_MAIL = 160,
+-  MEDIA_PLAY_PAUSE = 161,
+-  MEDIA_SELECT = 162,
+-  MEDIA_STOP = 163,
+-  MEDIA_TRACK_NEXT = 164,
+-  MEDIA_TRACK_PREVIOUS = 165,
+-  POWER = 166,
+-  SLEEP = 167,
+-  AUDIO_VOLUME_DOWN = 168,
+-  AUDIO_VOLUME_MUTE = 169,
+-  AUDIO_VOLUME_UP = 170,
+-  WAKE_UP = 171,
++  BROWSER_BACK = 151,
++  BROWSER_FAVORITES = 152,
++  BROWSER_FORWARD = 153,
++  BROWSER_HOME = 154,
++  BROWSER_REFRESH = 155,
++  BROWSER_SEARCH = 156,
++  BROWSER_STOP = 157,
++  EJECT = 158,
++  LAUNCH_APP_1 = 159,
++  LAUNCH_APP_2 = 160,
++  LAUNCH_MAIL = 161,
++  MEDIA_PLAY_PAUSE = 162,
++  MEDIA_SELECT = 163,
++  MEDIA_STOP = 164,
++  MEDIA_TRACK_NEXT = 165,
++  MEDIA_TRACK_PREVIOUS = 166,
++  POWER = 167,
++  SLEEP = 168,
++  AUDIO_VOLUME_DOWN = 169,
++  AUDIO_VOLUME_MUTE = 170,
++  AUDIO_VOLUME_UP = 171,
++  WAKE_UP = 172,
+ 
+   // Clipboard Keys
+-  COPY = 172,
+-  CUT = 173,
+-  PASTE = 174,
++  COPY = 173,
++  CUT = 174,
++  PASTE = 175,
+ }
+ 
+ /**
+@@ -390,7 +391,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
+   // Key encoder
+   ghostty_key_encoder_new(allocator: number, encoderPtrPtr: number): number;
+   ghostty_key_encoder_free(encoder: number): void;
+-  ghostty_key_encoder_setopt(encoder: number, option: number, valuePtr: number): number;
++  ghostty_key_encoder_set(encoder: number, option: number, valuePtr: number): number;
+   ghostty_key_encoder_encode(
+     encoder: number,
+     eventPtr: number,
+@@ -405,7 +406,7 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
+   ghostty_key_event_set_action(event: number, action: number): void;
+   ghostty_key_event_set_key(event: number, key: number): void;
+   ghostty_key_event_set_mods(event: number, mods: number): void;
+-  ghostty_key_event_set_utf8(event: number, ptr: number, len: number): void;
++  ghostty_key_event_set_utf8(event: number, stringPtr: number): number;
+ 
+   // Terminal lifecycle
+   ghostty_web_terminal_new(cols: number, rows: number): TerminalHandle;

@@ -488,14 +488,14 @@ declare interface GhosttyWasmExports extends WebAssembly.Exports {
     ghostty_wasm_free_sgr_attribute(ptr: number): void;
     ghostty_key_encoder_new(allocator: number, encoderPtrPtr: number): number;
     ghostty_key_encoder_free(encoder: number): void;
-    ghostty_key_encoder_setopt(encoder: number, option: number, valuePtr: number): number;
+    ghostty_key_encoder_set(encoder: number, option: number, valuePtr: number): number;
     ghostty_key_encoder_encode(encoder: number, eventPtr: number, bufPtr: number, bufLen: number, writtenPtr: number): number;
     ghostty_key_event_new(allocator: number, eventPtrPtr: number): number;
     ghostty_key_event_free(event: number): void;
     ghostty_key_event_set_action(event: number, action: number): void;
     ghostty_key_event_set_key(event: number, key: number): void;
     ghostty_key_event_set_mods(event: number, mods: number): void;
-    ghostty_key_event_set_utf8(event: number, ptr: number, len: number): void;
+    ghostty_key_event_set_utf8(event: number, stringPtr: number): number;
     ghostty_web_terminal_new(cols: number, rows: number): TerminalHandle;
     ghostty_web_terminal_new_with_config(cols: number, rows: number, configPtr: number): TerminalHandle;
     ghostty_web_terminal_free(terminal: TerminalHandle): void;
@@ -1232,35 +1232,36 @@ export declare enum Key {
     F23 = 143,
     F24 = 144,
     F25 = 145,
-    FN_LOCK = 146,
-    PRINT_SCREEN = 147,
-    SCROLL_LOCK = 148,
-    PAUSE = 149,
-    BROWSER_BACK = 150,
-    BROWSER_FAVORITES = 151,
-    BROWSER_FORWARD = 152,
-    BROWSER_HOME = 153,
-    BROWSER_REFRESH = 154,
-    BROWSER_SEARCH = 155,
-    BROWSER_STOP = 156,
-    EJECT = 157,
-    LAUNCH_APP_1 = 158,
-    LAUNCH_APP_2 = 159,
-    LAUNCH_MAIL = 160,
-    MEDIA_PLAY_PAUSE = 161,
-    MEDIA_SELECT = 162,
-    MEDIA_STOP = 163,
-    MEDIA_TRACK_NEXT = 164,
-    MEDIA_TRACK_PREVIOUS = 165,
-    POWER = 166,
-    SLEEP = 167,
-    AUDIO_VOLUME_DOWN = 168,
-    AUDIO_VOLUME_MUTE = 169,
-    AUDIO_VOLUME_UP = 170,
-    WAKE_UP = 171,
-    COPY = 172,
-    CUT = 173,
-    PASTE = 174
+    FN = 146,
+    FN_LOCK = 147,
+    PRINT_SCREEN = 148,
+    SCROLL_LOCK = 149,
+    PAUSE = 150,
+    BROWSER_BACK = 151,
+    BROWSER_FAVORITES = 152,
+    BROWSER_FORWARD = 153,
+    BROWSER_HOME = 154,
+    BROWSER_REFRESH = 155,
+    BROWSER_SEARCH = 156,
+    BROWSER_STOP = 157,
+    EJECT = 158,
+    LAUNCH_APP_1 = 159,
+    LAUNCH_APP_2 = 160,
+    LAUNCH_MAIL = 161,
+    MEDIA_PLAY_PAUSE = 162,
+    MEDIA_SELECT = 163,
+    MEDIA_STOP = 164,
+    MEDIA_TRACK_NEXT = 165,
+    MEDIA_TRACK_PREVIOUS = 166,
+    POWER = 167,
+    SLEEP = 168,
+    AUDIO_VOLUME_DOWN = 169,
+    AUDIO_VOLUME_MUTE = 170,
+    AUDIO_VOLUME_UP = 171,
+    WAKE_UP = 172,
+    COPY = 173,
+    CUT = 174,
+    PASTE = 175
 }
 
 /**
@@ -1289,12 +1290,12 @@ export declare class KeyEncoder {
  * Key encoder options
  */
 export declare enum KeyEncoderOption {
-    CURSOR_KEY_APPLICATION = 0,// DEC mode 1
-    KEYPAD_KEY_APPLICATION = 1,// DEC mode 66
-    IGNORE_KEYPAD_WITH_NUMLOCK = 2,// DEC mode 1035
-    ALT_ESC_PREFIX = 3,// DEC mode 1036
-    MODIFY_OTHER_KEYS_STATE_2 = 4,// xterm modifyOtherKeys
-    KITTY_KEYBOARD_FLAGS = 5
+    CURSOR_KEY_APPLICATION = 1,// DEC mode 1 (0 is GHOSTTY_KEY_ENCODER_OPT_INVALID in libghostty-vt 1.0.2)
+    KEYPAD_KEY_APPLICATION = 2,// DEC mode 66
+    IGNORE_KEYPAD_WITH_NUMLOCK = 3,// DEC mode 1035
+    ALT_ESC_PREFIX = 4,// DEC mode 1036
+    MODIFY_OTHER_KEYS_STATE_2 = 5,// xterm modifyOtherKeys
+    KITTY_KEYBOARD_FLAGS = 6
 }
 
 /**

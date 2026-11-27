@@ -87,6 +87,8 @@ git -C "$source_dir" apply "$vendor_dir/renderer-disposal.patch"
 git -C "$source_dir" apply "$vendor_dir/buffered-writes.patch"
 # The engine calls the page makes are named ghostty_web_*; last, so the patches above still read as upstream.
 git -C "$source_dir" apply "$vendor_dir/web-api-names.patch"
+# Align KeyEncoder calls, option/key enums and GhosttyString UTF-8 ABI with libghostty-vt 1.0.2 (#607).
+git -C "$source_dir" apply "$vendor_dir/key-encoder-102.patch"
 
 # The core: the signed libghostty-vt release, checked against the same pinned hashes and
 # key as scripts/build-vt, then built offline from its own dependency archive.
