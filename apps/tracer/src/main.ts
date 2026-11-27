@@ -1,5 +1,5 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession, countDownToRetry, recoveryAuth, isDeviceUserCode, type AuthStatus } from "./auth";
+import { AuthError, checkStatus, checkSession, countDownToRetry, recoveryAuth, isDeviceUserCode, type AuthSession, type AuthStatus } from "./auth";
 import { readApprovalLink, type ApprovalKind, type ApprovalLink } from "./approval-link";
 import { registerSignOut } from "./sign-out";
 import { warmOfflineShell } from "./offline-cache";
@@ -503,7 +503,7 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // another network round trip; the socket still checks authority on connection.
   const generation = ++sessionGeneration;
   sessionStarted = performance.timeOrigin + performance.now();
-  let identity: DrawingIdentity | undefined;
+  let identity: DrawingIdentity | AuthSession | undefined;
   try {
     identity = knownSession ?? await checkSession();
   } catch (error: unknown) {
