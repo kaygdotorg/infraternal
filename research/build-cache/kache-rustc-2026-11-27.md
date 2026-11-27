@@ -105,6 +105,22 @@ retained the original control timing.
 
 [Static build evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107167)
 
+## Workspace test comparison
+
+The wrapper-free `--no-run` build passed in 906.072 s wall,
+2,632.056 s user CPU and 328.899 s system CPU. The target peaked
+at 14,404,661,248 allocated bytes, including both static profiles.
+One-minute load min/median/max was 12.93/23.65/44.30.
+
+The first runtime fixture used `unshare --map-current-user`. It preserved
+the invoking UID, but the unmapped host root UID appeared as 65534 on
+`/home` and `/mnt/build`. Trusted-path and permission-sensitive tests
+therefore failed even in the control. Those results cannot qualify the
+wrapper. A preflight verified a temporary loopback-only network and mount
+namespace that retains the original UID mapping. Its launcher drops to
+the build account before executing any checkout code and mounts a
+private `/run` to isolate the host system bus.
+
 ## Cache sharing boundary
 
 Jobs under the same Unix account can share a compiler store and daemon
