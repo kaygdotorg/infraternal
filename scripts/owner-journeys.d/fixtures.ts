@@ -291,7 +291,9 @@ export async function runFixture(config: Fixture, h: Harness) {
         else await h.skip("embedded-after-warm", "No warm update was verified");
       }
       if (config.linux) await lifecycle(h, desktop.page, config.linux, "linux");
-      else await h.skip("linux-lifecycle", "No isolated Linux fixture was configured");
+      else await h.step("linux-fixture", undefined, async () => {
+        throw new Error("No isolated Linux fixture was configured");
+      });
     } finally {
       await desktop.close();
     }
@@ -300,7 +302,9 @@ export async function runFixture(config: Fixture, h: Harness) {
   if (phone) {
     try {
       if (config.mac) await lifecycle(h, phone.page, config.mac, "mac");
-      else await h.skip("mac-lifecycle", "No leased Mac fixture was configured");
+      else await h.step("mac-fixture", undefined, async () => {
+        throw new Error("No leased Mac fixture was configured");
+      });
     }
     finally { await phone.close(); }
   } else await h.skip("mac-lifecycle", "iPhone-sized sign-in failed");

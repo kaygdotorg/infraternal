@@ -2,30 +2,30 @@
 # Owner journeys after test deploys
 
 `scripts/owner-journeys` signs in to https://test.ssh.kayg.org using compute01's
-existing test-admin helper. It signs in at 1440 × 900 and 393 × 852 in Chromium. The fixture run opens fresh shells on the joined hosts. The probe requires a marker from the actual shell and
-checks the bytes for Ctrl+A, Ctrl+C, Ctrl+D, Ctrl+R and the four arrows on the wire and at
-the remote PTY. A separate check interrupts a foreground sleep with Ctrl+C. It
+existing test-admin helper. It signs in at 1440 × 900 and 393 × 852 in
+Chromium. The fixture run opens fresh shells on the joined hosts. The probe
+requires a marker from the actual shell and checks the bytes for Ctrl+A,
+Ctrl+C, Ctrl+D, Ctrl+R and the four arrows on the wire and at the remote PTY. A separate check interrupts a foreground sleep with Ctrl+C. It
 asks the sidebar to end only the session it just created. The iPhone row
 exercises the phone layout in Chromium at iPhone size. Safari and physical
 iPhone behavior need separate device runs.
 
 ## Test deploy hook
 
-Run the hook from an independently reviewed checkout on compute01 with Bun on
-PATH and the test-admin helper and Chromium already installed. The deploy
-operator waits for the test deploy and CA unlock, then calls this hook before
-promotion. Give the hook the SHA of the **deployed** build, which may differ
-from the reviewed suite's checkout.
+The orchestrator can call the hd01 wrapper after the test deployment and CA
+unlock. Add the following line inside the `test)` branch of
+`~/orch/state/deploy.sh`, immediately after the test-admin sign-in.
 
-```sh
-deploy.sh "$sha" test &&
-  netbird ssh claude@infraternal-dev-01-compute01.vpn.kayg.org \
-    "cd ~/worktrees/owner-journeys-reviewed && PATH=\$HOME/.nix-profile/bin:\$PATH \
-     scripts/owner-journeys-after-deploy '$sha' \$HOME/.config/infraternal-owner-journeys.json"
+```bash
+bash "$HOME/orch/state/owner-journeys-after-test.sh" "$R"
 ```
 
-If Bun comes from the dev shell, use `nix develop -c` before the hook.
-The hook acquires one build slot. Do not wrap it in a second slot. Keep the
+The wrapper runs a reviewed checkout on compute01 at
+`~/worktrees/owner-journeys-reviewed` with Bun from its dev shell. It expects
+`~/.config/infraternal-owner-journeys.json` and the existing test-admin
+helper and Chromium installation. The deployed SHA may differ from the
+reviewed suite's checkout. The hook acquires one build slot.
+Keep the
 same fixture leases through the entire full run and restore the fixture VM
 snapshots on interruption or a failed release check. The test service can
 share a machine with production. The warm helper requires the running
