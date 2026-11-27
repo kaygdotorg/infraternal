@@ -109,6 +109,9 @@ url = { workspace = true, optional = true }
 # kernel's write-space report after every datagram sent woke the parked engine
 # worker: 82-94% of an idle hub's wakeups (#260, J1255, D81).
 # Exact host routes use a seeded cache rebuilt from the allowed-IP trie (#260, J1266).
+# Retry the first unanswered active handshake in the next admission window, and
+# clear a peer's confirmed endpoint when its last session expires, resets, or
+# rotates keys (#260, J1265).
 # Deferring the initial timer-queue report in `DeviceState::add_peer` until after
 # `Arc::new_cyclic` and `packet_lookup.insert_peer` keeps dynamically added peers from
 # being dropped from `timer_queue` permanently (#605, J1299).
