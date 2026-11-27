@@ -24,7 +24,7 @@ test("a throttled layout startup counts down and retries", async ({ page }, info
       await route.continue();
     }
   });
-  await page.goto("/?mock=1");
+  await page.goto("/?mock=1&proto=product&fresh=1");
   await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible();
   await expect(page.getByText("Your layout will load when the connection is ready.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Retrying in 3s" })).toBeDisabled();
@@ -41,7 +41,7 @@ test("a throttled layout startup counts down and retries", async ({ page }, info
   expect(sessionRequests).toBe(1);
   await page.clock.fastForward(2000);
   await page.clock.resume();
-  await expect(page.locator("#tree")).toBeVisible();
+  await expect(page.locator(".cl-viewport")).toBeVisible();
   expect(sessionRequests).toBe(2);
 });
 

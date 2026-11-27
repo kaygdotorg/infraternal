@@ -49,6 +49,7 @@ interface CredentialOutputs extends Record<string, unknown> {
 
 /** Carries safe guidance, the HTTP code and an optional retry deadline. */
 export class AuthError extends Error {
+  /** Capture the safe error details supplied by the auth adapter. */
   constructor(message: string, readonly status?: number, readonly retryAt?: number) {
     super(message);
     this.name = "AuthError";

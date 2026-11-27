@@ -760,8 +760,10 @@ async fn public_status(auth: &Auth, value: Value) -> super::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    //! Browser Origin and network-budget checks for the auth adapter.
     use super::*;
 
+    /// Same-origin browser calls share a network window and CLI polls have a separate budget.
     #[tokio::test]
     async fn admission_partitions_reset_without_trusting_forwarded_headers() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

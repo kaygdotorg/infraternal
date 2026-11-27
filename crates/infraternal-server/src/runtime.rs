@@ -1311,7 +1311,7 @@ async fn source_admission(
         match policy.auth.admission_session(token, now, permit).await {
             Ok(Some(session)) => {
                 if let Err(response) = admit_temporal_request(
-                    &mut policy.sessions.lock().await,
+                    &mut *policy.sessions.lock().await,
                     session,
                     now,
                     BROWSER_SESSION_PER_MINUTE,
@@ -3045,6 +3045,7 @@ mod reviewer_admission {
             .unwrap()
             .status()
     }
+    /// Verify all recovery routes share the source budget and ignore untrusted forwarding.
     #[tokio::test]
     async fn reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass() {
         let policy = SourceAdmission::new(
