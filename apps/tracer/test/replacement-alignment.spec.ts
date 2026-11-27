@@ -4,7 +4,7 @@
  * is the most basic thing here", 2026-11-01, #242): when something takes the place of a row's words, its first letter is on
  * the x of the label it replaced, on the same centre line and in the same size.
  *
- * - The in-row question ("End session? End · Cancel"): its left edge is the row label's, and the neighbouring rows' labels';
+ * - The in-row question ("End session? End · Keep"): its left edge is the row label's, and the neighbouring rows' labels';
  *   the status dot keeps its column and sits on the question's centre line; the answers are not clipped by the row.
  * - The rename field: the text's left edge is the label's.
  * Measured at 1440 x 900 DPR 2 and 393 x 852 DPR 3, tolerance 0.5 px.
@@ -83,7 +83,7 @@ for (const [size, viewport, scale, touch] of [["desktop 1440×900 at DPR 2", { w
       expect(m.labelShown).toBe("0");
       expect(Math.abs(m.dotCy - m.asked.cy), "the dot and the question on one centre line").toBeLessThanOrEqual(1);
       // The answers follow on the same line and the row does not clip them.
-      expect(m.cancelRight, "Cancel inside the row").toBeLessThanOrEqual(m.rowRight + 0.5);
+      expect(m.cancelRight, "Keep inside the row").toBeLessThanOrEqual(m.rowRight + 0.5);
       await page.keyboard.press("Escape");
     });
 

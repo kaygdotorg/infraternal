@@ -157,7 +157,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
-  const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
+  const inventory = createLiveInventory({
+    accountId: options.accountId,
+    host: options.host.name,
+    async requestEnd(id) { await connection.call("terminal.end", { session_id: id }); },
+    onEndError() { core.toast.show({ message: "Couldn't end the session. Check the host connection and try again.", tone: "error" }); },
+  });
   let disposed = false, hostsStarted = false, hostsReady = false;
   let startHosts = (): void => {};
   let offHosts: (() => void) | undefined;

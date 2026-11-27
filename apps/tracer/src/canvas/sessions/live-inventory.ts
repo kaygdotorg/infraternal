@@ -3,10 +3,9 @@
  *
  * The server pushes its account-filtered intersection of persisted rows and the infraternal agent's live shim
  * snapshot. Local storage keeps names and frecency only until that first snapshot; it never establishes liveness.
- * A session is open while a window of this account shows it and detached when its window closed (D178: closing never ends a session). It is honest about what it
- * cannot do: it cannot end a session, read a session's output or exit code, or know which device typed last, so
- * `can` leaves those verbs out and the manager does not draw them. Renaming works: the name is the window's
- * name, saved in the canvas document, and a rename pins it.
+ * A session is open while a window of this account shows it and detached when its window closes. Closing a window
+ * leaves its shell running (D178). An explicit end waits for the host to confirm exit. A rename pins the name in
+ * the canvas document.
  *
  * After a new local session has appeared in a census, a complete host census is final for missing shims: absent rows become exited and `gone`, and are removed from
  * local storage so a later load never offers them as running. Its bounded exit-status sidecar keeps a saved code
@@ -33,7 +32,8 @@ export interface LiveInventory extends SessionInventory {
   dispose(): void;
 }
 
-export function createLiveInventory(options: { accountId: string; host: string }): LiveInventory {
+/** Builds the account inventory, with an optional request that waits for a deliberate shell exit. */
+export function createLiveInventory(options: { accountId: string; host: string; requestEnd?(id: string): Promise<void>; onEndError?(): void }): LiveInventory {
   const records = new Map<string, SessionRecord>();
   const owners = new Map<string, string>();
   // Only windows opened on this device need status after its sidecar is superseded.
@@ -41,6 +41,7 @@ export function createLiveInventory(options: { accountId: string; host: string }
   // A Result can overtake a pre-open census; only a positive census makes absence conclusive.
   const awaitingCensus = new Set<string>();
   const verifiedHosts = new Set<string>();
+  const ending = new Set<string>();
   let top = 0;
   let shared: Set<string> | undefined;
   const cache = createAccountNotifications();
@@ -48,9 +49,9 @@ export function createLiveInventory(options: { accountId: string; host: string }
   const emit = cache.notify;
   const blank = (id: string, name: string): SessionRecord => ({ id, name, pinned: false, state: "detached", lastOutput: "", age: "", viewers: 0, size: "", frecency: 0, screen: [] });
 
-  const can: InventoryCapabilities = { rename: true, end: false, runAgain: false, dismiss: false };
+  const can: InventoryCapabilities = { rename: true, end: options.requestEnd !== undefined, runAgain: false, dismiss: false };
   const only = (host: string, id: string): boolean => owners.get(id) === host;
-  return {
+  const inventory: LiveInventory = {
     can,
     setLayout(document) {
       const targets = documentWindows(document).flatMap((window) => window.target.type === "session" ? [window.target] : []);
@@ -105,7 +106,22 @@ export function createLiveInventory(options: { accountId: string; host: string }
       save();
       emit();
     },
-    end() { /* not offered: the shim cannot be asked yet (#100) */ },
+    async end(host, id) {
+      if (!options.requestEnd || !only(host, id) || ending.has(id)) return false;
+      if (records.get(id)?.gone) return true;
+      ending.add(id);
+      try {
+        await options.requestEnd(id);
+        inventory.gone(host, id);
+        return true;
+      } catch {
+        if (records.get(id)?.gone) return true;
+        options.onEndError?.();
+        return false;
+      } finally {
+        ending.delete(id);
+      }
+    },
     runAgain() { /* not offered */ },
     dismiss() { /* not offered: an ended session is forgotten at the next load (it is not saved) */ },
     // A final host answer stays exited even when another window selects the session.
@@ -176,4 +192,5 @@ export function createLiveInventory(options: { accountId: string; host: string }
     onChange: cache.subscribe,
     dispose: cache.dispose,
   };
+  return inventory;
 }

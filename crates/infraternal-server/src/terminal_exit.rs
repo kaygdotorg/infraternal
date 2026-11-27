@@ -5,8 +5,7 @@
 //! mass exit (a host reboot, a `kill` of many shells) those writes would fight
 //! every other sqlx writer for SQLite's lock in the busy handler (#562), so
 //! [`record_on_writer`] runs the same statement on the D379 writer thread
-//! when the server has one. [`record`] is the sqlx version for in-memory
-//! test databases.
+//! when the server has one, with an sqlx fallback for in-memory databases.
 use crate::auth::Auth;
 use infraternal_db::rusqlite::params;
 use serde::Deserialize;
@@ -58,6 +57,7 @@ fn validate(session: &[u8; 16], cursor: u64, event: &[u8]) -> Result<Option<i32>
 /// The caller binds the notice to its admitted attachment and ordered output cursor.
 /// A duplicate retains the first closure timestamp; stale authority cannot publish it.
 /// This is the sqlx version, used when the server has no D379 writer.
+#[cfg(test)]
 pub(crate) async fn record(
     pool: &SqlitePool,
     user: &str,
@@ -69,6 +69,18 @@ pub(crate) async fn record(
     let Some(status) = validate(session, cursor, event)? else {
         return Ok(false);
     };
+    record_status(pool, user, token, session, status).await?;
+    Ok(true)
+}
+
+/// Store a verified shell status for this account under its current login authority.
+async fn record_status(
+    pool: &SqlitePool,
+    user: &str,
+    token: &str,
+    session: &[u8; 16],
+    status: i32,
+) -> Result<(), ()> {
     // The write and authority predicate serialize logout/ownership changes.
     // Transport Close never enters this path: disconnect is resumable.
     // A census can establish closure before saved status arrives. Fill an unknown
@@ -86,7 +98,7 @@ pub(crate) async fn record(
     if changed.rows_affected() != 1 {
         return Err(());
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Same rules and SQL as [`record`], run on the D379 writer thread (#562) when
@@ -100,11 +112,24 @@ pub(crate) async fn record_on_writer(
     cursor: u64,
     event: &[u8],
 ) -> Result<bool, ()> {
-    let Some(db) = auth.database() else {
-        return record(pool, user, token, session, cursor, event).await;
-    };
     let Some(status) = validate(session, cursor, event)? else {
         return Ok(false);
+    };
+    record_status_on_writer(auth, pool, user, token, session, status).await?;
+    Ok(true)
+}
+
+/// Persist an exit verified by the caller, including a detached terminal ended explicitly.
+pub(crate) async fn record_status_on_writer(
+    auth: &Auth,
+    pool: &SqlitePool,
+    user: &str,
+    token: &str,
+    session: &[u8; 16],
+    status: i32,
+) -> Result<(), ()> {
+    let Some(db) = auth.database() else {
+        return record_status(pool, user, token, session, status).await;
     };
     let (session, user, hash) = (*session, user.to_owned(), crate::auth::hash(token));
     let changed = db
@@ -123,5 +148,5 @@ pub(crate) async fn record_on_writer(
     if changed != 1 {
         return Err(());
     }
-    Ok(true)
+    Ok(())
 }

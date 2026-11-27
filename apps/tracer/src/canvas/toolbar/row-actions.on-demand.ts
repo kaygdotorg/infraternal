@@ -4,7 +4,7 @@
  *
  * - a session (`s:host/id`): Open, Open beside, Rename (in place, the shared field), Copy name, End session… (asks
  *   first, in its row). A left swipe ends it (after the same question), a right swipe opens it beside and the row settles
- *   back in place. End is offered only where the inventory can end a session (`can.end`; the product's cannot yet, #100).
+ *   back in place. The inventory confirms the host ended the session before the row disappears.
  * - a host (`h:host`): Open (a shell on it), Rename where the Mesh knows the host, Copy name, and the host's removal where
  *   the instance offers it.
  * - a Mesh node (`n-…`): Open (flies to it), Rename, Copy name.
@@ -86,15 +86,20 @@ export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHo
       out.push(copyName(rec.name));
       if (inv?.can?.end !== false) out.push({
         id: "end", label: "End session…", icon: SESSION_ICON.end, danger: true, swipe: "left", swipeLabel: "End",
-        // Asked in the row itself (row-confirm.ts): "End session? End · Cancel". The effect is read out, not drawn.
+        // The live inventory does not identify the foreground program. Describe the effect even when its name is unknown.
         confirm: {
           title: `End '${rec.name}'?`,
           question: "End session?",
           shortQuestion: "End?",
-          effect: rec.running ? `${rec.running} is still running. Ending the session stops it.` : "Nothing is running in it.",
+          effect: rec.running ? `Ending the session stops ${rec.running}.` : "Ending the session closes its shell and stops programs running in it.",
           confirmLabel: "End",
+          cancelLabel: "Keep",
         },
-        run: () => { inv?.end(host, sid); const w = cx.sessionUi?.windowFor(host, sid); if (w && !w.owner.view.team) cx.win.close(w); },
+        run: async () => {
+          if (!await inv?.end(host, sid)) return;
+          const w = cx.sessionUi?.windowFor(host, sid);
+          if (w && !w.owner.view.team) cx.win.close(w);
+        },
       });
       return out;
     }

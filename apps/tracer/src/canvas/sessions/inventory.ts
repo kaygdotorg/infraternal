@@ -74,8 +74,8 @@ export interface SessionInventory {
   create?(host: string): SessionRecord;
   /** A rename pins the name. */
   rename(host: string, id: string, name: string): void;
-  /** Ends the session (explicit, after the confirmation naming what is running). */
-  end(host: string, id: string): void;
+  /** Ends the session after confirmation and reports whether the host ended it. */
+  end(host: string, id: string): Promise<boolean>;
   /** Starts an exited session's command again (it becomes open). */
   runAgain(host: string, id: string): void;
   /** Removes an exited session's kept screen. */

@@ -2280,7 +2280,7 @@ where
         }
         Frame::Call {
             call_id,
-            action_id: "terminal.startup",
+            action_id: action_id @ ("terminal.startup" | "terminal.end"),
             input_json,
         } if stream_id == CONTROL_STREAM
             && input_json.len() <= 8192
@@ -2290,9 +2290,14 @@ where
             let user = user_id.to_owned();
             let token = session_token.to_owned();
             let input = input_json.to_vec();
+            let end = action_id == "terminal.end";
             pending_plugin_calls.submit(false, async move {
                 let result = while_authorized_value(&state, &user, &token, false, async {
-                    Ok(startup_call(&state, &user, &input).await)
+                    Ok(if end {
+                        end_terminal(&state, &user, &token, &input).await
+                    } else {
+                        startup_call(&state, &user, &input).await
+                    })
                 })
                 .await
                 .unwrap_or(Err(AgentError::Unavailable));
@@ -3402,6 +3407,61 @@ async fn open_terminal(
     }
     state.sessions_changed();
     Ok(opened)
+}
+
+/// The browser identifies the session. Only the account's persisted row selects its host.
+async fn end_terminal(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    input: &[u8],
+) -> Result<Vec<u8>, AgentError> {
+    /// The only field the browser can use to identify the terminal to end.
+    #[derive(serde::Deserialize)]
+    struct EndTerminal {
+        /// Stable terminal ID returned by the open call and the inventory.
+        session_id: uuid::Uuid,
+    }
+    if crate::update_activity::frozen() {
+        return Err(AgentError::Unavailable);
+    }
+    let EndTerminal { session_id } =
+        serde_json::from_slice(input).map_err(|_| AgentError::Rejected)?;
+    let host = session_host_id(&state.pool, user, session_id.as_bytes())
+        .await
+        .map_err(|()| AgentError::Unavailable)?
+        .ok_or(AgentError::Rejected)?;
+    if session_gone(&state.pool, user, session_id.as_bytes())
+        .await
+        .map_err(|()| AgentError::Unavailable)?
+    {
+        return Ok(b"{}".to_vec());
+    }
+    let agent = terminal_agent(state, user, host)
+        .await
+        .map_err(|()| AgentError::Unavailable)?;
+    let id = serde_json::to_vec(&session_id).map_err(|_| AgentError::Rejected)?;
+    let reply = tokio::time::timeout(BACKEND_TIMEOUT, agent.call("terminal.end".to_owned(), id))
+        .await
+        .map_err(|_| AgentError::Unavailable)??;
+    let status = serde_json::from_slice::<i32>(&reply).map_err(|_| AgentError::Unavailable)?;
+    crate::terminal_exit::record_status_on_writer(
+        &state.auth,
+        &state.pool,
+        user,
+        token,
+        session_id.as_bytes(),
+        status,
+    )
+    .await
+    .map_err(|()| AgentError::Unavailable)?;
+    state
+        .queries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire(session_id.into_bytes());
+    state.sessions_changed();
+    Ok(b"{}".to_vec())
 }
 
 /// Core-only builds select the local host and refuse every remote selection.

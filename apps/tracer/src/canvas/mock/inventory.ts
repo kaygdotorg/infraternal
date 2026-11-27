@@ -121,7 +121,7 @@ export async function createMockInventory(world: MockWorld): Promise<MockInvento
       s.pinned = true;
       emit();
     },
-    end(host, id) { hosts.set(host, (hosts.get(host) ?? []).filter((s) => s.id !== id)); elsewhere.delete(key(host, id)); emit(); },
+    async end(host, id) { hosts.set(host, (hosts.get(host) ?? []).filter((s) => s.id !== id)); elsewhere.delete(key(host, id)); emit(); return true; },
     runAgain(host, id) {
       const s = find(host, id);
       if (!s || s.state !== "exited") return;
