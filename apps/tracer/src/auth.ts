@@ -63,6 +63,22 @@ function authRetryAt(header: string | null): number {
   return Number.isSafeInteger(deadline) ? Math.max(now + 1000, deadline) : now + 60_000;
 }
 
+/** Keep the cooldown text current and retry when the server's deadline passes. */
+export function countDownToRetry(label: HTMLElement, retryAt: number, retry: () => void): void {
+  const tick = (): void => {
+    if (!label.isConnected) return;
+    const remaining = retryAt - Date.now();
+    if (remaining <= 0) {
+      label.textContent = "Reconnecting…";
+      retry();
+      return;
+    }
+    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s.`;
+    window.setTimeout(tick, remaining % 1000 || 1000);
+  };
+  tick();
+}
+
 /** Public first-run state and its matching local setup-token command. */
 export interface AuthStatus {
   setupRequired: boolean;

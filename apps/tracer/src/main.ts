@@ -1,5 +1,5 @@
 /** Starts auth and the terminal, keeping the terminal bundle off the unauthenticated path. */
-import { AuthError, checkStatus, checkSession, recoveryAuth, isDeviceUserCode, type AuthStatus } from "./auth";
+import { AuthError, checkStatus, checkSession, countDownToRetry, recoveryAuth, isDeviceUserCode, type AuthStatus } from "./auth";
 import { readApprovalLink, type ApprovalKind, type ApprovalLink } from "./approval-link";
 import { registerSignOut } from "./sign-out";
 import { warmOfflineShell } from "./offline-cache";
@@ -330,7 +330,7 @@ function renderUnavailable(message: string, retryAt?: number): void {
     const countdown = document.createElement("span");
     countdown.setAttribute("role", "timer");
     lede.append(" ", countdown);
-    countDownToRetry(countdown, retryAt);
+    countDownToRetry(countdown, retryAt, () => { void refreshAuth(); });
   } else {
     const retry = mustGet<HTMLButtonElement>("#retry-status");
     retry.addEventListener("click", () => {
@@ -342,22 +342,6 @@ function renderUnavailable(message: string, retryAt?: number): void {
     healPreview();
   }
   scheduleBackdrop();
-}
-
-/** Update the timer until the server's retry deadline, even after the tab wakes from sleep. */
-function countDownToRetry(label: HTMLElement, retryAt: number): void {
-  const tick = (): void => {
-    if (!label.isConnected) return;
-    const remaining = retryAt - Date.now();
-    if (remaining <= 0) {
-      label.textContent = "Reconnecting…";
-      void refreshAuth();
-      return;
-    }
-    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s.`;
-    window.setTimeout(tick, remaining % 1000 || 1000);
-  };
-  tick();
 }
 
 function renderAuth(

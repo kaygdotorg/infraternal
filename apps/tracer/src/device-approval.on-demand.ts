@@ -10,7 +10,9 @@
  * the page; neither decides anything, so the request simply expires.
  */
 import {
+  AuthError,
   approveDeviceApproval,
+  countDownToRetry,
   inspectDeviceApproval,
   isDeviceUserCode,
   keyLifetimeLabel,
@@ -52,7 +54,7 @@ export async function mountDeviceApproval(
     return;
   }
 
-  renderChecking(host, join);
+  const checking = renderChecking(host, join);
   try {
     if (join) {
       const review = await inspectDeviceApproval(code, "join_machine");
@@ -62,6 +64,14 @@ export async function mountDeviceApproval(
       renderReview(host, code, review, hooks);
     }
   } catch (error: unknown) {
+    if (error instanceof AuthError && error.retryAt !== undefined) {
+      checking.setAttribute("role", "timer");
+      checking.removeAttribute("aria-live");
+      countDownToRetry(checking, error.retryAt, () => {
+        void mountDeviceApproval(host, kind, code, undefined, hooks);
+      });
+      return;
+    }
     renderError(host, join, safeAuthMessage(error));
   }
 }
@@ -80,7 +90,8 @@ export function mountDeviceApprovalSuccess(host: HTMLElement, kind: ApprovalKind
   </section>`;
 }
 
-function renderChecking(host: HTMLElement, join: boolean): void {
+/** Draw the review's loading card and return the status text for a cooldown. */
+function renderChecking(host: HTMLElement, join: boolean): HTMLElement {
   host.innerHTML = `<section class="auth-screen" aria-label="${join ? "Add machine approval" : "Device sign-in approval"}">
     <section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="device-approval-title">
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
@@ -89,6 +100,7 @@ function renderChecking(host: HTMLElement, join: boolean): void {
       <p class="auth-loading" role="status" aria-live="polite">Please wait</p>
     </section>
   </section>`;
+  return host.querySelector<HTMLElement>(".auth-loading")!;
 }
 
 /** The parts both kinds share, from the code down to the passkey button. `facts` is what differs. */

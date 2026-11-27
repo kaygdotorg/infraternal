@@ -82,6 +82,32 @@ async function mockJoin(page: Page, request: Record<string, unknown> = {}, optio
 
 const tick = (page: Page) => page.getByText("I checked that the code and key match my terminal");
 
+/** A refused inspection retries the read and leaves the passkey prompt to a fresh user action. */
+test("a throttled machine review retries without starting approval", async ({ page }) => {
+  const mock = await mockJoin(page);
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 200);
+  let inspections = 0;
+  await page.route("**/auth/device-inspect", async route => {
+    inspections++;
+    if (inspections === 1) await route.fulfill({ status: 429, headers: { "Retry-After": "3" }, json: {} });
+    else await route.fallback();
+  });
+  await page.goto(LINK);
+  await expect(page.getByRole("timer")).toHaveText("Retrying in 3s.");
+  expect(inspections).toBe(1);
+  await page.clock.fastForward(3000);
+  await page.clock.resume();
+  await expect(page.getByRole("heading", { name: TITLE("build-01") })).toBeVisible();
+  expect(inspections).toBe(2);
+  expect(mock.approvalStarts()).toBe(0);
+  await tick(page).click();
+  await page.getByRole("button", { name: "Approve with passkey" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "passkey prompt was cancelled" })).toBeVisible();
+  expect(mock.approvalStarts()).toBe(1);
+  expect(mock.approvals()).toBe(0);
+});
+
 test("the QR link's code is read from the fragment and removed from the address bar before any request", async ({ page }) => {
   const mock = await mockJoin(page);
   await page.goto(LINK);
