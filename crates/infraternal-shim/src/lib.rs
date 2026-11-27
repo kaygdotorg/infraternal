@@ -349,6 +349,12 @@ pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
 }
 
+/// End by the original terminating signal after the caller finishes cleanup.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn exit_by_signal(signal: nix::sys::signal::Signal) -> ! {
+    pty::exit_by_signal(signal);
+}
+
 /// Restore SIGTERM's default action and re-raise it, after a process handled
 /// SIGTERM to finish its shutdown steps (#221).
 #[cfg(target_os = "linux")]

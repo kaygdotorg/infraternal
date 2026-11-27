@@ -318,7 +318,7 @@ pub(crate) fn with_cancellation<F: std::future::Future<Output = Result<ExitCode,
             if json_output {
                 let _ = io::stdout().write_all(&crate::cli::output::interrupted_notice("up"));
             }
-            termination::reraise(signal);
+            infraternal_shim::exit_by_signal(signal);
         }
         Ok((Err(failure), None)) => fail(json_output, failure),
         Err(_) => fail(json_output, Failure::Runtime),

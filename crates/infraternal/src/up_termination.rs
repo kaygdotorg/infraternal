@@ -1,6 +1,6 @@
 //! Defers termination until enrollment and installation have released their owned resources.
 
-use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, kill, raise, sigaction};
+use nix::sys::signal::{Signal, kill};
 use std::{
     future::Future,
     io,
@@ -137,18 +137,6 @@ pub(super) fn scope<F: Future>(operation: impl FnOnce(Cancellation) -> F) -> io:
         }));
         Ok(operation(Cancellation { received, flag }).await)
     })
-}
-
-/// Restore the default action and stop by the original signal after cleanup (D305).
-pub(super) fn reraise(signal: Signal) -> ! {
-    let action = SigAction::new(SigHandler::SigDfl, SaFlags::empty(), SigSet::empty());
-    let mut unblocked = SigSet::empty();
-    unblocked.add(signal);
-    // SAFETY: the default action runs no user code, and rollback and output have finished.
-    if unsafe { sigaction(signal, &action) }.is_ok() && unblocked.thread_unblock().is_ok() {
-        let _ = raise(signal);
-    }
-    std::process::exit(128 + signal as i32)
 }
 
 /// Exercises actual process signals without changing the test runner's own signal handlers.
