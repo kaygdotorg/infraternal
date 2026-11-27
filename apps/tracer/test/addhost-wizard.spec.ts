@@ -775,6 +775,51 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(details).not.toContainText("Connecting to the host failed.");
     await page.screenshot({ path: tracerEvidencePath("addhost-netbird-connect", `connect-failure-${viewport.width}.png`) });
   });
+
+  test(`NetBird SSH failure offers local enrollment and preserves the sign-in details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "netbird-ssh.lab");
+    await expect(page.getByRole("heading", { name: "Couldn't add netbird-ssh.lab over SSH" })).toBeVisible();
+    const failure = onScreen(page, "failure");
+    const heading = failure.getByRole("heading");
+    const advice = failure.getByText(/Use the machine's own SSH/);
+    await expect(advice).toBeVisible();
+    const details = failure.locator(".ah-details");
+    await details.locator("summary").click();
+    await expect(details).toContainText("The SSH server offered sign-in with a password.");
+    await expect(details).toContainText("Tried signing in without a key or password.");
+    const [titleBox, adviceBox] = await Promise.all([heading.boundingBox(), advice.boundingBox()]);
+    expect(Math.abs(titleBox!.x - adviceBox!.x)).toBeLessThanOrEqual(0.5);
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await details.locator("pre").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `netbird-details-${viewport.width}.png`) });
+    await inWizard(page, "Use infraternal up").click();
+    await expect(onScreen(page, "install")).toContainText(`infraternal up '${new URL(page.url()).origin}'`);
+    await expect(onScreen(page, "install")).toContainText("approve the machine with your passkey");
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `join-command-${viewport.width}.png`) });
+    await inWizard(page, "Back").click();
+    await expect(failure).toContainText("NetBird's SSH server");
+  });
+
+  test(`macOS SSH system check offers local enrollment at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "mac-ssh.lab");
+    const failure = onScreen(page, "failure");
+    await expect(failure.getByRole("heading", { name: "Add mac-ssh.lab from the Mac" })).toBeVisible();
+    await expect(failure).toContainText("SSH sign-in worked.");
+    const details = failure.locator(".ah-details");
+    await details.locator("summary").click();
+    await expect(details).toContainText("The SSH system check found macOS.");
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `macos-details-${viewport.width}.png`) });
+    await inWizard(page, "Use infraternal up").click();
+    await expect(onScreen(page, "install")).toContainText(`infraternal up '${new URL(page.url()).origin}'`);
+  });
 }
 
 // #394 (owner, production): a root add of minipc01 showed the exit-71 paragraph, and the progress row wrapped it in red.

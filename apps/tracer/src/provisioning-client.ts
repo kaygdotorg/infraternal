@@ -103,6 +103,10 @@ export interface FailureDetail {
   host_key_changed?: boolean;
   /** Every automatic sign-in method was refused: the person must choose one (D183). Only on `auth`. */
   choose_method?: boolean;
+  /** SSH software as advertised by the peer, used only for recovery guidance. */
+  ssh_server?: "netbird";
+  /** Platform confirmed by the signed-in read-only system check. */
+  join_locally?: "macos";
 }
 
 /**
@@ -253,6 +257,8 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     failure.missing_binary = { architecture: value.missing_binary.architecture, path: value.missing_binary.path };
   }
   if (value.choose_method === true && value.kind === "auth") failure.choose_method = true;
+  if (value.ssh_server === "netbird" && value.kind === "auth") failure.ssh_server = "netbird";
+  if (value.join_locally === "macos" && value.kind === "unsupported") failure.join_locally = "macos";
   return failure;
 }
 

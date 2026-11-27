@@ -137,7 +137,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
 }
 
 /** The scripted failure of a named host: where it stops, what it reports and what Details shows. */
-interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
+interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; sshServer?: "netbird"; joinLocally?: "macos"; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
 
 /** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
 const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
@@ -195,6 +195,8 @@ function failureOf(target: Target): Failure | undefined {
   if (/^added/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "This host is already added. Open its terminal from Console.", evidence: "", alreadyAdded: true };
   if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
+  if (/^netbird-ssh/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "auth", choose: true, sshServer: "netbird", message: "The SSH server rejected sign-in.", evidence: "The SSH server offered sign-in with a password.\nTried signing in without a key or password." };
+  if (/^mac-ssh/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unsupported", joinLocally: "macos", message: "The SSH system check found macOS. Installing over SSH requires Linux with systemd.", evidence: "" };
   if (/^(installed|takeover)/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unrecognized_install", message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.", evidence: "Setup location: /var/lib/infraternal" };
   for (const refusal of ["cache", "prepared", "foreign"] as const) {
     if (name.startsWith(`unproven-${refusal}`)) return { failed_step: "upload", phase: 1, beforeLogin: false, kind: "unproven_files", refusal, message: "Setup changed nothing.", evidence: "Setup location: /var/lib/infraternal" };
@@ -264,7 +266,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
     const fail = (): void => {
       if (!failure) return;
       emit(target, "failed", failure.message, {
-        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), ...(failure.refusal ? { refusal: failure.refusal } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
+        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), ...(failure.refusal ? { refusal: failure.refusal } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? (failure.sshServer ? failure.evidence.split("\n") : [failure.evidence]) : [],
+        ...(failure.sshServer ? { ssh_server: failure.sshServer } : {}),
+        ...(failure.joinLocally ? { join_locally: failure.joinLocally } : {}),
         ...(failure.alreadyAdded ? { already_added: true, host_id: ADDED_HOST_ID } : {}),
         ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519", ...(failure.keyChanged ? { host_key_changed: true } : {}) } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });

@@ -14,6 +14,12 @@ use crate::model::{Failure, InstallMode};
 /// No shell expansion of client input occurs in this fixed script.
 pub const CHECK_SCRIPT: &str = r#"set -eu
 os=$(uname -s)
+# A Mac joins locally. Exit before the wrapper can run Linux ownership checks
+# or advertise a staging channel. The reason is the fixed receipt below.
+if [ "$os" = Darwin ]; then
+    printf 'CHECK platform macos\n'
+    exit 1
+fi
 arch=$(uname -m)
 uid=$(id -u)
 init=other

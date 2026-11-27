@@ -830,13 +830,13 @@ export class Wizard {
     // Retrying a host with leftovers would only find them again, so it is offered "Start fresh" instead.
     const fix = state === "failed" || awaitingKey(job.view) ? guideFor(job.entry.label, job.view.failure).fix : "none";
     // A dead end ("none") has no retry either: it would only meet the same refusal (J314 P2-1).
-    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none" || fix === "take-over";
+    row.querySelector<HTMLElement>(".ah-job-retry")!.hidden = state !== "failed" || fix === "start-fresh" || fix === "replace-stuck-install" || fix === "none" || fix === "take-over" || fix === "join-command";
     // The row tells the news in the page's tone: neutral news is never red here (TASTE: the icon matches the news).
     row.dataset.tone = state === "failed" ? guideFor(job.entry.label, job.view.failure).tone : "";
     const fixButton = row.querySelector<HTMLElement>(".ah-job-fix")!;
     fixButton.hidden = fix === "none" || fix === "retry";
     // The button names what it opens or does.
-    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "unlock" ? "Unlock" : "Install from the host";
+    fixButton.textContent = fix === "choose-method" ? "Sign in another way" : fix === "host-key" ? "Check the key" : fix === "replace-stuck-install" ? "Replace the stuck install" : fix === "start-fresh" ? "Start fresh" : fix === "take-over" ? "Take over" : fix === "unlock" ? "Unlock" : fix === "join-command" ? "Review SSH failure" : "Install from the host";
     this.marks.get(job.target)?.set(state);
     // A failure opens its steps so the reason sits next to the step that failed.
     if (state === "failed" && !row.dataset.touched) { row.dataset.open = "true"; row.querySelector(".ah-run-toggle")?.setAttribute("aria-expanded", "true"); }
@@ -902,7 +902,7 @@ export class Wizard {
     if (replaceStuck) guide.fix = "start-fresh";
     // Leftovers and a running setup are news to act on, not errors: a neutral icon, no red. Only a running
     // setup, which the person waits for, gets the clock (TASTE: the icon matches the news, #394).
-    const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || (guide.fix === "none" && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
+    const icon = guide.fix === "start-fresh" || guide.fix === "take-over" || ((guide.fix === "none" || guide.fix === "join-command") && guide.tone === "info") ? ICON.info : guide.fix === "retry" && guide.tone === "info" ? (job.view.failure?.kind === "setup_running" ? ICON.pending : ICON.info) : ICON.warning;
     // D368 (#433): a Start fresh that closes the stuck setup's own terminals lists each one before consent.
     const closing = guide.fix === "start-fresh" && !replaceStuck ? job.view.failure?.closes?.terminals ?? [] : [];
     page.innerHTML = `${this.hero(icon, guide.tone === "danger" ? "danger" : "")}<h1 class="ah-title">${escapeHtml(guide.title)}</h1>
@@ -917,9 +917,10 @@ export class Wizard {
     }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
+    const join = guide.fix === "join-command" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="install"><span>Use infraternal up</span></button>` : "";
     const unlock = guide.fix === "unlock" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-retry">${svg(ICON.shieldCheck)}<span>Unlock</span></button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
-    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${open}${takeOver}${unlock}${guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
+    this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>${install}${join}${open}${takeOver}${unlock}${guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" || guide.fix === "join-command" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (closing.length) {
       const label = this.foot.querySelector<HTMLElement>('[data-ah="start-fresh"] span');
       if (label) label.textContent = closing.length === 1 ? "Close it and start fresh" : "Close them and start fresh";
@@ -1006,7 +1007,7 @@ export class Wizard {
         ${reveal("password", `<input class="ah-account" type="text" autocomplete="username" value="${account}" readonly tabindex="-1" aria-label="Account" />
           <input class="ah-input" data-secret="password" ${ONE_OFF_SECRET_ATTRS} aria-label="Password for ${name}" placeholder="Password" tabindex="-1" />`)}
       </div></form>
-      <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>`;
+      <button class="ah-link ah-alt" type="button" data-ah="install">Or install from the host instead</button>${this.detailsBlock(job)}`;
     if (this.serverKey) {
       const list = createKeyValueList("This server's key");
       list.set([{ key: "Public key", value: this.serverKey.publicKey }, { key: "Fingerprint", value: this.serverKey.fingerprint }]);
@@ -1115,13 +1116,25 @@ export class Wizard {
     }
   }
 
+  /** Reuse the command display for local enrollment and one-time installation. */
   private renderInstall(page: HTMLElement): void {
     const job = this.fixing;
     const name = escapeHtml(job?.entry.label ?? "the host");
+    const join = guideFor(job?.entry.label ?? "", job?.view.failure).fix === "join-command";
     page.innerHTML = `${this.hero(ICON.terminal)}<h1 class="ah-title">Install from ${name}</h1>
-      <p class="ah-lede">Run this on the host. It connects out to this server, so the server never needs to reach it.</p>
+      <p class="ah-lede">${join ? "Run this command on the machine you want to add." : "Run this on the host. It connects out to this server, so the server never needs to reach it."}</p>
       <div class="ah-install" aria-live="polite"></div>`;
     this.setFoot(`<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-install">Back</button><button class="ui-button ah-primary" data-button="primary" type="button" data-ah="finish"><span>Done</span></button>`);
+    if (join) {
+      const list = createKeyValueList("Join command");
+      const origin = location.origin.replaceAll("'", "'\\''");
+      list.set([{ key: "Command", value: `infraternal up '${origin}'` }]);
+      const hint = document.createElement("p");
+      hint.className = "ah-text";
+      hint.textContent = "Open the link the command prints, then approve the machine with your passkey.";
+      page.querySelector(".ah-install")!.append(list.root, hint);
+      return;
+    }
     this.install = { state: "loading" };
     this.paintInstall();
     const host = job ? this.addressText(job.entry) : "";
