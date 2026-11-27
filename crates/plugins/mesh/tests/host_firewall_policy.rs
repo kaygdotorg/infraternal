@@ -405,6 +405,37 @@ fn clearing_host_policy_removes_its_table_config_and_loader() {
     assert!(report.contains("removed loader unit"));
 }
 
+/// An interrupted agent withdraws its live table and policy while its journal owns the loader.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn rollback_agent_policy_leaves_the_loader_for_install_journal_recovery() {
+    use infraternal_plugin_mesh::host_firewall::rollback_agent_policy;
+
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    write_policy_file(config.paths.agent_policy_path(), &Policy::default())
+        .expect("save the provisional agent policy");
+    config.write_owned_loader();
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("load the provisional host table");
+
+    rollback_agent_policy(&config.paths, true, Some(&nft)).expect("withdraw the agent policy");
+    assert!(!config.paths.agent_policy_path().exists());
+    assert!(config.paths.unit_path().is_file());
+    assert!(config.paths.enabled_path().is_symlink());
+    assert!(
+        !run_nft(
+            &nft,
+            &["-n", "list", "table", "inet", "infraternal_host"],
+            None
+        )
+        .status
+        .success(),
+        "rollback must remove the only role's live table"
+    );
+}
+
 /// Repeating a clear after removal succeeds without changing unrelated nft state.
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]

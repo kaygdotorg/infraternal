@@ -901,12 +901,23 @@ impl Install {
         if self.registered && own_unit {
             run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None)?;
         }
-        if self.registered
-            && own_firewall_unit
-            && let Err(error) =
-                run_systemctl(&self.systemctl, &["stop", HOST_FIREWALL_SERVICE], None)
-        {
-            eprintln!("Could not stop the host firewall during rollback: {error}");
+        if self.registered && own_firewall_unit {
+            run_systemctl(&self.systemctl, &["stop", HOST_FIREWALL_SERVICE], None)?;
+        }
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if self.registered && self.root == Path::new("/") {
+            let paths = host_firewall::HostFirewallPaths::system();
+            if self
+                .created
+                .iter()
+                .any(|entry| entry.path == paths.agent_policy_path())
+            {
+                // The service can republish its own marked policy with an updated
+                // listener before it stops, so its inode need not be the one recorded.
+                // The journal still proves there was no prior agent role file here.
+                host_firewall::rollback_agent_policy(&paths, self.replaced.is_empty(), None)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
         }
         self.restore_replaced_units()?;
         for created in self.created.iter().rev() {
@@ -935,12 +946,14 @@ impl Install {
         if self.registered {
             let _ = run_systemctl(&self.systemctl, &["daemon-reload"], None);
         }
-        if self.registered
-            && !self.replaced.is_empty()
-            && let Err(error) =
-                run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None)
-        {
-            eprintln!("Could not restore the prior host firewall service: {error}");
+        if self.registered && !self.replaced.is_empty() {
+            run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None).map_err(
+                |error| {
+                    io::Error::other(format!(
+                        "Could not restore the prior host firewall service: {error}"
+                    ))
+                },
+            )?;
         }
         if let Some(error) = failure {
             return Err(error);
