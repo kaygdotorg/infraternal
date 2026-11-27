@@ -3,6 +3,7 @@
 use infraternal_status::{Activity, Roots, probe};
 use std::{fs, path::PathBuf};
 
+/// Report a partial setup when only the companion host runs.
 #[test]
 fn masked_server_beside_a_running_host_has_a_partial_setup_headline() {
     let base = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
@@ -29,6 +30,7 @@ fn masked_server_beside_a_running_host_has_a_partial_setup_headline() {
             system_units: vec![root.join("system")],
             user_units: Some(root.join("user")),
             run_dir: None,
+            system_run_dir: None,
             data_dirs: vec![root.join("data")],
             net_class: root.join("net"),
         },

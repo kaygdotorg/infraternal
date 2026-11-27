@@ -41,6 +41,7 @@ fn isolated(name: &str, manager: &str, check: impl FnOnce(PathBuf)) {
     );
 }
 
+/// A missing system manager leaves the user manager able to report a restart loop.
 #[test]
 fn unavailable_system_manager_preserves_user_restart_observation() {
     isolated(
@@ -69,6 +70,7 @@ printf '%s\n' ActiveState=activating SubState=auto-restart NRestarts=45 MainPID=
                 system_units: vec![system],
                 user_units: Some(user),
                 run_dir: None,
+                system_run_dir: None,
                 data_dirs: vec![],
                 net_class: root.join("net"),
             };
@@ -138,6 +140,7 @@ printf '%s\n' ActiveState=failed SubState=failed NRestarts=45 MainPID=0 ExecMain
     );
 }
 
+/// Retained data keeps a masked server visible in its stopped state.
 #[test]
 fn masked_server_with_retained_data_is_not_described_as_running() {
     isolated(
@@ -155,6 +158,7 @@ fn masked_server_with_retained_data_is_not_described_as_running() {
                 system_units: vec![units],
                 user_units: None,
                 run_dir: None,
+                system_run_dir: None,
                 data_dirs: vec![data],
                 net_class: root.join("net"),
             };

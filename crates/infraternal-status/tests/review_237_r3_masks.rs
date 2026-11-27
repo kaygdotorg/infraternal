@@ -73,6 +73,7 @@ fn reset(root: &Path) -> Roots {
         system_units: vec![root.join("system")],
         user_units: Some(root.join("user")),
         run_dir: None,
+        system_run_dir: None,
         data_dirs: vec![root.join("data")],
         net_class: root.join("net"),
     }
