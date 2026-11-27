@@ -461,19 +461,17 @@ async fn device_host_mode_refuses_rows_in_test_deployment_order() {
         .run(&pool)
         .await
         .expect("old guard accepts the alternate column order");
-    let types: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT typeof(reported_os), typeof(device_approved), typeof(device_os) FROM remote_hosts",
+    let (hosts, shifted): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE typeof(reported_os) = 'integer'
+            AND typeof(device_approved) = 'text' AND typeof(device_os) = 'text')
+         FROM remote_hosts",
     )
-    .fetch_all(&pool)
+    .fetch_one(&pool)
     .await
     .expect("read shifted storage classes");
-    assert!(!types.is_empty());
-    assert!(
-        types
-            .iter()
-            .all(|(reported, approved, device)| reported == "integer"
-                && approved == "text"
-                && device == "text"),
+    assert_ne!(hosts, 0);
+    assert_eq!(
+        shifted, hosts,
         "the old migration produces the three shifted storage classes from #604"
     );
     pool.close().await;
