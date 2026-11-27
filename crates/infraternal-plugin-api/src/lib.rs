@@ -13,6 +13,7 @@ pub use action::{
 
 pub mod admission;
 pub mod channel;
+pub mod elevation_prompt;
 pub mod host_name;
 pub mod login_access;
 pub mod mesh_ssh_files;
