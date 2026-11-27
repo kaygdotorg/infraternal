@@ -86,14 +86,14 @@ fn j218_alias_commands_respect_word_boundaries() {
 #[ignore = "run only by the interruption probe"]
 fn j218_hold_enrollment_transaction() {
     let root = PathBuf::from(std::env::var_os("J218_ROOT").unwrap());
-    let result = super::super::termination::run(|interrupted| async move {
+    let result = super::super::termination::scope(|cancelled| async move {
         let _transaction = Install::begin(
             &root,
             nix::unistd::geteuid().as_raw(),
             Path::new("/bin/false"),
         )
         .unwrap()
-        .interrupt_on(interrupted);
+        .interrupt_on(cancelled.flag());
         fs::write(
             root.join("var/lib/infraternal/agent/identity.json"),
             b"fixture enrollment",
@@ -101,8 +101,9 @@ fn j218_hold_enrollment_transaction() {
         .unwrap();
         println!("\nJ218_TRANSACTION_READY");
         std::io::stdout().flush().unwrap();
-        std::future::pending::<()>().await;
-    });
+        cancelled.during(std::future::pending::<()>()).await
+    })
+    .unwrap();
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
     std::process::exit(1);
 }
@@ -278,14 +279,14 @@ fn j218_rollback_preserves_preexisting_unit_alias() {
 #[ignore = "run only by the installed-state interruption probe"]
 fn j218_hold_activation_transaction() {
     let root = PathBuf::from(std::env::var_os("J218_ROOT").unwrap());
-    let result = super::super::termination::run(|interrupted| async move {
+    let result = super::super::termination::scope(|cancelled| async move {
         let install = Install::begin(
             &root,
             nix::unistd::geteuid().as_raw(),
             &root.join("systemctl"),
         )
         .unwrap()
-        .interrupt_on(interrupted);
+        .interrupt_on(cancelled.flag());
         install.activate(&root.join("source"))
     });
     assert!(!matches!(result, Ok(Ok(()))));
@@ -294,12 +295,12 @@ fn j218_hold_activation_transaction() {
 
 /// Reap this probe's process group even when an assertion unwinds the parent test.
 struct Child(
-    /// The process-group leader; every fixture subprocess remains in its group.
+    /// The process-group leader for the probe and its interruptible manager checks.
     std::process::Child,
 );
 
 impl Drop for Child {
-    /// A dedicated process group contains only this child and its fake service manager.
+    /// Reap only the probe and any remaining interruptible manager checks.
     fn drop(&mut self) {
         if self.0.try_wait().is_ok_and(|status| status.is_none()) {
             let _ = nix::sys::signal::killpg(
@@ -359,7 +360,7 @@ fn j218_sigterm_rolls_back_published_install() {
     ] {
         assert!(fs::symlink_metadata(fixture.0.join(relative)).is_ok());
     }
-    // Terminal termination reaches both our helper and its currently executing manager.
+    // Terminal termination can stop the active check. Manager writes must finish first.
     nix::sys::signal::killpg(
         nix::unistd::Pid::from_raw(i32::try_from(child.0.id()).unwrap()),
         nix::sys::signal::Signal::SIGTERM,

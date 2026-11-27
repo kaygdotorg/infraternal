@@ -408,10 +408,7 @@ pub(crate) async fn run(
         .await
         .unwrap_or(Err(Failure::Failed));
     let (mut invitation, key_pkcs8, key_digest, fingerprint, short_key) =
-        approved.map_err(|failure| {
-            eprintln!("No system service was installed.");
-            failure
-        })?;
+        approved.inspect_err(|_| eprintln!("No system service was installed."))?;
     let payload = encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules)?;
     invitation.wipe();
     let installed = invoke_sudo(sudo, &payload, cancelled).await;
@@ -1149,29 +1146,26 @@ async fn invoke_sudo(
     {
         return Err(Failure::InstallConflict);
     }
+    let installation_started = output
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == b"UP_STAGE=installation");
     if let Some(code) = parse_result_marker(&output) {
         if code == 0 {
             return Ok(());
         }
-        if !output
-            .split(|byte| *byte == b'\n')
-            .any(|line| line == b"UP_STAGE=installation")
-        {
+        if !installation_started {
             eprintln!("No system service was installed.");
         }
         return Err(Failure::from_code(code).unwrap_or(Failure::Partial));
     }
-    if !output
-        .split(|byte| *byte == b'\n')
-        .any(|line| line == b"UP_STAGE=installation")
-    {
-        eprintln!("No system service was installed.");
-    } else {
+    if installation_started {
         eprintln!(
             "The system installer did not confirm cleanup. Check the local installation before retrying."
         );
+    } else {
+        eprintln!("No system service was installed.");
     }
-    if status.code() == Some(1) && matches!(sent, Ok(Ok(())) | Ok(Err(_))) {
+    if status.code() == Some(1) && sent.is_ok() {
         Err(Failure::SudoDenied)
     } else {
         Err(Failure::Partial)
@@ -1295,9 +1289,13 @@ fn run_systemctl(
 ) -> io::Result<()> {
     // Root runs systemctl with a fixed environment, not whatever sudo kept.
     use std::os::unix::process::CommandExt;
-    let output = Command::new(systemctl)
+    let mut command = Command::new(systemctl);
+    if !matches!(arguments.first().copied(), Some("is-active" | "show")) {
+        // A manager write must finish before the installer can revert it.
+        command.process_group(0);
+    }
+    let output = command
         .args(arguments)
-        .process_group(0)
         .env_clear()
         .env("PATH", HELPER_PATH)
         .output()?;
