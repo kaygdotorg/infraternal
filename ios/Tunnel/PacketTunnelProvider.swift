@@ -15,7 +15,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         delegateQueue: nil
     )
     /// Rust identity and link state scoped to this extension process.
-    private var join: SimulatorDeviceJoin?
+    private var join: DeviceJoin?
     /// The readable device label sent to the server for owner approval.
     private var hostname = "iPhone Simulator"
 
@@ -56,8 +56,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         _ messageData: Data,
         completionHandler: ((Data?) -> Void)?
     ) {
-        guard let completionHandler,
-              let message = try? JSONDecoder().decode(ProviderCommand.self, from: messageData),
+        guard let completionHandler else { return }
+        guard let message = try? JSONDecoder().decode(ProviderCommand.self, from: messageData),
               let join else {
             completionHandler(nil)
             return
@@ -75,6 +75,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let reply = JoinStatusReply(
                 status: join.status().description,
                 rttMilliseconds: nil,
+                joinElapsedMilliseconds: nil,
                 memorySamples: [MemorySample(phase: "idle", bytes: processFootprint())]
             )
             completionHandler(try? JSONEncoder().encode(reply))
