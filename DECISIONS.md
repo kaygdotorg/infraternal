@@ -2781,11 +2781,11 @@ access (#341 B19).
      - **D259's "typable within one round trip + 50 ms" applies when the
        connection can be reused or resumed.** While a host has attached
        terminals, the server sends one liveness probe on its control stream.
-       A matching Pong covers every attached terminal; terminal streams have
-       no separate liveness probes. A dead or half-open host link is detected
-       under D300's reply deadline, and input typed meanwhile is kept, never
-       lost. After a real network change a fresh TCP + TLS +
-       upgrade needs about three round trips, so that case's budget is
+       A matching Pong confirms the host link for every attached terminal;
+       terminal streams have no separate liveness probes. A dead or half-open
+       host link is detected under D300's reply deadline, and input typed
+       meanwhile is kept, never lost. After a real network change a fresh TCP
+       + TLS + upgrade needs about three round trips, so that case's budget is
        **three round trips + 50 ms**, measured on the perf VM through real TLS.
        The last screen still returns within one frame from the client's copy
        (D259, unchanged).
@@ -5205,12 +5205,30 @@ access (#341 B19).
        into files that are not infraternal's), and reporting only on
        `--retain` (the same files, the same objection).
 
-399. **One host-link lease covers its attached terminals (owner, 2026-11-27, #562; amends D265 and D300, and replaces the 2026-11-21 rule):**
+399. **One host-link lease covers its attached terminals (owner, 2026-11-27,
+     #562; amends D265 and D300, and replaces the 2026-11-21 rule):**
      - **Context:** J1034 measured about 41 wakeups per second in each attached terminal's shim from a 25 ms route probe. Those probes kept running when every viewer was hidden and could cut a healthy link under CPU starvation. The earlier rule paused each terminal's probe while all its viewers were hidden. That still used one lease per terminal and made host liveness depend on viewer visibility.
-     - **Rule:** while at least one terminal is attached, the server sends one correlated probe on that host's control stream. A matching Pong keeps every attached terminal on the link connected. The server stops probing when the last terminal detaches. Terminal streams have no separate liveness probes.
-     - **Visibility:** page or window visibility does not change the host-link lease. The server may accept a `terminal.visibility` notice for compatibility, but it does not pause, resume or restart liveness. Browser connection visibility still pauses that browser socket's probes (#244, #317).
-     - **Link death:** D300's reply deadline and two-miss policy apply to the shared host link. One miss marks the link doubtful and notifies each attached viewer. A second consecutive miss retires the link and its terminal attachments reconnect normally. A terminal stream that ends by EOF or reset is closed on that terminal alone; it does not retire the host link.
-     - **Unchanged:** terminal output keeps flowing and credit keeps returning regardless of viewer visibility. Input, replay and writer ownership are unchanged.
+     - **Rule:** while at least one terminal is attached, the server sends one
+       correlated probe on that host's control stream. A matching Pong confirms
+       the host link for every attached terminal. The server stops probing when
+       the last terminal detaches. Terminal streams have no separate liveness
+       probes.
+     - **Visibility:** page or window visibility does not change the host-link
+       lease. The server may accept a `terminal.visibility` notice for
+       compatibility, but it does not pause, resume or restart liveness.
+       Browser connection visibility still pauses that browser socket's probes
+       (#244, #317).
+     - **Scope:** this check detects a dead host link, not a terminal that
+       stops responding while its stream stays open. A terminal stream that
+       ends by EOF or reset is closed on that terminal alone; it does not retire
+       the host link.
+     - **Link death:** D300's reply deadline and two-miss policy apply to the
+       shared host link. One miss marks the link doubtful and notifies each
+       attached viewer. A second consecutive miss retires the link and its
+       terminal attachments reconnect normally.
+     - **Unchanged:** terminal output keeps flowing and credit keeps returning
+       regardless of viewer visibility. Input, replay and writer ownership
+       are unchanged.
 
 400. **Root on the server machine updates the server without a passkey; other devices keep the passkey (owner, 2026-11-22, #211; refines D251 and the S5 owner controls, keeps D168 and D217):**
      - **Context:** the owner decided that production stops being deployed with `deploy.sh`: each green dev build is published as a signed edge release, and production is updated from the CLI (later the S5 GUI) by the owner or the orchestrator. The update actions (`release.update.apply`, `rollback`, `cancel`, and `check` with a version) need the owner with a fresh passkey tap, which a shell on the server cannot give.
