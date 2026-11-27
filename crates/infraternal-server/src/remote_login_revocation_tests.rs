@@ -347,10 +347,10 @@ async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
     eprintln!("login_cleanup confirmed=false authority_cut=true retirement_pending=true");
 }
 
-/// Preferred host overrides reach an admitted remote actor before any terminal opens.
+/// Preparing a user-mode host asks its authenticated link to use its enrolled UID, even with a stored override.
 #[cfg(feature = "ssh")]
 #[tokio::test]
-async fn connected_remote_host_prepares_its_persons_preferred_account() {
+async fn connected_rootless_host_prepares_its_enrolled_account() {
     let fixture = login_host_action(Some(true), "terminal.login.prepare").await;
     let token = "remote-login-preparation-fixture";
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',unixepoch()+60,unixepoch(),1)")
@@ -389,7 +389,8 @@ async fn connected_remote_host_prepares_its_persons_preferred_account() {
         .unwrap()
         .unwrap();
     assert_eq!(input["person"], fixture.person.to_string());
-    assert_eq!(input["account"], "deploy");
+    assert_eq!(input["uid"], 1002);
+    assert!(input["account"].is_null());
     preparation.await.unwrap();
     fixture.peer.abort();
 }
