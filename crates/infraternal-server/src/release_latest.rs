@@ -103,11 +103,13 @@ fn origin() -> String {
 /// returns `None` and starts nothing. The check task sleeps between checks and is
 /// stopped by aborting it. The apply task ([`crate::update_apply`]) waits for a staged
 /// release and a quiet window, and runs this process's trial if it is one. `listen` is
-/// the HTTP listener the trial's health check calls.
+/// the HTTP listener the trial's health check calls. `executable` is the
+/// embedded infraternal agent image that the trial checks for local logins.
 pub(crate) fn start_updates(
     pool: sqlx::SqlitePool,
     data: &Path,
     listen: std::net::SocketAddr,
+    executable: std::path::PathBuf,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let artifact = infraternal_plugin_release::update::availability(release_build()).ok()?;
     let timing = crate::update_apply::Timing::from_environment();
@@ -132,6 +134,7 @@ pub(crate) fn start_updates(
         data.to_owned(),
         listen,
         artifact,
+        executable,
     );
     Some(match timing.checks {
         Some(first) => updater.spawn_after(first),

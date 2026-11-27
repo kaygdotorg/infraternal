@@ -1,6 +1,4 @@
 //! Packs access-only changes into one negotiated action without repeating peer identity [242,252,256].
-#[cfg(feature = "agent")]
-use crate::policy::model::NodeId;
 use crate::{
     configuration,
     dataplane::{AccessUpdate, Chunk, Config},
@@ -88,46 +86,21 @@ pub fn chunks(old: Option<&Config>, new: &Config) -> Result<Vec<Chunk>, &'static
     Ok(vec![part])
 }
 
-/// Replace rules only for exact, existing, ordered disjoint inclusive ranges.
-/// # Errors
-/// Refuses missing endpoints and reversed or overlapping ranges.
+/// Apply negotiated access updates on the node.
 #[cfg(feature = "agent")]
-pub fn apply(config: &mut Config, updates: &[AccessUpdate]) -> std::io::Result<()> {
-    let mut previous = None;
-    for update in updates {
-        if update.first > update.last
-            || previous.is_some_and(|last: NodeId| last >= update.first)
-            || !config.peers.contains_key(&update.first)
-            || !config.peers.contains_key(&update.last)
-        {
-            return Err(std::io::ErrorKind::InvalidData.into());
-        }
-        previous = Some(update.last);
-    }
-    // Validate the entire body first. Refusal cannot leave partly replaced rules.
-    for update in updates {
-        for (_, peer) in config.peers.range_mut(update.first..=update.last) {
-            if let Some(inbound) = &update.inbound {
-                peer.inbound = inbound.clone();
-            }
-            if let Some(outbound) = &update.outbound {
-                peer.outbound = outbound.clone();
-            }
-        }
-    }
-    Ok(())
-}
+pub use infraternal_mesh_node::access_updates::apply;
 
+/// Checks the negotiated update across the coordinator encoder and node decoder.
 #[cfg(all(test, feature = "agent"))]
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use crate::dataplane::DefaultPolicy;
     use crate::policy::{
         coordinator::Coordinator,
         model::{MeshSettings, Node, PublicKey},
         rules::TrafficPolicy,
     };
+    use crate::{dataplane::DefaultPolicy, policy::model::NodeId};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn config() -> Config {

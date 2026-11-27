@@ -352,10 +352,20 @@ fn prune(root: &Path, current: &Path, staging: &Path, locks: &Path, uid: u32) ->
 /// use nonblocking mode so other durable writes can use the shared workers.
 fn publication(exe: &Path, root: &Path, blocking: bool) -> io::Result<Published> {
     let uid = nix::unistd::Uid::effective().as_raw();
-    // Linux binds this exact magic link to the executing image, even after an
-    // anonymous upgrade. It is not an arbitrary pathname alias. All sources
-    // retain the same inode ownership, mode and change checks below.
+    // The Linux magic link pins the running inode, including an ordinary
+    // executable unlinked by an atomic install. Warm memfds require the
+    // embedded process to come from the trusted disk image instead (#613).
     let mut source = if cfg!(target_os = "linux") && exe == Path::new("/proc/self/exe") {
+        if fs::read_link(exe)?
+            .as_os_str()
+            .as_encoded_bytes()
+            .starts_with(b"/memfd:")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "untrusted login binary source",
+            ));
+        }
         File::open(exe)?
     } else {
         opened(exe)?

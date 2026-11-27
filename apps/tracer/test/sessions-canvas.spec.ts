@@ -225,7 +225,7 @@ test("ending a session names what is running and asks with the compact confirm",
     const tip = page.locator(".ui-confirm-tip[data-open='true']");
     await expect(tip).toBeVisible();
     await expect(tip.locator(".ui-confirm-tip-message")).toHaveText("End 'apt upgrade'?");
-    await expect(tip.locator(".ui-confirm-tip-detail")).toContainText("apt upgrade is still running");
+    await expect(tip.locator(".ui-confirm-tip-detail")).toContainText("Ending the session stops apt upgrade.");
     await expect(tip.locator("button")).toHaveCount(2);
     await expect(tip.locator("button").nth(1)).toHaveAttribute("aria-label", "End session");
     await expect(page.locator(".cl-sx-pop")).toBeVisible();
