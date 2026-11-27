@@ -3,7 +3,8 @@
 //! The CLI core and every plugin that presents its own records use these helpers, so
 //! a table printed by the core and a table printed by a plugin follow the same rules:
 //! a header only when there are two rows or more, every column as wide as its widest
-//! value, and only the last column wraps. Long words stay intact so they can be copied.
+//! value, and only the last column wraps. Tables that cannot fit a long value use
+//! labeled records so addresses and commands stay intact.
 //! Raw values (byte counts, epoch times) belong in `--json`; people get the units here.
 
 use serde_json::Value;
@@ -50,7 +51,8 @@ const GAP: usize = 2;
 ///
 /// `header` is printed only when there are at least two rows (a one-row answer needs no
 /// labels). Columns other than the last are truncated with an ellipsis when the table
-/// is too wide; the last column wraps at word boundaries.
+/// is too wide; the last column wraps at word boundaries. When a word will not
+/// fit in the last column, show labeled records so the value stays copyable.
 #[must_use]
 pub fn table(
     header: &[&str],
@@ -94,6 +96,15 @@ pub fn table(
             _ => break,
         }
     }
+    let last = columns - 1;
+    let last_column_overflows = rows
+        .iter()
+        .filter_map(|row| row.get(last))
+        .flat_map(|cell| cell.split_whitespace())
+        .any(|word| word.width() > widths[last]);
+    if last_column_overflows || widths.iter().sum::<usize>() + gaps > available {
+        return stacked_rows(header, rows, indent, width);
+    }
     let mut out = String::new();
     if show_header {
         let labels: Vec<String> = header.iter().map(|label| label.to_uppercase()).collect();
@@ -101,6 +112,45 @@ pub fn table(
     }
     for row in rows {
         push_row(&mut out, row, &widths, indent, tint);
+    }
+    out
+}
+
+/// Show each row as a labeled record when the columns cannot fit intact values.
+fn stacked_rows(header: &[&str], rows: &[Vec<String>], indent: usize, width: usize) -> String {
+    use std::fmt::Write as _;
+
+    let margin = " ".repeat(indent);
+    let available = width.saturating_sub(indent);
+    let mut out = String::new();
+    for row in rows {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        for (label, value) in header
+            .iter()
+            .copied()
+            .zip(row)
+            .filter(|(_, value)| !value.is_empty())
+        {
+            let value_column = label.width() + GAP;
+            let room = available.saturating_sub(value_column);
+            if value.split_whitespace().any(|word| word.width() > room) {
+                let _ = writeln!(out, "{margin}{label}");
+                for line in wrap(value, available) {
+                    let _ = writeln!(out, "{margin}{line}");
+                }
+            } else {
+                let alignment = " ".repeat(value_column);
+                for (index, line) in wrap(value, room).iter().enumerate() {
+                    if index == 0 {
+                        let _ = writeln!(out, "{margin}{label}  {line}");
+                    } else {
+                        let _ = writeln!(out, "{margin}{alignment}{line}");
+                    }
+                }
+            }
+        }
     }
     out
 }

@@ -959,13 +959,16 @@ mod tests {
         );
     }
 
+    /// Keep the full endpoint copyable in an 80-column terminal.
     #[test]
     fn a_wide_table_stays_within_the_width() {
         let mut row = peer(3, "10.254.0.3", 990);
-        row["peer"]["endpoint"] = "[2001:db8:1234:5678:9abc:def0:1234:5678]:47823".into();
+        let endpoint = "[2001:db8:1234:5678:9abc:def0:1234:5678]:47823";
+        row["peer"]["endpoint"] = endpoint.into();
         let page =
             serde_json::json!({"peers": [row, peer(4, "10.254.0.4", 990)], "next_cursor": null});
         let shown = peers_at(&page, 80, 1000).expect("present peers");
+        assert!(shown.body.contains(endpoint), "{}", shown.body);
         assert!(
             shown.body.lines().all(|line| line.chars().count() <= 80),
             "{}",
