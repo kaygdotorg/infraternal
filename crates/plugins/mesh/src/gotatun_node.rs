@@ -1600,6 +1600,11 @@ impl RuntimeState {
         }
         let desired = peer_keys_with_network_access(&config);
         let admitted_peers = admitted_peer_keys(&config);
+        let previous_admitted = self
+            .config
+            .as_ref()
+            .map(admitted_peer_keys)
+            .unwrap_or_default();
         let admission = Arc::clone(
             &self
                 .pending
@@ -1677,6 +1682,17 @@ impl RuntimeState {
             .collect();
         // Keep the larger link limit until the caller has replaced the peer route metrics.
         self.update_mtu(previous_mtu.max(mtu))?;
+        // Admit newly granted peers before inserting them into `GotaTun` so the device's timer
+        // task cannot send an initiation before our own receive guard accepts the peer's
+        // simultaneous initiation (#605). Existing peers stay admitted until the device write
+        // succeeds, and a failed write restores the previous admission set.
+        let mut pre_admitted = false;
+        if !admitted_peers.is_subset(&previous_admitted) {
+            let mut guard = admission.write().await;
+            guard.set_peers(previous_admitted.union(&admitted_peers).copied());
+            drop(guard);
+            pre_admitted = true;
+        }
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
             //
@@ -1693,6 +1709,10 @@ impl RuntimeState {
                 .await
                 .map_err(|_| io::Error::other("GotaTun peers could not be updated."))
             {
+                if pre_admitted {
+                    let mut guard = admission.write().await;
+                    guard.set_peers(previous_admitted);
+                }
                 let _ = self.update_mtu(previous_mtu);
                 return Err(error);
             }

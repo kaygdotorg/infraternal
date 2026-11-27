@@ -9,6 +9,18 @@ use serde_json::{Value, json};
 use sqlx::{FromRow, Row, SqlitePool};
 use uuid::Uuid;
 
+/// Name a host from its bootstrap address, retained hostname or OS fallback, in that order.
+pub(crate) fn host_display_name(
+    id: Uuid,
+    address: &str,
+    hostname: Option<&str>,
+    os: Option<&str>,
+) -> String {
+    machine_name(address)
+        .or_else(|| hostname.and_then(machine_name))
+        .unwrap_or_else(|| fallback_machine_name(os, &id.simple().to_string()))
+}
+
 /// Public host facts and an optional server-owned cleanup status, read together.
 type AdmittedHostRow = (
     [u8; 16],
@@ -279,11 +291,7 @@ impl Inventory for Source {
             for (id, address, os, hostname, mode, cleanup) in rows {
                 let id = Uuid::from_bytes(id);
                 let user = address.split_once('@').map(|(user, _)| user);
-                let name = machine_name(&address)
-                    .or_else(|| hostname.as_deref().and_then(machine_name))
-                    .unwrap_or_else(|| {
-                        fallback_machine_name(os.as_deref(), &id.simple().to_string())
-                    });
+                let name = host_display_name(id, &address, hostname.as_deref(), os.as_deref());
                 // A pending host may still have a draining actor, never usable
                 // authority. Expiry is derived from the ledger without a timer
                 // or a false durable receipt; renewal already refuses this row.

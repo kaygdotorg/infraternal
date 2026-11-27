@@ -112,7 +112,10 @@ url = { workspace = true, optional = true }
 # Retry the first unanswered active handshake in the next admission window, and
 # clear a peer's confirmed endpoint when its last session expires, resets, or
 # rotates keys (#260, J1265).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "dc6be80a74cc0a8edffa40ef5ed99d66dca0eb58", default-features = false, features = ["device", "ring"], optional = true }
+# Deferring the initial timer-queue report in `DeviceState::add_peer` until after
+# `Arc::new_cyclic` and `packet_lookup.insert_peer` keeps dynamically added peers from
+# being dropped from `timer_queue` permanently (#605, J1299).
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "db9d51d023b6581e6f5255200ab4a6eaa91e3bdd", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
