@@ -2223,11 +2223,13 @@ dependencies = [
  "hickory-proto",
  "infraternal-mesh",
  "infraternal-plugin-api",
+ "ipnetwork",
  "nix 0.32.0",
  "ring",
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "zeroize",
 ]
 

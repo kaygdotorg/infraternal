@@ -122,7 +122,8 @@ fn a_roamed_peer_keeps_the_reserve_on_the_mac() {
         node.chunk(chunk).expect("install the snapshot");
     }
     let (reply, admission) = std::sync::mpsc::sync_channel(1);
-    node.worker
+    node.test_state()
+        .worker
         .as_ref()
         .expect("running worker")
         .commands
