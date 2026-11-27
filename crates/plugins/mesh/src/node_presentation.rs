@@ -46,7 +46,7 @@ fn routes(value: &Value, width: usize) -> Result<Presented, PluginError> {
                     network["network"].as_str().unwrap_or("?"),
                     plural(network["peers"].as_u64().unwrap_or(0), "peer", "peers"),
                     if network["masquerade"] == true {
-                        "masqueraded"
+                        "uses this machine's address"
                     } else {
                         "keeps source addresses"
                     }
@@ -60,7 +60,7 @@ fn routes(value: &Value, width: usize) -> Result<Presented, PluginError> {
         Some("on") => rows.push((
             "Forwarding",
             format!(
-                "on; IPv4 forwarding {}",
+                "on, IPv4 forwarding {}",
                 forwarding["ip_forward"].as_str().unwrap_or("on")
             ),
         )),
@@ -81,7 +81,10 @@ fn routes(value: &Value, width: usize) -> Result<Presented, PluginError> {
                 let installed = &network["installed"];
                 let state = match installed["reason"].as_str() {
                     Some(reason) => {
-                        format!("{}: {reason}", installed["state"].as_str().unwrap_or("?"))
+                        format!(
+                            "{} ({reason})",
+                            installed["state"].as_str().unwrap_or("Unknown")
+                        )
                     }
                     None => installed["state"].as_str().unwrap_or("?").to_owned(),
                 };
@@ -89,7 +92,8 @@ fn routes(value: &Value, width: usize) -> Result<Presented, PluginError> {
                     network["network"].as_str().unwrap_or("?").to_owned(),
                     network["via"]
                         .as_str()
-                        .map_or_else(|| format!("node {}", network["via_node"]), str::to_owned),
+                        .unwrap_or("Unknown machine")
+                        .to_owned(),
                     state,
                 ]
             })
@@ -175,10 +179,7 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
     }
     if value["ipv6"] == false {
         // The mesh link has IPv6 off (#578): no IPv6 address was installed, so do not list one.
-        rows.push((
-            "IPv6",
-            "off on this machine (net.ipv6.conf disable_ipv6); the mesh runs IPv4-only".to_owned(),
-        ));
+        rows.push(("IPv6", "Off on this machine. Mesh uses IPv4.".to_owned()));
     } else if let Some(address) = value["addresses"]["ipv6"].as_str() {
         let address: std::net::Ipv6Addr = address.parse().map_err(|_| PluginError::Rejected)?;
         rows.push(("Address", address.to_string()));
@@ -221,19 +222,19 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
         let kind = match link.kind {
             ServerLinkKind::Disconnected => "not connected",
             ServerLinkKind::Local => "this machine is the server",
-            ServerLinkKind::Fallback => "over the enrolled port",
+            ServerLinkKind::Fallback => "over the port used to join",
             ServerLinkKind::Mesh => "over the mesh",
         };
         let reason = match link.reason {
-            ServerLinkReason::Connecting => "connecting to the enrolled server",
+            ServerLinkReason::Connecting => "connecting to the server this machine joined",
             ServerLinkReason::Local => "the server runs on this machine",
             ServerLinkReason::MeshUnavailable => "the mesh path is not available",
-            ServerLinkReason::MeshProven => "the mesh path is proven",
+            ServerLinkReason::MeshProven => "the mesh connection answered",
             ServerLinkReason::MeshRefused => "the mesh path was refused, retrying",
             ServerLinkReason::MeshInterrupted => "the mesh path was interrupted",
             ServerLinkReason::MeshDisabled => "the mesh path was withdrawn",
         };
-        rows.push(("Server", format!("{kind}; {reason}")));
+        rows.push(("Server", format!("{kind} ({reason})")));
         if let Some(endpoint) = link.endpoint {
             rows.push(("Link", endpoint.to_string()));
         }
@@ -252,14 +253,14 @@ fn status(value: Value, width: usize) -> Result<Presented, PluginError> {
             Some("chosen") => "chosen for this machine",
             _ => return Err(PluginError::Rejected),
         };
-        rows.push(("Data plane", format!("{engine}, {reason}")));
+        rows.push(("Mesh engine", format!("{engine} ({reason})")));
     }
     if let Some(enforcement) = value.get("enforcement").and_then(Value::as_str) {
         rows.push((
             "Enforcement",
             match enforcement {
-                "userspace" => "D164 access rules checked at both userspace TUN edges",
-                "kernel" => "D164 access rules checked by kernel WireGuard",
+                "userspace" => "Mesh checks access rules on incoming and outgoing traffic",
+                "kernel" => "The kernel checks mesh access rules",
                 _ => return Err(PluginError::Rejected),
             }
             .to_owned(),
@@ -649,18 +650,18 @@ mod tests {
                 ServerLinkKind::Mesh,
                 ServerLinkReason::MeshProven,
                 "over the mesh",
-                "the mesh path is proven",
+                "the mesh connection answered",
             ),
             (
                 ServerLinkKind::Fallback,
                 ServerLinkReason::MeshInterrupted,
-                "over the enrolled port",
+                "over the port used to join",
                 "the mesh path was interrupted",
             ),
             (
                 ServerLinkKind::Fallback,
                 ServerLinkReason::MeshRefused,
-                "over the enrolled port",
+                "over the port used to join",
                 "the mesh path was refused, retrying",
             ),
         ] {
@@ -731,14 +732,14 @@ mod tests {
             "engine_selection":{"engine":"gotatun","reason":"default"}});
         let shown = status(default, 100).expect("default engine").body;
         assert!(
-            shown.contains("Data plane  GotaTun (userspace), the default"),
+            shown.contains("Mesh engine  GotaTun (userspace) (the default)"),
             "{shown}"
         );
         let chosen = serde_json::json!({"state":"On","peer_count":1,
             "engine_selection":{"engine":"kernel","reason":"chosen"}});
         let shown = status(chosen, 100).expect("chosen engine").body;
         assert!(
-            shown.contains("Data plane  kernel WireGuard, chosen for this machine"),
+            shown.contains("Mesh engine  kernel WireGuard (chosen for this machine)"),
             "{shown}"
         );
     }
@@ -752,7 +753,7 @@ mod tests {
             100,
         )
         .expect("ipv4-only status");
-        assert!(off.body.contains("IPv4-only"), "{}", off.body);
+        assert!(off.body.contains("Mesh uses IPv4"), "{}", off.body);
         assert!(!off.body.contains("fd01::1"), "{}", off.body);
         let on = status(
             serde_json::json!({"state":"On","peer_count":0,"ipv6":true,
@@ -761,7 +762,7 @@ mod tests {
         )
         .expect("dual-stack status");
         assert!(on.body.contains("fd01::1"), "{}", on.body);
-        assert!(!on.body.contains("IPv4-only"), "{}", on.body);
+        assert!(!on.body.contains("Mesh uses IPv4"), "{}", on.body);
     }
 
     /// Status says how mesh names reach the host resolver, and why when they do not.
@@ -825,7 +826,7 @@ mod tests {
                 .contains("kernel-only protections are missing")
         );
         assert!(shown.body.contains("Enforcement"));
-        assert!(shown.body.contains("userspace TUN edges"));
+        assert!(shown.body.contains("incoming and outgoing traffic"));
         for protection in [
             "mesh-address anti-spoofing on non-mesh interfaces",
             "forwarding drops",

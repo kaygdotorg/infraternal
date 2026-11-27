@@ -10,7 +10,7 @@ use infraternal_plugin_api::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::{self, Read},
+    io::{self, IsTerminal as _, Read},
     path::PathBuf,
     process::ExitCode,
 };
@@ -230,8 +230,19 @@ fn refuse(json_output: bool, command: &str, error: &io::Error) -> ExitCode {
             Exit::Failed,
         ),
     };
+    let text = match (cause, error.kind()) {
+        (None, io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused) => {
+            "The infraternal agent isn't running on this machine."
+        }
+        (None, io::ErrorKind::TimedOut) => "The infraternal agent didn't answer in 5 seconds.",
+        (Some(Cause::NoRuntimeDirectory), _) => {
+            "Couldn't find the infraternal agent for this account."
+        }
+        _ => message,
+    };
     emit(
         CommandResult::new(command, CommandState::Failed, message, json!({}))
+            .with_text_message(text)
             .with_details(why)
             .with_next_step(next),
         json_output,
@@ -368,7 +379,10 @@ async fn execute(
     } else {
         output
     };
-    let width = RenderOptions::detect(false).usable_width();
+    let options = RenderOptions::detect(io::stdout().is_terminal());
+    let width = options
+        .usable_width()
+        .saturating_sub(if options.terminal { 4 } else { 0 });
     let presented = registry
         .present(presentation.unwrap_or(action), &shown, width)
         .map_err(|_| io::ErrorKind::InvalidData)?;
@@ -378,9 +392,21 @@ async fn execute(
         presented.message.clone(),
         presented.data.clone(),
     )
-    .with_body(presented.body.clone());
+    .with_panel(presented.body.clone());
     for next in &presented.next {
         result = result.with_next_step(next.clone());
+    }
+    if presentation.unwrap_or(action) == "mesh.status" {
+        result = match presented.data["state"].as_str() {
+            Some("Off") => result
+                .with_text_message("Mesh is off.")
+                .with_text_next(vec!["Turn on mesh with infraternal mesh up.".to_owned()]),
+            Some("Waiting") => result.with_text_message("Mesh is waiting for the server."),
+            Some("Stopping") => result.with_text_next(vec![
+                "Check whether mesh has stopped with infraternal mesh status.".to_owned(),
+            ]),
+            _ => result,
+        };
     }
     print(&result, json_output, false);
     Ok(Exit::Ok)
