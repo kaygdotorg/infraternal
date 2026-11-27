@@ -29,8 +29,9 @@
 
 use super::{
     Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal, fail, join_approval_link,
-    local_hostname, machine_key_short, machine_start_body, map_remote_failure, needs_terminal,
-    print_approval, server_url, start_approval, take_join_key, trusted_tool, wait_for_approval,
+    joined_message, local_hostname, machine_key_short, machine_start_body, map_remote_failure,
+    needs_terminal, print_approval, server_url, start_approval, take_join_key, trusted_tool,
+    wait_for_approval,
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -46,7 +47,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, IsTerminal, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
@@ -64,6 +65,8 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 
 /// Where one person's user-mode install lives (D395).
 pub(super) struct Paths {
+    /// The account home from the user database.
+    home: PathBuf,
     /// `~/Library/Application Support/infraternal`.
     base: PathBuf,
     /// The enrollment directory.
@@ -98,6 +101,7 @@ impl Paths {
             legacy_launch_agent: library
                 .join(format!("LaunchAgents/{}.plist", legacy::AGENT_LABEL)),
             base,
+            home,
         })
     }
 
@@ -105,19 +109,105 @@ impl Paths {
     fn receipt(&self) -> PathBuf {
         self.base.join(macos_user_mode::USER_RECEIPT)
     }
+}
 
-    /// The `PATH` line `up` prints, since a per-user Mac install adds no link (D395).
-    fn path_line(&self) -> String {
-        format!(
-            "export PATH=\"{}:$PATH\"",
-            self.binary
-                .parent()
-                .unwrap_or(&self.base)
-                .display()
-                .to_string()
-                .replace('"', "\\\"")
-        )
+/// Add the installed command to future interactive zsh sessions if the user agrees.
+fn offer_path(paths: &Paths) {
+    let Some(directory) = paths.binary.parent() else {
+        return;
+    };
+    if env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|entry| entry == directory))
+    {
+        return;
     }
+    let Some(shell) = env::var_os("SHELL") else {
+        return;
+    };
+    // Do not claim to configure another shell or guess which startup file it reads.
+    if Path::new(&shell)
+        .file_name()
+        .is_none_or(|name| name != "zsh")
+    {
+        return;
+    }
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return;
+    }
+    let config_dir = env::var_os("ZDOTDIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || Some(paths.home.clone()),
+            |value| {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path)
+            },
+        );
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+    let config = config_dir.join(".zshrc");
+    let mut stderr = io::stderr().lock();
+    let prompt = "Add infraternal to PATH for new zsh sessions? [y/N] ";
+    if write!(stderr, "\n{prompt}")
+        .and_then(|()| stderr.flush())
+        .is_err()
+    {
+        return;
+    }
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer).is_ok()
+        && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    {
+        match add_to_zsh_path(&config, directory) {
+            Ok(()) => {
+                let _ = writeln!(stderr, "Open a new terminal to run infraternal.");
+            }
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "Couldn't update .zshrc. Run infraternal using the full path shown above."
+                );
+            }
+        }
+    }
+}
+
+/// Append one shell-safe PATH line. Refuse special files, links and other users' files.
+fn add_to_zsh_path(config: &Path, directory: &Path) -> io::Result<()> {
+    let directory = directory
+        .to_str()
+        .filter(|path| !path.contains(['\n', '\r', ':']))
+        .ok_or(ErrorKind::InvalidInput)?;
+    let line = format!(
+        "export PATH='{}':\"$PATH\"",
+        directory.replace('\'', "'\\''")
+    );
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(config)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != nix::unistd::Uid::current().as_raw() {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    file.lock()?;
+    /// Bound the read before scanning for the existing entry.
+    const LIMIT: usize = 1024 * 1024;
+    let mut previous = String::new();
+    (&file)
+        .take(LIMIT as u64 + 1)
+        .read_to_string(&mut previous)?;
+    if previous.len() > LIMIT {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    if !previous.lines().any(|existing| existing == line) {
+        writeln!(&file, "\n{line}")?;
+    }
+    Ok(())
 }
 
 /// Whether a path exists, without following a final link.
@@ -256,8 +346,7 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
             install.committed = true;
             let paths = &install.paths;
             let local_network = wait_for_local_network(&paths.state);
-            let path_line = paths.path_line();
-            emit(
+            let result = emit(
                 CommandResult::new(
                     "up",
                     CommandState::Ready,
@@ -274,13 +363,18 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
                         "local_network": local_network.map(LocalNetwork::word),
                     }),
                 )
+                .with_text_message(joined_message(&hostname))
                 .with_body(format!(
-                    "Mac joined as {hostname} (user mode).\nService: active ({AGENT_LABEL})\nCommand: {}\nAdd it to your PATH:\n  {path_line}",
+                    "Server   {origin}\nMode     Runs while you're signed in to this Mac\nCommand  {}",
                     paths.binary.display()
                 )),
                 json_output,
                 Exit::Ok,
-            )
+            );
+            if !json_output {
+                offer_path(paths);
+            }
+            result
         }
         Err(failure) => fail(json_output, failure),
     }
@@ -322,7 +416,7 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         return first;
     }
     eprintln!(
-        "macOS asks whether infraternal may find devices on your local network. Click Allow, so this Mac reaches mesh peers on the same network directly. Waiting up to {} seconds…",
+        "Click Allow in the macOS Local Network prompt to connect directly to nearby mesh machines. Waiting up to {} seconds.",
         LOCAL_NETWORK_WAIT.as_secs()
     );
     let last = poll(Instant::now() + LOCAL_NETWORK_WAIT, &|state| {
@@ -332,7 +426,7 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         eprintln!("Local Network access allowed.");
     } else {
         eprintln!(
-            "Local Network access is not allowed yet. Peers on other networks work; to reach peers on this network, turn on infraternal under System Settings > Privacy & Security > Local Network. No restart is needed."
+            "Local Network access is off. To connect directly to nearby mesh machines, turn on infraternal in System Settings > Privacy & Security > Local Network."
         );
     }
     last
