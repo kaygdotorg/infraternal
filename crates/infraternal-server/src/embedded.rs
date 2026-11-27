@@ -244,22 +244,25 @@ impl AttachmentHandle {
         if std::time::Instant::now() >= expires {
             return false;
         }
-        let (completed, fence) = oneshot::channel();
-        let published = async {
-            self.0
-                .input
-                .send(ForwardInput::Fence(completed))
-                .await
-                .map_err(|_| ())?;
-            fence.await.map_err(|_| ())
-        };
         if !matches!(
-            tokio::time::timeout_at(expires.into(), published).await,
+            tokio::time::timeout_at(expires.into(), self.publish_queued_input()).await,
             Ok(Ok(()))
         ) {
             return false;
         }
         self.reply(query_seq, bytes, expires)
+    }
+
+    /// Wait until the input forwarder has put every preceding frame in the
+    /// host command FIFO. The caller can then enqueue work behind those frames.
+    pub(crate) async fn publish_queued_input(&self) -> Result<(), AgentError> {
+        let (completed, fence) = oneshot::channel();
+        self.0
+            .input
+            .send(ForwardInput::Fence(completed))
+            .await
+            .map_err(|_| AgentError::Unavailable)?;
+        fence.await.map_err(|_| AgentError::Unavailable)
     }
     /// Tells the host actor whether this attachment's viewer is hidden (page hidden or the window
     /// off the canvas). A parked attachment is sent no 25 ms route probes, so its shim sleeps; the
