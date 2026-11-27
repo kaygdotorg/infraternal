@@ -7,6 +7,7 @@ mod liveness;
 
 use std::time::Duration;
 
+/// An unissued link reply cannot extend the live host lease.
 #[tokio::test(start_paused = true)]
 async fn unissued_native_probe_reply_cannot_extend_readiness() {
     let mut route = liveness::Liveness::host_link();
