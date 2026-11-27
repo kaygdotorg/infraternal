@@ -2780,12 +2780,14 @@ access (#341 B19).
        keeping the old mechanism.
      - **D259's "typable within one round trip + 50 ms" applies when the
        connection can be reused or resumed.** While a host has attached
-       terminals, the server sends one liveness probe on its control stream.
-       A matching Pong confirms the host link for every attached terminal;
-       terminal streams have no separate liveness probes. A dead or half-open
-       host link is detected under D300's reply deadline, and input typed
-       meanwhile is kept, never lost. After a real network change a fresh TCP
-       + TLS + upgrade needs about three round trips, so that case's budget is
+       terminals, the server checks one shared liveness lease on its control
+       stream, using the existing 25 ms probe schedule. A matching Pong
+       confirms the host link for every attached terminal; it does not test
+       each terminal stream. Terminal streams have no separate liveness
+       probes. A dead or half-open host link is detected under D300's reply
+       deadline, and input typed meanwhile is kept, never lost. After a real
+       network change a fresh TCP + TLS + upgrade needs about three round
+       trips, so that case's budget is
        **three round trips + 50 ms**, measured on the perf VM through real TLS.
        The last screen still returns within one frame from the client's copy
        (D259, unchanged).
