@@ -23,8 +23,8 @@ worker.addEventListener("message", (event) => {
   const warmNavigation = !("warmNavigation" in value) || value.warmNavigation !== false;
   event.waitUntil((async () => {
     const cache = await caches.open(cacheName);
-    const targets = new Set(paths.map((u) => u.pathname));
-    if (warmNavigation) targets.add("/");
+    const targets = new Set(warmNavigation ? ["/"] : []);
+    for (const url of paths) targets.add(url.pathname);
     for (const path of targets) {
       try { const response = await fetch(path, { credentials: "omit" }); if (response.ok) await cache.put(path, response); } catch { /* keep the prior public asset while offline */ }
     }

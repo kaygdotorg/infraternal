@@ -50,7 +50,7 @@ test("a throttled layout startup counts down and retries", async ({ page }, info
 test("a controlled layout reload skips duplicate offline warming", async ({ page }) => {
   await page.addInitScript(() => {
     const post = ServiceWorker.prototype.postMessage;
-    ServiceWorker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
+    ServiceWorker.prototype.postMessage = function (this: ServiceWorker, message: unknown, ...args: unknown[]) {
       if (message && typeof message === "object" && "type" in message && message.type === "cache-drawing-assets"
         && "paths" in message && Array.isArray(message.paths)) {
         document.documentElement.dataset.offlineWarm = "warmNavigation" in message && message.warmNavigation === false
