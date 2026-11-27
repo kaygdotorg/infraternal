@@ -610,6 +610,7 @@ mod refusal_tests {
         assert_eq!(open_refusal(&refused), OpenRefusal::NoSystemd);
     }
 
+    /// A user-mode host distinguishes a missing named login from a forbidden account switch.
     #[test]
     fn rootless_host_names_why_it_cannot_log_in() {
         if nix::unistd::Uid::effective().is_root() {
