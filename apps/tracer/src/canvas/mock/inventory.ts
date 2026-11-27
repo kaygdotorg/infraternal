@@ -26,6 +26,7 @@ export interface MockInventory extends SessionInventory {
   dispose(): void;
 }
 
+/** Loads the mock host inventories and keeps their session actions in memory. */
 export async function createMockInventory(world: MockWorld): Promise<MockInventory> {
   let pristine: Array<{ id: string; sessions: SessionRecord[] }> = [];
   let hosts = new Map<string, SessionRecord[]>();

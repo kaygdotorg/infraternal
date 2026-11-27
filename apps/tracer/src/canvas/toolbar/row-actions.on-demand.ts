@@ -46,6 +46,7 @@ export interface RowActionsHooks {
   editing(open: boolean): void;
 }
 
+/** Wires the tree's shared actions for menus, gestures, the hover pill and the keyboard. */
 export function createRowActions(cx: Ctx, tree: HTMLElement, hooks: RowActionsHooks): { menu: RowMenu; openRename(row: HTMLElement): boolean; rowEntries(): PaletteEntry[]; actionsOf(row: HTMLElement): RowAction[]; dispose(): void } {
   const closeSidebar = hooks.closeSidebar;
   const openRename = createRowRename(cx, hooks.editing);

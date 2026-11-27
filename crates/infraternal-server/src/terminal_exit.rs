@@ -101,8 +101,8 @@ async fn record_status(
     Ok(())
 }
 
-/// Same rules and SQL as [`record`], run on the D379 writer thread (#562) when
-/// `auth` has one; otherwise it falls back to [`record`] on `pool`.
+/// Validate an attached exit notice and store its status on the D379 writer
+/// thread (#562) when available, or through the SQL pool otherwise.
 pub(crate) async fn record_on_writer(
     auth: &Auth,
     pool: &SqlitePool,

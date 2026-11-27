@@ -88,6 +88,16 @@ for (const way of ["mouse", "keyboard", "touch"] as const) {
       const ask = page.locator(".ui-row-ask");
       const label = session.locator(".bm-label");
       await expect(ask.getByRole("button", { name: "Keep", exact: true })).toBeVisible();
+      await expect(ask).toHaveAccessibleDescription(/closes its shell and stops programs/);
+      if (way === "mouse") {
+        await ask.getByRole("button", { name: "Keep", exact: true }).click();
+        await expect(ask).toHaveCount(0);
+        await expect(session).toBeVisible();
+        expect(pids.every(alive)).toBe(true);
+        await session.click({ button: "right" });
+        await page.getByRole("menuitem", { name: "End session…" }).click();
+        await expect(ask).toBeVisible();
+      }
       expect(pids.every(alive)).toBe(true);
       const labelX = (await label.boundingBox())!.x;
       const questionX = (await ask.locator(".ui-row-ask-q").boundingBox())!.x;
@@ -98,8 +108,8 @@ for (const way of ["mouse", "keyboard", "touch"] as const) {
       await expect(session).toHaveCount(0);
       await expect.poll(() => pids.filter(alive)).toEqual([]);
       await expect(windows(page)).toHaveCount(0);
-      expect((await request(server, context, "terminal.end", { session_id: sid })).ok).toBe(true);
       console.log(`SIDEBAR_SESSION_END ${way} confirmed_to_no_row_and_processes_ms=${Date.now() - started}`);
+      expect((await request(server, context, "terminal.end", { session_id: sid })).ok).toBe(true);
     } finally {
       await context.close();
       await server.dispose();
