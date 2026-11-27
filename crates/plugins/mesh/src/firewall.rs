@@ -2118,13 +2118,18 @@ mod tests {
     /// left the host table's kernel objects untouched, independent of how a
     /// given nft version prints them as text.
     fn host_table_json(nft: &std::path::Path) -> Vec<serde_json::Value> {
+        table_json(nft, "infraternal_host")
+    }
+
+    /// Read the named table as JSON objects in rule order, skipping CLI metadata.
+    fn table_json(nft: &std::path::Path, name: &str) -> Vec<serde_json::Value> {
         let output = Command::new(nft)
-            .args(["-j", "list", "table", "inet", "infraternal_host"])
+            .args(["-j", "list", "table", "inet", name])
             .output()
-            .expect("list the host input table");
+            .expect("list the live table");
         assert!(
             output.status.success(),
-            "list the host input table: {}",
+            "list the live table: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let document: serde_json::Value =
@@ -2138,7 +2143,7 @@ mod tests {
             .collect();
         assert!(
             objects.iter().any(|object| object.get("rule").is_some()),
-            "host table snapshot must contain its rules: {objects:?}"
+            "table snapshot must contain its rules: {objects:?}"
         );
         objects
     }
@@ -2234,6 +2239,13 @@ mod tests {
         firewall
             .install_kernel_guard(&config, &[], &ingress)
             .expect("first guard");
+        let handle = |objects: &[serde_json::Value]| {
+            objects
+                .iter()
+                .find_map(|entry| entry.get("table")?.get("handle")?.as_u64())
+                .expect("live table handle")
+        };
+        let original_handle = handle(&table_json(&nft, TABLE));
         for id in 2_u32..=25 {
             let mut peer = config
                 .peers
@@ -2251,22 +2263,32 @@ mod tests {
                 .expect("apply peer address delta");
             assert_eq!(firewall.guard_status.state, "installed");
         }
-        let table = || {
-            let output = Command::new(&nft)
-                .args(["-s", "-n", "list", "table", "inet", TABLE])
-                .output()
-                .expect("list the live guard");
-            assert!(output.status.success());
-            output.stdout
+        let normalize = |mut objects: Vec<serde_json::Value>| {
+            for item in &mut objects {
+                for object in item.as_object_mut().expect("table object").values_mut() {
+                    if let Some(object) = object.as_object_mut() {
+                        object.remove("handle");
+                        if let Some(serde_json::Value::Array(elements)) = object.get_mut("elem") {
+                            elements.sort_by_key(ToString::to_string);
+                        }
+                    }
+                }
+            }
+            objects
         };
-        let incremental = table();
+        let incremental = table_json(&nft, TABLE);
+        assert_eq!(
+            handle(&incremental),
+            original_handle,
+            "no table replacement"
+        );
         run(
             &nft,
             &["-f", "-"],
             &render_guard_only(&config, true, &[], &ingress),
         )
         .expect("replace the whole guard");
-        assert_eq!(incremental, table());
+        assert_eq!(normalize(incremental), normalize(table_json(&nft, TABLE)));
     }
     /// First adoption replaces an unmarked product-owned mesh table safely.
     #[test]
