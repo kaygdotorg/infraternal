@@ -636,11 +636,26 @@ pub(crate) async fn terminals(
     token: &str,
     origin: &str,
 ) -> Vec<[u8; 16]> {
+    open_terminals(
+        address,
+        token,
+        origin,
+        u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS).unwrap(),
+    )
+    .await
+}
+
+/// Open `count` real local terminals through the authenticated browser path.
+pub(crate) async fn open_terminals(
+    address: std::net::SocketAddr,
+    token: &str,
+    origin: &str,
+    count: u32,
+) -> Vec<[u8; 16]> {
     use infraternal_protocol::{Frame, decode_muxed_frame};
     let mut socket = browser(address, token, origin).await;
     let mut sessions = Vec::new();
-    for call_id in 1..=u32::try_from(infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS).unwrap()
-    {
+    for call_id in 1..=count {
         wire_send(
             &mut socket,
             0,
