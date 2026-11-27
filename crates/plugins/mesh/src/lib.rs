@@ -17,21 +17,22 @@ mod socket;
 pub use socket::{MeshPlugin, parse_subscription};
 
 /// Public-only configuration shared by the coordinator and node component.
-pub mod dataplane;
+pub use infraternal_mesh_node::dataplane;
 
 /// Owns the host input policy shared by the server and mesh node [D386].
 #[cfg(any(feature = "server", feature = "agent"))]
 pub mod host_firewall;
 
 /// Chooses the stable mesh UDP listener and its configured fallback behavior.
+#[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 mod listen_port;
 
 /// Direct-path candidates and the order nodes try them in (#515, D391).
-pub mod candidates;
+pub use infraternal_mesh_node::candidates;
 
 /// The per-peer candidate walks both `GotaTun` engines drive, Linux and macOS alike (#515).
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
-mod candidate_walks;
+use infraternal_mesh_node::candidate_walks;
 
 pub mod configuration;
 
@@ -107,15 +108,15 @@ mod gotatun_tun;
 
 /// Coalesces endpoint announcements from the Linux and Mac route listeners (#483).
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
-mod underlay_announce;
+use infraternal_mesh_node::underlay_announce;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Round-trip probes on the direct path, sent from the `WireGuard` port.
-pub mod direct_probe;
+pub use infraternal_mesh_node::direct_probe;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Drops handshake initiations from ungranted keys before the userspace engine sees them.
-mod handshake_admission;
+use infraternal_mesh_node::handshake_admission;
 
 #[cfg(all(feature = "agent", any(target_os = "linux", target_os = "macos")))]
 /// Enforces per-peer grants at both GotaTun TUN boundaries on Linux and macOS.

@@ -239,22 +239,9 @@ fn installed_keys(peers: &[WireGuardPeer]) -> BTreeSet<crate::policy::model::Pub
         .collect()
 }
 
-/// Peer statistics use the same public shape as the Linux kernel adapter.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Counters {
-    #[serde(default)]
-    pub persistent_keepalive_secs: u16,
-    pub handshake_secs: u64,
-    #[cfg(feature = "relay")]
-    #[serde(skip)]
-    pub handshake_nanos: u32,
-    pub received_bytes: u64,
-    pub sent_bytes: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<std::net::SocketAddr>,
-}
-
-type CounterMap = BTreeMap<crate::policy::model::PublicKey, Counters>;
+use infraternal_mesh_node::peer_stats::CounterMap;
+/// Peer counters exposed by the Mac node.
+pub use infraternal_mesh_node::peer_stats::Counters;
 
 /// One utun control socket and the interface name the kernel gave it.
 pub(crate) struct OpenUtun {
