@@ -187,9 +187,10 @@ pub fn retirement_error() -> io::Error {
 /// Whether an attempt ended with the authenticated retirement outcome.
 #[must_use]
 pub fn is_retired(error: &io::Error) -> bool {
-    error
-        .get_ref()
-        .is_some_and(|source| source.is::<InstallationRetired>())
+    let Some(source) = error.get_ref() else {
+        return false;
+    };
+    source.is::<InstallationRetired>()
 }
 
 /// Retry ordinary errors, including local resource and credential failures.
