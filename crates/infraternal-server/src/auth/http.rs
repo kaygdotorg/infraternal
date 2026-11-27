@@ -728,22 +728,41 @@ async fn ingress(
     // no process-wide counter: any such ceiling is the same lockout at N
     // networks, and distributed floods are the reverse proxy's job (#76913).
     // IP/proxy headers are never trusted here; `source` is the runtime's.
-    crate::runtime::admit_temporal_request(
+    if crate::runtime::admit_temporal_request(
         &mut auth.ingress.lock().await.networks,
         crate::runtime::browser_network(source),
+        now,
+        BROWSER_PER_MINUTE,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    // The standalone adapter has no runtime session admission. Keep its
+    // existing reserve for a live caller whose enclosing network is spent.
+    let token = cookie(headers).map_err(|_| Error::Throttled)?;
+    let user = auth
+        .session(token, now)
+        .await
+        .map_err(|_| Error::Throttled)?
+        .user_id;
+    crate::runtime::admit_temporal_request(
+        &mut auth.ingress.lock().await.people,
+        user,
         now,
         BROWSER_PER_MINUTE,
     )
     .map_err(|_| Error::Throttled)
 }
 
-/// Public browser requests per minute for each enclosing network.
+/// Browser requests per minute for each enclosing network and its signed-in reserve.
 const BROWSER_PER_MINUTE: u8 = 120;
 
-/// Public browser admission keyed by enclosing network, with oldest-window eviction.
+/// Browser admission keyed by enclosing network, plus the standalone adapter's live-user reserve.
 #[derive(Default)]
 pub(super) struct Ingress {
     networks: std::collections::HashMap<IpAddr, crate::runtime::SourceBucket>,
+    people: std::collections::HashMap<String, crate::runtime::SourceBucket>,
 }
 
 /// Keep the unauthenticated response limited to first-run state and its local command.

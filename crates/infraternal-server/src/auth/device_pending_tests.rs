@@ -1,7 +1,7 @@
 //! Public approval starts cannot grow the approvals table without bound (#263, J122 P2).
 use super::*;
 use crate::runtime::ClientAddress;
-use axum::http::StatusCode;
+use axum::{extract::ConnectInfo, http::StatusCode};
 use std::net::IpAddr;
 
 async fn start(app: &axum::Router, source: IpAddr, body: &Value) -> StatusCode {
@@ -202,6 +202,7 @@ async fn browser(
         .uri(format!("/auth/{action}"))
         .header("content-type", "application/json")
         .header("origin", ORIGIN)
+        .extension(ConnectInfo(SocketAddr::new(v4(77), 5000)))
         .extension(ClientAddress(v4(77)));
     if let Some(cookie) = cookie {
         request = request.header("cookie", format!("__Host-infraternal={cookie}"));
@@ -214,6 +215,97 @@ async fn browser(
         )
         .await
         .unwrap()
+}
+
+/// Old attempts stay with their code and a restarted runtime can start a fresh machine's passkey.
+#[tokio::test]
+async fn first_machine_review_after_restart_has_its_own_admission() {
+    let _guard = SERIAL.lock().await;
+    let (pool, path) = disk_pool("device-admission-restart").await;
+    let (auth, setup) = empty_with_pool(pool.clone()).await;
+    let fixture = fixture_with_bootstrap(auth, setup).await;
+    fixture.auth.set_test_http_time(NOW);
+    let app = crate::runtime::test_auth_admission_router(fixture.auth.clone());
+    let response = browser(&app, "device-start", None, &join()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let old = json!({"code": json_body(response).await["user_code"]});
+    for attempt in 0..60 {
+        let response = browser(&app, "device-inspect", Some(&fixture.session), &old).await;
+        let expected = if attempt < 5 {
+            StatusCode::OK
+        } else {
+            StatusCode::UNAUTHORIZED
+        };
+        assert_eq!(
+            response.status(),
+            expected,
+            "old machine inspection {attempt}"
+        );
+    }
+    assert_eq!(
+        browser(&app, "device-inspect", Some(&fixture.session), &old)
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let session = fixture.session.clone();
+    drop(app);
+    drop(fixture);
+
+    let auth = Auth::new(pool.clone(), "auth.example.test", ORIGIN)
+        .await
+        .unwrap();
+    auth.set_test_http_time(NOW);
+    let app = crate::runtime::test_auth_admission_router(auth);
+    let response = browser(&app, "device-start", None, &join()).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let new = json!({"code": json_body(response).await["user_code"]});
+    for _ in 0..30 {
+        assert_eq!(
+            browser(&app, "status", None, &json!({})).await.status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        browser(&app, "device-inspect", None, &new).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for _ in 0..240 {
+        assert_eq!(
+            browser(&app, "status", Some(&session), &json!({}))
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        browser(&app, "status", Some(&session), &json!({}))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        browser(&app, "device-inspect", Some(&session), &new)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let response = browser(&app, "device-approve-start", Some(&session), &new).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let start = json_body(response).await;
+    assert!(start["options"]["publicKey"]["challenge"].is_string());
+    assert_eq!(
+        browser(&app, "device-inspect", Some(&session), &old)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    println!(
+        "first new join after restart returned 200 for inspection and passkey start, with the public and layout windows spent; old code retained its 401"
+    );
+    drop(app);
+    pool.close().await;
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[tokio::test]

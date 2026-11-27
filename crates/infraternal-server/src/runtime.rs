@@ -1227,8 +1227,17 @@ struct SourceAdmission {
     behind_proxy: bool,
     trusted_proxies: Vec<ProxyNetwork>,
     buckets: Arc<Mutex<HashMap<(IpAddr, bool), SourceBucket>>>,
-    sessions: Arc<Mutex<HashMap<String, SourceBucket>>>,
+    sessions: Arc<Mutex<HashMap<(String, BrowserSessionLane), SourceBucket>>>,
     session_reads: Arc<Semaphore>,
+}
+
+/// Machine and device approvals have their own capacity, independent of layout traffic.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum BrowserSessionLane {
+    /// Layout startup and other signed-in browser requests.
+    Browser,
+    /// Read or approve a pending device request.
+    Approval,
 }
 
 impl SourceAdmission {
@@ -1302,7 +1311,7 @@ async fn source_admission(
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if let Some(token) = browser_admission_token(&policy.auth, &request) {
+    if let Some((token, lane)) = browser_admission_token(&policy.auth, &request) {
         // Cookie syntax grants no capacity. Bound concurrent indexed reads
         // even when the caller sends a new invalid cookie on every request.
         let Ok(permit) = policy.session_reads.clone().try_acquire_owned() else {
@@ -1312,9 +1321,12 @@ async fn source_admission(
             Ok(Some(session)) => {
                 if let Err(response) = admit_temporal_request(
                     &mut *policy.sessions.lock().await,
-                    session,
+                    (session, lane),
                     now,
-                    BROWSER_SESSION_PER_MINUTE,
+                    match lane {
+                        BrowserSessionLane::Browser => BROWSER_SESSION_PER_MINUTE,
+                        BrowserSessionLane::Approval => BROWSER_APPROVAL_PER_MINUTE,
+                    },
                 ) {
                     return response.into_response();
                 }
@@ -1345,40 +1357,50 @@ async fn source_admission(
 /// Two startup reads per reload, plus headroom for foreground checks and several open tabs.
 const BROWSER_SESSION_PER_MINUTE: u8 = 240;
 
+/// Capacity for twenty complete inspect/start/finish sequences per browser session.
+const BROWSER_APPROVAL_PER_MINUTE: u8 = 60;
+
 /// Select the cookie only for same-origin browser requests whose capacity belongs to
 /// a signed-in session. Public setup, login, recovery and device-code ceremonies
 /// keep their source limit, even if a caller happens to carry a valid cookie.
 fn browser_admission_token<'a>(
     auth: &Auth,
     request: &'a Request<axum::body::Body>,
-) -> Option<&'a str> {
+) -> Option<(&'a str, BrowserSessionLane)> {
     if request.method() != axum::http::Method::POST
         || request
             .headers()
             .get(header::ORIGIN)
             .and_then(|v| v.to_str().ok())
             != Some(auth.origin())
-        || !matches!(
-            request.uri().path(),
-            "/auth/status"
-                | "/auth/session"
-                | "/auth/account-summary"
-                | "/auth/add-start"
-                | "/auth/wraps"
-                | "/auth/recovery-rotate"
-                | "/auth/recovery-cancel"
-                | "/auth/device-inspect"
-                | "/auth/device-approve-start"
-                | "/auth/device-approve-finish"
-                | "/auth/security-settings"
-                | "/auth/security-settings-update"
-                | "/auth/api-list"
-                | "/auth/api-revoke"
-        )
     {
         return None;
     }
-    auth::cookies::session(request.headers()).map(|cookie| cookie.token)
+    let lane = match request.uri().path() {
+        "/auth/device-inspect" | "/auth/device-approve-start" | "/auth/device-approve-finish" => {
+            BrowserSessionLane::Approval
+        }
+        "/auth/status"
+        | "/auth/session"
+        | "/auth/account-summary"
+        | "/auth/add-start"
+        | "/auth/wraps"
+        | "/auth/recovery-rotate"
+        | "/auth/recovery-cancel"
+        | "/auth/security-settings"
+        | "/auth/security-settings-update"
+        | "/auth/api-list"
+        | "/auth/api-revoke" => BrowserSessionLane::Browser,
+        _ => return None,
+    };
+    auth::cookies::session(request.headers()).map(|cookie| (cookie.token, lane))
+}
+
+/// Mount production source admission around the auth router for in-process HTTP tests.
+#[cfg(test)]
+pub(crate) fn test_auth_admission_router(auth: Auth) -> Router {
+    let admission = SourceAdmission::new(auth.clone(), false, Vec::new());
+    auth::router(auth).layer(from_fn_with_state(admission, source_admission))
 }
 
 /// The network an auth caller is accounted to: the IPv4 address,
