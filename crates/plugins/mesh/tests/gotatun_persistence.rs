@@ -1601,8 +1601,14 @@ fn j534_wait_for_handshakes(
             thread::sleep(Duration::from_millis(10));
         }
     }
-    assert!(handshake_a, "node A did not establish handshake ({context})");
-    assert!(handshake_b, "node B did not establish handshake ({context})");
+    assert!(
+        handshake_a,
+        "node A did not establish handshake ({context})"
+    );
+    assert!(
+        handshake_b,
+        "node B did not establish handshake ({context})"
+    );
     handshake_started.elapsed().as_millis()
 }
 
