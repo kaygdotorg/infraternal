@@ -46,6 +46,58 @@ pub(crate) async fn admitted_store(
     (store, pool, host_id, fingerprint)
 }
 
+/// A durable retirement gets one final reply over TCP, even with no host actor.
+#[tokio::test]
+async fn retired_install_gets_a_final_tcp_reply() {
+    let (server, node, root, _) = identities();
+    let (store, _pool, host, fingerprint) = admitted_store(&node, &root).await;
+    assert!(!store.installation_retired(&fingerprint).await.unwrap());
+    store.revoke("owner", host, now().unwrap()).await.unwrap();
+    assert!(store.installation_retired(&fingerprint).await.unwrap());
+    assert!(!store.installation_retired(&[9; 32]).await.unwrap());
+    let hosts = RemoteHosts::default();
+    let listeners = RemoteListeners::start(
+        "127.0.0.1:0".parse().unwrap(),
+        &server,
+        std::slice::from_ref(&root),
+        store,
+        hosts.clone(),
+    )
+    .await
+    .unwrap();
+    let config = remote_tls::client_config(&node, &[root]).unwrap();
+    let channel = remote_tls::dial(listeners.local_addr().unwrap(), "localhost", &config)
+        .await
+        .unwrap()
+        .channel;
+    Transmit::default()
+        .send(
+            &channel,
+            0,
+            &Frame::Hello {
+                version: 1,
+                caps: 0,
+                client_info: "retired install fixture",
+            },
+        )
+        .await
+        .unwrap();
+    let mut receive = Receive::default();
+    let reply = tokio::time::timeout(Duration::from_secs(5), receive.next(&channel))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.stream_id, 0);
+    assert!(matches!(
+        reply.frame,
+        Frame::Close {
+            code: infraternal_protocol::CLOSE_INSTALL_RETIRED,
+            ..
+        }
+    ));
+    assert!(hosts.actor(host).await.is_none());
+}
+
 async fn admitted_tcp() -> (
     EnrollmentStore,
     sqlx::SqlitePool,

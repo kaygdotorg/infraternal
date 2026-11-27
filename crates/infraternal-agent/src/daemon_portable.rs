@@ -118,6 +118,7 @@ async fn dispatch(
                 tokio::time::timeout(std::time::Duration::from_secs(5), receive.next(channel))
                     .await
                     .map_err(|_| io::ErrorKind::TimedOut)??;
+            infraternal_link::supervisor::check_retirement(hello.stream_id, &hello.frame)?;
             if !matches!(hello.frame, Frame::Hello { version: 1, .. }) || hello.stream_id != 0 {
                 return Err(io::ErrorKind::InvalidData.into());
             }

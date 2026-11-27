@@ -120,6 +120,30 @@ impl EnrollmentStore {
         })
     }
 
+    /// Confirm that this exact certificate belongs to a permanently retired install.
+    ///
+    /// Preserve pending cleanup, temporary admission barriers and same-uid
+    /// certificate rotations. An unknown fingerprint cannot prove retirement.
+    pub(crate) async fn installation_retired(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM remote_certificates c
+             JOIN remote_hosts h ON c.host_id=h.id
+             WHERE c.fingerprint=? AND h.mode IN ('rootless','rootful')
+             AND ((h.revoked_at IS NOT NULL AND NOT EXISTS(
+                 SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0
+             ) AND NOT EXISTS(
+                 SELECT 1 FROM remote_host_promotions p WHERE p.host_id=h.id AND p.cleanup='uninstall'
+             )) OR (h.mode='rootful' AND c.role='active' AND c.execution_uid>0
+                 AND c.revoked_at IS NOT NULL)))",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_one(&self.0)
+        .await?)
+    }
+
     /// Admit a pending or retired host only for retained cleanup, never new work.
     /// The certificate must still be exact, valid and individually unrevoked.
     pub(crate) async fn admit_cleanup(
