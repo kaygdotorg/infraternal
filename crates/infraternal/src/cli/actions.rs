@@ -151,6 +151,7 @@ fn cli_plugin() -> PluginDefinition {
     #[cfg(machine_up)]
     {
         plugin.actions.push(up_action());
+        plugin.actions.push(uninstall_action());
         plugin.actions.push(up_system_action());
     }
     #[cfg(not(machine_up))]
@@ -557,6 +558,55 @@ fn up_action() -> ActionDefinition {
     #[cfg(not(machine_up))]
     let action = action.not_available_yet();
     action
+}
+
+/// Describe the removal preview and the explicit opt-in used by scripts.
+#[cfg(machine_up)]
+fn uninstall_action() -> ActionDefinition {
+    ActionDefinition::new(
+        ["uninstall"],
+        "Remove infraternal from this machine.",
+        "Review and remove this machine's installed infraternal agent.",
+        [
+            "Review which service, files and network resources will be removed.",
+            "Confirm interactively, or pass --yes to confirm in a script.",
+            "Use --keep-state to save the enrollment before removal.",
+        ],
+        JsonSchema::object(
+            [
+                (
+                    "system".to_owned(),
+                    JsonSchema::boolean("Select the system installation."),
+                ),
+                (
+                    "keep_state".to_owned(),
+                    JsonSchema::boolean("Save the private enrollment in a separate directory."),
+                ),
+                (
+                    "dry_run".to_owned(),
+                    JsonSchema::boolean("Show the uninstall plan without removing anything."),
+                ),
+                (
+                    "yes".to_owned(),
+                    JsonSchema::boolean("Confirm removal without an interactive prompt."),
+                ),
+            ],
+            [],
+        ),
+        JsonSchema::command_result(),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Destructive,
+            "cli.uninstall",
+            DryRun::Required,
+        ),
+    )
+    .with_cli_handler(CliHandler::Uninstall)
+    .with_safety(infraternal_plugin_api::SafetyNotes {
+        destructive: true,
+        dry_run_first: true,
+        notes: Vec::new(),
+    })
 }
 
 #[cfg(machine_up)]

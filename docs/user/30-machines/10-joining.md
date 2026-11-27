@@ -63,12 +63,6 @@ On a Mac, `infraternal up https://infra.example.org` joins in **user mode** by d
 
 Only one user account per Mac can use user mode, and user mode cannot be installed alongside root mode.
 
-To remove a user-mode install later, run as the same user (no password required):
-
-```sh
-~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>
-```
-
 ### Root mode (`--system`)
 
 For a headless Mac that must stay on the mesh before anyone logs in, pass `--system`:
@@ -78,6 +72,24 @@ infraternal up --system https://infra.example.org
 ```
 
 Root mode asks for `sudo` once and installs a system `LaunchDaemon` instead of a per-user `LaunchAgent`.
+
+## Uninstall from this machine
+
+```sh
+infraternal uninstall
+```
+
+Review the service, files, and mesh settings the command lists. Type `Remove`
+to uninstall, or press Enter to keep the installation. Run as the person who
+installed it in user mode. Use `--system` to select the system installation.
+Removing a system installation may ask for your administrator password.
+
+Use `--keep-state` to save a private copy of the enrollment outside the old
+installation directory. A new `infraternal up` asks for fresh enrollment.
+Use `--json` to read the plan as JSON, or `--json --yes` to confirm in a script.
+
+If the server still lists the host, use **Remove** in the machine list, then
+**Forget** if the server reports that cleanup is pending.
 
 ---
 

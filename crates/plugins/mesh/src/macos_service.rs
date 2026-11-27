@@ -245,7 +245,7 @@ pub fn remove_if_requested() -> Option<std::process::ExitCode> {
             return Some(std::process::ExitCode::FAILURE);
         }
     }
-    Some(match remove_installation(&host) {
+    Some(match remove_installation(&host, false) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!(
@@ -265,8 +265,45 @@ fn valid_host(host: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Read the selected root installation's public property list and, for root,
+/// its private receipt. The caller must recheck the receipt before removal.
+///
+/// # Errors
+/// Refuses a missing or foreign service and an invalid root installation receipt.
+pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
+    let daemon = owned_machine_plist()?.ok_or(io::ErrorKind::NotFound)?;
+    let base = Path::new(MACHINE_BASE);
+    require_root_directories(base)?;
+    let mut paths = vec![PathBuf::from(daemon.plist), base.to_path_buf()];
+    let host = if nix::unistd::Uid::effective().is_root() {
+        let receipt = base.join(MACHINE_OWNER);
+        require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
+        let mut contents = String::new();
+        File::open(receipt)?
+            .take(36)
+            .read_to_string(&mut contents)?;
+        let host = contents
+            .split_once(' ')
+            .ok_or(io::ErrorKind::InvalidData)?
+            .0;
+        if validate_installation(host)? {
+            paths.push(PathBuf::from(MACHINE_LINK));
+        }
+        Some(host.to_owned())
+    } else {
+        if fs::read_link(MACHINE_LINK).is_ok_and(|link| link == Path::new(MACHINE_BINARY)) {
+            paths.push(PathBuf::from(MACHINE_LINK));
+        }
+        None
+    };
+    Ok((host, paths))
+}
+
 /// Stop the live utun owner before retiring only the approved install's files.
-fn remove_installation(host: &str) -> io::Result<()> {
+///
+/// # Errors
+/// Refuses stale ownership, an existing enrollment backup or a cleanup failure.
+pub fn remove_installation(host: &str, keep_state: bool) -> io::Result<()> {
     let _lock = MachineLock::acquire()?;
     if !valid_host(host) {
         return Err(io::ErrorKind::InvalidInput.into());
@@ -291,6 +328,12 @@ fn remove_installation(host: &str) -> io::Result<()> {
             Err(io::ErrorKind::PermissionDenied.into())
         }
     };
+    let base = Path::new(MACHINE_BASE);
+    let backup =
+        keep_state.then(|| infraternal_plugin_api::uninstall_state::destination(base, host));
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::check_destination(path)?;
+    }
     let binary = Path::new(MACHINE_BINARY);
     let owned = owned_machine_plist()?;
     if trusted_executable(binary)? != binary
@@ -301,6 +344,9 @@ fn remove_installation(host: &str) -> io::Result<()> {
     verify()?;
     stop()?;
     verify()?;
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::preserve(Path::new(MACHINE_DATA), path, 0)?;
+    }
     remove_command_links(identity.1)?;
     verify()?;
     if let Some(daemon) = owned_machine_plist()? {
@@ -310,7 +356,6 @@ fn remove_installation(host: &str) -> io::Result<()> {
     verify()?;
     // Keep the receipt at the live path until every shared resource is gone.
     // Once renamed, deletion can resume without touching any replacement.
-    let base = Path::new(MACHINE_BASE);
     fs::rename(base, &retired)?;
     File::open(lifecycle)?.sync_all()?;
     File::open(base.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;

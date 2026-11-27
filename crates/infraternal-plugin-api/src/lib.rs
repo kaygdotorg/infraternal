@@ -4,6 +4,8 @@
 pub mod action;
 #[cfg(unix)]
 pub mod cli_alias;
+#[cfg(unix)]
+pub mod uninstall_state;
 
 pub use action::{
     ActionAvailability, ActionContract, ActionDefinition, ActionEffect, ActionExample,

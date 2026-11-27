@@ -221,7 +221,7 @@ default. Run it as the person who uses the Mac, without `sudo`:
   the program by its new identifier (`kayg.infraternal`); click Allow.
   Removal takes both the old and the new pieces.
 - To remove it, run
-  `~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>`
+  `infraternal uninstall`
   as the same person. It stops the agent, which drops the mesh interface and
   its routes, removes the helper's resolver file and the helper itself, and
   deletes the files above. It needs no password.

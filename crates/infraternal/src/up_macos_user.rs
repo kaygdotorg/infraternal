@@ -937,7 +937,7 @@ pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
             return Some(ExitCode::FAILURE);
         }
     }
-    Some(match uninstall(&paths, uid, host) {
+    Some(match uninstall(&paths, uid, host, false) {
         Ok(()) => {
             println!(
                 "infraternal: user mode removed; the mesh route, DNS entry and helper are gone."
@@ -951,17 +951,122 @@ pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
     })
 }
 
+/// The user install's validated host, files and optional mesh helper.
+pub(crate) struct UninstallReview {
+    /// Host ID from the private receipt.
+    pub host: String,
+    /// Install root containing the binary, enrollment and runtime state.
+    pub base: PathBuf,
+    /// Directory with the saved enrollment.
+    pub data: PathBuf,
+    /// Existing files and directories removed by the user-mode cleanup.
+    pub paths: Vec<PathBuf>,
+    /// Whether the helper serves this account.
+    pub helper: bool,
+    /// Shell configuration line displayed by `up` for manual setup.
+    pub path_line: String,
+}
+
+/// Discover the user job from the same LaunchAgent paths as status.
+pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
+    let paths = Paths::for_uid(uid)?;
+    let mut targets = checked_uninstall_paths(&paths, uid)?;
+    let host = read_uninstall_receipt(&paths, uid)?;
+    let helper = macos_helper::registration_for_current_user()?;
+    targets.push(paths.base.clone());
+    if exists(&paths.logs)? {
+        targets.push(paths.logs.clone());
+    }
+    Ok(UninstallReview {
+        host,
+        base: paths.base.clone(),
+        data: paths.data.clone(),
+        paths: targets,
+        helper,
+        path_line: paths.path_line(),
+    })
+}
+
+/// Read the receipt only from a private, real directory owned by the caller.
+fn read_uninstall_receipt(paths: &Paths, uid: u32) -> io::Result<String> {
+    let base = fs::symlink_metadata(&paths.base)?;
+    let receipt = paths.receipt();
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(receipt)?;
+    let meta = file.metadata()?;
+    if !base.is_dir()
+        || base.uid() != uid
+        || base.mode() & 0o077 != 0
+        || !meta.is_file()
+        || meta.uid() != uid
+        || meta.mode() & 0o077 != 0
+    {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    let mut text = String::new();
+    file.take(64).read_to_string(&mut text)?;
+    let host = text.trim_end();
+    if !macos_user_mode::receipt_names_host(&text, host) {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    Ok(host.to_owned())
+}
+
+/// Accept only installer launch arguments for this account's base and binary.
+fn checked_uninstall_paths(paths: &Paths, uid: u32) -> io::Result<Vec<PathBuf>> {
+    let mut plists = Vec::new();
+    for path in [&paths.launch_agent, &paths.legacy_launch_agent] {
+        if !exists(path)? {
+            continue;
+        }
+        let meta = fs::symlink_metadata(path)?;
+        if !meta.is_file() || meta.uid() != uid || meta.mode() & 0o022 != 0 {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        let output = Command::new("/usr/bin/plutil")
+            .args(["-extract", "ProgramArguments", "json", "-o", "-", "--"])
+            .arg(path)
+            .env_clear()
+            .output()?;
+        let expected = [
+            paths.binary.as_os_str(),
+            "agent".as_ref(),
+            "run".as_ref(),
+            "--data".as_ref(),
+            paths.data.as_os_str(),
+            "--state".as_ref(),
+            paths.state.as_os_str(),
+        ];
+        let words =
+            serde_json::from_slice::<Vec<String>>(&output.stdout).map_err(io::Error::other)?;
+        if !output.status.success() || !words.iter().map(std::ffi::OsStr::new).eq(expected) {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        plists.push(path.clone());
+    }
+    Ok(plists)
+}
+
+/// Remove the reviewed user install as its owner, with an optional enrollment backup.
+pub(crate) fn remove_user_install(uid: u32, host: &str, keep_state: bool) -> io::Result<()> {
+    uninstall(&Paths::for_uid(uid)?, uid, host, keep_state)
+}
+
 /// Stop the agent, remove the helper's resolver files and registration, then this person's files.
-fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
-    let mut receipt = String::new();
-    fs::File::open(paths.receipt())?
-        .take(64)
-        .read_to_string(&mut receipt)?;
-    if !macos_user_mode::receipt_names_host(&receipt, host) {
+fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Result<()> {
+    if read_uninstall_receipt(paths, uid)? != host {
         return Err(io::Error::new(
             ErrorKind::PermissionDenied,
             "this install belongs to another host",
         ));
+    }
+    checked_uninstall_paths(paths, uid)?;
+    let backup =
+        keep_state.then(|| infraternal_plugin_api::uninstall_state::destination(&paths.base, host));
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::check_destination(path)?;
     }
     stop_agent(uid)?;
     // The old-name agent, if this Mac still has it: unload only; its file goes below.
@@ -986,6 +1091,10 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             ),
         )),
     };
+    helper?;
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::preserve(&paths.data, path, uid)?;
+    }
     for plist in [&paths.launch_agent, &paths.legacy_launch_agent] {
         match fs::remove_file(plist) {
             Ok(()) => {}
@@ -1000,5 +1109,5 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    helper
+    Ok(())
 }

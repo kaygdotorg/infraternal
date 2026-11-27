@@ -432,6 +432,69 @@ impl EnrollmentStore {
         self.commit_revocation(transaction, host, now).await
     }
 
+    /// Retire only the installation that signed this request with its enrolled host key.
+    /// Recheck authority under the writer lock so a replaced certificate cannot retire its successor.
+    pub(crate) async fn retire_from_installation(
+        &self,
+        request: &infraternal_plugin_remote::local_retirement::Request,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if now < 0 || now.abs_diff(request.signed_at) > 120 || request.signature.len() != 64 {
+            return Err(EnrollmentError::Denied);
+        }
+        let host = request.host_id;
+        let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT public_key FROM remote_certificates WHERE fingerprint=? AND host_id=? AND key_algorithm='ed25519'",
+        )
+        .bind(request.fingerprint.as_slice())
+        .bind(host.as_bytes().as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        let key = public_key
+            .and_then(|key| crate::identity_key::IdentityKey::from_stored("ed25519", &key))
+            .ok_or(EnrollmentError::Denied)?;
+        if !key.verify(
+            &infraternal_plugin_remote::local_retirement::transcript(request),
+            &request.signature,
+        ) {
+            return Err(EnrollmentError::Denied);
+        }
+        let mut transaction = self.0.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE remote_hosts SET id=id WHERE id=? AND created_at<=? \
+             AND mode IN ('rootless','rootful') AND EXISTS(SELECT 1 FROM remote_certificates c \
+             WHERE c.fingerprint=? AND c.host_id=remote_hosts.id AND c.role='active' \
+             AND c.execution_uid=remote_hosts.execution_uid AND c.key_algorithm='ed25519' AND c.public_key=? \
+             AND c.not_before<=? AND c.not_after>? AND c.revoked_at IS NULL)",
+        )
+        .bind(host.as_bytes().as_slice()).bind(now).bind(request.fingerprint.as_slice())
+        .bind(key.as_bytes()).bind(now).bind(now)
+        .execute(&mut *transaction).await?.rows_affected();
+        if changed != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        let retired: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if retired {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) \
+             SELECT u.id,'remote.host.uninstall',?,0,?,'{}' FROM remote_hosts h \
+             JOIN users u ON u.id=h.owner_id WHERE h.id=? AND NOT EXISTS \
+             (SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id)",
+        )
+        .bind(host.to_string())
+        .bind(now)
+        .bind(host.as_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        self.commit_revocation(transaction, host, now).await
+    }
+
     /// Preserve the synchronous revocation contract for callers that require a
     /// durable host receipt. Only this request's watch is retained while offline.
     pub(crate) async fn commit_revocation(
@@ -602,25 +665,29 @@ pub(crate) mod tests {
     pub(crate) async fn enrolled_with_pool(
         pool: sqlx::SqlitePool,
     ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
+        enrolled_with_key(pool, [3; 32]).await
+    }
+
+    /// Enroll one fixture host with a key supplied by the test that will prove possession.
+    async fn enrolled_with_key(
+        pool: sqlx::SqlitePool,
+        key: [u8; 32],
+    ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         sqlx::query("INSERT INTO users (id, name, owner, recovery_hash, username, display_name) VALUES ('owner', 'owner', 1, 'test', 'owner', 'Owner')").execute(&pool).await.unwrap();
         let host = Uuid::from_u128(42);
         sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, 'owner', 'rootless', 1002, 100)")
             .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
         let store = EnrollmentStore::new(pool.clone());
-        let key_digest = openssl::sha::sha256(&[3u8; 32]);
+        let key_digest = openssl::sha::sha256(&key);
+        let mut record = certificate(1, 100);
+        record.public_key = crate::identity_key::IdentityKey::Ed25519(key);
         let token = store
             .issue("owner", host, Mode::Rootless, 100, &key_digest)
             .await
             .unwrap();
         store
-            .redeem(
-                token.secret(),
-                host,
-                Mode::Rootless,
-                100,
-                &certificate(1, 100),
-            )
+            .redeem(token.secret(), host, Mode::Rootless, 100, &record)
             .await
             .unwrap();
         (store, pool, host)
@@ -717,6 +784,58 @@ pub(crate) mod tests {
             not_before: now,
             not_after: now + 604_800,
         }
+    }
+
+    /// The exact host key may revoke its host. Other keys and modified requests leave authority live.
+    #[tokio::test]
+    async fn installation_retirement_requires_the_enrolled_host_signature() {
+        use infraternal_plugin_remote::local_retirement::{Request, transcript};
+        use openssl::{pkey::PKey, sign::Signer};
+
+        let key = PKey::generate_ed25519().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let (store, pool, host) =
+            enrolled_with_key(pool, key.raw_public_key().unwrap().try_into().unwrap()).await;
+        let mut request = Request {
+            host_id: host,
+            fingerprint: [1; 32],
+            signed_at: 150,
+            signature: vec![0; 64],
+        };
+        assert!(matches!(
+            store.retire_from_installation(&request, 150).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.signature = Signer::new_without_digest(&key)
+            .unwrap()
+            .sign_oneshot_to_vec(&transcript(&request))
+            .unwrap();
+        assert!(matches!(
+            store.retire_from_installation(&request, 271).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.host_id = Uuid::from_u128(43);
+        assert!(matches!(
+            store.retire_from_installation(&request, 150).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.host_id = host;
+        assert!(store.admit(&[1; 32], 150).await.is_ok());
+        store.retire_from_installation(&request, 150).await.unwrap();
+        assert!(store.admit(&[1; 32], 150).await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM mesh_audit WHERE action='remote.host.uninstall'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -155,6 +155,46 @@ pub(crate) fn public_file(path: &Path, uid: u32, max: u64) -> io::Result<String>
     }
     Ok(bytes)
 }
+/// The Linux paths and host used to review native service removal.
+pub struct Review {
+    /// The bootstrap state and host selected for removal.
+    pub context: Context,
+    /// The installation root that owns the enrollment and runtime directories.
+    pub base: PathBuf,
+    /// The files systemd and command discovery use for this installation.
+    pub paths: Vec<PathBuf>,
+}
+
+/// Find the host marker in this account's installed systemd unit.
+///
+/// # Errors
+/// Rejects an unrelated unit. An unprivileged review of a system install reads
+/// the public unit only. The elevated command always validates the private receipt.
+pub fn review(home: &Path, uid: u32, caller: u32) -> io::Result<Review> {
+    let paths = layout(&installation(&"0".repeat(32), home, uid), home, uid)?;
+    let unit = public_file(&paths.unit, uid, 4096)?;
+    let host = unit
+        .lines()
+        .find_map(|line| line.strip_prefix("# infraternal bootstrap "))
+        .ok_or_else(denied)?;
+    let context = installation(host, home, uid);
+    let paths = layout(&context, home, uid)?;
+    if caller == uid {
+        validate(&context, home, uid)?;
+    }
+    Ok(Review {
+        context,
+        base: paths.base.clone(),
+        paths: vec![
+            paths.unit,
+            paths.wanted,
+            paths.launcher,
+            paths.base.join("bin"),
+            paths.base.join("sessions"),
+        ],
+    })
+}
+
 /// Revalidate every owned artifact before handing off or removing any of them.
 /// # Errors
 /// Refuses arbitrary layouts, another uid/host, symlinks or unrelated units/launchers.
@@ -640,11 +680,25 @@ pub async fn cleanup(
     uid: u32,
     kernel: Kernel,
 ) -> io::Result<Vec<String>> {
+    cleanup_with_state(context, home, uid, kernel, false).await
+}
+
+/// Remove the reviewed install, optionally keeping a private copy of its enrollment.
+///
+/// # Errors
+/// Refuses an unowned install, an existing backup, or incomplete service cleanup.
+pub async fn cleanup_with_state(
+    context: &Context,
+    home: &Path,
+    uid: u32,
+    kernel: Kernel,
+    keep_state: bool,
+) -> io::Result<Vec<String>> {
     let paths = layout(context, home, uid)?;
     // Held until return: a re-add of this host meanwhile is refused with
     // "Setup is already running" instead of racing the removal (#235).
     let _setup = setup_guard(&paths.base).await?;
-    cleanup_locked(context, &paths, home, uid, kernel, true).await
+    cleanup_locked(context, &paths, home, uid, kernel, true, keep_state).await
 }
 
 /// Remove a committed root install only while its transaction still owns the
@@ -664,7 +718,7 @@ pub async fn cleanup_for_promotion(
     if !committed_transaction_matches(&paths.base, transaction, uid)? {
         return Ok(false);
     }
-    cleanup_locked(context, &paths, home, uid, kernel, false).await?;
+    cleanup_locked(context, &paths, home, uid, kernel, false, false).await?;
     Ok(true)
 }
 
@@ -676,8 +730,14 @@ async fn cleanup_locked(
     uid: u32,
     kernel: Kernel,
     stop_agent: bool,
+    keep_state: bool,
 ) -> io::Result<Vec<String>> {
     validate(context, home, uid)?;
+    let backup = keep_state
+        .then(|| infraternal_plugin_api::uninstall_state::destination(&paths.base, &context.host));
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::check_destination(path)?;
+    }
     (kernel.inspect)(&context.sessions)?;
     let sockets = context.sessions.join("sessions");
     if sockets.exists() {
@@ -709,6 +769,9 @@ async fn cleanup_locked(
         .into_iter()
         .map(left_line)
         .collect();
+    if let Some(path) = &backup {
+        infraternal_plugin_api::uninstall_state::preserve(&context.data, path, uid)?;
+    }
     std::fs::remove_file(&paths.unit)?;
     infraternal_plugin_api::cli_alias::remove(&paths.launcher, uid)?;
     std::fs::remove_file(&paths.launcher)?;
@@ -993,6 +1056,25 @@ mod tests {
         symlink(base.join("bin/live"), base.join("bin/current")).unwrap();
         Some((home, context, uid))
     }
+    /// Review names only the canonical Linux user installation and refuses an altered launcher.
+    #[test]
+    fn review_refuses_a_launcher_pointing_outside_the_owned_install() {
+        let Some((home, context, uid)) = installation("review", false) else {
+            return;
+        };
+        let plan = super::review(&home, uid, uid).unwrap();
+        assert_eq!(plan.context.host, context.host);
+        assert!(
+            plan.paths
+                .contains(&home.join(".config/systemd/user/infraternal-agent.service"))
+        );
+        let launcher = home.join(".local/bin/infraternal");
+        std::fs::remove_file(&launcher).unwrap();
+        std::os::unix::fs::symlink("/bin/sh", &launcher).unwrap();
+        assert!(super::review(&home, uid, uid).is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn bootstrap_lock_delays_uninstall_without_omitting_its_handler() {
         let Some((home, context, uid)) = installation("n", true) else {
