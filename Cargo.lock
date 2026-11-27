@@ -2285,6 +2285,7 @@ dependencies = [
  "libc",
  "nix 0.32.0",
  "openssl",
+ "quinn",
  "security-framework",
  "serde",
  "serde_json",

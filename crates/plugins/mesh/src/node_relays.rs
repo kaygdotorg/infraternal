@@ -1062,13 +1062,16 @@ mod tests {
         manager.set_role(&list);
         list.serve.as_mut().unwrap().roots.push(second_root);
         manager.set_role(&list);
-        let address = lock(&manager.state)
+        let port = lock(&manager.state)
             .role
             .as_ref()
             .expect("the relay role remains running")
             .relay
             .local_addr()
-            .unwrap();
+            .unwrap()
+            .port();
+        // The role binds all IPv4 interfaces; this isolated client dials the same port on loopback.
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
 
         let mut host = second_ca.issue(Purpose::Host(HostId([2; 16])));
         host.roots = first_ca.issue(Purpose::Host(HostId([3; 16]))).roots;
@@ -1078,16 +1081,23 @@ mod tests {
             Client::connect(&endpoint, config, address, NAME, Duration::from_secs(5))
                 .await
                 .expect("the relay accepts a leaf from the newly trusted CA");
-        assert_eq!(
-            lock(&manager.state)
-                .role
-                .as_ref()
-                .expect("the relay role remains running")
-                .relay
-                .stats()
-                .hosts,
-            1
-        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let hosts = lock(&manager.state)
+                    .role
+                    .as_ref()
+                    .expect("the relay role remains running")
+                    .relay
+                    .stats()
+                    .hosts;
+                if hosts == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the refreshed host registers with the relay");
         client
             .connection()
             .close(quinn::VarInt::from_u32(0), b"test finished");
@@ -1192,5 +1202,87 @@ mod mesh_down_review_tests {
         let state = lock(&manager.state);
         assert_eq!(state.paths_starting, None);
         assert_eq!(state.paths_generation, 5);
+    }
+}
+
+/// A removed pair cannot keep the loopback shim after an async relay judgement completes.
+#[cfg(all(test, feature = "test-support"))]
+mod stale_relay_path_review_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+    use crate::{dataplane::Peer, relay_path::PairSecret};
+    use infraternal_plugin_relay::testing::{Authority, Purpose};
+    use tokio::sync::mpsc;
+
+    /// A data-plane adapter whose callbacks succeed without touching a WireGuard device.
+    struct TestUpdater;
+
+    impl EndpointUpdater for TestUpdater {
+        fn handshake_preparer(
+            &self,
+            _peer: &Peer,
+        ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+            Ok(Arc::new(|| Ok(())))
+        }
+
+        fn handshake_starter(&self, _peer: &Peer) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+            Ok(Arc::new(|| {}))
+        }
+
+        fn route_mtu_updater(&self, _peer: &Peer) -> RouteMtuUpdater {
+            Arc::new(|_| Ok(()))
+        }
+    }
+
+    /// Make a relayable peer without opening a `WireGuard` device.
+    fn test_peer(key: u8) -> Peer {
+        Peer {
+            key: PairSecret::from_private(&[key; 32]).unwrap().public(),
+            previous_key: None,
+            previous_active: false,
+            addresses: crate::policy::model::Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            endpoint: None,
+            candidates: Vec::new(),
+            ipv4_only: false,
+            side_port: false,
+        }
+    }
+
+    /// Start idle relay paths; the empty relay list sends no network traffic.
+    async fn idle_paths(host: HostId) -> Arc<RelayPaths> {
+        let mut authority = Authority::new();
+        let credentials = authority.issue(Purpose::Host(host));
+        let (events, _receiver) = mpsc::channel(16);
+        Arc::new(
+            RelayPaths::start(
+                PairSecret::from_private(&[1; 32]).unwrap(),
+                9,
+                Vec::new(),
+                credentials,
+                events,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// A pair removed during its relay await releases its now-stale shim and task.
+    #[tokio::test]
+    async fn stale_relay_judgement_releases_its_shim() {
+        let node = NodeId(5);
+        let host = label(node);
+        let paths = idle_paths(host).await;
+        let mut updater = TestUpdater;
+        let local = paths
+            .relay_with_endpoint(&mut updater, host, &test_peer(3))
+            .await
+            .unwrap();
+        let state = Arc::new(Mutex::new(State::default()));
+
+        assert!(!mark_relayed_if_current(&paths, &state, node, 9, local).await);
+        assert!(!paths.has_registered_peer_for_test(host));
+        paths.shutdown(false).await;
     }
 }

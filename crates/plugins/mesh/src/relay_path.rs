@@ -1055,6 +1055,12 @@ impl RelayPaths {
         }
     }
 
+    /// Whether any peer or shim registration remains for `peer`; available only to relay tests.
+    #[cfg(all(test, feature = "test-support"))]
+    pub(crate) fn has_registered_peer_for_test(&self, peer: HostId) -> bool {
+        read(&self.shared.peers).contains_key(&peer) || lock(&self.shims).contains_key(&peer)
+    }
+
     /// Stop every task and close every relay connection.
     pub async fn close(self) {
         self.shutdown(false).await;
@@ -2583,8 +2589,7 @@ mod review_j375_tests {
     /// Clearing the relay list restores the configured endpoint before closing a loopback shim.
     #[tokio::test]
     async fn stopping_relay_paths_restores_endpointless_peers() {
-        let node = crate::policy::model::NodeId(6);
-        let host = label(node);
+        let host = HostId([6; 16]);
         let paths = idle_paths(host).await;
         let mut updater = ConcurrentAddUpdater::new();
         paths
@@ -2598,25 +2603,6 @@ mod review_j375_tests {
         assert_eq!(restored.load(Ordering::Relaxed), 1);
         assert!(read(&paths.shared.peers).is_empty());
         assert!(lock(&paths.shims).is_empty());
-    }
-
-    /// A pair removed during its relay await releases the now-stale shim and its task.
-    #[tokio::test]
-    async fn stale_relay_judgement_releases_its_shim() {
-        let node = crate::policy::model::NodeId(5);
-        let host = label(node);
-        let paths = idle_paths(host).await;
-        let mut updater = ConcurrentAddUpdater::new();
-        let local = paths
-            .relay_with_endpoint(&mut updater, host, &test_peer(3))
-            .await
-            .unwrap();
-        let state = Arc::new(Mutex::new(State::default()));
-
-        assert!(!mark_relayed_if_current(&paths, &state, node, 9, local).await);
-        assert!(!read(&paths.shared.peers).contains_key(&host));
-        assert!(lock(&paths.shims).is_empty());
-        paths.shutdown(false).await;
     }
 
     /// A delayed relay callback must not overwrite a subsequently restored direct MTU.
