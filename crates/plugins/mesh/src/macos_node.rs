@@ -1926,6 +1926,21 @@ impl RuntimeState {
         } else {
             None
         };
+        // Admit newly granted peers before inserting them into `GotaTun` so the device's timer
+        // task cannot send an initiation before our own receive guard accepts the peer's
+        // simultaneous initiation (#605). Existing peers stay admitted until the apply succeeds.
+        let previous_admitted = old_config
+            .as_ref()
+            .and_then(|old| peers_for_config(old).ok())
+            .map(|old_peers| installed_keys(&old_peers))
+            .unwrap_or_default();
+        let mut pre_admitted = false;
+        if !admitted.is_subset(&previous_admitted) {
+            let mut admission = self.admission.write().await;
+            admission.set_peers(previous_admitted.union(&admitted).copied());
+            drop(admission);
+            pre_admitted = true;
+        }
         // An authority replacement may have reached this path because the installed keys
         // disagreed with the snapshot. Rebuild from the complete list in that case.
         let peers_applied = if rollback_on_failure {
@@ -1935,6 +1950,10 @@ impl RuntimeState {
         };
         if let Err(error) = peers_applied {
             if rollback_on_failure {
+                if pre_admitted {
+                    let mut admission = self.admission.write().await;
+                    admission.set_peers(previous_admitted);
+                }
                 rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             }
             return Err(error);
@@ -1989,6 +2008,10 @@ impl RuntimeState {
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
                 let _ = route(&interface, *address, "add", Some(mtu));
+            }
+            if pre_admitted {
+                let mut admission = self.admission.write().await;
+                admission.set_peers(previous_admitted);
             }
             rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);
