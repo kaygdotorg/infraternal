@@ -22,6 +22,7 @@ async fn remote_targets(
         .collect()
 }
 
+/// Prepares each connected host with the same account selection as a terminal open.
 pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str) {
     let Ok(person) = uuid::Uuid::parse_str(user) else {
         return;

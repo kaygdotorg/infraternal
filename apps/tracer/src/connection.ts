@@ -36,6 +36,7 @@ export const CONTROL_STREAM = 0;
  * sent one; it never carries input or internal detail.
  */
 export class ActionRefused extends Error {
+  /** Keep optional typed details alongside the fixed reason. */
   constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }, readonly executionUid?: number) { super(message); this.name = "ActionRefused"; }
 }
 /**

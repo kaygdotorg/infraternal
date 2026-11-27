@@ -48,6 +48,7 @@ async fn change(
         )
         .await
 }
+/// Reopening a local store preserves both preference scopes and their precedence.
 #[tokio::test]
 async fn preferences_survive_reopen_and_host_override_wins() {
     let dir = std::env::temp_dir().join(format!("infraternal-accounts-{}", uuid::Uuid::new_v4()));
@@ -74,7 +75,7 @@ async fn preferences_survive_reopen_and_host_override_wins() {
         .get("alice", "alice-token", Selection { host_id: None })
         .await
         .unwrap();
-    assert_eq!(preferred.account, "local-user");
+    assert_eq!(preferred.account.as_deref(), Some("local-user"));
     assert_eq!(preferred.global_account, "operator");
     assert_eq!(
         change(&service, Scope::Host, None, None)
@@ -93,6 +94,7 @@ async fn preferences_survive_reopen_and_host_override_wins() {
     pool.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+/// Read and write authority require a live unlocked session and an owned host.
 #[tokio::test]
 async fn foreign_revoked_hosts_and_ended_sessions_cannot_read_or_change_preferences() {
     let pool = open(std::path::Path::new(":memory:")).await;
@@ -166,6 +168,7 @@ async fn foreign_revoked_hosts_and_ended_sessions_cannot_read_or_change_preferen
     );
     assert!(resolve(&pool, "alice", "alice-token", None).await.is_err());
 }
+/// Invalid account and scope input leave the current selection intact.
 #[tokio::test]
 async fn malformed_account_or_scope_never_mutates_storage() {
     let pool = open(std::path::Path::new(":memory:")).await;
@@ -200,6 +203,7 @@ async fn malformed_account_or_scope_never_mutates_storage() {
     assert!(accounts::DESCRIPTOR.validate().is_ok());
 }
 
+/// Keep a leading dash in the named preference for the host fallback policy.
 #[tokio::test]
 async fn leading_dash_preference_persists_for_host_fallback() {
     let pool = open(std::path::Path::new(":memory:")).await;
@@ -251,7 +255,7 @@ async fn queued_writer_rechecks_session_after_lock_wait() {
 async fn enrolled_host(pool: &SqlitePool, mode: &str, uid: u32) -> uuid::Uuid {
     let host = uuid::Uuid::new_v4();
     sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'alice',?,?,unixepoch())")
-        .bind(host.as_bytes().as_slice()).bind(mode).bind(uid).execute(pool).await.unwrap();
+        .bind(host.as_bytes().as_slice()).bind(mode).bind(i64::from(uid)).execute(pool).await.unwrap();
     host
 }
 

@@ -1275,6 +1275,7 @@ fn route_unavailable() -> Failure {
     Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
 
+/// Confirms an enrolled host can open its selected login before add-host completes.
 async fn confirm_preferred_login(
     actor: &EmbeddedAgent,
     person: Uuid,

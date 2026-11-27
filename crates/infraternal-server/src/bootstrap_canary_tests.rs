@@ -299,6 +299,7 @@ async fn reenrollment_requires_exact_restoration_acknowledgement() {
     }
 }
 
+/// Fail readiness if the selected login refuses preparation.
 #[tokio::test]
 async fn readiness_refuses_a_host_whose_preferred_login_path_fails() {
     let (socket, peer) = UnixStream::pair().unwrap();
@@ -327,6 +328,7 @@ async fn readiness_refuses_a_host_whose_preferred_login_path_fails() {
     let _ = task.await;
 }
 
+/// Prepare readiness with the same person, named account and grant as a terminal.
 #[tokio::test]
 async fn readiness_prepares_the_same_person_and_preferred_account_as_terminals() {
     let (socket, peer) = UnixStream::pair().unwrap();

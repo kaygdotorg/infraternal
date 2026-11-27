@@ -26,9 +26,10 @@ pub struct Change {
     /// None resets this scope to its default; it never names an operating-system uid.
     pub account: Option<String>,
 }
+/// The stored choices and the account selection that takes effect for a host.
 #[derive(Serialize)]
 pub struct Preference {
-    /// The effective named preference. Null selects the remote host’s execution account.
+    /// The effective named preference. Null selects the remote host's execution account.
     pub account: Option<String>,
     pub global_account: String,
     pub host_account: Option<String>,
