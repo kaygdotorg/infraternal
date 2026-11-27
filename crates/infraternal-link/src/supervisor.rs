@@ -160,6 +160,9 @@ impl std::fmt::Display for InstallationRetired {
 impl std::error::Error for InstallationRetired {}
 
 /// Recognize the retirement code only on the first authenticated control reply.
+///
+/// # Errors
+/// Returns the final retirement error for the reserved control close.
 pub fn check_retirement(stream: u32, frame: &infraternal_protocol::Frame<'_>) -> io::Result<()> {
     if stream == 0
         && matches!(

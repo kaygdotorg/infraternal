@@ -279,6 +279,7 @@ async fn connect_with_predecessor_fallback(
     }
 }
 
+/// Prove reachability on a candidate control stream and retain a final refusal.
 async fn prove_channel<C: Channel>(
     channel: &C,
     receive: &mut crate::transport::Receive,
@@ -431,6 +432,7 @@ async fn to_enrolled(
     answered(connection, path, since, false).await
 }
 
+/// How a controlled server path ended or changed transport.
 enum Steered {
     /// The session or its transport ended; the caller reconnects.
     Ended,
@@ -878,7 +880,7 @@ pub(super) async fn run(
 /// dial fails, runs one HTTPS session before trying direct again, so the
 /// server port stays optional (D196, D291, #146).
 /// # Errors
-/// Only when the host's credentials are no longer usable.
+/// Returns permanent retirement or a local failure that the outer supervisor must handle.
 // One supervisor loop owns path selection, proof and the optional failure
 // observer; splitting it would pass the same retained link state around.
 pub(super) async fn run_observed(
@@ -1067,8 +1069,8 @@ async fn run_https(
 ///
 /// Returns `Ok(true)` when a session ran (however it ended) and `Ok(false)`
 /// when the origin could not be reached; the caller owns the retry delay.
-/// Only expired or unusable credentials are an error. The link always ends
-/// reported as disconnected.
+/// Expired or unusable credentials and authenticated retirement are errors.
+/// The link always ends reported as disconnected.
 async fn https_once(
     identity: &RemoteIdentity,
     state: &std::path::Path,

@@ -23,7 +23,7 @@ pub(super) async fn disable(uid: u32) -> io::Result<bool> {
     disable_owned(&manager, uid, std::process::id()).await
 }
 
-/// Check MainPID before changing enablement. A manual run may share the
+/// Check `MainPID` before changing enablement. A manual run may share the
 /// product unit's name and filesystem layout but is not its main process.
 async fn disable_owned(manager: &Path, uid: u32, pid: u32) -> io::Result<bool> {
     let output = call(
@@ -73,13 +73,12 @@ mod tests {
     //! A retired service uses its own manager, and a manual run leaves the unit alone.
 
     use super::*;
-    use std::fs;
+    use std::{fs, os::unix::fs::DirBuilderExt};
 
     /// Verify the PID fence and both manager scopes without touching real units.
     #[tokio::test]
     async fn only_the_installed_main_pid_can_disable_the_unit() {
         let fixture = std::env::temp_dir().join(format!("retirement-{}", uuid::Uuid::new_v4()));
-        use std::os::unix::fs::DirBuilderExt;
         fs::DirBuilder::new().mode(0o700).create(&fixture).unwrap();
         let manager = fixture.join("systemctl");
         let log = fixture.join("calls");
