@@ -15,7 +15,8 @@
 //!   no deadline that would force it.
 //! - **Trial.** The new release checks itself within [`TRIAL_LIMIT`]: `/healthz`
 //!   answers 200 on its own listener, a write transaction commits, the CA is
-//!   unlocked if it was before, and its embedded infraternal agent lists every live
+//!   unlocked if it was before, its embedded infraternal agent can publish a login
+//!   image, and it lists every live
 //!   session the previous release recorded in the marker, except those whose shim
 //!   exited meanwhile (owner, 2026-11-21). On a pass it commits the boot pointer. Otherwise it
 //!   asks the loop to exec the previous release warm, which restores the database
@@ -446,6 +447,7 @@ pub(crate) fn start(
     data: PathBuf,
     listen: SocketAddr,
     artifact: &'static str,
+    executable: PathBuf,
 ) {
     let trial = TRIAL
         .lock()
@@ -459,7 +461,7 @@ pub(crate) fn start(
         if let Some(trial) = trial {
             // A trial ends in an exec (undo) or a commit; only after a commit does this
             // release go on to apply later updates.
-            if !run_trial(&trial, &pool, &data, listen, artifact).await {
+            if !run_trial(&trial, &pool, &data, listen, artifact, &executable).await {
                 return;
             }
         }
@@ -866,18 +868,32 @@ async fn run_trial(
     data: &Path,
     listen: SocketAddr,
     artifact: &'static str,
+    executable: &Path,
 ) -> bool {
     // A marker with a reason means B started again mid-trial or after a failed undo
     // exec: undo again, keeping the reason.
     let verdict = if trial.reason.is_some() {
         Err(apply::undo_reason(trial.reason.as_deref()))
     } else {
-        match tokio::time::timeout(TRIAL_LIMIT, healthy(pool, listen, trial)).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(reason)) => {
+        let check = async {
+            healthy(pool, listen, trial).await.map_err(|reason| {
                 tracing::warn!(reason, "update_health_failed");
-                Err(apply::UNHEALTHY)
-            }
+                apply::UNHEALTHY
+            })?;
+            #[cfg(target_os = "linux")]
+            infraternal_agent::logins::check_login_image(executable)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "update_login_image_failed");
+                    apply::LOGIN_IMAGE_FAILED
+                })?;
+            #[cfg(not(target_os = "linux"))]
+            let _ = executable;
+            Ok(())
+        };
+        match tokio::time::timeout(TRIAL_LIMIT, check).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => Err(reason),
             Err(_) => {
                 let missing = SESSIONS_WAITING.load(std::sync::atomic::Ordering::Relaxed);
                 let reason = if missing > 0 {
