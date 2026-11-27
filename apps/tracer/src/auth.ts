@@ -13,7 +13,8 @@ export interface AuthStart {
   options: { publicKey: Record<string, unknown> };
 }
 
-interface AuthSession {
+/** The signed-in browser identity and its optional layout-session binding. */
+export interface AuthSession {
   session_incarnation?: string;
   user_id: string;
   username: string;
