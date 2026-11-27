@@ -332,6 +332,7 @@ fn parse_cli_value(schema: &JsonSchema, value: &str) -> io::Result<Value> {
     }
 }
 
+/// Read every page of the component reply, then present one complete result.
 async fn execute(
     state: &std::path::Path,
     registry: &PluginRegistry,

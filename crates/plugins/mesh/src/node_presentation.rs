@@ -643,6 +643,7 @@ mod tests {
         assert_eq!(shown.message, "Waiting for server.");
     }
 
+    /// Describe the live server connection and why that path is in use.
     #[test]
     fn status_explains_the_observed_server_transport() {
         for (kind, reason, label, explanation) in [
@@ -726,6 +727,7 @@ mod tests {
             "Mesh is on. 1 peer."
         );
     }
+    /// Show the engine the machine uses and how it was selected.
     #[test]
     fn status_names_the_running_engine_and_why() {
         let default = serde_json::json!({"state":"On","peer_count":1,

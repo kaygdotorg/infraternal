@@ -341,6 +341,8 @@ pub fn age(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Pins the output shared by the CLI and plugin presenters.
+
     use super::{age, bullets, bytes, pairs, table, terminal_table, truncate, wrap};
 
     fn rows(items: &[&[&str]]) -> Vec<Vec<String>> {
@@ -380,6 +382,7 @@ mod tests {
         assert!(text.lines().count() > 3, "wrapped: {text}");
     }
 
+    /// A narrow table shortens its leading columns with a plain marker.
     #[test]
     fn wide_leading_columns_are_cut_with_an_ascii_marker() {
         let text = table(
@@ -450,6 +453,7 @@ mod tests {
         assert_eq!(age(400_000), "4 d ago");
     }
 
+    /// Key/value blocks align their value columns and keep empty values printable.
     #[test]
     fn pairs_align_values_and_wrap_under_them() {
         let text = pairs(
