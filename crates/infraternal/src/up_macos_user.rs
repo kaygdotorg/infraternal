@@ -970,8 +970,8 @@ pub(crate) struct UninstallReview {
 /// Discover the user job from the same LaunchAgent paths as status.
 pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
     let paths = Paths::for_uid(uid)?;
-    let mut targets = checked_uninstall_paths(&paths, uid)?;
     let host = read_uninstall_receipt(&paths, uid)?;
+    let mut targets = checked_uninstall_paths(&paths, uid)?;
     let helper = macos_helper::registration_for_current_user()?;
     targets.push(paths.base.clone());
     if exists(&paths.logs)? {
@@ -990,19 +990,16 @@ pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
 /// Read the receipt only from a private, real directory owned by the caller.
 fn read_uninstall_receipt(paths: &Paths, uid: u32) -> io::Result<String> {
     let base = fs::symlink_metadata(&paths.base)?;
+    if !base.is_dir() || base.uid() != uid || base.mode() & 0o077 != 0 {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
     let receipt = paths.receipt();
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
         .open(receipt)?;
     let meta = file.metadata()?;
-    if !base.is_dir()
-        || base.uid() != uid
-        || base.mode() & 0o077 != 0
-        || !meta.is_file()
-        || meta.uid() != uid
-        || meta.mode() & 0o077 != 0
-    {
+    if !meta.is_file() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
         return Err(ErrorKind::PermissionDenied.into());
     }
     let mut text = String::new();
@@ -1077,8 +1074,8 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
     {
         apply_old_agent_step(paths, uid, *step)?;
     }
-    // An unreadable registration is reported after the person's own files are gone, with the
-    // administrator command that removes the helper; it is never read as "no helper" (J1087).
+    // Keep the removal receipt if the helper remains, so a second run can finish cleanup.
+    // An unreadable registration is never read as "no helper" (J1087).
     let helper = match macos_helper::registration_for_current_user() {
         Ok(true) => macos_helper::request(&Request::Remove, None).map(|_| ()),
         Ok(false) => Ok(()),
@@ -1110,4 +1107,46 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod uninstall_tests {
+    //! Validate the same private receipt and LaunchAgent arguments used for removal.
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// A user install is selected by its receipt and exact service paths. A foreign plist is refused.
+    #[test]
+    fn review_only_accepts_this_accounts_launch_agent() {
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let root = env::temp_dir().join(format!("infraternal-uninstall-{}", uuid::Uuid::new_v4()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let paths = Paths {
+            base: root.clone(),
+            binary: root.join("bin/infraternal"),
+            data: root.join("agent"),
+            state: root.join("state"),
+            logs: root.join("logs"),
+            launch_agent: root.join("current.plist"),
+            legacy_launch_agent: root.join("legacy.plist"),
+        };
+        let host = uuid::Uuid::new_v4().simple().to_string();
+        write_new(&paths.receipt(), format!("{host}\n").as_bytes(), 0o600).unwrap();
+        assert_eq!(read_uninstall_receipt(&paths, uid).unwrap(), host);
+        let plist = macos_user_mode::agent_plist(
+            &paths.binary.to_string_lossy(),
+            &paths.data.to_string_lossy(),
+            &paths.state.to_string_lossy(),
+            &paths.logs.join("agent.log").to_string_lossy(),
+        );
+        write_new(&paths.launch_agent, plist.as_bytes(), 0o644).unwrap();
+        assert_eq!(
+            checked_uninstall_paths(&paths, uid).unwrap(),
+            [paths.launch_agent.clone()]
+        );
+        let foreign = plist.replace("<string>agent</string>", "<string>server</string>");
+        write_new(&paths.legacy_launch_agent, foreign.as_bytes(), 0o644).unwrap();
+        assert!(checked_uninstall_paths(&paths, uid).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

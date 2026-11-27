@@ -563,6 +563,53 @@ fn up_action() -> ActionDefinition {
 /// Describe the removal preview and the explicit opt-in used by scripts.
 #[cfg(machine_up)]
 fn uninstall_action() -> ActionDefinition {
+    let lines = |description| {
+        JsonSchema::array(
+            JsonSchema::string("A line of uninstall output."),
+            description,
+        )
+    };
+    let data = JsonSchema::object(
+        [
+            (
+                "system".to_owned(),
+                JsonSchema::boolean("The plan targets the system installation."),
+            ),
+            (
+                "remove".to_owned(),
+                lines("Files and resources named in the removal plan."),
+            ),
+            (
+                "notes".to_owned(),
+                lines("Other removal details, including any shell setup the installer printed."),
+            ),
+            (
+                "keep_state".to_owned(),
+                JsonSchema::boolean("The plan preserves the enrollment."),
+            ),
+            (
+                "administrator_required".to_owned(),
+                JsonSchema::boolean("Applying the plan requires administrator privileges."),
+            ),
+            (
+                "host_id".to_owned(),
+                JsonSchema::string("Host ID named in the local installation receipt."),
+            ),
+            (
+                "saved_state".to_owned(),
+                JsonSchema::string("Path of the saved enrollment directory when requested."),
+            ),
+            (
+                "server_retired".to_owned(),
+                JsonSchema::boolean("The server confirmed retirement of the host."),
+            ),
+            (
+                "remaining".to_owned(),
+                lines("Resources left in place because they did not belong to this install."),
+            ),
+        ],
+        [],
+    );
     ActionDefinition::new(
         ["uninstall"],
         "Remove infraternal from this machine.",
@@ -593,7 +640,7 @@ fn uninstall_action() -> ActionDefinition {
             ],
             [],
         ),
-        JsonSchema::command_result(),
+        JsonSchema::command_result_with(data),
         ActionContract::new(
             ActionTarget::Global,
             ActionEffect::Destructive,

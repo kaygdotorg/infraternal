@@ -179,8 +179,12 @@ pub fn review(home: &Path, uid: u32, caller: u32) -> io::Result<Review> {
         .ok_or_else(denied)?;
     let context = installation(host, home, uid);
     let paths = layout(&context, home, uid)?;
+    validate_unit(&unit, &paths, host)?;
     if caller == uid {
-        validate(&context, home, uid)?;
+        validate(&context, home, uid).map_err(|error| match error.kind() {
+            io::ErrorKind::NotFound => denied(),
+            _ => error,
+        })?;
     }
     Ok(Review {
         context,
@@ -225,14 +229,7 @@ fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) 
         }
     }
     let unit = public_file(&paths.unit, uid, 4096)?;
-    if !unit
-        .lines()
-        .any(|line| line == format!("# infraternal bootstrap {}", context.host))
-        || !unit.lines().any(|line| line == "KillMode=process")
-        || !unit.lines().any(|line| line == format!("ExecStart=\"{0}/bin/current\" agent --data \"{0}/state\" --state \"{0}/sessions\" run", paths.base.display()))
-    {
-        return Err(denied());
-    }
+    validate_unit(&unit, &paths, &context.host)?;
     if std::fs::read_link(&paths.launcher)? != paths.base.join("bin/current")
         || std::fs::read_link(paths.base.join("bin/current"))? != paths.base.join("bin/live")
     {
@@ -243,6 +240,19 @@ fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) 
             if target == paths.unit || target == Path::new("../infraternal-agent.service") => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         _ => return Err(denied()),
+    }
+    Ok(())
+}
+
+/// Check systemd's public unit before trusting it to identify a bootstrap installation.
+fn validate_unit(unit: &str, paths: &Layout, host: &str) -> io::Result<()> {
+    if !unit
+        .lines()
+        .any(|line| line == format!("# infraternal bootstrap {host}"))
+        || !unit.lines().any(|line| line == "KillMode=process")
+        || !unit.lines().any(|line| line == format!("ExecStart=\"{0}/bin/current\" agent --data \"{0}/state\" --state \"{0}/sessions\" run", paths.base.display()))
+    {
+        return Err(denied());
     }
     Ok(())
 }
@@ -1056,6 +1066,24 @@ mod tests {
         symlink(base.join("bin/live"), base.join("bin/current")).unwrap();
         Some((home, context, uid))
     }
+    /// The system unit must name the fixed system paths, even in an unprivileged preview.
+    #[test]
+    fn system_review_refuses_user_paths_in_the_installed_unit() {
+        let home = Path::new("/root");
+        let context = super::installation("00000000000000000000000000000001", home, 0);
+        let layout = layout(&context, home, 0).unwrap();
+        let unit = format!(
+            "# infraternal bootstrap {}\nKillMode=process\nExecStart=\"/var/lib/infraternal/bin/current\" agent --data \"/var/lib/infraternal/state\" --state \"/var/lib/infraternal/sessions\" run\n",
+            context.host
+        );
+        assert!(super::validate_unit(&unit, &layout, &context.host).is_ok());
+        let unrelated = unit.replace(
+            "/var/lib/infraternal",
+            "/home/other/.local/share/infraternal",
+        );
+        assert!(super::validate_unit(&unrelated, &layout, &context.host).is_err());
+    }
+
     /// Review names only the canonical Linux user installation and refuses an altered launcher.
     #[test]
     fn review_refuses_a_launcher_pointing_outside_the_owned_install() {

@@ -31,7 +31,10 @@ impl Plan {
     fn preview(&self, keep: bool, sudo: bool) -> CommandResult<Value> {
         let mut targets = self.targets.clone();
         if keep {
-            targets.push(format!("Save enrollment from {}", self.data.display()));
+            targets.push(format!(
+                "Save enrollment from {}",
+                safe_text(&self.data.to_string_lossy())
+            ));
         } else {
             targets.push(format!(
                 "Delete enrollment and keys in {}",
@@ -42,6 +45,7 @@ impl Plan {
             .iter()
             .map(|target| format!("  {target}"))
             .collect::<Vec<_>>();
+        body.push("Ask the server to retire this host and end its remote sessions.".into());
         body.extend(self.notes.iter().cloned());
         if sudo {
             body.push("Administrator access stops the system service and removes its files and network settings.".into());
@@ -75,8 +79,10 @@ pub(crate) fn run(matches: &clap::ArgMatches, json: bool) -> ExitCode {
     let sudo = plan.system && !nix::unistd::Uid::effective().is_root();
     let preview = plan.preview(keep, sudo);
     if matches.get_flag("dry_run") || (!yes && (json || !io::stdin().is_terminal())) {
+        let system_flag = if plan.system { " --system" } else { "" };
+        let keep_flag = if keep { " --keep-state" } else { "" };
         return emit(
-            preview.with_next_step("Run infraternal uninstall --yes to remove this installation."),
+            preview.with_next_step(format!("Run infraternal uninstall{system_flag}{keep_flag} --yes to remove this installation.")),
             json,
             Exit::Ok,
         );
@@ -142,21 +148,53 @@ fn elevate(plan: &Plan, identity: &str, keep: bool, json: bool) -> ExitCode {
     } else {
         command.args(["-p", "Password: "]);
     }
-    let status = command
-        .arg("--")
-        .arg(executable)
-        .args([
-            "__uninstall-reviewed",
-            identity,
-            if keep { "keep" } else { "remove" },
-            if json { "json" } else { "text" },
-        ])
-        .status();
+    command.arg("--").arg(executable).args([
+        "__uninstall-reviewed",
+        identity,
+        if keep { "keep" } else { "remove" },
+        if json { "json" } else { "text" },
+    ]);
+    if json {
+        if let Ok(output) = command.output()
+            && serde_json::from_slice::<Value>(&output.stdout).is_ok()
+            && io::stdout().write_all(&output.stdout).is_ok()
+            && let Some(code) = exit_status(output.status)
+        {
+            return code;
+        }
+    } else {
+        if io::stderr().is_terminal() {
+            eprintln!(
+                "Administrator access stops the system service and removes its files and mesh settings.\nGrant access to finish the uninstall. If you decline, the system installation stays in place."
+            );
+        }
+        if let Ok(status) = command.status()
+            && status.success()
+        {
+            return ExitCode::SUCCESS;
+        }
+    }
+    emit(
+        CommandResult::new(
+            "uninstall",
+            CommandState::Failed,
+            "Couldn't complete the system uninstall.",
+            json!({}),
+        )
+        .with_next_step(
+            "Check your administrator access and run an up-to-date infraternal uninstall --system.",
+        ),
+        json,
+        Exit::Failed,
+    )
+}
+
+/// Forward an elevated child status through the public CLI.
+fn exit_status(status: std::process::ExitStatus) -> Option<ExitCode> {
     status
-        .ok()
-        .and_then(|status| status.code())
+        .code()
         .and_then(|code| u8::try_from(code).ok())
-        .map_or(ExitCode::FAILURE, ExitCode::from)
+        .map(ExitCode::from)
 }
 
 /// Accept only the fixed system operation and the fingerprint of the previewed directory.
@@ -241,11 +279,15 @@ fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
             );
         }
     };
+    let mut data = json!({"host_id": host, "server_retired": server, "remaining": left});
+    if let Some(backup) = backup {
+        data["saved_state"] = json!(backup);
+    }
     let mut result = CommandResult::new(
         "uninstall",
         CommandState::Ready,
         "Removed infraternal from this machine.",
-        json!({"host_id": host, "saved_state": backup, "server_retired": server, "remaining": left}),
+        data,
     );
     if !server {
         result = result.with_next_step("The server may still list this host. In the machine list, select Remove, then Forget if cleanup is pending.");
@@ -257,8 +299,21 @@ fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
 fn paths(targets: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
     targets
         .into_iter()
-        .map(|file| format!("{}", file.display()).escape_default().to_string())
+        .map(|file| safe_text(&file.to_string_lossy()))
         .collect()
+}
+
+/// Preserve printable path characters while escaping terminal control characters.
+fn safe_text(text: &str) -> String {
+    let mut escaped = String::new();
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Discover the caller's native service first, or the system service when selected or alone.
@@ -363,7 +418,7 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
         targets,
         notes: vec![format!(
             "If you added this PATH line, remove it from your shell configuration.\n  {}",
-            review.path_line.escape_default()
+            safe_text(&review.path_line)
         )],
     })
 }
