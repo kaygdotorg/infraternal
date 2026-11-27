@@ -144,13 +144,21 @@ mount. Each arm runs in a fresh namespace. I stopped the invalid
 runtimes by their recorded process IDs. Their statuses serve as
 fixture diagnostics.
 
-The repaired control run completed `cargo test --offline --locked
---workspace --no-fail-fast` with exit 0. It reported 4,636 passed,
-405 ignored and zero failed across 244 top-level suites. Wall time
-was 2,414.400 s, user CPU was 3,554.192 s and system CPU was 654.595 s.
-The target peaked at 14,909,890,560 allocated bytes. One-minute load
-min/median/max was 8.07/24.77/60.76. The native detach test compiles
-its own example, which is included in the execution timing.
+Both repaired executions of `cargo test --offline --locked --workspace
+--no-fail-fast` exited 0. Each reported 4,636 passed, 405 ignored and zero
+failed across 244 top-level suites. The per-suite summaries and 5,035
+logged test names matched. The comparator handles interleaved output
+from nested test binaries. The native detach tests compile their own
+example, which is included in the execution timing.
+
+| Mode | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target bytes | Peak cache bytes | Peak combined bytes | Load 1m min/median/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Control | 2,414.400 | 3,554.192 / 654.595 | — | 14,909,890,560 | — | 14,909,890,560 | 8.07 / 24.77 / 60.76 |
+| Kache | 2,704.842 | 3,826.139 / 692.387 | 1.28 / 2.91 | 14,909,960,192 | 63,270,912 | 14,973,231,104 | 15.78 / 34.52 / 58.08 |
+
+The wrapped fixture used a separate empty store while the post-GC build
+store was parked. It recorded 0 hits and 8 misses during execution.
+[Workspace execution evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107557)
 
 The discarded namespace's init briefly survived the shutdown of its
 outer launcher. I terminated the verified old namespace init by host
@@ -171,7 +179,7 @@ boundary for different trust domains. This trial uses a dedicated store,
 socket, configuration and XDG cache root. It leaves shared hardlink restores
 off, so test and build targets do not share mutable inodes through the cache.
 
-The trial's cache lives on the home volume and the target lives on
+The cold build cache lived on the home volume and the target lived on
 `/mnt/build`. Cross-volume restores copy bytes. The 8 GiB blob limit
 covers cache blobs. The allocated footprint also includes bookkeeping
 and logs. Use measured free space and allocation for capacity planning
@@ -180,3 +188,15 @@ alongside the configured blob limit.
 These runs exercise Cargo inside `nix develop`. The [J1306 notes](kache-2026-11-27.md#nix-package-builds)
 describe the separate sandboxed Nix release package.
 [Upstream storage and sharing settings](https://ninja.kunobi.com/docs/kache/getting-started/configuration)
+
+## Later worktree setup
+
+The later pin is `604e7876ce5049ab5982f2c77e2372cfaef3a6c7`, three
+first-parent revisions after the original dev pin. It includes Rust
+changes to mesh state persistence. Its Cargo target starts empty and
+uses the post-GC compiler store. Home free space reached 22 GiB, below
+the host's 25 GiB build-slot floor, after the workspace comparison.
+The job's private cache path now points to its retained store on the
+build volume. That keeps the warm cache and targets on the same device.
+A cold-to-warm wall comparison therefore includes the source revision
+and storage layout changes.
