@@ -80,6 +80,7 @@ interface BootstrapEvent {
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
+/** A named fixture and the active attempt it owns, including any confirmation pause. */
 interface Target {
   id: string;
   publication?: { host_id: string; session_id: string };
