@@ -255,6 +255,18 @@ because the original file and its checksum are already in deployment history.
   table: measured value, target, the gate used and PASS/FAIL. A missing row
   fails the run like a missed one. The full log is kept under
   `$HOME/.cache/codex-scratch/latency/evidence/`.
+- **Remote-enabled server idle [D81, #602].** The report shows two advisory
+  rows for the release server with `--remote-listen`, one with no connected
+  hosts and one with an authenticated Linux host over QUIC. The probe counts
+  server task schedule-ins from Linux `/proc`, with no requests during the
+  windows. Five fresh fixtures each contribute one 60-second window per
+  configuration. With five samples, nearest-rank p95 is the maximum. The
+  initial budgets of 154 and 187 activations per minute round the measured
+  baseline p95s of 140 and 170 up after adding 10% (J1321, #602). The CA clock
+  check runs in both cases. The connected host also
+  adds QUIC keepalives and acknowledgements. To run these rows alone, use
+  `scripts/verify-remote-server-idle --binary /path/to/release/infraternal`
+  on Linux with unprivileged user namespaces, iproute2 and OpenSSL available.
 - **Rows a person sees (#569 finding 2, #573; reported beside the ten).**
   The ten rows above type one synthetic key at a time into a test double that
   repeats every byte, so they cannot see overlapping keys, a shell that
