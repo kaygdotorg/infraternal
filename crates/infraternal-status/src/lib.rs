@@ -961,6 +961,36 @@ fn waiting_for_server_configuration(bytes: &[u8]) -> bool {
     bytes.starts_with(br#"{"enabled":true,"config":null"#)
 }
 
+/// Count saved peers in either the snapshot or the selected journal's last complete record.
+#[cfg(feature = "mesh")]
+fn saved_peer_count(dir: &Path, anchor: &[u8]) -> Option<usize> {
+    use infraternal_mesh::public_journal;
+    use std::io::Read;
+
+    let Some(token) = public_journal::read_token(anchor) else {
+        return peer_count(anchor);
+    };
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(dir.join(public_journal::JOURNAL_FILE)).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut body = Vec::new();
+    file.take(public_journal::MAX_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .ok()?;
+    if body.len() > public_journal::MAX_BYTES {
+        return None;
+    }
+    public_journal::peer_count(&body, token)
+}
+
 /// Mesh state: the kernel interface says whether it is up, the snapshot says how many peers.
 fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
     let link = roots.net_class.join(MESH_INTERFACE).exists();
@@ -982,7 +1012,14 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         match fs::read(dir.join("mesh-public.json")) {
             Ok(bytes) => {
                 found = true;
-                peers = peer_count(&bytes);
+                #[cfg(feature = "mesh")]
+                {
+                    peers = saved_peer_count(&dir, &bytes);
+                }
+                #[cfg(not(feature = "mesh"))]
+                {
+                    peers = peer_count(&bytes);
+                }
                 waiting = waiting_for_server_configuration(&bytes);
                 break;
             }
