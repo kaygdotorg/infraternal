@@ -124,3 +124,20 @@ skipped. Use the full post-deploy invocation for those rows.
 cd ~/worktrees/owner-journeys-reviewed
 ~/infraternal-ops/build-slot nix develop -c scripts/owner-journeys --browser-only
 ```
+
+The user timer for this command is in `scripts/owner-journeys.d/`. From the
+reviewed checkout on compute01, the test-admin operator can install and enable
+it with the commands below. It runs daily at 04:45 IST, with up to five minutes
+of jitter. It runs no code from the live branch checkout.
+
+```sh
+install -d "$HOME/.config/systemd/user"
+install -m 0644 scripts/owner-journeys.d/infraternal-owner-journeys.{service,timer} \
+  "$HOME/.config/systemd/user/"
+systemctl --user daemon-reload
+systemctl --user enable --now infraternal-owner-journeys.timer
+systemctl --user list-timers infraternal-owner-journeys.timer
+```
+
+If compute01's test-admin account has no persistent user manager, run the same
+command from the orchestrator's scheduler instead.
