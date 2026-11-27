@@ -6,7 +6,10 @@
 //! key, the action route issues its own review token (D28, D333).
 //! D369 Forget archives an unreachable retirement and cancels its pending cleanup without touching the machine.
 //! Forget deletes the removal row; its details survive only in `mesh_audit.detail_json`.
-use crate::{auth::Auth, enrollment::EnrollmentStore, remote_runtime::RemoteHosts};
+use crate::{
+    auth::Auth, enrollment::EnrollmentStore, remote_inventory::host_display_name,
+    remote_runtime::RemoteHosts,
+};
 use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -396,7 +399,6 @@ impl Removal {
     ) -> Result<Value, crate::auth::Error> {
         let mut tx = self.pool.begin().await?;
         let (name, _) = Self::forget_record(&mut tx, person, host).await?;
-        let name = display_name(&name);
         Ok(
             json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops cleanup retries. Cleanup already sent to the machine may still finish. The audit record stays. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
         )
@@ -439,8 +441,9 @@ impl Removal {
         person: &str,
         host: Uuid,
     ) -> Result<(String, String), crate::auth::Error> {
-        sqlx::query_as(
-            "SELECT COALESCE(h.hostname,b.address,lower(hex(h.id))),
+        let (address, hostname, os, detail) =
+            sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
+            "SELECT COALESCE(b.address,''),h.hostname,COALESCE(b.os,h.reported_os),
              json_object('owner_id',h.owner_id,'removal_owner_id',r.owner_id,
                          'cleanup_person_id',q.person_id,'cleanup_confirmed',q.confirmed,
                          'requested_at',r.requested_at,'uninstall',r.uninstall,
@@ -452,8 +455,15 @@ impl Removal {
              WHERE h.id=? AND h.owner_id=? AND u.owner=1 AND h.revoked_at IS NULL AND q.confirmed=0
              AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)",
         )
-            .bind(host.as_bytes().as_slice()).bind(person)
-            .fetch_optional(&mut **tx).await?.ok_or(crate::auth::Error::Invalid)
+        .bind(host.as_bytes().as_slice())
+        .bind(person)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(crate::auth::Error::Invalid)?;
+        Ok((
+            host_display_name(host, &address, hostname.as_deref(), os.as_deref()),
+            detail,
+        ))
     }
 
     /// Keep the shared bounded admission until commit publication, even if the caller disconnects.
@@ -572,7 +582,7 @@ impl Removal {
         self.store.publish_revoked_authority().await;
         self.store.2.publish();
         Ok(
-            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here.",display_name(&name))}),
+            json!({"host_id":entry.host,"state":"forgotten","message":format!("{name} was forgotten here.")}),
         )
     }
 
