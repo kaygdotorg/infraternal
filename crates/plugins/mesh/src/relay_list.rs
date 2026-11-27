@@ -409,6 +409,9 @@ pub(crate) async fn push(
 /// Encode one relay list inside the action frame, trimming its oldest revocations as needed.
 /// # Errors
 /// Returns `None` if the remaining fields are invalid or cannot fit without dropping certificates.
+/// Client-only production builds do not send relay-list actions; tests keep this encoder available
+/// so the action-size bound remains covered without the server feature.
+#[cfg(any(feature = "server", test))]
 fn action_input(list: &mut RelayList) -> Option<Vec<u8>> {
     loop {
         let input = serde_json::to_vec(list).ok()?;

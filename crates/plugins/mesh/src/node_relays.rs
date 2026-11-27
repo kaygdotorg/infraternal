@@ -1093,6 +1093,7 @@ mod tests {
                 if hosts == 1 {
                     break;
                 }
+                // sleep: let the relay accept task publish registration without busy-spinning.
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         })
