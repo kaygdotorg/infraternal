@@ -703,6 +703,8 @@ fn mac_underlay_announce_device() {
             routes: std::collections::BTreeSet::default(),
             route_mtus: std::collections::BTreeMap::default(),
             networks: std::collections::BTreeMap::default(),
+            subnet_exceptions: std::collections::BTreeSet::new(),
+            admitted_networks: std::collections::BTreeSet::new(),
             network_status: crate::macos_node::subnet::NetworkStatus::default(),
             interface_mtu: 1280,
             port,

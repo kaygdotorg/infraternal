@@ -1492,6 +1492,8 @@ impl PendingWorker {
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
                     networks: BTreeMap::new(),
+                    subnet_exceptions: BTreeSet::new(),
+                    admitted_networks: BTreeSet::new(),
                     network_status,
                     interface_mtu,
                     port: info.port,
@@ -1718,6 +1720,10 @@ struct RuntimeState {
     route_mtus: BTreeMap<IpAddr, u16>,
     /// The subnet routes on the utun now, each with the MTU root mode gave it ([`subnet`]).
     networks: BTreeMap<crate::policy::networks::Network, Option<u16>>,
+    /// The exact addresses excluded in the last successful subnet reconcile.
+    subnet_exceptions: BTreeSet<IpAddr>,
+    /// Previously installed approved networks, which can be split around a roaming endpoint.
+    admitted_networks: BTreeSet<crate::policy::networks::Network>,
     /// What happened to each reachable network, shared with the node for `mesh routes`.
     network_status: subnet::NetworkStatus,
     /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.

@@ -37,8 +37,8 @@ slot_hold = load('root-slot-hold')
 
 def userns_available():
     """True when this host lets an unprivileged user create the sandbox's namespaces."""
-    probe = subprocess.run(['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', 'true'],
-                           capture_output=True)
+    probe = subprocess.run(['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--ipc',
+                            '--fork', 'true'], capture_output=True)
     return probe.returncode == 0
 
 
@@ -650,10 +650,10 @@ class SandboxShape(unittest.TestCase):
         return command, command[command.index('-c') + 1]
 
     def test_outer_namespace(self):
-        """User, net, mount and PID namespaces; --kill-child; no sudo; explicit environment."""
+        """User, net, mount, PID and IPC namespaces; --kill-child; no sudo; explicit environment."""
         command, _ = self.command()
-        self.assertEqual(command[:9], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
-                                       '--fork', '--kill-child', '--mount-proc'])
+        self.assertEqual(command[:10], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
+                                        '--ipc', '--fork', '--kill-child', '--mount-proc'])
         self.assertNotIn('sudo', command)
         self.assertEqual(command[command.index('env') + 1], '-i')
         self.assertIn('A=1', command)
@@ -672,13 +672,15 @@ class SandboxShape(unittest.TestCase):
         self.assertEqual(environment[marker], os.readlink('/proc/self/ns/net'))
 
     def test_test_runs_one_namespace_down(self):
-        """The test runs in a nested user namespace, after recursive read-only prepare and pivot_root (79752 P1, #601)."""
+        """The test runs in a nested user/IPC namespace, after allowlist root prepare and pivot_root (79752 P1, #601)."""
         _, setup = self.command()
         code = '\n'.join(line for line in setup.splitlines() if not line.lstrip().startswith('#'))
-        for step in ('--sandbox-prepare "$new" "$scratch" "$host_sockets"', 'pivot_root . .', 'umount -l .'):
+        for step in ('mount -t tmpfs -o mode=755,size=16m tmpfs "$new"',
+                     '--sandbox-prepare "$new" "$scratch" "$host_sockets"', 'pivot_root . .', 'umount -l .'):
             self.assertIn(step, code)
+        self.assertNotIn('mount --rbind / "$new"', code)
         self.assertNotIn('ro=recursive', code)
-        inner = code.index('exec unshare --user --map-root-user --net --mount --pid --fork --kill-child')
+        inner = code.index('exec unshare --user --map-root-user --net --mount --pid --ipc --fork --kill-child')
         self.assertGreater(inner, code.index('pivot_root . .'))
         self.assertNotIn('single', code)
 
@@ -691,14 +693,15 @@ class SandboxShape(unittest.TestCase):
             self.assertRegex(line, r'size=\d+[kmg]')
 
     def test_minimal_dev(self):
-        """/dev is a fresh tmpfs with a private devpts, mounted before /dev/shm, and nix socket dirs are covered."""
+        """/dev is a fresh tmpfs with a private devpts, mounted before /dev/shm, and only /nix/store is mounted."""
         _, setup = self.command()
         dev = setup.index('tmpfs "$new/dev"\n')
         self.assertLess(dev, setup.index('"$new/dev/shm"\n'))
         self.assertIn('-o newinstance', setup)
         self.assertNotIn('--rbind /dev', setup)
-        self.assertIn('"$new/nix/var/nix/daemon-socket"', setup)
-        self.assertIn('"$new/nix/var/determinate"', setup)
+        self.assertIn('/nix/store', setup)
+        self.assertNotIn('/nix/var/nix/daemon-socket', setup)
+        self.assertNotIn('/nix/var/determinate', setup)
 
     def test_writable_mounts_under_parses_mountinfo_and_escapes(self):
         """Only mounts under `root` lacking `ro` in per-mount options are reported (#601)."""
@@ -738,7 +741,7 @@ class SandboxShape(unittest.TestCase):
             self.assertIn('/s/root/sys/fs/cgroup', str(error.exception))
 
     def test_host_pathname_sockets_and_filtering(self):
-        """Only non-covered, non-allowed pathname sockets are selected for bind-masking (#601)."""
+        """Absolute and relative pathname sockets are resolved and filtered against covered/allowed prefixes (#601)."""
         sample = (
             'Num       RefCount Protocol Flags    Type St Inode Path\n'
             '0000000000000000: 00000002 00000000 00010000 0001 01 100 @abstract-sock\n'
@@ -747,16 +750,22 @@ class SandboxShape(unittest.TestCase):
             '0000000000000000: 00000002 00000000 00010000 0001 01 103 /nix/var/determinate/determinate-nixd.socket\n'
             '0000000000000000: 00000002 00000000 00010000 0001 01 104 /home/claude/.cache/other/agent.sock\n'
             '0000000000000000: 00000002 00000000 00010000 0001 01 105 /opt/custom/allowed.sock\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 106 relative.sock\n'
         )
         with tempfile.TemporaryDirectory() as directory:
             proc_unix = Path(directory) / 'unix'
             proc_unix.write_text(sample)
-            found = p.host_pathname_sockets(proc_unix)
+            fake_proc = Path(directory) / 'proc'
+            (fake_proc / '4242' / 'fd').mkdir(parents=True)
+            os.symlink('socket:[106]', fake_proc / '4242' / 'fd' / '3')
+            os.symlink('/etc/custom', fake_proc / '4242' / 'cwd')
+            found = p.host_pathname_sockets(proc_unix, proc_root=fake_proc)
         self.assertNotIn('@abstract-sock', found)
-        self.assertEqual(len(found), 5)
+        self.assertIn('/etc/custom/relative.sock', found)
+        self.assertEqual(len(found), 6)
         fake_resolve = lambda path: path.replace('/var/run/', '/run/', 1)
         to_mask = p.sockets_to_mask(found, allowed=('/opt/custom/allowed.sock',), resolver=fake_resolve)
-        self.assertEqual(to_mask, ['/home/claude/.cache/other/agent.sock'])
+        self.assertEqual(to_mask, ['/etc/custom/relative.sock', '/home/claude/.cache/other/agent.sock'])
 
 
 class Lifecycle(unittest.TestCase):

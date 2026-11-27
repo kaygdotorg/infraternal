@@ -1219,8 +1219,24 @@ impl RuntimeState {
 
     /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
     /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
-    /// configuration says; only the address the next packet goes to changes.
+    /// configuration says; only the address the next packet goes to changes. Check a candidate
+    /// inside an approved subnet against its current kernel route before installing it.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        let address = endpoint.ip().to_canonical();
+        if self.config.as_ref().is_some_and(|config| {
+            config.peers.values().any(|peer| {
+                peer.networks.through.iter().any(|route| {
+                    route.network.contains(address)
+                        && route.outbound != crate::policy::rules::TrafficPolicy::None
+                })
+            })
+        }) && tokio::task::spawn_blocking(move || crate::wireguard::is_tunnel_endpoint(address))
+            .await
+            .map_err(io::Error::other)??
+        {
+            // A walk can still remember an old endpoint after its exception was withdrawn.
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
         let policy = self
             .config
             .as_ref()
@@ -1367,11 +1383,11 @@ impl RuntimeState {
             .step(std::time::Instant::now(), &observed(&counters));
         let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
-            if self.set_endpoint(key, endpoint).await.is_ok() {
-                installed.push(key);
-            } else {
+            match self.set_endpoint(key, endpoint).await {
+                Ok(()) => installed.push(key),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => self.walks.abandon(key),
                 // The engine still holds the old address; the walk's next step tries again.
-                self.walks.install_failed(key);
+                Err(_) => self.walks.install_failed(key),
             }
         }
         let _ = self.rehandshake_all(installed);

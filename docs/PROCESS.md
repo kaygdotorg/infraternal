@@ -158,6 +158,17 @@ use a later timestamp. Independent branch changes must work in either arrival
 order. Regression tests exercise real SQLite with the shipping migrator flags,
 numbered history, both timestamp arrival orders and altered checksums.
 
+A migration that edits `sqlite_schema` must preserve every column's storage
+position. Capture the old column names and ordinals before the edit. After
+`PRAGMA writable_schema = RESET`, compare those ordinals with the new schema
+and check the SQLite storage class of each existing column using `typeof()`
+and a table scan (`NOT INDEXED`). Put both checks in the migration transaction,
+with named failing constraints so the error identifies the table or layout
+problem without exposing row values. Exercise the production-schema fixture
+and the other column order in a separate synthetic fixture. The guard for
+`20261125055624_device_host_mode.sql` is added by the embedder for both runners
+because the original file and its checksum are already in deployment history.
+
 ## 4. Integrate all the time, and dogfood at once
 
 - Small, frequent merges to `dev`. The gate runs on the merge result every
@@ -789,26 +800,33 @@ non-ignored test as that user. Before review 79752 the test discovery call
 branch, the real boundary is the shared build account (`claude`), not this
 sandbox. Within that scope, nothing runs as host root and there is no sudo.
 Each test runs in two nested user namespaces:
-- the outer namespace builds the mounts: the host filesystem bind-mounted and
-  locked read-only *recursively* via `mount_setattr(..., AT_RECURSIVE,
-  MOUNT_ATTR_RDONLY)` (independent of util-linux; verified against
-  `/proc/self/mountinfo`), `pivot_root`ed with the old root detached; tmpfs
-  with size caps at `/tmp` (512 MiB, which also holds the build-output view
-  `CARGO_TARGET_DIR=/tmp/ut`), `/run` (64 MiB), `/var/tmp` and `/dev/shm`
-  (256 MiB each); a minimal `/dev` (null, zero, full, random, urandom, tty,
-  `net/tun`, a private devpts); read-only tmpfs over the host nix daemon
-  socket directories (`/nix/var/nix/daemon-socket`, `/nix/var/determinate`)
-  and read-only regular-file bind masks over every remaining host pathname
-  Unix socket outside the allowlist (#601). A separate read-only tmpfs hides
-  `/var/lib` and blocks traversal into `/var/lib/infraternal`. Mesh test
-  builds use `INFRATERNAL_TEST_HOST_FIREWALL_ROOT=/run/infraternal-test` for
-  implicit listener policy paths. Tests that supply a policy layout explicitly
-  keep their files and fake loader under their own private root;
+- the outer namespace builds the mounts on a fresh size-capped tmpfs root
+  containing only the host trees the tests need (`/usr`, `/etc`, `/sys`,
+  `/nix/store`, system `/bin`/`/sbin`/`/lib`/`/lib64` symlinks or dirs, plus
+  the checkout and build target), all locked read-only *recursively* via
+  `mount_setattr(..., AT_RECURSIVE, MOUNT_ATTR_RDONLY)` (independent of
+  util-linux; verified against `/proc/self/mountinfo`), then `pivot_root`ed
+  with the old root detached; tmpfs with size caps at `/tmp` (512 MiB, which
+  also holds the build-output view `CARGO_TARGET_DIR=/tmp/ut`), `/run`
+  (64 MiB), `/var/tmp` and `/dev/shm` (256 MiB each); a minimal `/dev` (null,
+  zero, full, random, urandom, tty, `net/tun`, a private devpts); and
+  read-only regular-file bind masks over any remaining host pathname Unix
+  socket inside the mounted trees (including relative-path `/proc/net/unix`
+  entries resolved via `/proc/<pid>/fd` and `cwd`). Host-writable trees
+  (`$HOME`, `/var` outside `/var/tmp`, `/var/run` and `/var/lib`, `/srv`,
+  `/opt`, `/root`, `/nix/var`) are not mounted at all, so neither pre-start
+  nor post-start host sockets in those trees can be reached (#601). A separate
+  read-only tmpfs hides `/var/lib` and blocks traversal into
+  `/var/lib/infraternal`. Mesh test builds use
+  `INFRATERNAL_TEST_HOST_FIREWALL_ROOT=/run/infraternal-test` for implicit
+  listener policy paths. Tests that supply a policy layout explicitly keep
+  their files and fake loader under their own private root;
 - the inner namespace (`unshare --user --map-root-user --net --mount --pid
-  --kill-child`) runs the test. uid 0 there is the caller's uid outside, and
-  the kernel locks the inherited mounts, so the test cannot remount `/`
+  --ipc --kill-child`) runs the test. uid 0 there is the caller's uid outside,
+  and the kernel locks the inherited mounts, so the test cannot remount `/`
   read-write or unmount `/run` or `/tmp`. The network namespace has only
-  loopback. The environment is passed explicitly (`env -i`).
+  loopback, and the IPC namespace isolates host SysV shared memory, message
+  queues and semaphores. The environment is passed explicitly (`env -i`).
 - Each run has a 900 s hang timeout (`VERIFY_PRIVILEGED_TEST_TIMEOUT`; a hang
   guard, not a speed assertion), is SIGKILLed if the runner dies (parent-death
   signal, then `--kill-child` takes the namespace), and runs in a systemd user
@@ -823,9 +841,11 @@ host mount in `/proc/self/mountinfo`; superblock and bind remounts of `/`
 read-write; unmounting `/run` and `/tmp`; opening installed files, writing to
 or removing the `/var/lib` cover; the host user and system buses; the nix
 daemon and determinate-nixd sockets; any disallowed host pathname Unix socket
-(including a planted host listener); a host pty; a route off loopback; the
-host network and the internet; a uid map onto host root; a file left in
-`/tmp`. These probes are negative checks only. The evidence that they
+(including a planted pre-start absolute listener, a pre-start relative-path
+listener, and a post-start host listener created after sandbox startup); host
+SysV shared memory, message queues and semaphores; a host pty; a route off
+loopback; the host network and the internet; a uid map onto host root; a file
+left in `/tmp`. These probes are negative checks only. The evidence that they
 are live is J233's manual breakout of the earlier single-level layout (review
 79752 on #344), which these probes reproduce. **Any change to the sandbox
 layout needs a fresh manual escape review before merge.**

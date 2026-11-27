@@ -6,12 +6,12 @@ use infraternal_plugin_api::{
 };
 use infraternal_plugin_remote::inventory::{Changes, Inventory};
 use serde_json::{Value, json};
-use sqlx::SqlitePool;
+use sqlx::{FromRow, Row, SqlitePool};
 use uuid::Uuid;
 
 /// Public host facts and an optional server-owned cleanup status, read together.
 type AdmittedHostRow = (
-    Vec<u8>,
+    [u8; 16],
     String,
     Option<String>,
     Option<String>,
@@ -35,6 +35,48 @@ struct FactChanges {
     any: bool,
 }
 impl Source {
+    /// Read up to 128 decodable rows in bounded batches. Advance past failures
+    /// internally so the public cursor always names a host the client received.
+    async fn list_rows(
+        &self,
+        account: &str,
+        after: Option<Uuid>,
+    ) -> Result<(Vec<AdmittedHostRow>, bool), ()> {
+        let mut cursor = after.map(|id| *id.as_bytes());
+        let mut decoded = Vec::new();
+        let mut skipped = 0;
+        let has_more = loop {
+            // Same authority predicate as websocket::terminal_actor. Require a
+            // binary UUID so every admitted row has a canonical cursor.
+            let after = cursor.as_ref().map(<[u8; 16]>::as_slice);
+            let rows = sqlx::query(
+                "SELECT h.id,COALESCE(b.address,''),COALESCE(b.os,h.reported_os),h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND typeof(h.id)='blob' AND length(h.id)=16 AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
+                .bind(account).bind(after).bind(after).fetch_all(&self.pool).await
+                .map_err(|error| tracing::warn!(%error, "host inventory query failed"))?;
+            let remaining = 128 - decoded.len();
+            for row in rows.iter().take(remaining) {
+                match AdmittedHostRow::from_row(row) {
+                    Ok(host) => decoded.push(host),
+                    Err(error) => {
+                        tracing::warn!(%error, "skipping undecodable host inventory row");
+                        skipped += 1;
+                    }
+                }
+            }
+            let has_more = rows.len() > remaining;
+            if !has_more || decoded.len() == 128 {
+                break has_more;
+            }
+            cursor = Some(rows[remaining - 1].try_get(0).map_err(
+                |error| tracing::warn!(%error, "host inventory cursor could not be decoded"),
+            )?);
+        };
+        if skipped > 0 {
+            tracing::warn!(skipped, "host inventory page omitted undecodable rows");
+        }
+        Ok((decoded, has_more))
+    }
+
     /// Retain valid machine facts without allowing an older host to erase a name it cannot report.
     async fn save_facts(&self, id: Uuid, facts: &Value) -> FactChanges {
         let hostname = facts
@@ -230,19 +272,12 @@ impl Inventory for Source {
                     })
                 })
                 .transpose()?;
-            // Same authority predicate as websocket::terminal_actor. Unredeemed invitations are not admitted hosts.
-            let rows: Vec<AdmittedHostRow> = sqlx::query_as(
-                "SELECT h.id,COALESCE(b.address,''),COALESCE(b.os,h.reported_os),h.hostname,h.mode,CASE WHEN EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0) THEN CASE WHEN EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id AND c.revoked_at IS NULL AND c.not_after>unixepoch()) THEN 'pending' ELSE 'retired-unreachable' END END FROM remote_hosts h LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id WHERE h.owner_id=? AND h.revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id) AND (? IS NULL OR h.id>?) ORDER BY h.id LIMIT 129")
-                .bind(account).bind(after.map(|id| id.as_bytes().to_vec())).bind(after.map(|id| id.as_bytes().to_vec())).fetch_all(&self.pool).await.map_err(|_| ())?;
-            let mut next = if rows.len() > 128 {
-                Some(Uuid::from_slice(&rows[127].0).map_err(|_| ())?.to_string())
-            } else {
-                None
-            };
-            let mut hosts = Vec::with_capacity(rows.len().min(128));
+            let (rows, mut has_more) = self.list_rows(account, after).await?;
+            let mut last = None;
+            let mut hosts = Vec::with_capacity(rows.len());
             let mut bytes = 1024;
-            for (id, address, os, hostname, mode, cleanup) in rows.into_iter().take(128) {
-                let id = Uuid::from_slice(&id).map_err(|_| ())?;
+            for (id, address, os, hostname, mode, cleanup) in rows {
+                let id = Uuid::from_bytes(id);
                 let user = address.split_once('@').map(|(user, _)| user);
                 let name = machine_name(&address)
                     .or_else(|| hostname.as_deref().and_then(machine_name))
@@ -278,15 +313,14 @@ impl Inventory for Source {
                 }
                 let size = serde_json::to_vec(&value).map_err(|_| ())?.len();
                 if bytes + size > 60 * 1024 {
-                    next = hosts
-                        .last()
-                        .and_then(|value: &Value| value["id"].as_str())
-                        .map(str::to_owned);
+                    has_more = true;
                     break;
                 }
                 bytes += size;
                 hosts.push(value);
+                last = Some(id);
             }
+            let next = last.filter(|_| has_more).map(|id| id.to_string());
             Ok(json!({"hosts":hosts,"next":next}))
         })
     }
@@ -494,6 +528,44 @@ mod tests {
 #[cfg(test)]
 mod pagination_tests {
     use super::*;
+
+    /// A whole page of wrongly typed OS facts still leads to the healthy host.
+    #[tokio::test]
+    async fn undecodable_rows_are_skipped_and_still_advance_the_cursor() {
+        let (_, pool, enrolled) = crate::enrollment::authority::tests::enrolled().await;
+        let mut tx = pool.begin().await.unwrap();
+        for serial in 1_u128..=129 {
+            let id = Uuid::from_u128(serial);
+            if id != enrolled {
+                sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)")
+                    .bind(id.as_bytes().as_slice()).execute(&mut *tx).await.unwrap();
+                sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?1,?2,zeroblob(32),zeroblob(32),100,604900,1002)")
+                    .bind([u8::try_from(serial + 1).unwrap(); 32]).bind(id.as_bytes().as_slice())
+                    .execute(&mut *tx).await.unwrap();
+            }
+            if serial < 129 {
+                // SQLite's TEXT affinity converts an integer write to text.
+                // A blob stays wrongly typed when read by the SQLx row decoder.
+                sqlx::query("UPDATE remote_hosts SET reported_os=x'00' WHERE id=?")
+                    .bind(id.as_bytes().as_slice())
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+            }
+        }
+        tx.commit().await.unwrap();
+        let source = Source {
+            pool,
+            hosts: RemoteHosts::default(),
+            #[cfg(feature = "mesh")]
+            mesh: None,
+        };
+        let page = source.list("owner", None).await.unwrap();
+        assert_eq!(page["hosts"].as_array().unwrap().len(), 1);
+        assert_eq!(page["hosts"][0]["id"], Uuid::from_u128(129).to_string());
+        assert!(page["next"].is_null());
+    }
+
     /// Every host appears on exactly one page, however long its address.
     #[tokio::test]
     async fn long_destinations_stay_bounded_and_all_pages_are_complete() {
