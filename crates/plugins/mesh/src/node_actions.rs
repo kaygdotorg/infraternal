@@ -18,6 +18,16 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+/// The node's relay manager: the relay role and the relay paths (D402).
+#[cfg(all(feature = "relay", target_os = "linux"))]
+#[path = "node_relays.rs"]
+mod relays;
+#[cfg(all(feature = "relay", target_os = "linux"))]
+pub use relays::{
+    CredentialSource as RelayCredentialSource, HostLeaf as RelayHostLeaf,
+    set_credentials as set_relay_credentials,
+};
+
 /// The process retains kernel state across a remote-channel reconnect. A socket loss
 /// never drops this owner; only explicit down retires the component [166].
 struct Owner {
@@ -103,6 +113,9 @@ pub struct MeshNodePlugin {
     server_link: infraternal_plugin_api::server_path::ServerLink,
     configuration_observer: Option<ConfigurationObserver>,
     proxy_containment: Option<ProxyContainmentProbe>,
+    /// The relay role and relay paths (D402); only on a Linux node built with relays.
+    #[cfg(all(feature = "relay", target_os = "linux"))]
+    relays: Option<relays::RelayManager>,
     // The kernel dump behind the first `mesh.peers` page, reused by the pages that follow it (see `peer_page`).
     dump: Option<(std::time::Instant, Counters)>,
 }
@@ -164,12 +177,20 @@ impl MeshNodePlugin {
     /// Bind one process-owned component to its validated public-state directory.
     #[must_use]
     pub fn new(path: &std::path::Path) -> Self {
+        let owner = Arc::new(Mutex::new(Owner {
+            node: None,
+            path: Some(path.to_owned()),
+            restore_failed: false,
+        }));
         Self {
-            owner: Arc::new(Mutex::new(Owner {
-                node: None,
-                path: Some(path.to_owned()),
-                restore_failed: false,
-            })),
+            // The relay paths start from the list saved last, so a restart with the server
+            // down still knows its relays (D285, D402 Q2).
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: Some(relays::RelayManager::new(
+                owner.clone(),
+                &crate::relay_list::load(path),
+            )),
+            owner,
             changed: AtomicBool::new(false),
             ensure_failed: false,
             configure_failed: false,
@@ -195,6 +216,8 @@ impl MeshNodePlugin {
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: None,
             dump: None,
         }
     }
@@ -246,6 +269,8 @@ impl Default for MeshNodePlugin {
             server_link: infraternal_plugin_api::server_path::ServerLink::default(),
             configuration_observer: None,
             proxy_containment: None,
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            relays: None,
             dump: None,
         }
     }
@@ -418,11 +443,21 @@ impl AgentPlugin for MeshNodePlugin {
         }
     }
     fn call(&mut self, action: &str, input: &[u8]) -> Result<Vec<u8>, PluginError> {
+        // Taken before a configuration chunk is applied: a handshake that completes while
+        // the snapshot is applied is then newer than the time its peers were installed.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let started = std::time::SystemTime::now();
+        // The engine's counters as the configuration was applied, for the relay deadlines.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let mut relay_counters = None;
         let request = parse_action(action, input)?;
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let mut relay_identity_changed = false;
         // Proxy callbacks update this node's firewall, so release the Mesh owner lock before
         // notifying the sibling component to preserve one-way lock ordering.
         let (result, observed_config) = {
             let mut owner = self.owner.lock().map_err(|_| PluginError::Rejected)?;
+            let owner_path = owner.path.clone();
             let node = owner.node()?;
             let result = match request {
                 Request::Identity {
@@ -521,6 +556,10 @@ impl AgentPlugin for MeshNodePlugin {
                     let (value, key_changed) = rotation_response(node, request)?;
                     if key_changed {
                         self.changed.store(true, Ordering::Release);
+                        #[cfg(all(feature = "relay", target_os = "linux"))]
+                        {
+                            relay_identity_changed = true;
+                        }
                     }
                     value
                 }
@@ -556,6 +595,28 @@ impl AgentPlugin for MeshNodePlugin {
                         "enforcement": access_enforcement(node),
                         "kernel_guard": kernel_guard_status(node),
                     });
+                    #[cfg(all(feature = "relay", target_os = "linux"))]
+                    if let Some(relays) = &self.relays {
+                        let mut relay = relays.status();
+                        // Name each relayed peer the way `mesh peers` does.
+                        for pair in relay["relayed"].as_array_mut().into_iter().flatten() {
+                            let peer_id = pair["node"].as_u64().map(crate::policy::model::NodeId);
+                            #[cfg(feature = "mesh-dns")]
+                            let name = peer_id.and_then(|peer_id| {
+                                node.config()
+                                    .and_then(|config| config.peer_names.get(&peer_id).cloned())
+                            });
+                            #[cfg(not(feature = "mesh-dns"))]
+                            let name: Option<String> = None;
+                            pair["peer"] = json!(name.unwrap_or_else(|| {
+                                peer_id.map_or_else(
+                                    || "a peer".to_owned(),
+                                    |peer_id| format!("node {}", peer_id.0),
+                                )
+                            }));
+                        }
+                        status["relay"] = relay;
+                    }
                     // Public identity is useful for continuity checks; private key material never leaves the node.
                     if let Some(public_key) = node.interface_key() {
                         status["public_key"] = json!(public_key.0);
@@ -577,6 +638,25 @@ impl AgentPlugin for MeshNodePlugin {
                         reply["ipv4_only"] = json!(true);
                     }
                     reply
+                }
+                Request::Relays(list) => {
+                    // The public part is saved first, so the node keeps its relays across a
+                    // restart even if starting them fails now (D285). The role's key is not.
+                    if let Some(path) = owner_path.as_deref()
+                        && let Err(error) = crate::relay_list::save(path, &list)
+                    {
+                        tracing::warn!(%error, "mesh: could not save the relay list");
+                    }
+                    #[cfg(all(feature = "relay", target_os = "linux"))]
+                    let (accepted, serving) = self
+                        .relays
+                        .as_ref()
+                        .map_or((true, None), |relays| relays.set_list(&list));
+                    #[cfg(not(all(feature = "relay", target_os = "linux")))]
+                    let accepted = true;
+                    #[cfg(not(all(feature = "relay", target_os = "linux")))]
+                    let serving: Option<u16> = None;
+                    json!(crate::relay_list::RelaysReply { accepted, serving })
                 }
                 Request::Peers(page) => {
                     if page.cursor.as_ref().is_some_and(|cursor| {
@@ -604,6 +684,15 @@ impl AgentPlugin for MeshNodePlugin {
                     peer_page(node.config(), counters, page.cursor.as_ref(), page.presence)?
                 }
             };
+            #[cfg(all(feature = "relay", target_os = "linux"))]
+            if action == "mesh.configure"
+                && self
+                    .relays
+                    .as_ref()
+                    .is_some_and(relays::RelayManager::has_relays)
+            {
+                relay_counters = node.counters().ok();
+            }
             let observed_config = matches!(
                 action,
                 "mesh.identity" | "mesh.up" | "mesh.down" | "mesh.status" | "mesh.configure"
@@ -616,11 +705,28 @@ impl AgentPlugin for MeshNodePlugin {
             });
             (result, observed_config)
         };
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if action == "mesh.down"
+            && let Some(relays) = &self.relays
+        {
+            relays.mesh_down();
+        }
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if relay_identity_changed && let Some(relays) = &self.relays {
+            relays.identity_changed();
+        }
         if matches!(
             action,
             "mesh.up" | "mesh.down" | "mesh.rotation.commit" | "mesh.rotation.finish"
         ) {
             self.changed.store(true, Ordering::Release);
+        }
+        // A complete configuration gives every new or changed peer its relay deadline.
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if action == "mesh.configure"
+            && let (Some(relays), Some((config, _))) = (&self.relays, &observed_config)
+        {
+            relays.configured(config.as_ref(), started, relay_counters.as_ref());
         }
         if let Some((config, userspace_filter)) = observed_config
             && let Some(observer) = &self.configuration_observer
@@ -934,7 +1040,7 @@ impl infraternal_plugin_api::ComponentPlugin for MeshNodePlugin {
 /// Node action checks that need a Linux kernel or network namespace.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
-    #![allow(clippy::expect_used)]
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     /// Embedded infraternal agents have no tracing subscriber; repeated restore failures still reach stderr once.
     #[test]
     #[cfg(target_os = "linux")]
@@ -1033,6 +1139,49 @@ mod tests {
 
         assert_eq!(status["public_key"], json!(vec![7; 32]));
         assert!(status.get("private_key").is_none());
+    }
+
+    /// A rejected renewed relay leaf is reported so the coordinator retries it.
+    #[cfg(all(feature = "test-support", feature = "relay", target_os = "linux"))]
+    #[test]
+    fn a_failed_relay_leaf_update_is_not_acknowledged() {
+        use crate::relay_list::{RelayList, ServeRelay};
+        use infraternal_plugin_relay::testing::{Authority, Purpose};
+
+        const NAME: &str = "relay.example.org";
+        let directory = crate::node_state::tests::Directory::new();
+        let mut plugin = MeshNodePlugin::new(&directory.0);
+        let mut ca = Authority::new();
+        let (leaf, key) = ca.issue_pem(Purpose::Relay(NAME));
+        let role = ServeRelay {
+            name: NAME.into(),
+            port: 0,
+            leaf: format!("{leaf}{key}"),
+            roots: vec![ca.pem()],
+            revoked: Vec::new(),
+        };
+        let mut list = RelayList {
+            relays: Vec::new(),
+            serve: Some(role.clone()),
+        };
+        let started: serde_json::Value = serde_json::from_slice(
+            &plugin
+                .call("mesh.relays", &serde_json::to_vec(&list).unwrap())
+                .expect("start relay role"),
+        )
+        .unwrap();
+        assert!(started["accepted"].as_bool().unwrap());
+        assert!(started["serving"].as_u64().is_some());
+
+        list.serve.as_mut().unwrap().leaf = "not a relay certificate".into();
+        let renewed: serde_json::Value = serde_json::from_slice(
+            &plugin
+                .call("mesh.relays", &serde_json::to_vec(&list).unwrap())
+                .expect("reply to failed renewal"),
+        )
+        .unwrap();
+        assert!(!renewed["accepted"].as_bool().unwrap());
+        assert!(renewed["serving"].as_u64().is_some());
     }
 
     /// An inactive rootless mesh can be read without kernel setup or persisted Mesh state.

@@ -95,6 +95,7 @@ const STYLE = `
    own text keeps no halo: on the filled confirm button it only smears the glyphs. */
 .ui-confirm-tip button { text-shadow: none; }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes { background: var(--fg); color: var(--bg); }
+:is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes[data-tone="danger"] { background: var(--danger); color: #fff; }
 :is(.ui-confirm-tip, .ui-confirm-bar) .ui-confirm-yes svg { stroke-width: 2; }
 /* The secondary action keeps to the start of the row so the answer and the dismissal stay together on the right. */
 .ui-confirm-tip .ui-confirm-alt { margin-right: auto; }
@@ -168,6 +169,11 @@ export interface ConfirmTipOptions {
   titleNode?: Node;
   effectNode?: Node;
   confirmLabel: string;
+  /**
+   * Tone of the confirming button: omit for the default primary fill, or `"danger"` for a destructive removal
+   * (`--danger` fill with white text, matching the inline removal button in TASTE §4).
+   */
+  tone?: "danger";
   /** Disable the confirming action while keeping its explanation visible. */
   confirmDisabled?: boolean;
   cancelLabel: string;
@@ -257,6 +263,7 @@ export function mountConfirmTip(anchorOrNull: HTMLElement | null, options: Confi
   confirm.type = "button";
   confirm.disabled = options.confirmDisabled ?? false;
   confirm.className = "ui-confirm-yes";
+  if (options.tone === "danger") confirm.dataset.tone = "danger";
   confirm.setAttribute("aria-label", options.confirmLabel);
   confirm.dataset.tip = options.confirmLabel;
   confirm.innerHTML = options.named ? `<span></span>` : `<svg viewBox="0 0 24 24" aria-hidden="true">${options.confirmIcon ?? '<path d="m5.5 12.5 4 4 9-9"/>'}</svg>`;

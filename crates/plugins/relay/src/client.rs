@@ -8,7 +8,7 @@
 use crate::{
     probe::ProbeKey,
     tls,
-    wire::{self, HostId, Notice, Request},
+    wire::{self, Notice, Request, Token},
 };
 use std::{io, net::SocketAddr, time::Duration};
 
@@ -61,18 +61,19 @@ impl Client {
         ))
     }
 
-    /// Ask the relay to link with `peer`; the link exists once a `Linked` notice arrives.
+    /// Ask the relay for the link named `token` (see [`crate::token::pair_token`]); the
+    /// link exists once a `Linked` notice for the same token arrives.
     /// # Errors
     /// Fails if the control stream is gone.
-    pub async fn link(&self, peer: HostId) -> io::Result<()> {
-        self.send(Request::Link(peer)).await
+    pub async fn link(&self, token: Token) -> io::Result<()> {
+        self.send(Request::Link(token)).await
     }
 
-    /// Withdraw the request for `peer` and end any link with it.
+    /// Withdraw the request for `token` and end any link it has.
     /// # Errors
     /// Fails if the control stream is gone.
-    pub async fn unlink(&self, peer: HostId) -> io::Result<()> {
-        self.send(Request::Unlink(peer)).await
+    pub async fn unlink(&self, token: Token) -> io::Result<()> {
+        self.send(Request::Unlink(token)).await
     }
 
     async fn send(&self, request: Request) -> io::Result<()> {

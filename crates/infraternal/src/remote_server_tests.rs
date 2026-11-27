@@ -215,6 +215,36 @@ fn remote_listener_flags_become_host_input_rules() {
     assert!(rules.contains("iifname \"wt0\" ip saddr 10.69.69.0/24 udp dport 7444 accept"));
 }
 
+/// The persistent firewall entry follows the IPv4 relay socket even with an IPv6 TLS listener.
+#[test]
+fn relay_firewall_rule_matches_its_ipv4_listener() {
+    let args = parsed(&[
+        "infraternal",
+        "server",
+        "--remote-listen",
+        "[::]:7444",
+        "--relay-port",
+        "3478",
+        "--host-firewall-allow",
+        "*,*,tcp,22",
+    ]);
+    let policy = crate::host_firewall_policy(&args).expect("valid relay policy flags");
+    let relay = policy
+        .listeners
+        .iter()
+        .find(|listener| listener.address.port() == 3478)
+        .expect("relay UDP listener");
+
+    assert_eq!(
+        relay.protocol,
+        infraternal_plugin_mesh::host_firewall::Protocol::Udp
+    );
+    assert_eq!(
+        relay.address,
+        "0.0.0.0:3478".parse().expect("IPv4 wildcard")
+    );
+}
+
 #[test]
 fn service_dry_run_preserves_remote_listener_and_private_trust_path() {
     let args = parsed(&[
@@ -246,6 +276,7 @@ fn service_dry_run_preserves_remote_listener_and_private_trust_path() {
     assert!(unit.contains("KillMode=process"));
 }
 
+/// A missing CA directory refuses before any database or listener exists.
 #[tokio::test]
 async fn missing_ca_refuses_before_database_or_listener_creation() {
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
@@ -269,7 +300,8 @@ async fn missing_ca_refuses_before_database_or_listener_creation() {
             config,
             Options {
                 remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
-                remote_ca_dir: Some(directory.join("ca"))
+                remote_ca_dir: Some(directory.join("ca")),
+                relay_port: None,
             }
         ))
         .await
@@ -314,6 +346,7 @@ fn independent_review_remote_operator_commands_accept_json_output() {
     );
 }
 
+/// A failed cold start still closes the inherited handoff stdin.
 #[test]
 fn failed_cold_configuration_still_disposes_handoff_stdin() {
     use std::process::{Command, Stdio};
@@ -342,6 +375,7 @@ fn failed_cold_configuration_still_disposes_handoff_stdin() {
                     Options {
                         remote_listen: Some("127.0.0.1:7443".parse().unwrap()),
                         remote_ca_dir: Some(directory.join("ca")),
+                        relay_port: None,
                     }
                 ))
                 .is_err()

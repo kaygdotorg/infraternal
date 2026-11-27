@@ -502,6 +502,12 @@ fn server_input_fields() -> Vec<(String, JsonSchema)> {
             ),
         ),
         (
+            "relay_port".to_owned(),
+            JsonSchema::string(
+                "UDP port for the mesh relay on this server's machine. Needs --remote-listen.",
+            ),
+        ),
+        (
             "listen".to_owned(),
             JsonSchema::string("Address and port to listen on, such as 127.0.0.1:7443."),
         ),

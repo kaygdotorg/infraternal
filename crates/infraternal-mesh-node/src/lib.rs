@@ -47,3 +47,8 @@ pub mod tunnel_dns;
 /// Coalesce underlay events for the node worker.
 #[cfg(feature = "engine")]
 pub mod underlay_announce;
+
+/// Relay wire messages and their validation.
+pub mod relay_list;
+/// Checksummed mesh revision journal frames and replay.
+pub mod state_journal;

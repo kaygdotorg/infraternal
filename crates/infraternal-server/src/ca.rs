@@ -242,6 +242,34 @@ impl CertificateAuthority {
         start: i64,
         end: i64,
     ) -> Result<X509, CaError> {
+        self.sign_server_leaf(name, None, key, start, end)
+    }
+
+    /// Issue a relay leaf (D402 Q3): the same server-purpose leaf as [`Self::sign_server`]
+    /// plus one `urn:infraternal:relay:<relay>` URI SAN. Relay clients accept only a leaf
+    /// with that URI, and leg B refuses any leaf with it, so one key never serves both roles.
+    /// # Errors
+    /// The refusals of [`Self::sign_server`].
+    pub(crate) fn sign_relay(
+        &self,
+        name: &str,
+        relay: uuid::Uuid,
+        key: &PKey<Private>,
+        start: i64,
+        end: i64,
+    ) -> Result<X509, CaError> {
+        self.sign_server_leaf(name, Some(relay), key, start, end)
+    }
+
+    /// Sign and verify a server-purpose leaf; `relay` adds the relay URI SAN.
+    fn sign_server_leaf(
+        &self,
+        name: &str,
+        relay: Option<uuid::Uuid>,
+        key: &PKey<Private>,
+        start: i64,
+        end: i64,
+    ) -> Result<X509, CaError> {
         if start < 0 || end <= start {
             return Err(CaError);
         }
@@ -251,7 +279,7 @@ impl CertificateAuthority {
             return Err(CaError);
         }
         let leaf = self
-            .build_server(name, key, &start_time, &end_time)
+            .build_server(name, relay, key, &start_time, &end_time)
             .map_err(|_| CaError)?;
         let mut trust = X509StoreBuilder::new().map_err(|_| CaError)?;
         trust.add_cert(self.0.issuer.clone()).map_err(|_| CaError)?;
@@ -279,10 +307,12 @@ impl CertificateAuthority {
         Ok(leaf)
     }
 
-    /// Build and sign the server leaf described in [`Self::sign_server`].
+    /// Build and sign the server leaf described in [`Self::sign_server`], with the relay
+    /// URI SAN when `relay` is given ([`Self::sign_relay`]).
     fn build_server(
         &self,
         name: &str,
+        relay: Option<uuid::Uuid>,
         key: &PKey<Private>,
         start: &Asn1Time,
         end: &Asn1Time,
@@ -309,6 +339,10 @@ impl CertificateAuthority {
             san.ip(name);
         } else {
             san.dns(name);
+        }
+        let relay = relay.map(|relay| format!("urn:infraternal:relay:{relay}"));
+        if let Some(relay) = &relay {
+            san.uri(relay);
         }
         let san = san.build(&builder.x509v3_context(Some(&self.0.issuer), None))?;
         builder.append_extension(san)?;

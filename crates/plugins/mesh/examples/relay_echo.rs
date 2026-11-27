@@ -22,10 +22,10 @@
 //! treats it exactly like ciphertext.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use infraternal_mesh::model::{Addresses, PublicKey};
+use infraternal_mesh::model::Addresses;
 use infraternal_plugin_mesh::{
     dataplane,
-    relay_path::{EndpointUpdater, Event, RelayPaths, RelaySpec, RouteMtuUpdater},
+    relay_path::{EndpointUpdater, Event, PairSecret, RelayPaths, RelaySpec, RouteMtuUpdater},
 };
 use infraternal_plugin_relay::{testing::credentials_from_pem, wire::HostId};
 use serde::Deserialize;
@@ -168,8 +168,17 @@ async fn main() {
     let engine = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let wg_port = engine.local_addr().unwrap().port();
     let (events, mut event_queue) = tokio::sync::mpsc::channel(256);
+    // No engine and no real mesh keys here: each end's pair secret is its host uuid twice,
+    // and the peer's key is the public half of the peer's, so both ends derive one token.
+    let pair_secret = |host: HostId| {
+        let mut key = [0_u8; 32];
+        key[..16].copy_from_slice(&host.0);
+        key[16..].copy_from_slice(&host.0);
+        PairSecret::from_private(&key).unwrap()
+    };
+    let peer_key = pair_secret(peer).public();
     let paths = RelayPaths::start(
-        local,
+        pair_secret(local),
         wg_port,
         config
             .relays
@@ -208,7 +217,7 @@ async fn main() {
     )
     .await;
     let kernel = dataplane::Peer {
-        key: PublicKey([0; 32]),
+        key: peer_key,
         previous_key: None,
         previous_active: false,
         addresses: Addresses {

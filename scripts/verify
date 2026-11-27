@@ -160,6 +160,9 @@ verify_latency_steps() {
     # is the binary measured above; RTT is the profile's own. The bridge delays in user space, so no network
     # setting on the machine changes.
     local real_binary="${INFRATERNAL_LATENCY_BINARY:-$CARGO_TARGET_DIR/$native_target/release/infraternal}"
+    # D81 remote-enabled scheduling is an advisory measurement, even if its fixture cannot run.
+    "${script_dir}/verify-remote-server-idle" --binary "$real_binary" ||
+        printf 'Remote-enabled server idle measurement unavailable (D81, #602)\n' >&2
     local one_way=$(( ${INFRATERNAL_TEST_RTT:-300} / 2 ))
     (
         cd -- "$repo_dir/apps/tracer" &&

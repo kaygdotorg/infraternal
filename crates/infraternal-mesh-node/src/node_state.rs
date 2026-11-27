@@ -157,3 +157,21 @@ pub fn merge_authority(
         *reset_pending = true;
     }
 }
+
+/// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.
+/// # Errors
+/// Reports a serialization failure.
+pub fn encode_state(state: &State) -> std::io::Result<(Vec<u8>, AuthorityRecord)> {
+    let (config, authority) = split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let legacy = State {
+        enabled: state.enabled,
+        config,
+        authority_reset_pending: false,
+        #[cfg(target_os = "linux")]
+        backend: state.backend,
+    };
+    Ok((
+        serde_json::to_vec(&legacy).map_err(std::io::Error::other)?,
+        authority,
+    ))
+}

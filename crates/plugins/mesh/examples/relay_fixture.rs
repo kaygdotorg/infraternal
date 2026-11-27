@@ -275,7 +275,7 @@ async fn node() {
 
     let (events, mut event_queue) = tokio::sync::mpsc::channel(256);
     let paths = RelayPaths::start(
-        host(&config.host),
+        node.relay_pair_secret().unwrap(),
         port,
         config
             .relays

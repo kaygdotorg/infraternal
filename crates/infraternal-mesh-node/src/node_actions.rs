@@ -122,6 +122,17 @@ pub const ACTIONS: &[ActionDef] = &[
 /// The control actions an infraternal agent registers for its Mesh node.
 pub const CONTROL_ACTIONS: &[ActionDef] = &[
     action(
+        "mesh.relays",
+        "Take the relay list, and the relay role when given",
+        r#"{"type":"object"}"#,
+        r#"{"type":"object","properties":{"accepted":{"type":"boolean"},"serving":{"type":"integer","minimum":1,"maximum":65535}},"required":["accepted"],"additionalProperties":false}"#,
+        Effect::Write,
+        &[
+            "The authenticated coordinator sends the relays this node may use (D402 Q2).",
+            "The server's own node also gets the relay role and answers with its bound port.",
+        ],
+    ),
+    action(
         "mesh.identity",
         "Read enabled Mesh identity",
         "MeshIdentityProbe",
@@ -350,6 +361,8 @@ pub enum Request {
     Configure(Box<Chunk>),
     /// Read a bounded page of peers.
     Peers(Page),
+    /// The coordinator's relay list, already checked against its bounds (D402 Q2).
+    Relays(Box<crate::relay_list::RelayList>),
 }
 /// Parse the same bounded strict object accepted by the authenticated dispatcher.
 /// # Errors
@@ -399,6 +412,13 @@ pub fn parse_action(action: &str, input: &[u8]) -> Result<Request, PluginError> 
         }
         "mesh.configure" => Ok(Request::Configure(Box::new(parse(input)?))),
         "mesh.peers" => Ok(Request::Peers(parse(input)?)),
+        "mesh.relays" => {
+            let list: crate::relay_list::RelayList = parse(input)?;
+            if !list.valid() {
+                return Err(PluginError::Rejected);
+            }
+            Ok(Request::Relays(Box::new(list)))
+        }
         _ => Err(PluginError::UnknownAction),
     }
 }

@@ -61,7 +61,7 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   const settings = el("div", "ui-setting-list");
   const refuse = (error: unknown): string => (error instanceof Error ? error.message : "That did not work. Try again.");
   const channel = createSettingRow({
-    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel, caption: false,
+    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel,
     explain: "Stable is the tested release. Edge gets every build first and may break.",
     onSave: (v: SettingValue) => {
       if (v !== "edge") return source.setChannel(v as Channel).then(() => undefined, refuse);

@@ -46,6 +46,10 @@ impl NodeChannel for PeerChannel {
                 // A node without host facts: the coordinator keeps its stored name (#236).
                 return Err("host facts disabled");
             }
+            if action == "mesh.relays" {
+                // A node that predates relay lists (D402) refuses them.
+                return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
+            }
             assert_eq!(action, "mesh.configure");
             let chunk: Chunk = serde_json::from_slice(&input).unwrap();
             let reply = serde_json::to_vec(

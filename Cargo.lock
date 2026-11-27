@@ -2303,6 +2303,7 @@ dependencies = [
  "libc",
  "nix 0.32.0",
  "openssl",
+ "quinn",
  "ring",
  "security-framework",
  "serde",
@@ -2522,6 +2523,7 @@ dependencies = [
 name = "infraternal-status"
 version = "0.1.0"
 dependencies = [
+ "infraternal-mesh",
  "infraternal-shim",
  "nix 0.32.0",
  "uuid",

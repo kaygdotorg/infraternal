@@ -95,7 +95,7 @@ export function renderNetworks(cx: Ctx, pane: HTMLElement, source: RoutesSource)
     }
 
     const keep: SettingRow = createSettingRow({
-      id: `keep-source-${n.routeId}`, title: "Keep Each Machine's Address", spec: KEEP_SOURCE, value: n.keepSource, caption: false,
+      id: `keep-source-${n.routeId}`, title: "Keep Each Machine's Address", spec: KEEP_SOURCE, value: n.keepSource,
       explain: `Off: the network sees ${n.router}'s address and needs nothing else. On: it sees each machine's own mesh address, and needs a route back to the mesh through ${n.router}.`,
       onSave: (v) => { void source.setKeepSource(n.id, v === true).catch(failed); },
     });

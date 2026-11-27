@@ -5211,3 +5211,55 @@ access (#341 B19).
      - **Decision:** `infraternal server update status | check [VERSION] | apply [VERSION] | rollback | cancel | history | settings --quiet-minutes N` runs the same `release.update.*` actions inside the running server, over its private control socket (`<data>/restart/control.sock`). The kernel's peer credentials decide who may: root, or the account the server runs as. Such a caller needs **no fresh passkey** for apply, rollback, cancel or check VERSION. The owner's reasoning, as recorded on #211: root on the server machine can already replace the binary, so a passkey adds nothing there.
      - **Unchanged:** from any other device (the web app, a remote CLI) the rule stays the owner with a fresh passkey tap. Updates stay signed (D184) and warm (D217): the CLI asks the same switch, trial and D295 undo that the quiet-window update uses.
      - **Direction (owner, 2026-11-22; not built yet):** once the server becomes untrusted, with the canvas detached into the client and a shared client core, the server must not get root on every node or peer by default. The server may still update itself through root on its own machine, but it needs a passkey to unlock connections. The GUI and automatic updates do not need that passkey.
+
+402. **The relay manager, slice 1: the QUIC relay as a role, pushed relay lists, one home relay, predicted hard pairs and fast failover (owner, 2026-11-25 and 2026-11-26, #580, #483; answers the J1212 grill in `docs/design/relay-manager-grill.md`; amends D391's transport order, extends D163, D197, D285 and D313):**
+     - **Context:** the relay service, its client and the node's relay paths
+       are built and reviewed, but no shipped node relays (J1206): nothing
+       gives nodes a relay list or credentials, chooses relays, or starts the
+       manager in `infraternal agent`. J536b's matrix (#483) leaves five
+       profiles unreachable without a relay. J1212 put ten questions to the
+       owner, who answered on #580 on 2026-11-25 (Q1–Q6, Q9) and 2026-11-26
+       (Q7, Q8, Q10).
+     - **Q1 transport order:** the manager ships first with the QUIC
+       DATAGRAM relay that is already built, on the server; TLS and
+       WebSocket on 443 follow in the next slice. The owner: "agreed
+       (changes D391's order)".
+     - **Q2 relay list:** the server pushes the relay list in each node's
+       mesh configuration, and the node persists it, so it still knows its
+       relays while the server is down (D285). `--relay` stays for tests and
+       operators.
+     - **Q3 credentials:** nodes keep their deployment-CA certificates; no
+       shared secret. Each relay node gets a dedicated relay leaf from the
+       deployment CA.
+     - **Q4 who relays first:** in slice 1 only the server's machine runs a
+       relay. The owner added: "one binary, several roles, and the
+       combination of roles = what the node does; any node could be marked
+       anything" (D163, D197). The relay is a role of the one binary, never
+       coupled to the server process; slice 1 only turns it on for the
+       server's node. Node relays (D132's checkbox) and D285's automatic
+       datacenter relays come later.
+     - **Q5 connections:** one warm *home* relay per node, the lowest QUIC
+       round trip, moved only by D313 Q5's rule, on a slow keep-alive. Other
+       relays are connected only while a pair is relayed through them or
+       watched.
+     - **Q6 when a pair is relayed:** pairs predicted to be behind hard NAT
+       start on the relay at once; all others go direct first, with the
+       grace period as the backstop. The owner: "make the prediction really
+       good". Its false positives and false negatives are measured on
+       J536b's 18-profile matrix and reported.
+     - **Q7 failover:** fast. A pair switches on the first unanswered probe
+       (under 2 s). Probes run every 1 s only while a better path looks
+       likely, and every 5 s once the choice is settled. Idle wakeups stay at
+       zero and the anti-flap rule (D313 Q5) stays. Until anything is
+       measured, the pair uses the lower host id's home relay, so both ends
+       agree.
+     - **Q8 privacy:** link requests carry opaque session tokens instead of
+       host ids. No padding, cover traffic or second hop. Relays keep
+       counters only, never per-pair logs.
+     - **Q9 bounds:** a home relay and at most three standby connections per
+       node. Relay CPU and file-descriptor use are measured in slice 1, and
+       node relays get a bandwidth cap when they arrive.
+     - **Q10 data path:** the loopback shim seam stays. Its per-packet cost
+       is measured against an in-process hand-off on the perf VM; the data
+       path goes in-process only if the hop costs something noticeable.
+       `relay_path` must build on macOS in slice 1.
