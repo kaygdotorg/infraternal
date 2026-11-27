@@ -1954,6 +1954,8 @@ mod tests {
         let fixture = std::env::var_os("INFRATERNAL_TEST_SUDO_FIXTURE").unwrap();
         let mut sudo = std::process::Command::new(Path::new(&fixture).join("sudo"));
         sudo.current_dir(fixture);
+        // End libtest's status line before the CLI emits its JSON envelope.
+        println!();
         super::with_cancellation(
             |cancelled| async move {
                 invoke_sudo(sudo, b"", true, &cancelled).await?;
@@ -1998,6 +2000,8 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("INFRATERNAL_TEST_SUDO_FIXTURE", &temporary.0)
+            .env("TERM", "xterm")
+            .env_remove("NO_COLOR")
             .stdin(tty.slave.try_clone().unwrap())
             .stdout(Stdio::piped())
             .stderr(tty.slave);
