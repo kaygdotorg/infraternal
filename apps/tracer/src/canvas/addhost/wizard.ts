@@ -573,7 +573,7 @@ export class Wizard {
       if (status.locked !== false) this.go("authority");
       else { this.authorityReady = true; this.beginBatch(root); }
     } catch (error: unknown) {
-      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Host connections could not be checked. Try again.");
+      if (this.alive && !this.closing) this.showError(error instanceof ServiceError ? error.message : "Couldn't check host connections. Check your connection and try again.");
     } finally { this.setBusy(false); }
   }
 

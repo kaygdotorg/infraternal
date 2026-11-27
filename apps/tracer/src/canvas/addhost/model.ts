@@ -46,7 +46,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
   switch (failure?.kind) {
     case "unreachable": return "Couldn't reach this host";
     case "mesh-policy": return "This server can't connect to this host";
-    case "host-key": return "This host's key needs your OK";
+    case "host-key": return "Verify this host's key";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
@@ -66,7 +66,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
       // One short line: it heads the progress row and its failed stage, so a paragraph wrapped there in red
       // (#394). The server's full sentence is on the failure page and its Details.
       return failure.failed_step ? SHORT_STEP_LINE[failure.failed_step] : "Setting up this host didn't finish";
-    default: return "Something went wrong while setting up this host. Try again.";
+    default: return "Setup didn't finish. Open Details or try again.";
   }
 }
 
@@ -196,8 +196,8 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
   };
   if (failure?.join_locally === "macos") return {
     title: `Add ${name} from the Mac`,
-    happened: "SSH sign-in worked. This Mac joins from its own terminal.",
-    next: "Run infraternal up on the Mac.",
+    happened: "SSH sign-in worked, but Macs join from their own terminal.",
+    next: `Run infraternal up on ${name} to add it.`,
     fix: "join-command", tone: "info",
   };
   switch (failure?.kind) {
@@ -214,7 +214,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "retry", tone: "danger",
     };
     case "host-key": return {
-      title: `${name} needs your OK`,
+      title: `Verify ${name}'s host key`,
       happened: `${name} showed a security key this server hasn't seen before.`,
       next: "Compare the fingerprint with the one on the host before you trust it.",
       fix: failure.fingerprints?.length ? "host-key" : "retry", tone: failure.host_key_changed || !failure.fingerprints?.length ? "danger" : "info",
@@ -350,9 +350,9 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
         fix: "retry", tone: "danger",
       };
     default: return {
-      title: `Something went wrong with ${name}`,
-      happened: "Something went wrong while setting up this host.",
-      next: "Try again.",
+      title: `Couldn't finish setting up ${name}`,
+      happened: `Setup stopped before ${name} was ready.`,
+      next: "Open Details to see what stopped, or try again.",
       fix: "retry", tone: "danger",
     };
   }

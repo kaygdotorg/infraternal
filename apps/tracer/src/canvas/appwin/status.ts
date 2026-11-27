@@ -97,7 +97,7 @@ export function describe(state: StreamState, ctx: { machine: string; app: string
     case "unsupported":
       return { dot: "offline", keepPicture: false, card: { mark: "unsupported", title: "This browser can't show app windows", hint: state.reason === "codec" ? "It cannot decode this video format. A current Chrome, Edge, Safari or Firefox can." : "It needs video decoding in the page. A current Chrome, Edge, Safari or Firefox can." } };
     case "failed":
-      return { dot: "offline", keepPicture: false, card: { mark: state.reason === "unreachable" ? "offline" : "alert", title: state.reason === "unreachable" ? `${ctx.machine} can't be reached` : state.reason === "decode" ? "The picture could not be decoded" : "Couldn't open it", ...(state.reason === "refused" ? { hint: `${ctx.machine} did not start the stream. It may be off or asleep.` } : {}), action: { label: "Try again", id: "retry" } } };
+      return { dot: "offline", keepPicture: false, card: { mark: state.reason === "unreachable" ? "offline" : "alert", title: state.reason === "unreachable" ? `${ctx.machine} can't be reached` : state.reason === "decode" ? "Couldn't decode the video stream" : `Couldn't open ${subject}`, ...(state.reason === "refused" ? { hint: `${ctx.machine} did not start the stream. It may be off or asleep.` } : {}), action: { label: "Try again", id: "retry" } } };
   }
 }
 
