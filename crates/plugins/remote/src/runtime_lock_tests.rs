@@ -360,6 +360,41 @@ fn open_session_count_includes_only_bound_endpoints() {
     drop((second, control));
 }
 
+/// Starts the staged executable and waits for it to echo a byte from userspace.
+/// Keep stdin open through inspection so load cannot make the payload exit early.
+fn start_staged_payload(
+    payload: &Path,
+    endpoint: Option<&std::os::unix::net::UnixListener>,
+) -> std::process::Child {
+    use std::io::{Read, Write};
+    use std::os::fd::OwnedFd;
+    use std::process::{Command, Stdio};
+
+    // Map the endpoint into this child only. A non-CLOEXEC duplicate in
+    // the parent could leak the listener into another test's child.
+    let stderr = endpoint.map_or_else(Stdio::null, |listener| {
+        Stdio::from(OwnedFd::from(listener.try_clone().unwrap()))
+    });
+    let mut child = Command::new(payload)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(stderr)
+        .spawn()
+        .unwrap();
+    // Linux can wake the spawning thread during exec, before procfs
+    // consistently exposes the new executable and its descriptors.
+    child.stdin.as_mut().unwrap().write_all(b"r").unwrap();
+    let mut ready = [0];
+    child
+        .stdout
+        .as_mut()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"r");
+    child
+}
+
 /// A process running the staged payload counts as a shim only while it holds
 /// a socket bound to one of the install's session endpoints. Any other one is
 /// refused before a replacement stops anything (#305 P2-3).
@@ -371,7 +406,7 @@ fn a_payload_process_without_a_session_endpoint_is_refused_before_any_stop() {
     fs::create_dir(&stage).unwrap();
     fs::set_permissions(&stage, fs::Permissions::from_mode(0o700)).unwrap();
     let payload = stage.join("payload");
-    fs::copy("/bin/sleep", &payload).unwrap();
+    fs::copy("/bin/cat", &payload).unwrap();
     fs::set_permissions(&payload, fs::Permissions::from_mode(0o700)).unwrap();
     let root = directory(&base).unwrap();
     assert_eq!(stage_processes(&root), Ok(()), "nothing runs the payload");
@@ -382,25 +417,17 @@ fn a_payload_process_without_a_session_endpoint_is_refused_before_any_stop() {
     let listener =
         std::os::unix::net::UnixListener::bind(nested.join(format!("{}.sock", "3".repeat(32))))
             .unwrap();
-    // dup clears close-on-exec, so the payload process inherits the endpoint.
-    let inherited = nix::unistd::dup(&listener).unwrap();
-    let mut shim = std::process::Command::new(&payload)
-        .arg("30")
-        .spawn()
-        .unwrap();
-    drop(inherited);
-    assert_eq!(stage_processes(&root), Ok(()), "a shim serves its endpoint");
+    let shim = start_staged_payload(&payload, Some(&listener));
+    let shim_only = stage_processes(&root);
 
-    let mut stray = std::process::Command::new(&payload)
-        .arg("30")
-        .spawn()
-        .unwrap();
-    assert_eq!(stage_processes(&root), Err(73), "a stray payload process");
-    for child in [&mut shim, &mut stray] {
-        child.kill().unwrap();
-        child.wait().unwrap();
-    }
-    drop(listener);
+    let stray = start_staged_payload(&payload, None);
+    let with_stray = stage_processes(&root);
+    // EOF releases each child. Reap both before checking the scan results.
+    let [shim_exit, stray_exit] = [shim, stray].map(|mut child| child.wait().unwrap());
+    assert!(shim_exit.success(), "the shim survives inspection");
+    assert!(stray_exit.success(), "the stray survives inspection");
+    assert_eq!(shim_only, Ok(()), "a shim serves its endpoint");
+    assert_eq!(with_stray, Err(73), "a stray payload process");
 }
 
 /// A non-dumpable legacy shim can be retired only through its owned session socket.
