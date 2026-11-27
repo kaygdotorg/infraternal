@@ -13,7 +13,7 @@ use nix::{
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
@@ -619,52 +619,9 @@ impl Device {
     /// # Errors
     /// Reports malformed route dumps or an existing route covering a proposed address.
     pub fn check_routes(addresses: &[Addresses]) -> io::Result<()> {
-        let owned = index()?;
-        let payload = vec![0; 12];
-        for reply in Socket::open(SockProtocol::NetlinkRoute)?.request(26, 0x300, &payload)? {
-            let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
-            if header[1] == 0 {
-                continue;
-            }
-            let mut interface = None;
-            let mut destination = None;
-            for field in netlink::attributes(&reply[12..])? {
-                match field.kind {
-                    1 => destination = Some(field.payload),
-                    4 => interface = Some(netlink::u32_at(field.payload, 0)?),
-                    _ => {}
-                }
-            }
-            if interface == Some(owned) {
-                continue;
-            }
-            let destination = destination.ok_or(io::ErrorKind::InvalidData)?;
-            let conflict = match header[0] {
-                2 if header[1] <= 32 && destination.len() == 4 => {
-                    let network =
-                        u32::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
-                    let mask = u32::MAX << (32 - header[1]);
-                    addresses
-                        .iter()
-                        .any(|address| u32::from(address.ipv4) & mask == network & mask)
-                }
-                10 if header[1] <= 128 && destination.len() == 16 => {
-                    let network =
-                        u128::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
-                    let mask = u128::MAX << (128 - header[1]);
-                    addresses
-                        .iter()
-                        .any(|address| u128::from(address.ipv6) & mask == network & mask)
-                }
-                2 | 10 => return Err(io::ErrorKind::InvalidData.into()),
-                _ => false,
-            };
-            if conflict {
-                return Err(io::ErrorKind::AddrInUse.into());
-            }
-        }
-        Ok(())
+        RouteValidation::default().check(addresses)
     }
+
     /// Install local /32+/128 addresses while the link meets IPv6's minimum MTU, then apply the
     /// safe fallback until the node can derive a route-specific packet ceiling.
     ///
@@ -2848,6 +2805,132 @@ fn tx_queue_len_of(index: u32) -> io::Result<u32> {
         .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidData))
         .and_then(|field| netlink::u32_at(field.payload, 0))
 }
+/// A foreign route's address test, independent of table, interface and other route metadata.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum RoutePrefix {
+    V4 { network: u32, mask: u32 },
+    V6 { network: u128, mask: u128 },
+}
+
+impl RoutePrefix {
+    /// Decode a non-default route outside the mesh interface, preserving route dump errors.
+    fn from_route(reply: &[u8], owned: u32) -> io::Result<Option<Self>> {
+        let header = reply.get(..12).ok_or(io::ErrorKind::InvalidData)?;
+        let bits = header[1];
+        if bits == 0 {
+            return Ok(None);
+        }
+        let mut interface = None;
+        let mut destination = None;
+        for field in netlink::attributes(&reply[12..])? {
+            match field.kind {
+                1 => destination = Some(field.payload),
+                4 => interface = Some(netlink::u32_at(field.payload, 0)?),
+                _ => {}
+            }
+        }
+        if interface == Some(owned) {
+            return Ok(None);
+        }
+        let destination = destination.ok_or(io::ErrorKind::InvalidData)?;
+        match header[0] {
+            2 if bits <= 32 && destination.len() == 4 => {
+                let mask = u32::MAX << (32 - bits);
+                let address = u32::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
+                Ok(Some(Self::V4 {
+                    network: address & mask,
+                    mask,
+                }))
+            }
+            10 if bits <= 128 && destination.len() == 16 => {
+                let mask = u128::MAX << (128 - bits);
+                let address =
+                    u128::from_be_bytes(destination.try_into().map_err(io::Error::other)?);
+                Ok(Some(Self::V6 {
+                    network: address & mask,
+                    mask,
+                }))
+            }
+            2 | 10 => Err(io::ErrorKind::InvalidData.into()),
+            _ => Ok(None),
+        }
+    }
+
+    /// Report whether this route covers the proposed address of its own IP family.
+    fn covers(self, address: Addresses) -> bool {
+        match self {
+            Self::V4 { network, mask } => u32::from(address.ipv4) & mask == network,
+            Self::V6 { network, mask } => u128::from(address.ipv6) & mask == network,
+        }
+    }
+}
+
+/// Cache at most a D393 scale snapshot (4,096 peers and the local address) and as many prefixes.
+const ROUTE_VALIDATION_CACHE_LIMIT: usize = 4096 + 1;
+
+/// The addresses and foreign prefixes that were checked together on the last successful dump.
+///
+/// This records validation only, so it stays sound even if apply fails later. Each check rereads
+/// the live routes. A new foreign prefix is checked against all proposed addresses even when a
+/// snapshot keeps every peer, so an underlay change can still cause the same refusal as a full scan.
+/// Larger snapshots use a full scan. Prefixes past the cache limit also get a full scan.
+#[derive(Default)]
+pub(crate) struct RouteValidation {
+    /// Address pairs validated together against every stored prefix.
+    addresses: HashSet<Addresses>,
+    /// A bounded set of prefixes witnessed in the last successful live dump.
+    prefixes: HashSet<RoutePrefix>,
+}
+
+impl RouteValidation {
+    /// Refuse overlap against the current foreign routes, reusing successful address checks.
+    pub(crate) fn check(&mut self, addresses: &[Addresses]) -> io::Result<()> {
+        let owned = index()?;
+        let cache_addresses = addresses.len() <= ROUTE_VALIDATION_CACHE_LIMIT;
+        let mut prefixes = HashSet::new();
+        let changed = std::cell::OnceCell::new();
+        let mut validation: io::Result<()> = Ok(());
+        Socket::open(SockProtocol::NetlinkRoute)?.visit(26, 0x300, &[0; 12], |reply| {
+            // Keep the first route error in reply order, but finish the dump. As with
+            // a collected dump, a netlink framing error or interruption takes precedence.
+            if validation.is_ok() {
+                validation = (|| {
+                    let Some(prefix) = RoutePrefix::from_route(reply, owned)? else {
+                        return Ok(());
+                    };
+                    let candidates: &[Addresses] =
+                        if cache_addresses && self.prefixes.contains(&prefix) {
+                            changed.get_or_init(|| {
+                                addresses
+                                    .iter()
+                                    .copied()
+                                    .filter(|address| !self.addresses.contains(address))
+                                    .collect::<Vec<_>>()
+                            })
+                        } else {
+                            addresses
+                        };
+                    if candidates.iter().any(|address| prefix.covers(*address)) {
+                        return Err(io::ErrorKind::AddrInUse.into());
+                    }
+                    if cache_addresses && prefixes.len() < ROUTE_VALIDATION_CACHE_LIMIT {
+                        prefixes.insert(prefix);
+                    }
+                    Ok(())
+                })();
+            }
+            Ok(())
+        })?;
+        validation?;
+        self.prefixes = prefixes;
+        self.addresses.clear();
+        if !self.prefixes.is_empty() {
+            self.addresses.extend(addresses.iter().copied());
+        }
+        Ok(())
+    }
+}
+
 fn index() -> io::Result<u32> {
     Ok(nix::net::if_::if_nametoindex(INTERFACE)?)
 }

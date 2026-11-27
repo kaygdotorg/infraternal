@@ -305,6 +305,8 @@ enum WorkerCommand {
         reply: sync::SyncSender<io::Result<()>>,
     },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
+    /// Read the installed keys for reconciliation without touching per-peer statistics.
+    PeerKeys(sync::SyncSender<Vec<PublicKey>>),
     #[cfg(feature = "relay")]
     PrepareHandshake {
         key: PublicKey,
@@ -631,6 +633,17 @@ impl Engine {
             .send(WorkerCommand::Counters(reply))
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Read actual device membership, including either key of a rotating peer.
+    /// # Errors
+    /// Reports a stopped worker.
+    pub(crate) fn peer_keys(&self) -> io::Result<Vec<PublicKey>> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::PeerKeys(reply))
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe.into())
     }
 
     /// Return a relay callback that forces the selected `GotaTun` peer to start a handshake.
@@ -990,6 +1003,9 @@ async fn run_worker(
                 }
                 Some(WorkerCommand::SetOwner { owner, reply }) => {
                     let _ = reply.send(state.set_owner(owner));
+                }
+                Some(WorkerCommand::PeerKeys(reply)) => {
+                    let _ = reply.send(state.peer_keys().await);
                 }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
@@ -1708,6 +1724,20 @@ impl RuntimeState {
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
             .set_mtu(mtu)
+    }
+
+    /// List the live device's keys. A worker waiting to rebuild has no installed peers.
+    async fn peer_keys(&self) -> Vec<PublicKey> {
+        let Some(device) = self.device.as_ref() else {
+            return Vec::new();
+        };
+        device
+            .read(async |read| {
+                read.peer_keys()
+                    .map(|key| PublicKey(*key.as_bytes()))
+                    .collect()
+            })
+            .await
     }
 
     async fn counters(&self) -> io::Result<CounterMap> {

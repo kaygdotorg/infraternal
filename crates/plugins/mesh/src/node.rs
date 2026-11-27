@@ -5,7 +5,7 @@ use crate::{
     dataplane::Config,
     firewall::Firewall,
     gotatun_node::Engine,
-    wireguard::{Client, Device, Key},
+    wireguard::{Client, Device, Key, RouteValidation},
 };
 use std::os::unix::net::UnixStream;
 use std::{
@@ -748,6 +748,8 @@ pub struct Node {
     authority_reset: AuthorityResetState,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
+    /// Proposed addresses already checked against observed foreign route prefixes.
+    route_validation: RouteValidation,
     /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
     peer_route_state: Arc<Mutex<PeerRouteState>>,
     /// Passively restores deleted owned peer routes until this node goes down.
@@ -792,6 +794,7 @@ impl Default for Node {
             authority_reset: AuthorityResetState::Stable,
             pending: None,
             routes: BTreeSet::new(),
+            route_validation: RouteValidation::default(),
             peer_route_state: Arc::default(),
             route_repair: None,
             underlay_announce: Arc::default(),
@@ -1369,6 +1372,7 @@ impl Node {
         }
         Ok(())
     }
+    /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
     ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
@@ -1379,6 +1383,18 @@ impl Node {
                 .as_ref()
                 .ok_or(io::ErrorKind::NotConnected)?
                 .counters(),
+        }
+    }
+
+    /// Read the actual engine membership so reconciliation can retire orphan keys.
+    fn installed_peer_keys(&self) -> io::Result<Vec<crate::policy::model::PublicKey>> {
+        match self.engine_kind {
+            EngineKind::Kernel => Ok(Device::counters()?.into_keys().collect()),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .peer_keys(),
         }
     }
 
@@ -3686,7 +3702,7 @@ impl Node {
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
-        Device::check_routes(&proposed)?;
+        self.route_validation.check(&proposed)?;
         let old_peers = self.config.as_ref().map(|old| &old.peers);
         let changed: Vec<_> = config
             .peers
@@ -3707,10 +3723,9 @@ impl Node {
             .flatten()
             .collect();
         let retired_keys: Vec<_> = self
-            .peer_counters()?
-            .keys()
+            .installed_peer_keys()?
+            .into_iter()
             .filter(|key| !desired.contains(key))
-            .copied()
             .collect();
         let mut route_overrides_to_clear: BTreeSet<_> = retired_keys.iter().copied().collect();
         if let Some(old) = &self.config {

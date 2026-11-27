@@ -112,7 +112,7 @@ url = { workspace = true, optional = true }
 # Retry the first unanswered active handshake in the next admission window, and
 # clear a peer's confirmed endpoint when its last session expires, resets, or
 # rotates keys (#260, J1265).
-gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "f0bdc417f6b3e63fd7432295185455b20f9cbdb3", default-features = false, features = ["device", "ring"], optional = true }
+gotatun = { version = "0.10.3", git = "https://github.com/kaygdotorg/gotatun", rev = "dc6be80a74cc0a8edffa40ef5ed99d66dca0eb58", default-features = false, features = ["device", "ring"], optional = true }
 ipnetwork = { version = "0.21.1", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
