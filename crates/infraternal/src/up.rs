@@ -920,7 +920,12 @@ fn print_approval(
             .next()
             .is_some_and(|row| row.chars().count() <= options.width)
         {
-            qr
+            if options.color {
+                // A light quiet zone lets the same code scan against light and dark themes.
+                format!("\u{1b}[30;107m{qr}\u{1b}[0m")
+            } else {
+                qr
+            }
         } else {
             String::new()
         }
