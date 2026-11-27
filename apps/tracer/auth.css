@@ -104,6 +104,8 @@
 .auth-card h1 { margin: 0 0 0.625rem; color: var(--fg); font: var(--fw-title) var(--ui-size-title)/1.25 var(--font-face); letter-spacing: -0.03em; }
 .auth-eyebrow { margin: 0 0 0.375rem; color: var(--fg-3); font: var(--fw-label) var(--ui-size-eyebrow)/1 var(--font-face); letter-spacing: 0.02em; }
 .auth-lede { margin: 0 0 1.5rem; color: var(--fg-2); }
+/* The automatic layout retry has no action below the lede. */
+#status-error:last-child { margin-bottom: 0; }
 .auth-label { display: block; margin: 0 0 0.5rem; color: var(--fg-2); font-size: var(--ui-size-label); }
 .auth-input {
   display: block;

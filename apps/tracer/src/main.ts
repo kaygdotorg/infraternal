@@ -313,10 +313,8 @@ function renderAuthFailure(error: unknown): void {
 }
 
 /**
- * The access card for a server that cannot be reached. It is the sign-in card with different words:
- * the same mark, title, lede and full-width primary, through the sign-in card's own classes, so the
- * mark, the lede-to-action gap and the padding cannot drift from it. The explanation is the lede (it is
- * what the person reads next); pressing "Try again" shows the shared wait counter on the button.
+ * Reuse the sign-in card for an unavailable layout. During a server cooldown the lede shows
+ * when the page will retry. For other connection failures, the usual action lets the person retry.
  */
 function renderUnavailable(message: string, retryAt?: number): void {
   authLight();
@@ -325,34 +323,38 @@ function renderUnavailable(message: string, retryAt?: number): void {
     <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
     <h1 id="unavailable-title">Connect to load your layout</h1>
     <p id="status-error" class="auth-lede" role="${retryAt === undefined ? "alert" : "status"}"></p>
-    <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
-  mustGet<HTMLElement>("#status-error").textContent = message;
-  const retry = mustGet<HTMLButtonElement>("#retry-status");
+    ${retryAt === undefined ? '<button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button>' : ""}</section></section>`;
+  const lede = mustGet<HTMLElement>("#status-error");
+  lede.textContent = message;
   if (retryAt !== undefined) {
-    countDownToRetry(retry, retryAt);
-  } else retry.addEventListener("click", () => {
-    if (previewProto()) { location.reload(); return; }
-    retry.disabled = true;
-    loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
-    void refreshAuth();
-  }, { once: true });
-  if (retryAt === undefined) healPreview();
+    const countdown = document.createElement("span");
+    countdown.setAttribute("role", "timer");
+    lede.append(" ", countdown);
+    countDownToRetry(countdown, retryAt);
+  } else {
+    const retry = mustGet<HTMLButtonElement>("#retry-status");
+    retry.addEventListener("click", () => {
+      if (previewProto()) { location.reload(); return; }
+      retry.disabled = true;
+      loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
+      void refreshAuth();
+    }, { once: true });
+    healPreview();
+  }
   scheduleBackdrop();
 }
 
-/** Update the existing card action until the server's retry deadline, even after the tab wakes from sleep. */
-function countDownToRetry(button: HTMLButtonElement, retryAt: number): void {
-  button.disabled = true;
-  const label = button.querySelector("span")!;
+/** Update the timer until the server's retry deadline, even after the tab wakes from sleep. */
+function countDownToRetry(label: HTMLElement, retryAt: number): void {
   const tick = (): void => {
-    if (!button.isConnected) return;
+    if (!label.isConnected) return;
     const remaining = retryAt - Date.now();
     if (remaining <= 0) {
       label.textContent = "Reconnecting…";
       void refreshAuth();
       return;
     }
-    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s`;
+    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s.`;
     window.setTimeout(tick, remaining % 1000 || 1000);
   };
   tick();
