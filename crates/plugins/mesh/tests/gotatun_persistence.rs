@@ -1574,6 +1574,38 @@ fn j534_wait_for_ipv6_address(ns: &str, interface: &str, address: &str) {
     }
 }
 
+/// Poll both nodes until each records a completed handshake with the other, returning elapsed ms.
+fn j534_wait_for_handshakes(
+    node_a: &Node,
+    key_b: &PublicKey,
+    node_b: &Node,
+    key_a: &PublicKey,
+    context: &str,
+) -> u128 {
+    let handshake_started = Instant::now();
+    let handshake_deadline = handshake_started + Duration::from_secs(20);
+    let (mut handshake_a, mut handshake_b) = (false, false);
+    while Instant::now() < handshake_deadline && !(handshake_a && handshake_b) {
+        handshake_a = node_a
+            .counters()
+            .unwrap()
+            .get(key_b)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        handshake_b = node_b
+            .counters()
+            .unwrap()
+            .get(key_a)
+            .is_some_and(|counters| counters.handshake_secs != 0);
+        if !(handshake_a && handshake_b) {
+            // sleep: poll until both direct handshakes arrive or the deadline expires.
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(handshake_a, "node A did not establish handshake ({context})");
+    assert!(handshake_b, "node B did not establish handshake ({context})");
+    handshake_started.elapsed().as_millis()
+}
+
 /// Exercise simultaneous IPv6 endpoint delivery, grants, NAT rebinding, and UDP reflection.
 #[test]
 #[ignore = "Run as root, alone, inside unshare -m -n with ip and nft."]
@@ -1889,37 +1921,14 @@ fn simultaneous_ipv6_punch_rebinding_and_tunnel_grants() {
         assert!(a_update.join().unwrap());
         assert!(b_update.join().unwrap());
     });
-    let handshake_started = Instant::now();
-    let handshake_deadline = handshake_started + Duration::from_secs(20);
-    let (mut handshake_a, mut handshake_b) = (false, false);
-    while Instant::now() < handshake_deadline && !(handshake_a && handshake_b) {
-        handshake_a = node_a
-            .counters()
-            .unwrap()
-            .get(&id_b.public_key)
-            .is_some_and(|counters| counters.handshake_secs != 0);
-        handshake_b = node_b
-            .counters()
-            .unwrap()
-            .get(&id_a.public_key)
-            .is_some_and(|counters| counters.handshake_secs != 0);
-        if !(handshake_a && handshake_b) {
-            // sleep: poll until both direct handshakes arrive or the deadline expires.
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-    assert!(
-        handshake_a,
-        "node A did not establish the simultaneous IPv6 direct path"
+    let simultaneous_handshake_ms = j534_wait_for_handshakes(
+        &node_a,
+        &id_b.public_key,
+        &node_b,
+        &id_a.public_key,
+        "simultaneous IPv6 direct path",
     );
-    assert!(
-        handshake_b,
-        "node B did not establish the simultaneous IPv6 direct path"
-    );
-    eprintln!(
-        "J534_METRIC simultaneous_ipv6_handshake_ms={}",
-        handshake_started.elapsed().as_millis()
-    );
+    eprintln!("J534_METRIC simultaneous_ipv6_handshake_ms={simultaneous_handshake_ms}");
     // Grant decrypted tunnel input only after the direct underlay handshake is established.
     for ns in [NS_A, NS_B] {
         in_ns(ns, || {
@@ -2009,6 +2018,14 @@ fn simultaneous_ipv6_punch_rebinding_and_tunnel_grants() {
         assert!(a_update.join().unwrap());
         assert!(b_update.join().unwrap());
     });
+    let restore_handshake_ms = j534_wait_for_handshakes(
+        &node_a,
+        &id_b.public_key,
+        &node_b,
+        &id_a.public_key,
+        "after grant restoration",
+    );
+    eprintln!("J534_METRIC restore_handshake_ms={restore_handshake_ms}");
     let granted = in_ns(NS_A, || {
         TcpStream::connect_timeout(&mesh_server_b, Duration::from_secs(3))
     });
