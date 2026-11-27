@@ -157,6 +157,25 @@ impl Sender {
     }
 }
 impl Receiver {
+    /// Takes an already queued leading size report before output starts.
+    /// The attach can send this with its replay cursor before spending any
+    /// credit. Any earlier ordered command keeps its place and credit fence.
+    pub(super) fn take_initial_resize(&mut self) -> Option<(u16, u16, u16, u16)> {
+        let (raw, pending) = match self {
+            #[cfg(feature = "remote")]
+            Self::Native(_) => return None,
+            Self::Shared { raw, pending, .. } => (raw, pending),
+        };
+        if pending.is_none() {
+            *pending = raw.try_recv().ok();
+        }
+        let Command::Resize(cols, rows, px_w, px_h) = pending.as_ref()?.command else {
+            return None;
+        };
+        *pending = None;
+        Some((cols, rows, px_w, px_h))
+    }
+
     /// Waits for the next command to run, in send order. Returns `None` when the
     /// sender is gone and nothing remains. May be cancelled and called again without
     /// losing a command or credit.

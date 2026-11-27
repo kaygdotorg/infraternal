@@ -169,9 +169,8 @@ enum Request {
     Read(u64),
     /// Send a Snapshot of the screen, then stream from the head.
     Snapshot,
-    /// A reattach far behind ([`SNAPSHOT_FIRST_BACKLOG`]): send an exact
-    /// Snapshot if the engine can make one, otherwise replay raw from this
-    /// cursor, which the ring still holds (see [`Peer::snapshot_first`]).
+    /// For a large or resize-crossing backlog, try an exact Snapshot before
+    /// falling back to raw replay at this retained cursor.
     SnapshotFirst(u64),
     /// Repaint the screen for a viewer at least as large as the session
     /// whose own size is only staged (D74), then stream from the head (#521).
@@ -179,10 +178,23 @@ enum Request {
     /// link that negotiated it; see [`Peer::repaint_for_larger_viewer`].
     Repaint,
 }
+/// The input cursor response a peer has requested but has not received yet.
 #[derive(Clone, Copy)]
 enum InputReply {
     Ack,
     State,
+}
+/// What the next size report needs to check against the attach replay.
+#[derive(Default)]
+enum ReplaySizeCheck {
+    /// There is no attach replay to check.
+    #[default]
+    None,
+    /// A different grid may require the ordinary attach repaint.
+    Ordinary,
+    /// The initial replay crosses a resize. Try the exact shortcut after the
+    /// viewer confirms the current grid. Carries the original raw cursor.
+    ResizeCrossing(u64),
 }
 /// One connection to this shim (a viewer through the agent, an owner or a
 /// cleanup link): its socket, decoder and queued output, the writer it types
@@ -211,13 +223,13 @@ struct Peer {
     exited_sent: bool,
     stopping: bool,
     request: Option<Request>,
-    /// True from a `ReadFrom` that started a raw replay of bytes already
+    /// Set from a `ReadFrom` that started a replay of bytes already
     /// written until this viewer's next `Resize` or input. Raw bytes are only
     /// right at the size they were written for, and a viewer reports its size
     /// just after attaching, before it types. If that size differs from the
     /// session's (once a viewer has ever sized it), the viewer gets a Snapshot
     /// of the engine instead (#521).
-    replay_awaits_size: bool,
+    replay_awaits_size: ReplaySizeCheck,
     /// The echo state this peer was last told with [`Frame::EchoState`]; a new
     /// link starts at "echo on" (false), so only a hidden state needs a report.
     echo_hidden_told: bool,
@@ -405,12 +417,13 @@ impl Peer {
         self.cursor = Some(head);
         Ok(())
     }
-    /// Serve a reattach that is far behind with an exact Snapshot at `head`,
+    /// Serve a large or resize-crossing backlog with an exact Snapshot at `head`,
     /// or, when the engine cannot make one, with the raw replay from `seq`.
     ///
     /// Only the exact Snapshot is a shortcut here. The ring still holds every
-    /// byte from `seq`, so the raw replay is exact, and this never trades it for
-    /// the flagged approximate repaint or an Error (unlike [`Self::snapshot`]).
+    /// byte from `seq`, so fallback preserves the PTY stream even if its
+    /// original geometry differed. It never sends an approximate repaint or
+    /// an Error here (unlike [`Self::snapshot`]).
     /// A live shell's engine exports exactly unless the shell marks its prompt
     /// with OSC 133 (#521); such a reattach keeps the raw replay, because the
     /// owner chose exact-only snapshot-first (2026-11-25, #583). The browser
@@ -457,6 +470,7 @@ impl Peer {
         terminal: &mut impl SessionTerminal,
         ring: &Ring,
         config: &mut Config,
+        cursors: &mut Inputs,
     ) -> io::Result<bool> {
         let (cols, rows, px_w, px_h) = self.size;
         pty.resize(cols, rows, px_w, px_h)?;
@@ -496,6 +510,9 @@ impl Peer {
             // Control-only peers keep their ordered InputState fence; the
             // terminal provenance selects a notice on their next ReadFrom.
             return Ok(false);
+        }
+        if (config.cols, config.rows) != (cols, rows) {
+            cursors.last_resize_at = ring.head();
         }
         config.cols = cols;
         config.rows = rows;
@@ -595,7 +612,7 @@ mod input_ack_order_tests {
             exited_sent: false,
             stopping: false,
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
         };
         (peer, client)
@@ -1380,7 +1397,7 @@ fn run_configured(
                             exited_sent: false,
                             stopping: false,
                             request: None,
-                            replay_awaits_size: false,
+                            replay_awaits_size: ReplaySizeCheck::default(),
                             echo_hidden_told: false,
                         };
                         next.queue(&Frame::Hello {
@@ -1724,7 +1741,7 @@ fn handle<'a>(
         cursors.accept(writer, offset.unwrap_or(accepted), bytes, input)?;
         // Typing means this peer is past its attach (browsers report their
         // size before any input), so a later Resize is a live one (#521).
-        p.replay_awaits_size = false;
+        p.replay_awaits_size = ReplaySizeCheck::None;
         trace_host!(
             InputQueued,
             config.session,
@@ -1739,7 +1756,7 @@ fn handle<'a>(
             // duplicate bytes cannot steal the last typist's terminal geometry.
             if cursors.active_writer != Some(writer) {
                 p.size = cursors.get(p.writer)?.requested_size;
-                let applied = p.resize(pty, terminal, ring, config)?;
+                let applied = p.resize(pty, terminal, ring, config, cursors)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = Some(writer);
@@ -1815,11 +1832,12 @@ fn handle<'a>(
             // the wrong rows; a live viewer's own resize instead reflows its
             // screen locally and needs no repaint (#521).
             let session_size = (config.cols, config.rows);
-            let replay_wrong_size = std::mem::take(&mut p.replay_awaits_size)
+            let size_check = std::mem::take(&mut p.replay_awaits_size);
+            let replay_wrong_size = !matches!(size_check, ReplaySizeCheck::None)
                 && cursors.viewer_sized
                 && (cols, rows) != session_size;
             if cursors.active_writer.is_none() || cursors.active_writer == p.writer {
-                let applied = p.resize(pty, terminal, ring, config)?;
+                let applied = p.resize(pty, terminal, ring, config, cursors)?;
                 p.size = cursors.finish_resize(p.writer, applied)?;
                 if applied {
                     cursors.active_writer = p.writer;
@@ -1840,6 +1858,16 @@ fn handle<'a>(
                 p.request = Some(Request::Snapshot);
             } else if replay_wrong_size && fits {
                 p.request = Some(Request::Repaint);
+            } else if (cols, rows) == session_size
+                && let ReplaySizeCheck::ResizeCrossing(from) = size_check
+                && !matches!(p.request, Some(Request::Snapshot))
+            {
+                // Some raw frames may already be queued. A refusal continues
+                // at the next unsent byte.
+                let next = p.cursor.unwrap_or(from);
+                if next >= ring.start() {
+                    p.request = Some(Request::SnapshotFirst(next));
+                }
             }
         }
         Frame::ReadFrom(seq) if seq <= ring.head() => {
@@ -1848,21 +1876,34 @@ fn handle<'a>(
             // raw bytes cover this viewer's cursor; byte retention alone does
             // not cover omitted output. Raw bytes are laid out for the size
             // they were written at: the viewer's Resize right after this
-            // decides whether they still fit it (#521). Bytes from before an
-            // earlier resize are still replayed raw (a known gap, #521).
+            // decides whether they still fit it (#521).
             //
             // A viewer far behind gets the exact screen first when the engine
             // can export it (#583, `SNAPSHOT_FIRST_BACKLOG`). A cursor the ring
             // no longer holds is served by a Snapshot through `Read` already.
             let raw = !terminal.requires_approximation();
+            let retained = seq >= ring.start();
+            let large_backlog = retained && ring.head() - seq > SNAPSHOT_FIRST_BACKLOG;
+            // Viewer relays select a writer. Legacy readers (such as terminal
+            // capture) still consume their retained byte range as before.
+            let crosses_resize = retained
+                && p.caps & MULTI_WRITER != 0
+                && p.cursor.is_none()
+                && seq < cursors.last_resize_at;
             p.request = Some(if !raw {
                 Request::Snapshot
-            } else if seq >= ring.start() && ring.head() - seq > SNAPSHOT_FIRST_BACKLOG {
+            } else if large_backlog {
                 Request::SnapshotFirst(seq)
             } else {
                 Request::Read(seq)
             });
-            p.replay_awaits_size = raw && seq < ring.head();
+            p.replay_awaits_size = if !raw || seq == ring.head() {
+                ReplaySizeCheck::None
+            } else if crosses_resize && !large_backlog {
+                ReplaySizeCheck::ResizeCrossing(seq)
+            } else {
+                ReplaySizeCheck::Ordinary
+            };
         }
         Frame::SnapshotRequest => p.request = Some(Request::Snapshot),
         Frame::Signal(signal) => pty.signal_unless_exited(signal, exited)?,

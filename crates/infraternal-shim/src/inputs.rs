@@ -107,6 +107,9 @@ pub(super) struct Inputs {
     /// bytes written at it are not "another viewer's width", so an opener
     /// reporting a different size keeps the raw replay (#521).
     pub(super) viewer_sized: bool,
+    /// Output head at the last successful change of rows or columns.
+    /// Later writes leave this boundary intact. Zero cannot precede a cursor.
+    pub(super) last_resize_at: u64,
     /// Set whenever bytes reach the PTY ([`Inputs::advance`]). The session pump
     /// takes it to know that the program may have answered with a new echo mode,
     /// so it samples termios only after real PTY traffic (#569); nothing else
@@ -138,6 +141,7 @@ impl Inputs {
             )]),
             segments: VecDeque::new(),
             viewer_sized: false,
+            last_resize_at: 0,
             wrote_to_pty: false,
             #[cfg(feature = "process-per-user")]
             segment_limit: MAX_FRAME,

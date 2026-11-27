@@ -190,6 +190,12 @@ impl Frame {
     pub fn encode_into(&self, wire: &mut Vec<u8>) -> io::Result<()> {
         self.encode_mode::<false>(wire)
     }
+    /// Appends a complete frame to a batch to send in wire order.
+    /// # Errors
+    /// Rejects oversized frames without changing the existing batch.
+    pub fn append_to(&self, wire: &mut Vec<u8>) -> io::Result<()> {
+        self.encode_mode::<true>(wire)
+    }
     /// Encode retained output directly from a possibly wrapped ring. The
     /// complete frame size is validated before touching any preceding batch.
     /// # Errors
