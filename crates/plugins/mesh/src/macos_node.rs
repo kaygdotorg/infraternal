@@ -804,8 +804,10 @@ fn authority_path(path: &Path) -> PathBuf {
 fn encode_public_state(
     state: &SavedState,
 ) -> io::Result<(Vec<u8>, crate::node_state::AuthorityRecord)> {
-    let (config, authority) =
-        crate::node_state::split_authority(state.config.as_ref(), state.authority_reset_pending);
+    let (config, authority) = infraternal_mesh_node::node_state::split_authority(
+        state.config.as_ref(),
+        state.authority_reset_pending,
+    );
     let mut legacy = state.clone();
     legacy.config = config;
     legacy.authority_reset_pending = false;
