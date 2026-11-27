@@ -521,9 +521,9 @@ pub fn collect_static_facts(mode: AgentMode) -> HostFacts {
 /// Samples current resource counters into one cached identity snapshot.
 pub fn refresh_live_facts(facts: &mut HostFacts) {
     facts.root_disk = root_capacity();
+    facts.memory = collect_memory();
     #[cfg(target_os = "linux")]
     {
-        facts.memory = collect_memory();
         facts.uptime_seconds = read_limited("/proc/uptime", 256)
             .and_then(|value| value.split_ascii_whitespace().next().map(str::to_owned))
             .and_then(|value| value.split('.').next().and_then(|whole| whole.parse().ok()));
@@ -535,7 +535,7 @@ pub fn refresh_live_facts(facts: &mut HostFacts) {
     collect_macos_live(facts);
 }
 
-// Admission samples memory only: disk and identity work are unnecessary on this path.
+/// Samples the memory used by both terminal admission and live host facts.
 fn collect_memory() -> Option<Capacity> {
     #[cfg(target_os = "linux")]
     {
@@ -545,9 +545,7 @@ fn collect_memory() -> Option<Capacity> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut facts = collect_static_facts(AgentMode::Embedded);
-        collect_macos_live(&mut facts);
-        facts.memory
+        macos_memory(sysctl_u64)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -780,18 +778,37 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     sysctl_string(name)?.parse().ok()
 }
 
+/// Estimates allocatable RAM from Darwin's VM page counters.
+///
+/// The raw free sysctl excludes speculative pages, which XNU already includes
+/// in pageable file-backed pages. Count that cache and volatile purgeable pages
+/// only at normal kernel pressure. Under pressure, reclaiming more of the
+/// remaining cache can cause thrashing, so budget only immediately free pages.
+/// Keep nonpurgeable anonymous, wired and compressed pages out of the estimate.
+#[cfg(any(target_os = "macos", test))]
+fn macos_memory(read: impl Fn(&str) -> Option<u64>) -> Option<Capacity> {
+    let total_bytes = read("hw.memsize")?;
+    let page_size = read("hw.pagesize")?;
+    let free = read("vm.page_free_count")?;
+    // Darwin exposes the dispatch pressure values: normal = 1, warning = 2,
+    // critical = 4. Without a normal pressure reading, use raw free pages.
+    let available_pages = if read("kern.memorystatus_vm_pressure_level") == Some(1) {
+        free.saturating_add(read("vm.page_pageable_external_count").unwrap_or(0))
+            .saturating_add(read("vm.page_purgeable_count").unwrap_or(0))
+    } else {
+        free
+    };
+    let available_bytes = available_pages.saturating_mul(page_size).min(total_bytes);
+    Some(Capacity {
+        used_bytes: total_bytes - available_bytes,
+        total_bytes,
+    })
+}
+
+/// Samples the remaining macOS live counters outside the admission path.
 #[cfg(target_os = "macos")]
 fn collect_macos_live(facts: &mut HostFacts) {
     use sysctl::Sysctl;
-
-    let total = sysctl_u64("hw.memsize");
-    let free = sysctl_u64("vm.page_free_count")
-        .zip(sysctl_u64("hw.pagesize"))
-        .map(|(pages, size)| pages.saturating_mul(size));
-    facts.memory = total.zip(free).map(|(total_bytes, free_bytes)| Capacity {
-        used_bytes: total_bytes.saturating_sub(free_bytes.min(total_bytes)),
-        total_bytes,
-    });
     facts.uptime_seconds =
         sysctl::Ctl::new("kern.boottime")
             .ok()
@@ -811,4 +828,71 @@ fn collect_macos_live(facts: &mut HostFacts) {
                 sysctl::CtlValue::Struct(bytes) => parse_macos_load_average(&bytes),
                 _ => None,
             });
+}
+
+#[cfg(test)]
+mod memory_samples {
+    //! Replay real Darwin page counts and check which Linux field controls the floor.
+    use super::*;
+    use crate::MemoryPolicy;
+    use infraternal_plugin_api::admission::OpenRefusal;
+
+    /// Replay the `vm_statistics64` counters captured on the 8 GiB macOS 26.5.2 VM (#617).
+    fn macos_sample(
+        pressure: u64,
+        mach_free: u64,
+        speculative: u64,
+        file_backed: u64,
+        purgeable: u64,
+    ) -> Capacity {
+        macos_memory(|key| match key {
+            "hw.memsize" => Some(8 * 1024 * 1024 * 1024),
+            "hw.pagesize" => Some(16_384),
+            // The Mach free count includes speculative pages, unlike the sysctl.
+            "vm.page_free_count" => Some(mach_free - speculative),
+            "kern.memorystatus_vm_pressure_level" => Some(pressure),
+            "vm.page_pageable_external_count" => Some(file_backed),
+            "vm.page_purgeable_count" => Some(purgeable),
+            _ => None,
+        })
+        .unwrap()
+    }
+
+    /// Open below the old raw-free floor when an idle Mac has a large file cache.
+    #[test]
+    fn idle_macos_cache_counts_toward_admission() {
+        let memory = macos_sample(1, 64_880, 22_290, 169_669, 3_649);
+        let policy = MemoryPolicy::decode(
+            br#"{"terminalMemoryFloorMiB":1024,"terminalMemoryFloorPercent":5}"#,
+        )
+        .unwrap();
+        assert_eq!(memory.total_bytes - memory.used_bytes, 215_908 * 16_384);
+        assert_eq!(policy.admit(Some(memory), 0), Ok(()));
+    }
+
+    /// Keep the default floor effective when Darwin warns that reclaim is under pressure.
+    #[test]
+    fn pressured_macos_uses_immediately_free_pages() {
+        let memory = macos_sample(2, 8_003, 4_990, 89_951, 0);
+        assert_eq!(memory.total_bytes - memory.used_bytes, 3_013 * 16_384);
+        assert_eq!(
+            MemoryPolicy::default().admit(Some(memory), 0),
+            Err(OpenRefusal::HostMemoryLow {
+                available_mib: 47,
+                session_count: 0
+            })
+        );
+    }
+
+    /// Linux keeps using the kernel's `MemAvailable` estimate even when `MemFree` is small.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_uses_mem_available() {
+        let memory = memory_from_meminfo(
+            "MemTotal: 8388608 kB\nMemFree: 4096 kB\nMemAvailable: 524288 kB\n",
+        )
+        .unwrap();
+        assert_eq!(memory.total_bytes - memory.used_bytes, 512 * 1024 * 1024);
+        assert_eq!(MemoryPolicy::default().admit(Some(memory), 0), Ok(()));
+    }
 }
