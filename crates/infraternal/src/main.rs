@@ -915,24 +915,33 @@ fn status_result(
         components.push(json!({"name":"CA", "state":state, "state_detail":detail}));
         rows.push(vec!["CA".to_owned(), state, detail]);
     }
-    let tint = |column: usize, text: &str| {
-        (options.color && column == 1)
-            .then(|| cli::output::state_tint(text))
-            .flatten()
-    };
     let mut result = CommandResult::new(
         command,
         state,
         message,
         json!({"role": node.role.id(), "components": components}),
     )
-    .with_body(infraternal_plugin_api::present::table(
+    .with_panel(infraternal_plugin_api::present::table(
         &["Component", "State", "Detail"],
         &rows,
         0,
-        options.usable_width(),
-        Some(&tint),
+        options
+            .usable_width()
+            .saturating_sub(if options.terminal { 4 } else { 0 }),
+        None,
     ));
+    if rows.is_empty() {
+        result.body = Some(String::new());
+    }
+    if node.role == infraternal_status::Role::None {
+        let steps = [
+            "Join an existing server with infraternal up <server-url>.",
+            "Set up a server with infraternal server init.",
+        ];
+        result = result
+            .with_text_message("Infraternal isn't set up on this machine.")
+            .with_text_next(steps.map(str::to_owned).to_vec());
+    }
     for step in next {
         result = result.with_next_step(step);
     }
@@ -1134,12 +1143,13 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
         .iter()
         .map(|entry| vec![entry.command.clone(), entry.description.clone()])
         .collect();
-    let body = infraternal_plugin_api::present::table(
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let body = infraternal_plugin_api::present::terminal_table(
         &["Command", "What it does"],
         &rows,
         0,
-        cli::output::RenderOptions::detect(false).usable_width(),
-        None,
+        options.usable_width(),
+        options.terminal,
     );
     let name = path.join(" ");
     Some(emit(
@@ -1149,6 +1159,7 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
             format!("infraternal {name} has {}.", count_commands(commands.len())),
             json!({"commands": commands}),
         )
+        .with_text_message(format!("Choose a command for infraternal {name}."))
         .with_body(body)
         .with_next_step(format!("infraternal {name} <command> --help")),
         json_output,

@@ -3,10 +3,11 @@
 //! The CLI core and every plugin that presents its own records use these helpers, so
 //! a table printed by the core and a table printed by a plugin follow the same rules:
 //! a header only when there are two rows or more, every column as wide as its widest
-//! value, only the last column wraps, and the whole table fits the width it is given.
+//! value, and only the last column wraps. Long words stay intact so they can be copied.
 //! Raw values (byte counts, epoch times) belong in `--json`; people get the units here.
 
 use serde_json::Value;
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
 
 /// How the answer reads at a glance; the CLI maps it to a state word and a mark.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,12 +68,12 @@ pub fn table(
     let mut widths: Vec<usize> = (0..columns)
         .map(|column| {
             let mut widest = if show_header {
-                header[column].chars().count()
+                header[column].to_uppercase().width()
             } else {
                 0
             };
             for row in 0..rows.len() {
-                widest = widest.max(cells(row, column).chars().count());
+                widest = widest.max(cells(row, column).width());
             }
             widest.max(1)
         })
@@ -132,7 +133,7 @@ fn push_row(
         out.push_str(&" ".repeat(indent));
         for (column, width) in widths.iter().enumerate() {
             let text = wrapped[column].get(line).map_or("", String::as_str);
-            let used = text.chars().count();
+            let used = text.width();
             match tint
                 .and_then(|tint| tint(column, text))
                 .filter(|_| line == 0)
@@ -156,42 +157,41 @@ fn push_row(
     }
 }
 
-/// Cut `text` to `width` characters, ending in an ellipsis when something was removed.
+/// Shorten a cell to its column width with an ASCII marker.
 #[must_use]
 pub fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
+    if text.width() <= width {
         return text.to_owned();
     }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('…');
+    let marker = ".".repeat(width.min(3));
+    let mut available = width - marker.len();
+    let mut cut = String::new();
+    for character in text.chars() {
+        let columns = character.width().unwrap_or(0);
+        if columns > available {
+            break;
+        }
+        available -= columns;
+        cut.push(character);
+    }
+    cut.push_str(&marker);
     cut
 }
 
-/// Break `text` into lines of at most `width` characters at word boundaries.
-/// A word longer than the width is split.
+/// Wrap prose at word boundaries. Keep a long word intact so URLs and command
+/// arguments can still be copied. The terminal can display them on several lines.
 #[must_use]
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
     let mut lines = Vec::new();
     let mut line = String::new();
     for word in text.split_whitespace() {
-        let length = word.chars().count();
-        if !line.is_empty() && line.chars().count() + 1 + length > width {
+        if !line.is_empty() && line.width() + 1 + word.width() > width {
             lines.push(std::mem::take(&mut line));
         }
-        if length > width {
-            let mut chars = word.chars();
-            while chars.clone().count() > width {
-                line.extend(chars.by_ref().take(width));
-                lines.push(std::mem::take(&mut line));
-            }
-            line.extend(chars);
-        } else {
-            if !line.is_empty() {
-                line.push(' ');
-            }
-            line.push_str(word);
+        if !line.is_empty() {
+            line.push(' ');
         }
+        line.push_str(word);
     }
     if !line.is_empty() || lines.is_empty() {
         lines.push(line);
@@ -199,12 +199,90 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Treat pipes and terminals with missing or dumb terminal metadata as plain text.
+#[must_use]
+pub fn interactive(is_terminal: bool) -> bool {
+    is_terminal && std::env::var_os("TERM").is_some_and(|term| !term.is_empty() && term != "dumb")
+}
+
+/// Use terminal glyphs only when the effective locale declares UTF-8.
+#[must_use]
+pub fn supports_unicode(is_terminal: bool) -> bool {
+    interactive(is_terminal)
+        && ["LC_ALL", "LC_CTYPE", "LANG"]
+            .into_iter()
+            .filter_map(std::env::var_os)
+            .find(|locale| !locale.is_empty())
+            .is_some_and(|locale| {
+                let locale = locale.to_string_lossy().to_ascii_lowercase();
+                locale.contains("utf-8") || locale.contains("utf8")
+            })
+}
+
+/// Put a list marker on each item's first line and align its continuations.
+#[must_use]
+pub fn bullets(items: &[String], indent: usize, width: usize, unicode: bool) -> String {
+    use std::fmt::Write as _;
+
+    let marker = if unicode { "•" } else { "-" };
+    let margin = " ".repeat(indent);
+    let mut out = String::new();
+    for item in items {
+        for (index, line) in wrap(item, width.saturating_sub(indent + 2))
+            .iter()
+            .enumerate()
+        {
+            let prefix = if index == 0 { marker } else { " " };
+            let _ = writeln!(out, "{margin}{prefix} {line}");
+        }
+    }
+    out
+}
+
+/// Frame text that fits in the available columns. Keep long unbroken values
+/// intact and unframed when the window is too narrow to contain them.
+#[must_use]
+pub fn panel(body: &str, indent: usize, width: usize, unicode: bool) -> String {
+    use std::fmt::Write as _;
+
+    let content = body.lines().map(UnicodeWidthStr::width).max().unwrap_or(0);
+    if !unicode || content == 0 || content + indent + 4 > width {
+        let margin = " ".repeat(indent);
+        return body
+            .lines()
+            .map(|line| format!("{margin}{line}\n"))
+            .collect();
+    }
+    let margin = " ".repeat(indent);
+    let rule = "─".repeat(content + 2);
+    let mut out = format!("{margin}┌{rule}┐\n");
+    for line in body.lines() {
+        let padding = " ".repeat(content - line.width());
+        let _ = writeln!(out, "{margin}│ {line}{padding} │");
+    }
+    let _ = writeln!(out, "{margin}└{rule}┘");
+    out
+}
+
+/// Render an aligned table in a frame on a Unicode terminal.
+#[must_use]
+pub fn terminal_table(
+    header: &[&str],
+    rows: &[Vec<String>],
+    indent: usize,
+    width: usize,
+    unicode: bool,
+) -> String {
+    let room = width.saturating_sub(indent + if unicode { 4 } else { 0 });
+    panel(&table(header, rows, 0, room, None), indent, width, unicode)
+}
+
 /// Aligned `label  value` lines; values wrap under their own column.
 #[must_use]
 pub fn pairs(rows: &[(&str, String)], indent: usize, width: usize) -> String {
     let label = rows
         .iter()
-        .map(|(label, _)| label.chars().count())
+        .map(|(label, _)| label.width())
         .max()
         .unwrap_or(0);
     let value_column = indent + label + GAP;
@@ -215,7 +293,7 @@ pub fn pairs(rows: &[(&str, String)], indent: usize, width: usize) -> String {
             out.push_str(&" ".repeat(if index == 0 { indent } else { value_column }));
             if index == 0 {
                 out.push_str(name);
-                out.push_str(&" ".repeat(label - name.chars().count() + GAP));
+                out.push_str(&" ".repeat(label - name.width() + GAP));
             }
             out.push_str(line);
             out.push('\n');
@@ -263,7 +341,7 @@ pub fn age(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{age, bytes, pairs, table, truncate, wrap};
+    use super::{age, bullets, bytes, pairs, table, terminal_table, truncate, wrap};
 
     fn rows(items: &[&[&str]]) -> Vec<Vec<String>> {
         items
@@ -303,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_leading_columns_are_cut_with_an_ellipsis() {
+    fn wide_leading_columns_are_cut_with_an_ascii_marker() {
         let text = table(
             &["A", "B"],
             &rows(&[&["abcdefghijklmnopqrstuvwxyz", "1"], &["x", "2"]]),
@@ -311,7 +389,7 @@ mod tests {
             16,
             None,
         );
-        assert!(text.contains('…'), "{text}");
+        assert!(text.contains("..."), "{text}");
         assert!(
             text.lines().all(|line| line.chars().count() <= 16),
             "{text}"
@@ -330,6 +408,31 @@ mod tests {
             Some(&tint),
         );
         assert!(text.contains("\u{1b}[32mmesh\u{1b}[0m   on"), "{text:?}");
+    }
+
+    /// Tables count display columns, including the extra column for a wide character.
+    #[test]
+    fn terminal_and_plain_tables_have_aligned_columns() {
+        let data = rows(&[&["大阪", "on"], &["relay", "off"]]);
+        assert_eq!(
+            terminal_table(&["Name", "State"], &data, 0, 80, true),
+            "┌──────────────┐\n│ NAME   STATE │\n│ 大阪   on    │\n│ relay  off   │\n└──────────────┘\n"
+        );
+        assert_eq!(
+            terminal_table(&["Name", "State"], &data, 0, 80, false),
+            "NAME   STATE\n大阪   on\nrelay  off\n"
+        );
+    }
+
+    /// Long copyable values stay intact even if the line has to overflow.
+    #[test]
+    fn wrapping_preserves_commands_and_urls() {
+        let url = "https://server.example.org/#join=fake-code";
+        assert_eq!(wrap(&format!("Open {url}"), 20), ["Open", url]);
+        assert_eq!(
+            bullets(&["Run this command again".to_owned()], 0, 16, false),
+            "- Run this\n  command again\n"
+        );
     }
 
     #[test]
@@ -358,7 +461,7 @@ mod tests {
             40,
         );
         assert_eq!(text, "  Role     host\n  Version  0.1.0 edge\n");
-        assert_eq!(truncate("abcdef", 4), "abc…");
+        assert_eq!(truncate("abcdef", 4), "a...");
         assert_eq!(wrap("", 5), vec![String::new()]);
     }
 }

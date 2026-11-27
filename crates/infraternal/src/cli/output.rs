@@ -3,8 +3,7 @@
 //! A result is rendered one of two ways from the same [`CommandResult`]:
 //!
 //! - Text for people: the answer first, in plain words; then short aligned
-//!   blocks; then `Why` (only for failures) and `Next` (only when a follow-up is
-//!   true for this state). Colour and the state mark appear only on a terminal.
+//!   blocks and useful follow-ups. Color and symbols appear only on capable terminals.
 //!   Failures go to standard error so a script's standard output stays empty.
 //! - JSON for scripts and AI tools: one single-line envelope per result, with the
 //!   same fields for every command, including usage errors. Fields are only ever
@@ -65,6 +64,15 @@ pub struct CommandResult<T> {
     /// Aligned text that replaces the generic rendering of `data` for people; never serialized.
     #[serde(skip)]
     pub body: Option<String>,
+    /// Frame a preformatted detail block on terminals that can draw it.
+    #[serde(skip)]
+    frame_body: bool,
+    /// Headline for people when the JSON message must keep its original wording.
+    #[serde(skip)]
+    text_message: Option<String>,
+    /// Follow-ups for people when the JSON instructions must keep their original wording.
+    #[serde(skip)]
+    text_next: Option<Vec<String>>,
 }
 
 impl<T> CommandResult<T> {
@@ -88,6 +96,9 @@ impl<T> CommandResult<T> {
             error: None,
             data,
             body: None,
+            frame_body: false,
+            text_message: None,
+            text_next: None,
         }
     }
 
@@ -131,11 +142,33 @@ impl<T> CommandResult<T> {
         self
     }
 
+    /// Set the plain-language headline without changing the JSON contract.
+    #[must_use]
+    pub fn with_text_message(mut self, message: impl Into<String>) -> Self {
+        self.text_message = Some(message.into());
+        self
+    }
+
+    /// Replace the suggestions people see without changing the JSON contract.
+    #[must_use]
+    pub fn with_text_next(mut self, next: Vec<String>) -> Self {
+        self.text_next = Some(next);
+        self
+    }
+
     /// Give people this text instead of the generic rendering of `data`.
     #[must_use]
     pub fn with_body(mut self, body: impl Into<String>) -> Self {
         let body = body.into();
         self.body = (!body.trim().is_empty()).then_some(body);
+        self
+    }
+
+    /// Give a multi-part result a frame on a Unicode terminal.
+    #[must_use]
+    pub fn with_panel(mut self, body: impl Into<String>) -> Self {
+        self = self.with_body(body);
+        self.frame_body = true;
         self
     }
 }
@@ -294,7 +327,7 @@ pub fn interrupted_notice(command: &str) -> Vec<u8> {
 /// Formatting controls supplied by the output destination and test snapshots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenderOptions {
-    /// Whether the destination is a terminal.
+    /// Whether the destination supports Unicode terminal glyphs.
     pub terminal: bool,
     /// Whether ANSI color is allowed.
     pub color: bool,
@@ -311,7 +344,7 @@ impl RenderOptions {
     /// parser's own messages already do, so the two halves of the binary agree.
     #[must_use]
     pub fn detect(terminal: bool) -> Self {
-        let terminal = terminal && std::env::var_os("TERM").is_none_or(|term| term != "dumb");
+        let interactive = present::interactive(terminal);
         let width = infraternal_shim::stdout_columns()
             .map(usize::from)
             .or_else(|| {
@@ -321,8 +354,8 @@ impl RenderOptions {
             })
             .unwrap_or(80);
         Self {
-            terminal,
-            color: terminal && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
+            terminal: present::supports_unicode(terminal),
+            color: interactive && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
             width,
         }
     }
@@ -358,41 +391,59 @@ pub fn render_pretty<T: Serialize>(
     let width = options.usable_width();
     let mut sections: Vec<String> = Vec::new();
 
-    let headline = if options.terminal {
-        let mark = if options.color {
-            format!("{}{}\u{1b}[0m", result.state.color(), result.state.mark())
+    let message = result.text_message.as_deref().unwrap_or(&result.message);
+    let headline = if options.terminal || options.color {
+        let mark = if options.terminal {
+            result.state.mark()
         } else {
-            result.state.mark().to_owned()
+            "*"
         };
-        // The mark takes two columns of the first line.
-        let mut lines = present::wrap(&result.message, width.saturating_sub(2));
+        let mark = if options.color {
+            format!("{}{mark}\u{1b}[0m", result.state.color())
+        } else {
+            mark.to_owned()
+        };
+        // The mark and its space take two columns.
+        let mut lines = present::wrap(message, width.saturating_sub(2));
         lines[0] = format!("{mark} {}", lines[0]);
         for line in lines.iter_mut().skip(1) {
             line.insert_str(0, "  ");
         }
         lines.join("\n") + "\n"
     } else {
-        present::wrap(&result.message, width).join("\n") + "\n"
+        present::wrap(message, width).join("\n") + "\n"
     };
     sections.push(headline);
 
     if let Some(body) = &result.body {
-        sections.push(body.clone());
+        if !body.is_empty() {
+            sections.push(if result.frame_body {
+                present::panel(body, 0, width, options.terminal)
+            } else {
+                body.clone()
+            });
+        }
     } else {
         let data = serde_json::to_value(&result.data)?;
         sections.extend(render_data(&data, options));
     }
 
-    let mut closing: Vec<(&str, String)> = Vec::new();
     if let Some(details) = &result.details {
-        closing.push(("Why", details.clone()));
+        sections.push(present::pairs(&[("Details", details.clone())], 0, width));
     }
-    for (index, next) in result.next.iter().enumerate() {
-        closing.push((if index == 0 { "Next" } else { "" }, next.clone()));
-    }
-    let closing = present::pairs(&closing, 0, width);
-    if !closing.is_empty() {
-        sections.push(closing);
+    let next = result.text_next.as_ref().unwrap_or(&result.next);
+    if !next.is_empty() {
+        let items: Vec<String> = next
+            .iter()
+            .map(|step| {
+                if step.starts_with("infraternal ") {
+                    format!("Run {step}")
+                } else {
+                    step.clone()
+                }
+            })
+            .collect();
+        sections.push(present::bullets(&items, 0, width, options.terminal));
     }
     Ok(sections
         .iter()
@@ -440,22 +491,22 @@ fn render_data(data: &serde_json::Value, options: RenderOptions) -> Vec<String> 
         let indent = if headings { 2 } else { 0 };
         if let Some(items) = value.as_array() {
             if let Some((header, rows)) = object_rows(items) {
-                let tint = |column: usize, text: &str| {
-                    (options.color && header[column] == "state")
-                        .then(|| state_tint(text))
-                        .flatten()
-                };
                 let labels: Vec<String> = header.iter().map(|key| humanize(key)).collect();
                 let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-                block.push_str(&present::table(&labels, &rows, indent, width, Some(&tint)));
+                block.push_str(&present::terminal_table(
+                    &labels,
+                    &rows,
+                    indent,
+                    width,
+                    options.terminal,
+                ));
             } else {
-                for item in items.iter().filter(|item| !is_empty_value(item)) {
-                    for line in present::wrap(&scalar_text(item), width.saturating_sub(indent)) {
-                        block.push_str(&" ".repeat(indent));
-                        block.push_str(&line);
-                        block.push('\n');
-                    }
-                }
+                let items: Vec<String> = items
+                    .iter()
+                    .filter(|item| !is_empty_value(item))
+                    .map(scalar_text)
+                    .collect();
+                block.push_str(&present::bullets(&items, indent, width, options.terminal));
             }
         } else if let Some(nested) = value.as_object() {
             let rows: Vec<(String, String)> = nested
@@ -472,16 +523,6 @@ fn render_data(data: &serde_json::Value, options: RenderOptions) -> Vec<String> 
         sections.push(block);
     }
     sections
-}
-
-/// Terminal tint for a state word in a table column.
-pub fn state_tint(text: &str) -> Option<&'static str> {
-    match text.to_ascii_lowercase().as_str() {
-        "running" | "ready" | "on" | "active" => Some("\u{1b}[32m"),
-        "failed" | "refused" => Some("\u{1b}[31m"),
-        "stopped" | "unknown" | "off" => Some("\u{1b}[36m"),
-        _ => None,
-    }
 }
 
 /// Empty containers and blank strings have no useful human representation.
@@ -707,7 +748,7 @@ mod tests {
                 "  NAME    STATE\n",
                 "  server  running\n",
                 "  mesh    stopped\n\n",
-                "Next  infraternal mesh up\n"
+                "- Run infraternal mesh up\n"
             )
         );
     }
@@ -733,7 +774,7 @@ mod tests {
             ),
             "{output:?}"
         );
-        assert!(output.contains("\u{1b}[32mrunning\u{1b}[0m"), "{output:?}");
+        assert!(output.contains("│ server  running │"), "{output:?}");
         // The mark stays with NO_COLOR; plain output has neither mark nor colour.
         let marked = render_pretty(
             &result,
@@ -763,8 +804,8 @@ mod tests {
             render_pretty(&result, PLAIN).expect("render failure"),
             concat!(
                 "The infraternal agent on this machine is not answering.\n\n",
-                "Why   No socket in the runtime directory.\n",
-                "Next  infraternal agent run\n"
+                "Details  No socket in the runtime directory.\n\n",
+                "- Run infraternal agent run\n"
             )
         );
     }
