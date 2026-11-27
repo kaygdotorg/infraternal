@@ -7,7 +7,7 @@
 //! Raw values (byte counts, epoch times) belong in `--json`; people get the units here.
 
 use serde_json::Value;
-use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr as _};
+use unicode_width::{UnicodeWidthChar as _, UnicodeWidthStr};
 
 /// How the answer reads at a glance; the CLI maps it to a state word and a mark.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
