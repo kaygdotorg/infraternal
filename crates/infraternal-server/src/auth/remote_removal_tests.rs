@@ -841,7 +841,7 @@ async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
 }
 
 /// Exercise the bounded same-origin browser route, including its session authority.
-async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+async fn forget_response(f: &Fixture, host: Uuid) -> axum::response::Response {
     use tower::ServiceExt;
     crate::remote_removal_http::router(f.auth.clone(), removal(f))
         .oneshot(
@@ -856,7 +856,54 @@ async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
         )
         .await
         .unwrap()
-        .status()
+}
+
+/// Get the browser route's status when the caller does not need its response body.
+async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+    forget_response(f, host).await.status()
+}
+
+/// The browser's result uses the inventory label for both reported and fallback names.
+#[tokio::test]
+async fn forget_message_matches_inventory_name() {
+    use infraternal_plugin_remote::inventory::Inventory;
+
+    let f = fixture().await;
+    let inventory = crate::remote_inventory::Source {
+        pool: f.auth.pool.clone(),
+        hosts: crate::remote_runtime::RemoteHosts::default(),
+        #[cfg(feature = "mesh")]
+        mesh: None,
+    };
+    for hostname in [None, Some("Workshop.local")] {
+        let host = forget_fixture(&f, true).await;
+        sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE remote_hosts SET hostname=?,reported_os='macOS' WHERE id=?")
+            .bind(hostname)
+            .bind(host.as_bytes().as_slice())
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+
+        let listed = inventory.list(&f.user, None).await.unwrap();
+        let name = listed["hosts"][0]["name"].as_str().unwrap();
+        let expected = match hostname {
+            Some(_) => "workshop".to_owned(),
+            None => format!("macos-{}", &host.simple().to_string()[..6]),
+        };
+        assert_eq!(name, expected);
+        let response = forget_response(&f, host).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["message"], format!("{name} was forgotten here."));
+    }
 }
 
 /// Forget removes pending delivery and inventory visibility while preserving denial and audit.
