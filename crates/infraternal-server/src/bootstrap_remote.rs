@@ -797,6 +797,47 @@ impl Backend for RemoteBackend {
             Ok(!working)
         })
     }
+    /// Only this person's retired host, proved by the same local enrollment key and uid.
+    fn owns_retired_install<'a>(
+        &'a self,
+        authority: &'a Authority,
+        host: Uuid,
+        uid: u32,
+        digest: [u8; 32],
+    ) -> Operation<'a, bool> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            self.issuer
+                .store()
+                .retired_bootstrap_matches(&authority.owner, host, uid, &digest)
+                .await
+                .map_err(|_| unavailable())
+        })
+    }
+
+    /// Bound direct root SSH's candidate accounts to this owner's removed user installs.
+    fn retired_user_ids<'a>(&'a self, authority: &'a Authority) -> Operation<'a, Vec<u32>> {
+        Box::pin(async move {
+            self.authorize(authority).await?;
+            let ids: Vec<i64> = sqlx::query_scalar(
+                "SELECT DISTINCT h.execution_uid FROM remote_hosts h
+                 WHERE h.owner_id=? AND h.mode='rootless' AND h.execution_uid>0
+                   AND (h.revoked_at IS NOT NULL OR EXISTS(
+                       SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
+                   ))
+                 ORDER BY h.execution_uid LIMIT 16",
+            )
+            .bind(&authority.owner)
+            .fetch_all(&self.issuer.store().0)
+            .await
+            .map_err(|_| unavailable())?;
+            Ok(ids
+                .into_iter()
+                .filter_map(|uid| u32::try_from(uid).ok())
+                .collect())
+        })
+    }
+
     fn owns_failed_setup<'a>(
         &'a self,
         authority: &'a Authority,

@@ -592,8 +592,9 @@ fn enroll_and_start(
     let approval = runtime.block_on(start_approval(server, &body))?;
     let link = join_approval_link(server, &approval.user_code);
     print_approval(json_output, &short_key, &approval.user_code, &link)?;
-    let mut invitation =
-        runtime.block_on(wait_for_approval(server, &approval, host_id, origin, join))?;
+    let mut invitation = runtime.block_on(wait_for_approval(
+        server, &approval, host_id, origin, join, None,
+    ))?;
     let invitation_bytes =
         Zeroizing::new(serde_json::to_vec(&invitation.0).map_err(|_| Failure::Failed)?);
     invitation.wipe();

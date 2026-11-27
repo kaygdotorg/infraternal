@@ -286,7 +286,11 @@ struct Handoff {
     admin_rules: Vec<String>,
 }
 
-struct ApprovedInvitation(JoinInvitation);
+/// The approved join, carrying its optional prior-install proof separately from the invitation.
+struct ApprovedInvitation(
+    JoinInvitation,
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))] bool,
+);
 
 impl ApprovedInvitation {
     fn wipe(&mut self) {
@@ -325,6 +329,11 @@ fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
     crate::remote::retire_prepared_join_key(data).map_err(|_| Failure::LocalState)?;
     Ok(key)
 }
+
+/// Offer local retirement for a previous user installation after machine approval.
+#[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+#[path = "up_retire_previous.rs"]
+mod retire_previous;
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
 pub(crate) fn run(
@@ -432,12 +441,19 @@ pub(crate) fn run(
     if let Err(failure) = print_approval(json_output, &short_key, &approval.user_code, &link) {
         return fail(json_output, failure);
     }
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let old = retire_previous::inspect();
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retirement_hint = old.as_ref().map(retire_previous::preference);
+    #[cfg(not(all(target_os = "linux", feature = "plugin-ssh")))]
+    let retirement_hint: Option<String> = None;
     let mut invitation = match runtime.block_on(wait_for_approval(
         &server,
         &approval,
         host_id,
         &origin,
         JoinMode::System,
+        retirement_hint.as_deref(),
     )) {
         Ok(invitation) => invitation,
         Err(failure) => return fail(json_output, failure),
@@ -446,9 +462,15 @@ pub(crate) fn run(
         Ok(payload) => payload,
         Err(failure) => return fail(json_output, failure),
     };
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retire = old.filter(|plan| invitation.1 && retire_previous::confirm(plan));
     invitation.wipe();
     if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
         return fail(json_output, failure);
+    }
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    if let Some(plan) = retire {
+        retire_previous::finish(&plan);
     }
     #[cfg(all(
         target_os = "linux",
@@ -611,6 +633,8 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd).map_err(|_| Failure::Failed)?;
     let mut invitation = ApprovedInvitation(
         serde_json::from_slice(&handoff.invitation).map_err(|_| Failure::Permission)?,
+        #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+        false,
     );
     validate_invitation(&invitation.0, &origin, None, JoinMode::System)?;
     if crate::remote::key_digest_from_pkcs8(&handoff.key_pkcs8).ok() != Some(handoff.key_digest) {
@@ -870,6 +894,7 @@ async fn wait_for_approval(
     host_id: uuid::Uuid,
     origin: &str,
     join: JoinMode,
+    retirement_hint: Option<&str>,
 ) -> Result<ApprovedInvitation, Failure> {
     let deadline = Instant::now() + approval.lifetime;
     let body = Zeroizing::new(
@@ -893,7 +918,7 @@ async fn wait_for_approval(
             server,
             "/auth/device-redeem",
             &body,
-            Some("wait=10"),
+            Some(retirement_hint.unwrap_or("wait=10")),
             remaining.min(POLL_INTERVAL + REQUEST_TIMEOUT),
         )
         .await
@@ -906,6 +931,8 @@ async fn wait_for_approval(
             StatusCode::OK => {
                 let invitation = ApprovedInvitation(
                     serde_json::from_slice(&response.body).map_err(|_| Failure::Failed)?,
+                    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+                    response.retirement_authorized,
                 );
                 validate_invitation(&invitation.0, origin, Some(host_id), join)?;
                 return Ok(invitation);
@@ -930,7 +957,7 @@ async fn post_json(
     server: &Url,
     path: &'static str,
     body: &[u8],
-    preference: Option<&'static str>,
+    preference: Option<&str>,
     timeout: Duration,
 ) -> Result<crate::remote::ClientResponse, Failure> {
     let mut request_started = false;

@@ -1355,10 +1355,14 @@ take_over_finished_install() {
  takeover_expected=$1
  takeover_token=$2
  hex_id "$takeover_token"
- [ "$base" = "$up_root_base" ] || exit 71
+ [ "$base" = "$up_root_base" ] || [ "${retirement_approved:-no}" = yes ] || exit 71
  setup_guard
  refuse_cancelled "$takeover_token"
- takeover_observed=$(inspect_previous)
+ if [ "${retirement_approved:-no}" = yes ]; then
+  takeover_observed=$(retirement_installed)
+ else
+  takeover_observed=$(inspect_previous)
+ fi
  set -- $takeover_expected
  [ "$#" -ge 5 ] && [ "$1" = INFRATERNAL_SETUP_INSTALLED ] && [ "$5" = ready ] || exit 75
  takeover_host=$2

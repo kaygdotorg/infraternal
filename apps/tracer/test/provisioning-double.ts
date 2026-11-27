@@ -374,6 +374,24 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             });
             return;
           }
+          // A supported re-add pauses on an exact review of its old user installation.
+          if (target.name === "retire.lab" && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            emit(target, "check", "Review the earlier infraternal installation", {
+              kind: "retire_previous_install",
+              message: "This host has an earlier infraternal installation.",
+              log_tail: [],
+              retirement: {
+                challenge: target.challenge,
+                install: "c10909d1-6e81-47a3-b0f2-e5d4c3b2a190",
+                different_scope: true,
+                skip_challenge: challengeOf("skip-retirement"),
+                paths: ["/home/pat/.local/share/infraternal", "/home/pat/.config/systemd/user/infraternal-agent.service", "/home/pat/.local/bin/infraternal"],
+              },
+            }, undefined, { challenge: "00000000-0000-0000-0000-000000000000", mode: "rootless", findings: [] });
+            return;
+          }
           // Hosts named `takeover*`, added as root: the old install is offered for Take over, named by its id (D359).
           if (/^takeover/.test(target.name) && target.mode === "root" && !target.fresh) {
             target.challenge = challengeOf(target.id);

@@ -21,7 +21,7 @@ import { isCanonicalUuid } from "./identifiers";
 
 export type BootstrapStep = "check" | "install" | "facts" | "connect" | "done" | "failed";
 /** Public failure categories from the server (contracts/ssh-bootstrap.md); the page for each lives in addhost/model.ts. */
-export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account" | "authority_locked";
+export type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "retire_previous_install" | "unproven_files" | "no_account" | "authority_locked";
 export type BootstrapMode = "rootless" | "root";
 
 /** Phases a target passes through in order, before `done` (or `failed` at any point). */
@@ -91,6 +91,8 @@ export interface FailureDetail {
    * challenge only a confirmation that lists them may send (D368, #433).
    */
   closes?: { terminals: TakeoverTerminal[]; close_challenge: string };
+  /** The older installation and the exact removal paths bound to the current review. */
+  retirement?: { challenge: string; install: string; different_scope: boolean; skip_challenge?: string; paths: string[] };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -163,7 +165,7 @@ export interface OneUseAuth { key?: string; passphrase?: string; password?: stri
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 const STEPS: readonly string[] = ["check", "install", "facts", "connect", "done", "failed"];
 /** Every failure kind the server may send; anything else is dropped rather than shown (see {@link FailureKind}). */
-const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "unproven_files", "no_account", "authority_locked"];
+const KINDS: readonly string[] = ["unreachable", "auth", "mesh-policy", "host-key", "unsupported", "install", "stale_previous_attempt", "setup_running", "unrecognized_install", "retire_previous_install", "unproven_files", "no_account", "authority_locked"];
 
 /** Turns a host label into a valid request-local id (`[A-Za-z0-9._-]{1,128}`). */
 export function targetIdFor(label: string): string {
@@ -236,6 +238,17 @@ function parseFailure(value: unknown): FailureDetail | undefined {
     failure.takeover = { install: value.takeover.install, live: value.takeover.live,
       ...(isCanonicalUuid(closeChallenge) ? { close_challenge: closeChallenge } : {}),
       ...(Array.isArray(terminals) ? { terminals: terminals as TakeoverTerminal[] } : {}) };
+  }
+  if (value.kind === "retire_previous_install" && isRecord(value.retirement)) {
+    const { challenge, install, different_scope, skip_challenge, paths } = value.retirement;
+    if (isCanonicalUuid(challenge) && challenge !== "00000000-0000-0000-0000-000000000000"
+      && isCanonicalUuid(install) && typeof different_scope === "boolean"
+      && (different_scope ? isCanonicalUuid(skip_challenge) && skip_challenge !== challenge
+        && skip_challenge !== "00000000-0000-0000-0000-000000000000" : skip_challenge === undefined)
+      && isStrings(paths) && paths.length >= 3 && paths.length <= 5
+      && paths.every((path) => path.startsWith("/") && path.length <= 512 && !/[\x00-\x1f\x7f]/.test(path))) {
+      failure.retirement = { challenge, install, different_scope, paths, ...(isCanonicalUuid(skip_challenge) ? { skip_challenge } : {}) };
+    }
   }
   // A Start fresh that closes the stuck setup's own terminals (D368, #433): both the list and its own challenge, or neither.
   if (value.kind === "stale_previous_attempt" && isRecord(value.closes) && areTerminals(value.closes.terminals) && value.closes.terminals.length
@@ -435,7 +448,9 @@ export const awaitingKey = (view: TargetView): boolean =>
  * install of another server offered for Take over (D359). Only these carry `leftovers` and its challenge.
  */
 function pausesForConfirmation(failure: FailureDetail | undefined): boolean {
-  return failure?.kind === "stale_previous_attempt" || (failure?.kind === "unrecognized_install" && !!failure.takeover);
+  return failure?.kind === "stale_previous_attempt"
+    || (failure?.kind === "unrecognized_install" && !!failure.takeover)
+    || (failure?.kind === "retire_previous_install" && !!failure.retirement);
 }
 
 /** True while the attempt is paused on earlier-setup leftovers: it waits for the person, nothing is running. */

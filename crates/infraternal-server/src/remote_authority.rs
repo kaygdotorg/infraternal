@@ -144,6 +144,35 @@ impl EnrollmentStore {
         .await?)
     }
 
+    /// Match an earlier bootstrap's local enrollment to the same person's retired host.
+    /// The exact mode, execution uid and newest certificate key bind the old install.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_matches(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+        digest: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        let key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT c.public_key FROM remote_hosts h
+             JOIN remote_certificates c ON c.host_id=h.id
+             WHERE h.owner_id=? AND h.id=? AND h.execution_uid=?
+               AND h.mode IN ('rootless','rootful') AND c.execution_uid=h.execution_uid
+               AND c.role='active' AND c.key_algorithm='ed25519'
+               AND (h.revoked_at IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
+               ))
+             ORDER BY c.not_before DESC LIMIT 1",
+        )
+        .bind(owner)
+        .bind(host.as_bytes().as_slice())
+        .bind(i64::from(uid))
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(key.is_some_and(|key| key.len() == 32 && openssl::sha::sha256(&key) == *digest))
+    }
+
     /// Admit a pending or retired host only for retained cleanup, never new work.
     /// The certificate must still be exact, valid and individually unrevoked.
     pub(crate) async fn admit_cleanup(

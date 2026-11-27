@@ -98,6 +98,45 @@ async fn retired_install_gets_a_final_tcp_reply() {
     assert!(hosts.actor(host).await.is_none());
 }
 
+/// The local removal offer requires the retired host's owner, uid and key.
+#[tokio::test]
+async fn retirement_offer_is_bound_to_the_earlier_enrollment() {
+    let (_, node, root, _) = identities();
+    let (store, _, host, _) = admitted_store(&node, &root).await;
+    let digest = openssl::sha::sha256(&node.key.raw_public_key().unwrap());
+    assert!(
+        !store
+            .retired_bootstrap_matches("owner", host, 1002, &digest)
+            .await
+            .unwrap()
+    );
+    store.revoke("owner", host, now().unwrap()).await.unwrap();
+    assert!(
+        store
+            .retired_bootstrap_matches("owner", host, 1002, &digest)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .retired_bootstrap_matches("another owner", host, 1002, &digest)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .retired_bootstrap_matches("owner", host, 0, &digest)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store
+            .retired_bootstrap_matches("owner", host, 1002, &[0; 32])
+            .await
+            .unwrap()
+    );
+}
+
 async fn admitted_tcp() -> (
     EnrollmentStore,
     sqlx::SqlitePool,
