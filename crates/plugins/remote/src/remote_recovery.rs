@@ -34,7 +34,7 @@ pub enum RecoveryRequest {
     },
 }
 
-/// The same denial shape covers unknown, revoked, locked and out-of-window hosts.
+/// Recovery returns no details unless the request proves the enrolled key.
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecoveryResponse {
@@ -48,6 +48,8 @@ pub enum RecoveryResponse {
     },
     /// The exact committed seven-day certificate, safe to retry after a lost reply.
     Certificate { certificate_der: Vec<u8> },
+    /// The exact signed host request belonged to a durably retired installation.
+    Retired,
     /// No authority or detailed reason is returned.
     Denied,
 }
@@ -203,6 +205,7 @@ pub async fn exchange(
             }
             (challenge, issuer_fingerprint, issuer_generation, not_after)
         }
+        RecoveryResponse::Retired => return Err(infraternal_link::supervisor::retirement_error()),
         RecoveryResponse::Denied => return Err(denied()),
     };
     let transcript = transcript(RecoveryTranscript {
@@ -238,6 +241,7 @@ pub async fn exchange(
         RecoveryResponse::Certificate { certificate_der } => {
             canonical_certificate(&certificate_der)
         }
+        RecoveryResponse::Retired => Err(infraternal_link::supervisor::retirement_error()),
         RecoveryResponse::Challenge { .. } | RecoveryResponse::Denied => Err(denied()),
     }
 }

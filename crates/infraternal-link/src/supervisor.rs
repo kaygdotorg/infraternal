@@ -170,9 +170,15 @@ pub fn check_retirement(stream: u32, frame: &infraternal_protocol::Frame<'_>) ->
             }
         )
     {
-        return Err(io::Error::other(InstallationRetired));
+        return Err(retirement_error());
     }
     Ok(())
+}
+
+/// Convert a final retirement response from the pinned server into a terminal outcome.
+#[must_use]
+pub fn retirement_error() -> io::Error {
+    io::Error::other(InstallationRetired)
 }
 
 /// Whether an attempt ended with the authenticated retirement outcome.

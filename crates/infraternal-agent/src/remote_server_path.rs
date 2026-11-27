@@ -154,12 +154,15 @@ async fn connect(
                     && let Some(renewal) = renewal =>
             {
                 recovery_attempted = true;
-                if renewal
+                if let Err(recovery) = renewal
                     .recover(enrolled_address, &identity.server_name)
                     .await
-                    .is_err()
                 {
-                    return Err(error);
+                    return Err(if is_retired(&recovery) {
+                        recovery
+                    } else {
+                        error
+                    });
                 }
                 refreshed = current_credentials(identity, Some(renewal))?;
             }

@@ -316,9 +316,12 @@ impl Service {
         // Authenticate before any per-host state changes: the host ID and predecessor
         // fingerprint are public, so an unsigned request could otherwise fill the
         // pending operations and the host budget, and lock the real host out.
-        self.authenticate_challenge(&input).await?;
+        let retired = self.authenticate_challenge(&input).await?;
         if !self.limiter.admit_host(input.host) {
             return Err(Denied);
+        }
+        if retired {
+            return Ok(RecoveryResponse::Retired);
         }
         let pool = &self.store.0;
         let mut transaction = infraternal_plugin_api::storage::begin_immediate(pool)
@@ -386,20 +389,19 @@ impl Service {
         ))
     }
 
-    /// Verify the predecessor key's signature over the challenge request.
+    /// Verify the predecessor key's signature and return whether its installation is retired.
     ///
     /// This plain read takes no write lock, so unsigned traffic, already bounded per
     /// source, cannot serialize writers. The transactional lookup in `challenge_at`
     /// still rechecks revocation and the validity window before it records anything.
-    async fn authenticate_challenge(&self, input: &ChallengeInput) -> Result<(), Denied> {
+    async fn authenticate_challenge(&self, input: &ChallengeInput) -> Result<bool, Denied> {
         if input.signature.len() > MAX_SIGNATURE_BYTES {
             return Err(Denied);
         }
-        let (algorithm, public_key): (String, Vec<u8>) = sqlx::query_as(
-            "SELECT c.key_algorithm, c.public_key FROM remote_certificates c \
-             JOIN remote_hosts h ON h.id=c.host_id \
-             WHERE c.fingerprint=? AND c.host_id=? \
-             AND c.revoked_at IS NULL AND h.revoked_at IS NULL",
+        let (algorithm, public_key, revoked): (String, Vec<u8>, bool) = sqlx::query_as(
+            "SELECT c.key_algorithm, c.public_key, c.revoked_at IS NOT NULL OR h.revoked_at IS NOT NULL
+             FROM remote_certificates c JOIN remote_hosts h ON h.id=c.host_id
+             WHERE c.fingerprint=? AND c.host_id=?",
         )
         .bind(input.predecessor.as_slice())
         .bind(input.host.as_bytes().as_slice())
@@ -416,11 +418,21 @@ impl Service {
             &input.request,
             &input.digest,
         );
-        if public_key.verify(&message, &input.signature) {
-            Ok(())
-        } else {
-            Err(Denied)
+        if !public_key.verify(&message, &input.signature) {
+            return Err(Denied);
         }
+        if !revoked {
+            return Ok(false);
+        }
+        if self
+            .store
+            .installation_retired(&input.predecessor)
+            .await
+            .map_err(|_| Denied)?
+        {
+            return Ok(true);
+        }
+        Err(Denied)
     }
 
     /// Answer a repeated challenge request: return the committed certificate's challenge, or the same unexpired challenge
@@ -1150,6 +1162,29 @@ mod tests {
         challenge_signed_by(fixture, &fixture.identity_key, digest)
     }
 
+    /// Expired hosts learn retirement only after proving the exact predecessor key.
+    #[tokio::test]
+    async fn expired_retirement_requires_the_predecessor_signature() {
+        let fixture = recovery_fixture().await;
+        let store = &fixture.service.store;
+        store
+            .revoke("owner", fixture.host, fixture.now)
+            .await
+            .unwrap();
+        let digest = csr_digest(&fixture.csr_der);
+        let wrong_key = PKey::generate_ed25519().unwrap();
+        let refused = fixture
+            .service
+            .challenge_at(challenge_signed_by(&fixture, &wrong_key, digest))
+            .await;
+        assert!(refused.is_err());
+        let retired = fixture
+            .service
+            .challenge_at(challenge_input(&fixture, digest))
+            .await;
+        assert!(matches!(retired, Ok(RecoveryResponse::Retired)));
+    }
+
     /// The challenge, issuer fingerprint, generation and notAfter from a challenge response.
     fn challenge_receipt(response: &RecoveryResponse) -> ([u8; 32], [u8; 32], u64, i64) {
         match response {
@@ -1165,7 +1200,9 @@ mod tests {
                 *issuer_generation,
                 *not_after,
             ),
-            RecoveryResponse::Denied => panic!("eligible identity did not receive a challenge"),
+            RecoveryResponse::Denied | RecoveryResponse::Retired => {
+                panic!("eligible identity did not receive a challenge")
+            }
             RecoveryResponse::Certificate { .. } => {
                 panic!("challenge request returned a certificate")
             }
