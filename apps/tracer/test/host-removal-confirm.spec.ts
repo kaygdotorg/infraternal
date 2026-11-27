@@ -59,9 +59,15 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
       const pill = document.querySelector<HTMLElement>(".ui-window .ui-window-pill")!.getBoundingClientRect();
       const spans = [yes, no].map((button) => { const s = button.querySelector<HTMLElement>("span")!; return { text: s.textContent, scroll: s.scrollWidth, client: s.clientWidth }; });
       const byId = (id: string | null): string | undefined => (id ? document.getElementById(id)?.textContent ?? undefined : undefined);
+      const probe = document.createElement("span");
+      probe.style.color = "var(--danger)";
+      tip.append(probe);
+      const danger = getComputedStyle(probe).color;
+      probe.remove();
       return {
         side: tip.dataset.side, box: { l: box.left, r: box.right, t: box.top, b: box.bottom, w: box.width, cx: box.left + box.width / 2, cy: box.top + box.height / 2 },
-        yes: { l: yb.left, r: yb.right, t: yb.top, b: yb.bottom, h: yb.height, text: yes.textContent }, no: { l: nb.left, r: nb.right, t: nb.top, b: nb.bottom, h: nb.height, text: no.textContent },
+        yes: { l: yb.left, r: yb.right, t: yb.top, b: yb.bottom, h: yb.height, text: yes.textContent, tone: yes.dataset.tone, bg: getComputedStyle(yes).backgroundColor },
+        no: { l: nb.left, r: nb.right, t: nb.top, b: nb.bottom, h: nb.height, text: no.textContent }, danger,
         pill: { l: pill.left, r: pill.right, t: pill.top, b: pill.bottom }, spans, vw: innerWidth, vh: innerHeight,
         title: tip.querySelector(".ui-confirm-tip-message")!.textContent, yesLabel: yes.getAttribute("aria-label"),
         labelledBy: byId(tip.getAttribute("aria-labelledby")), describedBy: byId(tip.getAttribute("aria-describedby")),
@@ -78,6 +84,8 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
     expect(m.labelledBy, "the dialog is named by its title").toBe(m.title);
     expect(m.describedBy, "the dialog is described by its effect line").toContain("Revokes its access");
     expect(m.yes.text, "the button is the plain verb").toBe("Remove");
+    expect(m.yes.tone, "removal uses the shared danger tone").toBe("danger");
+    expect(m.yes.bg, "removal button wears the danger colour").toBe(m.danger);
     expect(m.yesLabel).toBe("Remove");
     expect(m.no.text).toBe("Keep");
     expect(m.no.r, "cancel sits beside confirm").toBeLessThanOrEqual(m.yes.l + 1);
@@ -110,6 +118,7 @@ for (const size of SIZES) for (const theme of THEMES) for (const level of LEVELS
     const side = await page.locator(".ui-confirm-tip").getAttribute("data-side");
     expect(["top", "bottom"], "anchored to the host's own row, with a tail").toContain(side);
     expect(await page.locator(".ui-confirm-tip-message").textContent()).toBe("Remove edge-arm?");
+    await expect(page.locator(".ui-confirm-tip .ui-confirm-yes")).toHaveAttribute("data-tone", "danger");
     const pixels = await measureOpenCard(page, `sidebar-${size.id}-${theme}-${level}`);
     await expectGlass(page, `sidebar ${size.id} ${theme} ${level}`, pixels, level, MIN_TEXT_BEHIND_SIDEBAR);
   } finally { await context.close(); }
