@@ -34,6 +34,7 @@ use super::{
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 use infraternal_plugin_mesh::{
     macos_helper,
     macos_local_network::{self, LocalNetwork},
@@ -170,11 +171,15 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Install the mesh helper for `uid` with the one `sudo` prompt of user mode.
-fn install_helper(sudo: &Path, executable: &Path, uid: u32) -> Result<(), Failure> {
-    eprintln!(
-        "infraternal needs your administrator password once, to let its mesh helper create the network interface, one route and a DNS entry."
-    );
+/// Install or refresh the mesh helper for `uid` with the one `sudo` prompt of user mode.
+fn install_helper(
+    sudo: &Path,
+    executable: &Path,
+    uid: u32,
+    prompt: ElevationPrompt,
+    json_output: bool,
+) -> Result<(), Failure> {
+    prompt.print_to_stderr(json_output);
     let status = Command::new(sudo)
         .arg("--")
         .arg(executable)
@@ -226,7 +231,13 @@ pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
         eprintln!("{error}");
         return fail(json_output, Failure::InstallConflict);
     }
-    if let Err(failure) = install_helper(&sudo, &executable, uid) {
+    if let Err(failure) = install_helper(
+        &sudo,
+        &executable,
+        uid,
+        ElevationPrompt::MacosUserHelperInstall,
+        json_output,
+    ) {
         return fail(json_output, failure);
     }
     // From here every failure also removes the helper this run installed.
@@ -376,7 +387,15 @@ fn refresh_existing(
     }
     // The helper first: its install also removes an old helper (one `sudo` prompt), and a
     // refused password leaves everything as it was.
-    if !helper_current && let Err(failure) = install_helper(sudo, executable, uid) {
+    if !helper_current
+        && let Err(failure) = install_helper(
+            sudo,
+            executable,
+            uid,
+            ElevationPrompt::MacosUserHelperRefresh,
+            json_output,
+        )
+    {
         return Some(fail(json_output, failure));
     }
     let refreshed = (|| {
