@@ -26,7 +26,7 @@ async function typeLine(page: Page, line: string): Promise<void> {
 /** The real server instance started per test and disposed afterwards. */
 let server: RealServer;
 test.beforeEach(async () => { server = await startRealServer({ port: Number(process.env.TRACER_TEST_PORT ?? 4679) }); });
-test.afterEach(async () => { await server.dispose(); });
+test.afterEach(async () => { await server?.dispose(); });
 
 /** All terminal output bytes the production server relayed to the browser so far. */
 const output = (): string => server.bridges.flatMap((bridge) => [...bridge.output.values()]).join("");
@@ -67,7 +67,7 @@ test("real shell receives exact Ctrl+key and arrow bytes and interrupts sleep 10
 
     // 2. Same check with Input Lock active (Ctrl+Shift+L).
     await page.keyboard.press("Control+Shift+L");
-    await expect.poll(() => page.locator("#stage").getAttribute("data-locked")).not.toBeNull();
+    await expect(page.locator("[data-input-lock]")).toHaveCount(1);
 
     await typeLine(
       page,
@@ -86,7 +86,7 @@ test("real shell receives exact Ctrl+key and arrow bytes and interrupts sleep 10
 
     // Release Input Lock.
     await page.keyboard.press("Control+Shift+L");
-    await expect.poll(() => page.locator("#stage").getAttribute("data-locked")).toBeNull();
+    await expect(page.locator("[data-input-lock]")).toHaveCount(0);
 
     // 3. Running `sleep 100` + Ctrl+C interrupts immediately with exit status 130.
     await typeLine(page, "sleep 100; echo SLEEP_STATUS=$?");
