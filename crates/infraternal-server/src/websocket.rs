@@ -3986,6 +3986,7 @@ mod link_notice_tests {
     //! A kept, doubted host link is never presented as a replay [D300, #234].
     use super::*;
 
+    /// Only opted-in viewers receive doubt notices, which do not wait for an Ack.
     #[test]
     fn doubt_notices_reach_only_viewers_that_announced_them_and_never_await_an_ack() {
         assert_eq!(

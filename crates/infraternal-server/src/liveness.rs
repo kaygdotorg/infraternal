@@ -296,6 +296,7 @@ mod tests {
         assert!(!route.retired());
     }
 
+    /// A scheduler stall does not expire a peer that answers within its allowance.
     #[tokio::test(start_paused = true)]
     async fn healthy_reply_survives_a_150ms_server_stall() {
         for mut route in [Liveness::host_link(), Liveness::answer_paced()] {
@@ -366,6 +367,7 @@ mod tests {
         assert_eq!(route.budget, Duration::from_millis(250));
     }
 
+    /// Sending again cannot renew an outstanding reply deadline.
     #[tokio::test(start_paused = true)]
     async fn pipelined_requests_do_not_renew_an_outstanding_deadline() {
         let mut route = Liveness::host_link();
@@ -390,6 +392,7 @@ mod tests {
         assert!(route.expired(), "another request cannot renew readiness");
     }
 
+    /// A late local callback does not charge the peer for a probe not yet sent.
     #[tokio::test(start_paused = true)]
     async fn late_native_probe_keeps_its_unissued_reply_allowance() {
         let mut route = Liveness::host_link();
@@ -404,6 +407,7 @@ mod tests {
         assert!(route.pong(nonce, stamp), "local delay is not peer silence");
     }
 
+    /// Server work after a timely answer does not expire the lease before another probe.
     #[tokio::test(start_paused = true)]
     async fn delayed_server_probe_does_not_expire_an_answered_route() {
         let mut route = Liveness::host_link();
@@ -421,6 +425,7 @@ mod tests {
         assert!(!route.expired());
     }
 
+    /// Stale replies cannot hide a missing response while newer probes are in flight.
     #[tokio::test(start_paused = true)]
     async fn missing_replies_expire_even_with_probes_in_flight() {
         let mut route = Liveness::host_link();
@@ -555,6 +560,7 @@ mod tests {
         }
     }
 
+    /// Browser and host-link estimators use the same allowance after one retransmission.
     #[tokio::test(start_paused = true)]
     async fn host_and_browser_allowance_cover_one_loss_recovery() {
         let mut host = Liveness::host_link();
@@ -572,6 +578,7 @@ mod tests {
         assert_eq!(browser.budget, Duration::from_millis(550));
     }
 
+    /// The host-link allowance keeps its LAN floor and both configured bounds.
     #[tokio::test(start_paused = true)]
     async fn host_allowance_has_a_floor_a_settled_long_haul_value_and_a_ceiling() {
         let mut lan = Liveness::host_link();

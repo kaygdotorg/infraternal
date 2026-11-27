@@ -3336,6 +3336,9 @@ fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) ->
     })
 }
 
+/// Decode the next complete host-link frame while preserving its borrowed payload.
+/// Correlated Pong frames carry only scalar state, so consume them without
+/// allocating or retaining a payload buffer.
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {

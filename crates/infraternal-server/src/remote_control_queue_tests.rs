@@ -16,6 +16,7 @@ async fn scheduled_probe_preserves_primary_at_full_native_control_capacity() {
     verify_saturated_primary(true).await;
 }
 
+/// Saturate the native control queue and verify its primary stream remains live.
 async fn verify_saturated_primary(wait_for_probe: bool) {
     let (server, node, root, _) = identities();
     let (store, _pool, host_id, _) = super::super::revocation::admitted_store(&node, &root).await;
