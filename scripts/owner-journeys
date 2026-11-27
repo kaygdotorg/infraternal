@@ -19,7 +19,7 @@ mkdir -p -- "$out"
 folder=$(mktemp -d "$out/run.XXXXXX")
 printf 'Owner journey evidence: %s\n' "$folder"
 # The software authenticator has a persistent signature counter. Keep this suite's runs serial.
-exec 9>"$HOME/.cache/codex-scratch/.owner-journeys.lock"
-flock 9
+exec 8>"$HOME/.cache/codex-scratch/.owner-journeys.lock"
+flock 8
 unset DEBUG PWDEBUG
 exec bun "$root/scripts/owner-journeys.d/run.ts" "$folder" "$mode" "${2:-}"
