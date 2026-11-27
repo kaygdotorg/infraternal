@@ -89,11 +89,16 @@ test("real shell receives exact Ctrl+key and arrow bytes and interrupts sleep 10
     await expect(page.locator("[data-input-lock]")).toHaveCount(0);
 
     // 3. Running `sleep 100` + Ctrl+C interrupts immediately with exit status 130.
-    await typeLine(page, "sleep 100; echo SLEEP_STATUS=$?");
+    //    The status is read by a second command line: an interactive shell drops the rest of a
+    //    line (`sleep 100; echo …`) once SIGINT kills its foreground command.
+    await typeLine(page, "sleep 100");
     await expect.poll(output, { timeout: 15_000 }).toContain("sleep 100");
     // sleep: let the shell spawn `sleep 100` before sending SIGINT via Ctrl+C.
     await page.waitForTimeout(300);
     await page.keyboard.press("Control+c");
+    await expect.poll(output, { timeout: 10_000 }).toContain("^C");
+    // Typed only after the interrupt; if `sleep` were still running, nothing would answer in time.
+    await typeLine(page, "echo SLEEP_STATUS=$?");
     await expect.poll(output, { timeout: 10_000 }).toContain("SLEEP_STATUS=130");
 
     expect(warnings.filter((w) => w.includes("Failed to encode key"))).toEqual([]);
