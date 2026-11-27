@@ -238,8 +238,45 @@ runtime and retains the same 5 GiB cache cap.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | x86_64 static | 1,445.078 | 2,546.534 / 239.983 | 17.59 / 20.78 | 2,327,953,408 / 5,959,598,080 / 8,287,551,488 | 16.05 / 22.36 / 38.33 | 374 / 151 / 23 |
 | aarch64 static | 1,640.553 | 2,645.596 / 184.062 | 11.45 / 13.63 | 3,725,619,200 / 5,670,809,600 / 9,396,428,800 | 14.63 / 24.96 / 40.75 | 270 / 71 / 16 |
+| Workspace test build | 1,514.522 | 2,695.536 / 342.163 | 43.44 / 58.21 | 14,484,410,368 / 8,400,629,760 / 22,885,040,128 | 20.73 / 33.90 / 67.26 | 508 / 268 / 0 |
 
-Both static outputs matched the unedited worktree's SHA-256. Hit rates
-were 68.25% on x86_64 and 75.63% on aarch64. Elapsed time rose by
-244.418 s and 213.279 s respectively. Median one-minute host load also
-rose from 18.09 to 22.36 and from 23.20 to 24.96.
+All three builds passed. Both static outputs matched the unedited
+worktree's SHA-256. Hit rates were 68.25% on x86_64, 75.63% on aarch64
+and 65.46% for the workspace test build. Including duplicates, reuse
+across the three builds grew from 1,099 of 1,681 requests (65.38%) to
+1,152 of 1,681 (68.53%). Wall time rose from 3,741.459 s to 4,600.153 s
+(23.0%), and CPU including the daemon rose from 8,634.011 s to
+8,818.974 s (2.1%). The edited case inherited a warmer store and ran at
+higher median host load in every stage. The edit's effect on wall time
+cannot be isolated from these runs. Both warm workspace stages compiled
+the test binaries. Test execution parity was measured at the original
+dev pin.
+
+[Warm build and edit receipts](https://git.kayg.org/attachments/4e052fa3-f84b-418f-b129-6c0451c96906)
+
+## Recommendation
+
+Keep the existing opt-in sccache setup. Rust-only kache preserved static
+output and test outcomes in the measured comparison. The three cold
+build stages took 4,105.324 s with kache and 4,000.434 s without a
+wrapper, a 2.6% increase. Total CPU including the daemon rose 5.5%.
+The warm builds demonstrated compiler reuse across directories, but the
+later workspace test build took 1,113.525 s against 897.378 s on the
+earlier wrapped pin. The source revisions, cache contents and host load
+vary across those measurements.
+
+If the owner wants a follow-up, compare pinned kache and the existing
+sccache setup in repeated, alternating runs at one revision, with
+matched host load, fresh targets and comparable cold and prewarmed
+stores. Measure complete build time alongside compiler requests.
+Keep the private Rust-only alias and disable build-script replay,
+target seeding, incremental seeding and shared hardlink restores.
+Restrict any shared store to a single trust domain. Use allocated bytes
+and the host's actual free-space floor for admission and cleanup.
+The warm cache alone peaked at 8.61 GiB with the 5 GiB blob budget.
+Any later release-package adoption needs a separate sandboxed Nix
+qualification.
+
+No repository code changed. The research-job exception makes
+`scripts/verify fast` inapplicable. The evidence includes the selected
+static builds, workspace test builds and cold workspace test execution.
