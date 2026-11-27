@@ -1,6 +1,6 @@
 # GotaTun side socket: small datagrams in their own `fq` flow
 
-**Job:** J1159, J1211 · **Issue:** #260 · **Status:** on by default for infraternal nodes, per peer, only
+**Job:** J1159, J1211, J1256 · **Issue:** #260 · **Status:** on by default for infraternal nodes, per peer, only
 for peers that advertise it (see "Turned on") · **Decision owner:** kayg · **Follows:** J1139, J1140 (`gotatun-send-limit.md`), J1143
 
 ## Problem
@@ -143,3 +143,48 @@ asking each node for a per-peer capability (a node is capable or it is not); sen
 peer and relying on the peer to ignore them (kernel WireGuard drops them, 71.7% loss).
 
 Measured numbers are on #260 (J1211 comment) and in `research/` receipts attached there.
+
+## On macOS (J1256, 2026-11-26)
+
+Same product behaviour as on Linux, no macOS-specific change needed. Raw receipts are on #260
+(J1256 comment); the harnesses are not in the repository.
+
+**Mixed mesh, product nodes.** A Mac node (macOS 26.5.2 VM) and two Linux nodes (L1 side socket
+on, L2 `INFRATERNAL_MESH_SIDE_SOCKET=off`) in network namespaces, in two VMs on one physical host, configured by
+the production coordinator compiler. Three counterbalanced rounds of Mac on / Mac off, 48 windows of
+30 s (`iperf3`, both directions, 1 and 8 flows) with the `rr.py` keystroke probe.
+
+- Side-port datagrams appear only between two advertising nodes: Mac → L1 2,371–2,491 per upload
+  window, L1 → Mac 745–885 per download window; none to or from L2, and none anywhere with the
+  Mac's switch off.
+- All 72,000 probes were answered.
+- Throughput (0.16–0.44 Gbit/s) and probe latency show no consistent difference between on and
+  off. The path is bounded by the VM host's user-mode network, so this proves interoperation, not
+  a latency effect.
+
+**Real Mac on Wi-Fi.** MacBook Air M1, macOS 27.2.1, 5 GHz. It has no root, so no utun: a harness
+ran one engine per host (the product's GotaTun pin and socket options) with TCP-shaped bulk in a
+fixed window and a 64 B probe every 20 ms. Medians over counterbalanced pairs of 30 s windows,
+Mac uploading, off / on:
+
+| series (peer) | load | Mbit/s | probe p50 ms |
+|---|---|---|---|
+| 6 pairs (Linux, behind a user-mode NAT) | 8 flows | 296 / 292 | 25.0 / 24.3 |
+| 6 pairs (same) | 1 flow | 220 / 217 | 14.8 / 15.2 |
+| 5 pairs (macOS, same LAN) | 8 flows | 327 / 334 | 32.0 / 31.8 |
+| 5 pairs (same) | 1 flow | 234 / 221 | 14.3 / 15.1 |
+| 5 pairs (same, probe skips the harness's bulk queue) | 8 flows | 303 / 320 | 32.6 / 31.6 |
+| 5 pairs (same) | 1 flow | 195 / 227 | 16.7 / 14.8 |
+
+The signs change from series to series: **no measurable gain and no measurable cost.** Idle
+probes were already p50 4 ms, p99 92 ms on this Wi-Fi, so tails are the radio's. In a sample of
+four saturating windows the Mac's own FQ-CoDel interface queue was empty at the median sample
+(a flow was backlogged in 30–45% of samples). The likely reading, not proven, is that most of the
+added delay sits where a second flow cannot pass it: below that queue (driver, radio) or ahead of
+the socket. The 30–70% gain of the Linux pairing needs a sender whose flow-fair queue holds the
+backlog, which this Mac rarely did.
+
+On macOS 27 the engine's connected-send pool stays unused (J1108), and 24 of the fork's
+`macos_connected` tests fail there both at the pin and at the pre-side-socket base `e87fef91`; its
+13 side-socket tests pass.
+

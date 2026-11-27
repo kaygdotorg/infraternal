@@ -15,19 +15,9 @@
 # run is never quoted as the gate; `scripts/verify fast` stays the gate (docs/PROCESS.md).
 # Sourced by scripts/verify after rust.sh, whose rust_run_gate and summary it reuses.
 
-# Runs `cargo test <args>` with the hang backstop around the TEST RUN only (#509).
-# The build comes first, untimed (`--no-run`): a cold compile on a loaded host can
-# take most of the budget, and a timeout that covers it reports a slow build as a
-# hung test (exit 124, seen once on a busy compute01). The timeout then starts on
-# an up-to-date build, so it measures only what it is meant to catch: a test
-# binary that never ends. Failure of the build keeps cargo's own exit code.
+# Runs `cargo test <args>` under the quick pre-check's hang bound (rust.sh).
 quick_cargo_test() {
-    cargo test "$@" --no-run || return $?
-    if command -v timeout >/dev/null; then
-        timeout --kill-after=30 "${VERIFY_QUICK_TEST_TIMEOUT:-1500}" cargo test "$@"
-    else
-        cargo test "$@"
-    fi
+    rust_bounded_cargo_test "${VERIFY_QUICK_TEST_TIMEOUT:-1500}" "$@"
 }
 
 # Prints the comma-separated `package/feature` list that `verify fast` gives the named packages (#581).

@@ -16,7 +16,7 @@
 use infraternal_db::rusqlite::{Connection, types::Value};
 use sqlx::{
     SqlStr, SqlitePool,
-    migrate::{Migration as SqlxMigration, MigrationType, Migrator},
+    migrate::{MigrateError, Migration as SqlxMigration, MigrationType, Migrator},
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use std::{
@@ -28,8 +28,14 @@ use std::{
 /// Relative path from the `infraternal-server` crate manifest to the checked-in fixture.
 const FIXTURE_RELATIVE_PATH: &str = "tests/fixtures/prod-schema.sqlite";
 
-/// The shipping `sqlx` migration set embedded at compile time.
-static SHIPPING_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
+/// Use the same executable SQL and original migration checksums as the server.
+mod shipping {
+    include!(concat!(env!("OUT_DIR"), "/compact_migrations.rs"));
+}
+use shipping::MIGRATIONS as SHIPPING_MIGRATIONS;
+
+/// Version of the schema rewrite that adds the device host mode.
+const DEVICE_HOST_MODE_VERSION: i64 = 20_261_125_055_624;
 
 /// Tables whose row count or existing column bytes are intentionally changed by
 /// a pending migration not yet reflected in the checked-in fixture.
@@ -430,6 +436,77 @@ async fn prod_schema_fixture_applies_pending_migrations_and_preserves_rows() {
         .expect("rusqlite runner accepts fixture");
     assert_eq!(report.validated, SHIPPING_MIGRATIONS.migrations.len());
     assert_eq!(report.applied, Vec::<i64>::new());
+}
+
+/// Build the test deployment's physical order by removing and appending its
+/// late-arriving `reported_os` column on a private fixture copy.
+fn append_reported_os_last(path: &Path) {
+    let conn = Connection::open(path).expect("open fixture for out-of-order schema");
+    conn.execute_batch(
+        "ALTER TABLE remote_hosts DROP COLUMN reported_os;
+         ALTER TABLE remote_hosts ADD COLUMN reported_os TEXT;
+         UPDATE remote_hosts SET device_approved=0, device_os='macOS', reported_os='Linux';",
+    )
+    .expect("materialize host records in test deployment order");
+}
+
+/// The historical SQL silently shifted populated records. The shipping
+/// migrator rejects that layout and rolls back the DDL and its history entry.
+#[tokio::test]
+async fn device_host_mode_refuses_rows_in_test_deployment_order() {
+    let original = FixtureCopy::new("original-device-mode");
+    append_reported_os_last(original.path());
+    let pool = open_sqlx_pool(original.path()).await;
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("old guard accepts the alternate column order");
+    let (hosts, shifted): (i64, i64) = sqlx::query_as(
+        "SELECT count(*), count(*) FILTER (WHERE typeof(reported_os) = 'integer'
+            AND typeof(device_approved) = 'text' AND typeof(device_os) = 'text')
+         FROM remote_hosts",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read shifted storage classes");
+    assert_ne!(hosts, 0);
+    assert_eq!(
+        shifted, hosts,
+        "the old migration produces the three shifted storage classes from #604"
+    );
+    pool.close().await;
+
+    let guarded = FixtureCopy::new("guarded-device-mode");
+    append_reported_os_last(guarded.path());
+    assert_sqlite_healthy(guarded.path(), "before guarded schema rewrite");
+    let before = capture_snapshot(guarded.path());
+    let pool = open_sqlx_pool(guarded.path()).await;
+    let error = SHIPPING_MIGRATIONS
+        .run(&pool)
+        .await
+        .expect_err("shipping migration must reject shifted host storage classes");
+    assert!(matches!(
+        &error,
+        MigrateError::ExecuteMigration(_, version) if *version == DEVICE_HOST_MODE_VERSION
+    ));
+    assert!(
+        error.to_string().contains("remote_hosts_storage_classes"),
+        "{error}"
+    );
+    let recorded: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = ?)")
+            .bind(DEVICE_HOST_MODE_VERSION)
+            .fetch_one(&pool)
+            .await
+            .expect("read migration history after rollback");
+    assert!(!recorded);
+    pool.close().await;
+    assert_sqlite_healthy(guarded.path(), "after guarded schema rollback");
+    assert_rows_preserved(
+        &before,
+        &capture_snapshot(guarded.path()),
+        "after guarded schema rollback",
+    );
 }
 
 /// Proves the upgrade harness exercises a real pending migration on top of the

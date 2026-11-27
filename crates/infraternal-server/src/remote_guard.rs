@@ -26,6 +26,9 @@ pub(crate) struct Revocations {
     /// kinds cannot starve each other at the cap: always-on devices must not
     /// lock out host connections, reconnects after a restart included.
     device_signals: Mutex<HashMap<Epoch, Weak<Revocation>>>,
+    /// Login cleanup has its own signal because ordinary removal opens this
+    /// delivery path after cutting normal host access. Forget cuts both.
+    cleanup_signals: Mutex<HashMap<Epoch, Weak<Revocation>>>,
     // Storage refusal must not let the last transport drop the cancellation
     // signal and permit a reconnect. Successful tombstones release this hold.
     cuts: Mutex<Cuts>,
@@ -114,7 +117,6 @@ impl Revocations {
     /// The live signal for `epoch`, creating it when there is none. A signal
     /// created while its host or epoch is cut starts cancelled.
     pub(crate) fn register(&self, host: Uuid, uid: u32) -> io::Result<Arc<Revocation>> {
-        let epoch = (host, uid);
         // Lock order: cuts, then signals (the same as `cut`).
         let cuts = self
             .cuts
@@ -127,6 +129,20 @@ impl Revocations {
         } else {
             &self.signals
         };
+        Self::register_signal(list, (host, uid), cuts.hosts.contains(&host))
+    }
+
+    /// Register a cleanup-only connection without reusing the cut for normal host access.
+    fn register_cleanup(&self, host: Uuid) -> io::Result<Arc<Revocation>> {
+        Self::register_signal(&self.cleanup_signals, (host, 0), false)
+    }
+
+    /// Reuse the live signal for this lane, with a bound on retained registrations.
+    fn register_signal(
+        list: &Mutex<HashMap<Epoch, Weak<Revocation>>>,
+        epoch: Epoch,
+        cut: bool,
+    ) -> io::Result<Arc<Revocation>> {
         let mut signals = list
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -139,7 +155,7 @@ impl Revocations {
                 return Err(io::ErrorKind::WouldBlock.into());
             }
         }
-        let signal = Revocation::new(cuts.hosts.contains(&host));
+        let signal = Revocation::new(cut);
         signals.insert(epoch, Arc::downgrade(&signal));
         Ok(signal)
     }
@@ -168,12 +184,31 @@ impl Revocations {
         &self,
         host: Uuid,
     ) -> io::Result<(Cut, Vec<tokio::sync::OwnedRwLockWriteGuard<()>>)> {
-        let cut = self.cut(host)?;
+        Ok(Self::drain(self.cut(host)?).await)
+    }
+
+    /// Stop both ordinary and cleanup-only writes before Forget commits.
+    /// Pin both cleanup lanes even when disconnected, so a concurrent
+    /// admission observes a cut signal or rechecks the committed ledger.
+    pub(crate) async fn quiesce_forget(
+        &self,
+        host: Uuid,
+    ) -> io::Result<(Cut, Vec<tokio::sync::OwnedRwLockWriteGuard<()>>)> {
+        let cleanup = self.register_cleanup(host)?;
+        let _successor = self.register(host, 0)?;
+        let mut cut = self.cut(host)?;
+        cleanup.changed.send_replace(true);
+        cut.0.push(cleanup);
+        Ok(Self::drain(cut).await)
+    }
+
+    /// Wait for writes already admitted in each cut lane to leave the transport.
+    async fn drain(cut: Cut) -> (Cut, Vec<tokio::sync::OwnedRwLockWriteGuard<()>>) {
         let mut drained = Vec::with_capacity(cut.0.len());
         for signal in &cut.0 {
             drained.push(signal.writes.clone().write_owned().await);
         }
-        Ok((cut, drained))
+        (cut, drained)
     }
 
     /// Fence new writes on every epoch of `host` before waiting for SQLite's
@@ -350,12 +385,20 @@ impl AuthorityGuard {
             .map_err(io::Error::other)?;
         let now = i64::try_from(elapsed.as_secs()).map_err(io::Error::other)?;
         if let Ok(successor) = store.admit_successor(&fingerprint, now).await {
-            return Self::successor(store, successor, elapsed);
+            return Self::successor(store, successor, elapsed, now).await;
         }
         let (identity, person) = store
             .admit_cleanup(&fingerprint, now)
             .await
             .map_err(|_| denied())?;
+        let signal = store.1.register_cleanup(identity.host)?;
+        let live = store
+            .admit_cleanup(&fingerprint, now)
+            .await
+            .map_err(|_| denied())?;
+        if live.0 != identity || live.1 != person || *signal.changed.borrow() {
+            return Err(denied());
+        }
         let lifetime =
             Duration::from_secs(u64::try_from(identity.not_after).map_err(|_| denied())?)
                 .checked_sub(elapsed)
@@ -367,8 +410,7 @@ impl AuthorityGuard {
             cleanup_person: Some(person),
             successor: None,
             identity: identity.clone(),
-            // Never revive the ordinary registration already cut by revocation.
-            signal: Revocation::new(false),
+            signal,
             certificate: Arc::new(
                 watch::channel(Admission {
                     fingerprint,
@@ -391,17 +433,24 @@ impl AuthorityGuard {
     /// cut of the rootless epoch leaves alone, and which host removal cuts
     /// with every other epoch (R2). Its lifetime ends with the promotion's
     /// deadline (or its certificate, for an uninstall).
-    fn successor(
+    async fn successor(
         store: EnrollmentStore,
         successor: crate::enrollment::promotion::SuccessorAuthority,
         elapsed: Duration,
+        now: i64,
     ) -> io::Result<Self> {
         let lifetime =
             Duration::from_secs(u64::try_from(successor.not_after).map_err(|_| denied())?)
                 .checked_sub(elapsed)
                 .ok_or_else(denied)?;
         let signal = store.1.register(successor.host, 0)?;
-        if *signal.changed.borrow() {
+        // Forget can end the promotion's cleanup between the initial lookup
+        // and registration. Check again with the signal already pinned.
+        let live = store
+            .admit_successor(&successor.fingerprint, now)
+            .await
+            .map_err(|_| denied())?;
+        if live != successor || *signal.changed.borrow() {
             return Err(denied());
         }
         let identity = HostAuthority {

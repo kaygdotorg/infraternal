@@ -30,6 +30,8 @@ use std::{
 /// refreshes write only to that link, never to whichever link holds the shared name later.
 #[derive(Clone, Debug, Default)]
 struct PeerRouteState {
+    /// Subnet routes share the same lock as the live endpoints they are derived from.
+    client_routes: crate::subnet_routes::ClientRoutes,
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
     overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
     /// Live direct endpoints learned after the coordinator's configured endpoint.
@@ -273,6 +275,10 @@ fn update_relay_route_mtu(
         {
             state.live_endpoints.insert(key, learned);
         }
+    } else if previous.is_some() != relay_mtu.is_some() && !state.client_routes.wanted.is_empty() {
+        // The relay uses a local shim, so its former direct endpoint no longer needs a hole.
+        state.client_routes.dirty = true;
+        state.sync_client_routes(false);
     }
     result
 }
@@ -2573,7 +2579,12 @@ impl Node {
         &self,
         network: crate::policy::networks::Network,
     ) -> serde_json::Value {
-        self.subnet.route_json(network)
+        crate::subnet_routes::route_json(
+            lock_route_state(&self.peer_route_state)
+                .client_routes
+                .states
+                .get(&network),
+        )
     }
 
     /// Whether this node forwards for the networks it serves, for `mesh routes`.
@@ -2601,36 +2612,15 @@ impl Node {
                 return;
             }
         };
-        let wanted = crate::subnet_routes::reachable_networks(&config);
-        // Every address the tunnel's own UDP goes to, including endpoints learned since the
-        // snapshot. A network holding one is left out (see `Device::sync_network_routes`).
-        // Limit: this runs when a snapshot is applied or the node starts, not when an endpoint
-        // is learned later, so a peer that roams into an already routed network keeps that
-        // route until the next snapshot (follow-up: the live-endpoint callback has no access to
-        // the node's route status).
-        let endpoints = crate::subnet_routes::underlay_addresses(
-            &config,
-            lock_route_state(&self.peer_route_state)
-                .live_endpoints
-                .values()
-                .copied(),
-        );
-        self.subnet.routes =
-            match Device::sync_network_routes(&wanted, config.addresses.ipv4, &endpoints) {
-                Ok(states) => states,
-                Err(error) => {
-                    tracing::warn!(error = %error, "mesh subnet routes could not be installed");
-                    wanted
-                        .iter()
-                        .map(|network| {
-                            (
-                                *network,
-                                crate::subnet_routes::RouteState::Failed(error.to_string()),
-                            )
-                        })
-                        .collect()
-                }
-            };
+        {
+            let mut state = lock_route_state(&self.peer_route_state);
+            let endpoints = crate::subnet_routes::underlay_addresses(
+                &config,
+                state.live_endpoints.values().copied(),
+            );
+            state.client_routes.configure(&config, &endpoints);
+            state.sync_client_routes(true);
+        }
         let (served, _) = crate::firewall::served_networks(&config);
         if served.is_empty() {
             self.stop_forwarding();
@@ -2704,14 +2694,16 @@ impl Node {
     /// or with the link.
     fn stop_subnet_routes(&mut self) {
         self.stop_forwarding();
-        let wanted_any = !std::mem::take(&mut self.subnet.routes).is_empty();
-        if wanted_any
-            && let Some(config) = &self.config
-            && let Err(error) = Device::sync_network_routes(&[], config.addresses.ipv4, &[])
+        let mut state = lock_route_state(&self.peer_route_state);
+        if !state.client_routes.states.is_empty()
+            && let Some(config) = self.config.as_ref()
+            && let Err(error) =
+                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None)
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");
         }
+        state.client_routes = crate::subnet_routes::ClientRoutes::default();
     }
 
     /// Apply one configuration chunk; [`Self::chunk`] adds the subnet-route reconcile.

@@ -3,10 +3,11 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::AsyncBufReadExt;
 
+/// Keystroke latency while the socket serves a 10,000-node Mesh snapshot over a delayed link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "weighted real-binary 300 ms Mesh/PTY measurement"]
 async fn mesh_snapshot_keystroke_latency_at_10000_nodes() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     // The auth unit fixture has one connection. A long inventory transaction
     // would monopolize it and park the independent authority watchdog. Use a
     // real disk-backed eight-connection pool, matching the deployed runtime.

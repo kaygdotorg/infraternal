@@ -124,8 +124,37 @@ class Campaign:
                     proof.request(proc, chunk)
         else:
             self.apply("All")
-            proof.run("ping", "-n", "-c", "1", "-W", "5", self.addresses[1]["ipv4"])
+            self.wait_for_peer_ipv4()
         self.remove_sender_filter()
+
+    def wait_for_peer_ipv4(self):
+        """Wait up to 10 seconds for a real ICMP reply through the newly applied mesh route."""
+        destination = self.addresses[1]["ipv4"]
+        start = time.monotonic()
+        deadline = start + 10
+        attempts = 0
+        detail = "no reply"
+        while (remaining := deadline - time.monotonic()) > 0:
+            attempts += 1
+            try:
+                ping = subprocess.run(
+                    ["ping", "-n", "-c", "1", "-W", "1", destination],
+                    capture_output=True, text=True, timeout=remaining,
+                )
+            except subprocess.TimeoutExpired:
+                break
+            if ping.returncode == 0:
+                print(f"mesh setup: IPv4 echo reply from {destination} after {attempts} "
+                      f"attempt(s) in {time.monotonic() - start:.2f}s")
+                return
+            detail = (ping.stderr or ping.stdout).strip()
+            if ping.returncode != 1:  # iputils uses 1 for no reply and 2 for other errors.
+                break
+        raise RuntimeError(
+            f"mesh setup: waited for an IPv4 ICMP echo reply from {destination}; "
+            f"{attempts} attempt(s) in {time.monotonic() - start:.2f}s (10s limit). "
+            f"Last ping: {detail}"
+        )
 
     def remote(self, *args):
         return proof.namespace(self.child.pid, *args)

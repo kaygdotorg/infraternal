@@ -5,6 +5,7 @@ use crate::embedded::AgentError;
 #[cfg(any(test, feature = "native-streams"))]
 use crate::remote_guard::AuthorityGuard;
 use bytes::{Bytes, BytesMut};
+use futures_util::FutureExt;
 use infraternal_agent::{
     channel::Channel,
     remote_native::NativeChannel,
@@ -672,7 +673,8 @@ impl RemoteLink {
 
     /// [`Self::write`] for the host actor: a frame that would open a terminal stream fails
     /// with `WouldBlock` at once when the agent has granted none that is free, so one
-    /// terminal never holds up the others (#562).
+    /// terminal never holds up the others (#562). Closing a native terminal also retires
+    /// it immediately if there is no room to write the Close.
     ///
     /// # Errors
     /// As [`Self::write`], plus that refusal.
@@ -1378,9 +1380,17 @@ impl RemoteLink {
                     link.terminal_channel(stream, frame, self.primed(), open)
                         .await?
                 };
-                let result = Transmit::default()
-                    .send(channel.as_ref(), stream, frame)
-                    .await;
+                let mut transmit = Transmit::default();
+                let send = transmit.send(channel.as_ref(), stream, frame);
+                let result = if terminal_close && matches!(open, StreamOpen::IfAvailable) {
+                    // A flow-controlled Close must not block the host actor from
+                    // consuming Pongs. Its write deadline can outlast the host's
+                    // measured reply allowance and take healthy terminals down.
+                    send.now_or_never()
+                        .unwrap_or_else(|| Err(io::ErrorKind::WouldBlock.into()))
+                } else {
+                    send.await
+                };
                 if terminal_close {
                     #[cfg(all(test, feature = "mesh-transport-proof", target_os = "linux"))]
                     if result.is_err() && std::env::var_os("ACCEPTANCE_STANDING_STAGES").is_some() {

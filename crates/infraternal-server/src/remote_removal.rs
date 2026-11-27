@@ -83,7 +83,14 @@ impl Removal {
         now: i64,
     ) -> Result<Value, crate::auth::Error> {
         let user = self.auth.bootstrap_owner(token, now).await?;
-        if !self.auth.bootstrap_host(&user, host).await {
+        // Both Remove and Forget renew the same owner session. A host
+        // awaiting cleanup still qualifies, matching the finish check below.
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM remote_hosts WHERE id=? AND owner_id=? AND revoked_at IS NULL)")
+            .bind(host.as_bytes().as_slice())
+            .bind(&user)
+            .fetch_one(&self.pool)
+            .await?;
+        if !owned {
             return Err(crate::auth::Error::Denied);
         }
         let mut taps = self.taps.lock().await;
@@ -356,7 +363,7 @@ impl Removal {
         .map_err(|_| crate::auth::Error::Denied)?
     }
 
-    /// Forget a retired-unreachable host in the browser's existing admin window (D369).
+    /// Forget a revoked host in the browser's existing admin window (D369, #591).
     /// No command is sent to the machine; its denial tombstone remains permanently.
     pub(crate) async fn forget_browser(
         &self,
@@ -381,18 +388,17 @@ impl Removal {
         .await
     }
 
-    /// Review an owner's expired pending removal without changing its audit or delivery state.
+    /// Review an owner's pending removal without changing its audit or delivery state.
     pub(crate) async fn review_forget_with_key(
         &self,
         person: &str,
         host: Uuid,
     ) -> Result<Value, crate::auth::Error> {
-        let now = crate::runtime::unix_seconds().map_err(|_| crate::auth::Error::Denied)?;
         let mut tx = self.pool.begin().await?;
-        let (name, _) = Self::forget_record(&mut tx, person, host, now).await?;
+        let (name, _) = Self::forget_record(&mut tx, person, host).await?;
         let name = display_name(&name);
         Ok(
-            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it."}),
+            json!({"dry_run":true,"host_id":host,"host":name,"label":format!("Forget {name}"),"effect":"Forgetting removes this host from the list and stops cleanup retries. Cleanup already sent to the machine may still finish. The audit record stays. If the infraternal agent is still installed, sign in to the machine and uninstall it the way it was installed. For a manual install, stop and remove its service unit, then delete its agent files and identity key."}),
         )
     }
 
@@ -424,14 +430,14 @@ impl Removal {
         .await
     }
 
-    /// Snapshot cleanup and any removal details only while this owner's host is retired-unreachable.
-    /// Inventory also shows abandoned setups without a removal row, so that row is optional here too.
+    /// Snapshot cleanup and any removal details for a revoked host still listed for its owner.
+    /// An unconfirmed cleanup already denies normal access. A valid certificate can only
+    /// deliver cleanup, so it does not block Forget. Abandoned setups can lack a removal row.
     /// An ineligible selection is Invalid, distinct from a Denied session or key authority check.
     async fn forget_record(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         person: &str,
         host: Uuid,
-        now: i64,
     ) -> Result<(String, String), crate::auth::Error> {
         sqlx::query_as(
             "SELECT COALESCE(h.hostname,b.address,lower(hex(h.id))),
@@ -444,11 +450,9 @@ impl Removal {
              LEFT JOIN remote_host_removals r ON r.host_id=h.id
              LEFT JOIN remote_host_bootstrap b ON b.host_id=h.id
              WHERE h.id=? AND h.owner_id=? AND u.owner=1 AND h.revoked_at IS NULL AND q.confirmed=0
-             AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)
-             AND NOT EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id
-                            AND c.revoked_at IS NULL AND c.not_after>MAX(?,unixepoch()))",
+             AND EXISTS(SELECT 1 FROM remote_certificates c WHERE c.host_id=h.id)",
         )
-            .bind(host.as_bytes().as_slice()).bind(person).bind(now)
+            .bind(host.as_bytes().as_slice()).bind(person)
             .fetch_optional(&mut **tx).await?.ok_or(crate::auth::Error::Invalid)
     }
 
@@ -512,10 +516,27 @@ impl Removal {
                 }
             }
         }
-        let (name, detail) = Self::forget_record(&mut tx, &entry.user, entry.host, live).await?;
+        let (name, detail) = Self::forget_record(&mut tx, &entry.user, entry.host).await?;
         sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'remote.host.forget',?,0,?,?)")
             .bind(&entry.user).bind(entry.host.to_string()).bind(live).bind(detail).execute(&mut *tx).await?;
         sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,?) WHERE id=?")
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        // A successor can deliver its own cleanup after ordinary removal
+        // tombstones the host. Forget ends that delivery as well, preserving
+        // the promotion and certificate records without claiming a receipt.
+        sqlx::query(crate::enrollment::promotion::ABANDON_WHERE_HOST)
+            .bind(live)
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE remote_host_promotions SET cleanup='none' WHERE host_id=? AND cleanup IN ('uninstall','retire')")
+            .bind(entry.host.as_bytes().as_slice())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE remote_certificates SET revoked_at=COALESCE(revoked_at,?) WHERE host_id=? AND role='successor'")
             .bind(live)
             .bind(entry.host.as_bytes().as_slice())
             .execute(&mut *tx)
@@ -543,7 +564,7 @@ impl Removal {
         let _fence = self
             .store
             .1
-            .quiesce(entry.host)
+            .quiesce_forget(entry.host)
             .await
             .map_err(|_| crate::auth::Error::Denied)?;
         tx.commit().await?;
@@ -551,7 +572,7 @@ impl Removal {
         self.store.publish_revoked_authority().await;
         self.store.2.publish();
         Ok(
-            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here. The machine itself was not changed.",display_name(&name))}),
+            json!({"host_id":entry.host,"state":"forgotten","message":format!("{} was forgotten here.",display_name(&name))}),
         )
     }
 

@@ -18,6 +18,8 @@ mod retirement;
 mod roamed_peer;
 /// Startup and journal writes sweep crash-left rotation journal temporaries.
 mod rotation_journal;
+/// Which peers use the second UDP socket, and what the Mac's socket factory binds (#260).
+mod side_socket;
 /// Real-Mac proof that an approved network behind a router peer is routed into the utun and
 /// reached through the tunnel, and that revoking it takes the route away (#580).
 mod subnet_routes;

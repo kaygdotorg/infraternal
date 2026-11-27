@@ -499,13 +499,8 @@ async fn a_successor_token_is_bound_to_its_staged_key_and_spent_once() {
     );
 }
 
-/// R1 + R2 at the transport: a successor's certificate is admitted only as a
-/// private successor guard (uid 0, never the host's ordinary guard), its
-/// operations end the moment the promotion is abandoned, after which it is
-/// admitted again only to uninstall itself; host removal cuts it too.
-#[tokio::test]
-async fn a_successor_guard_is_private_and_ends_with_its_promotion() {
-    use crate::remote_guard::AuthorityGuard;
+/// Prepare the normal certificate and promotion session for wall-clock admission.
+async fn promotion_on_real_clock() -> (EnrollmentStore, SqlitePool, Uuid, i64) {
     let now = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -527,6 +522,95 @@ async fn a_successor_guard_is_private_and_ends_with_its_promotion() {
         .execute(&pool)
         .await
         .unwrap();
+    (store, pool, host, now)
+}
+
+/// Forget must end cleanup admission for the host's abandoned root successor too.
+#[tokio::test]
+async fn forget_refuses_abandoned_successor_cleanup_reconnect() {
+    let (store, pool, host, now) = promotion_on_real_clock().await;
+    let person = Uuid::new_v4().to_string();
+    sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,name,owner,recovery_hash) VALUES(?,'review owner',1,'fixture')",
+    )
+    .bind(&person)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE sessions SET user_id=? WHERE token_hash='s'")
+        .bind(&person)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE remote_hosts SET owner_id=? WHERE id=?")
+        .bind(&person)
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let attempt = Uuid::from_u128(79);
+    enrolled_promotion(&store, host, attempt, now).await;
+    let token = "promotion-forget-session";
+    sqlx::query("UPDATE sessions SET token_hash=? WHERE token_hash='s'")
+        .bind(crate::auth::hash(token))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let auth = crate::auth::Auth::new(pool.clone(), "forget.test", "https://forget.test/")
+        .await
+        .unwrap();
+    let service = crate::remote_removal::Removal::new(
+        auth,
+        pool,
+        store.clone(),
+        crate::remote_runtime::RemoteHosts::default(),
+        std::path::PathBuf::new(),
+    );
+    let review = service.start(token, host, true, now).await.unwrap();
+    assert_eq!(
+        service
+            .finish_host(token, host, review["review"].as_str().unwrap(), now)
+            .await
+            .unwrap()["state"],
+        "pending"
+    );
+    assert_eq!(
+        store.admit_successor(&[7; 32], now).await.unwrap().purpose,
+        SuccessorPurpose::Uninstall
+    );
+    assert_eq!(
+        service.forget_browser(token, host, now).await.unwrap()["state"],
+        "forgotten"
+    );
+    let history: (String, String, bool) = sqlx::query_as(
+        "SELECT p.state,p.cleanup,c.revoked_at IS NOT NULL FROM remote_host_promotions p
+         JOIN remote_certificates c ON c.fingerprint=p.successor_fingerprint WHERE p.attempt=?",
+    )
+    .bind(attempt.as_bytes().as_slice())
+    .fetch_one(&store.0)
+    .await
+    .unwrap();
+    assert_eq!(history, ("abandoned".to_owned(), "none".to_owned(), true));
+    assert!(
+        crate::remote_guard::AuthorityGuard::admit_transport(store, [7; 32])
+            .await
+            .is_err(),
+        "a forgotten host still admits the abandoned successor for uninstall"
+    );
+}
+
+/// R1 + R2 at the transport: a successor's certificate is admitted only as a
+/// private successor guard (uid 0, never the host's ordinary guard), its
+/// operations end the moment the promotion is abandoned, after which it is
+/// admitted again only to uninstall itself; host removal cuts it too.
+#[tokio::test]
+async fn a_successor_guard_is_private_and_ends_with_its_promotion() {
+    use crate::remote_guard::AuthorityGuard;
+    let (store, _, host, now) = promotion_on_real_clock().await;
     let attempt = Uuid::from_u128(78);
     enrolled_promotion(&store, host, attempt, now).await;
     assert!(AuthorityGuard::admit(store.clone(), [7; 32]).await.is_err());
