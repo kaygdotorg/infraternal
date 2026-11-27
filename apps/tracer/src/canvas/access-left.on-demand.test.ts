@@ -60,6 +60,29 @@ function fakeCore(): { core: CoreScreen; said: string[] } {
   return { core, said };
 }
 
+/** The initial inventory burst shares one read while later host events keep the Inbox fresh. */
+test("startup host notifications share the first access report read", async () => {
+  const { core } = fakeCore();
+  let hostChange = (): void => {};
+  let reads = 0;
+  const source = createAccessReportInbox(core, {
+    list: async () => { reads++; return { reports: [], more: 0 }; },
+    dismiss: async () => {},
+  }, listener => { hostChange = listener; return () => {}; });
+  try {
+    hostChange();
+    hostChange();
+    expect(reads).toBe(0);
+    await source.refresh();
+    expect(reads).toBe(1);
+    hostChange();
+    await source.refresh();
+    expect(reads).toBe(2);
+  } finally {
+    source.dispose();
+  }
+});
+
 test("a changed report is one line: host first, the sentence as the body, the files and lines as the details", () => {
   const item = accessReportItem(entry(), () => {});
   expect(item.title).toBe("build-01: access left behind");
