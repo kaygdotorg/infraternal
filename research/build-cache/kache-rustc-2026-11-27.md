@@ -76,19 +76,27 @@ Wall time increased 27.5% in this serial comparison. Median one-minute
 host load also rose, from 21.66 to 27.46. Total measured CPU including
 the daemon rose 12.7%. These are single draws on a shared host.
 
-## Static aarch64 control
+## Static aarch64 comparison
 
 The aarch64 build uses the same per-arm target directories as the x86_64
 build, so Cargo can keep host-side build tools and the already staged Zig.
 The architecture-specific output starts cold. Target totals include the
 x86_64 outputs retained from the previous phase.
 
-The wrapper-free aarch64 build passed in 1,640.010 s wall, 2,804.749 s
-user CPU and 204.039 s system CPU. The 30,250,912-byte artifact is a stripped
-static ELF with no ELF interpreter. Its SHA-256 is
+Both builds produced the same 30,250,912-byte stripped static ELF with no
+ELF interpreter. SHA-256 is
 `1174cd826ba0a81900ad8b23a4dbdbe183ce590e4127fc1d12501608766ee767`.
-The target peaked at 3,842,617,344 allocated bytes in 55 samples. One-minute
-load was 13.08–50.74, with median 24.80.
+
+| Mode | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target bytes | Peak cache bytes | Peak combined bytes | Load 1m min/median/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Control | 1,640.010 | 2,804.749 / 204.039 | — | 3,842,617,344 | — | 3,842,617,344 | 13.08 / 24.80 / 50.74 |
+| Kache | 1,353.158 | 2,638.676 / 190.101 | 10.59 / 12.13 | 3,724,115,968 | 2,331,275,264 | 6,055,391,232 | 11.66 / 24.43 / 39.51 |
+
+The aarch64 wrapper logged 0 local hits, 357 misses and 0 duplicate
+compiles. Wall time fell 17.5% and measured CPU including the daemon
+fell 5.2%. Across both static builds, wall rose from 3,094.362 s to
+3,207.946 s and total CPU rose from 5,966.962 s to 6,184.049 s.
+The retained x86_64 cache is included in the aarch64 wrapped disk total.
 
 The harness initially rejected the aarch64 wording `statically linked`
 after Cargo had already exited successfully. I checked the saved artifact
