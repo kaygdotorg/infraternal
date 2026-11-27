@@ -57,12 +57,21 @@ bytes across the target, blob cache and private diagnostic cache on a
 Load averages describe the shared build host. The cache and target are on
 separate filesystems, so this trial measures cross-filesystem copies.
 
-## Static x86_64 control
+## Static x86_64 comparison
 
-The wrapper-free build passed and produced a 34,032,888-byte stripped
-static PIE with no ELF interpreter. Its SHA-256 is
+Both builds passed and produced the same 34,032,888-byte stripped static
+PIE with no ELF interpreter. SHA-256 is
 `ac2bcb3d7e2ec39f0db9b1ae7ea74ad7300111687b5a3359c0f7bb69d0b01456`.
-Wall time was 1,454.352 s, user CPU was 2,717.928 s, and system CPU
-was 240.246 s. The target peaked at 2,288,332,800 allocated bytes
-across 49 samples. One-minute host load ranged from 12.15 to 36.79,
-with median 21.66.
+The wrapped run's generated OpenSSL Makefile named the repository's
+`.cargo/musl-cc-avx512.sh` as its compiler, and the target contained zero
+`.kache-real` files.
+
+| Mode | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target bytes | Peak cache bytes | Peak combined bytes | Load 1m min/median/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Control | 1,454.352 | 2,717.928 / 240.246 | — | 2,288,332,800 | — | 2,288,332,800 | 12.15 / 21.66 / 36.79 |
+| Cold kache | 1,854.788 | 3,014.213 / 276.480 | 19.49 / 22.37 | 2,288,312,320 | 1,336,188,928 | 3,624,501,248 | 17.05 / 27.46 / 48.68 |
+
+Kache recorded 0 local hits, 548 misses and 0 duplicate compiles.
+Wall time increased 27.5% in this serial comparison. Median one-minute
+host load also rose, from 21.66 to 27.46. Total measured CPU including
+the daemon rose 12.7%. These are single draws on a shared host.
