@@ -350,6 +350,38 @@ impl RelayManager {
         (accepted, serving)
     }
 
+    /// Stop pair paths after the node removes its mesh interface and private key.
+    pub(super) fn mesh_down(&self) {
+        let paths = {
+            let mut state = lock(&self.state);
+            state.paths_generation = state.paths_generation.wrapping_add(1);
+            state.paths_starting = None;
+            state.starting = false;
+            state.pairs.clear();
+            state.active.clear();
+            state.paths.take().map(|paths| paths.running)
+        };
+        if let Some(paths) = paths {
+            self.spawn(async move { paths.shutdown(false).await });
+        }
+    }
+
+    /// Rebuild pair tokens from the node's newly committed mesh identity.
+    pub(super) fn identity_changed(&self) {
+        {
+            let mut state = lock(&self.state);
+            if state.paths.is_some() {
+                state.starting = true;
+                state.active.clear();
+            } else if state.paths_starting.is_some() {
+                // Invalidate a start that may already have read the previous host identity.
+                state.paths_generation = state.paths_generation.wrapping_add(1);
+                state.paths_starting = None;
+            }
+        }
+        self.start_paths();
+    }
+
     /// Judge `node` once, `wait` from now (D81: one timer per installed peer, never repeated).
     fn deadline(&self, node: NodeId, generation: u64, wait: Duration) {
         let owner = self.owner.clone();
@@ -710,9 +742,6 @@ async fn run_paths(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>, start: Pa
         tracing::warn!("relay: no listed relay resolved to an IPv4 address");
         return;
     }
-    let Ok(credentials) = credentials().map(HostLeaf::credentials) else {
-        return;
-    };
     let started = {
         let mut owner = lock(&owner);
         let Ok(node) = owner.node() else {
@@ -723,7 +752,13 @@ async fn run_paths(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>, start: Pa
         };
         let probes = node.direct_probes();
         let (events, queue) = tokio::sync::mpsc::channel(256);
-        RelayPaths::start(secret, port, specs.clone(), credentials, events)
+        let source = credentials.clone();
+        let client_config = move || {
+            source()
+                .map(HostLeaf::credentials)
+                .and_then(infraternal_plugin_relay::tls::client_config)
+        };
+        RelayPaths::start_with_config_source(secret, port, specs.clone(), client_config, events)
             .map(|paths| match probes {
                 Some((probes, Some(answers))) => paths.with_direct_probes(probes, answers),
                 _ => paths,
@@ -916,7 +951,7 @@ mod tests {
     use super::*;
 
     /// A pair fixture for manager state transitions that do not need a live data plane.
-    fn pair(generation: u64, relayed: Option<Reason>) -> Pair {
+    pub(super) fn pair(generation: u64, relayed: Option<Reason>) -> Pair {
         Pair {
             peer: Peer {
                 key: crate::policy::model::PublicKey([1; 32]),
@@ -1055,5 +1090,100 @@ mod tests {
         client
             .connection()
             .close(quinn::VarInt::from_u32(0), b"test finished");
+    }
+}
+
+/// Mesh-down path cleanup is tested without starting a `WireGuard` device or relay socket.
+#[cfg(test)]
+mod mesh_down_review_tests {
+    use super::*;
+
+    /// The `mesh.down` action clears relay pairs along with the node's mesh interface.
+    #[test]
+    fn mesh_down_action_clears_pair_state() {
+        use infraternal_plugin_api::AgentPlugin;
+
+        let mut plugin = super::MeshNodePlugin::from_node(crate::node::Node::default());
+        let manager = RelayManager::new(plugin.owner.clone(), &RelayList::default());
+        plugin.relays = Some(manager.clone());
+        {
+            let mut state = lock(&manager.state);
+            state.pairs.insert(
+                NodeId(1),
+                Pair {
+                    peer: Peer {
+                        key: crate::policy::model::PublicKey([1; 32]),
+                        previous_key: None,
+                        previous_active: false,
+                        addresses: crate::dataplane::Addresses {
+                            ipv4: "10.254.0.2".parse().expect("IPv4 fixture"),
+                            ipv6: "fd01::2".parse().expect("IPv6 fixture"),
+                        },
+                        endpoint: None,
+                        candidates: Vec::new(),
+                        ipv4_only: false,
+                        side_port: false,
+                    },
+                    installed: SystemTime::now(),
+                    relayed: Some(Reason::NoHandshake),
+                    generation: 3,
+                },
+            );
+            state.active.insert(label(NodeId(1)), Some(0));
+            state.starting = true;
+        }
+
+        plugin.call("mesh.down", b"{}").expect("mesh down action");
+
+        let state = lock(&manager.state);
+        assert!(state.pairs.is_empty());
+        assert!(state.active.is_empty());
+        assert!(!state.starting);
+    }
+
+    /// Mesh down invalidates a path start that is still using the previous mesh identity.
+    #[test]
+    fn mesh_down_invalidates_an_inflight_start() {
+        let owner = Arc::new(Mutex::new(Owner {
+            node: None,
+            path: None,
+            restore_failed: false,
+        }));
+        let manager = RelayManager::new(owner, &RelayList::default());
+        {
+            let mut state = lock(&manager.state);
+            state.paths_starting = Some(2);
+            state.paths_generation = 2;
+            state.starting = true;
+        }
+
+        manager.mesh_down();
+
+        let state = lock(&manager.state);
+        assert_eq!(state.paths_starting, None);
+        assert!(!state.starting);
+        assert_eq!(state.paths_generation, 3);
+    }
+
+    /// A key commit invalidates startup work that captured the predecessor mesh identity.
+    #[test]
+    fn identity_change_invalidates_an_inflight_start() {
+        let owner = Arc::new(Mutex::new(Owner {
+            node: None,
+            path: None,
+            restore_failed: false,
+        }));
+        let manager = RelayManager::new(owner, &RelayList::default());
+        {
+            let mut state = lock(&manager.state);
+            state.paths_starting = Some(4);
+            state.paths_generation = 4;
+        }
+
+        manager.identity_changed();
+
+        let state = lock(&manager.state);
+        assert_eq!(state.paths_starting, None);
+        assert_eq!(state.paths_generation, 5);
     }
 }

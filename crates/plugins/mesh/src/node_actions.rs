@@ -940,6 +940,8 @@ impl AgentPlugin for MeshNodePlugin {
         #[cfg(all(feature = "relay", target_os = "linux"))]
         let mut relay_counters = None;
         let request = parse_action(action, input)?;
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        let mut relay_identity_changed = false;
         // Proxy callbacks update this node's firewall, so release the Mesh owner lock before
         // notifying the sibling component to preserve one-way lock ordering.
         let (result, observed_config) = {
@@ -1043,6 +1045,10 @@ impl AgentPlugin for MeshNodePlugin {
                     let (value, key_changed) = rotation_response(node, request)?;
                     if key_changed {
                         self.changed.store(true, Ordering::Release);
+                        #[cfg(all(feature = "relay", target_os = "linux"))]
+                        {
+                            relay_identity_changed = true;
+                        }
                     }
                     value
                 }
@@ -1188,6 +1194,16 @@ impl AgentPlugin for MeshNodePlugin {
             });
             (result, observed_config)
         };
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if action == "mesh.down"
+            && let Some(relays) = &self.relays
+        {
+            relays.mesh_down();
+        }
+        #[cfg(all(feature = "relay", target_os = "linux"))]
+        if relay_identity_changed && let Some(relays) = &self.relays {
+            relays.identity_changed();
+        }
         if matches!(
             action,
             "mesh.up" | "mesh.down" | "mesh.rotation.commit" | "mesh.rotation.finish"

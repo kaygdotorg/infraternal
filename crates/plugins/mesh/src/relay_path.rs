@@ -604,7 +604,7 @@ struct Shared {
     by_token: RwLock<HashMap<Token, HostId>>,
     wg_port: u16,
     endpoint: quinn::Endpoint,
-    config: quinn::ClientConfig,
+    config: ClientConfigSource,
     relays: Vec<RelaySpec>,
     live: Vec<RwLock<Option<Arc<Live>>>>,
     peers: RwLock<HashMap<HostId, Arc<Peer>>>,
@@ -618,6 +618,9 @@ struct Shared {
     /// [`RelayPaths::with_direct_probes`]); without them pairs have relay candidates only.
     probes: OnceLock<DirectProbes>,
 }
+
+/// Builds a fresh client identity for each relay connection attempt.
+type ClientConfigSource = Arc<dyn Fn() -> io::Result<quinn::ClientConfig> + Send + Sync>;
 
 impl Shared {
     /// Monotonic time since this node's relay paths started.
@@ -720,6 +723,23 @@ impl RelayPaths {
         events: mpsc::Sender<Event>,
     ) -> io::Result<Self> {
         let config = infraternal_plugin_relay::tls::client_config(credentials)?;
+        Self::start_with_config_source(secret, wg_port, relays, move || Ok(config.clone()), events)
+    }
+
+    /// Start relay paths using credentials that are re-read for each new QUIC connection.
+    /// # Errors
+    /// Fails if the initial credentials cannot build a client configuration or if no client
+    /// socket can be bound.
+    pub(crate) fn start_with_config_source(
+        secret: PairSecret,
+        wg_port: u16,
+        relays: Vec<RelaySpec>,
+        config: impl Fn() -> io::Result<quinn::ClientConfig> + Send + Sync + 'static,
+        events: mpsc::Sender<Event>,
+    ) -> io::Result<Self> {
+        let config: ClientConfigSource = Arc::new(config);
+        // Catch a bad current leaf before installing paths; later calls refresh it after renewal.
+        let _ = config()?;
         let endpoint = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())?;
         let shared = Arc::new(Shared {
             local: secret.public(),
@@ -1857,15 +1877,19 @@ async fn drive(shared: Arc<Shared>, index: usize) {
         } else {
             CONNECT
         };
-        if let Ok((client, notices)) = Client::connect(
-            &shared.endpoint,
-            shared.config.clone(),
-            spec.address,
-            &spec.name,
-            connect_deadline,
-        )
-        .await
-        {
+        let connection = match (shared.config)() {
+            Ok(config) => Client::connect(
+                &shared.endpoint,
+                config,
+                spec.address,
+                &spec.name,
+                connect_deadline,
+            )
+            .await
+            .ok(),
+            Err(_) => None,
+        };
+        if let Some((client, notices)) = connection {
             serve(&shared, index, client, notices).await;
             last_healthy = Some(Instant::now());
             failures = 0;
@@ -2609,17 +2633,18 @@ mod review_j375_tests {
         )
         .unwrap();
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let mut config =
+        let client_config =
             tls::client_config(authority.issue(Purpose::Host(HostId([1; 16])))).unwrap();
         let mut transport = quinn::TransportConfig::default();
         transport
             .initial_mtu(1472)
             .min_mtu(1472)
             .mtu_discovery_config(None);
-        config.transport_config(Arc::new(transport));
+        let mut client_config = client_config;
+        client_config.transport_config(Arc::new(transport));
         let (client, _notices) = Client::connect(
             &endpoint,
-            config.clone(),
+            client_config.clone(),
             relay.local_addr().unwrap(),
             "relay.mesh.test",
             Duration::from_secs(5),
@@ -2669,7 +2694,7 @@ mod review_j375_tests {
             by_token: RwLock::default(),
             wg_port: 0,
             endpoint,
-            config,
+            config: Arc::new(move || Ok(client_config.clone())),
             relays: vec![],
             live: vec![],
             peers: RwLock::new(HashMap::from([(host, peer.clone())])),
@@ -2705,5 +2730,67 @@ mod review_j375_tests {
             final_budget, 1200,
             "inactive relay overwrote the direct path's safe route budget"
         );
+    }
+}
+
+/// Relay path credential renewal stays independent from connection and shim tests.
+#[cfg(all(test, feature = "test-support"))]
+mod relay_identity_refresh_tests {
+    use super::*;
+    use infraternal_plugin_relay::{
+        relay::{Admission, Limits, Relay},
+        testing::{Authority, Purpose},
+        tls,
+    };
+
+    /// A reconnect after the relay closes asks the credential source for another client config.
+    #[tokio::test]
+    async fn relay_reconnect_reads_fresh_client_configuration() {
+        let mut authority = Authority::new();
+        let config =
+            tls::client_config(authority.issue(Purpose::Host(HostId([4; 16])))).unwrap();
+        let admission: Admission = Arc::new(|_| true);
+        let relay = Relay::start(
+            "127.0.0.1:0".parse().unwrap(),
+            authority.issue(Purpose::Relay("relay.example.org")),
+            Limits::default(),
+            admission,
+        )
+        .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source_calls = calls.clone();
+        let source = move || {
+            source_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(config.clone())
+        };
+        let (events, _receiver) = mpsc::channel(16);
+        let paths = RelayPaths::start_with_config_source(
+            PairSecret::from_private(&[5; 32]).unwrap(),
+            9,
+            vec![RelaySpec {
+                address: relay.local_addr().unwrap(),
+                name: "relay.example.org".into(),
+            }],
+            source,
+            events,
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while relay.stats().hosts != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the initial relay connection completes");
+        relay.close().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while calls.load(Ordering::Relaxed) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drive asks for fresh credentials before its reconnect");
+        paths.shutdown(false).await;
     }
 }
