@@ -940,12 +940,26 @@ fn status_result(
     }
     if node.role == infraternal_status::Role::None {
         let steps = [
-            "Join an existing server with infraternal up <server-url>.",
-            "Set up a server with infraternal server init.",
-        ];
+            (
+                &["up"][..],
+                "Join a server with infraternal up <server-url>.",
+            ),
+            (
+                &["server", "init"][..],
+                "Set up a server with infraternal server init.",
+            ),
+        ]
+        .into_iter()
+        .filter(|(path, _)| {
+            registry
+                .find(path)
+                .is_some_and(|entry| entry.action.visible)
+        })
+        .map(|(_, step)| step.to_owned())
+        .collect();
         result = result
             .with_text_message("Infraternal isn't set up on this machine.")
-            .with_text_next(steps.map(str::to_owned).to_vec());
+            .with_text_next(steps);
     }
     for step in next {
         result = result.with_next_step(step);
