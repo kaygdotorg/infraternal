@@ -25,7 +25,7 @@ export interface BranchLeaf {
   heading?: boolean;
   /** A quiet note after the label: new output (a dot), or the result of a finished command. */
   mark?: "output" | "ok" | "fail";
-  /** What the warm tooltip of the mark says, when the default ("Finished successfully", "Failed", "New output") is not enough. */
+  /** What the warm tooltip of the mark says, when the default ("Finished", "Failed", "New output") is not enough. */
   markTip?: string;
   /** The label is a name the person may change by double click, double tap, F2 or the row menu (the tree's `rename` option saves it). */
   renamable?: boolean;
@@ -68,7 +68,7 @@ export interface BranchedMenu {
 export const branchRowId = (row: Element): string | undefined => (row as HTMLElement).dataset.id ?? row.querySelector<HTMLElement>(".bm-leaf")?.dataset.id;
 
 const DETACHED_NAME = "Detached";
-const MARK_TIP = { output: "New output", ok: "Finished successfully", fail: "Failed" } as const;
+const MARK_TIP = { output: "New output", ok: "Finished", fail: "Failed" } as const;
 const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;
 const STUB = 12;

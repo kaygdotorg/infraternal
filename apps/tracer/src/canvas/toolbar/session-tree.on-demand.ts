@@ -21,7 +21,7 @@ const leaf = (host: string, s: SessionRecord, renamable: boolean): BranchSection
   const code = s.exit?.code ?? 0;
   const mark = s.state === "exited" ? (code !== 0 ? "fail" : "ok") : s.activity;
   // The tick or cross on an exited row is the exit code in a picture; its tooltip says so in words.
-  const markTip = s.state === "exited" ? (code !== 0 ? `Failed, exit code ${code}` : "Finished successfully, exit code 0") : undefined;
+  const markTip = s.state === "exited" ? (code !== 0 ? `Failed, exit code ${code}` : "Finished, exit code 0") : undefined;
   const meta = s.state === "exited" ? (WORDS ? (code !== 0 ? `failed · ${code}` : "finished") : String(code)) : undefined;
   return { id: `s:${host}/${s.id}`, label: s.name, state: s.state, ...(mark ? { mark } : {}), ...(markTip ? { markTip } : {}), ...(meta ? { meta } : {}), ...(renamable ? { renamable: true, renameLabel: "Session name" } : {}) };
 };

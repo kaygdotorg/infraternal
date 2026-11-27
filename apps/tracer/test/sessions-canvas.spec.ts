@@ -299,9 +299,9 @@ test("the tick, the cross and the dot beside a session say what they mean in a t
       await expect(page.locator(".tip")).toBeHidden();
       return text;
     };
-    expect(await tipOf("build-01/release")).toBe("Finished successfully"); // detached, a command finished well
+    expect(await tipOf("build-01/release")).toBe("Finished"); // detached, a command finished well
     expect(await tipOf("build-01/journal")).toBe("New output");
-    expect(await tipOf("build-01/bench")).toBe("Finished successfully, exit code 0"); // exited: the tick is the exit code in a picture
+    expect(await tipOf("build-01/bench")).toBe("Finished, exit code 0"); // exited: the tick is the exit code in a picture
     expect(await tipOf("build-01/migrate")).toBe("Failed, exit code 1");
   } finally { await context.close(); }
 });
