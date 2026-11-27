@@ -94,7 +94,7 @@ export async function shellJourney(page: Page, label: string, machine?: string) 
   try {
     if (handle) {
       await step(`${label}-shell-output`, page, () => proveShell(page, shell, handle));
-      await step(`${label}-shell-keys`, page, () => checkKeys(page, shell.receipt));
+      await step(`${label}-shell-keys`, page, () => checkKeys(page, shell, handle));
     }
   } finally {
     const ended = await step(`${label}-sidebar-end`, page, () => endShell(page, shell.receipt.id));

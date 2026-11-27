@@ -4,7 +4,8 @@
 `scripts/owner-journeys` signs in to https://test.ssh.kayg.org using compute01's
 existing test-admin helper. It opens a fresh server shell at 1440 × 900 and
 393 × 852 in Chromium. The probe requires a marker from the actual shell and
-checks the terminal stream's bytes for Ctrl+C, the four arrows, and Ctrl+R. It
+checks the bytes for Ctrl+C, the four arrows, and Ctrl+R on the wire and at
+the remote PTY. It
 asks the sidebar to end only the session it just created. The iPhone row
 exercises the phone layout in Chromium at iPhone size. Safari and physical
 iPhone behavior need separate device runs.
