@@ -275,7 +275,7 @@ pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
     let base = Path::new(MACHINE_BASE);
     require_root_directories(base)?;
     let mut paths = vec![PathBuf::from(daemon.plist), base.to_path_buf()];
-    let host = if nix::unistd::Uid::effective().is_root() {
+    let (host, alias_created) = if nix::unistd::Uid::effective().is_root() {
         let receipt = base.join(MACHINE_OWNER);
         require_owned_plist(&fs::symlink_metadata(&receipt)?)?;
         let mut contents = String::new();
@@ -286,16 +286,25 @@ pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
             .split_once(' ')
             .ok_or(io::ErrorKind::InvalidData)?
             .0;
-        if validate_installation(host)? {
-            paths.push(PathBuf::from(MACHINE_LINK));
-        }
-        Some(host.to_owned())
+        (Some(host.to_owned()), validate_installation(host)?)
     } else {
-        if fs::read_link(MACHINE_LINK).is_ok_and(|link| link == Path::new(MACHINE_BINARY)) {
-            paths.push(PathBuf::from(MACHINE_LINK));
-        }
-        None
+        // The ownership receipt is private. Preview the matching alias and
+        // let the elevated cleanup check the receipt before removing it.
+        (None, true)
     };
+    let link = Path::new(MACHINE_LINK);
+    if fs::symlink_metadata(link).is_ok_and(|metadata| metadata.uid() == 0)
+        && fs::read_link(link).is_ok_and(|target| target == Path::new(MACHINE_BINARY))
+    {
+        paths.push(link.to_path_buf());
+        let alias = link.with_file_name("infra");
+        if alias_created
+            && fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.uid() == 0)
+            && fs::read_link(&alias).is_ok_and(|target| target == Path::new("infraternal"))
+        {
+            paths.push(alias);
+        }
+    }
     Ok((host, paths))
 }
 

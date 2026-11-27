@@ -1099,7 +1099,7 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
             Err(error) => return Err(error),
         }
     }
-    for directory in [&paths.base, &paths.logs] {
+    for directory in [&paths.logs, &paths.base] {
         match fs::remove_dir_all(directory) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}

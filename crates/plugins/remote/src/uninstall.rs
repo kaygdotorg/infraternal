@@ -841,7 +841,14 @@ async fn cleanup_locked(
         ));
     }
     match owned_payload_cache(&paths.base, uid) {
-        Ok(Some(cache)) => std::fs::remove_dir_all(cache)?,
+        Ok(Some(cache)) => {
+            if let Err(error) = std::fs::remove_dir_all(&cache) {
+                report.push(format!(
+                    "Couldn't remove {} ({error}). Remove the cache by hand.",
+                    cache.display()
+                ));
+            }
+        }
         Ok(None) => {}
         Err(_) => report.push(format!(
             "Left {} because infraternal could not verify its ownership.",
