@@ -5,7 +5,7 @@ use crate::{
     dataplane::Config,
     firewall::Firewall,
     gotatun_node::Engine,
-    wireguard::{Client, Device, Key},
+    wireguard::{Client, Device, Key, RouteValidation},
 };
 use std::os::unix::net::UnixStream;
 use std::{
@@ -748,6 +748,8 @@ pub struct Node {
     authority_reset: AuthorityResetState,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
+    /// Proposed addresses already checked against observed foreign route prefixes.
+    route_validation: RouteValidation,
     /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
     peer_route_state: Arc<Mutex<PeerRouteState>>,
     /// Passively restores deleted owned peer routes until this node goes down.
@@ -792,6 +794,7 @@ impl Default for Node {
             authority_reset: AuthorityResetState::Stable,
             pending: None,
             routes: BTreeSet::new(),
+            route_validation: RouteValidation::default(),
             peer_route_state: Arc::default(),
             route_repair: None,
             underlay_announce: Arc::default(),
@@ -1067,17 +1070,16 @@ impl Node {
             node.owned = true;
             node.kernel_owner = kernel_proof.clone();
             let identity = Device::identity_at(link.ifindex);
-            // A process can stop after marking the interface but before setting
-            // its key. With no saved configuration there are no retained mesh
-            // sessions to preserve; remove that incomplete owned startup only,
-            // by the index the proof read.
-            let incomplete = state.config.is_none()
-                && (identity
+            // A process can stop after marking the interface but before setting its key and
+            // binding its port. Such a link carries no session, whether or not a configuration
+            // from before a reboot is still saved, and no restart could adopt it. Remove that
+            // incomplete owned startup, by the index the proof read, so `up` starts afresh.
+            let incomplete = identity
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                || identity
                     .as_ref()
-                    .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
-                    || identity
-                        .as_ref()
-                        .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0));
+                    .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0);
             if incomplete {
                 Device::delete_ifindex(link.ifindex)?;
                 node.owned = false;
@@ -1089,9 +1091,6 @@ impl Node {
                 return Ok(node);
             }
             let (public_key, mut port) = identity?;
-            if public_key.0 == [0; 32] || port == 0 {
-                return Err(io::ErrorKind::NotConnected.into());
-            }
             port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
@@ -1373,6 +1372,7 @@ impl Node {
         }
         Ok(())
     }
+    /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
     ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
@@ -1383,6 +1383,18 @@ impl Node {
                 .as_ref()
                 .ok_or(io::ErrorKind::NotConnected)?
                 .counters(),
+        }
+    }
+
+    /// Read the actual engine membership so reconciliation can retire orphan keys.
+    fn installed_peer_keys(&self) -> io::Result<Vec<crate::policy::model::PublicKey>> {
+        match self.engine_kind {
+            EngineKind::Kernel => Ok(Device::counters()?.into_keys().collect()),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .peer_keys(),
         }
     }
 
@@ -1796,9 +1808,11 @@ impl Node {
                 }
             }
             EngineKind::GotaTun => {
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("recorded")?;
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
                 let route_endpoint_updater = self.route_endpoint_updater();
-                let engine = Engine::start(
+                let (engine, tun) = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
                     listen_port,
@@ -1808,14 +1822,14 @@ impl Node {
                     route_endpoint_updater,
                     Arc::clone(&self.underlay_announce),
                 )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("bound")?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
                     || !thp_disabled
                     || !offloads_enabled
                 {
-                    let mut engine = engine;
-                    let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 if let Some(store) = &self.store {
@@ -1824,32 +1838,32 @@ impl Node {
                     } else {
                         crate::listen_port::DEFAULT_PORT
                     };
-                    if let Err(error) = store.record_listen_port(saved) {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
+                    store.record_listen_port(saved)?;
                 }
-                let route_repair = match RouteRepairWorker::start(
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("port-recorded")?;
+                let route_repair = RouteRepairWorker::start(
                     Arc::clone(&self.peer_route_state),
                     Arc::clone(&self.underlay_announce),
-                ) {
-                    Ok(worker) => worker,
-                    Err(error) => {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
-                };
+                )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("route-listening")?;
+                self.save(self.config.as_ref(), true)?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("saved")?;
+                // Commit point (D332): the interface outlives this process only from here, when
+                // the saved state holds both the enabled choice and the proof that lets the next
+                // start take the link back. Every earlier stop or error drops the last queue
+                // descriptor and the kernel removes the link, so no start leaves one behind that
+                // the next start has to refuse. A node without a store can never prove a link,
+                // so its link stays transient. An adopted link is already persistent.
+                if self.store.is_some() && adopt.is_none() {
+                    tun.persist()?;
+                }
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("persisted")?;
                 self.owned = true;
                 self.gotatun = Some(engine);
-                if let Err(error) = self.save(self.config.as_ref(), true) {
-                    if let Some(mut engine) = self.gotatun.take() {
-                        let _ = engine.stop();
-                    }
-                    self.owned = false;
-                    return Err(error);
-                }
                 self.enabled = true;
                 self.route_repair = Some(route_repair);
                 let identity = Identity {
@@ -1867,6 +1881,8 @@ impl Node {
                 self.identity = Some(identity.clone());
                 // The host input table admits exactly the port this socket bound (D386).
                 self.firewall.set_listen_port(Some(identity.port))?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("listening")?;
                 Ok(identity)
             }
         }
@@ -3686,7 +3702,7 @@ impl Node {
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
-        Device::check_routes(&proposed)?;
+        self.route_validation.check(&proposed)?;
         let old_peers = self.config.as_ref().map(|old| &old.peers);
         let changed: Vec<_> = config
             .peers
@@ -3707,10 +3723,9 @@ impl Node {
             .flatten()
             .collect();
         let retired_keys: Vec<_> = self
-            .peer_counters()?
-            .keys()
+            .installed_peer_keys()?
+            .into_iter()
             .filter(|key| !desired.contains(key))
-            .copied()
             .collect();
         let mut route_overrides_to_clear: BTreeSet<_> = retired_keys.iter().copied().collect();
         if let Some(old) = &self.config {
@@ -4269,3 +4284,8 @@ mod route_repair_tests;
 #[cfg(test)]
 #[path = "node_live_route_tests.rs"]
 mod live_route_tests;
+
+/// Stops or fails a Linux `GotaTun` start after each step and checks that the next one works.
+#[cfg(test)]
+#[path = "node_startup_crash_tests.rs"]
+pub(crate) mod startup_crash_tests;

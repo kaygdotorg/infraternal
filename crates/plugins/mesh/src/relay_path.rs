@@ -73,14 +73,58 @@ use infraternal_plugin_relay::{
 use std::{
     collections::HashMap,
     io,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle};
+use tokio::{
+    io::{Interest, unix::AsyncFd},
+    sync::mpsc,
+    task::JoinHandle,
+};
+
+/// A loopback datagram socket whose only reactor interest is readability. Relay injection
+/// sends directly and drops on congestion, so a writable event would only wake the runtime.
+struct ShimSocket(AsyncFd<UdpSocket>);
+
+impl ShimSocket {
+    /// Bind an ephemeral port and accept datagrams only from the engine port.
+    fn bind(engine_port: u16) -> io::Result<Self> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+        socket.set_nonblocking(true)?;
+        socket.connect((Ipv4Addr::LOCALHOST, engine_port))?;
+        Ok(Self(AsyncFd::with_interest(socket, Interest::READABLE)?))
+    }
+
+    /// Return the loopback address advertised as this peer's endpoint.
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.0.get_ref().local_addr()
+    }
+
+    /// Wait for input before the caller allocates room for a relay frame.
+    async fn readable(&self) -> io::Result<()> {
+        self.0.readable().await.map(|_| ())
+    }
+
+    /// Append one datagram after the relay header without initializing or copying its payload.
+    #[allow(unsafe_code)]
+    fn try_recv(&self, buffer: &mut BytesMut) -> io::Result<()> {
+        let size = self.0.try_io(Interest::READABLE, |socket| {
+            socket2::SockRef::from(socket).recv(buffer.spare_capacity_mut())
+        })?;
+        // SAFETY: recv initialized exactly this many bytes in the spare capacity.
+        unsafe { buffer.advance_mut(size) };
+        Ok(())
+    }
+
+    /// Attempt injection at once. The caller counts congestion as a dropped datagram.
+    fn try_send(&self, payload: &[u8]) -> io::Result<usize> {
+        self.0.get_ref().send(payload)
+    }
+}
 
 /// Largest `WireGuard` packet the shim reads: a mesh-MTU data packet is 1412.
 const PACKET: usize = 1_500;
@@ -277,7 +321,7 @@ struct Peer {
     /// Moves the engine's endpoint for this peer back to its direct endpoint, keeping the
     /// session; `None` when the pair has no direct endpoint.
     use_direct: Option<Arc<dyn Fn() -> io::Result<()> + Send + Sync>>,
-    socket: UdpSocket,
+    socket: ShimSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
     state: Mutex<PeerState>,
@@ -692,13 +736,10 @@ impl RelayPaths {
         if let Some(existing) = read(&self.shared.peers).get(&peer) {
             return existing.socket.local_addr();
         }
-        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         // Connected: only the selected engine's UDP socket can feed this shim. Do not
         // update the peer endpoint until settle confirms an active relay; updating both
         // endpoints while the direct path is still pending starts crossed handshakes.
-        socket
-            .connect((Ipv4Addr::LOCALHOST, self.shared.wg_port))
-            .await?;
+        let socket = ShimSocket::bind(self.shared.wg_port)?;
         let local = socket.local_addr()?;
         let relayed_peer = dataplane::Peer {
             endpoint: Some(local),
@@ -941,11 +982,9 @@ async fn outbound(shared: Arc<Shared>, peer: Arc<Peer>) {
         }
         let mut buffer = BytesMut::with_capacity(wire::HEADER + PACKET);
         buffer.put_u32(0);
-        match peer.socket.try_recv_buf(&mut buffer) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
-            // A refused send from an earlier datagram surfaces here; keep going.
-            Err(_) => continue,
+        // Read readiness can go stale, and a refused send can surface on this receive.
+        if peer.socket.try_recv(&mut buffer).is_err() {
+            continue;
         }
         let Some((live, id)) = read(&peer.active)
             .clone()
@@ -1829,8 +1868,8 @@ impl Drop for Observer {
 
 #[cfg(test)]
 mod tests {
-    //! The relay trigger, link probes and the link choice; the data path itself runs in the
-    //! namespace proof and `examples/relay_echo.rs`.
+    //! The relay trigger, link probes, link choice and loopback socket. The full data path runs
+    //! in the namespace proof and `examples/relay_echo.rs`.
     use super::{
         LinkId, PING, PONG, PROBE_LEN, PeerState, RelayMtuTracker, direct_failed, parse_probe,
         probe_frame, wire,
@@ -1838,6 +1877,41 @@ mod tests {
     use crate::wireguard::Counters;
     use infraternal_mesh::path_choice::Path;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// The shim accepts only its engine's datagrams, preserves the relay prefix, and injects
+    /// a reply into the same engine socket.
+    #[tokio::test]
+    async fn shim_socket_keeps_the_engine_connected_in_both_directions() {
+        use super::ShimSocket;
+        use bytes::BytesMut;
+        use std::net::Ipv4Addr;
+        use tokio::net::UdpSocket;
+
+        let engine = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let shim = ShimSocket::bind(engine.local_addr().unwrap().port()).unwrap();
+        let foreign = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = shim.local_addr().unwrap();
+        foreign.send_to(b"foreign", addr).await.unwrap();
+        engine.send_to(b"cipher", addr).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), shim.readable())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut frame = BytesMut::with_capacity(32);
+        frame.extend_from_slice(b"link");
+        shim.try_recv(&mut frame).unwrap();
+        assert_eq!(&frame[..], b"linkcipher");
+
+        assert_eq!(shim.try_send(b"reply").unwrap(), 5);
+        let mut reply = [0; 16];
+        let (size, source) =
+            tokio::time::timeout(Duration::from_secs(5), engine.recv_from(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(source, addr);
+        assert_eq!(&reply[..size], b"reply");
+    }
 
     /// A probe survives the relay's framing and is never confused with `WireGuard` ciphertext.
     #[test]
@@ -2266,13 +2340,14 @@ mod review_j375_tests {
             Ok(())
         });
         let host = HostId([2; 16]);
+        let engine = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let peer = Arc::new(Peer {
             host,
             prepare_handshake: Arc::new(|| Ok(())),
             handshake_starter: Arc::new(|| {}),
             route_mtu_updater: callback,
             use_direct: None,
-            socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+            socket: ShimSocket::bind(engine.local_addr().unwrap().port()).unwrap(),
             starting: AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
             state: Mutex::new(PeerState {

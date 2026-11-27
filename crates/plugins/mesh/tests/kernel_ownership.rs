@@ -6,11 +6,12 @@
 #![allow(clippy::unwrap_used)]
 
 use infraternal_plugin_mesh::{
+    dataplane::{Chunk, DefaultPolicy},
     node::{EngineKind, Node},
-    policy::model::PublicKey,
+    policy::model::{Addresses, NodeId, PublicKey},
     wireguard::{Device, INTERFACE, Key},
 };
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, process::Command};
 
 fn private_state(name: &str) -> std::path::PathBuf {
     let state = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
@@ -165,6 +166,69 @@ fn our_own_unkeyed_kernel_link_is_still_cleaned_up() {
     let (unkeyed, after) = result.unwrap();
     assert!(unkeyed, "the unkeyed link was created");
     assert_eq!(after, None, "restore left our own incomplete link behind");
+}
+
+/// The smallest complete configuration the node saves: its own addresses and no peers.
+fn snapshot_without_peers(local_key: PublicKey) -> Chunk {
+    Chunk {
+        local_key: Some(local_key),
+        server: Some(NodeId(1)),
+        authority_epoch: None,
+        rotation_operation: None,
+        node: NodeId(2),
+        #[cfg(feature = "mesh-dns")]
+        name: None,
+        #[cfg(feature = "mesh-dns")]
+        dns_suffix: "internal".to_owned(),
+        from_version: None,
+        version: 1,
+        index: 0,
+        last: true,
+        addresses: Addresses {
+            ipv4: "10.254.0.2".parse().unwrap(),
+            ipv6: "fd01::2".parse().unwrap(),
+        },
+        default_policy: DefaultPolicy::Deny,
+        exposure: None,
+        upserted: BTreeMap::new(),
+        merged: BTreeMap::new(),
+        removed: Vec::new(),
+        #[cfg(feature = "mesh-dns")]
+        peer_names: BTreeMap::new(),
+        #[cfg(feature = "mesh-dns")]
+        removed_peer_names: Vec::new(),
+        access_updates: Vec::new(),
+    }
+}
+
+/// A reboot removes the link and keeps the saved configuration. A start that then stops between
+/// creating the new link and setting its key leaves our own unkeyed link beside that
+/// configuration. The next restart removes it, and the node starts again (#580).
+#[test]
+#[ignore = "Run inside a disposable network namespace with CAP_NET_ADMIN."]
+fn an_installed_kernel_node_replaces_its_own_unkeyed_link() {
+    let state = private_state("kernel-installed-unkeyed");
+    let result = (|| {
+        let mut node = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let ours = node.up()?.public_key;
+        node.chunk(snapshot_without_peers(ours))?;
+        drop(node);
+        remove_link();
+        // What the interrupted start leaves: a link marked with the recorded key, with no key set.
+        Device::create(ours)?;
+        let mut restarted = Node::restore_with_engine(&state, EngineKind::Kernel)?;
+        let removed = link_index().is_none();
+        restarted.up()?;
+        let started = link_index().is_some();
+        restarted.down()?;
+        Ok::<_, std::io::Error>((removed, started, link_index()))
+    })();
+    remove_link();
+    fs::remove_dir_all(&state).unwrap();
+    let (removed, started, after_down) = result.unwrap();
+    assert!(removed, "restore kept our own unfinished link");
+    assert!(started, "the node did not start again");
+    assert_eq!(after_down, None);
 }
 
 /// J555 F3 (#483, D391): an explicit `INFRATERNAL_MESH_PORT` must bind exactly that port, even
