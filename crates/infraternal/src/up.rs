@@ -274,8 +274,7 @@ impl Failure {
         }
     }
 
-    /// Return the status used by the macOS install handoff and the Linux tests.
-    #[cfg(any(test, target_os = "macos"))]
+    /// Return the numeric status used by the privileged install handoff.
     const fn exit_code(self) -> u8 {
         self.exit().code()
     }
