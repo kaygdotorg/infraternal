@@ -186,17 +186,59 @@ pub fn review(home: &Path, uid: u32, caller: u32) -> io::Result<Review> {
             _ => error,
         })?;
     }
+    let mut removal = vec![
+        paths.unit,
+        paths.launcher.clone(),
+        paths.base.join("bin"),
+        paths.base.join("sessions"),
+    ];
+    if paths.wanted.is_symlink() {
+        removal.push(paths.wanted);
+    }
+    let alias = paths.launcher.with_file_name("infra");
+    if std::fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.uid() == uid)
+        && std::fs::read_link(&alias).is_ok_and(|target| target == Path::new("infraternal"))
+    {
+        removal.push(alias);
+    }
+    if let Ok(Some(cache)) = owned_payload_cache(&paths.base, uid) {
+        removal.push(cache);
+    }
     Ok(Review {
         context,
-        base: paths.base.clone(),
-        paths: vec![
-            paths.unit,
-            paths.wanted,
-            paths.launcher,
-            paths.base.join("bin"),
-            paths.base.join("sessions"),
-        ],
+        base: paths.base,
+        paths: removal,
     })
+}
+
+/// Locate only the SSH installer's private, marked public payload cache.
+fn owned_payload_cache(base: &Path, uid: u32) -> io::Result<Option<PathBuf>> {
+    let cache = base.with_file_name("infraternal.bootstrap-cache");
+    let metadata = match std::fs::symlink_metadata(&cache) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o700
+        || public_file(&cache.join("owner"), uid, 64)? != "INFRATERNAL_PAYLOAD_CACHE_V1\n"
+    {
+        return Err(denied());
+    }
+    for entry in std::fs::read_dir(&cache)? {
+        let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        let mode = match entry.file_name().to_str() {
+            Some("owner") => 0o600,
+            Some("payload") => 0o700,
+            _ => return Err(denied()),
+        };
+        if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o777 != mode {
+            return Err(denied());
+        }
+    }
+    Ok(Some(cache))
 }
 
 /// Revalidate every owned artifact before handing off or removing any of them.
@@ -797,6 +839,17 @@ async fn cleanup_locked(
             infraternal_plugin_api::mesh_ssh_files::CONFIG_PATH,
             infraternal_plugin_api::mesh_ssh_files::KNOWN_HOSTS_PATH
         ));
+    }
+    match owned_payload_cache(&paths.base, uid) {
+        Ok(Some(cache)) => std::fs::remove_dir_all(cache)?,
+        Ok(None) => {}
+        Err(_) => report.push(format!(
+            "Left {} because infraternal could not verify its ownership.",
+            paths
+                .base
+                .with_file_name("infraternal.bootstrap-cache")
+                .display()
+        )),
     }
     remove_files(&paths.base).map(|left| report.into_iter().chain(left).collect())
 }

@@ -96,6 +96,15 @@ pub fn receipt_names_host(contents: &str, host: &str) -> bool {
         && contents.trim_end_matches('\n') == host
 }
 
+/// List only resolver entries carrying the root-owned infraternal marker.
+///
+/// # Errors
+/// Reports an unreadable resolver directory or entry.
+#[cfg(all(feature = "mesh-dns", target_os = "macos"))]
+pub fn managed_resolvers() -> io::Result<Vec<std::path::PathBuf>> {
+    crate::dns_integration::managed_macos_paths()
+}
+
 /// The version both sides must speak; a mismatch is refused, never guessed.
 pub const PROTOCOL_VERSION: u32 = 2;
 /// Largest request or reply body accepted, in bytes.

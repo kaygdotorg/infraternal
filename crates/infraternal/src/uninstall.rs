@@ -400,15 +400,23 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
     let mut targets = paths(review.paths);
     targets.push("Mesh tunnel and its routes, if active".into());
     if review.helper {
-        targets.extend(
+        let old_helper = infraternal_plugin_mesh::macos_helper::installed_binary()
+            == names::legacy::HELPER_BINARY;
+        let helper_paths = if old_helper {
+            [
+                names::legacy::HELPER_PLIST,
+                names::legacy::HELPER_BINARY,
+                names::legacy::HELPER_SOCKET,
+            ]
+        } else {
             [
                 names::HELPER_PLIST,
                 names::HELPER_BINARY,
                 names::HELPER_SOCKET,
-                "Resolver files in /etc/resolver written by the infraternal mesh helper",
             ]
-            .map(str::to_owned),
-        );
+        };
+        targets.extend(helper_paths.map(str::to_owned));
+        targets.extend(paths(names::managed_resolvers()?));
     }
     Ok(Plan {
         system: false,
@@ -430,6 +438,9 @@ fn system_plan(_caller: u32) -> io::Result<Plan> {
     let (host, paths_to_remove) = service::review_removal()?;
     let mut targets = paths(paths_to_remove);
     targets.push("Mesh tunnel and its routes, if active".into());
+    targets.extend(paths(
+        infraternal_plugin_mesh::macos_user_mode::managed_resolvers()?,
+    ));
     Ok(Plan {
         system: true,
         host,
