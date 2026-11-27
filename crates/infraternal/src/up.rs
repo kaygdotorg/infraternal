@@ -1094,6 +1094,7 @@ fn take_u32(bytes: &[u8], offset: &mut usize) -> Result<usize, Failure> {
     usize::try_from(u32::from_be_bytes(value)).map_err(|_| Failure::Permission)
 }
 
+/// Read `length` bytes from `bytes` starting at `offset` into a zeroizing buffer.
 fn take_bytes(
     bytes: &[u8],
     offset: &mut usize,

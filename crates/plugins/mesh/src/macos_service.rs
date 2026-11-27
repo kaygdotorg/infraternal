@@ -432,6 +432,7 @@ fn elevation_prompt_for_action(action: &str) -> Option<ElevationPrompt> {
     }
 }
 
+/// Run the fixed system-service action via `sudo`, prompting with an explanation only when needed.
 fn elevate(action: &str, executable: &Path, json_output: bool) -> io::Result<()> {
     let run_operation = || {
         Command::new(SUDO)
@@ -974,6 +975,7 @@ mod tests {
         assert_eq!(prompts, 1);
     }
 
+    /// Verify `up` and `down` map to their own elevation prompts while `status` has none.
     #[test]
     fn elevation_prompt_maps_up_and_down_actions() {
         use infraternal_plugin_api::elevation_prompt::ElevationPrompt;

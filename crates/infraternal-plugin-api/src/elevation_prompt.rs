@@ -296,11 +296,13 @@ impl ElevationPrompt {
     }
 }
 
+/// Unit tests pinning every elevation prompt's copy, width, styling, and non-TTY silence.
 #[cfg(test)]
 mod tests {
     use super::{ElevationPrompt, PromptOptions};
     use std::ffi::OsStr;
 
+    /// Every shipping [`ElevationPrompt`] variant, used for cross-cutting layout and TTY checks.
     const ALL_PROMPTS: [ElevationPrompt; 7] = [
         ElevationPrompt::MacosUserHelperInstall,
         ElevationPrompt::MacosUserHelperRefresh,
@@ -315,6 +317,7 @@ mod tests {
         ElevationPrompt::MacosMeshServiceDown,
     ];
 
+    /// Pin the plain-text wording of the fresh macOS user-mode helper install prompt.
     #[test]
     fn macos_user_helper_install_text_is_pinned() {
         assert_eq!(
@@ -332,6 +335,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the macOS user-mode helper refresh/update prompt.
     #[test]
     fn macos_user_helper_refresh_text_is_pinned() {
         assert_eq!(
@@ -348,6 +352,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the Linux `up` prompt when the host firewall is enabled.
     #[test]
     fn linux_system_install_with_firewall_text_is_pinned() {
         assert_eq!(
@@ -369,6 +374,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the Linux `up` prompt when built without the host firewall.
     #[test]
     fn linux_system_install_without_firewall_text_is_pinned() {
         assert_eq!(
@@ -389,6 +395,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the macOS `up --system` machine-wide install prompt.
     #[test]
     fn macos_system_install_text_is_pinned() {
         assert_eq!(
@@ -406,6 +413,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the macOS `mesh up` elevation prompt.
     #[test]
     fn macos_mesh_service_up_text_is_pinned() {
         assert_eq!(
@@ -422,6 +430,7 @@ mod tests {
         );
     }
 
+    /// Pin the plain-text wording of the macOS `mesh down` elevation prompt.
     #[test]
     fn macos_mesh_service_down_text_is_pinned() {
         assert_eq!(
@@ -437,6 +446,7 @@ mod tests {
         );
     }
 
+    /// Verify every prompt stays within 80 columns, emits no ANSI in plain mode, and ends cleanly.
     #[test]
     fn every_prompt_fits_an_80_column_terminal_and_has_no_ansi_in_plain_mode() {
         for prompt in ALL_PROMPTS {
@@ -459,6 +469,7 @@ mod tests {
         }
     }
 
+    /// Verify colour mode applies ANSI bold/arrow styling while keeping the loss line readable.
     #[test]
     fn color_mode_adds_ansi_only_when_enabled_and_preserves_words() {
         let styled = ElevationPrompt::MacosUserHelperInstall.render(true);
@@ -470,6 +481,7 @@ mod tests {
         );
     }
 
+    /// Verify non-TTY runs suppress the interactive prompt completely.
     #[test]
     fn non_tty_runs_do_not_print_any_prompt() {
         let options =
@@ -489,6 +501,7 @@ mod tests {
         }
     }
 
+    /// Verify `--json`, `TERM=dumb`, and non-empty `NO_COLOR` emit plain text on a TTY.
     #[test]
     fn json_dumb_term_and_no_color_keep_plain_text_on_tty() {
         let json_tty =
