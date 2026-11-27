@@ -40,7 +40,7 @@ use crate::{
 
 /// What the engine reports for each installed peer, by device key, as a walk reads it
 /// ([`observe`]). A peer missing from the map reads as silent: no bytes, no handshake.
-pub(crate) type Observed = BTreeMap<PublicKey, Seen>;
+pub type Observed = BTreeMap<PublicKey, Seen>;
 
 /// One peer's send address and the address a recent authenticated session confirmed.
 ///
@@ -48,11 +48,11 @@ pub(crate) type Observed = BTreeMap<PublicKey, Seen>;
 /// may preserve an address that a stale coordinator snapshot no longer lists, but only while
 /// the engine is still sending there and the peer's session remains live.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct EngineEndpoint {
+pub struct EngineEndpoint {
     /// Where the engine currently sends packets for this peer.
-    pub(crate) send: Option<SocketAddr>,
+    pub send: Option<SocketAddr>,
     /// The last authenticated source address, while its handshake is still recent.
-    pub(crate) live_confirmed: Option<SocketAddr>,
+    pub live_confirmed: Option<SocketAddr>,
 }
 
 /// Build an endpoint snapshot from `GotaTun` without treating an unconfirmed roam as reachable.
@@ -61,7 +61,7 @@ pub(crate) struct EngineEndpoint {
 /// sender proves its key. Only its separately confirmed endpoint is retained, and only for a
 /// session that has not exceeded [`SILENT`].
 #[must_use]
-pub(crate) fn engine_endpoint(
+pub fn engine_endpoint(
     send: Option<SocketAddr>,
     confirmed: Option<SocketAddr>,
     last_handshake_age: Option<std::time::Duration>,
@@ -79,7 +79,7 @@ pub(crate) fn engine_endpoint(
 /// and where the engine sent that peer's packets when the walk started. The worker moves the
 /// engine to `address` when the two differ, then sends a handshake there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Started {
+pub struct Started {
     /// The device key that owns the peer's endpoint ([`active_peer_key`]).
     pub key: PublicKey,
     /// The candidate the walk starts on.
@@ -92,7 +92,7 @@ pub(crate) struct Started {
 /// rotation overlap still routes through it, else the current key. Walks are kept under this key,
 /// because it is the device peer whose address a walk moves.
 #[must_use]
-pub(crate) fn active_peer_key(peer: &Peer) -> PublicKey {
+pub fn active_peer_key(peer: &Peer) -> PublicKey {
     if peer.previous_active {
         peer.previous_key.unwrap_or(peer.key)
     } else {
@@ -107,7 +107,7 @@ pub(crate) fn active_peer_key(peer: &Peer) -> PublicKey {
 /// pass them here. The access check is repeated here so the rule holds in one place for every
 /// caller: a walk never sends handshakes toward a peer whose grants allow no packet, even if a
 /// caller passes every configured peer (J781 finding 3, #515, #483).
-pub(crate) fn walking_peers<'a>(
+pub fn walking_peers<'a>(
     installed: impl IntoIterator<Item = &'a PeerPolicy>,
 ) -> BTreeMap<PublicKey, Peer> {
     installed
@@ -131,7 +131,7 @@ pub(crate) fn walking_peers<'a>(
 /// recovery time. The cost is one O(peers) read per snapshot that changes a peer; a snapshot
 /// that changes none reads nothing, and neither does the first one.
 #[must_use]
-pub(crate) fn engine_read_needed(applied: Option<&Config>, next: &Config) -> bool {
+pub fn engine_read_needed(applied: Option<&Config>, next: &Config) -> bool {
     let Some(applied) = applied else {
         return false;
     };
@@ -157,7 +157,7 @@ pub(crate) fn engine_read_needed(applied: Option<&Config>, next: &Config) -> boo
 /// An unconfirmed send endpoint, or a confirmed endpoint whose handshake is no longer live,
 /// takes the snapshot's.
 #[must_use]
-pub(crate) fn kept_address(
+pub fn kept_address(
     peer: &Peer,
     engine: EngineEndpoint,
     relay: Option<SocketAddr>,
@@ -172,11 +172,11 @@ pub(crate) fn kept_address(
 /// How long a worker's handshake task may take: a relay handshake waits for its session
 /// (`GotaTun`'s own wait has no deadline; one `WireGuard` attempt is 5 s, after which the peer's
 /// timers retry), and a bulk send is bounded by the same time.
-pub(crate) const HANDSHAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const HANDSHAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The wall clock in Unix seconds, the unit of the engine's handshake times.
 #[must_use]
-pub(crate) fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -186,7 +186,7 @@ pub(crate) fn unix_now() -> u64 {
 /// Turn one peer's engine counters into what a walk reads at `unix_now`: its received bytes, its
 /// last handshake (`0` once older than [`crate::candidates::SILENT`]) and the engine's address.
 #[must_use]
-pub(crate) const fn observe(
+pub const fn observe(
     received: u64,
     handshake_secs: u64,
     endpoint: Option<SocketAddr>,
@@ -201,7 +201,7 @@ pub(crate) const fn observe(
 
 /// Wait until the next walk step is due, or forever when no walk is running. A worker selects on
 /// it next to its commands, with the time from [`Walks::next_due`].
-pub(crate) async fn walk_due(at: Option<Instant>) {
+pub async fn walk_due(at: Option<Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
         None => std::future::pending().await,
@@ -211,13 +211,13 @@ pub(crate) async fn walk_due(at: Option<Instant>) {
 /// Every running or finished walk of one node, by device key, with the peer it was started for:
 /// a peer that is re-installed (it changed) starts a new walk.
 #[derive(Debug, Default)]
-pub(crate) struct Walks {
+pub struct Walks {
     walks: BTreeMap<PublicKey, (Peer, Rotation)>,
 }
 
 impl Walks {
     /// Drop every walk: the device stopped, or no configuration is applied.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.walks.clear();
     }
 
@@ -227,7 +227,7 @@ impl Walks {
     /// It does when a `wanted` peer is new or changed, or when a walk that found its peer must be
     /// checked for silence. Otherwise the snapshot changed nothing a walk cares about, and the
     /// worker reads nothing.
-    pub(crate) fn prepare(&mut self, wanted: &BTreeMap<PublicKey, Peer>) -> bool {
+    pub fn prepare(&mut self, wanted: &BTreeMap<PublicKey, Peer>) -> bool {
         self.walks.retain(|key, _| wanted.contains_key(key));
         let changed = wanted
             .iter()
@@ -246,12 +246,12 @@ impl Walks {
     /// A peer that is unchanged keeps its walk, finished or not (J585 F4), so an unrelated
     /// snapshot never sends a working peer back through its list. `before` holds the engine's
     /// send endpoint and its recent authenticated endpoint before the apply (empty unless
-    /// [`reinstalls_a_peer`]). A changed peer may be live on a later candidate (J602 F1), and
+    /// [`engine_read_needed`]). A changed peer may be live on a later candidate (J602 F1), and
     /// [`kept_address`] keeps that address if the new list still holds it (J699 P3-3). If a
     /// recent authenticated address fell off the list, it becomes the first item in this walk's
     /// private list too; otherwise the new walk would immediately undo the endpoint the apply
     /// just kept (#483).
-    pub(crate) fn start(
+    pub fn start(
         &mut self,
         wanted: BTreeMap<PublicKey, Peer>,
         observed: &Observed,
@@ -311,23 +311,19 @@ impl Walks {
 
     /// The engine could not be moved to a started walk's address. Drop the walk; the next applied
     /// snapshot starts it again.
-    pub(crate) fn abandon(&mut self, key: PublicKey) {
+    pub fn abandon(&mut self, key: PublicKey) {
         self.walks.remove(&key);
     }
 
     /// When the earliest running walk needs its next step; `None` when every walk has stopped.
     #[must_use]
-    pub(crate) fn next_due(&self) -> Option<Instant> {
+    pub fn next_due(&self) -> Option<Instant> {
         self.walks.values().filter_map(|(_, walk)| walk.due()).min()
     }
 
     /// Step every due walk at `now` with what the engine reports, and return the addresses to
     /// install, by device key. The worker installs each and sends a handshake there.
-    pub(crate) fn step(
-        &mut self,
-        now: Instant,
-        observed: &Observed,
-    ) -> Vec<(PublicKey, SocketAddr)> {
+    pub fn step(&mut self, now: Instant, observed: &Observed) -> Vec<(PublicKey, SocketAddr)> {
         self.walks
             .iter_mut()
             .filter_map(|(key, (_, walk))| {
@@ -339,7 +335,7 @@ impl Walks {
 
     /// The address the last [`Self::step`] returned for `key` could not be installed; the engine
     /// still sends to the previous one, and the walk's next step tries again.
-    pub(crate) fn install_failed(&mut self, key: PublicKey) {
+    pub fn install_failed(&mut self, key: PublicKey) {
         if let Some((_, walk)) = self.walks.get_mut(&key) {
             walk.install_failed();
         }

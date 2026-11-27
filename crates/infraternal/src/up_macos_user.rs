@@ -34,6 +34,7 @@ use super::{
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 use infraternal_plugin_mesh::{
     macos_helper,
     macos_local_network::{self, LocalNetwork},
@@ -181,16 +182,15 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
     Ok(())
 }
 
-/// Install the mesh helper for `uid` with the one `sudo` prompt of user mode.
+/// Install or refresh the mesh helper for `uid` with the one `sudo` prompt of user mode.
 async fn install_helper(
     sudo: &Path,
     executable: &Path,
     uid: u32,
+    prompt: ElevationPrompt,
+    json_output: bool,
     cancelled: &Cancellation,
 ) -> Result<(), Failure> {
-    eprintln!(
-        "infraternal needs your administrator password once, to let its mesh helper create the network interface, one route and a DNS entry."
-    );
     let mut command = Command::new(sudo);
     command
         .arg("--")
@@ -198,7 +198,7 @@ async fn install_helper(
         .arg(macos_helper::INSTALL_ENTRY)
         .arg(uid.to_string());
     let status = cancelled
-        .sudo_status(command)
+        .sudo_status(command, prompt, json_output)
         .await
         .map_err(|_| Failure::SudoUnavailable)?;
     if status.success() {
@@ -243,7 +243,15 @@ pub(crate) async fn run(
         Failure::InstallConflict
     })?;
     let mut install = Install::new(paths, uid);
-    install_helper(&sudo, &executable, uid, cancelled).await?;
+    install_helper(
+        &sudo,
+        &executable,
+        uid,
+        ElevationPrompt::MacosUserHelperInstall,
+        json_output,
+        cancelled,
+    )
+    .await?;
     cancelled.check().map_err(|_| Failure::Failed)?;
     let hostname = local_hostname();
     let (fingerprint, short_key) = enroll_and_start(
@@ -405,7 +413,16 @@ async fn refresh_existing(
     }
     // The helper first: its install also removes an old helper (one `sudo` prompt), and a
     // refused password leaves everything as it was.
-    if !helper_current && let Err(failure) = install_helper(sudo, executable, uid, cancelled).await
+    if !helper_current
+        && let Err(failure) = install_helper(
+            sudo,
+            executable,
+            uid,
+            ElevationPrompt::MacosUserHelperRefresh,
+            json_output,
+            cancelled,
+        )
+        .await
     {
         eprintln!(
             "The existing user-mode installation was kept. Run infraternal up again to finish the update."

@@ -81,7 +81,7 @@ pub(super) fn preflight() -> io::Result<()> {
         ));
     }
     if nix::unistd::Uid::effective().is_root()
-        && macos_service::control("status", false, Path::new(MACHINE_BINARY))?
+        && macos_service::control("status", false, Path::new(MACHINE_BINARY), false)?
             .is_some_and(|status| status.loaded)
     {
         return Err(refused(
@@ -388,7 +388,8 @@ impl Install {
         let deadline = Instant::now() + START_WAIT;
         loop {
             self.check_interruption()?;
-            if macos_service::control("status", false, binary)?.is_some_and(|status| status.running)
+            if macos_service::control("status", false, binary, false)?
+                .is_some_and(|status| status.running)
             {
                 break;
             }

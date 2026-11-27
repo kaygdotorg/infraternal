@@ -162,19 +162,8 @@ struct MacosInstall {
     suffixes: Vec<String>,
 }
 
-/// What `mesh status` reports about the host resolver integration.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct DnsState {
-    /// `resolved`, `networkmanager`, `hosts`, `resolver-files`, `unprivileged`, `unavailable`
-    /// or `off` (nothing attempted yet).
-    pub mode: &'static str,
-    /// One plain sentence a person can act on.
-    pub detail: String,
-    /// The suffixes routed to the mesh resolver.
-    pub suffixes: Vec<String>,
-    /// Whether the suffixes are also search domains.
-    pub search: bool,
-}
+/// Mesh DNS status shared with the node engine.
+pub(crate) use infraternal_mesh_node::dns_state::DnsState;
 
 /// Name of the environment switch that also makes the mesh suffix a search domain.
 ///

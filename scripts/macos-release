@@ -5,18 +5,35 @@
 # No JIT or unsigned-memory exceptions are needed, so all executables use the
 # hardened runtime without entitlements.
 #
-# Prerequisites, all on the Mac build machine and none in the repository:
-# - ~/.config/infraternal-signing/ holds keychain.pass and op-service-account-token
-#   (mode 0600). The dedicated keychain gets the Developer ID on the first run.
-# - A notarytool profile (default name infraternal-notary) in that keychain. Create
-#   it once with an App Store Connect API key kept in a 0600 file, so that no
-#   secret appears in argv:
-#     xcrun notarytool store-credentials infraternal-notary --keychain <keychain> \
-#       --key <AuthKey.p8> --key-id <KEY_ID> --issuer <ISSUER_UUID>
+# Prerequisites, all on the Mac build machine (or streamed into a temporary
+# dedicated keychain) and none in the repository:
+# - A dedicated signing keychain (default: ~/Library/Keychains/infraternal-signing.keychain-db)
+#   and a mode-0600 password file (default: ~/.config/infraternal-signing/keychain.pass).
+#   Pass --keychain PATH --keychain-password-file PATH [--delete-keychain] to use
+#   a per-build temporary keychain that is deleted on exit. Never opens, unlocks
+#   or modifies the login keychain or any other keychain.
+# - Notarization credentials, via either:
+#   1. --asc-dir DIR containing an App Store Connect API key (AuthKey_<KEY_ID>.p8
+#      mode 0600, key-id.txt, issuer-id.txt); only file paths and public IDs are
+#      passed to notarytool, never the key bytes; OR
+#   2. A notarytool profile (default name infraternal-notary) stored in the
+#      dedicated keychain:
+#        xcrun notarytool store-credentials infraternal-notary --keychain <keychain> \
+#          --key <AuthKey.p8> --key-id <KEY_ID> --issuer <ISSUER_UUID>
+# - Run inside the repository's Nix dev shell (`nix develop -c scripts/macos-release ...`)
+#   or with the pinned Rust toolchain on PATH.
 set -euo pipefail
 
 usage() {
-    printf 'usage: scripts/macos-release ABSOLUTE_OUTPUT_DIRECTORY [--notary-profile NAME | --skip-notarize]\n' >&2
+    cat >&2 <<'EOF'
+usage: scripts/macos-release ABSOLUTE_OUTPUT_DIRECTORY [options]
+  --keychain PATH                dedicated signing keychain (absolute path)
+  --keychain-password-file PATH  mode-0600 file holding the keychain password
+  --delete-keychain              delete the dedicated signing keychain on exit
+  --asc-dir PATH                 directory with AuthKey_<id>.p8, key-id.txt, issuer-id.txt
+  --notary-profile NAME          notarytool profile stored in the dedicated keychain
+  --skip-notarize                build, sign and verify signatures only (NOT a release)
+EOF
     exit 2
 }
 
@@ -26,7 +43,12 @@ output="$1"
 shift
 [[ "$output" != "/" ]] || usage
 output="${output%/}"
+keychain="$HOME/Library/Keychains/infraternal-signing.keychain-db"
+password_file="$HOME/.config/infraternal-signing/keychain.pass"
+delete_keychain=0
+asc_dir=""
 notary_profile="${INFRATERNAL_NOTARY_PROFILE:-infraternal-notary}"
+notary_profile_explicit=0
 # --skip-notarize builds, signs and verifies the signature only. Gatekeeper
 # rejects a Developer ID binary that Apple has not notarized, so the result is
 # named UNNOTARIZED and is never a release. It exists to prove the build and
@@ -34,9 +56,29 @@ notary_profile="${INFRATERNAL_NOTARY_PROFILE:-infraternal-notary}"
 skip_notarize=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --keychain)
+            [[ $# -ge 2 && "$2" = /* ]] || usage
+            keychain="$2"
+            shift 2
+            ;;
+        --keychain-password-file)
+            [[ $# -ge 2 && "$2" = /* ]] || usage
+            password_file="$2"
+            shift 2
+            ;;
+        --delete-keychain)
+            delete_keychain=1
+            shift
+            ;;
+        --asc-dir)
+            [[ $# -ge 2 && "$2" = /* ]] || usage
+            asc_dir="${2%/}"
+            shift 2
+            ;;
         --notary-profile)
             [[ $# -ge 2 && -n "$2" ]] || usage
             notary_profile="$2"
+            notary_profile_explicit=1
             shift 2
             ;;
         --skip-notarize)
@@ -47,6 +89,21 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ "$notary_profile" != -* ]] || usage
+if [[ -n "$asc_dir" && "$notary_profile_explicit" -eq 1 ]]; then
+    printf 'choose either --asc-dir or --notary-profile, not both\n' >&2
+    exit 2
+fi
+if [[ -n "$asc_dir" && "$skip_notarize" -eq 1 ]]; then
+    printf 'choose either --asc-dir or --skip-notarize, not both\n' >&2
+    exit 2
+fi
+# Refuse to ever open, unlock or delete a login or system keychain.
+case "$(basename -- "$keychain")" in
+    login.keychain | login.keychain-db | System.keychain | SystemRootCertificates.keychain)
+        printf 'refusing to touch non-dedicated keychain: %s\n' "$keychain" >&2
+        exit 2
+        ;;
+esac
 [[ "$(uname -s)" = Darwin && "$(uname -m)" = arm64 ]] || {
     printf 'run the macOS release build on an arm64 Mac\n' >&2
     exit 1
@@ -75,7 +132,6 @@ if [[ -z "${INFRATERNAL_MAC_LOCK_HELD:-}" ]]; then
         "$root/scripts/macos-release" "${original_args[@]}"
 fi
 
-keychain="$HOME/Library/Keychains/infraternal-signing.keychain-db"
 keychain_unlocked=0
 search_list_changed=0
 original_search_list=()
@@ -89,6 +145,10 @@ cleanup() {
     if [[ "$keychain_unlocked" -eq 1 ]]; then
         /usr/bin/security lock-keychain "$keychain" >/dev/null 2>&1 || true
     fi
+    if [[ "$delete_keychain" -eq 1 && -e "$keychain" ]]; then
+        /usr/bin/security delete-keychain "$keychain" >/dev/null 2>&1 || true
+        rm -f -- "$keychain" || true
+    fi
     if [[ -n "$scratch" ]]; then
         rm -rf -- "$scratch" || true
     fi
@@ -97,11 +157,18 @@ cleanup() {
 trap cleanup EXIT
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/infraternal-macos-release.XXXXXX")"
 
-# A non-login shell (ssh, launchd) has neither Homebrew's op nor rustup's cargo.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+# Preserve an active Nix dev-shell toolchain first; fall back to Homebrew and
+# rustup locations when invoked from a non-login shell (ssh, launchd).
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin"
+
+# Inside `nix develop`, Nix exports its own DEVELOPER_DIR and SDKROOT pointing
+# at a store SDK that has no Swift or Xcode tools. Drop Nix's overrides before
+# calling /usr/bin/swift, /usr/bin/xcrun, or swiftc so Apple's installed Xcode
+# toolchain and SDK are used (same pattern as scripts/macos-build-check).
+unset DEVELOPER_DIR TOOLCHAINS
+export SDKROOT="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)"
 
 signing_dir="$HOME/.config/infraternal-signing"
-password_file="$signing_dir/keychain.pass"
 token_file="$signing_dir/op-service-account-token"
 [[ -r "$password_file" && -n "$keychain" && -e "$keychain" ]] || {
     printf 'dedicated signing-keychain setup is incomplete\n' >&2
@@ -236,12 +303,36 @@ fi
     exit 1
 }
 
-# Fail before the long build when the notary credential is missing.
-if [[ "$skip_notarize" -eq 0 ]] && ! /usr/bin/xcrun notarytool history \
-    --keychain-profile "$notary_profile" --keychain "$keychain" >/dev/null 2>&1; then
-    printf 'notarytool profile %s is not available in the dedicated signing keychain\n' \
-        "$notary_profile" >&2
-    exit 1
+# Fail before the long build when the notary credential is missing or invalid.
+notary_auth_args=()
+if [[ "$skip_notarize" -eq 0 ]]; then
+    if [[ -n "$asc_dir" ]]; then
+        asc_key_id_file="$asc_dir/key-id.txt"
+        asc_issuer_id_file="$asc_dir/issuer-id.txt"
+        [[ -r "$asc_key_id_file" && -r "$asc_issuer_id_file" ]] || {
+            printf 'App Store Connect API key metadata missing in %s\n' "$asc_dir" >&2
+            exit 1
+        }
+        asc_key_id="$(/usr/bin/tr -d '[:space:]' < "$asc_key_id_file")"
+        asc_issuer_id="$(/usr/bin/tr -d '[:space:]' < "$asc_issuer_id_file")"
+        asc_key_file="$asc_dir/AuthKey_${asc_key_id}.p8"
+        [[ -n "$asc_key_id" && -n "$asc_issuer_id" && -r "$asc_key_file" ]] || {
+            printf 'App Store Connect API key file is missing in %s\n' "$asc_dir" >&2
+            exit 1
+        }
+        [[ "$(/usr/bin/stat -f '%Lp' "$asc_key_file")" = 600 ]] || {
+            printf 'App Store Connect API key file must have mode 0600\n' >&2
+            exit 1
+        }
+        # Only the file path and public IDs are passed; the private key bytes never enter argv.
+        notary_auth_args=(--key "$asc_key_file" --key-id "$asc_key_id" --issuer "$asc_issuer_id")
+    else
+        notary_auth_args=(--keychain-profile "$notary_profile" --keychain "$keychain")
+    fi
+    if ! /usr/bin/xcrun notarytool history "${notary_auth_args[@]}" >/dev/null 2>&1; then
+        printf 'notarytool credential check failed\n' >&2
+        exit 1
+    fi
 fi
 
 target="${CARGO_TARGET_DIR:-$root/target}"
@@ -253,11 +344,28 @@ target_triple=aarch64-apple-darwin
 # bash 4.3 (`local -n`) and macOS ships 3.2, so use the pinned compiler directly
 # (CARGO_BUILD_RUSTC overrides the config file) and give it the same path
 # normalization as plain flags: the published binaries must not carry the build
-# machine's home directory. Changing the D243 driver is not this job's call.
-export CARGO_BUILD_RUSTC="$(rustup which rustc)"
+# machine's home directory or Nix store toolchain path.
+if command -v rustc >/dev/null 2>&1; then
+    rustc_bin="$(command -v rustc)"
+elif command -v rustup >/dev/null 2>&1; then
+    rustc_bin="$(rustup which rustc)"
+else
+    printf 'rustc is not on PATH; run inside `nix develop` or install the pinned toolchain\n' >&2
+    exit 1
+fi
+export CARGO_BUILD_RUSTC="$rustc_bin"
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
-export RUSTFLAGS="--remap-path-prefix=$root=/infraternal --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$target=/build"
+rustc_sysroot="$("$rustc_bin" --print sysroot)"
+export RUSTFLAGS="--remap-path-prefix=$root=/infraternal --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$rustup_home=/rustup --remap-path-prefix=$rustc_sysroot=/rustup --remap-path-prefix=$target=/build"
+
+# Keep Nix's cargo/rustc and GNU utilities ahead of /usr/bin, and /usr/bin
+# ahead of Nix's xcbuild/xcrun shim so crates/plugins/desktop/build.rs finds
+# the real /usr/bin/xcrun and swiftc.
+cargo_dir="$(dirname -- "$(command -v cargo)")"
+bash_dir="$(dirname -- "$(command -v bash)")"
+sed_dir="$(dirname -- "$(command -v sed)")"
+export PATH="$cargo_dir:$bash_dir:$sed_dir:/usr/bin:$PATH"
 
 source scripts/release/feature-sets
 cargo build --locked --release --target "$target_triple" "${release_macos_host_cargo_args[@]}"
@@ -304,7 +412,7 @@ install -m 0755 "$rust_helper" "$release_root/infraternal-desktop-helper"
 if [[ "$skip_notarize" -eq 0 ]]; then
     /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$release_root" "$scratch/submission.zip"
     /usr/bin/xcrun notarytool submit "$scratch/submission.zip" \
-        --keychain-profile "$notary_profile" --keychain "$keychain" \
+        "${notary_auth_args[@]}" \
         --wait --output-format json >"$scratch/notary-response.json"
     notary_status="$(/usr/bin/python3 -I -c '
 import json, sys
@@ -332,11 +440,32 @@ printf 'codesign --verify --strict: infraternal-desktop-helper\n'
 /usr/bin/codesign --verify --strict --verbose=2 "$release_root/infraternal-desktop-helper"
 printf 'codesign --verify --strict: InfraternalCaptureHelper.app\n'
 /usr/bin/codesign --verify --strict --verbose=2 "$release_root/InfraternalCaptureHelper.app"
+
+# Verify the agent's cross-user helper admission rule (crates/infraternal-shim/src/code_identity.rs):
+# all three shipped artifacts must share the same Apple Team ID, and the helper
+# must satisfy the exact designated requirement the agent enforces on its peer.
+team_id_of() {
+    /usr/bin/codesign -dv --verbose=4 "$1" 2>&1 | /usr/bin/sed -n 's/^TeamIdentifier=//p'
+}
+cli_team="$(team_id_of "$release_root/infraternal")"
+helper_team="$(team_id_of "$release_root/infraternal-desktop-helper")"
+app_team="$(team_id_of "$release_root/InfraternalCaptureHelper.app")"
+[[ -n "$cli_team" && "$cli_team" != "not set" && "$cli_team" = "$helper_team" && "$cli_team" = "$app_team" ]] || {
+    printf 'TeamIdentifier mismatch across macOS artifacts\n' >&2
+    exit 1
+}
+printf 'helper peer requirement check: infraternal-desktop-helper\n'
+/usr/bin/codesign --verify --strict --verbose=2 \
+    -R "=identifier \"infraternal-desktop-helper\" and anchor apple generic and certificate leaf[subject.OU] = \"$cli_team\"" \
+    "$release_root/infraternal-desktop-helper"
+printf 'capture app requirement check: InfraternalCaptureHelper.app\n'
+/usr/bin/codesign --verify --strict --verbose=2 \
+    -R "=identifier \"com.infraternal.desktop.helper\" and anchor apple generic and certificate leaf[subject.OU] = \"$cli_team\"" \
+    "$release_root/InfraternalCaptureHelper.app"
+
 if [[ "$skip_notarize" -eq 0 ]]; then
-    printf 'spctl -a -vv: infraternal\n'
-    /usr/sbin/spctl -a -vv "$release_root/infraternal"
-    printf 'spctl -a -vv: infraternal-desktop-helper\n'
-    /usr/sbin/spctl -a -vv "$release_root/infraternal-desktop-helper"
+    # Gatekeeper's spctl assesses app bundles (bare Mach-O CLI binaries are
+    # verified by codesign above and checked online by macOS on first launch).
     printf 'spctl -a -vv: InfraternalCaptureHelper.app\n'
     /usr/sbin/spctl -a -vv "$release_root/InfraternalCaptureHelper.app"
     printf 'stapler validate: InfraternalCaptureHelper.app\n'

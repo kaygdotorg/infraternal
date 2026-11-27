@@ -104,15 +104,18 @@ impl Cancellation {
         Ok(status)
     }
 
-    /// Run a sudo installer that uses the terminal for its password prompt.
+    /// Explain the elevation just before starting a cancellable sudo password prompt.
     #[cfg(target_os = "macos")]
     pub(super) async fn sudo_status(
         &self,
         command: std::process::Command,
+        prompt: infraternal_plugin_api::elevation_prompt::ElevationPrompt,
+        json_output: bool,
     ) -> io::Result<ExitStatus> {
         if self.received().is_some() {
             return Err(interrupted());
         }
+        prompt.print_to_stderr(json_output);
         let mut child = tokio::process::Command::from(command).spawn()?;
         self.wait_for_child(&mut child).await
     }

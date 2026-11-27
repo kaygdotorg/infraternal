@@ -127,7 +127,7 @@ use crate::{
 
 /// Why the guard kept an initiation away from `GotaTun`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Refusal {
+pub enum Refusal {
     /// The packet is not a well-formed initiation with a valid MAC1 for this node.
     InvalidMac,
     /// The source already used its [`REFUSED_SOURCE_BUDGET`] or [`SOURCE_BUDGET`] this second;
@@ -152,7 +152,7 @@ pub(crate) enum Refusal {
 /// This was `GotaTun`'s own per-source handshake limit before the guard existed. `GotaTun` now
 /// decides load by its handshake backlog instead (#260, J1112), so this budget alone keeps one
 /// stranger at 100 key agreements a second.
-pub(crate) const REFUSED_SOURCE_BUDGET: u32 = 100;
+pub const REFUSED_SOURCE_BUDGET: u32 = 100;
 
 /// Key agreements per second and source, admitted or not.
 ///
@@ -160,7 +160,7 @@ pub(crate) const REFUSED_SOURCE_BUDGET: u32 = 100;
 /// The guard still bounds a granted peer's flood. (While `GotaTun` counted handshakes per source,
 /// past 100 a granted peer met its cookie first; since #260 J1112 it sends cookies only when its
 /// backlog says it is under load.)
-pub(crate) const SOURCE_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
+pub const SOURCE_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
 
 /// Key agreements per second and network (IPv4 /24, IPv6 /48) that may end in a refusal.
 ///
@@ -168,13 +168,13 @@ pub(crate) const SOURCE_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
 /// prefix can send from all of them without spoofing. Two sources' worth means a flood from one
 /// network takes at most a fifth of [`UNKNOWN_SOURCE_BUDGET`], however many addresses it uses
 /// (J713, #483).
-pub(crate) const REFUSED_NETWORK_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
+pub const REFUSED_NETWORK_BUDGET: u32 = 2 * REFUSED_SOURCE_BUDGET;
 
 /// Key agreements per second and network, admitted or not.
 ///
 /// Twice [`REFUSED_NETWORK_BUDGET`], so peers behind one carrier NAT share room for a mass
 /// reconnect. Known peer endpoints are not counted here (see [`UNKNOWN_SOURCE_BUDGET`]).
-pub(crate) const NETWORK_BUDGET: u32 = 2 * REFUSED_NETWORK_BUDGET;
+pub const NETWORK_BUDGET: u32 = 2 * REFUSED_NETWORK_BUDGET;
 
 /// Key agreements the guard runs per second for the whole node.
 ///
@@ -186,13 +186,13 @@ pub(crate) const NETWORK_BUDGET: u32 = 2 * REFUSED_NETWORK_BUDGET;
 /// endpoint, `WireGuard`'s five-second retry spreads 4,096 initiations over at most about eight
 /// seconds of the reserve, fewer when the unknown share is idle; that sizing assumes no flood is
 /// spending it at the same time (see [`RESERVED_BUDGET`] for what a flood leaves).
-pub(crate) const NODE_BUDGET: u32 = 1_000;
+pub const NODE_BUDGET: u32 = 1_000;
 
 /// The part of [`NODE_BUDGET`] that sources other than known peer endpoints may spend.
 ///
 /// Half, because new joins and peers at unknown endpoints still need room, and known endpoints
 /// alone use a few a second outside a mass reconnect. The other half is [`RESERVED_BUDGET`].
-pub(crate) const UNKNOWN_SOURCE_BUDGET: u32 = NODE_BUDGET / 2;
+pub const UNKNOWN_SOURCE_BUDGET: u32 = NODE_BUDGET / 2;
 
 /// The part of [`NODE_BUDGET`] reserved for known peer endpoints (an endpoint the coordinator
 /// configured for a peer, or one `GotaTun` confirmed from a peer's authenticated traffic).
@@ -201,7 +201,7 @@ pub(crate) const UNKNOWN_SOURCE_BUDGET: u32 = NODE_BUDGET / 2;
 /// [`reserve_share`] per window (J735, #483). So the reserve holds a known peer's initiation
 /// against every flood that does not spoof that peer's exact endpoint, as long as the node knows
 /// at most this many endpoints; the module doc states what happens with more.
-pub(crate) const RESERVED_BUDGET: u32 = NODE_BUDGET - UNKNOWN_SOURCE_BUDGET;
+pub const RESERVED_BUDGET: u32 = NODE_BUDGET - UNKNOWN_SOURCE_BUDGET;
 
 /// Configured-only endpoints may borrow up to this much before any confirmed endpoint uses
 /// the reserve. This leaves at least three quarters for returning peers when all slots would
@@ -579,14 +579,14 @@ fn distinct_endpoints(lists: Lists<'_>) -> usize {
 /// (`Device::confirmed_endpoint_changes`) covers every change this path cannot see, such as a
 /// peer moving to an address another peer already confirmed (#260 J1253).
 #[derive(Debug, Default)]
-pub(crate) struct SourceWatch {
+pub struct SourceWatch {
     /// Bumped when `confirmed` is replaced, so a receiver reloads its copy once per change.
     generation: AtomicU64,
     /// The confirmed endpoints in [`endpoint_list`] form. Held for one `Arc` clone, never across
     /// an `.await`.
     confirmed: Mutex<Arc<[EndpointKey]>>,
     /// Raised by the receive path for a source outside `confirmed`; the worker waits on it.
-    pub(crate) wake: CoalescedWake,
+    pub wake: CoalescedWake,
 }
 
 impl SourceWatch {
@@ -625,6 +625,7 @@ struct SourceCursor {
 }
 
 impl SourceCursor {
+    /// Start without a source and observe the current confirmed generation.
     fn new(watch: Arc<SourceWatch>) -> Self {
         let (generation, list) = watch.snapshot();
         Self {
@@ -660,7 +661,7 @@ impl SourceCursor {
 ///
 /// The peer list changes only after the device accepts a snapshot, while both key checks follow
 /// live local-key rotation.
-pub(crate) struct PeerAdmission {
+pub struct PeerAdmission {
     private_key: StaticSecret,
     public_key: X25519PublicKey,
     /// Checks MAC1 only; its own load limit is unused (see [`Self::check`]).
@@ -688,13 +689,14 @@ pub(crate) struct PeerAdmission {
     probes: Option<DirectProbes>,
     /// Key agreements this guard has run, counted in tests only, so a test can prove that a
     /// refused initiation never reached X25519 instead of inferring it from the verdict.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     key_agreements: std::sync::atomic::AtomicU32,
 }
 
 impl PeerAdmission {
     /// Create an empty admission set for the node's current `WireGuard` identity.
-    pub(crate) fn new(private_key: StaticSecret) -> Self {
+    #[must_use]
+    pub fn new(private_key: StaticSecret) -> Self {
         let public_key = X25519PublicKey::from(&private_key);
         let mac1 = RateLimiter::new(&public_key, u64::MAX);
         Self {
@@ -709,19 +711,19 @@ impl PeerAdmission {
             configured_limit: RESERVED_BUDGET,
             budget: Mutex::default(),
             probes: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             key_agreements: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
     /// Replace the identities accepted by the most recently applied device snapshot.
-    pub(crate) fn set_peers(&mut self, peers: impl IntoIterator<Item = PublicKey>) {
+    pub fn set_peers(&mut self, peers: impl IntoIterator<Item = PublicKey>) {
         self.peers = peers.into_iter().collect();
     }
 
     /// Replace the peers and their configured endpoints from the peer list the device just
     /// accepted: [`Self::set_peers`] and [`Self::set_configured_endpoints`] in one step.
-    pub(crate) fn install(
+    pub fn install(
         &mut self,
         keys: impl IntoIterator<Item = PublicKey>,
         peers: &[gotatun::device::Peer],
@@ -734,10 +736,7 @@ impl PeerAdmission {
     ///
     /// Call it with the same snapshot as [`Self::set_peers`]. Only exact addresses and ports
     /// count, so a flood has to spoof one to share a peer's reserved budget.
-    pub(crate) fn set_configured_endpoints(
-        &mut self,
-        endpoints: impl IntoIterator<Item = SocketAddr>,
-    ) {
+    pub fn set_configured_endpoints(&mut self, endpoints: impl IntoIterator<Item = SocketAddr>) {
         let configured = endpoint_list(endpoints);
         if configured != self.configured_endpoints {
             let old = std::mem::replace(&mut self.configured_endpoints, configured);
@@ -751,10 +750,7 @@ impl PeerAdmission {
     /// moves the send endpoint before its sender proves anything, so a replayed initiation could
     /// otherwise make an attacker's address known. The node workers call it through
     /// [`ConfirmedEndpointFeed`], which skips the write lock when nothing changed.
-    pub(crate) fn set_confirmed_endpoints(
-        &mut self,
-        endpoints: impl IntoIterator<Item = SocketAddr>,
-    ) {
+    pub fn set_confirmed_endpoints(&mut self, endpoints: impl IntoIterator<Item = SocketAddr>) {
         let confirmed = endpoint_list(endpoints);
         if confirmed != self.confirmed_endpoints {
             self.sources.publish(&confirmed);
@@ -805,14 +801,14 @@ impl PeerAdmission {
     /// Give the guard the node's direct-path probes. Without them probe-shaped datagrams pass to
     /// `GotaTun` unchanged (it drops them as invalid), which is how a node that does not probe
     /// behaves.
-    pub(crate) fn set_probes(&mut self, probes: DirectProbes) {
+    pub fn set_probes(&mut self, probes: DirectProbes) {
         self.probes = Some(probes);
     }
 
     /// Whether `source` is exactly a known peer endpoint (configured or confirmed). The probe
     /// responder asks it, so only an installed peer's endpoint gets an answer; tests ask what a
     /// guard knows, including the Mac worker's live guard (J736).
-    pub(crate) fn is_known_endpoint(&self, source: SocketAddr) -> bool {
+    pub fn is_known_endpoint(&self, source: SocketAddr) -> bool {
         self.known_slot(source).is_some()
     }
 
@@ -836,19 +832,20 @@ impl PeerAdmission {
     }
 
     /// The watch the receive task and the node worker share (see [`SourceWatch`]).
-    pub(crate) fn sources(&self) -> Arc<SourceWatch> {
+    pub fn sources(&self) -> Arc<SourceWatch> {
         Arc::clone(&self.sources)
     }
 
     /// Replace the local identity after `GotaTun` accepts a key rotation.
-    pub(crate) fn set_private_key(&mut self, private_key: StaticSecret) {
+    pub fn set_private_key(&mut self, private_key: StaticSecret) {
         self.public_key = X25519PublicKey::from(&private_key);
         self.mac1 = RateLimiter::new(&self.public_key, u64::MAX);
         self.private_key = private_key;
     }
 
     /// Mark only handshake initiations for cryptographic peer admission.
-    pub(crate) fn needs_admission(packet: &Packet) -> bool {
+    #[must_use]
+    pub fn needs_admission(packet: &Packet) -> bool {
         packet.as_ref().first() == Some(&WgPacketType::HandshakeInit.0)
     }
 
@@ -860,12 +857,7 @@ impl PeerAdmission {
     /// control the clock.
     /// # Errors
     /// Returns why an initiation was kept away from `GotaTun`; the caller drops it silently.
-    pub(crate) fn check(
-        &self,
-        packet: &Packet,
-        source: SocketAddr,
-        now: Instant,
-    ) -> Result<(), Refusal> {
+    pub fn check(&self, packet: &Packet, source: SocketAddr, now: Instant) -> Result<(), Refusal> {
         if !Self::needs_admission(packet) {
             return Ok(());
         }
@@ -887,7 +879,7 @@ impl PeerAdmission {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .spend(source, known, self.share, self.configured_limit, now)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         self.key_agreements
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let verdict = match parse_handshake_anon(&self.private_key, &self.public_key, &initiation) {
@@ -917,7 +909,7 @@ impl PeerAdmission {
 /// used with. Use one feed per guard; a feed shared by two guards would skip a write that the
 /// second one still needs.
 #[derive(Debug, Default)]
-pub(crate) struct ConfirmedEndpointFeed {
+pub struct ConfirmedEndpointFeed {
     /// The confirmed endpoints last written into the guard, in [`endpoint_list`] form.
     last: Vec<EndpointKey>,
 }
@@ -930,7 +922,7 @@ impl ConfirmedEndpointFeed {
     ///
     /// Returns whether the guard's list was replaced. Order and duplicates do not matter: the
     /// list is compared after sorting, so IPv4 and IPv4-mapped forms of one endpoint are equal.
-    pub(crate) async fn offer(
+    pub async fn offer(
         &mut self,
         admission: &RwLock<PeerAdmission>,
         endpoints: impl IntoIterator<Item = SocketAddr>,
@@ -958,7 +950,7 @@ impl ConfirmedEndpointFeed {
 /// together with their packets. A stamp of 0 means "unknown" and leaves the packet unjudged.
 /// macOS uses only the socket buffer because its socket has no kernel receive stamps for AQM.
 #[derive(Default)]
-pub(crate) struct AdmissionRecvBuf {
+pub struct AdmissionRecvBuf {
     /// The socket's batch buffer, used only by the socket.
     socket_buf: <GotaUdpSocket as UdpRecv>::RecvManyBuf,
     /// `rx_stamps[i]` is the kernel receive time (ns) of `packets[i]` after the guard's pass.
@@ -967,7 +959,7 @@ pub(crate) struct AdmissionRecvBuf {
 }
 
 /// Keeps the socket's batched receive path while filtering unregistered handshakes before `GotaTun`.
-pub(crate) struct PeerAdmissionUdpReceiver {
+pub struct PeerAdmissionUdpReceiver {
     socket: GotaUdpSocket,
     admission: Arc<RwLock<PeerAdmission>>,
     /// Set on the first datagram (the constructor is not async): see [`SourceWatch`].
@@ -978,7 +970,7 @@ pub(crate) struct PeerAdmissionUdpReceiver {
 
 impl PeerAdmissionUdpReceiver {
     /// Wrap a bound receive socket with the node's shared admission state.
-    pub(crate) fn new(socket: GotaUdpSocket, admission: Arc<RwLock<PeerAdmission>>) -> Self {
+    pub fn new(socket: GotaUdpSocket, admission: Arc<RwLock<PeerAdmission>>) -> Self {
         Self {
             socket,
             admission,
@@ -988,8 +980,11 @@ impl PeerAdmissionUdpReceiver {
     }
 
     /// The address the wrapped socket is bound to, for the Mac tests that check socket reuse.
-    #[cfg(all(test, target_os = "macos"))]
-    pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+    ///
+    /// # Errors
+    /// Reports a failed socket address lookup.
+    #[cfg(all(feature = "test-support", target_os = "macos"))]
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
 
@@ -2286,13 +2281,19 @@ mod tests {
 ///
 /// The Mac node's real-device test (J736) runs the same flood against its live worker's guard
 /// through [`flood_against`] and [`report`].
-#[cfg(test)]
-pub(crate) mod flood_fairness {
+#[cfg(any(test, all(feature = "test-support", target_os = "macos")))]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "the host fixture uses only the shared runner")
+)]
+pub mod flood_fairness {
     #![expect(
         clippy::expect_used,
         reason = "a broken fixture (bad address, key or lock) must stop the test loudly"
     )]
-    use super::{NODE_BUDGET, PeerAdmission, Refusal};
+    #[cfg(test)]
+    use super::Refusal;
+    use super::{NODE_BUDGET, PeerAdmission};
     use crate::policy::model::PublicKey;
     use gotatun::{
         noise::{Tunn, index_table::IndexTable, rate_limiter::RateLimiter},
@@ -2321,7 +2322,11 @@ pub(crate) mod flood_fairness {
 
     /// One MAC1-valid initiation from `sender` to the node whose public key is `node_public`,
     /// with a fresh ephemeral key.
-    pub(crate) fn initiation_to(node_public: X25519PublicKey, sender: [u8; 32]) -> Vec<u8> {
+    ///
+    /// # Panics
+    /// Panics if the fixture cannot create a fresh initiation.
+    #[must_use]
+    pub fn initiation_to(node_public: X25519PublicKey, sender: [u8; 32]) -> Vec<u8> {
         let sender = StaticSecret::from(sender);
         let sender_public = X25519PublicKey::from(&sender);
         let mut tunn = Tunn::new(
@@ -2362,32 +2367,32 @@ pub(crate) mod flood_fairness {
 
     /// The shape of one simulated flood.
     #[derive(Clone, Copy)]
-    pub(crate) struct Flood {
+    pub struct Flood {
         /// Flood initiations per second, evenly spaced.
-        pub(crate) rate: u32,
+        pub rate: u32,
         /// How many IPv6 /48 networks the flood comes from.
-        pub(crate) networks: u16,
+        pub networks: u16,
         /// How many /64s inside each /48 the flood rotates over.
-        pub(crate) prefixes_per_network: u32,
+        pub prefixes_per_network: u32,
         /// When, into each second, the granted peer sends its initiation.
-        pub(crate) peer_offset_ms: u64,
+        pub peer_offset_ms: u64,
         /// Whether the node knows the peer's source as one of its endpoints. Only [`simulate`]
         /// reads it; [`flood_against`] uses whatever the guard already knows.
-        pub(crate) peer_endpoint_known: bool,
+        pub peer_endpoint_known: bool,
     }
 
     /// What one simulated flood did.
-    pub(crate) struct Run {
+    pub struct Run {
         /// Granted-peer initiations the guard admitted.
-        pub(crate) peer_admitted: u32,
+        pub peer_admitted: u32,
         /// Granted-peer initiations sent (one every 5 s).
-        pub(crate) peer_attempts: u32,
+        pub peer_attempts: u32,
         /// Key agreements the guard ran during the flood.
-        pub(crate) key_agreements: u32,
+        pub key_agreements: u32,
         /// The most per-source entries the budget held at a window's end.
-        pub(crate) max_sources: usize,
+        pub max_sources: usize,
         /// The largest per-source map capacity seen.
-        pub(crate) max_capacity: usize,
+        pub max_capacity: usize,
     }
 
     /// Simulate `flood` for [`FLOOD_SECONDS`] while a granted peer retries every 5 s
@@ -2417,7 +2422,10 @@ pub(crate) mod flood_fairness {
     /// The guard keeps whatever peers and known endpoints it already has, so a live worker's
     /// guard shows what that worker taught it. `start` should be later than any real time the
     /// guard has seen, so the simulated windows are fresh.
-    pub(crate) fn flood_against(
+    ///
+    /// # Panics
+    /// Panics on invalid fixture parameters or a poisoned admission budget.
+    pub fn flood_against(
         admission: &PeerAdmission,
         node_public: X25519PublicKey,
         granted: &[u8],
@@ -2476,7 +2484,10 @@ pub(crate) mod flood_fairness {
     }
 
     /// Check the bounds every flood must keep, and print the run for the issue log.
-    pub(crate) fn report(name: &str, run: &Run) {
+    ///
+    /// # Panics
+    /// Panics if the run exceeds an admission resource bound.
+    pub fn report(name: &str, run: &Run) {
         println!(
             "J717 {name}: peer admitted {}/{} attempts, key agreements {} (cap {}), \
              max sources {}, max map capacity {}",

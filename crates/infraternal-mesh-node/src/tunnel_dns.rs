@@ -18,7 +18,7 @@
 //!
 //! Everything here is pure byte work, so the Linux gate tests it.
 
-use crate::dns::Records;
+use crate::dns::{Records, response_for_records};
 use std::net::Ipv6Addr;
 
 /// The fixed IPv6 header length; queries with extension headers are not answered.
@@ -28,7 +28,7 @@ const UDP_HEADER: usize = 8;
 /// IPv6 next-header value for UDP.
 const UDP: u8 = 17;
 /// The DNS port the resolver file names.
-pub(crate) const PORT: u16 = 53;
+pub const PORT: u16 = 53;
 /// Hop limit of reply packets; they never leave the host.
 const HOP_LIMIT: u8 = 64;
 
@@ -39,7 +39,7 @@ const HOP_LIMIT: u8 = 64;
 /// Only a packet that passes goes on to [`answer`], which checks the full address against the
 /// node's own deployment.
 #[must_use]
-pub(crate) fn looks_like_resolver_query(packet: &[u8]) -> bool {
+pub fn looks_like_resolver_query(packet: &[u8]) -> bool {
     packet.len() >= IPV6_HEADER + UDP_HEADER
         && packet[0] >> 4 == 6
         && packet[6] == UDP
@@ -54,12 +54,7 @@ pub(crate) fn looks_like_resolver_query(packet: &[u8]) -> bool {
 /// `records` is the node's current name snapshot. The reply swaps the addresses and ports of the
 /// query and carries a correct UDP checksum, which IPv6 requires.
 #[must_use]
-pub(crate) fn answer(
-    packet: &[u8],
-    resolver: Ipv6Addr,
-    records: &Records,
-    mtu: usize,
-) -> Option<Vec<u8>> {
+pub fn answer(packet: &[u8], resolver: Ipv6Addr, records: &Records, mtu: usize) -> Option<Vec<u8>> {
     if !looks_like_resolver_query(packet) || packet[24..40] != resolver.octets() {
         return None;
     }
@@ -72,7 +67,7 @@ pub(crate) fn answer(
         return None;
     }
     let query = &packet[IPV6_HEADER + UDP_HEADER..];
-    let reply = crate::dns::response_for_records(query, records).ok()?;
+    let reply = response_for_records(query, records).ok()?;
     let source: [u8; 16] = packet[8..24].try_into().ok()?;
     let source_port = [packet[40], packet[41]];
     build_reply(resolver, Ipv6Addr::from(source), source_port, &reply, mtu)

@@ -48,6 +48,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use crate::trusted_program::{ToolError, trusted_program};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 #[cfg(all(
     target_os = "linux",
     any(feature = "plugin-mesh", feature = "plugin-server")
@@ -411,7 +412,7 @@ pub(crate) async fn run(
         approved.inspect_err(|_| eprintln!("No system service was installed."))?;
     let payload = encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules)?;
     invitation.wipe();
-    let installed = invoke_sudo(sudo, &payload, cancelled).await;
+    let installed = invoke_sudo(sudo, &payload, json_output, cancelled).await;
     if cancelled.received().is_some() {
         if installed.is_ok() {
             eprintln!("The installation finished and the system service remains installed.");
@@ -1080,6 +1081,7 @@ fn take_u32(bytes: &[u8], offset: &mut usize) -> Result<usize, Failure> {
     usize::try_from(u32::from_be_bytes(value)).map_err(|_| Failure::Permission)
 }
 
+/// Read `length` bytes from `bytes` starting at `offset` into a zeroizing buffer.
 fn take_bytes(
     bytes: &[u8],
     offset: &mut usize,
@@ -1089,6 +1091,32 @@ fn take_bytes(
     let value = bytes.get(*offset..end).ok_or(Failure::Permission)?;
     *offset = end;
     Ok(Zeroizing::new(value.to_vec()))
+}
+
+/// Select the elevation explanation matching what this platform's `up` actually installs.
+const fn system_elevation_prompt() -> ElevationPrompt {
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: true,
+        }
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(feature = "plugin-mesh", feature = "plugin-server"))
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: false,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ElevationPrompt::MacosSystemInstall
+    }
 }
 
 /// The one sudo invocation: a root-owned sudo runs this binary's hidden helper.
@@ -1118,12 +1146,14 @@ fn trusted_tool(candidates: &[&str], missing: Failure) -> Result<PathBuf, Failur
 async fn invoke_sudo(
     command: Command,
     payload: &[u8],
+    json_output: bool,
     cancelled: &Cancellation,
 ) -> Result<(), Failure> {
     if cancelled.received().is_some() {
         eprintln!("No system service was installed.");
         return Err(Failure::Failed);
     }
+    system_elevation_prompt().print_to_stderr(json_output);
     let mut child = tokio::process::Command::from(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1888,7 +1918,9 @@ mod tests {
         let command = std::process::Command::new(temporary.0.join("missing-sudo"));
 
         let failure = super::termination::scope(|cancelled| async move {
-            invoke_sudo(command, b"", &cancelled).await.unwrap_err()
+            invoke_sudo(command, b"", false, &cancelled)
+                .await
+                .unwrap_err()
         })
         .unwrap();
 
@@ -1905,12 +1937,109 @@ mod tests {
         let command = std::process::Command::new(sudo);
 
         let failure = super::termination::scope(|cancelled| async move {
-            invoke_sudo(command, b"", &cancelled).await.unwrap_err()
+            invoke_sudo(command, b"", false, &cancelled)
+                .await
+                .unwrap_err()
         })
         .unwrap();
 
         assert_eq!(failure.exit(), Exit::NotAllowed);
         assert!(failure.message().contains("sudo"));
+    }
+
+    /// Run the system elevation boundary with the test's sudo fixture and real signal handlers.
+    #[test]
+    #[ignore = "run only in the password-prompt test's private terminal"]
+    fn sudo_password_prompt_child() {
+        let fixture = std::env::var_os("INFRATERNAL_TEST_SUDO_FIXTURE").unwrap();
+        let mut sudo = std::process::Command::new(Path::new(&fixture).join("sudo"));
+        sudo.current_dir(fixture);
+        super::with_cancellation(
+            |cancelled| async move {
+                invoke_sudo(sudo, b"", true, &cancelled).await?;
+                Ok(std::process::ExitCode::SUCCESS)
+            },
+            true,
+        );
+    }
+
+    /// Ctrl-C at the password prompt leaves the system installation baseline intact.
+    #[test]
+    fn ctrl_c_at_sudo_password_prompt_leaves_a_clean_baseline() {
+        use nix::{
+            poll::{PollFd, PollFlags, poll},
+            pty::openpty,
+        };
+        use std::{
+            io::{Read, Write},
+            os::{fd::AsFd, unix::process::ExitStatusExt},
+            process::{Command, Stdio},
+        };
+
+        let temporary = TemporaryDirectory::new();
+        fs::write(temporary.0.join("keep"), b"existing").unwrap();
+        crate::test_executable::write(
+            &temporary.0.join("sudo"),
+            "#!/bin/sh\nprintf 'Password: ' >/dev/tty\nread -r password </dev/tty || exit 1\n: >installed\n",
+            0o755,
+        );
+        let tty = openpty(None, None).unwrap();
+        let mut terminal = fs::File::from(tty.master);
+        // A private controlling terminal delivers VINTR to the CLI and sudo's foreground group.
+        let mut command = Command::new("setsid");
+        command
+            .arg("--ctty")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::tests::sudo_password_prompt_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("INFRATERNAL_TEST_SUDO_FIXTURE", &temporary.0)
+            .stdin(tty.slave.try_clone().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(tty.slave);
+        infraternal_shim::prepare_child(&mut command);
+        let mut child = crate::restart_binary::fixture::ChildGuard::new(command.spawn().unwrap());
+        drop(command);
+
+        let mut prompt = Vec::new();
+        while !prompt.ends_with(b"Password: ") {
+            let mut ready = [PollFd::new(terminal.as_fd(), PollFlags::POLLIN)];
+            assert_eq!(poll(&mut ready, 5000_u16).unwrap(), 1, "no password prompt");
+            let mut bytes = [0; 1024];
+            let count = terminal.read(&mut bytes).unwrap();
+            assert_ne!(count, 0, "terminal closed before the password prompt");
+            prompt.extend_from_slice(&bytes[..count]);
+        }
+        terminal.write_all(b"\x03").unwrap();
+
+        let mut done = [PollFd::new(
+            child.process().stdout.as_ref().unwrap().as_fd(),
+            PollFlags::POLLHUP,
+        )];
+        assert_eq!(poll(&mut done, 5000_u16).unwrap(), 1, "sudo kept running");
+        let output = child.output();
+        assert_eq!(output.status.signal(), Some(nix::libc::SIGINT));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let envelopes: Vec<serde_json::Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(envelopes.len(), 1, "{stdout}");
+        assert_eq!(envelopes[0]["error"]["code"], "interrupted");
+        assert!(!temporary.0.join("installed").exists());
+        assert_eq!(fs::read(temporary.0.join("keep")).unwrap(), b"existing");
+        let prompt = String::from_utf8(prompt).unwrap();
+        let action = prompt
+            .find("Infraternal needs administrator privileges")
+            .unwrap();
+        let benefit = prompt.find("If you grant it, you get:").unwrap();
+        let loss = prompt.find("If you don't, you won't be able to").unwrap();
+        assert!(action < benefit && benefit < loss);
+        assert!(!prompt.contains('\x1b'), "JSON mode styled the prompt");
     }
 
     #[test]
@@ -2032,5 +2161,17 @@ mod tests {
         let start = lines.iter().position(|line| line.starts_with("ExecStart="));
         assert!(relabel.is_some(), "{unit}");
         assert!(relabel < start, "{unit}");
+    }
+
+    /// #616: `infraternal up` selects the Linux system install elevation prompt
+    /// matching whether this build includes the host input firewall.
+    #[test]
+    fn system_elevation_prompt_matches_linux_features() {
+        assert_eq!(
+            super::system_elevation_prompt(),
+            super::ElevationPrompt::LinuxSystemInstall {
+                host_firewall: cfg!(any(feature = "plugin-mesh", feature = "plugin-server")),
+            }
+        );
     }
 }
