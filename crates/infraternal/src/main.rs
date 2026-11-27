@@ -313,12 +313,7 @@ fn run_invocation() -> ExitCode {
         }
     };
     let requested_json = requested_json_early();
-    let tree = if requested_json {
-        cli::command_tree::build(&registry)
-    } else {
-        cli::command_tree::build_for_terminal(&registry)
-    };
-    let matches = match tree.try_get_matches() {
+    let matches = match cli::command_tree::build(&registry).try_get_matches() {
         Ok(matches) => matches,
         Err(error) => return parse_failure(&registry, &error, requested_json),
     };
@@ -835,6 +830,13 @@ fn parse_failure(registry: &ActionRegistry, error: &clap::Error, json: bool) -> 
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             if !json =>
         {
+            // Terminal help changes labels only. Keep those changes off the
+            // startup path used by successful commands and private workers.
+            if let Err(display) = cli::command_tree::build_for_terminal(registry).try_get_matches()
+                && display.kind() == error.kind()
+            {
+                display.exit();
+            }
             error.exit()
         }
         _ => emit(cli::usage::result(&tree, &args, error), json, Exit::Usage),
