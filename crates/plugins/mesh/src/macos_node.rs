@@ -574,6 +574,168 @@ fn run_ifconfig<'a>(arguments: impl IntoIterator<Item = &'a str>) -> io::Result<
     }
 }
 
+/// Platform effects used while applying and rolling back a node snapshot.
+trait HostNet: Send {
+    /// Configure the owned tunnel and its optional mesh addresses.
+    fn configure_interface(utun: &MacUtun, config: Option<&Config>, mtu: u16) -> io::Result<()>;
+
+    /// Set the MTU after route metrics have been reconciled.
+    fn set_interface_mtu(utun: &MacUtun, mtu: u16) -> io::Result<()>;
+
+    /// Apply one host route operation on the owned interface.
+    fn route(interface: &str, address: IpAddr, operation: &str, mtu: Option<u16>)
+    -> io::Result<()>;
+
+    /// Delete the specified routes after validating their owning interface.
+    fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()>;
+
+    /// Read the effective mesh budget with a fresh, per-snapshot probe cache.
+    fn probe_paths(config: Option<&Config>) -> PathBudgets;
+
+    /// Bind a DNS listener for the snapshot's local resolver address.
+    #[cfg(feature = "mesh-dns")]
+    fn bind_dns(config: &Config) -> io::Result<crate::dns::Resolver>;
+
+    /// Publish host split DNS through the tunnel's configured integration.
+    #[cfg(feature = "mesh-dns")]
+    fn configure_dns(
+        integration: &mut crate::dns_integration::DnsIntegration,
+        utun: &MacUtun,
+        records: &crate::dns::Records,
+        address: std::net::Ipv6Addr,
+    ) -> io::Result<()>;
+
+    /// Clear the previous split DNS integration before restoring a node.
+    #[cfg(feature = "mesh-dns")]
+    fn clear_dns() -> io::Result<()>;
+}
+
+/// Applies node networking through the macOS kernel or the user-mode helper.
+struct MacHostNet;
+
+impl HostNet for MacHostNet {
+    fn configure_interface(utun: &MacUtun, config: Option<&Config>, mtu: u16) -> io::Result<()> {
+        configure_interface(utun, config, mtu)
+    }
+
+    fn set_interface_mtu(utun: &MacUtun, mtu: u16) -> io::Result<()> {
+        set_interface_mtu(utun, mtu)
+    }
+
+    fn route(
+        interface: &str,
+        address: IpAddr,
+        operation: &str,
+        mtu: Option<u16>,
+    ) -> io::Result<()> {
+        route(interface, address, operation, mtu)
+    }
+
+    fn remove_routes(interface: &str, routes: &BTreeSet<IpAddr>) -> io::Result<()> {
+        remove_routes(interface, routes)
+    }
+
+    fn probe_paths(config: Option<&Config>) -> PathBudgets {
+        PathBudgets::probe(config)
+    }
+
+    #[cfg(feature = "mesh-dns")]
+    fn bind_dns(config: &Config) -> io::Result<crate::dns::Resolver> {
+        crate::dns::Resolver::bind(config)
+    }
+
+    #[cfg(feature = "mesh-dns")]
+    fn configure_dns(
+        integration: &mut crate::dns_integration::DnsIntegration,
+        utun: &MacUtun,
+        records: &crate::dns::Records,
+        address: std::net::Ipv6Addr,
+    ) -> io::Result<()> {
+        configure_host_dns(integration, utun, records, address)
+    }
+
+    #[cfg(feature = "mesh-dns")]
+    fn clear_dns() -> io::Result<()> {
+        crate::dns_integration::DnsIntegration::default().remove()
+    }
+}
+
+/// Durable Mac node operations that depend on files or the local key provider.
+trait NodeStore: Send {
+    /// Read the public snapshot and its authority record.
+    fn load_public(path: &Path) -> io::Result<Option<SavedState>>;
+
+    /// Atomically save public intent.
+    fn store_public(path: &Path, state: &SavedState) -> io::Result<()>;
+
+    /// Write a fail-closed snapshot when atomic replacement failed.
+    fn fence_public(path: &Path, state: &SavedState) -> io::Result<()>;
+
+    /// Replace public intent only if its accepted authority and base still match.
+    fn replace_public(path: &Path, state: &SavedState, expected: &Config) -> io::Result<()>;
+
+    /// Return the saved private key, if one exists, in a zeroizing buffer.
+    fn load_private(store: &crate::node_state::Store) -> io::Result<Option<Zeroizing<Vec<u8>>>>;
+
+    /// Open or initialize the platform key and return its public identity.
+    fn open_private(state: &Path) -> io::Result<(StaticSecret, crate::policy::model::PublicKey)>;
+
+    /// Record a journal-authorized private key and its public interface identity.
+    fn record_rotation_identity(
+        store: &crate::node_state::Store,
+        operation: &str,
+        sequence: u64,
+        private: &[u8],
+        public: &crate::policy::model::PublicKey,
+    ) -> io::Result<()>;
+
+    /// Retire the local identity when the enrolment changes.
+    fn retire_private(state: &Path) -> io::Result<()>;
+}
+
+/// Stores the Mac node's durable intent and identity at the host's existing paths.
+struct MacNodeStore;
+
+impl NodeStore for MacNodeStore {
+    fn load_public(path: &Path) -> io::Result<Option<SavedState>> {
+        read_public_state(path)
+    }
+
+    fn store_public(path: &Path, state: &SavedState) -> io::Result<()> {
+        write_public_state(path, state)
+    }
+
+    fn fence_public(path: &Path, state: &SavedState) -> io::Result<()> {
+        write_public_state_in_place(path, state)
+    }
+
+    fn replace_public(path: &Path, state: &SavedState, expected: &Config) -> io::Result<()> {
+        write_public_state_full_snapshot(path, state, expected)
+    }
+
+    fn load_private(store: &crate::node_state::Store) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        store.read_private_key()
+    }
+
+    fn open_private(state: &Path) -> io::Result<(StaticSecret, crate::policy::model::PublicKey)> {
+        crate::macos_key::load_or_create(state)
+    }
+
+    fn record_rotation_identity(
+        store: &crate::node_state::Store,
+        operation: &str,
+        sequence: u64,
+        private: &[u8],
+        public: &crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        store.record_rotation_identity(operation, sequence, private, public)
+    }
+
+    fn retire_private(state: &Path) -> io::Result<()> {
+        crate::macos_key::retire_key(state, crate::macos_key::RotationReason::EnrolmentChanged)
+    }
+}
+
 /// Public durable intent shared with the Linux node journal; the `WireGuard` secret is never serialized.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -636,7 +798,7 @@ pub fn forget(state: &Path) -> io::Result<()> {
         Ok(_) => {}
     }
     crate::node_state::Store::open_for_macos(state)?.discard_rotation_state()?;
-    crate::macos_key::retire_key(state, crate::macos_key::RotationReason::EnrolmentChanged)?;
+    MacNodeStore::retire_private(state)?;
     match fs::remove_file(state.join(PUBLIC_STATE)) {
         Ok(()) => File::open(state)?.sync_all(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -1398,7 +1560,7 @@ impl PendingWorker {
                 }
                 let device = runtime.block_on(async {
                     let mtu = interface_mtu;
-                    configure_interface(&utun, config.as_ref(), mtu)?;
+                    MacHostNet::configure_interface(&utun, config.as_ref(), mtu)?;
                     utun.set_mtu(mtu);
                     #[cfg(feature = "mesh-dns")]
                     let mut dns_integration = crate::dns_integration::DnsIntegration::default();
@@ -1407,8 +1569,8 @@ impl PendingWorker {
                     #[cfg(feature = "mesh-dns")]
                     if let Some(config) = config.as_ref() {
                         let records = crate::dns::Records::from_config(config)?;
-                        let resolver = crate::dns::Resolver::bind(config)?;
-                        if let Err(error) = configure_host_dns(
+                        let resolver = MacHostNet::bind_dns(config)?;
+                        if let Err(error) = MacHostNet::configure_dns(
                             &mut dns_integration,
                             &utun,
                             &records,
@@ -1444,8 +1606,10 @@ impl PendingWorker {
                             .get(address)
                             .copied()
                             .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                        if let Err(error) = route(&info.interface, *address, "add", Some(mtu)) {
-                            let _ = remove_routes(&info.interface, &installed);
+                        if let Err(error) =
+                            MacHostNet::route(&info.interface, *address, "add", Some(mtu))
+                        {
+                            let _ = MacHostNet::remove_routes(&info.interface, &installed);
                             device.stop().await;
                             return Err(error);
                         }
@@ -1616,7 +1780,7 @@ impl Worker {
     /// Path MTUs are probed here, on the caller's thread, so the packet runtime only installs
     /// the results.
     fn apply(&self, config: Config) -> io::Result<RuntimeInfo> {
-        let budgets = PathBudgets::probe(Some(&config));
+        let budgets = MacHostNet::probe_paths(Some(&config));
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::Apply {
@@ -1634,7 +1798,7 @@ impl Worker {
     ///
     /// Path MTUs are probed here, on the caller's thread, as for [`Worker::apply`].
     fn replace_authority(&self, config: Config) -> io::Result<RuntimeInfo> {
-        let budgets = PathBudgets::probe(Some(&config));
+        let budgets = MacHostNet::probe_paths(Some(&config));
         let (reply, result) = sync::sync_channel(1);
         self.commands
             .send(WorkerCommand::ReplaceAuthority {
@@ -1843,16 +2007,16 @@ impl RuntimeState {
         utun.set_mtu(staging);
         let host_utun = utun.clone();
         let budgets = tokio::task::spawn_blocking(move || {
-            set_interface_mtu(&host_utun, staging)?;
+            MacHostNet::set_interface_mtu(&host_utun, staging)?;
             for address in changed {
                 let mtu = budgets
                     .route_mtus
                     .get(&address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                route(&interface, address, "change", Some(mtu))?;
+                MacHostNet::route(&interface, address, "change", Some(mtu))?;
             }
-            set_interface_mtu(&host_utun, budgets.interface_mtu)?;
+            MacHostNet::set_interface_mtu(&host_utun, budgets.interface_mtu)?;
             Ok::<_, io::Error>(budgets)
         })
         .await
@@ -1896,7 +2060,7 @@ impl RuntimeState {
         let old_route_mtus = self.route_mtus.clone();
         let old_mtu = self.interface_mtu;
         let staging_mtu = old_mtu.max(new_mtu).max(crate::mesh_mtu::IPV6_MINIMUM_MTU);
-        if let Err(error) = configure_interface(utun, Some(&config), staging_mtu) {
+        if let Err(error) = MacHostNet::configure_interface(utun, Some(&config), staging_mtu) {
             if rollback_on_failure {
                 rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             }
@@ -1905,7 +2069,7 @@ impl RuntimeState {
         utun.set_mtu(staging_mtu);
         #[cfg(feature = "mesh-dns")]
         let pending_dns_resolver = if self.dns_resolver.is_none() {
-            match crate::dns::Resolver::bind(&config) {
+            match MacHostNet::bind_dns(&config) {
                 Ok(resolver) => Some(resolver),
                 Err(error) => {
                     if rollback_on_failure {
@@ -1958,7 +2122,7 @@ impl RuntimeState {
                     .get(address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                route(&interface, *address, "add", Some(mtu))?;
+                MacHostNet::route(&interface, *address, "add", Some(mtu))?;
                 added.insert(*address);
             }
             for address in
@@ -1968,19 +2132,19 @@ impl RuntimeState {
                     .get(&address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                route(&interface, address, "change", Some(mtu))?;
+                MacHostNet::route(&interface, address, "change", Some(mtu))?;
                 changed.insert(address);
             }
             for address in old_routes.difference(&new_routes) {
-                route(&interface, *address, "delete", None)?;
+                MacHostNet::route(&interface, *address, "delete", None)?;
                 removed.insert(*address);
             }
-            set_interface_mtu(utun, new_mtu)?;
+            MacHostNet::set_interface_mtu(utun, new_mtu)?;
             utun.set_mtu(new_mtu);
             Ok(())
         })();
         if let Err(error) = routes_applied {
-            let _ = remove_routes(&interface, &added);
+            let _ = MacHostNet::remove_routes(&interface, &added);
             if !rollback_on_failure {
                 // An authority replacement never restores the retired authority's routes; the
                 // caller stops this worker, which tears down the utun and its routes.
@@ -1991,14 +2155,14 @@ impl RuntimeState {
                     .get(address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                let _ = route(&interface, *address, "change", Some(mtu));
+                let _ = MacHostNet::route(&interface, *address, "change", Some(mtu));
             }
             for address in &removed {
                 let mtu = old_route_mtus
                     .get(address)
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
-                let _ = route(&interface, *address, "add", Some(mtu));
+                let _ = MacHostNet::route(&interface, *address, "add", Some(mtu));
             }
             if pre_admitted {
                 let mut admission = self.admission.write().await;
@@ -2017,7 +2181,7 @@ impl RuntimeState {
                 .as_ref()
                 .or(pending_dns_resolver.as_ref())
                 .ok_or(io::ErrorKind::NotConnected)?;
-            if let Err(error) = configure_host_dns(
+            if let Err(error) = MacHostNet::configure_dns(
                 &mut self.dns_integration,
                 utun,
                 &dns_records,
@@ -2074,10 +2238,9 @@ impl RuntimeState {
     /// Returns a DNS or route cleanup error after the device and utun descriptor have been stopped.
     async fn stop(&mut self) -> io::Result<()> {
         let dns_result = self.stop_dns();
-        let route_result = self
-            .utun
-            .as_ref()
-            .map_or(Ok(()), |utun| remove_routes(utun.name(), &self.routes));
+        let route_result = self.utun.as_ref().map_or(Ok(()), |utun| {
+            MacHostNet::remove_routes(utun.name(), &self.routes)
+        });
         // Subnet routes go with the utun; root mode removes them first, as it does host routes.
         self.remove_networks();
         // Ending every handshake task drops its device handle, so this one is the last.
@@ -2132,12 +2295,12 @@ async fn replace_peers(device: &GotaDevice, peers: Vec<WireGuardPeer>) -> io::Re
 /// on the packet runtime.
 async fn rollback_device(device: &GotaDevice, config: Option<&Config>, mtu: u16, utun: &MacUtun) {
     if let Some(config) = config {
-        let _ = configure_interface(utun, Some(config), mtu);
+        let _ = MacHostNet::configure_interface(utun, Some(config), mtu);
         if let Ok(peers) = peers_for_config(config) {
             let _ = replace_peers(device, peers).await;
         }
     } else {
-        let _ = set_interface_mtu(utun, mtu);
+        let _ = MacHostNet::set_interface_mtu(utun, mtu);
     }
     utun.set_mtu(mtu);
 }
@@ -2196,9 +2359,7 @@ fn recover_macos_rotation_key(
     let recorded = store
         .recorded_interface()?
         .ok_or(io::ErrorKind::InvalidData)?;
-    let saved = store
-        .read_private_key()?
-        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved = MacNodeStore::load_private(store)?.ok_or(io::ErrorKind::InvalidData)?;
     let saved_public = RotationKey::from_private(&saved)?.1;
     if rotation.completed {
         if recorded != candidate_public || saved_public != candidate_public {
@@ -2221,7 +2382,8 @@ fn recover_macos_rotation_key(
     if !legal_partial_write {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    store.record_rotation_identity(
+    MacNodeStore::record_rotation_identity(
+        store,
         &rotation.operation_id,
         rotation.sequence,
         candidate.private_bytes(),
@@ -2242,9 +2404,7 @@ fn validate_macos_rotation_proof(
     let recorded = store
         .recorded_interface()?
         .ok_or(io::ErrorKind::InvalidData)?;
-    let saved = store
-        .read_private_key()?
-        .ok_or(io::ErrorKind::InvalidData)?;
+    let saved = MacNodeStore::load_private(store)?.ok_or(io::ErrorKind::InvalidData)?;
     let saved_public = RotationKey::from_private(&saved)?.1;
     if rotation.completed {
         if current != candidate_public
@@ -2277,7 +2437,7 @@ fn macos_snapshot_binding_is_authorized(
     store: &crate::node_state::Store,
     bound: crate::policy::model::PublicKey,
 ) -> io::Result<bool> {
-    let Some(private) = store.read_private_key()? else {
+    let Some(private) = MacNodeStore::load_private(store)? else {
         return Ok(false);
     };
     let private_public = RotationKey::from_private(&private)?.1;
@@ -2340,9 +2500,9 @@ impl Node {
             crate::macos_machine::bind(state_directory, crate::macos_machine::fingerprint())?;
         }
         #[cfg(feature = "mesh-dns")]
-        crate::dns_integration::DnsIntegration::default().remove()?;
+        MacHostNet::clear_dns()?;
         let path = state_directory.join(PUBLIC_STATE);
-        let (state, rotate) = match read_public_state(&path)? {
+        let (state, rotate) = match MacNodeStore::load_public(&path)? {
             Some(saved) => reconcile(saved, enrolment),
             None => (
                 SavedState {
@@ -2358,10 +2518,7 @@ impl Node {
                 "Mesh state is not bound to this enrolment; discarding its peers and starting with a new WireGuard key"
             );
             store.discard_rotation_state()?;
-            crate::macos_key::retire_key(
-                state_directory,
-                crate::macos_key::RotationReason::EnrolmentChanged,
-            )?;
+            MacNodeStore::retire_private(state_directory)?;
         }
         let mut stale_routes = state.routes.clone();
         if let Some(config) = &state.config {
@@ -2462,7 +2619,7 @@ impl Node {
         let listen_port = crate::listen_port::from_environment(saved_port)?;
         let (private_key, public_key) = if let Some(rotation) = store.rotation_secret()? {
             let (journal_key, journal_public) = recover_macos_rotation_key(store, &rotation)?;
-            let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
+            let (secret, keychain_public) = MacNodeStore::open_private(state)?;
             if keychain_public != journal_public
                 || RotationKey::from_private(journal_key.private_bytes())?.1 != journal_public
             {
@@ -2470,11 +2627,12 @@ impl Node {
             }
             (secret, journal_public)
         } else {
-            if store.recorded_interface()?.is_some() && store.read_private_key()?.is_none() {
+            if store.recorded_interface()?.is_some() && MacNodeStore::load_private(store)?.is_none()
+            {
                 return Err(io::ErrorKind::InvalidData.into());
             }
-            let (secret, keychain_public) = crate::macos_key::load_or_create(state)?;
-            let bytes = store.read_private_key()?.ok_or(io::ErrorKind::NotFound)?;
+            let (secret, keychain_public) = MacNodeStore::open_private(state)?;
+            let bytes = MacNodeStore::load_private(store)?.ok_or(io::ErrorKind::NotFound)?;
             let (_, file_public) = RotationKey::from_private(&bytes)?;
             if file_public != keychain_public {
                 return Err(io::ErrorKind::InvalidData.into());
@@ -2512,7 +2670,7 @@ impl Node {
             listen_port,
             self.config.clone(),
             desired_routes.clone(),
-            PathBudgets::probe(self.config.as_ref()),
+            MacHostNet::probe_paths(self.config.as_ref()),
             self.network_status.clone(),
         )?;
         let info = startup.info().clone();
@@ -2541,7 +2699,7 @@ impl Node {
             }
             Err(error) => {
                 if let Some(interface) = self.interface.as_deref() {
-                    let _ = remove_routes(interface, &self.routes);
+                    let _ = MacHostNet::remove_routes(interface, &self.routes);
                 }
                 self.interface = None;
                 self.routes.clear();
@@ -2607,7 +2765,8 @@ impl Node {
         let (candidate, candidate_public) = RotationKey::from_private(&rotation.candidate)?;
         let (_, previous_public) = RotationKey::from_private(&rotation.previous)?;
         if rotation.commit_requested && current == candidate_public {
-            store.record_rotation_identity(
+            MacNodeStore::record_rotation_identity(
+                store,
                 &rotation.operation_id,
                 rotation.sequence,
                 candidate.private_bytes(),
@@ -2691,9 +2850,7 @@ impl Node {
         }
 
         let store = self.store.as_ref().ok_or(io::ErrorKind::NotConnected)?;
-        let private = store
-            .read_private_key()?
-            .ok_or(io::ErrorKind::InvalidData)?;
+        let private = MacNodeStore::load_private(store)?.ok_or(io::ErrorKind::InvalidData)?;
         let (previous, previous_public) = RotationKey::from_private(&private)?;
         if previous_public != current || store.recorded_interface()? != Some(current) {
             return Err(io::ErrorKind::InvalidData.into());
@@ -2765,7 +2922,8 @@ impl Node {
         if let Some(config) = self.config.as_mut() {
             config.local_key = Some(candidate_public);
         }
-        store.record_rotation_identity(
+        MacNodeStore::record_rotation_identity(
+            store,
             operation_id,
             sequence,
             candidate.private_bytes(),
@@ -2790,8 +2948,7 @@ impl Node {
         if identity.public_key != candidate_public
             || (!rotation.completed && !rotation.commit_requested)
             || store.recorded_interface()? != Some(candidate_public)
-            || store
-                .read_private_key()?
+            || MacNodeStore::load_private(store)?
                 .map(|private| RotationKey::from_private(&private).map(|(_, public)| public))
                 .transpose()?
                 != Some(candidate_public)
@@ -3182,9 +3339,9 @@ impl Node {
             backend: None,
             binding: self.binding.clone(),
         };
-        match write_public_state(path, &state) {
+        match MacNodeStore::store_public(path, &state) {
             Ok(()) => Ok(()),
-            Err(atomic_error) => write_public_state_in_place(path, &state).inspect_err(|error| {
+            Err(atomic_error) => MacNodeStore::fence_public(path, &state).inspect_err(|error| {
                 tracing::error!(
                     atomic_error_kind = ?atomic_error.kind(),
                     fallback_error_kind = ?error.kind(),
@@ -3232,9 +3389,9 @@ impl Node {
             binding: self.binding.clone(),
         };
         let persistence = self.path.as_ref().map_or(Ok(()), |path| {
-            match write_public_state(path, &state) {
+            match MacNodeStore::store_public(path, &state) {
                 Ok(()) => Ok(()),
-                Err(atomic_error) => write_public_state_in_place(path, &state).inspect_err(|error| {
+                Err(atomic_error) => MacNodeStore::fence_public(path, &state).inspect_err(|error| {
                     tracing::error!(
                         atomic_error_kind = ?atomic_error.kind(),
                         fallback_error_kind = ?error.kind(),
@@ -3277,7 +3434,7 @@ impl Node {
         interface: Option<String>,
     ) -> io::Result<()> {
         if let Some(path) = &self.path {
-            write_public_state(
+            MacNodeStore::store_public(
                 path,
                 &SavedState {
                     enabled,
@@ -3308,7 +3465,7 @@ impl Node {
         expected: &Config,
     ) -> io::Result<()> {
         let path = self.path.as_ref().ok_or(io::ErrorKind::InvalidData)?;
-        write_public_state_full_snapshot(
+        MacNodeStore::replace_public(
             path,
             &SavedState {
                 enabled: true,
