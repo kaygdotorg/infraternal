@@ -19,6 +19,7 @@ import { createAccountNotifications } from "../../account-storage";
 import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInventory, SessionRecord } from "./inventory";
 
 
+/** Reconciles the live host census with the sessions this account has opened. */
 export interface LiveInventory extends SessionInventory {
   /** Whether this tab has already asked the host to end the session. */
   isEnding(id: string): boolean;
