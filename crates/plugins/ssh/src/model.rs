@@ -295,6 +295,10 @@ pub struct Failure {
 /// Each uuid keeps its own field, so one can never be read or sent as the other.
 #[derive(Clone, Debug, Default)]
 struct FailureIds {
+    /// The peer's self-reported SSH identification, used only as recovery guidance.
+    netbird_ssh: bool,
+    /// The authenticated system check reported macOS, which uses local enrollment.
+    macos_join: bool,
     /// Binds a host-key confirmation to the observation that produced it.
     host_key_challenge: Option<uuid::Uuid>,
     /// The owner's existing host that makes this an already-added failure.
@@ -453,6 +457,16 @@ impl Serialize for Failure {
         if self.choose_method {
             state.serialize_field("choose_method", &self.choose_method)?;
         }
+        if self.netbird_ssh() {
+            state.serialize_field("ssh_server", "netbird")?;
+        }
+        if self
+            .ids
+            .as_deref()
+            .is_some_and(|details| details.macos_join)
+        {
+            state.serialize_field("join_locally", "macos")?;
+        }
         if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.host_key_challenge) {
             state.serialize_field("host_key_challenge", &uuid)?;
         }
@@ -466,6 +480,28 @@ impl Serialize for Failure {
 }
 
 impl Failure {
+    /// Explain how to enroll a Mac after its SSH system check succeeded.
+    pub(crate) fn macos_join() -> Self {
+        let mut failure = Self::unsupported(
+            "The SSH system check found macOS. Installing over SSH requires Linux with systemd.",
+        );
+        failure.ids.get_or_insert_with(Box::default).macos_join = true;
+        failure
+    }
+
+    /// Record the peer's self-reported SSH software for the recovery UI.
+    pub(crate) fn with_netbird_ssh(mut self) -> Self {
+        self.ids.get_or_insert_with(Box::default).netbird_ssh = true;
+        self
+    }
+
+    /// True when the failed connection identified itself as the embedded SSH server.
+    pub(crate) fn netbird_ssh(&self) -> bool {
+        self.ids
+            .as_deref()
+            .is_some_and(|details| details.netbird_ssh)
+    }
+
     #[must_use]
     pub fn new(kind: FailureKind, message: &'static str) -> Self {
         Self {

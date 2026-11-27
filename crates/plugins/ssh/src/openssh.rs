@@ -161,6 +161,7 @@ impl Session {
             .map(str::to_owned)
             .collect()
     }
+    /// Start the strictly checked master, enabling only scoped diagnostic receipts.
     fn command(&self, socket: &std::path::Path) -> Command {
         let mut command = Command::new(&self.ssh);
         // Method-specific authentication precedes retained public preferences;
@@ -219,7 +220,7 @@ impl Session {
             "-o",
             "LogLevel=ERROR",
             "-o",
-            "LogVerbose=sshconnect2.c:ssh_userauth2():*",
+            "LogVerbose=kex.c:kex_exchange_identification():*,sshconnect2.c:ssh_userauth2():*,sshconnect2.c:input_userauth_failure():*,sshconnect2.c:userauth():*",
         ]);
         let destination = &self.configuration.destination;
         command.args(["-M", "-N", "-S"]).arg(socket);
@@ -484,6 +485,8 @@ const NETBIRD_NO_ACCOUNT: &str = "User authentication failed";
 /// Only allowlisted categories/text survive; remote banners and command output are discarded.
 #[must_use]
 pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure {
+    use crate::connection_diagnostics;
+
     let text = String::from_utf8_lossy(&stderr[..stderr.len().min(8192)]);
     let mut failure = if text.trim() == NETBIRD_NO_ACCOUNT {
         // The `NetBird` SSH server accepts the network sign-in, then ends the
@@ -498,19 +501,24 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
         )
     } else if !ssh_failure {
         Failure::install("The remote bootstrap command failed.")
-    } else if text.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
-        || text.contains("Host key verification failed")
-        || text.contains("host key is known")
-    {
+    } else if text.lines().any(|line| {
+        line.trim() == "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @"
+            || line.trim() == "REMOTE HOST IDENTIFICATION HAS CHANGED"
+    }) {
+        Failure::new(
+            FailureKind::HostKey,
+            "The SSH host key differs from the trusted key. Verify the fingerprint on the host before replacing it.",
+        )
+    } else if text.lines().any(|line| {
+        line.starts_with("Host key verification failed")
+            || (line.starts_with("No ") && line.contains("host key is known"))
+    }) {
         Failure::new(
             FailureKind::HostKey,
             "The SSH host key needs review before connecting.",
         )
-    } else if text.contains("Permission denied") || text.contains("Authentication failed") {
-        Failure::new(
-            FailureKind::Auth,
-            "SSH authentication failed. Choose another credential.",
-        )
+    } else if connection_diagnostics::auth_refused(&text) {
+        Failure::new(FailureKind::Auth, "The SSH server rejected sign-in.")
     } else if ssh_failure
         && (text.contains("Connection refused") || text.contains("Connection timed out"))
         && mesh.is_peer
@@ -528,6 +536,22 @@ pub fn classify(stderr: &[u8], ssh_failure: bool, mesh: MeshEvidence) -> Failure
     } else {
         Failure::install("The remote bootstrap command failed.")
     };
+    if ssh_failure {
+        if let Some(reason) = connection_diagnostics::dial_reason(&text)
+            && matches!(
+                failure.kind,
+                FailureKind::Unreachable | FailureKind::MeshPolicy
+            )
+        {
+            failure.message = reason;
+        }
+        if failure.kind == FailureKind::Auth {
+            connection_diagnostics::authentication(&text, &mut failure);
+            if connection_diagnostics::netbird(&text) {
+                failure = failure.with_netbird_ssh();
+            }
+        }
+    }
     failure.log_tail.push(match failure.kind {
         FailureKind::HostKey => "OpenSSH refused host-key verification.",
         FailureKind::Auth => "OpenSSH refused authentication.",

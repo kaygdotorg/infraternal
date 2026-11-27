@@ -23,6 +23,17 @@ const NO_SIGPIPE: MsgFlags = MsgFlags::empty();
 /// # Errors
 /// Refuses empty endpoints, failed DNS/connect, socket setup or descriptor delivery.
 pub fn handoff(host: &str, port: u16, channel: &impl AsRawFd) -> io::Result<()> {
+    handoff_with_diagnostic(host, port, channel).map_err(|(error, _)| error)
+}
+
+/// Hand off the socket and classify a failed dial without exposing resolver or OS text.
+/// # Errors
+/// Returns the local error and a fixed diagnostic for the invoking SSH client.
+pub fn handoff_with_diagnostic(
+    host: &str,
+    port: u16,
+    channel: &impl AsRawFd,
+) -> Result<(), (io::Error, &'static str)> {
     let stream = connect(host, port)?;
     let descriptors = [stream.as_raw_fd()];
     let sent = sendmsg::<()>(
@@ -32,35 +43,46 @@ pub fn handoff(host: &str, port: u16, channel: &impl AsRawFd) -> io::Result<()> 
         NO_SIGPIPE,
         None,
     )
-    .map_err(io::Error::from)?;
+    .map_err(|error| (io::Error::from(error), "Socket handoff failed"))?;
     if sent != 1 {
-        return Err(io::ErrorKind::WriteZero.into());
+        return Err((io::ErrorKind::WriteZero.into(), "Socket handoff failed"));
     }
     // SCM_RIGHTS transfers a kernel reference. Closing this helper's copy
     // leaves exactly the parent's socket; no relay or helper remains running.
     Ok(())
 }
 
-fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
+/// Resolve before dialing so a resolver failure cannot be mistaken for a TCP refusal.
+fn connect(host: &str, port: u16) -> Result<TcpStream, (io::Error, &'static str)> {
     if host.is_empty() || port == 0 {
-        return Err(io::ErrorKind::InvalidInput.into());
+        return Err((io::ErrorKind::InvalidInput.into(), "Invalid endpoint"));
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut failure = io::Error::from(io::ErrorKind::AddrNotAvailable);
-    for address in (host, port).to_socket_addrs()? {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| (error, "Could not resolve hostname"))?;
+    for address in addresses {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
+            return Err((io::ErrorKind::TimedOut.into(), "Connection timed out"));
         }
         match TcpStream::connect_timeout(&address, remaining) {
             Ok(stream) => {
-                stream.set_nodelay(true)?;
+                stream
+                    .set_nodelay(true)
+                    .map_err(|error| (error, "Socket setup failed"))?;
                 return Ok(stream);
             }
             Err(error) => failure = error,
         }
     }
-    Err(failure)
+    let diagnostic = match failure.kind() {
+        io::ErrorKind::ConnectionRefused => "Connection refused",
+        io::ErrorKind::TimedOut => "Connection timed out",
+        _ => "Connection failed",
+    };
+    Err((failure, diagnostic))
 }
 
 #[cfg(test)]
