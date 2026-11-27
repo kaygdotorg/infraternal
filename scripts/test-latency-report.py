@@ -72,6 +72,17 @@ class ReportTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("MISSING", table)
 
+    def test_remote_idle_is_reported_even_above_budget(self):
+        """Both D81 configurations stay advisory independently of the latency rows."""
+        for key, label, sources in targets.REMOTE_IDLE_ROWS:
+            with self.subTest(key=key):
+                metric = targets.row_line(key, source="release-server", n=5, value=300,
+                                          unit="activations/min", target=180, report_only=True)
+                table, passed = targets.report(full_log() + "\n" + metric)
+                self.assertTrue(passed, table)
+                self.assertIn(f"| {label} | 300.00 (n=5) | 180.00 | {sources} | REPORT |", table)
+                self.assertIn("MISSING (reported)", table)
+
     def test_missing_row_fails(self):
         log = "\n".join(line for line in full_log().splitlines() if "d375_idle_agent_rss" not in line)
         table, passed = targets.report(log)
