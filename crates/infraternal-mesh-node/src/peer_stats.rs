@@ -1,10 +1,12 @@
 //! Converts GotaTun peer snapshots into mesh counters and confirmed paths.
 
 use crate::policy::model::PublicKey;
+#[cfg(all(unix, feature = "engine"))]
 use gotatun::device::configure::PeerStats;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+#[cfg(all(unix, feature = "engine"))]
 use std::{
-    collections::BTreeMap,
     net::SocketAddr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -31,9 +33,10 @@ pub struct Counters {
 }
 
 /// Peer counters indexed by device key.
-pub type CounterMap = BTreeMap<crate::policy::model::PublicKey, Counters>;
+pub type CounterMap = BTreeMap<PublicKey, Counters>;
 
 /// Return one authenticated address per active installed key.
+#[cfg(all(unix, feature = "engine"))]
 #[must_use]
 pub fn confirmed_endpoints(peers: Vec<PeerStats>) -> Vec<(PublicKey, SocketAddr)> {
     peers
@@ -49,6 +52,7 @@ pub fn confirmed_endpoints(peers: Vec<PeerStats>) -> Vec<(PublicKey, SocketAddr)
 }
 
 /// Convert the engine's relative handshake times and byte counts to public counters.
+#[cfg(all(unix, feature = "engine"))]
 #[must_use]
 pub fn counters(peers: Vec<PeerStats>) -> CounterMap {
     let now = SystemTime::now()

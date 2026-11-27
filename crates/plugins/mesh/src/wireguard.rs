@@ -11,7 +11,6 @@ use nix::{
     },
 };
 use openssl::pkey::PKey;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     io,
@@ -92,24 +91,8 @@ impl Key {
     }
 }
 pub use crate::dataplane::Peer;
-/// Public kernel peer status, available even while the coordinator is unreachable.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Counters {
-    #[serde(default)]
-    pub persistent_keepalive_secs: u16,
-    pub handshake_secs: u64,
-    /// Subsecond precision used to order handshakes against endpoint updates.
-    #[cfg(feature = "relay")]
-    #[serde(skip)]
-    pub handshake_nanos: u32,
-    pub received_bytes: u64,
-    pub sent_bytes: u64,
-    /// Where the kernel currently sends this peer's packets: the configured
-    /// endpoint, or the source of its latest authenticated packet (roaming).
-    /// It is not discovery evidence by itself (contracts/mesh-discovery.md).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub endpoint: Option<SocketAddr>,
-}
+/// Public counters read from the kernel peer table.
+pub use infraternal_mesh_node::peer_stats::Counters;
 /// Interface name is fixed: ownership never includes an operator's other interfaces.
 pub const INTERFACE: &str = "infraternal0";
 /// The unbound kernel marker that links created before D340 carry.

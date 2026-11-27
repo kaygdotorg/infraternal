@@ -286,7 +286,7 @@ fn publish(state: &Path, bytes: &[u8; KEY_LENGTH]) -> io::Result<()> {
     result
 }
 
-/// Generate a private WireGuard key with the system random source.
+/// Generate a private `WireGuard` key with the system random source.
 fn generate() -> io::Result<Zeroizing<[u8; KEY_LENGTH]>> {
     let mut bytes = Zeroizing::new([0_u8; KEY_LENGTH]);
     SystemRandom::new()

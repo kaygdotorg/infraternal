@@ -5,6 +5,7 @@
 //! uninstall retires the key, interface record and rotation journal, so a later `up` starts with a
 //! fresh identity (#260, #367).
 use crate::dataplane::Config;
+#[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -17,34 +18,16 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+/// Public snapshot persisted by the host store.
+pub use infraternal_mesh_node::node_state::State;
+/// Authority and rotation records consumed by the durable host store.
+pub(crate) use infraternal_mesh_node::node_state::{
+    AuthorityRecord, RotationSecret, merge_authority, split_authority,
+};
+
 /// Bound public snapshots consistently with the macOS node's state reader.
 #[cfg(target_os = "linux")]
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
-/// Public runtime state needed to restore mesh intent without storing private key material.
-/// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct State {
-    pub enabled: bool,
-    pub config: Option<Config>,
-    /// True after a new authority is fenced and until its first full snapshot is saved.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub authority_reset_pending: bool,
-    #[serde(default)]
-    #[cfg(target_os = "linux")]
-    pub backend: Option<crate::firewall::Backend>,
-}
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            config: None,
-            authority_reset_pending: false,
-            #[cfg(target_os = "linux")]
-            backend: None,
-        }
-    }
-}
 /// One node's durable local state: public snapshot, routes, identity record, private key and rotation journal.
 /// A shared directory lease stays open for this store's lifetime, so migration cannot move state while
 /// this handle can write. Short writer locks serialize updates from independent stores.
@@ -79,42 +62,6 @@ pub struct Store {
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
-}
-
-/// A fixed-size local record makes an interrupted key switch retryable.
-/// While open it stores predecessor and candidate private keys; completion clears the predecessor
-/// private bytes and keeps only its public key for binding checks. The record never enters logs or
-/// the public snapshot.
-pub(crate) struct RotationSecret {
-    pub(crate) operation_id: String,
-    pub(crate) sequence: u64,
-    /// The predecessor private key while the journal is open; its public key after completion.
-    pub(crate) previous: [u8; 32],
-    /// The candidate private key selected by commit intent and retained for retry.
-    pub(crate) candidate: [u8; 32],
-    pub(crate) commit_requested: bool,
-    /// The candidate is the retained interface key; `previous` no longer contains private bytes.
-    pub(crate) completed: bool,
-}
-impl Drop for RotationSecret {
-    fn drop(&mut self) {
-        self.previous.zeroize();
-        self.candidate.zeroize();
-    }
-}
-impl RotationSecret {
-    /// Whether a completed marker authorizes this saved predecessor or candidate binding.
-    ///
-    /// New markers retain the predecessor's public bytes. Older markers contain zero here and
-    /// can therefore authorize only the candidate they already select.
-    pub(crate) fn completed_binding_matches(
-        &self,
-        bound: crate::policy::model::PublicKey,
-        candidate: crate::policy::model::PublicKey,
-    ) -> bool {
-        self.completed
-            && (bound == candidate || (self.previous != [0; 32] && bound.0 == self.previous))
-    }
 }
 
 /// Marks the private rotation-secret file format, version 1.
@@ -1270,31 +1217,6 @@ fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::P
 /// File beside `mesh-public.json` that holds a node's authority metadata.
 pub(crate) const AUTHORITY_FILE: &str = "mesh-authority.json";
 
-/// Authority metadata kept outside the public snapshot (D295 rollback, #382 P2).
-///
-/// The previous release parses `mesh-public.json` with `deny_unknown_fields`, so the epoch and
-/// the reset marker cannot live there: a rolled-back binary would fail to read its own state and
-/// leave the node without a mesh. They live in this separate file, which older releases never
-/// open. The snapshot file keeps exactly the older shape.
-///
-/// Writers update the snapshot first and this record second. Readers treat a missing or stale
-/// record as harmless: a wrong or missing epoch only makes the next server snapshot count as an
-/// authority change, and a reset marker is honoured only over a peer-free deny snapshot.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AuthorityRecord {
-    /// The server authority epoch the saved snapshot came from, if it carried one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) epoch: Option<String>,
-    /// Snapshot metadata retained for exact-base persistence checks, never a continuity proof.
-    /// Reset recovery revalidates the operation from the incoming authenticated full snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) rotation_operation: Option<crate::dataplane::RotationContinuation>,
-    /// True after a new authority was fenced and until its first full snapshot is saved.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) reset_pending: bool,
-}
-
 /// Read the authority record, treating a missing, unreadable or malformed file as empty.
 ///
 /// An empty record is always safe to act on (see [`AuthorityRecord`]), so a damaged file is
@@ -1337,55 +1259,6 @@ pub(crate) fn write_authority(path: &Path, record: &AuthorityRecord) -> io::Resu
         };
     }
     write_public(path, &serde_json::to_vec(record).map_err(io::Error::other)?)
-}
-
-/// Move the authority metadata out of a snapshot about to be written, returning the stripped
-/// copy for the snapshot file and the record for [`AUTHORITY_FILE`].
-pub(crate) fn split_authority(
-    config: Option<&Config>,
-    reset_pending: bool,
-) -> (Option<Config>, AuthorityRecord) {
-    let mut stripped = config.cloned();
-    let epoch = stripped
-        .as_mut()
-        .and_then(|config| config.authority_epoch.take());
-    let rotation_operation = stripped
-        .as_mut()
-        .and_then(|config| config.rotation_operation.take());
-    (
-        stripped,
-        AuthorityRecord {
-            epoch,
-            rotation_operation,
-            reset_pending,
-        },
-    )
-}
-
-/// Fill a just-read snapshot's authority metadata from its record.
-///
-/// Values written inline by earlier builds of this change win. The record's epoch applies only
-/// to an epoch-less snapshot. Its reset marker applies only when the snapshot is peer-free and
-/// deny-by-default, the state a reset writes first; anything else means the record is older
-/// than the snapshot, and is ignored.
-pub(crate) fn merge_authority(
-    config: Option<&mut Config>,
-    reset_pending: &mut bool,
-    record: AuthorityRecord,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    config.rotation_operation = record.rotation_operation;
-    if config.authority_epoch.is_none() {
-        config.authority_epoch = record.epoch;
-    }
-    if record.reset_pending
-        && config.peers.is_empty()
-        && config.default_policy == crate::dataplane::DefaultPolicy::Deny
-    {
-        *reset_pending = true;
-    }
 }
 
 /// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.

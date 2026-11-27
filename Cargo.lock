@@ -2220,6 +2220,7 @@ dependencies = [
  "bytes",
  "foldhash",
  "gotatun",
+ "hickory-proto",
  "infraternal-mesh",
  "infraternal-plugin-api",
  "nix 0.32.0",
@@ -2227,6 +2228,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]

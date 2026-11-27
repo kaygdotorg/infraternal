@@ -12,7 +12,7 @@ ee = []
 # The node path is optional so coordinator-only builds can use the wire types.
 engine = ["dep:bytes", "dep:foldhash", "dep:gotatun", "dep:tokio"]
 # Carries the same optional DNS fields as the mesh plugin.
-mesh-dns = []
+mesh-dns = ["dep:hickory-proto"]
 # Preserve the subsecond handshake counter used by relayed paths.
 relay = []
 # Expose the node fixtures needed by the platform plugin's tests.
@@ -23,9 +23,11 @@ infraternal-mesh = { version = "0.1.0", path = "../infraternal-mesh" }
 infraternal-plugin-api.workspace = true
 bytes = { workspace = true, optional = true }
 foldhash = { version = "0.2", optional = true }
+hickory-proto = { workspace = true, optional = true }
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+zeroize.workspace = true
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "time"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
