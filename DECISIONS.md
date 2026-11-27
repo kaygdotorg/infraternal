@@ -2779,13 +2779,16 @@ access (#341 B19).
        Rejected: a header (the branch did this without a decision) and
        keeping the old mechanism.
      - **D259's "typable within one round trip + 50 ms" applies when the
-       connection can be reused or resumed.** The server pings, so a dead
-       or half-open link is detected within about one round trip; input
-       typed meanwhile is kept, never lost. After a real network change a
-       fresh TCP + TLS + upgrade needs about three round trips, so that
-       case's budget is **three round trips + 50 ms**, measured on the
-       perf VM through real TLS. The last screen still returns within one
-       frame from the client's copy (D259, unchanged).
+       connection can be reused or resumed.** While a host has attached
+       terminals, the server sends one liveness probe on its control stream.
+       A matching Pong covers every attached terminal; terminal streams have
+       no separate liveness probes. A dead or half-open host link is detected
+       under D300's reply deadline, and input typed meanwhile is kept, never
+       lost. After a real network change a fresh TCP + TLS +
+       upgrade needs about three round trips, so that case's budget is
+       **three round trips + 50 ms**, measured on the perf VM through real TLS.
+       The last screen still returns within one frame from the client's copy
+       (D259, unchanged).
      - **QUIC/WebTransport resumption is researched next** (0–1 round trip
        after a network change, browser support including Safari, size and
        code cost) and decided after measurement. Rejected for now: a
@@ -3338,14 +3341,17 @@ access (#341 B19).
        `infraternal canvas` (C3), and the exit-code table (C7).
 300. **When the server gives up on a quiet host (owner, 2026-10-17, #234;
      amends D265):** a missed liveness reply no longer cuts a healthy link.
-     (A) The reply deadline follows the measured path: about twice the
-     smoothed round trip plus four times its variation plus a small margin,
-     so one lost packet's recovery fits (measured at 150 ms with 1% loss:
-     12 cut links in 10 minutes down to 1). (B) One miss only marks the
-     route doubtful and the window shows reconnecting; the link is retired
-     after a second consecutive miss. A dead host is noticed after about
-     0.4 s at 150 ms instead of 0.25 s; LAN is unchanged. (C) sending probes
-     outside the ordered stream is a later, separate design question.
+     One correlated probe on the host control stream covers every terminal
+     attached to that host. A matching Pong renews the shared host-link lease;
+     terminal streams do not send separate liveness probes. (A) The reply
+     deadline follows the measured path: about twice the smoothed round trip
+     plus four times its variation plus a small margin, so one lost packet's
+     recovery fits (measured at 150 ms with 1% loss: 12 cut links in 10 minutes
+     down to 1). (B) One missed reply marks the host link doubtful and its
+     attached terminals show reconnecting. The server retires the link after a
+     second consecutive miss. A dead host is noticed after about 0.4 s at
+     150 ms instead of 0.25 s; LAN is unchanged. (C) Sending probes outside
+     the ordered stream is a later, separate design question.
 301. **Size exceptions accepted, trim later (owner, 2026-10-17; one-off
      D243 exceptions like D298):** replacing a stuck agent (#231/#235,
      about +53 KB), the honest Mesh view (#236, about +37 KB),
@@ -5199,12 +5205,12 @@ access (#341 B19).
        into files that are not infraternal's), and reporting only on
        `--retain` (the same files, the same objection).
 
-399. **Route probes pause while every viewer of a terminal is hidden (owner, 2026-11-21, #562; amends D265 and D300):**
-     - **Context:** J1034 measured about 41 wakeups per second in each attached terminal's shim (a 25 ms route probe, D265) even when its only viewer was a background tab, a minimised window, a locked phone or a window off the canvas: 4,055 wakeups/s at 100 attached terminals, unchanged with every viewer hidden. Hidden browser sockets already park their own probes (#244, #317), but the route probe to the shim ran on. Under CPU starvation the missed probes also cut the link to the infraternal agent (J1034 finding 7c).
-     - **The owner decided, verbatim:** "Pause probes while every viewer is hidden".
-     - **Rule:** a viewer is hidden when its page is hidden or its window is off the live canvas. The client tells the server per terminal. The server sends no route probes for an attachment whose viewer is hidden, so a terminal whose viewers are all hidden costs its shim no probe wakeups. The first show starts a fresh probe lease at once (one probe tick, 25 ms, plus one round trip). D265's probe cadence and D300's reply deadlines and miss policy are unchanged for every route that is probed.
-     - **Link death while parked:** the host link keeps its own unparked lease (D300), so a dead link is still noticed after about 0.4 s and every attachment reattaches through the normal reconnect. On return the person pays at most that reconnect, one extra round trip, which the owner accepted. A route that died alone (a stuck shim on a healthy link) is found on the first probes after the show, within D265's startup allowance, instead of while nobody could see it.
-     - **Unchanged:** output keeps flowing and credit keeps returning to a hidden terminal; input, replay and writer ownership are untouched. Only liveness probing pauses.
+399. **One host-link lease covers its attached terminals (owner, 2026-11-27, #562; amends D265 and D300, and replaces the 2026-11-21 rule):**
+     - **Context:** J1034 measured about 41 wakeups per second in each attached terminal's shim from a 25 ms route probe. Those probes kept running when every viewer was hidden and could cut a healthy link under CPU starvation. The earlier rule paused each terminal's probe while all its viewers were hidden. That still used one lease per terminal and made host liveness depend on viewer visibility.
+     - **Rule:** while at least one terminal is attached, the server sends one correlated probe on that host's control stream. A matching Pong keeps every attached terminal on the link connected. The server stops probing when the last terminal detaches. Terminal streams have no separate liveness probes.
+     - **Visibility:** page or window visibility does not change the host-link lease. The server may accept a `terminal.visibility` notice for compatibility, but it does not pause, resume or restart liveness. Browser connection visibility still pauses that browser socket's probes (#244, #317).
+     - **Link death:** D300's reply deadline and two-miss policy apply to the shared host link. One miss marks the link doubtful and notifies each attached viewer. A second consecutive miss retires the link and its terminal attachments reconnect normally. A terminal stream that ends by EOF or reset is closed on that terminal alone; it does not retire the host link.
+     - **Unchanged:** terminal output keeps flowing and credit keeps returning regardless of viewer visibility. Input, replay and writer ownership are unchanged.
 
 400. **Root on the server machine updates the server without a passkey; other devices keep the passkey (owner, 2026-11-22, #211; refines D251 and the S5 owner controls, keeps D168 and D217):**
      - **Context:** the owner decided that production stops being deployed with `deploy.sh`: each green dev build is published as a signed edge release, and production is updated from the CLI (later the S5 GUI) by the owner or the orchestrator. The update actions (`release.update.apply`, `rollback`, `cancel`, and `check` with a version) need the owner with a fresh passkey tap, which a shell on the server cannot give.
