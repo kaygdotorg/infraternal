@@ -88,7 +88,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -343,6 +343,9 @@ struct Peer {
     /// Moves the engine's endpoint for this peer back to its direct endpoint, keeping the
     /// session; `None` when the pair has no direct endpoint.
     use_direct: Option<Arc<dyn Fn() -> io::Result<()> + Send + Sync>>,
+    /// Reinstalls the configured peer after these relay paths stop, including an endpoint-less
+    /// peer whose last endpoint was the loopback shim.
+    restore: Arc<dyn Fn() -> io::Result<()> + Send + Sync>,
     socket: UdpSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
@@ -644,6 +647,10 @@ pub struct RelayPaths {
     shared: Arc<Shared>,
     drivers: Vec<JoinHandle<()>>,
     shims: Mutex<HashMap<HostId, JoinHandle<()>>>,
+    /// Serializes shim creation, removal and shutdown so two judges cannot orphan a socket.
+    add_peer_lock: tokio::sync::Mutex<()>,
+    /// Once set, an old judge cannot attach a new shim to paths being replaced.
+    stopped: AtomicBool,
 }
 
 /// The selected data plane's relay callbacks for one configured peer (see `settle`).
@@ -664,6 +671,16 @@ pub trait EndpointUpdater {
 
     /// Return a callback that writes this peer's route budget for a direct or relayed path.
     fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater;
+
+    /// Return a callback that restores the configured peer after the relay shim stops.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    fn restorer(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        self.handshake_preparer(peer)
+    }
 }
 
 impl EndpointUpdater for crate::node::Node {
@@ -680,6 +697,13 @@ impl EndpointUpdater for crate::node::Node {
 
     fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater {
         self.relay_route_mtu_updater(peer)
+    }
+
+    fn restorer(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        self.relay_endpoint_restorer(peer)
     }
 }
 
@@ -720,6 +744,8 @@ impl RelayPaths {
             shared,
             drivers,
             shims: Mutex::new(HashMap::new()),
+            add_peer_lock: tokio::sync::Mutex::new(()),
+            stopped: AtomicBool::new(false),
         })
     }
 
@@ -762,8 +788,9 @@ impl RelayPaths {
         kernel: &dataplane::Peer,
         standby: bool,
     ) -> io::Result<SocketAddr> {
-        if let Some(existing) = read(&self.shared.peers).get(&peer) {
-            return existing.socket.local_addr();
+        let _serial = self.add_peer_lock.lock().await;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(io::ErrorKind::NotConnected.into());
         }
         // Tokens from the key the peer's sessions use now: during a key overlap that is the
         // previous key until the switch (`previous_active`), the same choice as its routes.
@@ -778,6 +805,24 @@ impl RelayPaths {
             .map(|relay| self.shared.secret.token(&key, &relay.name))
             .collect::<Option<Vec<_>>>()
             .ok_or(io::ErrorKind::InvalidInput)?;
+        let existing = { read(&self.shared.peers).get(&peer).cloned() };
+        if let Some(existing) = existing {
+            let (existing_endpoint, on_direct) = {
+                let state = lock(&existing.state);
+                (
+                    state.direct.as_ref().map(|direct| direct.endpoint),
+                    state.on_direct(),
+                )
+            };
+            if existing.key == key
+                && existing.tokens == tokens
+                && existing_endpoint == kernel.endpoint
+                && on_direct == standby
+            {
+                return existing.socket.local_addr();
+            }
+            self.release_locked(peer).await;
+        }
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         // Connected: only the selected engine's UDP socket can feed this shim. Do not
         // update the peer endpoint until settle confirms an active relay; updating both
@@ -798,6 +843,7 @@ impl RelayPaths {
             .endpoint
             .map(|_| endpoint_updater.handshake_preparer(kernel))
             .transpose()?;
+        let restore = endpoint_updater.restorer(kernel)?;
         let relays = self.shared.relays.len();
         let mut state = PeerState::new(relays);
         if let Some(endpoint) = kernel.endpoint {
@@ -811,6 +857,7 @@ impl RelayPaths {
             handshake_starter,
             route_mtu_updater,
             use_direct,
+            restore,
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
@@ -871,13 +918,34 @@ impl RelayPaths {
     /// Stop relaying `peer`: withdraw its requests and close its shim socket.
     /// The caller installs whatever endpoint replaces the shim.
     pub async fn release(&self, peer: HostId) {
+        let _serial = self.add_peer_lock.lock().await;
+        self.release_locked(peer).await;
+    }
+
+    /// Release `peer` only if it still owns `expected`; a stale judge cannot remove a newer
+    /// generation's shim after its relay setup finishes.
+    pub(crate) async fn release_if(&self, peer: HostId, expected: SocketAddr) {
+        let _serial = self.add_peer_lock.lock().await;
+        let matches = read(&self.shared.peers)
+            .get(&peer)
+            .and_then(|shim| shim.socket.local_addr().ok())
+            == Some(expected);
+        if matches {
+            self.release_locked(peer).await;
+        }
+    }
+
+    /// Remove the shim and withdraw outstanding requests. Caller holds `add_peer_lock`.
+    async fn release_locked(&self, peer: HostId) {
         let Some(shim) = write(&self.shared.peers).remove(&peer) else {
             return;
         };
         {
             let mut by_token = write(&self.shared.by_token);
             for token in &shim.tokens {
-                by_token.remove(token);
+                if by_token.get(token) == Some(&peer) {
+                    by_token.remove(token);
+                }
             }
         }
         if let Some(task) = lock(&self.shims).remove(&peer) {
@@ -969,17 +1037,56 @@ impl RelayPaths {
 
     /// Stop every task and close every relay connection.
     pub async fn close(self) {
+        self.shutdown(false).await;
+    }
+
+    /// Stop shared relay state even when a manager still holds another `Arc` to these paths.
+    pub(crate) async fn shutdown(&self, restore_direct: bool) {
+        let _serial = self.add_peer_lock.lock().await;
+        self.stopped.store(true, Ordering::Release);
         for task in &self.drivers {
             task.abort();
         }
         for (_, task) in lock(&self.shims).drain() {
             task.abort();
         }
+        let peers: Vec<_> = write(&self.shared.peers)
+            .drain()
+            .map(|(_, peer)| peer)
+            .collect();
+        write(&self.shared.by_token).clear();
+        for peer in peers {
+            *write(&peer.active) = None;
+            if restore_direct {
+                let generation = {
+                    let mut state = lock(&peer.state);
+                    state.active = None;
+                    if let Some(direct) = state.direct.as_mut() {
+                        direct.on = true;
+                    }
+                    advance_generation(&peer);
+                    *lock(&peer.route_mtu_generation)
+                };
+                if !update_peer_route_mtu(&peer, generation, None).await {
+                    tracing::warn!("Could not restore peer route after relay paths stopped");
+                }
+                let restore = peer.restore.clone();
+                if !tokio::task::spawn_blocking(move || restore())
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                {
+                    tracing::warn!("Could not restore peer endpoint after relay paths stopped");
+                }
+            }
+        }
         for slot in &self.shared.live {
             if let Some(live) = write(slot).take() {
                 live.client.close();
             }
         }
+        self.shared
+            .endpoint
+            .close(quinn::VarInt::from_u32(0), b"relay paths stopped");
         let _ =
             tokio::time::timeout(Duration::from_secs(1), self.shared.endpoint.wait_idle()).await;
     }
@@ -2326,6 +2433,169 @@ mod review_j375_tests {
     };
     use std::sync::atomic::{AtomicBool, AtomicU16};
 
+    /// An endpoint adapter that pauses concurrent shim creation before insertion.
+    struct ConcurrentAddUpdater {
+        rendezvous: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+        prepared: Arc<std::sync::atomic::AtomicUsize>,
+        restored: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ConcurrentAddUpdater {
+        /// Create an adapter with a bounded rendezvous and callback counters.
+        fn new() -> Self {
+            Self {
+                rendezvous: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+                prepared: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restored: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl EndpointUpdater for ConcurrentAddUpdater {
+        fn handshake_preparer(
+            &self,
+            _peer: &dataplane::Peer,
+        ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+            self.prepared.fetch_add(1, Ordering::Relaxed);
+            let (count, ready) = &*self.rendezvous;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let (count, _) = ready
+                .wait_timeout_while(count, Duration::from_millis(100), |count| *count < 2)
+                .unwrap();
+            drop(count);
+            let restored = self.restored.clone();
+            Ok(Arc::new(move || {
+                restored.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }))
+        }
+
+        fn handshake_starter(
+            &self,
+            _peer: &dataplane::Peer,
+        ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+            Ok(Arc::new(|| {}))
+        }
+
+        fn route_mtu_updater(&self, _peer: &dataplane::Peer) -> RouteMtuUpdater {
+            Arc::new(|_| Ok(()))
+        }
+
+    }
+
+    /// Build a data-plane peer for relay-path tests without touching a WireGuard device.
+    fn test_peer(key: u8) -> dataplane::Peer {
+        dataplane::Peer {
+            key: PairSecret::from_private(&[key; 32]).unwrap().public(),
+            previous_key: None,
+            previous_active: false,
+            addresses: dataplane::Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            endpoint: None,
+            candidates: Vec::new(),
+            ipv4_only: false,
+            side_port: false,
+        }
+    }
+
+    /// Start idle relay paths for a host identity; an empty relay list sends no network traffic.
+    async fn idle_paths(host: HostId) -> Arc<RelayPaths> {
+        let mut authority = Authority::new();
+        let credentials = authority.issue(Purpose::Host(host));
+        let (events, _receiver) = mpsc::channel(16);
+        Arc::new(
+            RelayPaths::start(
+                PairSecret::from_private(&[1; 32]).unwrap(),
+                9,
+                Vec::new(),
+                credentials,
+                events,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Two judges for one pair share one shim instead of orphaning the first socket and task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_add_peer_reuses_one_loopback_socket() {
+        let host = HostId([7; 16]);
+        let paths = idle_paths(host).await;
+        let mut peer = test_peer(2);
+        peer.endpoint = Some("127.0.0.1:10002".parse().unwrap());
+        let mut first_updater = ConcurrentAddUpdater::new();
+        let mut second_updater = ConcurrentAddUpdater {
+            rendezvous: first_updater.rendezvous.clone(),
+            prepared: first_updater.prepared.clone(),
+            restored: first_updater.restored.clone(),
+        };
+        let prepared = first_updater.prepared.clone();
+        let first_paths = paths.clone();
+        let second_paths = paths.clone();
+        let first_peer = peer.clone();
+        let second_peer = peer.clone();
+        let first = tokio::spawn(async move {
+            first_paths
+                .relay_with_endpoint(&mut first_updater, host, &first_peer)
+                .await
+        });
+        let second = tokio::spawn(async move {
+            second_paths
+                .relay_with_endpoint(&mut second_updater, host, &second_peer)
+                .await
+        });
+
+        let first_socket = first.await.unwrap().unwrap();
+        let second_socket = second.await.unwrap().unwrap();
+        assert_eq!(first_socket, second_socket);
+        assert_eq!(prepared.load(Ordering::Relaxed), 3);
+        assert_eq!(read(&paths.shared.peers).len(), 1);
+        assert_eq!(lock(&paths.shims).len(), 1);
+        paths.shutdown(false).await;
+    }
+
+    /// Clearing the relay list restores the configured endpoint before closing a loopback shim.
+    #[tokio::test]
+    async fn stopping_relay_paths_restores_endpointless_peers() {
+        let node = crate::policy::model::NodeId(6);
+        let host = label(node);
+        let paths = idle_paths(host).await;
+        let mut updater = ConcurrentAddUpdater::new();
+        paths
+            .relay_with_endpoint(&mut updater, host, &test_peer(6))
+            .await
+            .unwrap();
+        let restored = updater.restored.clone();
+
+        paths.shutdown(true).await;
+
+        assert_eq!(restored.load(Ordering::Relaxed), 1);
+        assert!(read(&paths.shared.peers).is_empty());
+        assert!(lock(&paths.shims).is_empty());
+    }
+
+    /// A pair removed during its relay await releases the now-stale shim and its task.
+    #[tokio::test]
+    async fn stale_relay_judgement_releases_its_shim() {
+        let node = crate::policy::model::NodeId(5);
+        let host = label(node);
+        let paths = idle_paths(host).await;
+        let mut updater = ConcurrentAddUpdater::new();
+        let local = paths
+            .relay_with_endpoint(&mut updater, host, &test_peer(3))
+            .await
+            .unwrap();
+        let state = Arc::new(Mutex::new(State::default()));
+
+        assert!(!mark_relayed_if_current(&paths, &state, node, 9, local).await);
+        assert!(!read(&paths.shared.peers).contains_key(&host));
+        assert!(lock(&paths.shims).is_empty());
+        paths.shutdown(false).await;
+    }
+
     /// A delayed relay callback must not overwrite a subsequently restored direct MTU.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stale_relay_callback_must_not_overwrite_direct_path_budget() {
@@ -2379,6 +2649,7 @@ mod review_j375_tests {
             handshake_starter: Arc::new(|| {}),
             route_mtu_updater: callback,
             use_direct: None,
+            restore: Arc::new(|| Ok(())),
             socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
             starting: AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),

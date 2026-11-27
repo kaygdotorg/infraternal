@@ -1452,6 +1452,53 @@ impl Node {
         }
     }
 
+    /// Return a relay callback that restores this peer from its accepted Mesh configuration.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_endpoint_restorer(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || restore_kernel_peer(&peer)))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .endpoint_restorer(peer.key)),
+        }
+    }
+
+    /// Restore a peer from the latest accepted snapshot after its relay shim stops.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn restore_relay_endpoint(
+        &self,
+        key: crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        let peer =
+            self.config()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .map(|policy| policy.peer.clone());
+        match self.engine_kind {
+            EngineKind::Kernel => peer.map_or(Ok(()), |peer| restore_kernel_peer(&peer)),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .restore_peer(key),
+        }
+    }
+
     /// Return a callback that keeps this peer's kernel route on its active path budget.
     ///
     /// The callback keeps only the peer's key. Each call resolves the accepted peer under the
@@ -4185,6 +4232,17 @@ impl Node {
         }
         Ok(())
     }
+}
+
+/// Restore one kernel peer after its loopback relay shim closes.
+#[cfg(all(feature = "relay", target_os = "linux"))]
+fn restore_kernel_peer(peer: &crate::dataplane::Peer) -> io::Result<()> {
+    if peer.endpoint.is_some() {
+        return crate::relay_path::prepare_kernel_handshake(peer);
+    }
+    let mut client = crate::wireguard::Client::new()?;
+    client.peers(&[], &[peer.key])?;
+    client.peers(std::slice::from_ref(peer), &[])
 }
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
 

@@ -166,15 +166,21 @@ struct State {
     /// Bumped by every start; a start that finishes after a newer one began closes its own.
     paths_generation: u64,
     /// A first start is running, so pairs failing at the same deadline start it only once.
-    paths_starting: bool,
+    paths_starting: Option<u64>,
 }
 
 /// Clears [`State::paths_starting`] when a start ends, whichever way it ends.
-struct Starting(Arc<Mutex<State>>);
+struct Starting {
+    state: Arc<Mutex<State>>,
+    generation: u64,
+}
 
 impl Drop for Starting {
     fn drop(&mut self) {
-        lock(&self.0).paths_starting = false;
+        let mut state = lock(&self.state);
+        if state.paths_starting == Some(self.generation) {
+            state.paths_starting = None;
+        }
     }
 }
 
@@ -254,6 +260,14 @@ impl EndpointUpdater for OwnerUpdater {
             // A stopped node has no route to update; a later reinstall builds a new one.
             Err(_) => Arc::new(|_| Ok(())),
         }
+    }
+
+    fn restorer(&self, peer: &Peer) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        let owner = self.0.clone();
+        let key = peer.key;
+        Ok(Arc::new(move || {
+            OwnerUpdater(owner.clone()).with_node(|node| node.restore_relay_endpoint(key))
+        }))
     }
 }
 
@@ -481,9 +495,8 @@ impl RelayManager {
                 .collect();
             state.pairs.retain(|node, pair| {
                 let Some(peer) = peers.get(node) else {
-                    if pair.relayed.is_some() {
-                        released.push(*node);
-                    }
+                    // A judge may have inserted its shim but not marked this pair relayed yet.
+                    released.push(*node);
                     return false;
                 };
                 let same_keys = peer.key == pair.peer.key
@@ -501,7 +514,8 @@ impl RelayManager {
                 };
                 if keep {
                     pair.peer = (*peer).clone();
-                } else if pair.relayed.is_some() {
+                } else {
+                    // Also retire a shim created by a judge that is still awaiting its relay.
                     released.push(*node);
                 }
                 keep
@@ -646,16 +660,19 @@ fn begin_paths(state: &Arc<Mutex<State>>) -> Option<PathsStart> {
     let mut state = lock(state);
     let wanted = state.pairs.values().any(|pair| pair.relayed.is_some());
     let replace = std::mem::take(&mut state.starting) && state.paths.is_some();
-    let first =
-        state.paths.is_none() && !state.paths_starting && wanted && !state.relays.is_empty();
+    let first = state.paths.is_none()
+        && state.paths_starting.is_none()
+        && wanted
+        && !state.relays.is_empty();
     if !replace && !first {
         return None;
     }
-    state.paths_starting = true;
     state.paths_generation += 1;
+    let generation = state.paths_generation;
+    state.paths_starting = Some(generation);
     Some(PathsStart {
         relays: state.relays.clone(),
-        generation: state.paths_generation,
+        generation,
         credentials,
     })
 }
@@ -677,12 +694,13 @@ async fn run_paths(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>, start: Pa
         generation,
         credentials,
     } = start;
-    let _starting = Starting(state.clone());
+    let _starting = Starting {
+        state: state.clone(),
+        generation,
+    };
     let old = lock(&state).paths.take();
-    if let Some(old) = old
-        && let Ok(old) = Arc::try_unwrap(old.running)
-    {
-        old.close().await;
+    if let Some(old) = old {
+        old.running.shutdown(relays.is_empty()).await;
     }
     if relays.is_empty() {
         return;
@@ -722,40 +740,22 @@ async fn run_paths(owner: Arc<Mutex<Owner>>, state: Arc<Mutex<State>>, start: Pa
         paths.close().await;
         return;
     }
-    let rejudge: Vec<(NodeId, u64, Duration, bool)> = {
+    let rejudge: Vec<(NodeId, u64)> = {
         let mut locked = lock(&state);
         locked.paths = Some(Paths {
             running: Arc::new(paths),
             relays,
             specs,
         });
-        // Pairs the replaced paths relayed move to the new ones at once (their
-        // handshakes went through the old relay, so they prove nothing about the
-        // direct path). Every other pair is judged at the rest of its own deadline,
-        // which covers pairs whose deadline passed while no paths ran.
-        let now = SystemTime::now();
-        locked
-            .pairs
-            .iter_mut()
-            .map(|(node, pair)| {
-                let relayed = pair.relayed.take().is_some();
-                let waited = now.duration_since(pair.installed).unwrap_or_default();
-                let wait = if relayed {
-                    Duration::ZERO
-                } else {
-                    GRACE.saturating_sub(waited)
-                };
-                (*node, pair.generation, wait, relayed)
-            })
-            .collect()
+        // Existing deadline tasks remain the sole owner of unrelayed pairs. Only pairs that
+        // already failed a direct-path check need an immediate judge on the replacement paths.
+        take_rejudges(&mut locked)
     };
-    for (node, pair_generation, wait, relayed) in rejudge {
+    for (node, pair_generation) in rejudge {
         let owner = owner.clone();
         let state = state.clone();
         spawn(async move {
-            // sleep: the rest of this pair's one deadline (D81: nothing repeats).
-            tokio::time::sleep(wait).await;
-            judge(&owner, &state, node, pair_generation, relayed).await;
+            judge(&owner, &state, node, pair_generation, true).await;
         });
     }
     let events_state = state.clone();
@@ -851,13 +851,9 @@ async fn judge(
         .relay_with_endpoint(&mut updater, label(node), &pair.peer)
         .await
     {
-        Ok(_) => {
-            if let Some(entry) = lock(state)
-                .pairs
-                .get_mut(&node)
-                .filter(|entry| entry.generation == generation)
-            {
-                entry.relayed = Some(Reason::NoHandshake);
+        Ok(endpoint) => {
+            if !mark_relayed_if_current(&paths, state, node, generation, endpoint).await {
+                return;
             }
             tracing::info!(
                 peer = node.0,
@@ -867,6 +863,44 @@ async fn judge(
         }
         Err(error) => tracing::warn!(peer = node.0, %error, "relay: could not relay the pair"),
     }
+}
+
+/// Take only already-failed pairs when relay paths are replaced; their original deadline tasks
+/// remain the only timers for every pair that has not failed yet.
+fn take_rejudges(state: &mut State) -> Vec<(NodeId, u64)> {
+    state
+        .pairs
+        .iter_mut()
+        .filter_map(|(node, pair)| pair.relayed.take().map(|_| (*node, pair.generation)))
+        .collect()
+}
+
+/// Record a completed relay setup, or remove its shim if configuration replaced that pair while
+/// the async setup was in flight.
+async fn mark_relayed_if_current(
+    paths: &RelayPaths,
+    state: &Arc<Mutex<State>>,
+    node: NodeId,
+    generation: u64,
+    endpoint: SocketAddr,
+) -> bool {
+    let current = {
+        let mut state = lock(state);
+        if let Some(pair) = state
+            .pairs
+            .get_mut(&node)
+            .filter(|pair| pair.generation == generation)
+        {
+            pair.relayed.get_or_insert(Reason::NoHandshake);
+            true
+        } else {
+            false
+        }
+    };
+    if !current {
+        paths.release_if(label(node), endpoint).await;
+    }
+    current
 }
 
 /// Run `future` on the runtime of the task calling it (always the relay runtime here).
@@ -881,12 +915,50 @@ mod tests {
     //! Labels and reasons; the role and paths run in the namespace proof and relay tests.
     use super::*;
 
+    /// A pair fixture for manager state transitions that do not need a live data plane.
+    fn pair(generation: u64, relayed: Option<Reason>) -> Pair {
+        Pair {
+            peer: Peer {
+                key: crate::policy::model::PublicKey([1; 32]),
+                previous_key: None,
+                previous_active: false,
+                addresses: crate::dataplane::Addresses {
+                    ipv4: "10.254.0.2".parse().expect("IPv4 fixture"),
+                    ipv6: "fd01::2".parse().expect("IPv6 fixture"),
+                },
+                endpoint: None,
+                candidates: Vec::new(),
+                ipv4_only: false,
+                side_port: false,
+            },
+            installed: SystemTime::now(),
+            relayed,
+            generation,
+        }
+    }
+
     /// A pair label depends only on the node id, and different nodes get different labels.
     #[test]
     fn labels_are_stable_and_distinct_per_node() {
         assert_eq!(label(NodeId(7)), label(NodeId(7)));
         assert_ne!(label(NodeId(7)), label(NodeId(8)));
         assert_eq!(label(NodeId(1)).0[15], 1);
+    }
+
+    /// Replacing paths keeps one deadline task for waiting pairs and rejudges failures only.
+    #[test]
+    fn replacement_paths_do_not_duplicate_waiting_pair_deadlines() {
+        let waiting = NodeId(1);
+        let failed = NodeId(2);
+        let mut state = State::default();
+        state.pairs.insert(waiting, pair(11, None));
+        state
+            .pairs
+            .insert(failed, pair(12, Some(Reason::NoHandshake)));
+
+        assert_eq!(take_rejudges(&mut state), vec![(failed, 12)]);
+        assert_eq!(state.pairs[&waiting].relayed, None);
+        assert_eq!(state.pairs[&failed].relayed, None);
     }
 
     /// A session counts as live only while its handshake is younger than 180 s; no handshake,
