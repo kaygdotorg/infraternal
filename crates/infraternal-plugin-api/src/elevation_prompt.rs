@@ -465,12 +465,15 @@ mod tests {
         assert!(styled.contains("\u{1b}[1mInfraternal needs administrator privileges"));
         assert!(styled.contains("\u{1b}[36m→\u{1b}[0m Install the on-demand mesh helper"));
         assert!(styled.contains("\u{1b}[32m→\u{1b}[0m This Mac joins your mesh"));
-        assert!(styled.ends_with("If you don't, you won't be able to join this Mac to your mesh.\n"));
+        assert!(
+            styled.ends_with("If you don't, you won't be able to join this Mac to your mesh.\n")
+        );
     }
 
     #[test]
     fn non_tty_runs_do_not_print_any_prompt() {
-        let options = PromptOptions::from_env(false, false, Some(OsStr::new("xterm-256color")), None);
+        let options =
+            PromptOptions::from_env(false, false, Some(OsStr::new("xterm-256color")), None);
         assert_eq!(
             options,
             PromptOptions {
