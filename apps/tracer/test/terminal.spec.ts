@@ -9,6 +9,42 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await terminalScenario(page, info);
 });
 
+/** A session probe refused at startup shows a countdown and restores the layout without a click. */
+test("a throttled layout startup counts down and retries", async ({ page }, info) => {
+  await page.setViewportSize({ width: 393, height: 852 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 200);
+  let sessionRequests = 0;
+  await page.route("**/auth/session", async (route) => {
+    sessionRequests++;
+    if (sessionRequests === 1) {
+      await route.fulfill({ status: 429, headers: { "Retry-After": "3" }, json: {} });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto("/?mock=1");
+  await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible();
+  await expect(page.getByText("Your layout will load when the connection is ready.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retrying in 3s" })).toBeDisabled();
+  await page.clock.fastForward(1000);
+  const countdown = page.getByRole("button", { name: "Retrying in 2s" });
+  await expect(countdown).toBeDisabled();
+  const left = await page.locator("#unavailable-title, #status-error, #retry-status")
+    .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().left));
+  expect(left).toHaveLength(3);
+  for (const edge of left) expect(Math.abs(edge - left[0]!)).toBeLessThanOrEqual(0.5);
+  const path = info.outputPath("layout-retry-phone.png");
+  await page.screenshot({ path, animations: "disabled" });
+  await info.attach("layout-retry-phone", { path, contentType: "image/png" });
+  expect(sessionRequests).toBe(1);
+  await page.clock.fastForward(2000);
+  await page.clock.resume();
+  await expect(page.locator("#tree")).toBeVisible();
+  expect(sessionRequests).toBe(2);
+});
+
 /** Access failures must not expose a guessed form or browser exception details. */
 test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }, info) => {
   await page.context().request.post("/__mock/reset");

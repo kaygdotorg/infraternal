@@ -199,15 +199,16 @@ async function start(): Promise<void> {
   } catch (error: unknown) {
     await fontsReady;
     installTooltips();
-    renderUnavailable(safeMessage(error));
+    renderAuthFailure(error);
   }
 }
 
+/** Retry startup with fresh auth requests after a connection failure or cooldown. */
 async function refreshAuth(): Promise<void> {
   try {
     await showAuthState(await checkStatus());
   } catch (error: unknown) {
-    renderUnavailable(safeMessage(error));
+    renderAuthFailure(error);
   }
 }
 
@@ -304,30 +305,57 @@ function healPreview(): void {
 /** Applies the sign-in scheme (light or dark); the backdrop follows later scheme changes live. */
 const authLight = (): boolean => useAuthScheme((light) => backdrop?.setLight(light));
 
+/** Discard a speculative session result when startup failed before consuming it. */
+function renderAuthFailure(error: unknown): void {
+  sessionProbe = undefined;
+  const retryAt = error instanceof AuthError ? error.retryAt : undefined;
+  renderUnavailable(retryAt === undefined ? safeMessage(error) : "Your layout will load when the connection is ready.", retryAt);
+}
+
 /**
  * The access card for a server that cannot be reached. It is the sign-in card with different words:
  * the same mark, title, lede and full-width primary, through the sign-in card's own classes, so the
  * mark, the lede-to-action gap and the padding cannot drift from it. The explanation is the lede (it is
  * what the person reads next); pressing "Try again" shows the shared wait counter on the button.
  */
-function renderUnavailable(message: string): void {
+function renderUnavailable(message: string, retryAt?: number): void {
   authLight();
   document.documentElement.removeAttribute("data-ui-font");
   app.innerHTML = `<section class="auth-screen" aria-label="Server unavailable"><section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="unavailable-title">
     <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
     <h1 id="unavailable-title">Connect to load your layout</h1>
-    <p id="status-error" class="auth-lede" role="alert"></p>
+    <p id="status-error" class="auth-lede" role="${retryAt === undefined ? "alert" : "status"}"></p>
     <button id="retry-status" class="auth-primary auth-login" type="button"><span>Try again</span><span class="busy-count" hidden></span></button></section></section>`;
   mustGet<HTMLElement>("#status-error").textContent = message;
   const retry = mustGet<HTMLButtonElement>("#retry-status");
-  retry.addEventListener("click", () => {
+  if (retryAt !== undefined) {
+    countDownToRetry(retry, retryAt);
+  } else retry.addEventListener("click", () => {
     if (previewProto()) { location.reload(); return; }
     retry.disabled = true;
     loading(retry.querySelector<HTMLElement>(".busy-count")!, 400);
     void refreshAuth();
   }, { once: true });
-  healPreview();
+  if (retryAt === undefined) healPreview();
   scheduleBackdrop();
+}
+
+/** Update the existing card action until the server's retry deadline, even after the tab wakes from sleep. */
+function countDownToRetry(button: HTMLButtonElement, retryAt: number): void {
+  button.disabled = true;
+  const label = button.querySelector("span")!;
+  const tick = (): void => {
+    if (!button.isConnected) return;
+    const remaining = retryAt - Date.now();
+    if (remaining <= 0) {
+      label.textContent = "Reconnecting…";
+      void refreshAuth();
+      return;
+    }
+    label.textContent = `Retrying in ${Math.ceil(remaining / 1000)}s`;
+    window.setTimeout(tick, remaining % 1000 || 1000);
+  };
+  tick();
 }
 
 function renderAuth(
@@ -489,7 +517,13 @@ async function showTerminal(knownSession?: DrawingIdentity, instant = false): Pr
   // another network round trip; the socket still checks authority on connection.
   const generation = ++sessionGeneration;
   sessionStarted = performance.timeOrigin + performance.now();
-  const identity = knownSession ?? await checkSession();
+  let identity: DrawingIdentity | undefined;
+  try {
+    identity = knownSession ?? await checkSession();
+  } catch (error: unknown) {
+    if (generation === sessionGeneration) renderAuthFailure(error);
+    return;
+  }
   if (generation !== sessionGeneration) return;
   // No session at all is a 401: the cookie is gone or no longer valid (another sign-in, a server restart). That sends the
   // person to sign-in, exactly as the background session check does; it is not a server whose name could not be read.
