@@ -37,7 +37,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -80,6 +80,17 @@ fn in_ns<T: Send>(ns: &str, f: impl FnOnce() -> T + Send) -> T {
         scope
             .spawn(|| {
                 enter(ns);
+                // The namespace owns the kernel rules. Keep role files in its fixture too,
+                // including on build hosts that run their own enrolled infraternal agent.
+                #[cfg(feature = "test-support")]
+                let _policy_paths = {
+                    use infraternal_plugin_mesh::host_firewall::{
+                        HostFirewallPaths, HostFirewallPathsTestOverride,
+                    };
+                    let root =
+                        std::env::temp_dir().join(format!("j1156-firewall-{}", std::process::id()));
+                    HostFirewallPathsTestOverride::install(&HostFirewallPaths::under(&root))
+                };
                 f()
             })
             .join()
@@ -262,7 +273,12 @@ fn connect_from_a(port: u16) -> Option<String> {
 /// From namespace A, connect to `address:port` and read its answer; `None` when the connection
 /// fails within a few seconds.
 fn connect_from_a_to(address: Ipv4Addr, port: u16) -> Option<String> {
-    in_ns(NS_A, || {
+    connect_from(NS_A, address, port)
+}
+
+/// Connect from one namespace to a TCP echo fixture and return the peer's reply.
+fn connect_from(namespace: &str, address: Ipv4Addr, port: u16) -> Option<String> {
+    in_ns(namespace, || {
         let mut stream =
             TcpStream::connect_timeout(&SocketAddr::from((address, port)), Duration::from_secs(4))
                 .ok()?;
@@ -608,10 +624,12 @@ fn a_network_holding_a_peer_underlay_address_is_not_routed_into_the_mesh() {
     assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
     assert!(route().contains("203.0.113.0/24"), "control: not routed");
 
-    // And when the endpoint moves into the network again, the installed route is taken off.
+    // A newly configured endpoint inside an already admitted route gets the same exact
+    // exception as a roaming endpoint. The initial admission guard above still applies.
     let applied = in_ns(NS_A, || node_a.chunk(snapshot(a, b, inside, 4, through)));
     assert!(applied.is_ok_and(|applied| applied), "snapshot refused");
-    assert_eq!(route().trim(), "", "the route outlived the endpoint change");
+    assert!(selected_route(Ipv4Addr::new(203, 0, 113, 2)).contains("dev j1156ab"));
+    assert!(selected_route(Ipv4Addr::new(203, 0, 113, 3)).contains("dev infraternal0"));
 
     in_ns(NS_A, || node_a.down().unwrap());
     in_ns(NS_B, || node_b.down().unwrap());
@@ -802,5 +820,167 @@ fn subnet_routes_left_by_an_earlier_run_are_removed_at_the_next_start() {
 
     in_ns(NS_A, || node_a.down().unwrap());
     let _ = fs::remove_dir_all(&state_a);
+    cleanup();
+}
+
+/// Read the actual IPv4 route selected for `address` in the client namespace.
+fn selected_route(address: Ipv4Addr) -> String {
+    run(
+        "ip",
+        &["-n", NS_A, "-4", "route", "get", &address.to_string()],
+    )
+}
+
+/// Wait for a confirmed endpoint to reach the kernel route table. The deadline is a hang guard.
+fn wait_for_route(address: Ipv4Addr, device: &str) -> Duration {
+    let start = std::time::Instant::now();
+    loop {
+        let route = selected_route(address);
+        if route
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| pair == ["dev", device])
+        {
+            return start.elapsed();
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{address} still selects {route}"
+        );
+    }
+}
+
+/// Prove that an authenticated source change excludes exactly one address, keeps the rest
+/// of the subnet reachable, and restores the full prefix after the peer leaves it.
+#[test]
+#[ignore = "Run as root, alone, inside unshare -m -n with ip and nft, issue #580."]
+fn a_confirmed_roam_preserves_the_subnet_and_both_mesh_directions() {
+    cleanup();
+    topology();
+    let (state_a, state_b) = (state("j1273-a"), state("j1273-b"));
+    let (mut a, id_a) = start(NS_A, &state_a);
+    let (mut b, id_b) = start(NS_B, &state_b);
+    let home = Ipv4Addr::new(198, 51, 100, 253);
+    let away = Ipv4Addr::new(192, 0, 2, 2);
+    let other_away = Ipv4Addr::new(192, 0, 2, 3);
+    run(
+        "ip",
+        &["-n", NS_A, "route", "add", "default", "via", "192.0.2.2"],
+    );
+    for address in [home, other_away] {
+        run(
+            "ip",
+            &[
+                "-n",
+                NS_B,
+                "addr",
+                "add",
+                &format!("{address}/32"),
+                "dev",
+                "lo",
+            ],
+        );
+    }
+    // Match the ordinary LAN proof: this fixture owns its forwarding switch and starts off.
+    in_ns(NS_B, || {
+        fs::write("/proc/sys/net/ipv4/ip_forward", "0").unwrap();
+    });
+    routed_with_node_access(
+        &mut a,
+        &mut b,
+        ((2, id_a.public_key), (3, id_b.public_key)),
+        (
+            SocketAddr::from(([192, 0, 2, 1], id_a.port)),
+            SocketAddr::from((away, id_b.port)),
+        ),
+        1,
+        false,
+        &TrafficPolicy::All,
+    );
+
+    let forwarding = in_ns(NS_B, || b.forwarding_state());
+    assert_eq!(forwarding["state"], "on", "{forwarding}");
+    let check_lan = |phase| {
+        let route = selected_route(HOST);
+        assert!(route.contains("dev infraternal0"), "{phase}: {route}");
+        assert!(
+            route.contains(&format!("src {}", addresses(2).ipv4)),
+            "{phase}: {route}"
+        );
+        let seen = lan_server(GRANTED);
+        assert!(
+            connect_from_a(GRANTED).is_some(),
+            "{phase}: {route}, forwarding {forwarding}"
+        );
+        assert_eq!(
+            seen.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ROUTER_LAN
+        );
+    };
+    check_lan("before the roam");
+
+    let check_mesh = |from, to, address| {
+        let seen = server_at(to, address, GRANTED);
+        assert!(
+            connect_from(from, address, GRANTED).is_some(),
+            "mesh path from {from} to {to} stopped"
+        );
+        seen.recv_timeout(Duration::from_secs(5)).unwrap();
+    };
+    let a_mesh = addresses(2).ipv4;
+    let b_mesh = addresses(3).ipv4;
+    check_mesh(NS_A, NS_B, b_mesh);
+    assert!(selected_route(home).contains("dev infraternal0"));
+    let sink = in_ns(NS_A, || UdpSocket::bind((a_mesh, 0)).unwrap());
+    let sender = in_ns(NS_B, || UdpSocket::bind((b_mesh, 0)).unwrap());
+    let destination = sink.local_addr().unwrap();
+
+    let move_peer = |source: Ipv4Addr| {
+        run(
+            "ip",
+            &[
+                "-n",
+                NS_B,
+                "route",
+                "replace",
+                "192.0.2.1/32",
+                "dev",
+                "j1156ba",
+                "src",
+                &source.to_string(),
+            ],
+        );
+        sender.send_to(b"authenticated roam", destination).unwrap();
+    };
+    move_peer(home);
+    let enter = wait_for_route(home, "j1156ab");
+    check_mesh(NS_A, NS_B, b_mesh);
+    check_mesh(NS_B, NS_A, a_mesh);
+    check_lan("after the roam into the subnet");
+
+    move_peer(other_away);
+    let leave = wait_for_route(home, "infraternal0");
+    check_mesh(NS_A, NS_B, b_mesh);
+    check_mesh(NS_B, NS_A, a_mesh);
+    let routes = lan_route(NS_A);
+    assert!(routes.starts_with(LAN), "{routes}");
+    move_peer(away);
+    let start = std::time::Instant::now();
+    while in_ns(NS_A, || a.counters().unwrap()[&id_b.public_key].endpoint)
+        != Some(SocketAddr::from((away, id_b.port)))
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "outside roam was never observed"
+        );
+    }
+    assert_eq!(lan_route(NS_A), routes);
+    println!("J1273 /24 end-to-end settle: enter {enter:?}, leave {leave:?}");
+
+    in_ns(NS_A, || a.down().unwrap());
+    in_ns(NS_B, || b.down().unwrap());
+    fs::remove_dir_all(state_a).unwrap();
+    fs::remove_dir_all(state_b).unwrap();
     cleanup();
 }

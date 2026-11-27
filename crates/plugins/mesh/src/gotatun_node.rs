@@ -1235,8 +1235,24 @@ impl RuntimeState {
 
     /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
     /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
-    /// configuration says; only the address the next packet goes to changes.
+    /// configuration says; only the address the next packet goes to changes. Check a candidate
+    /// inside an approved subnet against its current kernel route before installing it.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        let address = endpoint.ip().to_canonical();
+        if self.config.as_ref().is_some_and(|config| {
+            config.peers.values().any(|peer| {
+                peer.networks.through.iter().any(|route| {
+                    route.network.contains(address)
+                        && route.outbound != crate::policy::rules::TrafficPolicy::None
+                })
+            })
+        }) && tokio::task::spawn_blocking(move || crate::wireguard::is_tunnel_endpoint(address))
+            .await
+            .map_err(io::Error::other)??
+        {
+            // A walk can still remember an old endpoint after its exception was withdrawn.
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
         let policy = self
             .config
             .as_ref()
@@ -1383,11 +1399,11 @@ impl RuntimeState {
             .step(std::time::Instant::now(), &observed(&counters));
         let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
-            if self.set_endpoint(key, endpoint).await.is_ok() {
-                installed.push(key);
-            } else {
+            match self.set_endpoint(key, endpoint).await {
+                Ok(()) => installed.push(key),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => self.walks.abandon(key),
                 // The engine still holds the old address; the walk's next step tries again.
-                self.walks.install_failed(key);
+                Err(_) => self.walks.install_failed(key),
             }
         }
         let _ = self.rehandshake_all(installed);
@@ -2926,6 +2942,42 @@ mod tests {
             .sum()
     }
 
+    /// Block until no thread named `name` has blocked and been woken again for a second, and all
+    /// of them are asleep. The engine retries far more often than that, so this returns only once
+    /// it has given up on every peer and the start-up work has drained, however long a loaded host
+    /// takes for that (#597). Panics if the threads are never still.
+    fn wait_until_still(name: &str) {
+        use std::time::{Duration, Instant};
+        const QUIET: Duration = Duration::from_secs(1);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut previous = wakeups_of(name);
+        let mut quiet_since = Instant::now();
+        while quiet_since.elapsed() < QUIET {
+            assert!(Instant::now() < deadline, "{name} threads never went still");
+            // sleep: sample the kernel's counters; nothing is sent to the threads.
+            std::thread::sleep(Duration::from_millis(50));
+            let current = wakeups_of(name);
+            if current != previous || !all_asleep(name) {
+                quiet_since = Instant::now();
+            }
+            previous = current;
+        }
+    }
+
+    /// Whether every thread of this process named `name` is in interruptible sleep: none is
+    /// waiting for a CPU or a disk.
+    fn all_asleep(name: &str) -> bool {
+        std::fs::read_dir("/proc/self/task")
+            .expect("tasks")
+            .flatten()
+            .filter_map(|task| std::fs::read_to_string(task.path().join("stat")).ok())
+            .filter(|stat| stat.contains(&format!("({name})")))
+            .all(|stat| {
+                stat.rsplit_once(") ")
+                    .is_some_and(|(_, rest)| rest.starts_with('S'))
+            })
+    }
+
     /// D81 for offline peers (#260 J1253): once the engine has given up on every peer, the
     /// node's worker and engine threads do not wake at all, however many peers there are.
     ///
@@ -3037,8 +3089,7 @@ mod tests {
             ));
             (commands, worker)
         });
-        // sleep: every attempt gives up after 2 s; the rest lets the start-up work finish.
-        std::thread::sleep(Duration::from_secs(5));
+        wait_until_still(THREADS);
         sink.set_nonblocking(true).expect("sink mode");
         let mut buffer = [0_u8; 256];
         // The sink's buffer keeps only the first initiations; that some arrived shows the

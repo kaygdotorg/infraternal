@@ -120,14 +120,18 @@ def log(message):
 def gated_rows(latency_targets, log_text):
     """The gated measurement of every D375 row in a profile log, as `{key: summary}`.
 
-    A row gates on its unthrottled (browser) or native measurement, exactly as
-    `latency_targets.report` does. A row that is missing from the log is absent here.
+    A gating row uses its unthrottled (browser), native, or explicit display, and a
+    reported-only row falls back to whichever display was measured (for example `60hz`
+    for `first-paint-network.spec.ts`), matching `latency_targets.report`. Preserves
+    `protocol` and `wire` tags when present so nights compare within one protocol (#573).
     """
     measured = latency_targets.parse("\n".join([log_text, *latency_targets.compose_own_overhead(log_text)]))
     rows = {}
     for row in (*latency_targets.ROWS, *latency_targets.EXTRA_ROWS):
         entries = measured.get(row.key, {})
         display = latency_targets.gated_display(row, entries)
+        if display is None and not row.gating:
+            display = next(iter(entries), None)
         if display is None:
             continue
         fields = entries[display]
@@ -137,10 +141,16 @@ def gated_rows(latency_targets, log_text):
             continue
         result = fields.get("result", "FAIL")
         if samples < row.min_n:
-            result = f"FAIL (n {samples} < {row.min_n})"
-        rows[row.key] = {"measure": row.measure, "value": value, "unit": fields.get("unit", ""),
-                         "gate": fields.get("gate", "?"), "n": samples, "result": result,
-                         "display": display}
+            result = f"FAIL (n {samples} < {row.min_n})" if row.gating else f"REPORT (n {samples} < {row.min_n})"
+        measure = latency_targets.row_measure(row, fields) if hasattr(latency_targets, "row_measure") else row.measure
+        summary = {"measure": measure, "value": value, "unit": fields.get("unit", ""),
+                   "gate": fields.get("gate", "?"), "n": samples, "result": result,
+                   "display": display}
+        if "protocol" in fields:
+            summary["protocol"] = fields["protocol"]
+        if "wire" in fields:
+            summary["wire"] = fields["wire"]
+        rows[row.key] = summary
     return rows
 
 
@@ -148,12 +158,13 @@ def regressions(previous, current):
     """The rows that got worse than the previous night by more than the share and the noise floor.
 
     `previous` and `current` are `gated_rows` results. Frame rates are better when higher.
-    A row without a previous value, or a previous night that failed to measure it, is not compared.
+    A row without a previous value, a previous night that failed to measure it, or a row
+    whose transport `protocol` changed (for example HTTP/1.1 to HTTP/2, #573) is not compared.
     """
     found = []
     for key, now in current.items():
         before = previous.get(key)
-        if before is None or before["unit"] != now["unit"]:
+        if before is None or before["unit"] != now["unit"] or before.get("protocol") != now.get("protocol"):
             continue
         worse_by = before["value"] - now["value"] if now["unit"] == "fps" else now["value"] - before["value"]
         if worse_by > NOISE_FLOOR and worse_by > REGRESSION_SHARE * abs(before["value"]):
@@ -333,6 +344,8 @@ def run_verify(source, binary, work, log_path, root):
     tmp = tempfile.mkdtemp(prefix="nl", dir="/tmp")  # short and private: socket paths must fit SUN_LEN (J952)
     env = dict(os.environ, INFRATERNAL_LATENCY_BINARY=str(binary), CARGO_TARGET_DIR=str(work / "target"),
                TMPDIR=tmp, INFRATERNAL_EVIDENCE_DIR=str(work / "evidence"))
+    # Production (ssh.kayg.org) serves HTTP/2; keep FIRST_PAINT_PROTOCOL=http1 selectable when comparing (#573).
+    env.setdefault("FIRST_PAINT_PROTOCOL", "http2")
     bun_dir = find_bun()
     if bun_dir:
         env["PATH"] = f"{bun_dir}:{env['PATH']}"

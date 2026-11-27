@@ -47,6 +47,29 @@ use nft_fixture::NftFixture;
 /// Give each temporary policy layout a unique private directory.
 static NEXT_CONFIG_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+/// Catch accidental use of the installed policy before a fixture opens either role file.
+#[cfg(feature = "test-support")]
+#[test]
+#[ignore = "Run with verify-privileged in a disposable user and mount namespace."]
+fn privileged_fixture_refuses_live_policy_paths() {
+    assert!(
+        std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_some(),
+        "run this fixture through scripts/verify-privileged"
+    );
+    let paths = HostFirewallPaths::system();
+    let read = read_policy_file(paths.server_policy_path()).expect_err("refuse the system read");
+    let write = write_policy_file(paths.agent_policy_path(), &Policy::default())
+        .expect_err("refuse the system write");
+    for error in [read, write] {
+        assert!(
+            error
+                .to_string()
+                .contains("privileged test refused to access live state"),
+            "{error}"
+        );
+    }
+}
+
 /// Build a prod-shaped policy without depending on a host or installed nft tool.
 fn prod_policy(mesh_enabled: bool) -> Policy {
     Policy {

@@ -861,9 +861,9 @@ async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
 
 /// Forget removes pending delivery and inventory visibility while preserving denial and audit.
 #[tokio::test]
-async fn forget_retired_host_keeps_audit_and_denial() {
+async fn forget_pending_host_keeps_audit_and_denial() {
     let f = fixture().await;
-    let host = forget_fixture(&f, false).await;
+    let host = forget_fixture(&f, true).await;
     sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'remote.host.remove',?,0,1,'{}')")
         .bind(&f.user).bind(host.to_string()).execute(&f.auth.pool).await.unwrap();
     assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
@@ -923,11 +923,40 @@ async fn forget_retired_host_keeps_audit_and_denial() {
     );
 }
 
-/// A live certificate, another owner, or an expired admin window cannot be forgotten.
+/// A pending host can renew the same owner's expired admin window and finish Forget.
 #[tokio::test]
-async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
+async fn forget_passkey_renews_admin_window_for_pending_host() {
+    let mut f = fixture().await;
+    let host = forget_fixture(&f, true).await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET fresh=? WHERE token_hash=?")
+        .bind(now - 901)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        forget_request(&f, host).await,
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+
+    let service = removal(&f);
+    let start = service
+        .reauth_start(&f.session, host, now)
+        .await
+        .expect("the pending host should be eligible for a renewal challenge");
+    let proof = f.software.login(&start, ORIGIN, true);
+    service
+        .reauth_finish(&f.session, host, str_field(&start, "ceremony"), proof, now)
+        .await
+        .expect("a valid proof should renew the current owner session");
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+}
+
+/// Forget requires pending cleanup, ownership, and a fresh admin window.
+#[tokio::test]
+async fn forget_rechecks_state_owner_and_admin_window() {
     for rule in [
-        "pending",
         "other-owner",
         "non-owner",
         "expired",
@@ -935,7 +964,7 @@ async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
         "confirmed",
     ] {
         let f = fixture().await;
-        let host = forget_fixture(&f, rule == "pending").await;
+        let host = forget_fixture(&f, true).await;
         match rule {
             "other-owner" => {
                 sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('other','other',0,'unused')").execute(&f.auth.pool).await.unwrap();

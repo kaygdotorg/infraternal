@@ -89,6 +89,68 @@ class DecisionTests(unittest.TestCase):
         for needle in ("abcdef012345", "FAIL Real echo", "SLOWER Own overhead", "+50 %", "| table |", "published/x"):
             self.assertIn(needle, text)
 
+    def test_protocol_tag_is_parsed_for_60hz_reported_rows_and_guards_regressions(self):
+        """Nightly parsing keeps 60hz first-paint rows, records protocol/wire, and skips cross-protocol diffs (#573)."""
+        base = "\n".join(line for line in log_with().splitlines() if "d375_first_paint_4g_signin" not in line)
+        h1_line = targets.row_line("first_paint_4g_signin", source="real-server-tracer-production-build",
+                                   display="60hz", n=5, value=620.0, unit="ms", target=targets.FIRST_PAINT_MS,
+                                   report_only=True, extra="p50_ms=615.00 protocol=http1 wire=http/1.1")
+        h2_fast = targets.row_line("first_paint_4g_signin", source="real-server-tracer-production-build",
+                                   display="60hz", n=5, value=500.0, unit="ms", target=targets.FIRST_PAINT_MS,
+                                   report_only=True, extra="p50_ms=495.00 protocol=http2 wire=h2")
+        h2_slow = targets.row_line("first_paint_4g_signin", source="real-server-tracer-production-build",
+                                   display="60hz", n=5, value=750.0, unit="ms", target=targets.FIRST_PAINT_MS,
+                                   report_only=True, extra="p50_ms=740.00 protocol=http2 wire=h2")
+
+        rows_h1 = nightly.gated_rows(targets, base + "\n" + h1_line)
+        rows_h2_fast = nightly.gated_rows(targets, base + "\n" + h2_fast)
+        rows_h2_slow = nightly.gated_rows(targets, base + "\n" + h2_slow)
+
+        self.assertEqual(nightly.failing(targets, rows_h2_fast), [])
+        self.assertEqual(rows_h2_fast["first_paint_4g_signin"]["protocol"], "http2")
+        self.assertEqual(rows_h2_fast["first_paint_4g_signin"]["wire"], "h2")
+        self.assertEqual(rows_h2_fast["first_paint_4g_signin"]["display"], "60hz")
+        self.assertIn("(HTTP/2)", rows_h2_fast["first_paint_4g_signin"]["measure"])
+        self.assertEqual(rows_h1["first_paint_4g_signin"]["protocol"], "http1")
+        self.assertIn("(HTTP/1.1)", rows_h1["first_paint_4g_signin"]["measure"])
+
+        # Same protocol: +50% slowdown is flagged as a regression with the protocol label.
+        slower = nightly.regressions(rows_h2_fast, rows_h2_slow)
+        self.assertEqual([item["key"] for item in slower], ["first_paint_4g_signin"])
+        self.assertIn("(HTTP/2)", slower[0]["measure"])
+        # Different protocol (http1 -> http2, even if slower): not compared across protocols.
+        self.assertEqual(nightly.regressions(rows_h1, rows_h2_slow), [])
+
+    def test_run_verify_defaults_first_paint_protocol_to_http2_and_allows_override(self):
+        """`run_verify` passes FIRST_PAINT_PROTOCOL=http2 by default and keeps http1 selectable (#573)."""
+        seen_envs = []
+
+        class FakeChild:
+            """Stand-in subprocess handle returning exit status 0."""
+
+            pid = 12345
+
+            def wait(self, timeout=None):
+                """Return a clean exit code without spawning a process."""
+                return 0
+
+        def fake_popen(argv, *, cwd, env, stdout, stderr, start_new_session):
+            """Capture the child environment passed to `scripts/verify latency`."""
+            seen_envs.append(dict(env))
+            return FakeChild()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.object(nightly, "prepare_tracer"), \
+                    mock.patch.object(nightly.subprocess, "Popen", side_effect=fake_popen):
+                with mock.patch.dict(nightly.os.environ, {}, clear=False):
+                    nightly.os.environ.pop("FIRST_PAINT_PROTOCOL", None)
+                    self.assertEqual(nightly.run_verify(root, root / "bin", root, root / "log1", root), 0)
+                with mock.patch.dict(nightly.os.environ, {"FIRST_PAINT_PROTOCOL": "http1"}, clear=False):
+                    self.assertEqual(nightly.run_verify(root, root / "bin", root, root / "log2", root), 0)
+        self.assertEqual(seen_envs[0]["FIRST_PAINT_PROTOCOL"], "http2")
+        self.assertEqual(seen_envs[1]["FIRST_PAINT_PROTOCOL"], "http1")
+
 
 class PublishTests(unittest.TestCase):
     """A night appears whole or not at all, and `latest` always names a complete night."""

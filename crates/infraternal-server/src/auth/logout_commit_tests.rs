@@ -2,10 +2,11 @@
 
 use super::*;
 
+/// Times how long a logout takes to publish its revocation.
 #[tokio::test]
 #[ignore = "measurement only; run on a perf VM under perf-run.sh"]
 async fn logout_publication_measurement() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let f = fixture().await;
     let affected: Vec<_> = (0..16).map(|_| f.auth.revocation_events(&f.user)).collect();
     let auth = &f.auth;

@@ -156,7 +156,12 @@ pub(super) async fn run_worker(
             }
             () = confirmed_scan.wait() => {
                 confirmed_scan.start();
-                state.admit_confirmed_endpoints().await;
+                let endpoints = state.admit_confirmed_endpoints().await;
+                if state.reconcile_networks(Some(&endpoints)).await
+                    && let Some(announcer) = announcer.as_mut()
+                {
+                    announcer.resync();
+                }
                 confirmed_scan.finish(Instant::now());
             }
             () = announcement_due(announcer.as_mut()) => {
@@ -477,11 +482,11 @@ impl RuntimeState {
             .step(std::time::Instant::now(), &observed(&counters));
         let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
-            if self.set_endpoint(key, endpoint).await.is_ok() {
-                installed.push(key);
-            } else {
+            match self.set_endpoint(key, endpoint).await {
+                Ok(()) => installed.push(key),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => self.walks.abandon(key),
                 // The engine still holds the old address; the walk's next step tries again.
-                self.walks.install_failed(key);
+                Err(_) => self.walks.install_failed(key),
             }
         }
         self.rehandshake_all(installed);
@@ -492,14 +497,22 @@ impl RuntimeState {
     /// goes changes, and the session is kept.
     ///
     /// An address that one of this utun's host routes covers is refused, the same rule the
-    /// snapshot's own endpoints pass (`validate_underlay_routes`): the peer's packets would loop
-    /// back into the tunnel.
+    /// snapshot's own endpoints pass (`validate_underlay_routes`). Also check the current subnet
+    /// routes because a walk may still hold a candidate whose exception has expired.
     /// # Errors
     /// Reports an address inside the mesh, a peer the configuration does not install, or a
     /// device that rejected the update.
     async fn set_endpoint(&self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
-        if self.routes.contains(&endpoint.ip()) {
+        let address = endpoint.ip().to_canonical();
+        if self.routes.contains(&address) {
             return Err(io::ErrorKind::InvalidInput.into());
+        }
+        if self
+            .networks
+            .keys()
+            .any(|network| network.contains(address))
+        {
+            return Err(io::ErrorKind::AddrInUse.into());
         }
         let policy = self
             .config

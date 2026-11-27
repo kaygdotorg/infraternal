@@ -2,8 +2,8 @@
 use super::{Error, Result};
 use sqlx::{SqlitePool, migrate::MigrateError};
 
-// The build retains the original checksums while removing only executable SQL
-// comments and redundant whitespace. No runtime hash, parser or allocation is added.
+// The build retains the original checksums and compacts executable SQL. It
+// also wraps the device host schema rewrite in transactional layout checks.
 include!(concat!(env!("OUT_DIR"), "/compact_migrations.rs"));
 
 /// Retag only the shipped, successful index migration; normal `SQLx` validation handles every other history.

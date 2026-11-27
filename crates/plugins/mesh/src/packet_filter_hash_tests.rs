@@ -21,7 +21,7 @@ use std::{
 /// The retired slot function (SipHash-1-3, fixed zero keys): the attacker's model of the table.
 fn retired_start(key: FlowKey) -> usize {
     let mut hasher = DefaultHasher::new();
-    key.canonical().hash(&mut hasher);
+    key.min(key.reverse()).hash(&mut hasher);
     usize::try_from(hasher.finish() % FLOW_SLOTS_PER_PEER_HASH).expect("slot index")
 }
 
@@ -109,4 +109,21 @@ fn flow_slot_collisions_stay_spread_under_a_crafted_search() {
         seeded_mean < 2.0,
         "seeded slot function: mean probe {seeded_mean} (max {seeded_max}) should stay near 1"
     );
+}
+
+/// Each tuple and its reverse start at the same slot for both address families.
+#[test]
+fn flow_slot_is_independent_of_packet_direction() {
+    for port in [0, 1, 443, 32_768, u16::MAX] {
+        for protocol in [0, 6, 17, u8::MAX] {
+            let mut key = tuple(port, 443);
+            key.protocol = protocol;
+            assert_eq!(flow_start(key), flow_start(key.reverse()));
+            key.source = "2001:db8::1".parse().expect("IPv6 address");
+            key.destination = "2001:db8::2".parse().expect("IPv6 address");
+            assert_eq!(flow_start(key), flow_start(key.reverse()));
+            key.destination = key.source;
+            assert_eq!(flow_start(key), flow_start(key.reverse()));
+        }
+    }
 }

@@ -15,8 +15,10 @@ single Python copy of that table:
   (the gate) and paced to a 60 Hz display (reported beside it), and checks
   with `frame_pacing` that the unthrottled run really ran above 60 Hz;
 - `report()` reads a whole `scripts/verify latency` log and prints the table with
-  the measured value next to each target. A row that is missing or failed makes
-  the report exit non-zero, so a row cannot silently drop out of the gate.
+  the measured value next to each target, appending the HTTP transport protocol
+  label (`HTTP/2` or `HTTP/1.1`) whenever a row carries `protocol=`/`wire=`
+  (#573). A row that is missing or failed makes the report exit non-zero, so a
+  row cannot silently drop out of the gate.
 
 The browser suite keeps a TypeScript copy of the same numbers in
 `apps/tracer/test/latency-targets.ts`; `scripts/test-latency-report.py` checks
@@ -166,6 +168,32 @@ GATED_DISPLAYS = ("unthrottled", "native")
 UNTHROTTLED_MIN_FPS = RENDER_FPS
 #: The CPU slowdown the phone first-paint row applies (Chromium's mobile preset uses the same factor).
 PHONE_CPU_SLOWDOWN = 4
+#: Human-readable transport protocol labels for METRIC `protocol=` / `wire=` tags (#573).
+PROTOCOL_LABELS = {
+    "http2": "HTTP/2",
+    "h2": "HTTP/2",
+    "http1": "HTTP/1.1",
+    "http/1.1": "HTTP/1.1",
+}
+
+
+def protocol_label(fields: dict[str, str]) -> str | None:
+    """Return the human-readable HTTP protocol label for a parsed METRIC line, or None when untagged.
+
+    `first-paint-network.spec.ts` tags its rows with `protocol=http2 wire=h2` or
+    `protocol=http1 wire=http/1.1` (#573). Reports use this label so every first-paint number
+    states which transport protocol produced it.
+    """
+    raw = fields.get("protocol") or fields.get("wire")
+    if not raw:
+        return None
+    return PROTOCOL_LABELS.get(raw.lower(), raw)
+
+
+def row_measure(row: Row, fields: dict[str, str]) -> str:
+    """Format a row's display name, appending its measured transport protocol when present."""
+    label = protocol_label(fields)
+    return f"{row.measure} ({label})" if label else row.measure
 
 
 def _fields(text: str) -> dict[str, str]:
@@ -323,7 +351,7 @@ def report(log_text: str) -> tuple[str, bool]:
         passed &= result == "PASS"
         reruns = f", worst of {fields['runs']} runs" if int(fields.get("runs", "1")) > 1 else ""
         lines.append(
-            f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
+            f"| {row_measure(row, fields)} | {row.target} | {fields.get('gate', '?')} {unit} | "
             f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}{reruns}) | {shown_60} | "
             f"{fields.get('target_met', '?')} | {result} |"
         )
@@ -352,7 +380,7 @@ def report(log_text: str) -> tuple[str, bool]:
         # A reported row never fails the run; a gating one fails on anything but PASS.
         passed &= result == "PASS" if row.gating else not result.startswith("FAIL")
         lines.append(
-            f"| {row.measure} | {row.target} | {fields.get('gate', '?')} {unit} | "
+            f"| {row_measure(row, fields)} | {row.target} | {fields.get('gate', '?')} {unit} | "
             f"{fields.get('value', '?')} {unit} (n={fields.get('n', '?')}) | {', '.join(others) or '-'} | "
             f"{fields.get('target_met', '?')} | {result} |"
         )
