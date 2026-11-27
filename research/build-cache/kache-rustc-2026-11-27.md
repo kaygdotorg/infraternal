@@ -207,7 +207,27 @@ earlier collection.
 | Operation | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target/cache/combined bytes | Load 1m min/median/max | Hits/misses/dups |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | x86_64 static | 1,200.660 | 2,438.729 / 218.403 | 14.48 / 17.03 | 2,325,200,896 / 5,923,962,880 / 8,116,604,928 | 10.61 / 18.09 / 33.67 | 335 / 196 / 17 |
+| aarch64 static | 1,427.274 | 2,674.699 / 197.563 | 11.56 / 13.97 | 3,725,418,496 / 5,730,127,872 / 9,455,546,368 | 10.12 / 23.20 / 36.76 | 252 / 90 / 15 |
+| Workspace test build | 1,113.525 | 2,609.562 / 340.755 | 42.59 / 54.67 | 14,484,295,680 / 9,250,243,920 / 21,932,773,376 | 12.50 / 29.08 / 42.93 | 512 / 264 / 0 |
 
-The x86_64 hit rate was 61.13%. Its static SHA-256 was
+The x86_64, aarch64 and test-build hit rates were 61.13%, 70.59% and
+65.98%, with duplicate compiles included in the denominator. All
+three builds passed. The 34,084,088-byte x86_64 SHA-256 was
 `9a071df87be6583c6d254203e51aeb62f1e96ca40e7ebb72cd3fad5e815e63ff`.
-The cold-to-warm comparison crosses revisions and host load conditions.
+The 30,288,672-byte aarch64 SHA-256 was
+`97673eace5149759314b6ef14361d9433b695893b349d95792e094260b69659d`.
+
+The cold-to-warm comparison crosses revisions and host load
+conditions. The later aarch64 and workspace test builds took longer
+than their earlier wrapped equivalents despite the recorded hits.
+The wrapper only caches Rust outputs, so native compiler work and
+uncached links still run.
+
+## One-crate edit setup
+
+The edited worktree starts from the same later pin with a fresh target
+and the retained store from the completed later worktree. Its sole
+tracked change is an appended comment in
+`crates/infraternal-link/src/lib.rs`. The two warm cases run one after
+the other in a single admitted build slot. Each has a private daemon
+runtime and retains the same 5 GiB cache cap.
