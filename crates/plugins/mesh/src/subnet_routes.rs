@@ -21,8 +21,10 @@
 //! the rest of the mesh keeps working. The packet filter refuses forwarded packets whenever
 //! forwarding is not fully in place, so a half-configured router forwards nothing.
 use crate::policy::networks::Network;
-#[cfg(target_os = "linux")]
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 #[cfg(target_os = "linux")]
 use std::{io, path::Path};
 
@@ -88,20 +90,12 @@ pub(crate) enum Forwarding {
 #[cfg(target_os = "linux")]
 #[derive(Debug, Default)]
 pub(crate) struct SubnetState {
-    /// The networks this node may reach through router peers, and what happened to each.
-    pub(crate) routes: BTreeMap<Network, RouteState>,
     /// Whether this node forwards for its served networks.
     pub(crate) forwarding: Forwarding,
 }
 
 #[cfg(target_os = "linux")]
 impl SubnetState {
-    /// The status of one reachable network, for `mesh routes`.
-    #[must_use]
-    pub(crate) fn route_json(&self, network: Network) -> serde_json::Value {
-        route_json(self.routes.get(&network))
-    }
-
     /// The forwarding status, for `mesh routes`.
     #[must_use]
     pub(crate) fn forwarding_json(&self) -> serde_json::Value {
@@ -115,6 +109,45 @@ impl SubnetState {
                 serde_json::json!({"state": "unavailable", "reason": reason})
             }
         }
+    }
+}
+
+/// Linux subnet client state. It is serialized with the peer route state on snapshots and roams.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClientRoutes {
+    /// The tunnel's preferred IPv4 source, set by the first reconcile.
+    pub(crate) source: Option<Ipv4Addr>,
+    /// Approved routes that passed the snapshot endpoint guard.
+    pub(crate) wanted: Vec<Network>,
+    /// Snapshot refusals kept visible while live endpoints change.
+    pub(crate) refused: BTreeMap<Network, RouteState>,
+    /// Networks already accepted on this link, which can retain the rest of their range on roam.
+    pub(crate) admitted: BTreeSet<Network>,
+    /// Exact endpoint addresses excluded in the last successful reconcile.
+    pub(crate) exceptions: BTreeSet<IpAddr>,
+    /// A matching endpoint changed, or a failed transaction still needs a retry.
+    pub(crate) dirty: bool,
+    /// Status of each snapshot network for `mesh routes`.
+    pub(crate) states: BTreeMap<Network, RouteState>,
+}
+
+#[cfg(target_os = "linux")]
+impl ClientRoutes {
+    /// Guard initial installs as before. A previously installed network keeps its admission
+    /// across snapshots so the coordinator publishing a learned endpoint cannot undo its bypass.
+    pub(crate) fn configure(&mut self, config: &crate::dataplane::Config, endpoints: &[IpAddr]) {
+        let wanted = reachable_networks(config);
+        self.source = Some(config.addresses.ipv4);
+        self.admitted
+            .retain(|network| wanted.binary_search(network).is_ok());
+        let (mut existing, new): (Vec<_>, Vec<_>) = wanted
+            .into_iter()
+            .partition(|network| self.admitted.contains(network));
+        let (routable, refused) = split_by_underlay(&new, endpoints);
+        existing.extend(routable);
+        self.wanted = existing;
+        self.refused = refused;
     }
 }
 
@@ -171,10 +204,99 @@ pub(crate) fn holds_endpoint_sentence(address: std::net::IpAddr, machine: &str) 
     )
 }
 
-/// Every underlay address this node sends to: each peer's configured endpoint and walk
-/// candidates (a walk may move the peer to any of them) and the authenticated endpoints the
-/// engine learned since (`live`). A wanted network holding one of them is never routed into the
-/// mesh link.
+/// The underlay addresses that would otherwise be sent through one of these subnet routes.
+pub(crate) fn matching_endpoints(
+    networks: &(impl Iterator<Item = Network> + Clone),
+    endpoints: impl IntoIterator<Item = IpAddr>,
+) -> BTreeSet<IpAddr> {
+    endpoints
+        .into_iter()
+        .filter(|address| {
+            (*networks)
+                .clone()
+                .any(|network| network.contains(*address))
+        })
+        .collect()
+}
+
+/// The CIDRs covering `network` minus the endpoint host addresses. Leaving an exact address
+/// uncovered lets normal underlay routing pick its current path. Every installed route still
+/// belongs to the tunnel interface and goes away with it.
+///
+/// The budget bounds route writes even if every peer roams into one network. An empty result
+/// means the only address was excluded, or a safe cover would exceed `limit`.
+fn excluding_endpoints(
+    network: Network,
+    endpoints: &BTreeSet<IpAddr>,
+    limit: usize,
+) -> Vec<Network> {
+    let mut work = vec![network];
+    let mut cover = Vec::new();
+    while let Some(part) = work.pop() {
+        let first = part.address();
+        if !endpoints
+            .range(first..)
+            .next()
+            .is_some_and(|ip| part.contains(*ip))
+        {
+            if cover.len() == limit {
+                return Vec::new();
+            }
+            cover.push(part);
+            continue;
+        }
+        let prefix = part.prefix() + 1;
+        let second = match first {
+            IpAddr::V4(first) if prefix <= 32 => {
+                IpAddr::V4(Ipv4Addr::from(u32::from(first) | (1 << (32 - prefix))))
+            }
+            IpAddr::V6(first) if prefix <= 128 => {
+                IpAddr::V6(Ipv6Addr::from(u128::from(first) | (1 << (128 - prefix))))
+            }
+            _ => continue,
+        };
+        work.extend(Network::new(second, prefix));
+        work.extend(Network::new(first, prefix));
+    }
+    cover
+}
+
+/// The approved networks and the kernel prefixes to put on the tunnel for each one.
+pub(crate) type RouteTargets = BTreeMap<Network, Vec<Network>>;
+
+/// Keep the ordinary routes within the limit first, then spend the remaining route budget
+/// on networks with an exception. A network with no safe cover is left out in its entirety.
+pub(crate) fn route_targets(
+    networks: &[Network],
+    endpoints: &BTreeSet<IpAddr>,
+    limit: usize,
+) -> (RouteTargets, BTreeMap<Network, RouteState>) {
+    let mut targets = BTreeMap::new();
+    let mut skipped = BTreeMap::new();
+    let mut available = limit.saturating_sub(networks.len());
+    for &network in networks {
+        let parts = excluding_endpoints(network, endpoints, available + 1);
+        if parts.is_empty() {
+            available += 1;
+            skipped.insert(
+                network,
+                RouteState::Skipped("an underlay endpoint must stay outside the tunnel".to_owned()),
+            );
+        } else {
+            available -= parts.len() - 1;
+            targets.insert(network, parts);
+        }
+    }
+    (targets, skipped)
+}
+
+/// Root mode allows at most this many extra kernel routes per reconcile. The user-mode Mac
+/// helper has its own tighter bound on the number of routes in a request.
+pub(crate) const EXTRA_ROUTE_LIMIT: usize = 256;
+
+/// Addresses to check before admitting a new route: snapshot endpoints, possible walk
+/// addresses, and endpoints the engine has already authenticated (`live`). Once a route is
+/// admitted, it follows the active endpoint with exact exclusions.
 #[cfg(target_os = "linux")]
 #[must_use]
 pub(crate) fn underlay_addresses(
@@ -191,8 +313,11 @@ pub(crate) fn underlay_addresses(
                 .iter()
                 .chain(policy.peer.candidates.iter())
         })
-        .map(std::net::SocketAddr::ip)
-        .chain(live.into_iter().map(|endpoint| endpoint.ip()))
+        .map(|endpoint| endpoint.ip().to_canonical())
+        .chain(
+            live.into_iter()
+                .map(|endpoint| endpoint.ip().to_canonical()),
+        )
         .collect();
     addresses.sort_unstable();
     addresses.dedup();
@@ -246,6 +371,59 @@ pub(crate) fn reachable_networks(config: &crate::dataplane::Config) -> Vec<Netwo
     networks
 }
 
+#[cfg(test)]
+mod endpoint_tests {
+    //! Prefix covers must create an exact hole on either address family and bound kernel writes.
+    use super::*;
+
+    /// A /24 with two endpoints still routes all 254 other addresses exactly once.
+    #[test]
+    fn two_shared_subnet_endpoints_leave_two_exact_holes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let network: Network = "198.51.100.0/24".parse()?;
+        let outside = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let first = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3));
+        let second = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 124));
+        let endpoints = matching_endpoints(&[network].into_iter(), [first, first, second, outside]);
+        assert_eq!(endpoints, BTreeSet::from([first, second]));
+        let parts = excluding_endpoints(network, &endpoints, 64);
+        for last in 0..=255 {
+            let address = IpAddr::V4(Ipv4Addr::new(198, 51, 100, last));
+            assert_eq!(
+                parts.iter().filter(|part| part.contains(address)).count(),
+                usize::from(!endpoints.contains(&address)),
+                "{address}",
+            );
+        }
+        assert_eq!(
+            excluding_endpoints(network, &BTreeSet::from([outside]), 1),
+            [network]
+        );
+        Ok(())
+    }
+
+    /// A /128 is an exact exclusion. If the route budget runs out, leave the unsafe parent out.
+    #[test]
+    fn exact_host_exclusions_and_bounded_fallback() -> Result<(), Box<dyn std::error::Error>> {
+        let network: Network = "2001:db8::/126".parse()?;
+        let endpoint: IpAddr = "2001:db8::2".parse()?;
+        let endpoints = BTreeSet::from([endpoint]);
+        let parts = excluding_endpoints(network, &endpoints, 2);
+        assert_eq!(
+            parts,
+            [
+                "2001:db8::/127".parse::<Network>()?,
+                "2001:db8::3/128".parse::<Network>()?
+            ]
+        );
+        let empty: [Network; 0] = [];
+        assert_eq!(excluding_endpoints(network, &endpoints, 1), empty);
+        let host = Network::new(endpoint, 128)?;
+        assert_eq!(excluding_endpoints(host, &endpoints, 1), empty);
+        Ok(())
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     //! Status wording and the snapshot-derived network list.
@@ -257,21 +435,18 @@ mod tests {
     fn route_and_forwarding_status_say_what_happened() {
         let network: Network = "192.168.1.0/24".parse().unwrap();
         let mut state = SubnetState::default();
-        assert_eq!(state.route_json(network)["state"], "pending");
-        state.routes.insert(network, RouteState::Overlaps(network));
+        assert_eq!(route_json(None)["state"], "pending");
+        let overlap = RouteState::Overlaps(network);
         assert!(
-            state.route_json(network)["reason"]
+            route_json(Some(&overlap))["reason"]
                 .as_str()
                 .unwrap()
                 .contains("already routes 192.168.1.0/24")
         );
-        state.routes.insert(
-            network,
-            RouteState::Skipped("this Mac already reaches it through en0".to_owned()),
-        );
-        assert_eq!(state.route_json(network)["state"], "not installed");
+        let skipped = RouteState::Skipped("this Mac already reaches it through en0".to_owned());
+        assert_eq!(route_json(Some(&skipped))["state"], "not installed");
         assert_eq!(
-            state.route_json(network)["reason"],
+            route_json(Some(&skipped))["reason"],
             "this Mac already reaches it through en0"
         );
         assert_eq!(state.forwarding_json()["state"], "idle");

@@ -305,6 +305,8 @@ enum WorkerCommand {
         reply: sync::SyncSender<io::Result<()>>,
     },
     Counters(sync::SyncSender<io::Result<CounterMap>>),
+    /// Read the installed keys for reconciliation without touching per-peer statistics.
+    PeerKeys(sync::SyncSender<Vec<PublicKey>>),
     #[cfg(feature = "relay")]
     PrepareHandshake {
         key: PublicKey,
@@ -391,8 +393,11 @@ impl Engine {
     /// so the addresses, the routes a person added and open flows survive an infraternal agent
     /// restart. `adopt` names the live link that the caller proved is this installation's
     /// (`Node::restore`); it is reattached only while it still has that index and owner. With no
-    /// `adopt`, any marked link refuses the start. A new TUN becomes persistent only once it is
-    /// marked and the engine is up, so a failed start leaves no interface behind.
+    /// `adopt`, any marked link refuses the start.
+    ///
+    /// A new TUN is not persistent when this returns. The caller gets its handle and makes it
+    /// persistent after it saves the node's startup state; a start that stops before then,
+    /// by error or by process exit, takes the link with it.
     /// # Errors
     /// Reports TUN registration, UDP bind, runtime or device initialization failures, and
     /// `AlreadyExists` for a link this start may not take, including one another process holds.
@@ -405,7 +410,7 @@ impl Engine {
         adopt: Option<u32>,
         route_endpoint_updater: RouteEndpointUpdater,
         underlay_announce: Arc<UnderlayAnnounce>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, LinuxTun)> {
         crate::packet_filter::warn_about_sysctl_gaps();
         let filter = Arc::new(match config.as_ref() {
             Some(config) => PacketFilter::new(config, proxy_ingress.clone())?,
@@ -457,7 +462,7 @@ impl Engine {
                 worker_health
                     .tx_queue_len
                     .store(tx_queue_len, Ordering::Relaxed);
-                if info_tx.send(Ok(info.clone())).is_err() {
+                if info_tx.send(Ok((info.clone(), tun.tun.clone()))).is_err() {
                     if let Some(device) = device.and_then(Arc::into_inner) {
                         runtime.block_on(device.stop());
                     }
@@ -483,20 +488,23 @@ impl Engine {
                     underlay_announce,
                 ));
             })?;
-        let info = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
-            Ok(info) => info,
+        let (info, tun) = match info_rx.recv().map_err(|_| io::ErrorKind::BrokenPipe)? {
+            Ok(started) => started,
             Err(error) => {
                 let _ = join.join();
                 return Err(error);
             }
         };
-        Ok(Self {
-            commands,
-            join: Some(join),
-            info,
-            health,
-            filter,
-        })
+        Ok((
+            Self {
+                commands,
+                join: Some(join),
+                info,
+                health,
+                filter,
+            },
+            tun,
+        ))
     }
 
     /// Whether the engine is running, how often it was rebuilt, and what it dropped.
@@ -630,6 +638,17 @@ impl Engine {
             .send(WorkerCommand::Counters(reply))
             .map_err(|_| io::ErrorKind::BrokenPipe)?;
         result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+    }
+
+    /// Read actual device membership, including either key of a rotating peer.
+    /// # Errors
+    /// Reports a stopped worker.
+    pub(crate) fn peer_keys(&self) -> io::Result<Vec<PublicKey>> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::PeerKeys(reply))
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe.into())
     }
 
     /// Return a relay callback that forces the selected `GotaTun` peer to start a handshake.
@@ -774,6 +793,8 @@ async fn initialize(
         Some(code) if code == nix::libc::EBUSY => io::Error::from(io::ErrorKind::AlreadyExists),
         _ => error,
     })?;
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("created")?;
     // The check above and the attach are two steps: confirm the attached link is still the
     // proven one, or a fresh one under this name.
     let attached = crate::wireguard::Device::active_link();
@@ -797,12 +818,16 @@ async fn initialize(
     if adopt.is_none() {
         crate::wireguard::Device::mark_tun(local_public_key)?;
     }
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("marked")?;
     crate::wireguard::Device::activate_tun(tun.owned_ifindex()?, mtu)?;
     // Raised on a new and on a reattached TUN alike. A refusal does not stop the engine: the
     // length it really has goes to `mesh status`.
     let tx_queue_len = crate::wireguard::Device::raise_tx_queue_len(TUN_TX_QUEUE_LEN)
         .or_else(|_| crate::wireguard::Device::tx_queue_len())
         .unwrap_or(0);
+    #[cfg(test)]
+    crate::node::startup_crash_tests::checkpoint("activated")?;
     let tun = LinuxPacketIo::new(tun, filter);
     let (factory, port) = bind_udp(requested_port, private_key.clone()).await?;
     let peers = config
@@ -841,8 +866,6 @@ async fn initialize(
         offloads_enabled,
         probes,
     };
-    // Marked and running: from here the interface outlives this process (D332).
-    tun.tun.persist()?;
     Ok(Started {
         tx_queue_len,
         tun,
@@ -1012,6 +1035,9 @@ async fn run_worker(
                 Some(WorkerCommand::SetOwner { owner, reply }) => {
                     let _ = reply.send(state.set_owner(owner));
                 }
+                Some(WorkerCommand::PeerKeys(reply)) => {
+                    let _ = reply.send(state.peer_keys().await);
+                }
                 Some(WorkerCommand::Counters(reply)) => {
                     let _ = reply.send(state.counters().await);
                 }
@@ -1168,7 +1194,7 @@ impl RuntimeState {
     /// peer's key (transport data, or the response to our own initiation). The send endpoint is
     /// not used, because an accepted handshake initiation moves it before its sender proves
     /// anything, and a replayed initiation could then choose our route MTU (#489 J549 P1).
-    /// `None` means no proof yet, and routes keep the coordinator's configured endpoint.
+    /// When a peer has no proof from a live session, routes use the coordinator's endpoint.
     async fn live_peer_endpoint_snapshot(&self) -> BTreeMap<PublicKey, Option<SocketAddr>> {
         let (Some(device), Some(config)) = (self.device.as_ref(), self.config.as_ref()) else {
             return BTreeMap::new();
@@ -1254,8 +1280,24 @@ impl RuntimeState {
 
     /// Install `endpoint` on the peer whose key currently owns its host routes: a relay address,
     /// or the next direct-path candidate of a walk (#515). Keys, routes and keepalive stay as the
-    /// configuration says; only the address the next packet goes to changes.
+    /// configuration says; only the address the next packet goes to changes. Check a candidate
+    /// inside an approved subnet against its current kernel route before installing it.
     async fn set_endpoint(&mut self, key: PublicKey, endpoint: SocketAddr) -> io::Result<()> {
+        let address = endpoint.ip().to_canonical();
+        if self.config.as_ref().is_some_and(|config| {
+            config.peers.values().any(|peer| {
+                peer.networks.through.iter().any(|route| {
+                    route.network.contains(address)
+                        && route.outbound != crate::policy::rules::TrafficPolicy::None
+                })
+            })
+        }) && tokio::task::spawn_blocking(move || crate::wireguard::is_tunnel_endpoint(address))
+            .await
+            .map_err(io::Error::other)??
+        {
+            // A walk can still remember an old endpoint after its exception was withdrawn.
+            return Err(io::ErrorKind::AddrInUse.into());
+        }
         let policy = self
             .config
             .as_ref()
@@ -1402,11 +1444,11 @@ impl RuntimeState {
             .step(std::time::Instant::now(), &observed(&counters));
         let mut installed = Vec::with_capacity(moves.len());
         for (key, endpoint) in moves {
-            if self.set_endpoint(key, endpoint).await.is_ok() {
-                installed.push(key);
-            } else {
+            match self.set_endpoint(key, endpoint).await {
+                Ok(()) => installed.push(key),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => self.walks.abandon(key),
                 // The engine still holds the old address; the walk's next step tries again.
-                self.walks.install_failed(key);
+                Err(_) => self.walks.install_failed(key),
             }
         }
         let _ = self.rehandshake_all(installed);
@@ -1620,6 +1662,11 @@ impl RuntimeState {
         }
         let desired = peer_keys_with_network_access(&config);
         let admitted_peers = admitted_peer_keys(&config);
+        let previous_admitted = self
+            .config
+            .as_ref()
+            .map(admitted_peer_keys)
+            .unwrap_or_default();
         let admission = Arc::clone(
             &self
                 .pending
@@ -1697,6 +1744,17 @@ impl RuntimeState {
             .collect();
         // Keep the larger link limit until the caller has replaced the peer route metrics.
         self.update_mtu(previous_mtu.max(mtu))?;
+        // Admit newly granted peers before inserting them into `GotaTun` so the device's timer
+        // task cannot send an initiation before our own receive guard accepts the peer's
+        // simultaneous initiation (#605). Existing peers stay admitted until the device write
+        // succeeds, and a failed write restores the previous admission set.
+        let mut pre_admitted = false;
+        if !admitted_peers.is_subset(&previous_admitted) {
+            let mut guard = admission.write().await;
+            guard.set_peers(previous_admitted.union(&admitted_peers).copied());
+            drop(guard);
+            pre_admitted = true;
+        }
         if !changed.is_empty() || !retired.is_empty() {
             // One device transaction: packet workers never see a half-applied snapshot.
             //
@@ -1713,6 +1771,10 @@ impl RuntimeState {
                 .await
                 .map_err(|_| io::Error::other("GotaTun peers could not be updated."))
             {
+                if pre_admitted {
+                    let mut guard = admission.write().await;
+                    guard.set_peers(previous_admitted);
+                }
                 let _ = self.update_mtu(previous_mtu);
                 return Err(error);
             }
@@ -1744,6 +1806,20 @@ impl RuntimeState {
             .as_ref()
             .ok_or(io::ErrorKind::NotConnected)?
             .set_mtu(mtu)
+    }
+
+    /// List the live device's keys. A worker waiting to rebuild has no installed peers.
+    async fn peer_keys(&self) -> Vec<PublicKey> {
+        let Some(device) = self.device.as_ref() else {
+            return Vec::new();
+        };
+        device
+            .read(async |read| {
+                read.peer_keys()
+                    .map(|key| PublicKey(*key.as_bytes()))
+                    .collect()
+            })
+            .await
     }
 
     async fn counters(&self) -> io::Result<CounterMap> {

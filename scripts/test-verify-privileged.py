@@ -37,8 +37,8 @@ slot_hold = load('root-slot-hold')
 
 def userns_available():
     """True when this host lets an unprivileged user create the sandbox's namespaces."""
-    probe = subprocess.run(['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', 'true'],
-                           capture_output=True)
+    probe = subprocess.run(['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--ipc',
+                            '--fork', 'true'], capture_output=True)
     return probe.returncode == 0
 
 
@@ -650,10 +650,10 @@ class SandboxShape(unittest.TestCase):
         return command, command[command.index('-c') + 1]
 
     def test_outer_namespace(self):
-        """User, net, mount and PID namespaces; --kill-child; no sudo; explicit environment."""
+        """User, net, mount, PID and IPC namespaces; --kill-child; no sudo; explicit environment."""
         command, _ = self.command()
-        self.assertEqual(command[:9], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
-                                       '--fork', '--kill-child', '--mount-proc'])
+        self.assertEqual(command[:10], ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid',
+                                        '--ipc', '--fork', '--kill-child', '--mount-proc'])
         self.assertNotIn('sudo', command)
         self.assertEqual(command[command.index('env') + 1], '-i')
         self.assertIn('A=1', command)
@@ -672,30 +672,100 @@ class SandboxShape(unittest.TestCase):
         self.assertEqual(environment[marker], os.readlink('/proc/self/ns/net'))
 
     def test_test_runs_one_namespace_down(self):
-        """The test runs in a nested user namespace, after pivot_root, with --kill-child (79752 P1)."""
+        """The test runs in a nested user/IPC namespace, after allowlist root prepare and pivot_root (79752 P1, #601)."""
         _, setup = self.command()
-        for step in ('ro=recursive', 'pivot_root . .', 'umount -l .'):
-            self.assertIn(step, setup)
-        inner = setup.index('exec unshare --user --map-root-user --net --mount --pid --fork --kill-child')
-        self.assertGreater(inner, setup.index('pivot_root . .'))
-        self.assertNotIn('single', setup)
+        code = '\n'.join(line for line in setup.splitlines() if not line.lstrip().startswith('#'))
+        for step in ('mount -t tmpfs -o mode=755,size=16m tmpfs "$new"',
+                     '--sandbox-prepare "$new" "$scratch" "$host_sockets"', 'pivot_root . .', 'umount -l .'):
+            self.assertIn(step, code)
+        self.assertNotIn('mount --rbind / "$new"', code)
+        self.assertNotIn('ro=recursive', code)
+        inner = code.index('exec unshare --user --map-root-user --net --mount --pid --ipc --fork --kill-child')
+        self.assertGreater(inner, code.index('pivot_root . .'))
+        self.assertNotIn('single', code)
 
     def test_tmpfs_sizes(self):
         """Every tmpfs the sandbox mounts carries a size cap (79752 P3-2)."""
         _, setup = self.command()
         tmpfs = [line for line in setup.splitlines() if 'mount -t tmpfs' in line]
-        self.assertGreaterEqual(len(tmpfs), 6)
+        self.assertGreaterEqual(len(tmpfs), 7)
         for line in tmpfs:
             self.assertRegex(line, r'size=\d+[kmg]')
 
     def test_minimal_dev(self):
-        """/dev is a fresh tmpfs with a private devpts, mounted before /dev/shm, and the nix socket is covered."""
+        """/dev is a fresh tmpfs with a private devpts, mounted before /dev/shm, and only /nix/store is mounted."""
         _, setup = self.command()
         dev = setup.index('tmpfs "$new/dev"\n')
         self.assertLess(dev, setup.index('"$new/dev/shm"\n'))
         self.assertIn('-o newinstance', setup)
         self.assertNotIn('--rbind /dev', setup)
-        self.assertIn('"$new/nix/var/nix/daemon-socket"', setup)
+        self.assertIn('/nix/store', setup)
+        self.assertNotIn('/nix/var/nix/daemon-socket', setup)
+        self.assertNotIn('/nix/var/determinate', setup)
+
+    def test_writable_mounts_under_parses_mountinfo_and_escapes(self):
+        """Only mounts under `root` lacking `ro` in per-mount options are reported (#601)."""
+        sample = (
+            '415 369 253:3 / /s/root ro,relatime - ext4 /dev/vda3 rw\n'
+            '439 415 0:24 / /s/root/sys rw,nosuid,nodev,noexec - sysfs sysfs rw\n'
+            '441 439 0:30 / /s/root/sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n'
+            '442 415 0:31 / /s/root/with\\040space rw,relatime - tmpfs tmpfs rw\n'
+            '443 369 0:32 / /s/root-other rw,relatime - tmpfs tmpfs rw\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            info = Path(directory) / 'mountinfo'
+            info.write_text(sample)
+            self.assertEqual(
+                p.writable_mounts_under('/s/root', mountinfo=info),
+                ['/s/root/sys', '/s/root/sys/fs/cgroup', '/s/root/with space'],
+            )
+
+    def test_set_tree_readonly_uses_mount_setattr_and_fails_on_remaining_rw(self):
+        """`set_tree_readonly` calls `mount_setattr(AT_RECURSIVE)` and verifies mountinfo (#601)."""
+        fake_libc = mock.MagicMock()
+        fake_libc.syscall.return_value = 0
+        with tempfile.TemporaryDirectory() as directory:
+            info = Path(directory) / 'mountinfo'
+            info.write_text('415 369 253:3 / /s/root ro,relatime - ext4 /dev/vda3 rw\n')
+            p.set_tree_readonly('/s/root', libc=fake_libc, mountinfo=info)
+            args = fake_libc.syscall.call_args[0]
+            self.assertEqual(args[0], p.SYS_MOUNT_SETATTR)
+            self.assertEqual(args[1], p.AT_FDCWD)
+            self.assertEqual(args[2], b'/s/root')
+            self.assertEqual(args[3], p.AT_RECURSIVE)
+
+            # A mount that stays writable after mount_setattr must fail closed.
+            info.write_text('441 415 0:30 / /s/root/sys/fs/cgroup rw,nosuid - cgroup2 cgroup2 rw\n')
+            with self.assertRaises(RuntimeError) as error:
+                p.set_tree_readonly('/s/root', libc=fake_libc, mountinfo=info)
+            self.assertIn('/s/root/sys/fs/cgroup', str(error.exception))
+
+    def test_host_pathname_sockets_and_filtering(self):
+        """Absolute and relative pathname sockets are resolved and filtered against covered/allowed prefixes (#601)."""
+        sample = (
+            'Num       RefCount Protocol Flags    Type St Inode Path\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 100 @abstract-sock\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 101 /run/dbus/system_bus_socket\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 102 /var/run/netbird.sock\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 103 /nix/var/determinate/determinate-nixd.socket\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 104 /home/claude/.cache/other/agent.sock\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 105 /opt/custom/allowed.sock\n'
+            '0000000000000000: 00000002 00000000 00010000 0001 01 106 relative.sock\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            proc_unix = Path(directory) / 'unix'
+            proc_unix.write_text(sample)
+            fake_proc = Path(directory) / 'proc'
+            (fake_proc / '4242' / 'fd').mkdir(parents=True)
+            os.symlink('socket:[106]', fake_proc / '4242' / 'fd' / '3')
+            os.symlink('/etc/custom', fake_proc / '4242' / 'cwd')
+            found = p.host_pathname_sockets(proc_unix, proc_root=fake_proc)
+        self.assertNotIn('@abstract-sock', found)
+        self.assertIn('/etc/custom/relative.sock', found)
+        self.assertEqual(len(found), 6)
+        fake_resolve = lambda path: path.replace('/var/run/', '/run/', 1)
+        to_mask = p.sockets_to_mask(found, allowed=('/opt/custom/allowed.sock',), resolver=fake_resolve)
+        self.assertEqual(to_mask, ['/etc/custom/relative.sock', '/home/claude/.cache/other/agent.sock'])
 
 
 class Lifecycle(unittest.TestCase):

@@ -16,13 +16,23 @@ What the sandbox contains, and what it does not:
   boundary is the shared build account, not this sandbox.
 - Nothing runs as host root, and there is no sudo.
 - Each test binary runs in two nested user namespaces. The outer one builds
-  the mounts: the host filesystem bind-mounted read-only (recursively) and
-  `pivot_root`ed with the old root detached; size-capped tmpfs at /tmp, /run,
-    /var/tmp and /dev/shm; a minimal /dev with a private devpts; a tmpfs over
-    the nix daemon socket and a read-only cover over /var/lib. The inner one (new user, net, mount and PID
-  namespaces, `--kill-child`) runs the test. Mounts are locked against nested
-  namespaces, so the test's uid 0 (the caller's uid outside) cannot undo them.
-  The network namespace has only loopback.
+  the mounts on a fresh size-capped tmpfs root containing only the host trees
+  the tests need (`/usr`, `/etc`, `/sys`, `/nix/store`, system `/bin`/`/sbin`/
+  `/lib`/`/lib64` symlinks or dirs, plus the checkout and build target), all
+  locked read-only recursively via
+  `mount_setattr(..., AT_RECURSIVE, MOUNT_ATTR_RDONLY)` (independent of
+  util-linux), then `pivot_root`ed with the old root detached; size-capped
+  tmpfs at /tmp, /run, /var/tmp and /dev/shm; a minimal /dev with a private
+  devpts; a locked read-only tmpfs at /var/lib blocking /var/lib/infraternal;
+  and read-only regular-file bind masks over any remaining host pathname Unix
+  sockets inside the mounted trees. Host-writable trees (`$HOME`, `/var`
+  outside `/var/tmp`, `/var/run` and `/var/lib`, `/srv`, `/opt`, `/root`,
+  `/nix/var`) are not mounted at all, so neither pre-start nor post-start host
+  sockets in them can be reached. The inner namespace (new user, net, mount,
+  PID and IPC namespaces, `--kill-child`) runs the test. Mounts are locked
+  against nested namespaces, so the test's uid 0 (the caller's uid outside)
+  cannot undo them. The network namespace has only loopback, and the IPC
+  namespace isolates SysV shared memory, message queues and semaphores.
 - Each run has a hang timeout, dies with the runner (parent-death signal plus
   `--kill-child`), and runs in a memory-capped systemd user scope when the
   user manager is reachable.
@@ -50,6 +60,7 @@ user namespaces and runs inside the flake dev shell (for `nft`, `ip`, cargo).
 """
 import argparse
 import ctypes
+import errno
 import fnmatch
 import json
 import os
@@ -57,8 +68,11 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import socket
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
 import uuid
 
@@ -158,6 +172,19 @@ OTHER_NEEDS = re.compile(r'perf VM|CPUWeight|MESH_REVIEW_PROBE|release binary|st
 CHILD_ONLY = re.compile(r'^Child-only fixture:')
 IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)')
 
+# Linux mount_setattr(2) constants. Syscall 442 is architecture-independent
+# across modern Linux targets (x86_64, aarch64, riscv64) since Linux 5.12.
+SYS_MOUNT_SETATTR = 442
+AT_FDCWD = -100
+AT_RECURSIVE = 0x8000
+MOUNT_ATTR_RDONLY = 0x00000001
+MS_BIND = 4096
+
+# Mount prefixes replaced by fresh sandbox tmpfs mounts or omitted from the
+# allowlist root. Any host pathname socket whose resolved path lies under one
+# of these is already unreachable.
+REPLACED_MOUNT_PREFIXES = ('/tmp', '/run', '/var/tmp', '/var/lib', '/dev', '/nix/var')
+
 # The sandbox is built in two user namespaces. The OUTER one (where this
 # script runs) makes the mounts; the INNER one (`unshare ... --kill-child`,
 # started at the end) is where the test runs. Mounts a namespace makes are
@@ -167,20 +194,66 @@ IGNORED_TEST = re.compile(r'#\[ignore\s*=\s*"([^"]*)"\]\s*(?:#\[[^\]]*\]\s*)*(?:
 # (review 79752 P1). `--kill-child` ties the inner PID 1 to this process, so a
 # killed runner leaves nothing behind.
 #
+# The root filesystem is assembled on a fresh size-capped tmpfs containing only
+# the read-only host trees the tests need (`/usr`, `/etc`, `/sys`, `/nix/store`,
+# system `/bin`/`/sbin`/`/lib`/`/lib64`, `$checkout`, and `$target`). Host-
+# writable trees such as `$HOME`, `/var` (except `/var/tmp`, `/var/run`, and
+# `/var/lib`), `/srv`, `/opt`, `/root`, and `/nix/var` are not mounted at all,
+# so host pathname sockets created before or after sandbox start in those trees
+# are unreachable (#601). As defense-in-depth, any remaining host pathname Unix
+# socket inside a mounted tree outside `ALLOWED_HOST_SOCKETS` is bind-masked
+# with an empty regular file, and `mount_setattr(..., AT_RECURSIVE,
+# MOUNT_ATTR_RDONLY)` locks `$new` and every mounted child tree (including
+# `/sys/fs/cgroup`) read-only regardless of the host's util-linux version.
 # Tmpfs sizes are capped so one test cannot fill the shared `claude` memory
-# slice (79752 P3-2). A minimal /dev replaces the host's devtmpfs/devpts, and
-# tmpfs covers every pathname socket dir outside /run and /tmp (the nix daemon
-# socket), so neither stays reachable (79752 P2-1).
+# slice (79752 P3-2).
 #
-# Arguments: scratch dir, target dir, run cwd, then the test command.
+# Arguments: scratch dir, checkout dir, target dir, run cwd, python path, script path, JSON list of host sockets, then the test command.
 SANDBOX_SETUP = r'''set -eu
 export PATH="$PATH:/usr/sbin:/sbin"
-scratch=$1 target=$2 runcwd=$3; shift 3
+scratch=$1 checkout=$2 target=$3 runcwd=$4 py=$5 self=$6 host_sockets=$7; shift 7
 new=$scratch/root
 mount --make-rprivate /
-mount --rbind / "$new"
-# Recursively read-only: every host mount under the new root, not just the top.
-mount -o remount,bind,ro=recursive "$new"
+# Build the sandbox root on a fresh tmpfs so host-writable trees (/home, /var,
+# /srv, /opt, /mnt, /root, /nix/var) are omitted rather than masked piecemeal.
+mount -t tmpfs -o mode=755,size=16m tmpfs "$new"
+for tree in /usr /etc /sys /nix/store; do
+    if [ -d "$tree" ]; then
+        mkdir -p "$new$tree"
+        mount --rbind "$tree" "$new$tree"
+    fi
+done
+for entry in bin sbin lib lib64; do
+    if [ -L "/$entry" ]; then
+        ln -s "$(readlink "/$entry")" "$new/$entry"
+    elif [ -d "/$entry" ]; then
+        mkdir -p "$new/$entry"
+        mount --rbind "/$entry" "$new/$entry"
+    fi
+done
+# Expose only the checkout and build target directories (read-only) from the host.
+if [ -n "$checkout" ] && [ "$checkout" != "/" ] && [ -d "$checkout" ]; then
+    mkdir -p "$new$checkout"
+    mount --rbind "$checkout" "$new$checkout"
+fi
+if [ -n "$target" ] && [ "$target" != "/" ] && [ -d "$target" ]; then
+    case "$target" in
+        "$checkout"|"$checkout"/*) ;;
+        *)
+            mkdir -p "$new$target"
+            mount --rbind "$target" "$new$target"
+            ;;
+    esac
+fi
+# Create mountpoints and compatibility symlinks on the tmpfs root before locking
+# the entire mounted tree read-only.
+mkdir -p "$new/proc" "$new/dev" "$new/tmp" "$new/run" "$new/var/tmp" "$new/var/lib"
+ln -s /run "$new/var/run"
+ln -s /run/lock "$new/var/lock"
+# Mask any remaining host pathname socket inside mounted trees, then lock
+# the entire mounted tree (including child mounts such as /sys/fs/cgroup)
+# read-only via mount_setattr(AT_RECURSIVE) instead of util-linux ro=recursive.
+"$py" "$self" --sandbox-prepare "$new" "$scratch" "$host_sockets"
 mount -t proc proc "$new/proc"
 # The minimal /dev is mounted before /dev/shm, or it would cover it.
 {
@@ -196,10 +269,6 @@ mount -t proc proc "$new/proc"
     ln -s /proc/self/fd "$new/dev/fd"
     ln -s /proc/self/fd/0 "$new/dev/stdin"; ln -s /proc/self/fd/1 "$new/dev/stdout"; ln -s /proc/self/fd/2 "$new/dev/stderr"
     if [ -e /dev/net/tun ]; then : > "$new/dev/net/tun"; mount --bind /dev/net/tun "$new/dev/net/tun"; fi
-    # Cover pathname sockets a read-only mount would still allow connect() to.
-    if [ -d "$new/nix/var/nix/daemon-socket" ]; then
-        mount -t tmpfs -o mode=755,size=1m tmpfs "$new/nix/var/nix/daemon-socket"
-    fi
 }
 # Sized tmpfs: one sandbox cannot fill the shared memory slice (79752 P3-2).
 mount -t tmpfs -o mode=1777,size=512m,nr_inodes=1m tmpfs "$new/tmp"
@@ -226,9 +295,10 @@ pivot_root . .
 umount -l .
 cd "$runcwd"
 # Enter the inner namespace. It inherits (and the kernel locks) these mounts,
-# so the test's uid 0 cannot undo them. --kill-child kills the inner PID 1 if
+# so the test's uid 0 cannot undo them. --ipc isolates SysV shared memory,
+# message queues and semaphores. --kill-child kills the inner PID 1 if
 # this process dies. bash is PID 1 inside, reaping orphaned test children.
-exec unshare --user --map-root-user --net --mount --pid --fork --kill-child --mount-proc \
+exec unshare --user --map-root-user --net --mount --pid --ipc --fork --kill-child --mount-proc \
     bash -c 'ip link set lo up; "$@" </dev/null' inner "$@"
 '''
 
@@ -433,21 +503,26 @@ def executables(root, selected):
     return found
 
 
-def sandboxed(command, environment, cwd, scratch, target):
+def sandboxed(command, environment, cwd, scratch, target, checkout=None):
     """The argv that runs `command` in the two-level sandbox described above.
 
     `environment` is passed explicitly (`env -i`), so nothing else from the
     caller's environment leaks in. CARGO_TARGET_DIR points at the tmpfs view.
     The namespace marker lets tests compare against the parent net namespace;
     `/proc/1` inside the inner PID namespace names its own init process.
+    `checkout` is the repository root exposed read-only alongside `target`.
     """
+    checkout = Path(__file__).resolve().parents[1] if checkout is None else checkout
     environment = dict(environment, CARGO_TARGET_DIR='/tmp/ut', TMPDIR='/tmp',
                        INFRATERNAL_VERIFY_OUTER_NETNS=os.readlink('/proc/self/ns/net'))
     pairs = [f'{key}={value}' for key, value in sorted(environment.items())
              if '\n' not in value and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', key)]
-    return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--fork', '--kill-child',
-            '--mount-proc', 'env', '-i', *pairs, 'bash', '-c', SANDBOX_SETUP, 'privileged-sandbox',
-            str(scratch), str(target), str(cwd), *command]
+    # Read host pathname sockets before `unshare --net` hides the host's `/proc/net/unix`.
+    host_sockets = json.dumps(sockets_to_mask(host_pathname_sockets()))
+    return ['unshare', '--user', '--map-root-user', '--net', '--mount', '--pid', '--ipc', '--fork',
+            '--kill-child', '--mount-proc', 'env', '-i', *pairs, 'bash', '-c', SANDBOX_SETUP,
+            'privileged-sandbox', str(scratch), str(checkout), str(target), str(cwd),
+            sys.executable, str(Path(__file__).resolve()), host_sockets, *command]
 
 
 def memory_scope():
@@ -503,20 +578,25 @@ def _die_with_parent():
     ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
 
 
-def run_sandboxed(command, environment, cwd, scratch, target, scope, capture=False, timeout=None):
+def run_sandboxed(command, environment, cwd, scratch, target, scope, capture=False, timeout=None,
+                  checkout=None, on_start=None):
     """Run one command in the sandbox with a hang timeout; returns CompletedProcess.
 
     On timeout the sandbox's outer `unshare` is SIGKILLed, and `--kill-child`
     takes the whole namespace with it. Returncode 124 marks a timeout.
     A new session means no controlling terminal, so /dev/tty opens nothing.
+    When `on_start` is provided, it runs immediately after `Popen` spawns the
+    sandbox (after pre-start host sockets have already been snapshotted).
     """
     timeout = TEST_TIMEOUT_SECONDS if timeout is None else timeout
-    argv = scope + sandboxed(command, environment, cwd, scratch, target)
+    argv = scope + sandboxed(command, environment, cwd, scratch, target, checkout=checkout)
     process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, start_new_session=True,
                                preexec_fn=_die_with_parent, text=True,
                                stdout=subprocess.PIPE if capture else None,
                                stderr=subprocess.PIPE if capture else None)
     try:
+        if on_start is not None:
+            on_start()
         stdout, stderr = process.communicate(timeout=timeout)
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     except subprocess.TimeoutExpired:
@@ -528,6 +608,220 @@ def run_sandboxed(command, environment, cwd, scratch, target, scope, capture=Fal
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+# Host pathname Unix sockets explicitly allowed inside the sandbox. Empty by
+# default: tests should talk only to sockets they create inside the sandbox.
+ALLOWED_HOST_SOCKETS = ()
+
+
+def resolve_relative_unix_sockets(inodes_to_paths, proc_root='/proc'):
+    """Resolve relative-path `/proc/net/unix` entries via readable `/proc/<pid>/fd` + `cwd`.
+
+    A process that binds a Unix socket with a relative path (for example after
+    `chdir(dir)`) leaves a non-`/` path in `/proc/net/unix`. When no such
+    entries exist this function returns immediately. Otherwise it inspects
+    readable `/proc/<pid>/fd/*` symlinks for matching `socket:[<inode>]`
+    entries and joins each process's `/proc/<pid>/cwd` with the relative path.
+    If a process `chdir`ed after `bind()`, `cwd` may no longer match; the
+    sandbox's primary defense against those sockets (and any post-start
+    sockets) is the allowlist root filesystem, which omits host-writable trees
+    such as `$HOME`, `/var`, `/srv`, and `/nix/var` altogether (#601).
+    """
+    if not inodes_to_paths:
+        return set()
+    resolved = set()
+    wanted = {f'socket:[{inode}]': paths for inode, paths in inodes_to_paths.items()}
+    try:
+        entries = list(Path(proc_root).iterdir())
+    except OSError:
+        return resolved
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            matched = []
+            for fd in (entry / 'fd').iterdir():
+                try:
+                    target = os.readlink(fd)
+                except OSError:
+                    continue
+                if target in wanted:
+                    matched.extend(wanted[target])
+            if not matched:
+                continue
+            cwd = os.readlink(entry / 'cwd')
+        except OSError:
+            continue
+        for rel in matched:
+            resolved.add(os.path.normpath(os.path.join(cwd, rel)))
+    return resolved
+
+
+def host_pathname_sockets(proc_net_unix='/proc/net/unix', proc_root='/proc'):
+    """Return sorted unique pathname Unix sockets currently listed by the kernel.
+
+    `/proc/net/unix` lists every open Unix socket; pathname sockets carry a
+    path in field 8 (abstract sockets begin with `@` and are already isolated
+    by the network namespace). Absolute paths are collected directly; relative
+    paths are resolved through readable `/proc/<pid>/fd` + `/proc/<pid>/cwd`
+    entries as defense-in-depth alongside the allowlist sandbox root, which
+    omits host-writable trees (`$HOME`, `/var`, `/srv`, `/nix/var`, etc.) so
+    neither relative-path nor post-start host sockets in those trees can be
+    reached (#601).
+    """
+    found = set()
+    relative_by_inode = {}
+    try:
+        lines = Path(proc_net_unix).read_text(errors='replace').splitlines()
+    except OSError:
+        return []
+    for line in lines[1:]:
+        parts = line.split(None, 7)
+        if len(parts) != 8:
+            continue
+        path = parts[7]
+        if path.startswith('@'):
+            continue
+        if path.startswith('/'):
+            found.add(path)
+        elif path:
+            relative_by_inode.setdefault(parts[6], []).append(path)
+    if relative_by_inode:
+        found.update(resolve_relative_unix_sockets(relative_by_inode, proc_root=proc_root))
+    return sorted(found)
+
+
+def unescape_mountinfo_path(path):
+    """Decode octal escapes (such as `\\040` for space) from `/proc/self/mountinfo`."""
+    return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match.group(1), 8)), path)
+
+
+def writable_mounts_under(root, mountinfo='/proc/self/mountinfo'):
+    """Return sorted mountpoints at or under `root` whose mount options lack `ro`.
+
+    Reads field 5 (per-mount flags) rather than superblock flags, because a
+    read-only bind mount of a writable superblock carries `ro` in field 5 while
+    keeping `rw` in the superblock options.
+    """
+    prefix = str(root).rstrip('/')
+    writable = []
+    for line in Path(mountinfo).read_text().splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        mountpoint = unescape_mountinfo_path(parts[4])
+        if mountpoint == prefix or mountpoint.startswith(prefix + '/'):
+            if 'ro' not in parts[5].split(','):
+                writable.append(mountpoint)
+    return sorted(set(writable))
+
+
+def set_tree_readonly(root, libc=None, mountinfo='/proc/self/mountinfo'):
+    """Make `root` and every child mount under it read-only, independent of util-linux.
+
+    Calls Linux `mount_setattr(AT_FDCWD, root, AT_RECURSIVE, MOUNT_ATTR_RDONLY)`
+    directly so older `util-linux` builds (such as 2.39.3 on dev-02, where
+    `mount -o remount,bind,ro=recursive` leaves child mounts like
+    `/sys/fs/cgroup` writable) cannot weaken the sandbox (#601). Falls back to
+    remounting each mountpoint from `mountinfo` only on `ENOSYS`, and always
+    verifies that zero mounts under `root` remain writable.
+    """
+    libc = ctypes.CDLL(None, use_errno=True) if libc is None else libc
+    attr = struct.pack('=QQQQ', MOUNT_ATTR_RDONLY, 0, 0, 0)
+    result = libc.syscall(SYS_MOUNT_SETATTR, AT_FDCWD, os.fsencode(str(root)), AT_RECURSIVE,
+                          ctypes.c_char_p(attr), len(attr))
+    if result != 0:
+        err = ctypes.get_errno()
+        if err != errno.ENOSYS:
+            raise OSError(err, os.strerror(err), str(root))
+        for mountpoint in writable_mounts_under(root, mountinfo):
+            subprocess.run(['mount', '-o', 'remount,bind,ro', mountpoint], check=True)
+    remaining = writable_mounts_under(root, mountinfo)
+    if remaining:
+        raise RuntimeError(f'mounts remained writable under {root}: {", ".join(remaining)}')
+
+
+def is_covered_socket_path(path, covered_prefixes=REPLACED_MOUNT_PREFIXES):
+    """True when `path` lies inside a directory replaced by a fresh sandbox tmpfs."""
+    clean = path.rstrip('/')
+    for prefix in covered_prefixes:
+        base = prefix.rstrip('/')
+        if clean == base or clean.startswith(base + '/'):
+            return True
+    return False
+
+
+def sockets_to_mask(sockets, allowed=ALLOWED_HOST_SOCKETS, covered_prefixes=REPLACED_MOUNT_PREFIXES,
+                    resolver=os.path.realpath):
+    """Return sorted unique resolved socket paths that must be bind-masked.
+
+    A host pathname socket is skipped only when it is explicitly listed in
+    `allowed` or when either its raw path or its resolved path lies under a
+    directory already covered by a fresh sandbox tmpfs (for example `/var/run/*`
+    resolving to `/run/*`).
+    """
+    resolved_prefixes = tuple({p for prefix in covered_prefixes for p in (prefix, resolver(prefix))})
+    resolved_allowed = {p for entry in allowed for p in (entry, resolver(entry))}
+    masked = set()
+    for path in sockets:
+        real = resolver(path)
+        if path in resolved_allowed or real in resolved_allowed:
+            continue
+        if is_covered_socket_path(path, resolved_prefixes) or is_covered_socket_path(real, resolved_prefixes):
+            continue
+        masked.add(real)
+    return sorted(masked)
+
+
+def mask_host_pathname_sockets(new_root, mask_file, sockets=None, allowed=ALLOWED_HOST_SOCKETS, libc=None):
+    """Bind-mount an empty mode-000 regular file over every accessible disallowed host socket.
+
+    Runs inside the outer mount namespace before `set_tree_readonly()` and
+    `pivot_root`. Binding a regular file over the socket inode hides it from
+    `connect()` without disturbing sibling files in the same directory.
+    Sockets that vanished or live under directories unreadable by the build
+    user (`ENOENT`, `ENOTDIR`, `EACCES`, `ELOOP`) are skipped; any other mount
+    failure fails closed.
+    """
+    sockets = host_pathname_sockets() if sockets is None else sockets
+    targets = sockets_to_mask(sockets, allowed=allowed)
+    if not targets:
+        return
+    mask_path = Path(mask_file)
+    mask_path.write_bytes(b'')
+    mask_path.chmod(0)
+    libc = ctypes.CDLL(None, use_errno=True) if libc is None else libc
+    root_prefix = str(new_root).rstrip('/')
+    for path in targets:
+        target = root_prefix + path
+        try:
+            info = os.lstat(target)
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ELOOP):
+                continue
+            raise
+        if not stat.S_ISSOCK(info.st_mode):
+            continue
+        if libc.mount(os.fsencode(str(mask_path)), os.fsencode(target), None, MS_BIND, None) != 0:
+            err = ctypes.get_errno()
+            if err in (errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ELOOP):
+                continue
+            raise OSError(err, os.strerror(err), target)
+
+
+def prepare_sandbox_root(new_root, scratch, host_sockets):
+    """Mask remaining host pathname sockets and lock every mount under `new_root` read-only.
+
+    Invoked by `SANDBOX_SETUP` inside the outer mount namespace after
+    assembling the allowlist tmpfs root and mounting the read-only host trees
+    (`/usr`, `/etc`, `/sys`, `/nix/store`, checkout, and target), so the root
+    and every mounted child tree become read-only before `pivot_root` and the
+    inner user namespace. `host_sockets` is captured in the host network
+    namespace before `unshare --net` clears `/proc/net/unix`.
+    """
+    mask_host_pathname_sockets(new_root, Path(scratch) / 'masked-socket', sockets=host_sockets)
+    set_tree_readonly(new_root)
 
 
 # Each probe must FAIL inside the sandbox; the label says what it would prove.
@@ -542,6 +836,16 @@ ESCAPES = {
     'write /var/lib/infraternal': ': > /var/lib/infraternal',
     'remount /var/lib writable': 'mount -o remount,bind,rw /var/lib',
     'unmount /var/lib': 'umount -l /var/lib',
+    'write own cgroup under /sys/fs/cgroup':
+        'cg=$(cut -d: -f3 /proc/self/cgroup); '
+        'test -n "$cg" && d="/sys/fs/cgroup$cg/.privileged-escape" && mkdir "$d" && rmdir "$d"',
+    'have a writable inherited host mount':
+        '"$PYTHON" -c \'import sys; '
+        'allow = {"/proc", "/dev", "/dev/pts", "/dev/shm", "/tmp", "/run", "/var/tmp"}; '
+        'rw = [p[4] for line in open("/proc/self/mountinfo") '
+        'if (p := line.split()) and p[4] not in allow and not p[4].startswith("/dev/") '
+        'and "ro" not in p[5].split(",")]; '
+        'sys.exit(0 if rw else 1)\'',
     'superblock remount rw /': 'mount -o remount,rw /',
     'bind remount rw /': 'mount -o remount,bind,rw / && touch "$HOME_DIR/.privileged-escape-bindrw"',
     'unmount /run': 'umount /run',
@@ -550,6 +854,45 @@ ESCAPES = {
     # Through the system bus, uid 0 of a test once rewrote the host's resolved links (#584).
     'reach the host system bus': 'test -S /run/dbus/system_bus_socket || test -S /var/run/dbus/system_bus_socket',
     'reach the nix daemon socket': 'nix --extra-experimental-features nix-command store info --store daemon',
+    'reach the determinate nixd socket':
+        '"$PYTHON" -c \'import socket; s=socket.socket(socket.AF_UNIX); '
+        's.connect("/nix/var/determinate/determinate-nixd.socket"); s.close()\'',
+    'reach any disallowed host pathname socket':
+        '"$PYTHON" -c \'import json, os, socket, sys\n'
+        'paths = json.loads(os.environ.get("DISALLOWED_HOST_SOCKETS", "[]"))\n'
+        'for path in paths:\n'
+        '    for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET):\n'
+        '        try:\n'
+        '            s = socket.socket(socket.AF_UNIX, kind)\n'
+        '            s.settimeout(1.0)\n'
+        '            s.connect(path)\n'
+        '            s.close()\n'
+        '            sys.exit(0)\n'
+        '        except OSError:\n'
+        '            pass\n'
+        'sys.exit(1)\'',
+    'reach a host relative-path pathname socket':
+        '"$PYTHON" -c \'import os, socket; s=socket.socket(socket.AF_UNIX); '
+        's.connect(os.environ["REL_HOST_SOCKET"]); s.close()\'',
+    'reach a host pathname socket created after sandbox start':
+        '"$PYTHON" -c \'import os, socket; s=socket.socket(socket.AF_UNIX); '
+        's.connect(os.environ["POST_START_SOCKET"]); s.close()\'',
+    'attach host SysV shared memory':
+        '"$PYTHON" -c \'import ctypes, os, sys\n'
+        'libc=ctypes.CDLL(None)\n'
+        'libc.shmat.restype=ctypes.c_void_p\n'
+        'libc.shmdt.argtypes=[ctypes.c_void_p]\n'
+        'addr=libc.shmat(int(os.environ["HOST_SHM_ID"]), None, 0)\n'
+        'rc = 0 if addr != ctypes.c_void_p(-1).value else 1\n'
+        'if rc == 0: libc.shmdt(addr)\n'
+        'sys.exit(rc)\'',
+    'access host SysV message queue':
+        '"$PYTHON" -c \'import ctypes, os, sys; libc=ctypes.CDLL(None); '
+        'buf=ctypes.create_string_buffer(256); '
+        'sys.exit(0 if libc.msgctl(int(os.environ["HOST_MSG_ID"]), 2, buf) == 0 else 1)\'',
+    'access host SysV semaphore':
+        '"$PYTHON" -c \'import ctypes, os, sys; libc=ctypes.CDLL(None); '
+        'sys.exit(0 if libc.semctl(int(os.environ["HOST_SEM_ID"]), 0, 12) >= 0 else 1)\'',
     'write a host pty': 'printf . > /dev/pts/0',
     'reach the host network': 'timeout 3 bash -c "exec 3<>/dev/tcp/$OUTSIDE_ADDRESS/22"',
     'have a route off loopback': 'ip route show table main | grep -q . || ip -6 route show table main | grep -v "^fe80" | grep -q .',
@@ -576,10 +919,75 @@ def self_check(scratch, target, checkout, scope):
     for label, probe in ESCAPES.items():
         probes.append(f'if ( {probe} ) >/dev/null 2>&1; then echo "ESCAPED: {label}"; else echo "contained: {label}"; fi')
     probes.append(f'touch /tmp/{marker} && echo "contained: wrote only to the sandbox tmpfs"')
-    environment = {'HOME_DIR': str(Path.home()), 'CHECKOUT': str(checkout), 'TARGET_DIR': str(target),
-                   'OUTSIDE_ADDRESS': address[1] if address else '1.1.1.1', 'PATH': os.environ['PATH'],
-                   'HOST_USER_BUS': os.environ.get('DBUS_SESSION_BUS_ADDRESS', f'/run/user/{os.getuid()}/bus').removeprefix('unix:path=')}
-    result = run_sandboxed(['bash', '-c', '\n'.join(probes)], environment, '/', scratch, target, scope, capture=True)
+    planted_sock = None
+    planted_path = scratch / 'escape.sock'
+    rel_sock = None
+    rel_path = scratch / 'rel-escape.sock'
+    post_sock = None
+    post_path = scratch / 'post-escape.sock'
+    libc = ctypes.CDLL(None, use_errno=True)
+    shm_id = -1
+    msg_id = -1
+    sem_id = -1
+    try:
+        if scratch.is_dir():
+            planted_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            planted_sock.bind(str(planted_path))
+            planted_sock.listen(1)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(scratch)
+                rel_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                rel_sock.bind(rel_path.name)
+                rel_sock.listen(1)
+            finally:
+                os.chdir(old_cwd)
+        shm_id = libc.shmget(0, 4096, 0o1000 | 0o600)
+        msg_id = libc.msgget(0, 0o1000 | 0o600)
+        sem_id = libc.semget(0, 1, 0o1000 | 0o600)
+        disallowed = [path for path in host_pathname_sockets() if path not in ALLOWED_HOST_SOCKETS]
+        if planted_sock is not None and str(planted_path) not in disallowed:
+            disallowed.append(str(planted_path))
+        environment = {
+            'HOME_DIR': str(Path.home()),
+            'CHECKOUT': str(checkout),
+            'TARGET_DIR': str(target),
+            'OUTSIDE_ADDRESS': address[1] if address else '1.1.1.1',
+            'PATH': os.environ['PATH'],
+            'PYTHON': sys.executable,
+            'DISALLOWED_HOST_SOCKETS': json.dumps(disallowed),
+            'REL_HOST_SOCKET': str(rel_path),
+            'POST_START_SOCKET': str(post_path),
+            'HOST_SHM_ID': str(shm_id),
+            'HOST_MSG_ID': str(msg_id),
+            'HOST_SEM_ID': str(sem_id),
+            'HOST_USER_BUS': os.environ.get('DBUS_SESSION_BUS_ADDRESS',
+                                            f'/run/user/{os.getuid()}/bus').removeprefix('unix:path='),
+        }
+
+        def bind_post_start_socket():
+            """Create a host pathname socket after pre-start discovery has already run."""
+            nonlocal post_sock
+            if scratch.is_dir():
+                post_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                post_sock.bind(str(post_path))
+                post_sock.listen(1)
+
+        result = run_sandboxed(['bash', '-c', '\n'.join(probes)], environment, '/', scratch, target, scope,
+                               capture=True, checkout=checkout, on_start=bind_post_start_socket)
+    finally:
+        for sock in (planted_sock, rel_sock, post_sock):
+            if sock is not None:
+                sock.close()
+        for sock_path in (planted_path, rel_path, post_path):
+            if sock_path.exists():
+                sock_path.unlink(missing_ok=True)
+        if shm_id >= 0:
+            libc.shmctl(shm_id, 0, None)
+        if msg_id >= 0:
+            libc.msgctl(msg_id, 0, None)
+        if sem_id >= 0:
+            libc.semctl(sem_id, 0, 0)
     print(result.stdout, end='', flush=True)
     escaped = [line for line in result.stdout.splitlines() if line.startswith('ESCAPED')]
     expected = len(ESCAPES) + 1
@@ -613,7 +1021,8 @@ def plan(root, selected, binaries, base, scratch, target, scope):
                 continue
             environment = dict(base, CARGO_MANIFEST_DIR=str(root / directory))
             result = run_sandboxed(listing_command(path, ['--list', '--ignored']),
-                                   environment, root / directory, scratch, target, scope, capture=True)
+                                   environment, root / directory, scratch, target, scope, capture=True,
+                                   checkout=root)
             if result.returncode:
                 missing.append(f'{package} {target_key} (--list failed: {result.stderr.strip()[-200:]})')
                 continue
@@ -708,7 +1117,8 @@ def run(root, selected, target):
             print(f'=== [{index}/{len(runs)}] {label}', flush=True)
             environment = dict(base, CARGO_MANIFEST_DIR=str(root / directory))
             command = listing_command(path, [*test_args, '--test-threads=1', '--nocapture'])
-            result = run_sandboxed(command, environment, root / directory, scratch, target, scope)
+            result = run_sandboxed(command, environment, root / directory, scratch, target, scope,
+                                   checkout=root)
             verdict = 'TIMEOUT' if result.returncode == 124 else ('PASS' if result.returncode == 0 else 'FAIL')
             print(f'=== [{index}/{len(runs)}] {label}: {verdict}', flush=True)
             if result.returncode:
@@ -728,7 +1138,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--base', default=os.environ.get('VERIFY_QUICK_BASE', 'origin/dev'))
     parser.add_argument('--self-check', action='store_true', help='only prove the sandbox contains planted escapes')
+    parser.add_argument('--sandbox-prepare', nargs=3, metavar=('NEW_ROOT', 'SCRATCH', 'HOST_SOCKETS_JSON'),
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.sandbox_prepare:
+        prepare_sandbox_root(args.sandbox_prepare[0], args.sandbox_prepare[1],
+                             json.loads(args.sandbox_prepare[2]))
+        return
     root = Path(__file__).resolve().parents[1]
     target = Path(os.environ.get('CARGO_TARGET_DIR', str(root / 'target'))).resolve()
     if args.self_check:

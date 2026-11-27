@@ -19,11 +19,12 @@ use super::*;
 use crate::embedded::{AgentError, AttachmentHandle, TerminalAttachment, TerminalOutput};
 use infraternal_agent::remote_native::NativeChannel;
 use infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
+use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
-/// How long one attach may take on loopback before the test calls it stuck. The actor gives
-/// each terminal write one second, so a starved stream fails well inside this.
-const ATTACH_BOUND: Duration = Duration::from_secs(5);
+/// Hang guard for fixture events and replies. The maximum QUIC idle period of this
+/// fixture is 60 seconds, and the actor has a separate one-second write deadline.
+const HANG_BOUND: Duration = Duration::from_secs(60);
 
 /// How long a refusal may take. Well under the one second the host actor gives a terminal
 /// write, so it proves the actor never sat waiting for a stream the agent will not grant.
@@ -52,6 +53,8 @@ struct FullHost {
     /// Held open: the actor stops when no replacement link can ever arrive.
     _accepts: mpsc::Sender<RemoteLink>,
     _server: quinn::Endpoint,
+    /// The test owns this stream so it can observe retirement while leaving input unread.
+    deaf_stream: oneshot::Receiver<remote_quic::BoundStream>,
 }
 
 impl FullHost {
@@ -89,13 +92,18 @@ impl FullHost {
         }
         endpoint.set_default_client_config(client);
         let address = listener.local_addr().unwrap();
+        let (handoff, deaf_stream) = oneshot::channel();
         let agent = tokio::spawn(async move {
             let connection = endpoint
                 .connect(address, "localhost")
                 .unwrap()
                 .await
                 .unwrap();
-            stand_in_agent(connection, stand_in.deaf_writer).await;
+            stand_in_agent(
+                connection,
+                stand_in.deaf_writer.map(|writer| (writer, handoff)),
+            )
+            .await;
         });
         let connection = listener.accept().await.unwrap().await.unwrap();
         let link = RemoteLink::quic(connection.clone()).await.unwrap();
@@ -108,6 +116,7 @@ impl FullHost {
             next_writer: 2,
             _accepts: accepts,
             _server: listener,
+            deaf_stream,
         }
     }
 
@@ -115,7 +124,7 @@ impl FullHost {
     async fn attach_writer(&self, writer: u32) -> TerminalAttachment {
         let mut session = [0; 16];
         session[..4].copy_from_slice(&writer.to_be_bytes());
-        tokio::time::timeout(ATTACH_BOUND, self.actor.attach(session, 0, 0, writer))
+        tokio::time::timeout(HANG_BOUND, self.actor.attach(session, 0, 0, writer))
             .await
             .unwrap_or_else(|_| panic!("writer {writer}: attach did not answer"))
             .unwrap_or_else(|error| {
@@ -140,8 +149,11 @@ impl FullHost {
 
 /// The infraternal agent's side of the link: greet, answer liveness probes on the control
 /// stream, acknowledge each terminal's attach and input, and hold each terminal stream until
-/// the server closes or resets it. The stream of `deaf_writer` is held without being read.
-async fn stand_in_agent(connection: quinn::Connection, deaf_writer: Option<u32>) {
+/// the server closes or resets it. Hand the deliberately unread stream to the test.
+async fn stand_in_agent(
+    connection: quinn::Connection,
+    mut deaf: Option<(u32, oneshot::Sender<remote_quic::BoundStream>)>,
+) {
     let (send, receive) = connection.open_bi().await.unwrap();
     let control = NativeChannel::control(send, receive).unwrap();
     let hello = Frame::Hello {
@@ -164,13 +176,20 @@ async fn stand_in_agent(connection: quinn::Connection, deaf_writer: Option<u32>)
         }
     });
     while let Ok(bound) = remote_quic::accept_bound(&binding).await {
-        let deaf = Some(bound.writer_id) == deaf_writer;
+        if deaf
+            .as_ref()
+            .is_some_and(|(writer, _)| *writer == bound.writer_id)
+        {
+            let (_, handoff) = deaf.take().unwrap();
+            assert!(
+                handoff.send(bound).is_ok(),
+                "the unread stream lost its receiver"
+            );
+            continue;
+        }
         relays.spawn(async move {
             let writer = bound.writer_id;
             let channel = NativeChannel::terminal(bound).unwrap();
-            if deaf {
-                std::future::pending::<()>().await;
-            }
             let mut receive = Receive::default();
             while let Ok(decoded) = receive.next(&channel).await {
                 let in_seq_acked = match decoded.frame {
@@ -240,22 +259,27 @@ async fn replacing_every_terminal_of_a_full_link_succeeds() {
 /// The two halves of an attached terminal, as the browser socket holds them.
 type Terminal = (AttachmentHandle, mpsc::Receiver<TerminalOutput>);
 
-/// One keystroke on `terminal` that must come back acknowledged: the terminal still works.
+/// Type one keystroke and require the browser-facing Ack for exactly that byte.
 async fn type_and_expect_ack(terminal: &mut Terminal, in_seq: u64) {
     let (handle, output) = terminal;
-    send_input(handle, in_seq, b"x").await;
     let acknowledged = in_seq + 1;
-    tokio::time::timeout(ATTACH_BOUND, async {
+    tokio::time::timeout(HANG_BOUND, async {
+        send_input(handle, in_seq, b"x").await;
         loop {
             match output.recv().await {
                 Some(TerminalOutput::Ack { in_seq_acked }) if in_seq_acked == acknowledged => break,
+                Some(output @ (TerminalOutput::Closed { .. } | TerminalOutput::Reconnecting)) => {
+                    panic!(
+                        "terminal stopped before acknowledging input {acknowledged}: {output:?}"
+                    );
+                }
                 Some(_) => {}
                 None => panic!("the terminal's output ended"),
             }
         }
     })
     .await
-    .expect("input was never acknowledged");
+    .unwrap_or_else(|_| panic!("input was never acknowledged: expected cursor {acknowledged}"));
 }
 
 /// Queue `bytes` as the browser's input on this terminal.
@@ -266,21 +290,18 @@ async fn send_input(handle: &AttachmentHandle, in_seq: u64, bytes: &[u8]) {
     handle.send_frame(wire.into()).await.unwrap();
 }
 
-/// Attach `writer`, require the host actor to refuse it with `Unavailable`, and say how
-/// long the answer took.
-async fn expect_refused(pair: &FullHost, writer: u32) -> Duration {
+/// Require an exhausted-stream refusal before a transport write could time out.
+async fn expect_refused(pair: &FullHost, writer: u32) {
     let mut session = [0; 16];
     session[..4].copy_from_slice(&writer.to_be_bytes());
-    let asked = std::time::Instant::now();
-    let refused = tokio::time::timeout(ATTACH_BOUND, pair.actor.attach(session, 0, 0, writer))
+    let refused = tokio::time::timeout(REFUSAL_BOUND, pair.actor.attach(session, 0, 0, writer))
         .await
-        .unwrap_or_else(|_| panic!("writer {writer}: attach did not answer"));
+        .unwrap_or_else(|_| panic!("writer {writer}: stream refusal held the host actor"));
     assert!(
         matches!(refused, Err(AgentError::Unavailable)),
         "writer {writer}: expected a refusal, link closed: {:?}",
         pair.connection.close_reason()
     );
-    asked.elapsed()
 }
 
 /// An infraternal agent without the extra stream credit (#562) frees streams in batches of more
@@ -297,27 +318,21 @@ async fn an_attach_with_no_stream_to_open_is_refused_alone() {
     .await;
     let mut attached = pair.attach_new(MAX_TERMINAL_STREAMS).await;
     drop(attached.drain(..10).collect::<Vec<_>>());
-    let mut waits = vec![expect_refused(&pair, pair.next_writer).await];
-    // sleep: a link the first attach took down has finished closing by now.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    expect_refused(&pair, pair.next_writer).await;
     assert!(
         pair.connection.close_reason().is_none(),
         "one attach without a stream closed the link"
     );
     for index in 1..10 {
-        waits.push(expect_refused(&pair, pair.next_writer + 2 * index).await);
+        expect_refused(&pair, pair.next_writer + 2 * index).await;
     }
     // A resumed browser reattaching a routed terminal needs a new stream too.
     let (resumed, previous) = attached.remove(0);
-    waits.push(expect_refused(&pair, resumed).await);
+    expect_refused(&pair, resumed).await;
     drop(previous);
     assert!(
         pair.connection.close_reason().is_none(),
         "the link was closed"
-    );
-    assert!(
-        waits.iter().all(|wait| *wait < REFUSAL_BOUND),
-        "a refusal held the host actor: {waits:?}"
     );
     let mut attached: Vec<Terminal> = attached
         .into_iter()
@@ -329,7 +344,7 @@ async fn an_attach_with_no_stream_to_open_is_refused_alone() {
     // More freed streams than an eighth of the credit reach the server, and a retry succeeds.
     drop(attached.drain(..10).collect::<Vec<_>>());
     let writer = pair.next_writer + 100;
-    let retried = tokio::time::timeout(ATTACH_BOUND, async {
+    let retried = tokio::time::timeout(HANG_BOUND, async {
         loop {
             let mut session = [0; 16];
             session[..4].copy_from_slice(&writer.to_be_bytes());
@@ -365,38 +380,68 @@ async fn a_close_the_agent_does_not_read_retires_only_that_terminal() {
     let (writer, stuck) = attached.remove(0);
     assert_eq!(writer, DEAF);
     let (stuck, _unread) = stuck.split();
+    let mut deaf = tokio::time::timeout(HANG_BOUND, pair.deaf_stream)
+        .await
+        .expect("the unread terminal was never bound")
+        .expect("the stand-in dropped the unread terminal");
     // Fill the stuck stream's window exactly: the binding and the attach are in it already.
-    let size = |frame: &Frame<'_>| {
+    let encode = |frame: &Frame<'_>| {
         let mut wire = Vec::new();
         infraternal_protocol::encode_frame_into(frame, &mut wire).unwrap();
-        wire.len()
+        wire
     };
     let mut session = [0; 16];
     session[..4].copy_from_slice(&DEAF.to_be_bytes());
-    let used = size(&Frame::Call {
+    let binding = encode(&Frame::Call {
         call_id: 0,
         action_id: "transport.bind",
         input_json: br#"{"writer_id":2}"#,
-    }) + size(&Frame::AttachTerm {
+    })
+    .len();
+    let attach = Frame::AttachTerm {
         session_id: &session,
         last_out_seq: 0,
         last_in_seq: 0,
-    });
-    let room = usize::try_from(WINDOW).unwrap() - used;
+    };
+    let unread_window = usize::try_from(WINDOW).unwrap() - binding;
+    let mut expected = encode(&attach);
+    let room = unread_window - expected.len();
     let filler = (0..room)
         .rev()
         .map(|length| vec![b'x'; length])
-        .find(|bytes| size(&Frame::Input { in_seq: 0, bytes }) <= room)
+        .find(|bytes| encode(&Frame::Input { in_seq: 0, bytes }).len() == room)
         .unwrap();
-    send_input(&stuck, 0, &filler).await;
-    // sleep: the input reaches the actor through its own task; the detach below must follow it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // Dropping the handle detaches, as a closed window does.
-    drop(stuck);
+    expected.extend(encode(&Frame::Input {
+        in_seq: 0,
+        bytes: &filler,
+    }));
     let mut survivor = attached.remove(0).1.split();
-    // sleep: let the actor reach the blocked Close and pass its one-second write bound.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
     type_and_expect_ack(&mut survivor, 0).await;
+    tokio::time::timeout(HANG_BOUND, async {
+        send_input(&stuck, 0, &filler).await;
+        stuck.publish_queued_input().await.unwrap();
+    })
+    .await
+    .expect("the window filler never reached the actor's queue");
+    // The handle enqueues Detach behind the filler. Keep the QUIC receive half
+    // unread until the server drops its receive half and sends STOP_SENDING.
+    drop(stuck);
+    let stopped = tokio::time::timeout(HANG_BOUND, deaf.send.stopped())
+        .await
+        .expect("the blocked Close never retired the unread stream")
+        .expect("the host link failed before it retired the unread stream");
+    assert!(stopped.is_some(), "the server must stop the unread stream");
+    // Reading now cannot give the Close more credit. Require the complete
+    // window filler and EOF so an early detach cannot masquerade as a blocked one.
+    let received = tokio::time::timeout(HANG_BOUND, deaf.receive.read_to_end(unread_window))
+        .await
+        .expect("the retired stream never ended")
+        .expect("the unread stream must contain only the attach and the filler");
+    assert!(
+        received == expected,
+        "the retired stream must contain its full window filler"
+    );
+    type_and_expect_ack(&mut survivor, 1).await;
     assert!(
         pair.connection.close_reason().is_none(),
         "the link was closed"

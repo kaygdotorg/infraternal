@@ -160,7 +160,7 @@ impl MeshSettings {
 
 /// The address pair of one node. These become host routes (`/32` and `/128`)
 /// on its peers. Subnet routes and exit nodes are outside stage 1.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Addresses {
     /// The node's IPv4 address inside the deployment range.
     pub ipv4: Ipv4Addr,

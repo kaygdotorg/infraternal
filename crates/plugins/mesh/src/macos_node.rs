@@ -1492,6 +1492,8 @@ impl PendingWorker {
                     routes: info.routes,
                     route_mtus: initial_route_mtus,
                     networks: BTreeMap::new(),
+                    subnet_exceptions: BTreeSet::new(),
+                    admitted_networks: BTreeSet::new(),
                     network_status,
                     interface_mtu,
                     port: info.port,
@@ -1718,6 +1720,10 @@ struct RuntimeState {
     route_mtus: BTreeMap<IpAddr, u16>,
     /// The subnet routes on the utun now, each with the MTU root mode gave it ([`subnet`]).
     networks: BTreeMap<crate::policy::networks::Network, Option<u16>>,
+    /// The exact addresses excluded in the last successful subnet reconcile.
+    subnet_exceptions: BTreeSet<IpAddr>,
+    /// Previously installed approved networks, which can be split around a roaming endpoint.
+    admitted_networks: BTreeSet<crate::policy::networks::Network>,
     /// What happened to each reachable network, shared with the node for `mesh routes`.
     network_status: subnet::NetworkStatus,
     /// The utun MTU of the applied snapshot; a failed update restores it without re-probing.
@@ -1920,6 +1926,21 @@ impl RuntimeState {
         } else {
             None
         };
+        // Admit newly granted peers before inserting them into `GotaTun` so the device's timer
+        // task cannot send an initiation before our own receive guard accepts the peer's
+        // simultaneous initiation (#605). Existing peers stay admitted until the apply succeeds.
+        let previous_admitted = old_config
+            .as_ref()
+            .and_then(|old| peers_for_config(old).ok())
+            .map(|old_peers| installed_keys(&old_peers))
+            .unwrap_or_default();
+        let mut pre_admitted = false;
+        if !admitted.is_subset(&previous_admitted) {
+            let mut admission = self.admission.write().await;
+            admission.set_peers(previous_admitted.union(&admitted).copied());
+            drop(admission);
+            pre_admitted = true;
+        }
         // An authority replacement may have reached this path because the installed keys
         // disagreed with the snapshot. Rebuild from the complete list in that case.
         let peers_applied = if rollback_on_failure {
@@ -1929,6 +1950,10 @@ impl RuntimeState {
         };
         if let Err(error) = peers_applied {
             if rollback_on_failure {
+                if pre_admitted {
+                    let mut admission = self.admission.write().await;
+                    admission.set_peers(previous_admitted);
+                }
                 rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             }
             return Err(error);
@@ -1983,6 +2008,10 @@ impl RuntimeState {
                     .copied()
                     .unwrap_or(crate::mesh_mtu::FALLBACK_MESH_MTU);
                 let _ = route(&interface, *address, "add", Some(mtu));
+            }
+            if pre_admitted {
+                let mut admission = self.admission.write().await;
+                admission.set_peers(previous_admitted);
             }
             rollback_device(device, old_config.as_ref(), old_mtu, utun).await;
             return Err(error);

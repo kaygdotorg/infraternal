@@ -19,7 +19,9 @@ struct LoginHost {
 async fn login_host(reply: Option<bool>) -> LoginHost {
     login_host_action(reply, "terminal.login.revoke").await
 }
-/// Start an enrolled peer and retain its exact TLS identity for reconnect proof.
+/// Start an enrolled peer that serves one test action and keeps answering probes
+/// until the server disconnects it or the test stops it.
+/// Retain its exact TLS identity for reconnect proof.
 async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -> LoginHost {
     let (server, host_identity, root, _) = identities();
     let (store, pool, host, fingerprint) = admitted_store(&host_identity, &root).await;
@@ -54,7 +56,8 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
             .await
             .unwrap();
         let mut receive = Receive::default();
-        Transmit::default()
+        let mut transmit = Transmit::default();
+        transmit
             .send(
                 &connection.channel,
                 0,
@@ -67,32 +70,47 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
             .await
             .unwrap();
         receive.next(&connection.channel).await.unwrap();
-        if let Ok(request) = receive.next(&connection.channel).await
-            && let Frame::Call {
-                call_id,
-                action_id,
-                input_json,
-            } = request.frame
-        {
-            assert_eq!(action_id, expected_action);
-            seen.send(serde_json::from_slice(input_json).unwrap())
-                .unwrap();
-            if let Some(revoked) = reply {
-                let json = serde_json::json!({"revoked":revoked}).to_string();
-                let _ = Transmit::default()
-                    .send(
-                        &connection.channel,
-                        0,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: json.as_bytes(),
-                        },
-                    )
-                    .await;
+        let mut seen = Some(seen);
+        while let Ok(request) = receive.next(&connection.channel).await {
+            match request.frame {
+                Frame::Ping { nonce, sent_us } => {
+                    if transmit
+                        .send(&connection.channel, 0, &Frame::Pong { nonce, sent_us })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Frame::Call {
+                    call_id,
+                    action_id,
+                    input_json,
+                } => {
+                    let Some(seen) = seen.take() else {
+                        continue;
+                    };
+                    assert_eq!(action_id, expected_action);
+                    seen.send(serde_json::from_slice(input_json).unwrap())
+                        .unwrap();
+                    if let Some(revoked) = reply {
+                        let json = serde_json::json!({"revoked":revoked}).to_string();
+                        let _ = transmit
+                            .send(
+                                &connection.channel,
+                                0,
+                                &Frame::Result {
+                                    call_id,
+                                    ok: true,
+                                    json: json.as_bytes(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                _ => {}
             }
         }
-        let _ = receive.next(&connection.channel).await;
     });
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {

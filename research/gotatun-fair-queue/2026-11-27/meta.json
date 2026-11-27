@@ -1,0 +1,101 @@
+{
+ "info": {
+  "hub": {
+   "time": 1795756245.0177565,
+   "cpus": 6,
+   "load": [
+    0.0,
+    0.05859375,
+    0.23388671875
+   ],
+   "top": [
+    "     27  0.3 ksoftirqd/1",
+    "    785  0.3 netbird",
+    "     33  0.1 ksoftirqd/2",
+    "     17  0.1 ksoftirqd/0",
+    "     39  0.0 ksoftirqd/3"
+   ],
+   "kernel": "6.12.113+deb13-amd64",
+   "clock_offset_s": -0.0067
+  },
+  "tcp": {
+   "time": 1795756246.4590201,
+   "cpus": 4,
+   "load": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "top": [
+    " 492230 16.6 python3",
+    "     39  0.9 ksoftirqd/3",
+    "     17  0.4 ksoftirqd/0",
+    "    765  0.3 netbird",
+    "     27  0.1 ksoftirqd/1"
+   ],
+   "kernel": "6.12.117+deb13-amd64",
+   "clock_offset_s": 0.5403
+  },
+  "flood": {
+   "time": 1795756246.8112044,
+   "cpus": 4,
+   "load": [
+    0.13037109375,
+    0.03125,
+    0.00927734375
+   ],
+   "top": [
+    "  60005  4.6 python3",
+    "    755  0.2 netbird",
+    "  59920  0.1 kworker/0:3-wg-crypt-wt0",
+    "  59864  0.0 kworker/1:2-wg-crypt-wt0",
+    "  59780  0.0 systemd"
+   ],
+   "kernel": "6.12.117+deb13-amd64",
+   "clock_offset_s": -0.0042
+  }
+ },
+ "setup": {
+  "hub": {
+   "routes": "10.70.3.0/24 dev j1268v proto kernel scope link src 10.70.3.231"
+  },
+  "tcp": {
+   "routes": "10.70.3.0/24 dev j1268v proto kernel scope link src 10.70.3.232"
+  },
+  "flood": {
+   "routes": "10.70.3.0/24 dev j1268v proto kernel scope link src 10.70.3.233"
+  }
+ },
+ "guard": {
+  "hub": {
+   "outside-lan": [
+    0,
+    0
+   ],
+   "ipv6": [
+    0,
+    0
+   ]
+  },
+  "tcp": {
+   "outside-lan": [
+    0,
+    0
+   ],
+   "ipv6": [
+    0,
+    0
+   ]
+  },
+  "flood": {
+   "outside-lan": [
+    0,
+    0
+   ],
+   "ipv6": [
+    0,
+    0
+   ]
+  }
+ }
+}
