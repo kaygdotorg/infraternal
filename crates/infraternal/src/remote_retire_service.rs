@@ -84,7 +84,7 @@ mod tests {
         let log = fixture.join("calls");
         crate::test_executable::write(
             &manager,
-            &format!(
+            format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'show '*) echo 42;; esac\n",
                 log.display()
             ),
