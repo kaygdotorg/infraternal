@@ -816,6 +816,129 @@ async fn waiting_reports_beyond_the_shown_ones_are_counted() {
     assert_eq!(value["reports"][0]["recorded_at"], 120, "newest first");
 }
 
+/// Record the owner Mac's approval and active certificate without SSH install coordinates.
+async fn joined_mac(f: &Fixture, key: &[u8], now: i64) -> (Uuid, [u8; 32]) {
+    sqlx::query("UPDATE sessions SET fresh=?,expires=? WHERE token_hash=?")
+        .bind(now)
+        .bind(now + 3600)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let host = Uuid::new_v4();
+    let fingerprint = openssl::sha::sha256(host.as_bytes());
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,hostname,device_approved,device_os) VALUES(?,?,'rootless',501,1,'MBP.local',1,'macOS')")
+        .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?,?,zeroblob(32),?,?,?,501)")
+        .bind(fingerprint.as_slice()).bind(host.as_bytes().as_slice()).bind(key)
+        .bind(now-3600).bind(now+3600).execute(&f.auth.pool).await.unwrap();
+    (host, fingerprint)
+}
+
+/// A Mac uninstalled without notifying its server still offers a named, actionable Forget path.
+#[tokio::test]
+async fn removing_an_offline_up_install_names_the_mac_and_offers_forget() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let (host, _) = joined_mac(&f, &[7; 32], now).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, now).await.unwrap();
+    assert_eq!(start["action"]["host"], "mbp");
+    let result = service
+        .finish_host(&f.session, host, str_field(&start, "review"), now)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    assert_eq!(result["up_install"], true);
+    assert_eq!(result["manual"], Value::Null);
+    assert_eq!(
+        result["message"],
+        "Access revoked for mbp. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall on mbp."
+    );
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+    assert!(!live(&f, host).await);
+}
+
+/// A cold-locked signer for the retirement route, which needs only the host's proof.
+struct RetirementLockedCa;
+
+impl crate::ca::CaKeySource for RetirementLockedCa {
+    /// No new certificates may be issued in this fixture.
+    fn load(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+        Err(crate::ca::CaError)
+    }
+}
+
+/// A local uninstall signed by the approved Mac retires the row after its ordinary login receipt.
+#[tokio::test]
+async fn local_uninstall_retires_an_up_install_without_a_browser_remove() {
+    use infraternal_plugin_remote::local_retirement::{self, Request, transcript};
+    use openssl::{pkey::PKey, sign::Signer};
+    use tower::ServiceExt;
+
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let signing = PKey::generate_ed25519().unwrap();
+    let (host, fingerprint) = joined_mac(&f, &signing.raw_public_key().unwrap(), now).await;
+    let mut request = Request {
+        host_id: host,
+        fingerprint,
+        signed_at: now,
+        signature: Vec::new(),
+    };
+    request.signature = Signer::new_without_digest(&signing)
+        .unwrap()
+        .sign_oneshot_to_vec(&transcript(&request))
+        .unwrap();
+    assert!(removal(&f).start(&f.session, host, true, now).await.is_ok());
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+    let app = crate::remote_http::router_with_store(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        store.clone(),
+        std::sync::Arc::new(RetirementLockedCa),
+        crate::remote_http::EnrollmentEndpoint {
+            ca_der: Vec::new(),
+            endpoint: "127.0.0.1:4443".parse().unwrap(),
+            server_name: "localhost".into(),
+        },
+    );
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(local_retirement::PATH)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&request).unwrap(),
+        ))
+        .unwrap();
+    let mut inventory = store.2.subscribe();
+    let person = Uuid::parse_str(&f.user).unwrap();
+    let (retired, receipt) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(app.oneshot(request), async {
+            inventory.changed().await.unwrap();
+            assert!(store.removal_requested(host).await.unwrap());
+            assert!(!store.pending_uninstall(host).await.unwrap());
+            store
+                .confirm_removal_cleanup(host, person, None, None)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        retired.unwrap().status(),
+        axum::http::StatusCode::NO_CONTENT
+    );
+    receipt.unwrap();
+    assert!(!live(&f, host).await);
+    assert!(
+        removal(&f)
+            .start(&f.session, host, true, now)
+            .await
+            .is_err()
+    );
+}
+
 /// A removed host with its original removal record and a 14-minute-old admin approval.
 async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
     let host = owned_host(f).await;

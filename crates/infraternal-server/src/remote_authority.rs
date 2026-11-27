@@ -312,6 +312,12 @@ impl EnrollmentStore {
                 crate::access_report::store(&mut transaction, host, person, &report, now).await?;
             }
         }
+        if pending && answer.is_none() {
+            // A signed local uninstall owns the files. The server only had
+            // to complete the login receipt, and must never ask it to uninstall again.
+            sqlx::query("UPDATE remote_host_removals SET host_cleanup='retained',completed_at=MAX(requested_at,unixepoch()) WHERE host_id=? AND owner_id=? AND uninstall=0 AND host_cleanup='pending'")
+                .bind(host.as_bytes().as_slice()).bind(person.to_string()).execute(&mut *transaction).await?;
+        }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.
         sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,unixepoch()) WHERE id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.person_id=? AND q.confirmed=0)")
@@ -492,6 +498,12 @@ impl EnrollmentStore {
         .bind(host.as_bytes().as_slice())
         .execute(&mut *transaction)
         .await?;
+        // This host runs its own local uninstall. Mark removal so the login
+        // receipt takes the short removal path without an access report or a
+        // second uninstall request. Preserve an earlier browser removal.
+        sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) \
+            SELECT id,owner_id,?,0,'pending' FROM remote_hosts WHERE id=? ON CONFLICT(host_id) DO NOTHING")
+            .bind(now).bind(host.as_bytes().as_slice()).execute(&mut *transaction).await?;
         self.commit_revocation(transaction, host, now).await
     }
 
