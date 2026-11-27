@@ -1133,7 +1133,7 @@ impl RuntimeState {
     /// peer's key (transport data, or the response to our own initiation). The send endpoint is
     /// not used, because an accepted handshake initiation moves it before its sender proves
     /// anything, and a replayed initiation could then choose our route MTU (#489 J549 P1).
-    /// `None` means no proof yet, and routes keep the coordinator's configured endpoint.
+    /// When a peer has no proof from a live session, routes use the coordinator's endpoint.
     async fn live_peer_endpoint_snapshot(&self) -> BTreeMap<PublicKey, Option<SocketAddr>> {
         let (Some(device), Some(config)) = (self.device.as_ref(), self.config.as_ref()) else {
             return BTreeMap::new();
