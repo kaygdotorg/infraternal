@@ -301,6 +301,7 @@ fn legacy_7443_identity_migrates_atomically_to_its_https_origin() {
     assert_eq!(stored.host_id, migrated.host_id);
 }
 
+/// Keep the SSH-proved key stable until bootstrap can retire its private file.
 #[test]
 fn prepared_join_key_digest_is_stable_across_bootstrap_steps() {
     let directory = Directory::new();

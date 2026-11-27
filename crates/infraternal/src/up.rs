@@ -1883,6 +1883,7 @@ mod tests {
         assert!(failure.message().contains("local"));
     }
 
+    /// A missing sudo executable reports which local dependency is unavailable.
     #[test]
     fn missing_sudo_has_a_local_not_found_cause() {
         let temporary = TemporaryDirectory::new();
@@ -1897,6 +1898,7 @@ mod tests {
         assert!(failure.message().contains("sudo"));
     }
 
+    /// A sudo refusal stays a local permission error even if the child never reads stdin.
     #[test]
     fn sudo_denial_has_a_local_permission_cause() {
         let temporary = TemporaryDirectory::new();
