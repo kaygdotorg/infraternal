@@ -6,6 +6,104 @@ use infraternal_plugin_ssh::{
     openssh::classify,
 };
 
+/// Both dial paths keep DNS, refused and timed-out connections distinct and private.
+#[test]
+fn dial_failures_name_the_cause_and_a_next_step() {
+    for (line, expected) in [
+        (
+            "ssh: Could not resolve hostname private-sentinel: Name or service not known",
+            "look up the host name",
+        ),
+        (
+            "ssh: connect to host private-sentinel port 22: Connection refused",
+            "refused the SSH connection",
+        ),
+        (
+            "ssh: connect to host private-sentinel port 22: Connection timed out",
+            "timed out",
+        ),
+        (
+            "infraternal SSH connector: Could not resolve hostname",
+            "look up the host name",
+        ),
+        (
+            "infraternal SSH connector: Connection refused",
+            "refused the SSH connection",
+        ),
+        (
+            "infraternal SSH connector: Connection timed out",
+            "timed out",
+        ),
+    ] {
+        let failure = classify(line.as_bytes(), true, MeshEvidence::default());
+        assert_eq!(failure.kind, FailureKind::Unreachable);
+        assert!(failure.message.contains(expected), "{failure:?}");
+        assert!(
+            !serde_json::to_string(&failure)
+                .unwrap()
+                .contains("private-sentinel")
+        );
+    }
+}
+
+/// A changed key gets specific guidance while an unrecognized key still asks for review.
+#[test]
+fn host_key_mismatch_remains_a_trust_failure() {
+    let changed = classify(
+        b"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\r\nHost key verification failed.\r\n",
+        true,
+        MeshEvidence::default(),
+    );
+    let unknown = classify(
+        b"Host key verification failed.\n",
+        true,
+        MeshEvidence::default(),
+    );
+    assert_eq!(changed.kind, FailureKind::HostKey);
+    assert_eq!(unknown.kind, FailureKind::HostKey);
+    assert!(changed.message.contains("differs from the trusted key"));
+    assert!(unknown.message.contains("needs review"));
+}
+
+/// Only the protocol identification populates the recovery hint, and only fixed method names leave stderr.
+#[test]
+fn auth_failure_reports_offers_attempts_and_observed_ssh_software() {
+    let output = b"debug1: kex.c:kex_exchange_identification():1534 (pid=42): Remote protocol version 2.0, remote software version NetBird-SSH-Server-0.83.2 private-sentinel\r\n\
+debug1: sshconnect2.c:input_userauth_failure():601 (pid=42): Authentications that can continue: publickey,password,private-sentinel\r\n\
+debug2: sshconnect2.c:userauth():526 (pid=42): we sent a publickey packet, wait for reply\r\n\
+sshconnect2.c:userauth():517 (pid=42): user@private-sentinel: Permission denied (publickey,password).\r\n";
+    let modern = String::from_utf8_lossy(output).replace("(pid=42)", "(bin=ssh, pid=42)");
+    for output in [output.as_slice(), modern.as_bytes()] {
+        let failure = classify(output, true, MeshEvidence::default());
+        assert_eq!(failure.kind, FailureKind::Auth);
+        let wire = serde_json::to_value(&failure).unwrap();
+        assert_eq!(wire["ssh_server"], "netbird");
+        assert!(
+            failure
+                .log_tail
+                .contains(&"The SSH server offered sign-in with a password.")
+        );
+        assert!(
+            failure
+                .log_tail
+                .contains(&"Tried signing in with an SSH key.")
+        );
+        assert!(
+            !failure
+                .log_tail
+                .contains(&"Tried signing in with an SSH password.")
+        );
+        assert!(!wire.to_string().contains("private-sentinel"));
+    }
+
+    let wrong_source = b"debug1: kex.c:kex_exchange_identification():1509 (pid=42): banner line 0: NetBird-SSH-Server-0.83.2\r\nuser@host: Permission denied (publickey).\r\n";
+    for (bytes, ssh_failure) in [(wrong_source.as_slice(), true), (output.as_slice(), false)] {
+        let wire =
+            serde_json::to_value(classify(bytes, ssh_failure, MeshEvidence::default())).unwrap();
+        assert!(wire.get("ssh_server").is_none());
+    }
+}
+
 #[test]
 fn mesh_policy_requires_both_discovery_facts_and_a_transport_refusal() {
     let peer = MeshEvidence {

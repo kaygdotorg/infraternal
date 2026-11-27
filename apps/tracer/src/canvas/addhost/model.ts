@@ -41,6 +41,8 @@ function takeoverStopped(failure: FailureDetail): boolean {
 
 /** One plain sentence for a failure. An unknown or missing failure gets the generic one; the raw text stays in the details. */
 export function failureLine(failure: FailureDetail | undefined): string {
+  if (failure?.ssh_server === "netbird") return "This address uses NetBird SSH";
+  if (failure?.join_locally === "macos") return "Add this Mac from the machine itself";
   switch (failure?.kind) {
     case "unreachable": return "Couldn't reach this host";
     case "mesh-policy": return "This server can't connect to this host";
@@ -161,7 +163,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "retire-install" | "unlock" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "join-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "retire-install" | "unlock" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -187,6 +189,18 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
   // Without a button to open its terminal (an older server sends no host id; the page may not list the host) the
   // copy carries the route itself, so the page is never a dead end. Keys follow the platform (⌘ only on Apple keyboards).
   if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: canOpen ? "" : `Find its terminal with ${shortcutLabel({ mac: "⌘K", other: "Ctrl K" })}.`, fix: "none", tone: "info" };
+  if (failure?.ssh_server === "netbird") return {
+    title: `Couldn't add ${name} over SSH`,
+    happened: "This address answers with NetBird's SSH server, which only accepts NetBird sign-ins.",
+    next: "Use the machine's own SSH (on macOS: Remote Login) at its LAN address, or run infraternal up on the machine.",
+    fix: "join-command", tone: "danger",
+  };
+  if (failure?.join_locally === "macos") return {
+    title: `Add ${name} from the Mac`,
+    happened: "SSH sign-in worked. This Mac joins from its own terminal.",
+    next: "Run infraternal up on the Mac.",
+    fix: "join-command", tone: "info",
+  };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,

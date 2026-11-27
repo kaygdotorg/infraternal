@@ -45,12 +45,8 @@ fn removes_only_permissions(old: &Config, next: &Config) -> bool {
         })
 }
 
-/// The two owner-selected Linux frontends; kernel policy is retained independently of processes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Backend {
-    Nft,
-    NfTables,
-}
+/// The Linux frontend selected in a saved mesh snapshot.
+pub use infraternal_mesh_node::node_state::Backend;
 
 /// The live state of the optional kernel-only guard for a `GotaTun` node.
 #[derive(Clone, Debug, serde::Serialize)]

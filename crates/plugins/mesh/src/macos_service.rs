@@ -10,6 +10,7 @@ use std::{
 };
 
 use crate::macos_user_mode::{self as names, legacy};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 
 /// The system service's launchd label.
 pub const LABEL: &str = names::DAEMON_LABEL;
@@ -405,6 +406,7 @@ pub fn control(
     action: &str,
     system_service: bool,
     executable: &Path,
+    json_output: bool,
 ) -> io::Result<Option<Status>> {
     if system_service {
         MachineLock::acquire()?.set_service(action, executable)?;
@@ -414,14 +416,24 @@ pub fn control(
         "status" => status().map(Some),
         "up" | "down" => {
             let executable = trusted_executable(executable)?;
-            elevate(action, &executable)?;
+            elevate(action, &executable, json_output)?;
             status().map(Some)
         }
         _ => Err(io::ErrorKind::InvalidInput.into()),
     }
 }
 
-fn elevate(action: &str, executable: &Path) -> io::Result<()> {
+/// Select the elevation explanation for a privileged macOS mesh service action.
+fn elevation_prompt_for_action(action: &str) -> Option<ElevationPrompt> {
+    match action {
+        "up" => Some(ElevationPrompt::MacosMeshServiceUp),
+        "down" => Some(ElevationPrompt::MacosMeshServiceDown),
+        _ => None,
+    }
+}
+
+/// Run the fixed system-service action via `sudo`, prompting with an explanation only when needed.
+fn elevate(action: &str, executable: &Path, json_output: bool) -> io::Result<()> {
     let run_operation = || {
         Command::new(SUDO)
             .args(["-n", "--"])
@@ -439,6 +451,9 @@ fn elevate(action: &str, executable: &Path) -> io::Result<()> {
             .status()
     };
     run_privileged_operation(run_operation, is_authorized, || {
+        if let Some(prompt) = elevation_prompt_for_action(action) {
+            prompt.print_to_stderr(json_output);
+        }
         Command::new(SUDO).arg("-v").status()
     })
 }
@@ -958,5 +973,20 @@ mod tests {
         assert_eq!(operations, 2);
         assert_eq!(authorization_checks, 1);
         assert_eq!(prompts, 1);
+    }
+
+    /// Verify `up` and `down` map to their own elevation prompts while `status` has none.
+    #[test]
+    fn elevation_prompt_maps_up_and_down_actions() {
+        use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
+        assert_eq!(
+            super::elevation_prompt_for_action("up"),
+            Some(ElevationPrompt::MacosMeshServiceUp)
+        );
+        assert_eq!(
+            super::elevation_prompt_for_action("down"),
+            Some(ElevationPrompt::MacosMeshServiceDown)
+        );
+        assert_eq!(super::elevation_prompt_for_action("status"), None);
     }
 }

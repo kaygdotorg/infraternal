@@ -29,7 +29,7 @@
 # Options:
 #   --fork DIR        the fork checkout (default: $GOTATUN_FORK, else ../gotatun next to the repo).
 #   --from REF        the series to carry (default: the commit infraternal pins in
-#                     crates/plugins/mesh/Cargo.toml, because that is what ships; landed
+#                     the workspace Cargo.toml, because that is what ships; landed
 #                     patches sit on top of the last sync branch, so its tip may be older).
 #   --onto REF        the upstream commit to rebase onto (default: upstream/main).
 #   --date YYYYMMDD   the branch date (default: today, UTC).
@@ -54,7 +54,7 @@ set -euo pipefail
 
 UPSTREAM_URL="https://github.com/mullvad/gotatun"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MESH_TOML="$REPO_ROOT/crates/plugins/mesh/Cargo.toml"
+WORKSPACE_TOML="$REPO_ROOT/Cargo.toml"
 
 # Print to stderr and exit with the given code.
 die() {
@@ -74,9 +74,9 @@ usage() {
   sed -n '/^# Usage:/,/^# Exit codes:/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# The fork commit infraternal pins today, read from the mesh crate's `rev = "..."`.
+# The fork commit infraternal pins today, read from the workspace dependency's `rev = "..."`.
 pinned_rev() {
-  sed -n 's/^gotatun = .*rev = "\([0-9a-f]*\)".*/\1/p' "$MESH_TOML" | head -n1
+  sed -n 's/^gotatun = .*rev = "\([0-9a-f]*\)".*/\1/p' "$WORKSPACE_TOML" | head -n1
 }
 
 # Run git inside the fork checkout.
@@ -200,7 +200,7 @@ cmd_sync() {
 
   if [[ -z "$from" ]]; then
     from="$(pinned_rev)"
-    [[ -n "$from" ]] || die 2 "cannot read the GotaTun rev from $MESH_TOML; pass --from"
+    [[ -n "$from" ]] || die 2 "cannot read the GotaTun rev from $WORKSPACE_TOML; pass --from"
   fi
   local from_sha onto_sha base
   from_sha="$(fgit rev-parse --quiet --verify "$from^{commit}")" ||

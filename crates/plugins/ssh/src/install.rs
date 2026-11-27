@@ -649,6 +649,9 @@ start_setup_lease
                 return Err(crate::previous_attempt::classify(failure));
             }
             match receipt.as_slice() {
+                b"CHECK platform macos\n" if stdout.is_empty() => {
+                    return Err(Failure::macos_join().at(InstallStep::Connect));
+                }
                 b"CHECK ready dd\n" => break true,
                 b"CHECK ready head\n" => break false,
                 _ => {}
@@ -1546,8 +1549,14 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
         let status = receipt.strip_prefix(b"FAIL connect ")?;
         let mut upload = b"FAIL upload ".to_vec();
         upload.extend_from_slice(status);
-        return parse_refusal(&upload, InstallStep::Upload)
-            .map(|failure| failure.at(InstallStep::Connect));
+        return parse_refusal(&upload, InstallStep::Upload).map(|mut failure| {
+            if failure.exit_status == Some(1) {
+                failure.log_tail.push(
+                    "The read-only SSH system check stopped before it could confirm this host supports SSH installation.",
+                );
+            }
+            failure.at(InstallStep::Connect)
+        });
     }
     let (prefix, transfer) = match step {
         InstallStep::Upload => (b"STEP upload\n".as_slice(), true),

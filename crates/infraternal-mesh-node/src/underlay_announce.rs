@@ -30,29 +30,29 @@ use tokio::{sync::Notify, time::Instant};
 /// [`CoalescedWake::begin`] right before it reads the state the requests are about, so a request
 /// that arrives during that read queues exactly one more wakeup and is never lost.
 #[derive(Debug, Default)]
-pub(crate) struct CoalescedWake {
+pub struct CoalescedWake {
     /// Set from the first request until the waiter starts the work that will observe it.
     /// Tests of the signals built on it read it directly.
-    pub(crate) pending: AtomicBool,
+    pub pending: AtomicBool,
     notify: Notify,
 }
 
 impl CoalescedWake {
     /// Whether a wakeup is already queued and not yet begun. Only the Linux packet path asks; tests on every host check it.
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn is_pending(&self) -> bool {
+    pub fn is_pending(&self) -> bool {
         self.pending.load(Ordering::Relaxed)
     }
 
     /// Queue one wakeup unless one is already queued.
-    pub(crate) fn request(&self) {
+    pub fn request(&self) {
         if !self.pending.swap(true, Ordering::AcqRel) {
             self.notify.notify_one();
         }
     }
 
     /// Wait for the next coalesced wakeup. Cancel-safe: a dropped wait consumes nothing.
-    pub(crate) async fn notified(&self) {
+    pub async fn notified(&self) {
         self.notify.notified().await;
     }
 
@@ -60,7 +60,7 @@ impl CoalescedWake {
     ///
     /// A request after this point is not covered by the read that follows, so it must queue
     /// another wakeup; clearing the flag first guarantees that it does.
-    pub(crate) fn begin(&self) {
+    pub fn begin(&self) {
         self.pending.store(false, Ordering::Release);
     }
 }
@@ -74,7 +74,7 @@ impl CoalescedWake {
 /// starts schedules the next one, so the last request in any sequence is always followed by a
 /// run (the trailing edge is kept).
 #[derive(Default)]
-pub(crate) struct CoalescedSchedule {
+pub struct CoalescedSchedule {
     /// When the scheduled run is due; `None` while nothing is scheduled.
     due: Option<Instant>,
     /// When the previous run last recorded its dispatch or completion.
@@ -83,20 +83,21 @@ pub(crate) struct CoalescedSchedule {
 
 impl CoalescedSchedule {
     /// Whether a run is scheduled. Callers stop listening for requests while it is.
-    pub(crate) fn is_armed(&self) -> bool {
+    #[must_use]
+    pub fn is_armed(&self) -> bool {
         self.due.is_some()
     }
 
     /// Schedule a run for a request seen at `now`: after the debounce, and no sooner than the
     /// floor after the previous run.
-    pub(crate) fn arm(&mut self, now: Instant) {
+    pub fn arm(&mut self, now: Instant) {
         let debounce = now + COALESCE_DEBOUNCE;
         let minimum = self.last.map_or(now, |last| last + COALESCE_MIN_INTERVAL);
         self.due = Some(debounce.max(minimum));
     }
 
     /// Sleep until the scheduled run is due, or forever while none is scheduled.
-    pub(crate) async fn wait(&self) {
+    pub async fn wait(&self) {
         if let Some(at) = self.due {
             tokio::time::sleep_until(at).await;
         } else {
@@ -105,12 +106,12 @@ impl CoalescedSchedule {
     }
 
     /// The run starts: nothing is scheduled any more.
-    pub(crate) fn start(&mut self) {
+    pub fn start(&mut self) {
         self.due = None;
     }
 
     /// Record the caller's rate-limit reference time.
-    pub(crate) fn finish(&mut self, now: Instant) {
+    pub fn finish(&mut self, now: Instant) {
         self.last = Some(now);
     }
 }
@@ -129,19 +130,19 @@ impl CoalescedSchedule {
 /// kernel engine nobody waits on it, so a change costs one atomic swap. Each macOS worker
 /// owns its wake alongside its listener.
 #[derive(Debug, Default)]
-pub(crate) struct UnderlayAnnounce {
+pub struct UnderlayAnnounce {
     wake: CoalescedWake,
 }
 
 impl UnderlayAnnounce {
     /// Record that the underlay changed. Cheap and non-blocking; safe from any thread.
-    pub(crate) fn changed(&self) {
+    pub fn changed(&self) {
         self.wake.request();
     }
 
     /// Whether an announcement was requested since the last call; clears the request.
-    #[cfg(test)]
-    pub(crate) fn take_for_test(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_for_test(&self) -> bool {
         let pending = self.wake.pending.load(Ordering::Acquire);
         self.wake.begin();
         pending
@@ -157,14 +158,14 @@ impl UnderlayAnnounce {
 /// session, so the rate must not follow the churn. The last change is always announced: a
 /// change after an announcement starts schedules the next one, which is how the announcement
 /// after IPv6 duplicate address detection, or after a late connected route, still goes out.
-pub(crate) struct AnnouncementWaiter {
+pub struct AnnouncementWaiter {
     announce: Arc<UnderlayAnnounce>,
     schedule: CoalescedSchedule,
 }
 
 impl AnnouncementWaiter {
     /// Wait on `announce` for the worker that owns this waiter.
-    pub(crate) fn new(announce: Arc<UnderlayAnnounce>) -> Self {
+    pub fn new(announce: Arc<UnderlayAnnounce>) -> Self {
         Self {
             announce,
             schedule: CoalescedSchedule::default(),
@@ -177,7 +178,7 @@ impl AnnouncementWaiter {
     /// Cancel-safe, so it can sit in a `select!`: the schedule keeps its deadline across a
     /// dropped call, and a dropped wait for a change consumes nothing. The floor counts from
     /// when the announcement starts; the keepalive request itself takes microseconds per peer.
-    pub(crate) async fn next(&mut self) {
+    pub async fn next(&mut self) {
         if !self.schedule.is_armed() {
             self.announce.wake.notified().await;
             self.schedule.arm(Instant::now());
@@ -201,7 +202,7 @@ impl Drop for AnnouncementWaiter {
 /// Wait until the engine reports a changed confirmed endpoint
 /// (`Device::confirmed_endpoint_changes`, passed in as `changes`); forever while no engine
 /// runs. Cancel-safe: a change reported while nobody waits is seen by the next wait.
-pub(crate) async fn confirmed_changed(changes: Option<Arc<Notify>>) {
+pub async fn confirmed_changed(changes: Option<Arc<Notify>>) {
     match changes {
         Some(changes) => changes.notified().await,
         None => std::future::pending().await,
@@ -209,9 +210,9 @@ pub(crate) async fn confirmed_changed(changes: Option<Arc<Notify>>) {
 }
 
 /// Coalesce closely spaced requests (packet deliveries, kernel notifications) into one run.
-pub(crate) const COALESCE_DEBOUNCE: Duration = Duration::from_millis(25);
+pub const COALESCE_DEBOUNCE: Duration = Duration::from_millis(25);
 /// Bound each coalesced kind of work (route refreshes and endpoint scans) to four runs a second.
-pub(crate) const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
+pub const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What an underlay listener last saw of the host's network facts (addresses, routes, links),
 /// so a notification that only repeats a known fact is not counted as a change (#483 J633 P1).
@@ -225,7 +226,7 @@ pub(crate) const COALESCE_MIN_INTERVAL: Duration = Duration::from_millis(250);
 /// A fact the book has not seen counts, so a book that starts empty (or is rebuilt after lost
 /// notifications) costs at most one extra announcement per fact, never a missed one.
 #[derive(Debug)]
-pub(crate) struct ChangeBook<K, V> {
+pub struct ChangeBook<K, V> {
     known: std::collections::HashMap<K, V>,
 }
 
@@ -250,7 +251,7 @@ impl<K: Eq + std::hash::Hash, V: Eq> Eq for ChangeBook<K, V> {}
 impl<K: Eq + std::hash::Hash, V: PartialEq> ChangeBook<K, V> {
     /// Record that `key` exists with `value`. Returns whether that is a change: a new key or a
     /// different value. The same key with the same value (a refresh) is not.
-    pub(crate) fn present(&mut self, key: K, value: V) -> bool {
+    pub fn present(&mut self, key: K, value: V) -> bool {
         if self.known.get(&key) == Some(&value) {
             return false;
         }
@@ -260,14 +261,14 @@ impl<K: Eq + std::hash::Hash, V: PartialEq> ChangeBook<K, V> {
 
     /// Record that `key` is gone. A removal always counts, known or not: the book may have
     /// missed the fact's arrival (it started empty, or notifications were lost).
-    pub(crate) fn absent(&mut self, key: &K) -> bool {
+    pub fn absent(&mut self, key: &K) -> bool {
         self.known.remove(key);
         true
     }
 
     /// How many facts the book holds; the host's own address, route or link count.
     #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.known.len()
     }
 }

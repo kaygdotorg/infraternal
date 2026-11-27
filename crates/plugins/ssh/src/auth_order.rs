@@ -96,6 +96,7 @@ impl AutoAuth {
         }
     }
 
+    /// Try available sign-in methods in order and preserve the public facts if all fail.
     async fn automatic(
         &self,
         destination: Destination,
@@ -131,6 +132,7 @@ impl AutoAuth {
                 AuthMethod::Network,
             ]
         };
+        let mut refused = None::<Failure>;
         for method in methods {
             // The future is created inside the loop: successful earlier auth must
             // not request the next browser secret or read the locked server key.
@@ -186,11 +188,26 @@ impl AutoAuth {
                         },
                     ));
                 }
-                Err(error) if error.kind == FailureKind::Auth && error.exit_status.is_none() => {}
+                Err(mut error)
+                    if error.kind == FailureKind::Auth && error.exit_status.is_none() =>
+                {
+                    // A later refusal may offer a different set of methods. Keep
+                    // only the fixed facts reported by the attempted connections.
+                    if let Some(previous) = refused.take() {
+                        for line in previous.log_tail {
+                            if !error.log_tail.contains(&line) {
+                                error.log_tail.push(line);
+                            }
+                        }
+                    }
+                    refused = Some(error);
+                }
                 Err(error) => return Err(error),
             }
         }
-        let mut failure = Failure::new(FailureKind::Auth, "Choose an SSH authentication method.");
+        let mut failure = refused.unwrap_or_else(|| {
+            Failure::new(FailureKind::Auth, "Choose an SSH authentication method.")
+        });
         failure.choose_method = true;
         Err(failure)
     }

@@ -247,6 +247,16 @@ pub fn name(person: uuid::Uuid, uid: u32) -> String {
 /// Where a root infraternal agent publishes the account-readable login images (D247).
 const LOGIN_IMAGES: &str = "/var/cache/infraternal-login-bin";
 
+/// Exercise the same image publication that starts a per-account login worker.
+/// The update trial uses this without creating an account login or PTY session.
+/// # Errors
+/// Returns the file, trust, or executable-cache refusal from login publication.
+pub async fn check_login_image(exe: &Path) -> io::Result<()> {
+    crate::login_binary::accessible(exe, Path::new(LOGIN_IMAGES))
+        .await
+        .map(drop)
+}
+
 /// Open a host login or authenticate its existing worker before launching any terminal.
 /// # Errors
 /// Returns host manager, account, worker readiness or privilege failures.

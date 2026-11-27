@@ -2076,6 +2076,27 @@ impl Link {
         frame.encode_into(&mut self.transmit)?;
         self.session.peer.write_all(&self.transmit).await
     }
+    /// Starts replay with a queued size report in the same write, so the
+    /// shim can select the correct repaint before sending its first raw chunk.
+    async fn start_replay(
+        &mut self,
+        cursor: u64,
+        commands: &mut session_commands::Receiver,
+    ) -> io::Result<()> {
+        Shim::ReadFrom(cursor).encode_into(&mut self.transmit)?;
+        if cursor < self.session.head
+            && let Some((cols, rows, px_w, px_h)) = commands.take_initial_resize()
+        {
+            Shim::Resize {
+                cols,
+                rows,
+                px_w,
+                px_h,
+            }
+            .append_to(&mut self.transmit)?;
+        }
+        self.session.peer.write_all(&self.transmit).await
+    }
     // Inspect readiness without consuming bytes or waiting: a retired shim's
     // unread final frames are irreplaceable once its rendezvous is removed.
     async fn read_closed(&self) -> io::Result<bool> {
@@ -2456,7 +2477,7 @@ async fn terminal_run(
         session
             .as_mut()
             .ok_or_else(|| sessions::invalid("missing shim"))?
-            .send(&Shim::ReadFrom(cursor))
+            .start_replay(cursor, &mut commands)
             .await?;
     }
     #[cfg(feature = "plugin-host-facts")]

@@ -2214,6 +2214,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "infraternal-mesh-node"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "foldhash",
+ "gotatun",
+ "hickory-proto",
+ "infraternal-mesh",
+ "infraternal-plugin-api",
+ "nix 0.32.0",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "infraternal-plugin-backup"
 version = "0.1.0"
 dependencies = [
@@ -2272,12 +2290,12 @@ name = "infraternal-plugin-mesh"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "foldhash",
  "futures-util",
  "gotatun",
  "hickory-proto",
  "infraternal-linux-tun",
  "infraternal-mesh",
+ "infraternal-mesh-node",
  "infraternal-plugin-api",
  "infraternal-plugin-relay",
  "infraternal-protocol",
@@ -2286,6 +2304,7 @@ dependencies = [
  "nix 0.32.0",
  "openssl",
  "quinn",
+ "ring",
  "security-framework",
  "serde",
  "serde_json",
@@ -2507,7 +2526,11 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-shim",
  "nix 0.32.0",
+ "serde",
+ "serde_json",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
