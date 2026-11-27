@@ -107,10 +107,22 @@ retained the original control timing.
 
 ## Workspace test comparison
 
-The wrapper-free `--no-run` build passed in 906.072 s wall,
-2,632.056 s user CPU and 328.899 s system CPU. The target peaked
-at 14,404,661,248 allocated bytes, including both static profiles.
-One-minute load min/median/max was 12.93/23.65/44.30.
+Both `--no-run` builds passed. The wrapped store already contained the
+static build outputs. The first native test build in each target was cold.
+Target totals include the two static profiles retained from earlier phases.
+
+| Mode | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target bytes | Peak cache bytes | Peak combined bytes | Load 1m min/median/max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Control | 906.072 | 2,632.056 / 328.899 | — | 14,404,661,248 | — | 14,404,661,248 | 12.93 / 23.65 / 44.30 |
+| Kache | 897.378 | 2,763.679 / 367.321 | 42.28 / 57.93 | 14,404,747,264 | 12,554,342,400 | 26,959,089,664 | 14.57 / 20.56 / 27.11 |
+
+Kache recorded 0 local hits, 776 misses and 0 duplicate compiles. Wall
+time fell 1.0% and measured CPU including the daemon rose 9.1%. The
+registered store briefly reached 12,492,117,765 bytes against an 8 GiB
+configured budget. The home volume fell below the host's shared 25 GiB
+build-slot floor. Collecting only the private cache at a 5 GiB cap left
+4,814,858,154 registered bytes and about 29.9 GiB free. Any subsequent
+warm comparison starts from that reduced store, with the 5 GiB cap.
 
 The first runtime fixture used `unshare --map-current-user`. It preserved
 the invoking UID, but the unmapped host root UID appeared as 65534 on
@@ -119,7 +131,11 @@ therefore failed even in the control. Those results cannot qualify the
 wrapper. A preflight verified a temporary loopback-only network and mount
 namespace that retains the original UID mapping. Its launcher drops to
 the build account before executing any checkout code and mounts a
-private `/run` to isolate the host system bus.
+private `/run` to isolate the host system bus. The invalid runtimes
+were stopped by their own recorded process IDs. Their statuses serve
+as fixture diagnostics.
+
+[Test-build and fixture evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107336)
 
 ## Cache sharing boundary
 
