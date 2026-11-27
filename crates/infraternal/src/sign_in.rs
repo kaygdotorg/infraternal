@@ -1078,6 +1078,7 @@ fn exit_for_failure(failure: Failure) -> Exit {
     }
 }
 
+/// Give sign-in failures a recovery step and preserve the machine result.
 fn fail(json_output: bool, failure: Failure) -> ExitCode {
     let (state, message, next) = match failure {
         Failure::InvalidServer => (
@@ -1166,9 +1167,14 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
             "Check the server's device keys and revoke a matching key before retrying sign-in.",
         ),
     };
-    emit(
-        CommandResult::new("sign-in", state, message, json!({})).with_next_step(next),
-        json_output,
-        exit_for_failure(failure),
-    )
+    let mut result = CommandResult::new("sign-in", state, message, json!({})).with_next_step(next);
+    if failure == Failure::InvalidServer {
+        result = result
+            .with_text_message("Enter the server's HTTPS address.")
+            .with_text_next(vec![
+                "Use the address from your browser without anything after the hostname and optional port."
+                    .to_owned(),
+            ]);
+    }
+    emit(result, json_output, exit_for_failure(failure))
 }
