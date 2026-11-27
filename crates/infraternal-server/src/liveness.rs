@@ -97,6 +97,7 @@ impl Liveness {
     }
 
     /// True while the viewer is hidden: no probe is due and none is owed [#562].
+    #[cfg(test)]
     pub(crate) fn is_suspended(&self) -> bool {
         self.suspended
     }
