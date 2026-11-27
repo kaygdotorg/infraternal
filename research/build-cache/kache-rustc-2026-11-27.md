@@ -75,3 +75,22 @@ Kache recorded 0 local hits, 548 misses and 0 duplicate compiles.
 Wall time increased 27.5% in this serial comparison. Median one-minute
 host load also rose, from 21.66 to 27.46. Total measured CPU including
 the daemon rose 12.7%. These are single draws on a shared host.
+
+## Static aarch64 control
+
+The aarch64 build uses the same per-arm target directories as the x86_64
+build, so Cargo can keep host-side build tools and the already staged Zig.
+The architecture-specific output starts cold. Target totals include the
+x86_64 outputs retained from the previous phase.
+
+The wrapper-free aarch64 build passed in 1,640.010 s wall, 2,804.749 s
+user CPU and 204.039 s system CPU. The 30,250,912-byte artifact is a stripped
+static ELF with no ELF interpreter. Its SHA-256 is
+`1174cd826ba0a81900ad8b23a4dbdbe183ce590e4127fc1d12501608766ee767`.
+The target peaked at 3,842,617,344 allocated bytes in 55 samples. One-minute
+load was 13.08–50.74, with median 24.80.
+
+The harness initially rejected the aarch64 wording `statically linked`
+after Cargo had already exited successfully. I checked the saved artifact
+with `readelf -lW`, updated the check to accept both static ELF forms, and
+retained the original control timing.
