@@ -10,6 +10,11 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
+/// Capture the same visible commands in human terminal and pipe modes.
+#[cfg(target_os = "linux")]
+#[path = "fixtures/terminal_copy.rs"]
+mod terminal_copy;
+
 const STATES: [&str; 9] = [
     "ready",
     "running",

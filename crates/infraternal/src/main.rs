@@ -938,6 +938,9 @@ fn status_result(
     if rows.is_empty() {
         result.body = Some(String::new());
     }
+    for step in next {
+        result = result.with_next_step(step);
+    }
     if node.role == infraternal_status::Role::None {
         let steps = [
             (
@@ -960,9 +963,6 @@ fn status_result(
         result = result
             .with_text_message("Infraternal isn't set up on this machine.")
             .with_text_next(steps);
-    }
-    for step in next {
-        result = result.with_next_step(step);
     }
     let down = node.confirmed_down_count();
     (result, down)

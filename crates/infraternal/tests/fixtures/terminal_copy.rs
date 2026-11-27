@@ -1,12 +1,6 @@
 //! Pins common CLI refusals on a terminal and a pipe, including the JSON seam.
 
-#![cfg(all(
-    target_os = "linux",
-    feature = "remote",
-    feature = "plugin-mesh",
-    feature = "plugin-server"
-))]
-#![allow(clippy::expect_used)] // A fixture that cannot start must fail the test.
+use super::commands;
 
 use std::{
     fs::File,
@@ -59,18 +53,11 @@ fn terminal(mut cmd: Command) -> (i32, String) {
     )
 }
 
-/// Usage mistakes are safe to log and point to help for the command being used.
+/// Check each enabled command. A mistyped option cannot run its handler.
 #[test]
-fn common_commands_have_plain_and_terminal_refusal_goldens() {
-    for path in [
-        &["status"][..],
-        &["up"],
-        &["mesh", "peers"],
-        &["server", "init"],
-        &["agent", "join"],
-        &["sign-in"],
-    ] {
-        let mut args = path.to_vec();
+fn every_command_has_plain_and_terminal_refusal_text() {
+    for path in commands() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
         args.push("--bad-option=private-test-value");
         let full = format!("infraternal {}", path.join(" "));
         let follow_up = format!("See the available options with {full} --help.");
@@ -96,6 +83,21 @@ fn common_commands_have_plain_and_terminal_refusal_goldens() {
         );
         assert_eq!(json["next_step"], format!("{full} --help"));
         assert_eq!(json["error"]["argument"], "--bad-option");
+    }
+}
+
+/// Help for each command gives its usage on a terminal or in a pipe.
+#[test]
+fn every_command_can_show_help_in_a_terminal_and_a_pipe() {
+    for path in commands() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let pipe = command(&args).output().expect("read help from a pipe");
+        let (status, text) = terminal(command(&args));
+        assert!(pipe.status.success() && status == 0, "{path:?}");
+        assert!(pipe.stderr.is_empty(), "{path:?}");
+        assert!(text.contains("Usage:"), "{path:?}");
+        assert_eq!(text.as_bytes(), pipe.stdout, "{path:?}");
     }
 }
 

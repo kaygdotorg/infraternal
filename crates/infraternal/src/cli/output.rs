@@ -109,6 +109,9 @@ impl<T> CommandResult<T> {
         if self.next.is_empty() {
             self.next_step = Some(next_step.clone());
         }
+        if let Some(text_next) = &mut self.text_next {
+            text_next.push(next_step.clone());
+        }
         self.next.push(next_step);
         self
     }
@@ -736,6 +739,7 @@ mod tests {
         .with_next_step("infraternal mesh up")
     }
 
+    /// A pipe gets the answer, aligned data and the action in reading order.
     #[test]
     fn plain_text_answers_first_then_aligned_blocks_then_next() {
         let output = render_pretty(&status(), PLAIN).expect("render status");
@@ -753,6 +757,7 @@ mod tests {
         );
     }
 
+    /// A capable terminal gets visible state markers and a framed component table.
     #[test]
     fn terminal_output_has_a_mark_and_colour_and_wraps_to_the_width() {
         let mut result = status();
@@ -790,6 +795,7 @@ mod tests {
         assert!(!render_pretty(&result, PLAIN).expect("plain").contains('●'));
     }
 
+    /// A refusal includes its reason and a way to recover.
     #[test]
     fn a_failure_says_why_and_what_to_do() {
         let result = CommandResult::new(
