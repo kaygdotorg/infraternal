@@ -479,7 +479,9 @@ async fn expired_host_leaf_is_rejected_by_mtls_and_recovers_with_registered_key_
     verify_completed_recovery_retries(&fixture, &recovered).await;
 }
 
-async fn respond(channel: &impl Channel) -> u64 {
+/// Serve the fixture's terminal-open exchange and return the negotiated capabilities
+/// and decoder, which may already hold bytes of the next control frame.
+async fn respond(channel: &impl Channel) -> (u64, Receive) {
     let mut receive = Receive::default();
     let hello = Frame::Hello {
         version: 1,
@@ -518,9 +520,10 @@ async fn respond(channel: &impl Channel) -> u64 {
         )
         .await
         .unwrap();
-    caps
+    (caps, receive)
 }
 
+/// Keep the TLS host connected until the actor receives the enrolled UID's open reply.
 #[tokio::test]
 async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
     let (server, host, root, _) = identities();
@@ -532,7 +535,16 @@ async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
         let client = remote_tls::dial(address, "localhost", &client_config)
             .await
             .unwrap();
-        respond(&client.channel).await;
+        let (_, mut receive) = respond(&client.channel).await;
+        let mut transmit = Transmit::default();
+        while let Ok(decoded) = receive.next(&client.channel).await {
+            if let Frame::Ping { nonce, sent_us } = decoded.frame {
+                transmit
+                    .send(&client.channel, 0, &Frame::Pong { nonce, sent_us })
+                    .await
+                    .unwrap();
+            }
+        }
     });
     let connection = remote_tls::accept(listener.accept().await.unwrap().0, &server_config)
         .await
@@ -553,9 +565,15 @@ async fn tcp_actor_uses_enrolled_uid_and_replays_admission_hello() {
     .unwrap()
     .unwrap();
     assert_eq!(id, *Uuid::from_u128(7).as_bytes());
-    peer.await.unwrap();
+    // Dropping the peer before the actor reads the result can reset the link
+    // with the reply still in flight, particularly if a probe is unread.
+    peer.abort();
+    if let Err(error) = peer.await {
+        assert!(error.is_cancelled(), "TLS open fixture failed: {error}");
+    }
 }
 
+/// Check that a native writer keeps both durable offsets across the QUIC attach.
 #[tokio::test]
 async fn quic_actor_binds_durable_writer_and_recovery_offsets() {
     use infraternal_agent::remote_native::NativeChannel;
@@ -577,7 +595,7 @@ async fn quic_actor_binds_durable_writer_and_recovery_offsets() {
             .unwrap();
         let (send, receive) = connection.open_bi().await.unwrap();
         let control = NativeChannel::control(send, receive).unwrap();
-        let caps = respond(&control).await;
+        let (caps, _) = respond(&control).await;
         let binding = remote_quic::negotiate_binding(
             &connection,
             &Frame::Hello {
