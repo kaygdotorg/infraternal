@@ -175,6 +175,8 @@ fn offer_path(paths: &Paths) {
 
 /// Append one shell-safe PATH line. Refuse special files, links and other users' files.
 fn add_to_zsh_path(config: &Path, directory: &Path) -> io::Result<()> {
+    /// Bound the read before scanning for the existing entry.
+    const LIMIT: usize = 1024 * 1024;
     let directory = directory
         .to_str()
         .filter(|path| !path.contains(['\n', '\r', ':']))
@@ -195,8 +197,6 @@ fn add_to_zsh_path(config: &Path, directory: &Path) -> io::Result<()> {
         return Err(ErrorKind::PermissionDenied.into());
     }
     file.lock()?;
-    /// Bound the read before scanning for the existing entry.
-    const LIMIT: usize = 1024 * 1024;
     let mut previous = String::new();
     (&file)
         .take(LIMIT as u64 + 1)

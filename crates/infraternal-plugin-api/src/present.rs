@@ -248,10 +248,11 @@ pub fn panel(body: &str, indent: usize, width: usize, unicode: bool) -> String {
     let content = body.lines().map(UnicodeWidthStr::width).max().unwrap_or(0);
     if !unicode || content == 0 || content + indent + 4 > width {
         let margin = " ".repeat(indent);
-        return body
-            .lines()
-            .map(|line| format!("{margin}{line}\n"))
-            .collect();
+        let mut plain = String::new();
+        for line in body.lines() {
+            let _ = writeln!(plain, "{margin}{line}");
+        }
+        return plain;
     }
     let margin = " ".repeat(indent);
     let rule = "─".repeat(content + 2);
