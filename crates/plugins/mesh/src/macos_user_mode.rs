@@ -100,8 +100,8 @@ pub fn receipt_names_host(contents: &str, host: &str) -> bool {
 ///
 /// # Errors
 /// Reports an unreadable resolver directory or entry.
-#[cfg(all(feature = "mesh-dns", target_os = "macos"))]
-pub fn managed_resolvers() -> io::Result<Vec<std::path::PathBuf>> {
+#[cfg(all(feature = "agent", feature = "mesh-dns", target_os = "macos"))]
+pub fn managed_resolvers() -> std::io::Result<Vec<PathBuf>> {
     crate::dns_integration::managed_macos_paths()
 }
 
