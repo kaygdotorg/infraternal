@@ -2677,11 +2677,13 @@ mod server_data_resolution_tests {
     use infraternal_status::Roots;
     use std::{fs, path::PathBuf};
 
+    /// Probe only the service directories supplied by the test.
     fn roots(system_units: Vec<PathBuf>) -> Roots {
         Roots {
             system_units,
             user_units: None,
             run_dir: None,
+            system_run_dir: None,
             data_dirs: Vec::new(),
             net_class: PathBuf::new(),
         }

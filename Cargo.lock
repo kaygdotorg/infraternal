@@ -2507,7 +2507,11 @@ dependencies = [
  "infraternal-mesh",
  "infraternal-shim",
  "nix 0.32.0",
+ "serde",
+ "serde_json",
+ "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

@@ -4,12 +4,13 @@
 //! description text or from a service manager that may not be reachable. The
 //! probe therefore works in three steps:
 //!
-//! 1. Find infraternal unit files in the system and user unit directories and
+//! 1. Find infraternal service definitions in the system and user directories and
 //!    classify each by its effective `ExecStart` (drop-ins included, an empty
 //!    `ExecStart=` resets earlier ones). The classification uses the
 //!    subcommand (`server` or `agent`), so any unit name and any description
 //!    works. `--state` comes from the same line, so a node with a
 //!    non-default runtime directory is read where it really keeps its state.
+//!    On macOS, the installer records the equivalent arguments in a launchd plist.
 //! 2. Ask the owning manager for the runtime properties of only those units (at most
 //!    two observations per unit, four concurrent `systemctl show` calls). A manager that does not answer makes that
 //!    unit "Unknown"; it never makes the whole node unknown, because the
@@ -72,6 +73,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
+
+/// Read only the public server origin from the private enrollment.
+mod enrollment;
+/// Observe launchd services and their local mesh tunnel.
+#[cfg(any(target_os = "macos", test))]
+mod macos;
 
 /// Mesh interface created by the mesh component.
 const MESH_INTERFACE: &str = "infraternal0";
@@ -157,6 +164,8 @@ pub struct Unit {
     pub data: Option<PathBuf>,
     /// `--state` argument, when given.
     pub state: Option<PathBuf>,
+    /// Whether the installer registered the infraternal agent with launchd.
+    launchd: bool,
     /// A canonical installer unit masked on disk is unavailable by configuration.
     masked: bool,
     /// Plain local query failure, without manager output or sensitive arguments.
@@ -170,8 +179,10 @@ pub struct Roots {
     pub system_units: Vec<PathBuf>,
     /// The user's unit directory, when a home is known.
     pub user_units: Option<PathBuf>,
-    /// Runtime state of the default node (`/run/infraternal` or the user's runtime dir).
+    /// Default runtime state of the invoking user's service.
     pub run_dir: Option<PathBuf>,
+    /// Default runtime state of the system service, even when called by another user.
+    pub system_run_dir: Option<PathBuf>,
     /// Default data directories checked when no unit names one.
     pub data_dirs: Vec<PathBuf>,
     /// Kernel interface list.
@@ -183,35 +194,53 @@ impl Roots {
     #[must_use]
     #[inline(never)]
     pub fn detect() -> Self {
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let rooted = nix::unistd::Uid::effective().is_root();
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute());
+        let mut launchd = cfg!(target_os = "macos");
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
             .or_else(|| home.as_ref().map(|home| home.join(".config")));
-        let run_dir = if rooted {
-            Some(PathBuf::from("/run/infraternal"))
-        } else {
-            std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("infraternal"))
-        };
+        let run_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join("infraternal"));
         // Debug builds expose a fixture root to CLI integration tests; release
         // builds always read the installer-owned system unit directory.
-        let system_units = {
-            #[cfg(debug_assertions)]
-            if let Some(directory) = std::env::var_os("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR") {
-                vec![PathBuf::from(directory)]
-            } else {
-                vec![PathBuf::from("/etc/systemd/system")]
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                vec![PathBuf::from("/etc/systemd/system")]
-            }
+        #[cfg(debug_assertions)]
+        let fixture_units = std::env::var_os("INFRATERNAL_TEST_SYSTEMD_SYSTEM_UNIT_DIR");
+        #[cfg(not(debug_assertions))]
+        let fixture_units: Option<std::ffi::OsString> = None;
+        if fixture_units.is_some() {
+            launchd = false;
+        }
+        let system_units = vec![fixture_units.map_or_else(
+            || {
+                PathBuf::from(if launchd {
+                    "/Library/LaunchDaemons"
+                } else {
+                    "/etc/systemd/system"
+                })
+            },
+            PathBuf::from,
+        )];
+        let user_units = if launchd {
+            // Match `up`, which writes to the account's registered home even
+            // when the invoking shell supplies a different HOME.
+            nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+                .ok()
+                .flatten()
+                .map(|account| account.dir.join("Library/LaunchAgents"))
+        } else {
+            config.map(|config| config.join("systemd/user"))
         };
         Self {
             // Installers write units to /etc; packaged units elsewhere are not ours.
             system_units,
-            user_units: config.map(|config| config.join("systemd/user")),
+            user_units,
             run_dir,
+            system_run_dir: cfg!(target_os = "linux").then(|| PathBuf::from("/run/infraternal")),
             // A server's database lives here when no unit names it. Debug builds
             // take the same fixture hook as `infraternal`'s install paths, so tests
             // never read the machine's real data folder.
@@ -507,7 +536,15 @@ fn assemble(roots: &Roots, ids: &[String], mut units: Vec<(Unit, Activity)>) -> 
 /// stays Unknown with a reason; neither spawn nor join is a panic path.
 #[must_use]
 pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
-    let mut units: Vec<_> = discover(roots)
+    let local_units = discover(roots);
+    #[cfg(target_os = "macos")]
+    let local_units = {
+        let mut local_units = local_units;
+        local_units.extend(macos::local_units(roots));
+        local_units.sort_by_key(|unit| unit.scope == Scope::User);
+        local_units
+    };
+    let mut units: Vec<_> = local_units
         .into_iter()
         .map(|mut unit| {
             unit.query_error = Some("service query worker unavailable");
@@ -533,7 +570,7 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
                                 unit.query_error = Some("service query capacity exhausted");
                                 continue;
                             }
-                            match manager_activity_result(unit.scope, &unit.name) {
+                            match local_activity(unit) {
                                 Ok(activity) => {
                                     *state = activity;
                                     unit.query_error = None;
@@ -554,6 +591,15 @@ pub fn probe_local(roots: &Roots, ids: &[String]) -> NodeStatus {
         }
     });
     assemble(roots, ids, units)
+}
+
+/// Query the manager that owns this service, without consulting the CLI binary's location.
+fn local_activity(unit: &Unit) -> Result<Activity, &'static str> {
+    #[cfg(target_os = "macos")]
+    if unit.launchd {
+        return macos::activity(unit);
+    }
+    manager_activity_result(unit.scope, &unit.name)
 }
 
 /// Units in discovery order: system directories first, then the user's. A
@@ -727,6 +773,7 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
             kind,
             data: None,
             state: None,
+            launchd: false,
             masked: true,
             query_error: None,
         });
@@ -749,6 +796,7 @@ fn read_unit(scope: Scope, dir: &Path, name: &str, require_infraternal: bool) ->
         kind,
         data: option(&words, "--data"),
         state: option(&words, "--state"),
+        launchd: false,
         masked: false,
         query_error: None,
     })
@@ -852,23 +900,48 @@ fn row(name: &str, state: &str, detail: impl Into<String>) -> Component {
     }
 }
 
+/// Build one component row from the observed service and installed state.
 fn component(id: &str, role: Role, units: &[(Unit, Activity)], roots: &Roots) -> Component {
+    use std::fmt::Write as _;
+
     let of = |kind| units.iter().find(|(unit, _)| unit.kind == kind);
     let unit_detail = |unit: &Unit, activity: Activity| {
-        let scope = unit.scope.label();
-        if unit.masked {
-            format!("{scope} service; service is masked")
-        } else if let Activity::Restarting { code, status } = activity {
-            match code {
-                1 => format!("{scope} service; last exit status {status}"),
-                2 | 3 => format!("{scope} service; last signal {status}"),
-                _ => format!("{scope} service; last exit unavailable"),
-            }
-        } else if let Some(reason) = unit.query_error {
-            format!("{scope} service; {reason}")
+        let mut detail = if unit.launchd {
+            let mode = match unit.scope {
+                Scope::User => "user mode",
+                Scope::System => "root mode",
+            };
+            format!("{mode} ({})", unit.name)
         } else {
-            format!("{scope} service")
+            format!("{} service", unit.scope.label())
+        };
+        if unit.kind == Kind::Agent
+            && let Some(data) = unit.data.as_deref()
+        {
+            match enrollment::server(data, unit.scope) {
+                Ok(Some(server)) => {
+                    detail.push_str(", joined to ");
+                    detail.push_str(&server);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    detail.push_str(", enrollment details unavailable to this account");
+                }
+                _ => {}
+            }
         }
+        if unit.masked {
+            detail.push_str("; service is masked");
+        } else if let Activity::Restarting { code, status } = activity {
+            let _ = match code {
+                1 => write!(detail, "; last exit status {status}"),
+                2 | 3 => write!(detail, "; last signal {status}"),
+                _ => detail.write_str("; last exit unavailable"),
+            };
+        } else if let Some(reason) = unit.query_error {
+            detail.push_str("; ");
+            detail.push_str(reason);
+        }
+        detail
     };
     match id {
         "server" => match of(Kind::Server) {
@@ -961,6 +1034,15 @@ fn waiting_for_server_configuration(bytes: &[u8]) -> bool {
     bytes.starts_with(br#"{"enabled":true,"config":null"#)
 }
 
+/// Explain how to recover when the enabled mesh has no accepted server configuration.
+fn mesh_waiting() -> Component {
+    row(
+        "mesh",
+        "Waiting",
+        "No server configuration accepted; check server and infraternal agent compatibility",
+    )
+}
+
 /// Count saved peers in either the snapshot or the selected journal's last complete record.
 #[cfg(feature = "mesh")]
 fn saved_peer_count(dir: &Path, anchor: &[u8]) -> Option<usize> {
@@ -993,10 +1075,27 @@ fn saved_peer_count(dir: &Path, anchor: &[u8]) -> Option<usize> {
 
 /// Mesh state: the kernel interface says whether it is up, the snapshot says how many peers.
 fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
+    #[cfg(any(target_os = "macos", test))]
+    if let Some((unit, activity)) = units
+        .iter()
+        .filter(|(unit, _)| unit.launchd)
+        .find(|(_, activity)| *activity == Activity::Active)
+        .or_else(|| units.iter().find(|(unit, _)| unit.launchd))
+    {
+        return macos::mesh(unit, *activity, &roots.net_class);
+    }
     let link = roots.net_class.join(MESH_INTERFACE).exists();
     let mut dirs: Vec<PathBuf> = units
         .iter()
-        .filter_map(|(unit, _)| unit.state.clone())
+        .filter_map(|(unit, _)| {
+            unit.state
+                .clone()
+                .or_else(|| match (unit.kind, unit.scope) {
+                    (Kind::Agent, Scope::System) => roots.system_run_dir.clone(),
+                    (Kind::Agent, Scope::User) => roots.run_dir.clone(),
+                    (Kind::Server, _) => None,
+                })
+        })
         .collect();
     dirs.extend(units.iter().filter_map(|(unit, _)| {
         (unit.kind == Kind::Server)
@@ -1028,11 +1127,7 @@ fn mesh(units: &[(Unit, Activity)], roots: &Roots) -> Component {
         }
     }
     if waiting {
-        row(
-            "mesh",
-            "Waiting",
-            "No server configuration accepted; check server and infraternal agent compatibility",
-        )
+        mesh_waiting()
     } else {
         match (link, peers) {
             (true, Some(count)) => row("mesh", "Running", format!("peers: {count}")),
@@ -1169,6 +1264,7 @@ fn known_activity(activity: Activity) -> Result<Activity, &'static str> {
     }
 }
 
+/// Read the runtime properties of one systemd service within its query budget.
 fn manager_properties(
     scope: Scope,
     unit: &str,
@@ -1188,22 +1284,41 @@ fn manager_properties(
     if scope == Scope::User {
         command.arg("--user");
     }
-    let mut child = command.args([
+    command.args([
         "show",
         "--property=ActiveState,SubState,NRestarts,MainPID,ExecMainStartTimestampMonotonic,ExecMainCode,ExecMainStatus",
         "--no-pager", unit,
-    ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0")
-        .stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped()).spawn().map_err(|_| "could not start the service manager query")?;
+    ]).env("LC_ALL", "C").env("SYSTEMD_COLORS", "0").stderr(Stdio::null());
+    let output = command_output(&mut command, deadline)?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err("service manager query was refused")
+    }
+}
+
+/// Read a fixed macOS system tool under the same stop-and-reap budget as systemd.
+#[cfg(target_os = "macos")]
+fn manager_output(command: &mut Command) -> Result<std::process::Output, &'static str> {
+    command.stderr(Stdio::piped());
+    command_output(command, std::time::Instant::now() + manager_query_budget())
+}
+
+/// Wait for a local manager query until its deadline, reaping it on timeout.
+fn command_output(
+    command: &mut Command,
+    deadline: std::time::Instant,
+) -> Result<std::process::Output, &'static str> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|_| "could not start the service manager query")?;
     let status = wait_manager_child(&mut child, deadline);
-    if let Ok(status) = status {
-        let output = child
+    if status.is_ok() {
+        child
             .wait_with_output()
-            .map_err(|_| "could not read the service manager response")?;
-        if status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        } else {
-            Err("service manager query was refused")
-        }
+            .map_err(|_| "could not read the service manager response")
     } else {
         // Reap only the process this probe started. An unresponsive
         // manager is unknown, never grounds to claim a running service.
@@ -1321,10 +1436,7 @@ impl NodeStatus {
             return (
                 Activity::Inactive,
                 "This machine is not set up yet.".to_owned(),
-                vec![
-                    "infraternal agent join <server-url>".to_owned(),
-                    "infraternal server init".to_owned(),
-                ],
+                vec!["infraternal up <server>".to_owned()],
             );
         }
         let overall = self.overall();
@@ -1385,6 +1497,10 @@ impl NodeStatus {
             .iter()
             .take(3)
             .map(|unit| {
+                #[cfg(any(target_os = "macos", test))]
+                if unit.launchd {
+                    return format!("launchctl print {}", macos::target(unit));
+                }
                 let restarting = self.units.iter().any(|(u, a)| {
                     u.scope == unit.scope
                         && u.name == unit.name

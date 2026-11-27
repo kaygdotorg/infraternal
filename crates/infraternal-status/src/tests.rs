@@ -122,11 +122,13 @@ impl Fixture {
         Self { root }
     }
 
+    /// Point every status lookup at this fixture.
     fn roots(&self) -> Roots {
         Roots {
             system_units: vec![self.root.join("etc")],
             user_units: Some(self.root.join("user")),
             run_dir: Some(self.root.join("run")),
+            system_run_dir: None,
             data_dirs: vec![self.root.join("var-lib"), self.root.join("home-data")],
             net_class: self.root.join("net"),
         }
@@ -484,13 +486,14 @@ fn snapshot_scan_counts_peers_through_nesting_strings_and_spacing() {
     assert_eq!(peer_count(br#"{"config":{"peers":{"3":{"#), None);
 }
 
+/// An unconfigured machine gives the current join command.
 #[test]
 fn the_headline_says_how_to_join_when_nothing_is_installed() {
     let fixture = Fixture::new();
     let (activity, message, next) = fixture.status(&[]).headline();
     assert_eq!(activity, Activity::Inactive);
     assert_eq!(message, "This machine is not set up yet.");
-    assert_eq!(next[0], "infraternal agent join <server-url>");
+    assert_eq!(next, ["infraternal up <server>"]);
 }
 
 #[test]
@@ -1025,4 +1028,166 @@ fn recorded_server_unit_ignores_agents_foreign_programs_and_relative_paths() {
             ..RecordedServer::default()
         })
     );
+}
+
+/// Write the private enrollment fields used by status without needing a server or a real key.
+fn write_enrollment(fixture: &Fixture, directory: &str, identity: &str) {
+    let file = format!("{directory}/identity.json");
+    fixture.write(&file, identity);
+    for (path, mode) in [(directory, 0o700), (&file, 0o600)] {
+        fs::set_permissions(fixture.root.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+/// Linux discovers the system unit from `up` and the per-user unit from remote installation.
+#[test]
+fn linux_installs_report_scope_enrollment_and_mesh() {
+    for (scope, unit_dir, state_dir) in [
+        (Scope::System, "etc", "system-run"),
+        (Scope::User, "user", "user-run"),
+    ] {
+        let fixture = Fixture::new();
+        let data = fixture.root.join("enrollment");
+        write_enrollment(
+            &fixture,
+            "enrollment",
+            r#"{"server_name":"legacy.example","public_origin":"https://mesh.example:8443","key_der":"private-fixture"}"#,
+        );
+        fixture.write(
+            &format!("{unit_dir}/infraternal-agent.service"),
+            &format!("[Service]\nExecStart=/var/lib/infraternal/bin/infraternal agent run --data \"{}\"\n", data.display()),
+        );
+        fixture.write(&format!("{state_dir}/mesh-public.json"), MESH);
+        fixture.write("net/infraternal0/.keep", "");
+        let mut roots = fixture.roots();
+        roots.run_dir = Some(fixture.root.join("user-run"));
+        roots.system_run_dir = Some(fixture.root.join("system-run"));
+        let ids = ["agent".to_owned(), "mesh".to_owned()];
+        let status = probe(&roots, &ids, &|observed, _| {
+            assert_eq!(observed, scope);
+            Activity::Active
+        });
+        assert_eq!(status.role, Role::Host);
+        assert_eq!(state(&status, "agent").0, "Running");
+        let detail = state(&status, "agent").1;
+        assert!(detail.starts_with(&format!("{} service", scope.label())));
+        if scope == Scope::User || nix::unistd::Uid::effective().is_root() {
+            assert!(
+                detail.ends_with("joined to https://mesh.example:8443"),
+                "{detail}"
+            );
+        } else {
+            assert!(
+                detail.ends_with("enrollment details unavailable to this account"),
+                "{detail}"
+            );
+        }
+        assert_eq!(state(&status, "mesh"), ("Running", "peers: 2"));
+    }
+}
+
+/// Both launchd modes take their enrollment and mesh directories from the installed job.
+/// A reused utun name without the configured address does not establish a live mesh.
+#[test]
+fn macos_installs_report_scope_service_and_their_own_tunnel() {
+    use super::macos;
+    for (scope, directory, label, base) in [
+        (
+            Scope::System,
+            "Library/LaunchDaemons",
+            "kayg.infraternal.mesh",
+            "Library/Application Support/infraternal",
+        ),
+        (
+            Scope::User,
+            "home/Library/LaunchAgents",
+            "kayg.infraternal.agent",
+            "home/Library/Application Support/infraternal",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let plist = format!("{directory}/{label}.plist");
+        fixture.write(&plist, "<?xml version=\"1.0\"?><plist version=\"1.0\"/>");
+        write_enrollment(
+            &fixture,
+            &format!("{base}/agent"),
+            r#"{"server_name":"mesh.example","key_der":"private-fixture"}"#,
+        );
+        let state_directory = format!("{base}/state");
+        fixture.write(&format!("{state_directory}/mesh-public.json"), r#"{"enabled":true,"config":{"addresses":{"ipv4":"192.0.2.3","ipv6":"2001:db8::3"},"peers":{"4":{}}},"interface":"utun7"}"#);
+        let units = macos::units(
+            &fixture.root.join("Library/LaunchDaemons"),
+            Some(&fixture.root.join("home/Library/LaunchAgents")),
+            |path| {
+                assert_eq!(path, fixture.root.join(&plist));
+                Some(vec![
+                    fixture
+                        .root
+                        .join(base)
+                        .join("bin/infraternal")
+                        .display()
+                        .to_string(),
+                    "agent".to_owned(),
+                    "run".to_owned(),
+                    "--data".to_owned(),
+                    fixture.root.join(base).join("agent").display().to_string(),
+                    "--state".to_owned(),
+                    fixture.root.join(&state_directory).display().to_string(),
+                ])
+            },
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].scope, scope);
+        assert_eq!(units[0].name, label);
+        let ids = ["agent".to_owned(), "mesh".to_owned()];
+        let activity = macos::observed(true, b"\tstate = running\n", b"").unwrap();
+        let status =
+            |activity| super::assemble(&fixture.roots(), &ids, vec![(units[0].clone(), activity)]);
+        fixture.write("net/utun7/192.0.2.55", "");
+        assert_eq!(
+            state(&status(activity), "mesh"),
+            ("Stopped", "interface is down")
+        );
+        fixture.write("net/utun7/192.0.2.3", "");
+        let running = status(activity);
+        assert_eq!(running.role, Role::Host);
+        assert_eq!(state(&running, "agent").0, "Running");
+        let detail = state(&running, "agent").1;
+        let mode = if scope == Scope::User { "user" } else { "root" };
+        assert!(
+            detail.starts_with(&format!("{mode} mode ({label})")),
+            "{detail}"
+        );
+        if scope == Scope::User || nix::unistd::Uid::effective().is_root() {
+            assert!(
+                detail.ends_with("joined to https://mesh.example"),
+                "{detail}"
+            );
+        }
+        assert_eq!(state(&running, "mesh"), ("Running", "peers: 1"));
+        let stopped = status(macos::observed(false, b"", b"Could not find service").unwrap());
+        assert_eq!(stopped.confirmed_down_count(), 1);
+        assert_eq!(state(&stopped, "mesh").0, "Stopped");
+        assert_eq!(
+            stopped.headline().2,
+            [format!("launchctl print {}", macos::target(&units[0]))]
+        );
+        assert!(macos::observed(false, b"", b"Could not find domain").is_err());
+    }
+}
+
+/// An enrollment containing URL credentials or a link to another identity supplies no server.
+#[test]
+fn enrollment_rejects_credentials_and_symlinks() {
+    let fixture = Fixture::new();
+    write_enrollment(
+        &fixture,
+        "agent",
+        r#"{"server_name":"mesh.example","public_origin":"https://user:private@mesh.example"}"#,
+    );
+    let data = fixture.root.join("agent");
+    assert_eq!(super::enrollment::server(&data, Scope::User).unwrap(), None);
+    fs::rename(data.join("identity.json"), data.join("old-identity.json")).unwrap();
+    std::os::unix::fs::symlink("old-identity.json", data.join("identity.json")).unwrap();
+    assert!(super::enrollment::server(&data, Scope::User).is_err());
 }
