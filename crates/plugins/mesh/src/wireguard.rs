@@ -21,6 +21,11 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// Kernel-side suppression of route additions sent by this node.
+#[path = "wireguard_route_filter.rs"]
+mod route_filter;
+use route_filter::RouteQueue;
+
 /// A node-local ephemeral secret. It cannot be serialized, cloned or debug printed.
 pub struct Key(Zeroizing<Vec<u8>>);
 impl Key {
@@ -520,6 +525,7 @@ impl Device {
         networks: &crate::subnet_routes::RouteTargets,
         source: std::net::Ipv4Addr,
         proven: Option<ActiveLink>,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<BTreeMap<crate::policy::networks::Network, crate::subnet_routes::RouteState>>
     {
         use crate::{policy::networks::Network, subnet_routes::RouteState};
@@ -602,6 +608,11 @@ impl Device {
             {
                 return Err(error);
             }
+        }
+        if let Some(underlay) = underlay
+            && allowed.keys().any(|part| ours.get(part) != Some(&true))
+        {
+            underlay.ignore_route_adds(&socket);
         }
         for (part, network) in allowed {
             if ours.get(&part) == Some(&true) {
@@ -792,7 +803,7 @@ impl Device {
     /// # Errors
     /// Returns route-netlink errors.
     pub fn routes(peers: &[Peer], remove: bool) -> io::Result<()> {
-        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove)
+        Self::routes_with_mtu_overrides(peers, &BTreeMap::new(), remove, None)
     }
 
     /// Install peer routes using live relay MTUs where one is active, otherwise the direct route.
@@ -802,6 +813,7 @@ impl Device {
         peers: &[Peer],
         overrides: &BTreeMap<PublicKey, u16>,
         remove: bool,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<()> {
         if peers.is_empty() {
             return Ok(());
@@ -815,6 +827,9 @@ impl Device {
         // An IPv6-off link takes no IPv6 routes (#578). Removal still tries both families: the
         // kernel already dropped any IPv6 route there, and a missing route is tolerated below.
         let mut ipv6 = remove || ipv6_enabled_on(&mut socket, index)?;
+        if !remove && let Some(underlay) = underlay {
+            underlay.ignore_route_adds(&socket);
+        }
         for peer in peers {
             let mtu = (!remove).then(|| {
                 overrides
@@ -877,12 +892,13 @@ impl Device {
     pub(crate) fn replace_peer_routes_on(
         link: &ActiveLink,
         routes: &[(&Peer, u16)],
+        underlay: Option<std::sync::Arc<UnderlayWatch>>,
     ) -> io::Result<bool> {
         if routes.is_empty() {
             return Ok(true);
         }
         Self::verify_repair_link(link)?;
-        let mut writer = PeerRouteWriter::open(link.ifindex)?;
+        let mut writer = PeerRouteWriter::open(link.ifindex, underlay)?;
         for (peer, mtu) in routes {
             writer.replace(peer, *mtu)?;
         }
@@ -895,11 +911,13 @@ impl Device {
     /// batch uses the same index (a name-only lookup per write could follow a substituted link).
     /// # Errors
     /// Reports a missing marked link, or a socket or link-read error.
-    pub(crate) fn peer_route_writer() -> io::Result<PeerRouteWriter> {
+    pub(crate) fn peer_route_writer(
+        underlay: Option<std::sync::Arc<UnderlayWatch>>,
+    ) -> io::Result<PeerRouteWriter> {
         let index = Self::active_link()?
             .ok_or(io::ErrorKind::NotConnected)?
             .ifindex;
-        PeerRouteWriter::open(index)
+        PeerRouteWriter::open(index, underlay)
     }
 
     /// Re-add one missing route only when no route already occupies its destination, and say
@@ -916,6 +934,7 @@ impl Device {
         peer: &Peer,
         address: IpAddr,
         mtu: u16,
+        underlay: Option<&UnderlayWatch>,
     ) -> io::Result<bool> {
         Self::verify_repair_link(link)?;
         let (family, prefix, destination) = match address {
@@ -933,6 +952,9 @@ impl Device {
         // to repair, and the kernel would refuse the write anyway (#578).
         if family == 10 && !ipv6_enabled_on(&mut socket, link.ifindex)? {
             return Ok(false);
+        }
+        if let Some(underlay) = underlay {
+            underlay.ignore_route_adds(&socket);
         }
         match socket.request(24, 4 | 0x200 | 0x400, &payload) {
             Ok(_) => Ok(true),
@@ -1316,7 +1338,7 @@ pub(crate) struct UnderlayWatch {
     watched: std::sync::atomic::AtomicBool,
     /// A duplicate of the running listener's socket, which shares its receive queue, so
     /// [`UnderlayWatch::settled_generation`] can see whether notifications are still waiting.
-    queue: std::sync::Mutex<Option<OwnedFd>>,
+    queue: std::sync::Mutex<Option<RouteQueue>>,
     /// Whether the listener is between taking a notification off its socket and counting it,
     /// or is inside the quiet period after lost notifications, which it counts only at the end.
     reading: std::sync::atomic::AtomicBool,
@@ -1358,8 +1380,7 @@ impl UnderlayWatch {
     /// socket, then the listener is not reading, then the generation is read. A listener that
     /// takes a notification sets `reading` before its `recv` and clears it only after counting,
     /// so a notification that left the queue before the first check is counted by the time the
-    /// second one sees `reading` clear. The check never blocks: a busy listener (it also reads
-    /// the echoes of our own route writes) only costs the caller fresh lookups.
+    /// second one sees `reading` clear. A busy listener only costs the caller fresh lookups.
     pub(crate) fn settled_generation(&self) -> Option<u64> {
         {
             let queue = self
@@ -1367,7 +1388,7 @@ impl UnderlayWatch {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let queue = queue.as_ref()?;
-            let mut waiting = [PollFd::new(queue.as_fd(), PollFlags::POLLIN)];
+            let mut waiting = [PollFd::new(queue.fd.as_fd(), PollFlags::POLLIN)];
             if !matches!(poll(&mut waiting, PollTimeout::ZERO), Ok(0)) {
                 return None;
             }
@@ -1384,7 +1405,21 @@ impl UnderlayWatch {
         *self
             .queue
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = queue;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = queue.map(RouteQueue::new);
+    }
+
+    /// Suppress additions from a bound request socket before it starts writing. If the kernel
+    /// or sandbox refuses the filter, keep using the listener and handle echoes as usual.
+    fn ignore_route_adds(&self, writer: &Socket) {
+        let mut queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = queue.as_mut()
+            && let Err(error) = queue.ignore_adds_from(writer.as_fd())
+        {
+            tracing::debug!(%error, "mesh route notification filter unavailable");
+        }
     }
 
     /// Mark whether the listener holds notifications it has not counted yet.
@@ -1400,8 +1435,8 @@ impl UnderlayWatch {
 /// endpoint to an [`UnderlayAnnounce`](crate::gotatun_node::UnderlayAnnounce).
 ///
 /// This is the node's only route-netlink subscription (#483 J633 P1): the endpoint announce
-/// reads the same notifications as the route repair and the MTU watch, so the kernel copies
-/// each notification once, including the echo of our own peer-route writes.
+/// reads the same queue as the route repair and the MTU watch. A socket filter keeps echoes
+/// of the node's own route additions out of that queue.
 pub(crate) struct RouteMonitor {
     /// The route multicast socket subscribed in the node's network namespace.
     fd: OwnedFd,
@@ -2180,6 +2215,8 @@ fn network_route_payload(
 pub(crate) struct PeerRouteWriter {
     /// The route-netlink socket every write of the batch uses.
     socket: Socket,
+    /// Registers the socket with the listener on the first write, if the batch writes anything.
+    underlay: Option<std::sync::Arc<UnderlayWatch>>,
     /// The link index every route of the batch goes to.
     ifindex: u32,
     /// Whether the link carries IPv6, as last observed by this writer.
@@ -2190,11 +2227,12 @@ impl PeerRouteWriter {
     /// Open a writer for link `ifindex` and read whether that link carries IPv6.
     /// # Errors
     /// Reports a socket error or an unreadable link.
-    fn open(ifindex: u32) -> io::Result<Self> {
+    fn open(ifindex: u32, underlay: Option<std::sync::Arc<UnderlayWatch>>) -> io::Result<Self> {
         let mut socket = Socket::open(SockProtocol::NetlinkRoute)?;
         let ipv6 = ipv6_enabled_on(&mut socket, ifindex)?;
         Ok(Self {
             socket,
+            underlay,
             ifindex,
             ipv6,
         })
@@ -2222,6 +2260,9 @@ impl PeerRouteWriter {
     /// # Errors
     /// Returns route-netlink errors; IPv6 being turned off during the write is not one.
     pub(crate) fn replace(&mut self, peer: &Peer, mtu: u16) -> io::Result<()> {
+        if let Some(underlay) = self.underlay.take() {
+            underlay.ignore_route_adds(&self.socket);
+        }
         for (family, prefix, address) in [
             (2_u8, 32, peer.addresses.ipv4.octets().to_vec()),
             (10, 128, peer.addresses.ipv6.octets().to_vec()),
@@ -4182,6 +4223,85 @@ mod endpoint_announce_tests {
         assert!(
             listener.announce.take_for_test(),
             "an address change lost in the overflow was not announced"
+        );
+    }
+
+    /// Acknowledged writes from both peer route batches leave the listener socket unreadable.
+    /// Another process can still change or remove the same tagged route, and an underlay change
+    /// still reaches the underlay watch and endpoint announcer.
+    #[test]
+    #[ignore = "needs a private network namespace: run the test binary under unshare -Urnm"]
+    fn namespace_filters_only_route_additions_from_the_mesh_writer() {
+        let mut listener = namespace();
+        let underlay = Arc::clone(&listener.monitor.underlay);
+        underlay.set_watched(true);
+        let generation = underlay.generation();
+        let peer = Peer {
+            key: PublicKey([1; 32]),
+            previous_key: None,
+            previous_active: false,
+            addresses: Addresses {
+                ipv4: "10.88.0.2".parse().unwrap(),
+                ipv6: "fd88::2".parse().unwrap(),
+            },
+            endpoint: None,
+            candidates: Vec::new(),
+            ipv4_only: false,
+            side_port: false,
+        };
+        for mtu in [1232, 1408] {
+            let mut writer = PeerRouteWriter::open(
+                listener.monitor.interface_index,
+                Some(Arc::clone(&underlay)),
+            )
+            .unwrap();
+            assert!(writer.writes_ipv6_for(&peer));
+            writer.replace(&peer, mtu).unwrap();
+            // The kernel multicasts before acknowledging each write. No reader has drained the
+            // socket, so a zero-time poll proves the notifications never made it readable.
+            assert_eq!(underlay.settled_generation(), generation, "own MTU {mtu}");
+        }
+
+        ip(&[
+            "route",
+            "replace",
+            "10.88.0.2/32",
+            "dev",
+            "m0",
+            "proto",
+            "250",
+            "mtu",
+            "1280",
+        ]);
+        assert_eq!(underlay.settled_generation(), None, "foreign mesh change");
+        ip(&[
+            "-6",
+            "route",
+            "del",
+            "fd88::2/128",
+            "dev",
+            "m0",
+            "proto",
+            "250",
+        ]);
+        let wake = listener
+            .monitor
+            .wait_for_deleted_peer_route(
+                listener.cancel.as_fd(),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .unwrap();
+        assert!(
+            matches!(wake, RouteWake::Deleted(address) if address == IpAddr::V6(peer.addresses.ipv6))
+        );
+
+        ip(&["route", "add", "10.89.0.0/24", "dev", "d0", "proto", "250"]);
+        assert_eq!(underlay.settled_generation(), None, "underlay route queued");
+        listener.pump();
+        assert_ne!(underlay.settled_generation(), generation);
+        assert!(
+            listener.announce.take_for_test(),
+            "underlay change announced"
         );
     }
 

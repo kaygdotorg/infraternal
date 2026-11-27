@@ -74,7 +74,7 @@ pub(super) fn write_snapshot_routes(
         state.written.clear();
         return Ok(None);
     }
-    let mut writer = Device::peer_route_writer()?;
+    let mut writer = Device::peer_route_writer(state.underlay.clone())?;
     let ifindex = writer.ifindex();
     // Only a generation that already counts every announced change may vouch for an old
     // budget: a caller that changes the underlay and applies a snapshot right after must see
@@ -311,7 +311,7 @@ fn write_live_route_budgets(
         ));
     };
     let routes: Vec<_> = route_peers.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
-    let ipv6 = match Device::replace_peer_routes_on(&link, &routes) {
+    let ipv6 = match Device::replace_peer_routes_on(&link, &routes, state.underlay.clone()) {
         Ok(ipv6) => ipv6,
         Err(error) => {
             // A partial batch leaves unknown kernel budgets: rewrite these peers next time.
@@ -384,7 +384,7 @@ impl PeerRouteState {
         let proven = if snapshot { None } else { self.link };
         let client = &mut self.client_routes;
         client.dirty = true;
-        match Device::sync_network_routes(&targets, source, proven) {
+        match Device::sync_network_routes(&targets, source, proven, self.underlay.as_deref()) {
             Ok(result) => {
                 if result
                     .values()
