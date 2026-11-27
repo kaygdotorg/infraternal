@@ -50,9 +50,11 @@ pub(crate) async fn admitted_store(
 #[tokio::test]
 async fn retired_install_gets_a_final_tcp_reply() {
     let (server, node, root, _) = identities();
-    let (store, _pool, host, fingerprint) = admitted_store(&node, &root).await;
+    let (store, pool, host, fingerprint) = admitted_store(&node, &root).await;
     assert!(!store.installation_retired(&fingerprint).await.unwrap());
     store.revoke("owner", host, now().unwrap()).await.unwrap();
+    assert!(!store.installation_retired(&fingerprint).await.unwrap());
+    crate::enrollment::authority::tests::finish_fixture_cleanup(&pool, host).await;
     assert!(store.installation_retired(&fingerprint).await.unwrap());
     assert!(!store.installation_retired(&[9; 32]).await.unwrap());
     let hosts = RemoteHosts::default();

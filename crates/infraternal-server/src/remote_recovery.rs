@@ -1171,6 +1171,8 @@ mod tests {
             .revoke("owner", fixture.host, fixture.now)
             .await
             .unwrap();
+        crate::enrollment::authority::tests::finish_fixture_cleanup(&fixture.pool, fixture.host)
+            .await;
         let digest = csr_digest(&fixture.csr_der);
         let wrong_key = PKey::generate_ed25519().unwrap();
         let refused = fixture

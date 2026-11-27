@@ -217,8 +217,7 @@ async fn ipv6_wildcard_listener_reuses_binding_and_preserves_ipv4_discovery() {
 #[tokio::test]
 async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usable() {
     let (server, node, root, _) = identities();
-    let (store, _pool, host_id, fingerprint) =
-        super::revocation::admitted_store(&node, &root).await;
+    let (store, pool, host_id, fingerprint) = super::revocation::admitted_store(&node, &root).await;
     let hosts = RemoteHosts::default();
     let primary = RemoteListeners::start(
         "127.0.0.1:0".parse().unwrap(),
@@ -340,6 +339,7 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
         .revoke("owner", host_id, now().unwrap())
         .await
         .unwrap();
+    crate::enrollment::authority::tests::finish_fixture_cleanup(&pool, host_id).await;
     assert!(store.admit(&fingerprint, now().unwrap()).await.is_err());
     tokio::time::timeout(Duration::from_secs(3), async {
         while hosts.actor(host_id).await.is_some() {

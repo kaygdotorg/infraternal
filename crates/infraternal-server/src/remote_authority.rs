@@ -679,6 +679,19 @@ pub(crate) mod tests {
         (store, pool, host)
     }
 
+    /// Record the final cleanup receipt for a fixture with the legacy owner name.
+    /// This name cannot send the production UUID-based receipt itself.
+    pub(crate) async fn finish_fixture_cleanup(pool: &sqlx::SqlitePool, host: Uuid) {
+        let receipt = sqlx::query(
+            "UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=? AND confirmed=0",
+        )
+        .bind(host.as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(receipt.rows_affected(), 1);
+    }
+
     /// Turns the fixture's enrolled host into a `device` row (#580) so a test can give
     /// it P-256 certificates. The mode and uid are write-once for hosts, so the guard
     /// trigger is dropped for this fixture only, as the bootstrap tests do. The host's
