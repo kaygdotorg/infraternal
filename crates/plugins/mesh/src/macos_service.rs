@@ -266,11 +266,12 @@ fn valid_host(host: &str) -> bool {
 }
 
 /// Read the selected root installation's public property list and, for root,
-/// its private receipt. The caller must recheck the receipt before removal.
+/// its private receipt. A matching alias is conditional when only root can read
+/// its ownership flag. The caller rechecks the private receipt before removal.
 ///
 /// # Errors
 /// Refuses a missing or foreign service and an invalid root installation receipt.
-pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
+pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>, Option<PathBuf>)> {
     let daemon = owned_machine_plist()?.ok_or(io::ErrorKind::NotFound)?;
     let base = Path::new(MACHINE_BASE);
     require_root_directories(base)?;
@@ -292,6 +293,7 @@ pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
         // let the elevated cleanup check the receipt before removing it.
         (None, true)
     };
+    let mut conditional_alias = None;
     let link = Path::new(MACHINE_LINK);
     if fs::symlink_metadata(link).is_ok_and(|metadata| metadata.uid() == 0)
         && fs::read_link(link).is_ok_and(|target| target == Path::new(MACHINE_BINARY))
@@ -302,10 +304,14 @@ pub fn review_removal() -> io::Result<(Option<String>, Vec<PathBuf>)> {
             && fs::symlink_metadata(&alias).is_ok_and(|metadata| metadata.uid() == 0)
             && fs::read_link(&alias).is_ok_and(|target| target == Path::new("infraternal"))
         {
-            paths.push(alias);
+            if host.is_some() {
+                paths.push(alias);
+            } else {
+                conditional_alias = Some(alias);
+            }
         }
     }
-    Ok((host, paths))
+    Ok((host, paths, conditional_alias))
 }
 
 /// Stop the live utun owner before retiring only the approved install's files.

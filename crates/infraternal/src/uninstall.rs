@@ -435,7 +435,7 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
 /// Review the root-mode LaunchDaemon and its fixed machine paths.
 fn system_plan(_caller: u32) -> io::Result<Plan> {
     use infraternal_plugin_mesh::macos_service as service;
-    let (host, paths_to_remove) = service::review_removal()?;
+    let (host, paths_to_remove, conditional_alias) = service::review_removal()?;
     let mut targets = paths(paths_to_remove);
     targets.push("Mesh tunnel and its routes, if active".into());
     targets.extend(paths(
@@ -447,7 +447,15 @@ fn system_plan(_caller: u32) -> io::Result<Plan> {
         base: service::MACHINE_BASE.into(),
         data: service::MACHINE_DATA.into(),
         targets,
-        notes: Vec::new(),
+        notes: conditional_alias
+            .into_iter()
+            .map(|path| {
+                format!(
+                    "Remove {} if this installation created it.",
+                    safe_text(&path.to_string_lossy()),
+                )
+            })
+            .collect(),
     })
 }
 
