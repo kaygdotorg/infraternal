@@ -191,3 +191,28 @@ fn machine_start_body_refuses_bad_names_and_fingerprints() {
         );
     }
 }
+
+/// A device join omits `execution_uid`, as the server's device mode requires.
+#[test]
+fn device_machine_start_body_omits_execution_uid() {
+    let body = super::device_machine_start_body(
+        Uuid::from_u128(2),
+        "simulator",
+        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "kind": "join_machine",
+            "device": "simulator",
+            "request": {
+                "host_id": "00000000-0000-0000-0000-000000000002",
+                "hostname": "simulator",
+                "mode": "device",
+                "key_fingerprint": "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            }
+        })
+    );
+}

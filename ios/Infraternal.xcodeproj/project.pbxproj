@@ -1,0 +1,97 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* InfraternalApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* InfraternalApp.swift */; };
+		A10000000000000000000002 /* ClientBindings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ClientBindings.swift */; };
+		A10000000000000000000003 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* PacketTunnelProvider.swift */; };
+		A10000000000000000000004 /* TunnelBindings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* TunnelBindings.swift */; };
+		A10000000000000000000008 /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* DeviceIdentity.swift */; };
+		A10000000000000000000005 /* InfraternalClientFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* InfraternalClientFFI.xcframework */; };
+		A10000000000000000000006 /* InfraternalTunnelFFI.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* InfraternalTunnelFFI.xcframework */; };
+		A10000000000000000000007 /* InfraternalTunnel.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* InfraternalTunnel.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A30000000000000000000001 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A40000000000000000000001 /* Project object */; proxyType = 1; remoteGlobalIDString = A50000000000000000000002; remoteInfo = InfraternalTunnel; };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A60000000000000000000001 /* Embed App Extensions */ = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (A10000000000000000000007 /* InfraternalTunnel.appex in Embed App Extensions */, ); name = "Embed App Extensions"; runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* InfraternalApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfraternalApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* ClientBindings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClientBindings.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* TunnelBindings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelBindings.swift; sourceTree = "<group>"; };
+		A20000000000000000000005 /* InfraternalClientFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = InfraternalClientFFI.xcframework; sourceTree = "<group>"; };
+		A20000000000000000000006 /* InfraternalTunnelFFI.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = InfraternalTunnelFFI.xcframework; sourceTree = "<group>"; };
+		A20000000000000000000008 /* App Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A20000000000000000000009 /* App entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Infraternal.entitlements; sourceTree = "<group>"; };
+		A2000000000000000000000A /* Tunnel Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A2000000000000000000000B /* Tunnel entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = InfraternalTunnel.entitlements; sourceTree = "<group>"; };
+		A20000000000000000000007 /* InfraternalTunnel.appex */ = {isa = PBXFileReference; explicitFileType = wrapper.app-extension; includeInIndex = 0; path = InfraternalTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000C /* Infraternal.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Infraternal.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000D /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A70000000000000000000001 /* App Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000005 /* InfraternalClientFFI.xcframework in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000002 /* Tunnel Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000006 /* InfraternalTunnelFFI.xcframework in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A80000000000000000000001 = {isa = PBXGroup; children = (A80000000000000000000002 /* App */, A80000000000000000000003 /* Tunnel */, A80000000000000000000004 /* Frameworks */, A80000000000000000000005 /* Products */, ); sourceTree = "<group>"; };
+		A80000000000000000000002 /* App */ = {isa = PBXGroup; children = (A20000000000000000000001 /* InfraternalApp.swift */, A20000000000000000000008 /* App Info.plist */, A20000000000000000000009 /* App entitlements */, A80000000000000000000006 /* Generated client bindings */, ); path = App; sourceTree = "<group>"; };
+		A80000000000000000000003 /* Tunnel */ = {isa = PBXGroup; children = (A20000000000000000000003 /* PacketTunnelProvider.swift */, A2000000000000000000000D /* DeviceIdentity.swift */, A2000000000000000000000A /* Tunnel Info.plist */, A2000000000000000000000B /* Tunnel entitlements */, A80000000000000000000007 /* Generated tunnel bindings */, ); path = Tunnel; sourceTree = "<group>"; };
+		A80000000000000000000004 /* Frameworks */ = {isa = PBXGroup; children = (A20000000000000000000005 /* InfraternalClientFFI.xcframework */, A20000000000000000000006 /* InfraternalTunnelFFI.xcframework */, ); path = Frameworks; sourceTree = "<group>"; };
+		A80000000000000000000005 /* Products */ = {isa = PBXGroup; children = (A2000000000000000000000C /* Infraternal.app */, A20000000000000000000007 /* InfraternalTunnel.appex */, ); name = Products; sourceTree = "<group>"; };
+		A80000000000000000000006 /* Generated client bindings */ = {isa = PBXGroup; children = (A20000000000000000000002 /* ClientBindings.swift */, ); path = ../Generated/Client; sourceTree = "<group>"; };
+		A80000000000000000000007 /* Generated tunnel bindings */ = {isa = PBXGroup; children = (A20000000000000000000004 /* TunnelBindings.swift */, ); path = ../Generated/Tunnel; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A50000000000000000000001 /* InfraternalIOS */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget "InfraternalIOS" */; buildPhases = (AA000000000000000000001 /* App Sources */, A70000000000000000000001 /* App Frameworks */, AB000000000000000000001 /* App Resources */, A60000000000000000000001 /* Embed App Extensions */, ); buildRules = (); dependencies = (AC000000000000000000001 /* PBXTargetDependency */, ); name = InfraternalIOS; productName = Infraternal; productReference = A2000000000000000000000C /* Infraternal.app */; productType = "com.apple.product-type.application"; };
+		A50000000000000000000002 /* InfraternalTunnel */ = {isa = PBXNativeTarget; buildConfigurationList = A90000000000000000000003 /* Build configuration list for PBXNativeTarget "InfraternalTunnel" */; buildPhases = (AA000000000000000000002 /* Tunnel Sources */, A70000000000000000000002 /* Tunnel Frameworks */, AB000000000000000000002 /* Tunnel Resources */, ); buildRules = (); dependencies = (); name = InfraternalTunnel; productName = InfraternalTunnel; productReference = A20000000000000000000007 /* InfraternalTunnel.appex */; productType = "com.apple.product-type.app-extension"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A40000000000000000000001 /* Project object */ = {isa = PBXProject; attributes = {LastUpgradeCheck = 2700; TargetAttributes = {A50000000000000000000001 = {CreatedOnToolsVersion = 27.2; }; A50000000000000000000002 = {CreatedOnToolsVersion = 27.2; }; }; }; buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXProject "Infraternal" */; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = A80000000000000000000001; productRefGroup = A80000000000000000000005 /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A50000000000000000000001 /* InfraternalIOS */, A50000000000000000000002 /* InfraternalTunnel */, ); };
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AB000000000000000000001 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		AB000000000000000000002 /* Tunnel Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AA000000000000000000001 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001 /* InfraternalApp.swift in Sources */, A10000000000000000000002 /* ClientBindings.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		AA000000000000000000002 /* Tunnel Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000003 /* PacketTunnelProvider.swift in Sources */, A10000000000000000000004 /* TunnelBindings.swift in Sources */, A10000000000000000000008 /* DeviceIdentity.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AC000000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A50000000000000000000002 /* InfraternalTunnel */; targetProxy = A30000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		AD000000000000000000001 /* Debug project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Debug; };
+		AD000000000000000000002 /* Release project */ = {isa = XCBuildConfiguration; buildSettings = {ALWAYS_SEARCH_USER_PATHS = NO; CLANG_ENABLE_MODULES = YES; CLANG_ENABLE_OBJC_ARC = YES; IPHONEOS_DEPLOYMENT_TARGET = 26.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; }; name = Release; };
+		AD000000000000000000003 /* App Debug */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = App/Infraternal.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = App/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 26.0; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = org.kayg.infraternal.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks"; }; name = Debug; };
+		AD000000000000000000004 /* App Release */ = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_ENTITLEMENTS = App/Infraternal.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = App/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 26.0; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = org.kayg.infraternal.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks"; }; name = Release; };
+		AD000000000000000000005 /* Tunnel Debug */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Tunnel/InfraternalTunnel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Tunnel/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 26.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = org.kayg.infraternal.ios.PacketTunnel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SKIP_INSTALL = YES; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks"; }; name = Debug; };
+		AD000000000000000000006 /* Tunnel Release */ = {isa = XCBuildConfiguration; buildSettings = {APPLICATION_EXTENSION_API_ONLY = YES; CODE_SIGN_ENTITLEMENTS = Tunnel/InfraternalTunnel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; GENERATE_INFOPLIST_FILE = NO; INFOPLIST_FILE = Tunnel/Info.plist; IPHONEOS_DEPLOYMENT_TARGET = 26.0; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @executable_path/../../Frameworks"; MARKETING_VERSION = 0.1; PRODUCT_BUNDLE_IDENTIFIER = org.kayg.infraternal.ios.PacketTunnel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SKIP_INSTALL = YES; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks"; }; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A90000000000000000000001 /* Build configuration list for PBXProject "Infraternal" */ = {isa = XCConfigurationList; buildConfigurations = (AD000000000000000000001 /* Debug project */, AD000000000000000000002 /* Release project */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A90000000000000000000002 /* Build configuration list for PBXNativeTarget "InfraternalIOS" */ = {isa = XCConfigurationList; buildConfigurations = (AD000000000000000000003 /* App Debug */, AD000000000000000000004 /* App Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A90000000000000000000003 /* Build configuration list for PBXNativeTarget "InfraternalTunnel" */ = {isa = XCConfigurationList; buildConfigurations = (AD000000000000000000005 /* Tunnel Debug */, AD000000000000000000006 /* Tunnel Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A40000000000000000000001 /* Project object */;
+}

@@ -19,6 +19,8 @@ members = [
     "crates/infraternal-session",
     "crates/infraternal-status",
     "crates/infraternal-sign-in",
+    "crates/infraternal-tunnel-ffi",
+    "crates/infraternal-client-ffi",
     "crates/plugins/ssh",
     "crates/plugins/relay",
     "crates/plugins/proxy",
@@ -99,6 +101,7 @@ infraternal-protocol = { version = "0.1.0", path = "crates/infraternal-protocol"
 infraternal-server = { version = "0.1.0", path = "crates/infraternal-server" }
 clap = { version = "4.5", features = ["derive", "string"] }
 criterion = "0.8"
+uniffi = "=0.32.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
