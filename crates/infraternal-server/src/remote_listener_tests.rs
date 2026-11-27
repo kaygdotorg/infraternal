@@ -329,7 +329,7 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
     }
 
     // The certificate retains the same TLS settings after durable revocation,
-    // but it must never receive an application Hello or register an actor.
+    // but the only application reply it may receive is final retirement.
     let additional = hosts
         .listen("127.0.0.3".parse().unwrap())
         .await
@@ -368,8 +368,9 @@ async fn leased_tcp_admits_current_identity_releases_lease_and_keeps_primary_usa
                     .await
                     .expect("revoked identity's leased TLS channel was not retired");
             assert!(
-                denied.is_err(),
-                "revoked certificate received application bytes on leased TLS"
+                matches!(denied, Ok(frame) if frame.stream_id == 0
+                    && matches!(frame.frame, Frame::Close { code: infraternal_protocol::CLOSE_INSTALL_RETIRED, .. })),
+                "revoked certificate must receive only the final retirement reply on leased TLS"
             );
         }
     }

@@ -7,7 +7,8 @@ retirement_installed() {
  (base="${unit%/*}"; no_redirect)
  (base="${launcher%/*}"; no_redirect)
  validate_finished_install
- [ "$($manager show -p FragmentPath --value infraternal-agent.service)" = "$unit" ] || exit 71
+ loaded_unit=$($manager show -p FragmentPath --value infraternal-agent.service)
+ [ -n "$loaded_unit" ] && [ "$loaded_unit" -ef "$unit" ] || exit 71
  installed_terminals=$(finished_terminal_records)
  [ -z "$installed_terminals" ] || exit 73
  holders_beside_agent
