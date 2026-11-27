@@ -36,7 +36,7 @@ export const CONTROL_STREAM = 0;
  * sent one; it never carries input or internal detail.
  */
 export class ActionRefused extends Error {
-  constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }) { super(message); this.name = "ActionRefused"; }
+  constructor(message = "the server refused the action", readonly reason?: string, readonly memory?: { availableMiB: number; sessionCount: number }, readonly executionUid?: number) { super(message); this.name = "ActionRefused"; }
 }
 /**
  * Terminals one socket carries under the D214 browser pooling policy. This
@@ -923,7 +923,7 @@ export class MuxConnection {
         const pending = this.calls.get(frame.callId);
         if (!pending) { this.fail("server returned an unexpected action result"); return; }
         this.calls.delete(frame.callId);
-        if (!frame.ok) { const refusal = refusalReason(frame.json); pending.reject(new ActionRefused(undefined, refusal.reason, refusal.memory)); return; }
+        if (!frame.ok) { const refusal = refusalReason(frame.json); pending.reject(new ActionRefused(undefined, refusal.reason, refusal.memory, refusal.executionUid)); return; }
         try {
           pending.resolve(asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(frame.json)) as unknown));
         } catch { pending.reject(new Error("the server returned an unreadable result")); }
@@ -1038,8 +1038,8 @@ export class MuxConnection {
   }
 }
 
-/** Fixed reason codes are additive to the legacy error word; only validated counters reach product copy. */
-function refusalReason(body: Uint8Array): { reason?: string; memory?: { availableMiB: number; sessionCount: number } } {
+/** Fixed reason codes are additive to the legacy error word; only validated numbers reach product copy. */
+function refusalReason(body: Uint8Array): { reason?: string; memory?: { availableMiB: number; sessionCount: number }; executionUid?: number } {
   if (body.byteLength > 32 * 1024) return {};
   try {
     const parsed = asRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)) as unknown);
@@ -1049,6 +1049,10 @@ function refusalReason(body: Uint8Array): { reason?: string; memory?: { availabl
     if (reason === "host_memory_low" && typeof available === "number" && Number.isSafeInteger(available) && available >= 0
       && typeof count === "number" && Number.isSafeInteger(count) && count >= 0) {
       return { reason, memory: { availableMiB: available, sessionCount: count } };
+    }
+    const uid = parsed.execution_uid;
+    if (reason === "no_login" && typeof uid === "number" && Number.isInteger(uid) && uid > 0 && uid <= 0xffffffff) {
+      return { reason, executionUid: uid };
     }
     return { reason };
   } catch { return {}; }

@@ -58,7 +58,7 @@ async fn preferences_survive_reopen_and_host_override_wins() {
     let service = AccountsPlugin::new(pool.clone());
     assert_eq!(
         resolve(&pool, "alice", "alice-token", None).await.unwrap(),
-        "alice"
+        Some("alice".into())
     );
     change(&service, Scope::Global, None, Some("operator"))
         .await
@@ -81,14 +81,14 @@ async fn preferences_survive_reopen_and_host_override_wins() {
             .await
             .unwrap()
             .account,
-        "operator"
+        Some("operator".into())
     );
     assert_eq!(
         change(&service, Scope::Global, None, None)
             .await
             .unwrap()
             .account,
-        "alice"
+        Some("alice".into())
     );
     pool.close().await;
     std::fs::remove_dir_all(dir).unwrap();
@@ -128,11 +128,11 @@ async fn foreign_revoked_hosts_and_ended_sessions_cannot_read_or_change_preferen
             .await
             .unwrap()
             .account,
-        "host-user"
+        Some("host-user".into())
     );
     assert_eq!(
         resolve(&pool, "alice", "alice-token", None).await.unwrap(),
-        "alice"
+        Some("alice".into())
     );
     sqlx::query("UPDATE remote_hosts SET revoked_at=unixepoch() WHERE id=?")
         .bind(host.as_bytes().as_slice())
@@ -195,7 +195,7 @@ async fn malformed_account_or_scope_never_mutates_storage() {
     );
     assert_eq!(
         resolve(&pool, "alice", "alice-token", None).await.unwrap(),
-        "alice"
+        Some("alice".into())
     );
     assert!(accounts::DESCRIPTOR.validate().is_ok());
 }
@@ -216,7 +216,7 @@ async fn leading_dash_preference_persists_for_host_fallback() {
     .unwrap();
     assert_eq!(
         resolve(&pool, "alice", "alice-token", None).await.unwrap(),
-        "-root"
+        Some("-root".into())
     );
     // Resolution remains a host operation: persistence never selects uid zero.
 }
@@ -247,91 +247,82 @@ async fn queued_writer_rechecks_session_after_lock_wait() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Adds one host owned by `user` the way add-host records it: its mode and the SSH
-/// address it was added with.
-async fn added_host(pool: &SqlitePool, user: &str, mode: &str, address: &str) -> uuid::Uuid {
+/// Record the execution identity that an enrolled host supplies to its link.
+async fn enrolled_host(pool: &SqlitePool, mode: &str, uid: u32) -> uuid::Uuid {
     let host = uuid::Uuid::new_v4();
-    // The schema requires uid 0 for a rootful host and a non-zero uid otherwise.
-    let uid = if mode == "rootful" { 0 } else { 1000 };
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,?,?,?,unixepoch())")
-        .bind(host.as_bytes().as_slice()).bind(user).bind(mode).bind(uid).execute(pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO remote_host_bootstrap(host_id,address,trust_lookup) VALUES (?,?,NULL)",
-    )
-    .bind(host.as_bytes().as_slice())
-    .bind(address)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES (?,'alice',?,?,unixepoch())")
+        .bind(host.as_bytes().as_slice()).bind(mode).bind(uid).execute(pool).await.unwrap();
     host
 }
 
-/// #305 F-A: production's owner is named "K Gopal Krishna" and added `kayg@code`
-/// rootless. A rootless infraternal agent can open only its own account, so with no
-/// stored preference the login must be the SSH account the host was added with, not
-/// the infraternal username; otherwise every such add stops at its login check.
+/// User-mode hosts use the link's enrollment UID even when both stored
+/// preferences differ. An invitation join has no SSH bootstrap row.
 #[tokio::test]
-async fn a_rootless_host_with_no_preference_logs_in_as_the_account_it_was_added_with() {
+async fn rootless_hosts_delegate_login_to_the_enrolled_uid() {
     let pool = open(std::path::Path::new(":memory:")).await;
     person(&pool, "alice", "alice-token").await;
-    sqlx::query("UPDATE users SET username='K Gopal Krishna' WHERE id='alice'")
+    let joined = enrolled_host(&pool, "rootless", 501).await;
+    let added = enrolled_host(&pool, "rootless", 1000).await;
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES (?,'operator@worker')")
+        .bind(added.as_bytes().as_slice())
         .execute(&pool)
         .await
         .unwrap();
-    let rootless = added_host(&pool, "alice", "rootless", "kayg@code.vpn.kayg.org").await;
-    assert_eq!(
-        resolve(&pool, "alice", "alice-token", Some(rootless))
-            .await
-            .unwrap(),
-        "kayg"
-    );
-    #[cfg(feature = "remote")]
-    assert_eq!(
-        resolve_for_key(&pool, "alice", rootless).await.unwrap(),
-        "kayg"
-    );
-    // An explicit global choice cannot work on a rootless host either; it still
-    // never replaces the only account that host's infraternal agent can open.
+
     let service = AccountsPlugin::new(pool.clone());
+    for host in [joined, added] {
+        assert_eq!(
+            resolve(&pool, "alice", "alice-token", Some(host)).await,
+            Ok(None)
+        );
+        change(&service, Scope::Global, None, Some("deploy"))
+            .await
+            .unwrap();
+        let stored = change(&service, Scope::Host, Some(host), Some("other"))
+            .await
+            .unwrap();
+        assert_eq!(stored.account, None);
+        assert_eq!(stored.host_account.as_deref(), Some("other"));
+        assert_eq!(stored.global_account, "deploy");
+        assert_eq!(
+            resolve(&pool, "alice", "alice-token", Some(host)).await,
+            Ok(None)
+        );
+        #[cfg(feature = "remote")]
+        assert_eq!(resolve_for_key(&pool, "alice", host).await, Ok(None));
+        change(&service, Scope::Global, None, None).await.unwrap();
+    }
+}
+
+/// System-mode hosts keep host preference, global preference, then server username.
+#[tokio::test]
+async fn rootful_hosts_keep_the_named_preference_order() {
+    let pool = open(std::path::Path::new(":memory:")).await;
+    person(&pool, "alice", "alice-token").await;
+    let host = enrolled_host(&pool, "rootful", 0).await;
+    sqlx::query("INSERT INTO remote_host_bootstrap(host_id,address) VALUES (?,'root@worker')")
+        .bind(host.as_bytes().as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let service = AccountsPlugin::new(pool.clone());
+    assert_eq!(
+        resolve(&pool, "alice", "alice-token", Some(host)).await,
+        Ok(Some("alice".into()))
+    );
     change(&service, Scope::Global, None, Some("deploy"))
         .await
         .unwrap();
     assert_eq!(
-        resolve(&pool, "alice", "alice-token", Some(rootless))
-            .await
-            .unwrap(),
-        "kayg"
+        resolve(&pool, "alice", "alice-token", Some(host)).await,
+        Ok(Some("deploy".into()))
     );
-    // A rootful host honours the explicit global choice; without one it keeps the
-    // infraternal username, even when it was added as root (D336).
-    let rootful = added_host(&pool, "alice", "rootful", "root@db.example:2222").await;
-    assert_eq!(
-        resolve(&pool, "alice", "alice-token", Some(rootful))
-            .await
-            .unwrap(),
-        "deploy"
-    );
-    change(&service, Scope::Global, None, None).await.unwrap();
-    assert_eq!(
-        resolve(&pool, "alice", "alice-token", Some(rootful))
-            .await
-            .unwrap(),
-        "K Gopal Krishna",
-        "a rootful host must not default to the account it was added with"
-    );
-    // An explicit per-host choice always wins; with no host at all the infraternal
-    // username stays the fallback.
-    change(&service, Scope::Host, Some(rootless), Some("other"))
+    change(&service, Scope::Host, Some(host), Some("other"))
         .await
         .unwrap();
     assert_eq!(
-        resolve(&pool, "alice", "alice-token", Some(rootless))
-            .await
-            .unwrap(),
-        "other"
-    );
-    assert_eq!(
-        resolve(&pool, "alice", "alice-token", None).await.unwrap(),
-        "K Gopal Krishna"
+        resolve(&pool, "alice", "alice-token", Some(host)).await,
+        Ok(Some("other".into()))
     );
 }

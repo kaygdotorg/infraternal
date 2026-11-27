@@ -42,6 +42,8 @@ export interface WindowModel {
    * its birth and every later layout edit as "waiting for a session id". Cleared when a new shell in it does start.
    */
   openRefused?: boolean;
+  /** Account confirmed by the host when this session opened, valid only for that session. */
+  openedAccount?: { sessionId: string; account: string };
   user?: string;
   os?: HostPlatform;
   /** Fixed height in px, or a ratio of the column height when 1 or less; a window without one shares its column equally. */
@@ -137,3 +139,10 @@ export interface ViewModel {
 
 /** One row of the Containers list. */
 export interface ContainerRow { name: string; image: string; state: "running" | "restarting" | "exited"; cpu: string }
+
+
+/** The new shell's confirmed account takes precedence over the host inventory label. */
+export function windowTitle(model: WindowModel): { host: string; user?: string; session?: string } {
+  const user = model.openedAccount && model.openedAccount.sessionId === model.sessionId ? model.openedAccount.account : model.user;
+  return { host: model.host, ...(user ? { user } : {}), ...(model.session ? { session: model.session } : {}) };
+}

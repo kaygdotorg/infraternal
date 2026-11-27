@@ -28,7 +28,8 @@ pub struct Change {
 }
 #[derive(Serialize)]
 pub struct Preference {
-    pub account: String,
+    /// The effective named preference. Null selects the remote host’s execution account.
+    pub account: Option<String>,
     pub global_account: String,
     pub host_account: Option<String>,
 }

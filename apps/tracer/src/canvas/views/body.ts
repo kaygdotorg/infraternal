@@ -4,6 +4,7 @@
  * streams text, and a window without access says so. Each kind decides its body here and nowhere else, so a new
  * kind (remote desktop, say) is one more branch and one more adapter.
  */
+import { windowTitle } from "../model/types";
 import type { Ctx, WinRec } from "../context";
 import { el } from "../dom";
 import { onDemand } from "../../on-demand";
@@ -43,6 +44,7 @@ export function makeBody(cx: Ctx, rec: WinRec): void {
       paintLink(rec, false, undefined);
       cx.sessionUi?.paint(rec);
     }, changed: () => {
+      if (m.openedAccount) rec.card.setTitle(windowTitle(m));
       cx.store.changed();
       // A session id the window just learned (a new shell was created on the server): the inventory knows it is open.
       if (m.sessionId) cx.adapters.inventory?.attach(m.host, m.sessionId, m.session ? { name: m.session, pinned: m.sessionPinned === true } : undefined);

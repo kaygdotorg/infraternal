@@ -506,7 +506,12 @@ fn open_refusal(error: &io::Error) -> infraternal_plugin_api::admission::OpenRef
         return OpenRefusal::ProbeTimeout;
     }
     match (RootlessRefusal::of(error), error.kind()) {
-        (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin,
+        (Some(RootlessRefusal::NoMatchingLogin), _) => OpenRefusal::NoLogin {
+            execution_uid: None,
+        },
+        (Some(RootlessRefusal::ExecutionAccountMissing(uid)), _) => OpenRefusal::NoLogin {
+            execution_uid: Some(uid),
+        },
         (Some(RootlessRefusal::OtherAccount), _) => OpenRefusal::Permission,
         (
             None,
@@ -587,6 +592,17 @@ mod refusal_tests {
         );
     }
 
+    /// The host identifies an absent execution account by its enrolled UID.
+    #[test]
+    fn a_missing_execution_account_reports_its_uid() {
+        assert_eq!(
+            open_refusal(&missing_execution_account(501)),
+            OpenRefusal::NoLogin {
+                execution_uid: Some(501),
+            }
+        );
+    }
+
     /// A root host without systemd names its own reason, not "try again" (D354).
     #[test]
     fn a_root_host_without_systemd_names_why_it_cannot_log_in() {
@@ -602,7 +618,12 @@ mod refusal_tests {
         }
         // A person whose name is no account here: a root host would fall back to root, a rootless one cannot.
         let absent = crate::logins::account("j142-no-such-account").unwrap_err();
-        assert_eq!(open_refusal(&absent), OpenRefusal::NoLogin);
+        assert_eq!(
+            open_refusal(&absent),
+            OpenRefusal::NoLogin {
+                execution_uid: None
+            }
+        );
         // An account that exists but is not this infraternal agent's own.
         let other = crate::logins::account("root").unwrap_err();
         assert_eq!(open_refusal(&other), OpenRefusal::Permission);
@@ -972,6 +993,14 @@ fn login_access_allows(
     }
 }
 
+/// Name the enrolled account by UID when the host can no longer resolve its name.
+fn missing_execution_account(uid: u32) -> io::Error {
+    if uid == 0 {
+        return io::Error::other("login account absent");
+    }
+    crate::logins::RootlessRefusal::ExecutionAccountMissing(uid).denied()
+}
+
 /// Apply trusted server authority, resolve the account and fence shell creation.
 /// A positive login snapshot never clears a pending or persisted revocation.
 async fn open_requested(
@@ -1008,7 +1037,7 @@ async fn open_requested(
             (
                 nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(input.uid))
                     .map_err(io::Error::from)?
-                    .ok_or_else(|| io::Error::other("login account absent"))?,
+                    .ok_or_else(|| missing_execution_account(input.uid))?,
                 false,
             )
         };

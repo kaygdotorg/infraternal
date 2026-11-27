@@ -57,7 +57,7 @@ pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str)
                     else {
                         return;
                     };
-                    let _ = actor.prepare_login(person, Some(account), grant).await;
+                    let _ = actor.prepare_login(person, account, grant).await;
                 })
                 .await;
             }
