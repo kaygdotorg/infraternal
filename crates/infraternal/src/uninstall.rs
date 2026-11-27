@@ -74,7 +74,7 @@ pub(crate) fn run(matches: &clap::ArgMatches, json: bool) -> ExitCode {
     let yes = matches.get_flag("yes");
     let plan = match discover(matches.get_flag("system")) {
         Ok(plan) => plan,
-        Err(error) => return discovery_error(error, json),
+        Err(error) => return discovery_error(&error, json),
     };
     let sudo = plan.system && !nix::unistd::Uid::effective().is_root();
     let preview = plan.preview(keep, sudo);
@@ -89,7 +89,7 @@ pub(crate) fn run(matches: &clap::ArgMatches, json: bool) -> ExitCode {
     }
     let identity = match plan.identity() {
         Ok(identity) => identity,
-        Err(error) => return discovery_error(error, json),
+        Err(error) => return discovery_error(&error, json),
     };
     if !json {
         print(&preview, false, true);
@@ -110,7 +110,7 @@ pub(crate) fn run(matches: &clap::ArgMatches, json: bool) -> ExitCode {
         return elevate(&plan, &identity, keep, json);
     }
     if plan.identity().as_deref().ok() != Some(&identity) {
-        return discovery_error(io::ErrorKind::PermissionDenied.into(), json);
+        return discovery_error(&io::ErrorKind::PermissionDenied.into(), json);
     }
     execute(&plan, keep, json)
 }
@@ -213,7 +213,7 @@ pub(crate) fn elevated_if_requested() -> Option<ExitCode> {
         || (!json && format != "text")
     {
         return Some(discovery_error(
-            io::ErrorKind::PermissionDenied.into(),
+            &io::ErrorKind::PermissionDenied.into(),
             json,
         ));
     }
@@ -225,13 +225,13 @@ pub(crate) fn elevated_if_requested() -> Option<ExitCode> {
         {
             execute(&plan, keep == "keep", json)
         }
-        Ok(_) => discovery_error(io::ErrorKind::PermissionDenied.into(), json),
-        Err(error) => discovery_error(error, json),
+        Ok(_) => discovery_error(&io::ErrorKind::PermissionDenied.into(), json),
+        Err(error) => discovery_error(&error, json),
     })
 }
 
 /// Keep a discovery failure distinct from a failure after cleanup has started.
-fn discovery_error(error: io::Error, json: bool) -> ExitCode {
+fn discovery_error(error: &io::Error, json: bool) -> ExitCode {
     if error.kind() == io::ErrorKind::NotFound {
         return emit(
             CommandResult::new(
@@ -252,14 +252,14 @@ fn discovery_error(error: io::Error, json: bool) -> ExitCode {
 /// Ask the server before stopping its local link, then carry out owned cleanup.
 fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
     let Some(host) = plan.host.as_deref() else {
-        return discovery_error(io::ErrorKind::PermissionDenied.into(), json_output);
+        return discovery_error(&io::ErrorKind::PermissionDenied.into(), json_output);
     };
     let backup =
         keep.then(|| infraternal_plugin_api::uninstall_state::destination(&plan.base, host));
     if let Some(path) = &backup
         && let Err(error) = infraternal_plugin_api::uninstall_state::check_destination(path)
     {
-        return discovery_error(error, json_output);
+        return discovery_error(&error, json_output);
     }
     let server = crate::remote::retire_for_local_uninstall(&plan.data, host);
     let left = match remove(plan, host, keep) {
