@@ -261,8 +261,9 @@ because the original file and its checksum are already in deployment history.
   server task schedule-ins from Linux `/proc`, with no requests during the
   windows. Five fresh fixtures each contribute one 60-second window per
   configuration. With five samples, nearest-rank p95 is the maximum. The
-  proposed budget rounds that rate plus 10% up to the next whole activation
-  per minute. The CA clock check runs in both cases. The connected host also
+  initial budgets of 154 and 187 activations per minute round the measured
+  baseline p95s of 140 and 170 up after adding 10% (J1321, #602). The CA clock
+  check runs in both cases. The connected host also
   adds QUIC keepalives and acknowledgements. To run these rows alone, use
   `scripts/verify-remote-server-idle --binary /path/to/release/infraternal`
   on Linux with unprivileged user namespaces, iproute2 and OpenSSL available.

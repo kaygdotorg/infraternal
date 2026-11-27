@@ -20,10 +20,11 @@ import uuid
 sys.dont_write_bytecode = True
 from agent_fixture import cleanup, fixture_state
 from idle_canary import measure_scheduled_slices, wait_until_idle
-from latency_targets import row_line
+from latency_targets import REMOTE_IDLE_ROWS, row_line
 
 WINDOW_SECONDS = 60
 SAMPLES = 5
+
 
 def port():
     """Choose a free local TCP port inside the fixture namespace."""
@@ -208,11 +209,11 @@ def main():
     signal.signal(signal.SIGTERM, terminate)
     os.umask(0o077)
     samples = [observe(args.binary.resolve(), WINDOW_SECONDS) for _ in range(SAMPLES)]
-    for index, key in enumerate(("remote_server_idle_zero", "remote_server_idle_one")):
+    for index, (key, _, _, budget) in enumerate(REMOTE_IDLE_ROWS):
         rates = sorted(pair[index] for pair in samples)
         p95 = rates[math.ceil(.95 * len(rates)) - 1]
         print(row_line(key, source="release-server", n=len(rates), value=p95,
-                       unit="activations/min", target=math.ceil(p95 * 1.10), report_only=True))
+                       unit="activations/min", target=budget, report_only=True))
 
 
 if __name__ == "__main__":

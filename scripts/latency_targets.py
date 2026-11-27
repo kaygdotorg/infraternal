@@ -109,14 +109,15 @@ EXTRA_ROWS = (
     Row("first_paint_3g_signin", "First paint, fast 3G: sign-in visible", "reported", 5, gating=False),
     Row("first_paint_3g_connected", "First paint, fast 3G: terminal connected", "reported", 5, gating=False),
 )
-#: Remote-on scheduler activations have their own D81 report and proposed budgets (#602).
+#: Proposed D81 budgets from J1321's five dev-02 windows on the J1286 release.
+#: Keep the reference fixed so later reports can show whether rates grew (#602).
 REMOTE_IDLE_ROWS = (
-    ("remote_server_idle_zero", "Remote enabled, zero connected hosts", "CA clock check"),
-    ("remote_server_idle_one", "Remote enabled, one connected Linux host", "CA clock check, QUIC keepalives and ACKs"),
+    ("remote_server_idle_zero", "Remote enabled, zero connected hosts", "CA clock check", 154),
+    ("remote_server_idle_one", "Remote enabled, one connected Linux host", "CA clock check, QUIC keepalives and ACKs", 187),
 )
 
 #: Every key `row_line` accepts.
-ROW_KEYS = {row.key for row in (*ROWS, *EXTRA_ROWS)} | {key for key, _, _ in REMOTE_IDLE_ROWS}
+ROW_KEYS = {row.key for row in (*ROWS, *EXTRA_ROWS)} | {key for key, _, _, _ in REMOTE_IDLE_ROWS}
 
 
 def round_trip_bound_ms(rtt_ms: float, jitter_ms: float) -> float:
@@ -393,11 +394,12 @@ def report(log_text: str) -> tuple[str, bool]:
     lines.extend(("", "Remote-enabled server idle (D81, #602)", "",
                   "| Configuration | p95 activations/min | Proposed budget (activations/min) | Wakeup sources | Result |",
                   "|---|---|---|---|---|"))
-    for key, measure, sources in REMOTE_IDLE_ROWS:
+    for key, measure, sources, budget in REMOTE_IDLE_ROWS:
         fields = measured.get(key, {}).get("native", {})
-        value = f"{fields['value']} (n={fields['n']})" if fields else "-"
-        result = "REPORT" if fields else "MISSING (reported)"
-        lines.append(f"| {measure} | {value} | {fields.get('target', '-')} | {sources} | {result} |")
+        present = {"value", "n"} <= fields.keys()
+        value = f"{fields['value']} (n={fields['n']})" if present else "-"
+        result = "REPORT" if present else "MISSING (reported)"
+        lines.append(f"| {measure} | {value} | {budget} | {sources} | {result} |")
     during_rows, idle = frame_pacing(log_text)
     lines.append("")
     lines.append("Frame pacing while the rows ran (frames per second): " +
