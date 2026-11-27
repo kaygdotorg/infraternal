@@ -108,6 +108,7 @@ for (const way of ["mouse", "keyboard", "touch"] as const) {
       await expect(session).toHaveCount(0);
       await expect.poll(() => pids.filter(alive)).toEqual([]);
       await expect(windows(page)).toHaveCount(0);
+      await expect(page.getByText(/Shell was stopped by signal/)).toHaveCount(0);
       console.log(`SIDEBAR_SESSION_END ${way} confirmed_to_no_row_and_processes_ms=${Date.now() - started}`);
       expect((await request(server, context, "terminal.end", { session_id: sid })).ok).toBe(true);
     } finally {

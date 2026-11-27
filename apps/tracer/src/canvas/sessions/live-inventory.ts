@@ -20,6 +20,8 @@ import type { DeviceInfo, InventoryCapabilities, InventoryStatus, SessionInvento
 
 
 export interface LiveInventory extends SessionInventory {
+  /** Whether this tab has already asked the host to end the session. */
+  isEnding(id: string): boolean;
   /** The server answered that the host no longer has this session (#158): it becomes exited and `gone`. */
   gone(host: string, id: string, status?: number): void;
   /** Hide cached host rows while the agent cannot provide an authoritative inventory. */
@@ -53,6 +55,7 @@ export function createLiveInventory(options: { accountId: string; host: string; 
   const only = (host: string, id: string): boolean => owners.get(id) === host;
   const inventory: LiveInventory = {
     can,
+    isEnding: (id) => ending.has(id),
     setLayout(document) {
       const targets = documentWindows(document).flatMap((window) => window.target.type === "session" ? [window.target] : []);
       shared = new Set(targets.map((t) => t.id));

@@ -175,6 +175,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
     onFirstTerminalSettled: () => { hostsReady = true; startHosts(); },
     onSessionGone: inventory.gone,
+    isEndingSession: inventory.isEnding,
     getEndedSession: (host, id) => {
       const session = inventory.get(host, id);
       return session?.gone ? (session.exit ? { status: session.exit.code } : {}) : undefined;
