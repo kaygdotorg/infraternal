@@ -196,7 +196,18 @@ first-parent revisions after the original dev pin. It includes Rust
 changes to mesh state persistence. Its Cargo target starts empty and
 uses the post-GC compiler store. Home free space reached 22 GiB, below
 the host's 25 GiB build-slot floor, after the workspace comparison.
-The job's private cache path now points to its retained store on the
-build volume. That keeps the warm cache and targets on the same device.
-A cold-to-warm wall comparison therefore includes the source revision
-and storage layout changes.
+The job temporarily kept its inactive cache on the build volume.
+Home free space recovered to 254 GiB. The runner moved the store back
+to the original home path before timing, so the warm store and targets
+again use separate ext4 devices. The warm cache cap is 5 GiB after the
+earlier collection.
+
+## Later worktree measurements
+
+| Operation | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target/cache/combined bytes | Load 1m min/median/max | Hits/misses/dups |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| x86_64 static | 1,200.660 | 2,438.729 / 218.403 | 14.48 / 17.03 | 2,325,200,896 / 5,923,962,880 / 8,116,604,928 | 10.61 / 18.09 / 33.67 | 335 / 196 / 17 |
+
+The x86_64 hit rate was 61.13%. Its static SHA-256 was
+`9a071df87be6583c6d254203e51aeb62f1e96ca40e7ebb72cd3fad5e815e63ff`.
+The cold-to-warm comparison crosses revisions and host load conditions.
