@@ -337,6 +337,7 @@ async fn admission(State(api): State<Api>, request: Request, next: Next) -> Resp
         .await
         .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
 }
+/// Reserve a bounded request slot and authorize owner routes before reading their bodies.
 async fn admit_request(api: Api, request: Request, next: Next) -> Response {
     let owner = !matches!(
         request.uri().path(),

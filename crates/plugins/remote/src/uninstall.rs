@@ -247,6 +247,7 @@ fn owned_payload_cache(base: &Path, uid: u32) -> io::Result<Option<PathBuf>> {
 pub fn validate(context: &Context, home: &Path, uid: u32) -> io::Result<()> {
     validate_artifacts(context, home, uid, true)
 }
+/// Verify the receipt, service unit and launch links for this exact bootstrap install.
 fn validate_artifacts(context: &Context, home: &Path, uid: u32, unlocked: bool) -> io::Result<()> {
     let paths = layout(context, home, uid)?;
     let base = std::fs::symlink_metadata(&paths.base)?;

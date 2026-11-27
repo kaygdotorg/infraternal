@@ -4,6 +4,7 @@
 pub mod action;
 #[cfg(unix)]
 pub mod cli_alias;
+/// Private enrollment backups for native uninstall.
 #[cfg(unix)]
 pub mod uninstall_state;
 

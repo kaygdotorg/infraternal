@@ -58,6 +58,7 @@ mod test_executable;
 /// The one check that a program root will run is one only root can replace (#146).
 #[cfg(any(machine_up, feature = "plugin-server"))]
 mod trusted_program;
+/// Reviews and removes the current machine's native installation.
 #[cfg(machine_up)]
 mod uninstall;
 #[cfg(machine_up)]
