@@ -4,7 +4,7 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "../../apps/tracer/node_modules/playwright";
-import { checkInterrupt, checkKeys, endShell, openShell, origin, proveShell, until } from "./browser";
+import { checkInterrupt, checkKeys, endShell, openShell, origin, proveShell, trackPageSockets, until } from "./browser";
 
 const [out, mode, fixturePath] = process.argv.slice(2);
 
@@ -71,6 +71,7 @@ export async function signIn(label: string, width: number, height: number) {
     try {
       if (new URL(session.page.url()).origin !== origin) throw new Error("Sign-in reached an unexpected origin");
       session.page.setDefaultTimeout(10_000);
+      trackPageSockets(session.page);
       await screenshot(session.page, `${label}-sign-in.png`);
       return session;
     } catch (error) {

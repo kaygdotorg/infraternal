@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /** Browser actions and passive terminal receipts from the deployed test instance. */
-import type { ElementHandle, Page } from "../../apps/tracer/node_modules/playwright";
+import type { ElementHandle, Page, WebSocket } from "../../apps/tracer/node_modules/playwright";
 import { WebSocketFrameDecoder } from "../../packages/protocol/src/codec";
 
 /** The only public origin these owner journeys open. */
@@ -27,12 +27,27 @@ export async function until<T>(read: () => T | Promise<T>, message: string, time
   throw new Error(message);
 }
 
+/** Tracks live sockets per page so shell checks can reuse one signed-in connection. */
+const pageSockets = new WeakMap<Page, Set<WebSocket>>();
+
+/** Install before opening the app connection, then keep the same page for each shell. */
+export function trackPageSockets(page: Page) {
+  if (pageSockets.has(page)) return;
+  const sockets = new Set<WebSocket>();
+  pageSockets.set(page, sockets);
+  page.on("websocket", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+}
+
 /** Bounded wire observations for the current fresh terminal, without retaining unrelated shell traffic. */
 function observeShell(page: Page) {
   const receipt = { id: "", input: "", open: "", ended: false };
   let tail = "";
   let armed = false;
-  page.on("websocket", (socket) => {
+  /** Connect this probe to the current browser socket and any replacement during the open. */
+  const attach = (socket: WebSocket) => {
     const address = new URL(socket.url());
     if (address.origin !== origin.replace("https:", "wss:") || address.pathname !== "/v1/ws") return;
     const sent = new WebSocketFrameDecoder(), received = new WebSocketFrameDecoder();
@@ -67,7 +82,9 @@ function observeShell(page: Page) {
         }
       });
     });
-  });
+  };
+  for (const socket of pageSockets.get(page) ?? []) attach(socket);
+  page.on("websocket", attach);
   return {
     receipt,
     /** Start observing immediately before the owner clicks their chosen shell. */
@@ -82,8 +99,6 @@ function observeShell(page: Page) {
 /** Opens a fresh shell through the palette and observes its server allocation. */
 export async function openShell(page: Page, name?: string) {
   const observed = observeShell(page);
-  // Observe the socket from its start. Existing restored sessions are left alone.
-  await page.reload();
   const rows = await palette(page, name ? `Open shell on ${name}` : "Open shell");
   const row = name
     ? rows.filter({ has: page.getByText(`Open shell on ${name}`, { exact: true }) })

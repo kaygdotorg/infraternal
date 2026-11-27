@@ -133,7 +133,7 @@ async function addBySsh(page: Page, fixture: HostFixture, shot: () => Promise<vo
 }
 
 /** Follows the PTY's approval link only on the test origin and compares the displayed code and machine key. */
-async function joinHost(page: Page, host: HostFixture, platform: "linux" | "mac", shot: () => Promise<void>) {
+export async function joinHost(page: Page, host: HostFixture, platform: "linux" | "mac", shot: () => Promise<void>) {
   const run = start(host.driver, "up", origin);
   try {
     const approval = await until(() => {
@@ -170,7 +170,7 @@ async function joinHost(page: Page, host: HostFixture, platform: "linux" | "mac"
 }
 
 /** Runs the confirmation on a specific hostname and waits for the server's response. */
-async function hostAction(page: Page, name: string, verb: "Remove" | "Forget", cancel = false) {
+export async function hostAction(page: Page, name: string, verb: "Remove" | "Forget", cancel = false) {
   const label = verb === "Remove" ? `Remove host: ${name}` : `Forget ${name}`;
   const rows = await palette(page, label);
   await rows.filter({ has: page.getByText(label, { exact: true }) }).click();
@@ -277,10 +277,12 @@ export async function runFixture(config: Fixture, h: Harness) {
   if (config.linux && config.mac && (config.linux.name === config.mac.name ||
       (config.linux.ssh && config.linux.ssh === config.mac.ssh))) throw new Error("Linux and Mac fixtures must be distinct");
   if (!config.warmUpdate) await h.skip("warm-update", "No signed test update was staged");
-  const desktop = await h.signIn("fixture-desktop", 1440, 900);
+  const desktop = await h.signIn("fixture", 1440, 900);
   if (desktop) {
     try {
       if (config.warmUpdate) {
+        // Track the existing app connection once before running the two warm probes.
+        await desktop.page.reload();
         await h.shellJourney(desktop.page, "embedded-before-warm");
         const applied = await h.step("warm-update-apply", undefined, async () => {
           const output = await cli(config.warmUpdate!, "apply", origin);
@@ -294,18 +296,13 @@ export async function runFixture(config: Fixture, h: Harness) {
       else await h.step("linux-fixture", undefined, async () => {
         throw new Error("No isolated Linux fixture was configured");
       });
-    } finally {
-      await desktop.close();
-    }
-  } else await h.skip("warm-and-linux", "Desktop sign-in failed");
-  const phone = await h.signIn("fixture-iphone", 393, 852);
-  if (phone) {
-    try {
-      if (config.mac) await lifecycle(h, phone.page, config.mac, "mac");
+      await desktop.page.setViewportSize({ width: 393, height: 852 });
+      if (config.mac) await lifecycle(h, desktop.page, config.mac, "mac");
       else await h.step("mac-fixture", undefined, async () => {
         throw new Error("No leased Mac fixture was configured");
       });
+    } finally {
+      await desktop.close();
     }
-    finally { await phone.close(); }
-  } else await h.skip("mac-lifecycle", "iPhone-sized sign-in failed");
+  } else await h.skip("fixture-lifecycle", "Passkey sign-in failed");
 }
