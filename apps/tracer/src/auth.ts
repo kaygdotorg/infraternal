@@ -282,6 +282,7 @@ export interface AccountSummary {
   recovery_set_up: boolean;
 }
 
+/** Reads the signed-in account's passkey count and recovery setup state from the server. */
 export async function readAccountSummary(): Promise<AccountSummary> {
   const summary = await post<AccountSummary>("account-summary", {});
   if (typeof summary.user_id !== "string" || typeof summary.session_incarnation !== "string"
@@ -403,6 +404,7 @@ export async function addSecondPasskey(userId: string): Promise<void> {
   }, { kind: "passkey.add" });
 }
 
+/** Runs passkey sign-in and unwraps the account data-encryption key for the browser session or a bound action. */
 async function unlockWithPasskey(
   device: string,
   expectedUser?: string,
@@ -787,6 +789,7 @@ function base64url(bytes: Uint8Array): string {
   return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
+/** Decodes an unpadded base64url string into bytes, rejecting malformed or non-canonical encodings. */
 function decodeBase64url(value: string): Uint8Array {
   if (!/^[A-Za-z0-9_-]*$/.test(value) || value.length % 4 === 1) throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
@@ -796,6 +799,7 @@ function decodeBase64url(value: string): Uint8Array {
   return bytes;
 }
 
+/** Validates that a JSON value from the server is a non-null plain object. */
 function record(value: unknown, name: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new AuthError("Received an invalid response from the server. Reload the page or update the server.");
   return value as Record<string, unknown>;
@@ -806,6 +810,7 @@ function requiredString(value: unknown, name: string): string {
   return value;
 }
 
+/** Validates that a JSON field is a lowercase canonical UUID string. */
 function canonicalUuid(value: unknown, name: string): string {
   const result = requiredString(value, name);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result)) {

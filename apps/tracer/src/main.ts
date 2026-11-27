@@ -906,6 +906,7 @@ async function checkForegroundSession(): Promise<void> {
 }
 
 
+/** Turns a sign-in or approval error into a safe, plain-language message for the user. */
 function safeMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
     return "Passkey prompt was cancelled or timed out. Try again.";

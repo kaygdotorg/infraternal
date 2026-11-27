@@ -5,6 +5,7 @@ import { onDoubleActivate } from "./double-activate";
 import { cssPx } from "./ui-scale";
 import { triggeredByKeyboard } from "./input-source";
 import { EASE_OUT } from "./motion";
+/** One selectable leaf or group caption inside a branched sidebar section. */
 export interface BranchLeaf {
   id: string;
   label: string;
@@ -68,6 +69,7 @@ export interface BranchedMenu {
 export const branchRowId = (row: Element): string | undefined => (row as HTMLElement).dataset.id ?? row.querySelector<HTMLElement>(".bm-leaf")?.dataset.id;
 
 const DETACHED_NAME = "Detached";
+/** Default warm tooltips for session activity and completion marks. */
 const MARK_TIP = { output: "New output", ok: "Finished", fail: "Failed" } as const;
 const MARK_NAME ={ output: "new output", ok: "command finished", fail: "command failed" } as const;
 const RADIUS = 8;

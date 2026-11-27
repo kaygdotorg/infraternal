@@ -9,6 +9,7 @@ import { ServiceError, type AuthorityRootStatus, type AuthorityStatus } from "./
 interface CaStart extends AuthStart { ca: { member: string; generation: number; salt: string; operation?: "setup" | "unlock" } }
 interface StoredWrap { kind: string; key_id: string; wrap: Wrap; prf_input?: string }
 
+/** Sends a same-origin JSON POST to `/remote/ca/<path>` and maps HTTP failures to plain-language errors. */
 async function post<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(`/remote/ca/${path}`, { method: "POST", credentials: "same-origin", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new ServiceError(response.status === 404 || response.status === 503 ? "Host connections are not configured on this server. Configure the remote component on the server, then try again." : "Couldn't unlock host connections. Use an administrator passkey and try again.");

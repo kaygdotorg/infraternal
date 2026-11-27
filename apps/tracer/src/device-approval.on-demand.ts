@@ -80,6 +80,7 @@ export function mountDeviceApprovalSuccess(host: HTMLElement, kind: ApprovalKind
   </section>`;
 }
 
+/** Renders the loading card while the server looks up the pending join or sign-in request. */
 function renderChecking(host: HTMLElement, join: boolean): void {
   host.innerHTML = `<section class="auth-screen" aria-label="${join ? "Add machine approval" : "Device sign-in approval"}">
     <section class="auth-card auth-signin ui-overlay-surface" aria-labelledby="device-approval-title">

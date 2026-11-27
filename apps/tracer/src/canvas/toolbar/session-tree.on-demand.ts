@@ -17,6 +17,7 @@ declare const __CLUSTERS_PREVIEW__: boolean;
  */
 const WORDS = typeof __CLUSTERS_PREVIEW__ !== "undefined" && __CLUSTERS_PREVIEW__ && new URLSearchParams(location.search).get("marks") === "words";
 
+/** Converts one session record into a sidebar branch leaf with its state dot, activity mark, and tooltip. */
 const leaf = (host: string, s: SessionRecord, renamable: boolean): BranchSection["leaves"][number] => {
   const code = s.exit?.code ?? 0;
   const mark = s.state === "exited" ? (code !== 0 ? "fail" : "ok") : s.activity;
