@@ -28,9 +28,9 @@
 //! identity.
 
 use super::{
-    Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal, fail, join_approval_link,
-    local_hostname, machine_key_short, machine_start_body, map_remote_failure, needs_terminal,
-    print_approval, server_url, start_approval, take_join_key, trusted_tool, wait_for_approval,
+    Cancellation, Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal,
+    join_approval_link, local_hostname, machine_key_short, machine_start_body, map_remote_failure,
+    needs_terminal, print_approval, server_url, start_approval, trusted_tool, wait_for_approval,
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -47,6 +47,7 @@ use std::{
     fs,
     io::{self, ErrorKind, Read},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
@@ -63,6 +64,8 @@ const LAUNCHCTL: &str = "/bin/launchctl";
 
 /// Where one person's user-mode install lives (D395).
 pub(super) struct Paths {
+    /// The account home, locked for the duration of an install or removal.
+    home: PathBuf,
     /// `~/Library/Application Support/infraternal`.
     base: PathBuf,
     /// The enrollment directory.
@@ -97,7 +100,15 @@ impl Paths {
             legacy_launch_agent: library
                 .join(format!("LaunchAgents/{}.plist", legacy::AGENT_LABEL)),
             base,
+            home,
         })
+    }
+
+    /// Serialize this account's install and removal without creating a lock path.
+    fn lock(&self) -> io::Result<fs::File> {
+        let home = fs::File::open(&self.home)?;
+        home.try_lock().map_err(io::Error::from)?;
+        Ok(home)
     }
 
     /// The receipt naming this install's host.
@@ -171,19 +182,24 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
 }
 
 /// Install the mesh helper for `uid` with the one `sudo` prompt of user mode.
-fn install_helper(sudo: &Path, executable: &Path, uid: u32) -> Result<(), Failure> {
+async fn install_helper(
+    sudo: &Path,
+    executable: &Path,
+    uid: u32,
+    cancelled: &Cancellation,
+) -> Result<(), Failure> {
     eprintln!(
         "infraternal needs your administrator password once, to let its mesh helper create the network interface, one route and a DNS entry."
     );
-    let status = Command::new(sudo)
+    let mut command = Command::new(sudo);
+    command
         .arg("--")
         .arg(executable)
         .arg(macos_helper::INSTALL_ENTRY)
-        .arg(uid.to_string())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
+        .arg(uid.to_string());
+    let status = cancelled
+        .sudo_status(command)
+        .await
         .map_err(|_| Failure::SudoUnavailable)?;
     if status.success() {
         Ok(())
@@ -193,86 +209,92 @@ fn install_helper(sudo: &Path, executable: &Path, uid: u32) -> Result<(), Failur
 }
 
 /// Request a fresh user-mode approval, enroll as this person, and start the `LaunchAgent`.
-pub(crate) fn run(server_input: &str, json_output: bool) -> ExitCode {
-    let server = match server_url(server_input) {
-        Ok(server) => server,
-        Err(failure) => return fail(json_output, failure),
-    };
+pub(crate) async fn run(
+    server_input: &str,
+    json_output: bool,
+    cancelled: &Cancellation,
+) -> Result<ExitCode, Failure> {
+    let server = server_url(server_input)?;
     let origin = server.origin().ascii_serialization();
     if !approval_display_is_terminal(json_output) {
-        return needs_terminal(&origin, json_output);
+        return Ok(needs_terminal(&origin, json_output));
     }
     let uid = nix::unistd::Uid::current().as_raw();
     if uid == 0 || nix::unistd::Uid::effective().is_root() {
         eprintln!(
             "infraternal up: run this as the person who uses this Mac, without sudo. For a Mac without a logged-in user, use infraternal up --system."
         );
-        return fail(json_output, Failure::InstallConflict);
+        return Err(Failure::InstallConflict);
     }
-    let Ok(executable) = env::current_exe() else {
-        return fail(json_output, Failure::Permission);
-    };
-    let sudo = match trusted_tool(&SUDO_CANDIDATES, Failure::SudoUnavailable) {
-        Ok(sudo) => sudo,
-        Err(failure) => return fail(json_output, failure),
-    };
-    let Ok(paths) = Paths::for_uid(uid) else {
-        return fail(json_output, Failure::LocalState);
-    };
-    if let Some(outcome) = refresh_existing(&paths, uid, &sudo, &executable, json_output) {
+    let executable = env::current_exe().map_err(|_| Failure::Permission)?;
+    let sudo = trusted_tool(&SUDO_CANDIDATES, Failure::SudoUnavailable)?;
+    let paths = Paths::for_uid(uid).map_err(|_| Failure::LocalState)?;
+    let _lock = paths.lock().map_err(|error| {
+        eprintln!("Could not lock this account for installation: {error}");
+        Failure::InstallConflict
+    })?;
+    if let Some(outcome) =
+        refresh_existing(&paths, uid, &sudo, &executable, json_output, cancelled).await
+    {
         return outcome;
     }
-    if let Err(error) = preflight(&paths, uid) {
+    preflight(&paths, uid).map_err(|error| {
         eprintln!("{error}");
-        return fail(json_output, Failure::InstallConflict);
-    }
-    if let Err(failure) = install_helper(&sudo, &executable, uid) {
-        return fail(json_output, failure);
-    }
-    // From here every failure also removes the helper this run installed.
+        Failure::InstallConflict
+    })?;
     let mut install = Install::new(paths, uid);
+    install_helper(&sudo, &executable, uid, cancelled).await?;
+    cancelled.check().map_err(|_| Failure::Failed)?;
     let hostname = local_hostname();
-    let result = enroll_and_start(
+    let (fingerprint, short_key) = enroll_and_start(
         &mut install,
         &server,
         &origin,
         &hostname,
         &executable,
         json_output,
-    );
-    match result {
-        Ok((fingerprint, short_key)) => {
-            install.committed = true;
-            let paths = &install.paths;
-            let local_network = wait_for_local_network(&paths.state);
-            let path_line = paths.path_line();
-            emit(
-                CommandResult::new(
-                    "up",
-                    CommandState::Ready,
-                    "This Mac joined the server in user mode and its infraternal agent is running.",
-                    json!({
-                        "server": origin,
-                        "hostname": hostname,
-                        "mode": "user",
-                        "key_fingerprint": fingerprint,
-                        "machine_key": short_key,
-                        "service": AGENT_LABEL,
-                        "status": "active",
-                        "path": paths.binary.display().to_string(),
-                        "local_network": local_network.map(LocalNetwork::word),
-                    }),
-                )
-                .with_body(format!(
-                    "Mac joined as {hostname} (user mode).\nService: active ({AGENT_LABEL})\nCommand: {}\nAdd it to your PATH:\n  {path_line}",
-                    paths.binary.display()
-                )),
-                json_output,
-                Exit::Ok,
-            )
-        }
-        Err(failure) => fail(json_output, failure),
-    }
+        cancelled,
+    )
+    .await?;
+    install.committed = true;
+    let paths = &install.paths;
+    let local_network = local_network_outcome(&paths.state, cancelled).await?;
+    let path_line = paths.path_line();
+    Ok(emit(
+        CommandResult::new(
+            "up",
+            CommandState::Ready,
+            "This Mac joined the server in user mode and its infraternal agent is running.",
+            json!({
+                "server": origin,
+                "hostname": hostname,
+                "mode": "user",
+                "key_fingerprint": fingerprint,
+                "machine_key": short_key,
+                "service": AGENT_LABEL,
+                "status": "active",
+                "path": paths.binary.display().to_string(),
+                "local_network": local_network.map(LocalNetwork::word),
+            }),
+        )
+        .with_body(format!(
+            "Mac joined as {hostname} (user mode).\nService: active ({AGENT_LABEL})\nCommand: {}\nAdd it to your PATH:\n  {path_line}",
+            paths.binary.display()
+        )),
+        json_output,
+        Exit::Ok,
+    ))
+}
+
+/// The optional Local Network prompt follows commit, so cancellation keeps the install.
+async fn local_network_outcome(
+    state: &Path,
+    cancelled: &Cancellation,
+) -> Result<Option<LocalNetwork>, Failure> {
+    cancelled.during(wait_for_local_network(state)).await.map_err(|_| {
+        eprintln!("The infraternal agent and mesh helper remain installed. Use Remove host on the server to uninstall this Mac.");
+        Failure::Failed
+    })
 }
 
 /// How long `up` waits for the person to answer the Local Network alert.
@@ -287,23 +309,9 @@ const LOCAL_NETWORK_WAIT: Duration = Duration::from_secs(90);
 /// [`LOCAL_NETWORK_WAIT`] for it. It never fails the join: peers across the internet work
 /// either way, and the agent keeps checking, so a later Allow works without a restart. Returns
 /// the last state seen, if any.
-fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
+async fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
     let file = state.join(macos_local_network::STATE_FILE);
-    let read = || {
-        fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| LocalNetwork::from_word(&text))
-    };
-    let poll = |until: Instant, done: &dyn Fn(LocalNetwork) -> bool| {
-        let mut last = read();
-        while !last.is_some_and(done) && Instant::now() < until {
-            // sleep: the agent publishes its answer only through this file.
-            std::thread::sleep(Duration::from_millis(250));
-            last = read();
-        }
-        last
-    };
-    let first = poll(Instant::now() + Duration::from_secs(5), &|_| true);
+    let first = poll_local_network(&file, Duration::from_secs(5), |_| true).await;
     if matches!(
         first,
         Some(LocalNetwork::Allowed | LocalNetwork::NoLocalNetwork)
@@ -314,9 +322,10 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         "macOS asks whether infraternal may find devices on your local network. Click Allow, so this Mac reaches mesh peers on the same network directly. Waiting up to {} seconds…",
         LOCAL_NETWORK_WAIT.as_secs()
     );
-    let last = poll(Instant::now() + LOCAL_NETWORK_WAIT, &|state| {
+    let last = poll_local_network(&file, LOCAL_NETWORK_WAIT, |state| {
         state == LocalNetwork::Allowed
-    });
+    })
+    .await;
     if last == Some(LocalNetwork::Allowed) {
         eprintln!("Local Network access allowed.");
     } else {
@@ -325,6 +334,25 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         );
     }
     last
+}
+
+/// Wait for the permission state file to report a matching answer or reach the deadline.
+async fn poll_local_network(
+    file: &Path,
+    timeout: Duration,
+    done: impl Fn(LocalNetwork) -> bool,
+) -> Option<LocalNetwork> {
+    let until = Instant::now() + timeout;
+    loop {
+        let last = fs::read_to_string(file)
+            .ok()
+            .and_then(|text| LocalNetwork::from_word(&text));
+        if last.is_some_and(&done) || Instant::now() >= until {
+            return last;
+        }
+        // sleep: the agent publishes its answer only through this file.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
 
 /// Bring an existing user-mode install of this account up to this build, or `None` when there
@@ -339,13 +367,14 @@ fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
 /// replaces the agent binary, and restarts the agent; the enrollment is kept. Comparing the
 /// bytes, not a version number, also carries a fixed helper to Macs whose protocol did not
 /// change. When both already match, `None` lets [`preflight`] report the existing install.
-fn refresh_existing(
+async fn refresh_existing(
     paths: &Paths,
     uid: u32,
     sudo: &Path,
     executable: &Path,
     json_output: bool,
-) -> Option<ExitCode> {
+    cancelled: &Cancellation,
+) -> Option<Result<ExitCode, Failure>> {
     if !exists(&paths.receipt()).ok()? || macos_helper::registered_uid().ok()? != Some(uid) {
         return None;
     }
@@ -376,8 +405,12 @@ fn refresh_existing(
     }
     // The helper first: its install also removes an old helper (one `sudo` prompt), and a
     // refused password leaves everything as it was.
-    if !helper_current && let Err(failure) = install_helper(sudo, executable, uid) {
-        return Some(fail(json_output, failure));
+    if !helper_current && let Err(failure) = install_helper(sudo, executable, uid, cancelled).await
+    {
+        eprintln!(
+            "The existing user-mode installation was kept. Run infraternal up again to finish the update."
+        );
+        return Some(Err(failure));
     }
     let refreshed = (|| {
         if !agent_current {
@@ -389,11 +422,22 @@ fn refresh_existing(
             restart_agent(uid)
         }
     })();
-    let local_network = (moving && refreshed.is_ok())
-        .then(|| wait_for_local_network(&paths.state))
-        .flatten();
+    if cancelled.received().is_some() {
+        eprintln!(
+            "The existing user-mode installation was kept. Run infraternal up again to finish the update."
+        );
+        return Some(Err(Failure::Failed));
+    }
+    let local_network = if moving && refreshed.is_ok() {
+        match local_network_outcome(&paths.state, cancelled).await {
+            Ok(state) => state,
+            Err(failure) => return Some(Err(failure)),
+        }
+    } else {
+        None
+    };
     Some(match refreshed {
-        Ok(()) => emit(
+        Ok(()) => Ok(emit(
             CommandResult::new(
                 "up",
                 CommandState::Ready,
@@ -416,10 +460,13 @@ fn refresh_existing(
             )),
             json_output,
             Exit::Ok,
-        ),
+        )),
         Err(error) => {
             eprintln!("{error}");
-            fail(json_output, Failure::Partial)
+            eprintln!(
+                "The existing user-mode installation was kept. Run infraternal up again to finish the update."
+            );
+            Err(Failure::Partial)
         }
     })
 }
@@ -563,37 +610,34 @@ fn migrate_agent(paths: &Paths, uid: u32) -> io::Result<()> {
 }
 
 /// The approval, enrollment and activation, all under the install's rollback.
-fn enroll_and_start(
+async fn enroll_and_start(
     install: &mut Install,
     server: &url::Url,
     origin: &str,
     hostname: &str,
     executable: &Path,
     json_output: bool,
+    cancelled: &Cancellation,
 ) -> Result<(String, String), Failure> {
     let host_id = uuid::Uuid::new_v4();
-    let data = crate::remote::default_data().map_err(|_| Failure::LocalState)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|_| Failure::Runtime)?;
-    let key_digest = runtime
-        .block_on(crate::remote::prepare_machine_join_key(origin, &data))
-        .map_err(|error| map_remote_failure(&error))?;
-    let _key_copy = super::PendingKeyCopy(&data);
-    let key_pkcs8 = take_join_key(&data)?;
-    if crate::remote::key_digest_from_pkcs8(&key_pkcs8).ok() != Some(key_digest) {
-        return Err(Failure::LocalState);
-    }
-    let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(key_digest));
-    let short_key = machine_key_short(&fingerprint).ok_or(Failure::Failed)?;
     let join = JoinMode::User(install.uid);
-    let body = machine_start_body(host_id, hostname, &fingerprint, join)?;
-    let approval = runtime.block_on(start_approval(server, &body))?;
-    let link = join_approval_link(server, &approval.user_code);
-    print_approval(json_output, &short_key, &approval.user_code, &link)?;
-    let mut invitation =
-        runtime.block_on(wait_for_approval(server, &approval, host_id, origin, join))?;
+    let approval = async {
+        let (key_pkcs8, key_digest) = crate::remote::prepare_machine_join_key(origin)
+            .await
+            .map_err(|error| map_remote_failure(&error))?;
+        let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(key_digest));
+        let short_key = machine_key_short(&fingerprint).ok_or(Failure::Failed)?;
+        let body = machine_start_body(host_id, hostname, &fingerprint, join)?;
+        let approval = start_approval(server, &body).await?;
+        let link = join_approval_link(server, &approval.user_code);
+        print_approval(json_output, &short_key, &approval.user_code, &link)?;
+        let invitation = wait_for_approval(server, &approval, host_id, origin, join).await?;
+        Ok::<_, Failure>((invitation, key_pkcs8, fingerprint, short_key))
+    };
+    let (mut invitation, key_pkcs8, fingerprint, short_key) = cancelled
+        .during(approval)
+        .await
+        .map_err(|_| Failure::Failed)??;
     let invitation_bytes =
         Zeroizing::new(serde_json::to_vec(&invitation.0).map_err(|_| Failure::Failed)?);
     invitation.wipe();
@@ -602,20 +646,22 @@ fn enroll_and_start(
         Failure::LocalState
     })?;
     let join_url = format!("{origin}/remote/join");
-    let data_directory = install.paths.data.clone();
-    super::termination::run(|_interrupted| async move {
-        crate::remote::join_with_key(&join_url, &data_directory, &invitation_bytes, &key_pkcs8)
-            .await
-            .map_err(|error| map_remote_failure(&error))
-    })
-    .map_err(|error| {
-        eprintln!("{error}");
-        Failure::Failed
-    })??;
-    install.activate(executable, host_id).map_err(|error| {
-        eprintln!("{error}");
-        Failure::Partial
-    })?;
+    cancelled
+        .during(crate::remote::join_with_key(
+            &join_url,
+            &install.paths.data,
+            &invitation_bytes,
+            &key_pkcs8,
+        ))
+        .await
+        .map_err(|_| Failure::Failed)?
+        .map_err(|error| map_remote_failure(&error))?;
+    install
+        .activate(executable, host_id, cancelled)
+        .map_err(|error| {
+            eprintln!("{error}");
+            Failure::Partial
+        })?;
     Ok((fingerprint, short_key))
 }
 
@@ -634,7 +680,7 @@ struct Install {
 }
 
 impl Install {
-    /// Start tracking an install whose helper is already registered.
+    /// Start tracking before sudo can register the helper.
     fn new(paths: Paths, uid: u32) -> Self {
         Self {
             paths,
@@ -725,7 +771,13 @@ impl Install {
     }
 
     /// Publish the binary, receipt and `LaunchAgent`, start it, and wait until launchd runs it.
-    fn activate(&mut self, source: &Path, host: uuid::Uuid) -> io::Result<()> {
+    fn activate(
+        &mut self,
+        source: &Path,
+        host: uuid::Uuid,
+        cancelled: &Cancellation,
+    ) -> io::Result<()> {
+        cancelled.check()?;
         let binary = self.paths.binary.clone();
         let mut input = fs::File::open(source)?;
         if !input.metadata()?.is_file() {
@@ -759,6 +811,7 @@ impl Install {
         let launch_agent = self.paths.launch_agent.clone();
         write_new(&launch_agent, plist.as_bytes(), 0o644)?;
         self.created.push(launch_agent.clone());
+        cancelled.check()?;
         self.agent_loaded = true;
         launchctl_checked(&[
             "bootstrap".into(),
@@ -766,7 +819,11 @@ impl Install {
             launch_agent.into(),
         ])?;
         let deadline = Instant::now() + START_WAIT;
-        while !agent_running(self.uid)? {
+        loop {
+            cancelled.check()?;
+            if agent_running(self.uid)? {
+                return cancelled.check();
+            }
             if Instant::now() >= deadline {
                 return Err(io::Error::other(
                     "launchd did not report the infraternal agent as running",
@@ -775,7 +832,6 @@ impl Install {
             // sleep: launchd exposes job state only through polling.
             std::thread::sleep(Duration::from_millis(200));
         }
-        Ok(())
     }
 }
 
@@ -786,30 +842,70 @@ impl Drop for Install {
         if self.committed {
             return;
         }
-        if self.agent_loaded {
-            let _ = stop_agent(self.uid);
-        }
-        for path in self.created.drain(..).rev() {
-            let result = match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path),
-                Ok(_) => fs::remove_file(&path),
-                Err(_) => continue,
-            };
-            if let Err(error) = result {
-                eprintln!(
-                    "infraternal: could not remove {} during rollback ({:?}); remove it before retrying.",
-                    path.display(),
-                    error.kind()
-                );
-            }
-        }
-        if let Err(error) = macos_helper::request(&Request::Remove, None) {
+        if self.agent_loaded && stop_agent(self.uid).is_err() {
             eprintln!(
-                "infraternal: the mesh helper could not remove itself ({error}); run sudo {} {} to remove it.",
-                macos_helper::installed_binary(),
-                macos_helper::REMOVE_ENTRY
+                "Could not stop the infraternal agent. Its installation was kept so it can be removed from the server."
             );
+            return;
         }
+        let local_removed = self.created.drain(..).rev().fold(true, |removed, path| {
+            let result = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => {
+                    if path.starts_with(&self.paths.base) || path == self.paths.logs {
+                        fs::remove_dir_all(&path)
+                    } else {
+                        fs::remove_dir(&path)
+                    }
+                }
+                Ok(_) => fs::remove_file(&path),
+                Err(error) if error.kind() == ErrorKind::NotFound => return removed,
+                Err(error) => Err(error),
+            };
+            removed & result.is_ok()
+        });
+        let helper_removed = (|| {
+            if macos_helper::registered_uid()? != Some(self.uid) {
+                return Ok(false);
+            }
+            macos_helper::request(&Request::Remove, None)?;
+            wait_for_helper_unload()?;
+            Ok::<_, io::Error>(true)
+        })();
+        let result = match (local_removed, helper_removed) {
+            (true, Ok(true)) => {
+                "Removed the unfinished user-mode installation and its mesh helper."
+            }
+            (true, Ok(false)) => "No user-mode installation was left by this attempt.",
+            (false, Ok(_)) => {
+                "Some user-mode files remain. Remove the unfinished installation before retrying."
+            }
+            (_, Err(_)) => {
+                eprintln!(
+                    "Cleanup could not be confirmed. Run infraternal up again to reuse the helper, or run sudo {} {} to remove it.",
+                    macos_helper::installed_binary(),
+                    macos_helper::REMOVE_ENTRY,
+                );
+                return;
+            }
+        };
+        eprintln!("{result}");
+    }
+}
+
+/// Wait for the helper's deferred bootout before another attempt can register the same job.
+fn wait_for_helper_unload() -> io::Result<()> {
+    let deadline = Instant::now() + START_WAIT;
+    let label = format!("system/{}", macos_user_mode::HELPER_LABEL);
+    loop {
+        let output = launchctl(&["print".into(), label.clone().into()])?;
+        if !output.status.success() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other("launchd did not unload the mesh helper"));
+        }
+        // sleep: the helper replies before unloading its own job.
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -822,14 +918,18 @@ fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         .mode(mode)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)?;
-    file.write_all(contents)?;
-    file.sync_all()
+    let result = file.write_all(contents).and_then(|()| file.sync_all());
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result
 }
 
 /// Run `/bin/launchctl` with a clean environment.
 fn launchctl(arguments: &[OsString]) -> io::Result<std::process::Output> {
     Command::new(LAUNCHCTL)
         .args(arguments)
+        .process_group(0)
         .env_clear()
         .stdin(Stdio::null())
         .output()
@@ -953,6 +1053,7 @@ pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
 
 /// Stop the agent, remove the helper's resolver files and registration, then this person's files.
 fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
+    let _lock = paths.lock()?;
     let mut receipt = String::new();
     fs::File::open(paths.receipt())?
         .take(64)
@@ -975,7 +1076,9 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
     // An unreadable registration is reported after the person's own files are gone, with the
     // administrator command that removes the helper; it is never read as "no helper" (J1087).
     let helper = match macos_helper::registration_for_current_user() {
-        Ok(true) => macos_helper::request(&Request::Remove, None).map(|_| ()),
+        Ok(true) => {
+            macos_helper::request(&Request::Remove, None).and_then(|_| wait_for_helper_unload())
+        }
         Ok(false) => Ok(()),
         Err(error) => Err(io::Error::new(
             error.kind(),

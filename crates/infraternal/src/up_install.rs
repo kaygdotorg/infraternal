@@ -1010,10 +1010,13 @@ impl Install {
 impl Drop for Install {
     /// Normal errors and handled signals use the same cleanup as next-run durable recovery.
     fn drop(&mut self) {
+        let started = !self.created.is_empty();
         if self.rollback().is_err() {
             eprintln!(
-                "Could not finish rollback of this infraternal installation. Retry sudo infraternal up to recover its private journal."
+                "Could not finish rollback of this infraternal installation. Retry infraternal up to recover its private journal."
             );
+        } else if started && !self.committed {
+            eprintln!("Removed the unfinished system installation.");
         }
     }
 }

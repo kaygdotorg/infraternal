@@ -255,7 +255,7 @@ pub fn run_if_requested() -> Option<ExitCode> {
                 ExitCode::FAILURE
             });
         }
-        (INSTALL_ENTRY, Some(uid), 2) => install(uid),
+        (INSTALL_ENTRY, Some(uid), 2) => install_to_completion(uid),
         (REMOVE_ENTRY, None, 1) => remove_registration(None),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -947,6 +947,20 @@ pub(crate) fn open_utun() -> io::Result<(OwnedFd, String)> {
 // Install and removal (root).
 // ---------------------------------------------------------------------------
 
+/// Finish a privileged publication or its rollback even if sudo forwards Ctrl-C.
+fn install_to_completion(uid: u32) -> io::Result<()> {
+    use nix::sys::signal::{SigSet, Signal};
+
+    // This entry runs on its own, before any threads. Sudo still cancels its prompt;
+    // once root starts publishing, the caller waits and can remove the registered job.
+    let mut stop = SigSet::empty();
+    for signal in [Signal::SIGINT, Signal::SIGTERM, Signal::SIGHUP] {
+        stop.add(signal);
+    }
+    stop.thread_block()?;
+    install(uid)
+}
+
 /// Install or refresh the helper for `uid` and load it into launchd.
 ///
 /// Copies the running binary to [`HELPER_BINARY`] (root-owned, 0755), writes the property
@@ -960,6 +974,10 @@ fn install(uid: u32) -> io::Result<()> {
             "user mode needs a real, non-root account",
         ));
     }
+    let _lock = crate::macos_service::MachineLock::acquire()?;
+    if Path::new(crate::macos_service::MACHINE_BASE).exists() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
     if ROOT_MODE_PLISTS
         .iter()
         .any(|plist| Path::new(plist).exists())
@@ -969,7 +987,8 @@ fn install(uid: u32) -> io::Result<()> {
             "this Mac runs infraternal in root mode; remove that first",
         ));
     }
-    match registered_uid()? {
+    let previous = registered_uid()?;
+    match previous {
         Some(registered) if registered != uid => {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -986,6 +1005,41 @@ fn install(uid: u32) -> io::Result<()> {
     }
     // The new helper goes in before the old one goes out, so a failed install leaves the Mac
     // with a helper that still works. Both listen on their own sockets, so they never clash.
+    let old_binary = match fs::symlink_metadata(HELPER_BINARY) {
+        Ok(file) => Some((file.dev(), file.ino())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let result = publish_helper(uid);
+    if result.is_err() && previous.is_none() {
+        // Nothing else owned this registration at preflight. A failed bootstrap
+        // has no usable socket through which the caller could ask for removal.
+        if let Err(error) = remove_unfinished_helper(uid, old_binary) {
+            eprintln!("Could not remove the unfinished mesh helper: {error}");
+        }
+    }
+    result
+}
+
+/// Remove publication files from a fresh install whose launchd setup failed.
+fn remove_unfinished_helper(uid: u32, old_binary: Option<(u64, u64)>) -> io::Result<()> {
+    if registered_uid()? == Some(uid) {
+        let _ = launchctl(&["bootout", &format!("system/{HELPER_LABEL}")]);
+        remove_root_file(Path::new(HELPER_PLIST))?;
+        remove_helper_socket()?;
+    }
+    match fs::symlink_metadata(HELPER_BINARY) {
+        Ok(file) if Some((file.dev(), file.ino())) != old_binary => {
+            remove_root_file(Path::new(HELPER_BINARY))
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Publish the current helper and retire an old registration only after it works.
+fn publish_helper(uid: u32) -> io::Result<()> {
     publish_binary(&std::env::current_exe()?)?;
     publish_file(
         Path::new(HELPER_PLIST),
@@ -1062,6 +1116,11 @@ fn remove_registration(uid: Option<u32>) -> io::Result<()> {
         // An administrator's removal also takes the helper of a build before #580.
         retire_legacy_helper(None)?;
     }
+    remove_helper_socket()
+}
+
+/// Unlink the current socket after removal so new clients cannot connect to it.
+fn remove_helper_socket() -> io::Result<()> {
     // launchd keeps its listening socket open until the job is unloaded but never unlinks
     // the path, so removal does: no new connection can arrive, and nothing is left behind
     // (found on the Mac VM). Only root can create entries in /var/run, so the path is ours.
