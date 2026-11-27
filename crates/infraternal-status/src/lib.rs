@@ -969,7 +969,17 @@ fn saved_peer_count(dir: &Path, anchor: &[u8]) -> Option<usize> {
     let Some(token) = public_journal::read_token(anchor) else {
         return peer_count(anchor);
     };
-    let file = fs::File::open(dir.join(public_journal::JOURNAL_FILE)).ok()?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
+    }
+    let file = options.open(dir.join(public_journal::JOURNAL_FILE)).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut body = Vec::new();
     file.take(public_journal::MAX_BYTES as u64 + 1)
         .read_to_end(&mut body)

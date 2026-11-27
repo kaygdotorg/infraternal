@@ -1149,6 +1149,27 @@ impl Store {
         #[cfg(feature = "cutoff-measure")]
         let _write =
             crate::cutoff_measure::Stage::new(next.node, next.version, "journal_delta_write");
+        let result = self.commit_peer_revision(previous, next, backend, &change, state);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::FileTooLarge)
+        {
+            // Keep supporting full snapshots that exceed the append format's checkpoint bound.
+            return self.save(&state());
+        }
+        result
+    }
+
+    /// Check the durable base and publish a record while no other Store can write it.
+    #[cfg(target_os = "linux")]
+    fn commit_peer_revision(
+        &self,
+        previous: &Config,
+        next: &Config,
+        backend: Option<crate::firewall::Backend>,
+        change: &delta::Delta,
+        state: impl FnOnce() -> State,
+    ) -> io::Result<()> {
         let writer = lock_mesh_store_writer(
             self.path.parent().ok_or(io::ErrorKind::InvalidInput)?,
             &self.directory_lease,
@@ -1158,7 +1179,7 @@ impl Store {
             && let Some(file) = delta::open(&self.delta_path, true)?
             && active.matches(&self.path, &file, previous.version, backend)?
         {
-            return active.append(file, &self.delta_path, &change, next.peers.len(), state);
+            return active.append(file, &self.delta_path, change, next.peers.len(), state);
         }
 
         // Another Store, an old binary or recovery may have written while this handle was open.
@@ -1188,7 +1209,7 @@ impl Store {
         }
         let active = if let Some(mut active) = loaded {
             let file = delta::open(&self.delta_path, true)?.ok_or(io::ErrorKind::InvalidData)?;
-            active.append(file, &self.delta_path, &change, next.peers.len(), state)?;
+            active.append(file, &self.delta_path, change, next.peers.len(), state)?;
             active
         } else {
             delta::start(&self.path, &self.delta_path, &state())?

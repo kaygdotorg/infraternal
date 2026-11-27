@@ -29,7 +29,7 @@ pub fn read_token(body: &[u8]) -> Option<Token> {
     let trailer = body.get(body.len().checked_sub(MARKER.len() + 128)?..)?;
     let bits = trailer.strip_prefix(MARKER)?;
     let mut token = Token::default();
-    for (byte, group) in token.iter_mut().zip(bits.chunks_exact(8)) {
+    for (byte, group) in token.iter_mut().zip(bits.as_chunks::<8>().0) {
         for b in group {
             *byte = (*byte << 1)
                 | match b {

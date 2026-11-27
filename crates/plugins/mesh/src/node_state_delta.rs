@@ -367,8 +367,8 @@ fn write_checkpoint(path: &Path, token: Token, state: &State) -> io::Result<File
     let mut body = token.to_vec();
     body.push(b'\n');
     body.extend_from_slice(&encode_frame(state, count)?);
-    if body.len() > super::MAX_PUBLIC_STATE_BYTES as usize {
-        return Err(io::ErrorKind::InvalidData.into());
+    if body.len() > MAX_BYTES - COMPACT_BYTES {
+        return Err(io::ErrorKind::FileTooLarge.into());
     }
     write_public(path, &body)?;
     Ok(FileStamp::of(&fs::symlink_metadata(path)?))

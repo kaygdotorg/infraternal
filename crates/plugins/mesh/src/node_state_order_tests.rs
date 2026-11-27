@@ -252,7 +252,7 @@ fn journal_peer(id: u8, word: u64) -> crate::dataplane::PeerPolicy {
             (0..40)
                 .map(|port| Port {
                     protocol: Protocol::Tcp,
-                    number: ((word % 60_000) as u16) + port + 1,
+                    number: u16::try_from(word % 60_000).expect("bounded port") + port + 1,
                 })
                 .collect(),
         ),
@@ -296,9 +296,9 @@ fn journal_matches_full_snapshots_through_compaction_and_torn_records() {
             random ^= random << 13;
             random ^= random >> 7;
             random ^= random << 17;
-            let id = (random % 23 + 2) as u8;
+            let id = u8::try_from(random % 23 + 2).expect("bounded peer");
             let node = NodeId(u64::from(id));
-            if random % 5 == 0 {
+            if random.is_multiple_of(5) {
                 next.peers.remove(&node);
                 #[cfg(feature = "mesh-dns")]
                 next.peer_names.remove(&node);
