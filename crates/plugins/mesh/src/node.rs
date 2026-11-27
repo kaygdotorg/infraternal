@@ -264,6 +264,7 @@ fn update_relay_route_mtu(
         std::slice::from_ref(&route_peer),
         &state.overrides,
         false,
+        state.underlay.as_deref(),
     );
     if result.is_err() {
         match previous {
@@ -1372,6 +1373,27 @@ impl Node {
         }
         Ok(())
     }
+    /// Persist a stable apply using the prior accepted configuration as the journal base.
+    fn save_applied_revision(
+        &self,
+        config: &Config,
+        snapshot_base: Option<&Config>,
+        changed_routes: bool,
+    ) -> io::Result<()> {
+        if snapshot_base.is_none()
+            && self.authority_reset == AuthorityResetState::Stable
+            && self.engine_kind == EngineKind::GotaTun
+            && let (Some(store), Some(previous)) = (&self.store, &self.config)
+        {
+            // The access-only path cannot change the route inventory. A topology change
+            // still persists the reduced inventory after the kernel cleanup.
+            if changed_routes {
+                store.record_routes(&self.routes)?;
+            }
+            return store.save_peer_revision(previous, config, self.firewall.backend());
+        }
+        self.save_with_snapshot_base(Some(config), true, snapshot_base)
+    }
     /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
@@ -1470,6 +1492,53 @@ impl Node {
         }
     }
 
+    /// Return a relay callback that restores this peer from its accepted Mesh configuration.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_endpoint_restorer(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || restore_kernel_peer(&peer)))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .endpoint_restorer(peer.key)),
+        }
+    }
+
+    /// Restore a peer from the latest accepted snapshot after its relay shim stops.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn restore_relay_endpoint(
+        &self,
+        key: crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        let peer =
+            self.config()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .map(|policy| policy.peer.clone());
+        match self.engine_kind {
+            EngineKind::Kernel => peer.map_or(Ok(()), |peer| restore_kernel_peer(&peer)),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .restore_peer(key),
+        }
+    }
+
     /// Return a callback that keeps this peer's kernel route on its active path budget.
     ///
     /// The callback keeps only the peer's key. Each call resolves the accepted peer under the
@@ -1504,6 +1573,18 @@ impl Node {
         }
     }
 
+    /// This node's mesh key as a relay [`PairSecret`](crate::relay_path::PairSecret): the
+    /// secret both ends of a relayed pair derive their opaque link tokens from (D402 Q8).
+    /// Read from the node's saved private key; the key itself never leaves the secret.
+    /// # Errors
+    /// Fails when the node has no saved key yet (it has never been brought up).
+    #[cfg(feature = "relay")]
+    pub fn relay_pair_secret(&self) -> io::Result<crate::relay_path::PairSecret> {
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let key = store.read_private_key()?.ok_or(io::ErrorKind::NotFound)?;
+        crate::relay_path::PairSecret::from_private(&key)
+    }
+
     /// Return a callback for learned endpoints reported by the `GotaTun` worker.
     ///
     /// The callback only updates installed peers and leaves relay budgets active. It runs route
@@ -1528,7 +1609,7 @@ impl Node {
         if remove {
             // Removal writes every peer: the record no longer describes any of them.
             state.forget_written();
-            return Device::routes_with_mtu_overrides(peers, &state.overrides, true);
+            return Device::routes_with_mtu_overrides(peers, &state.overrides, true, None);
         }
         // Only routes that differ from the record are written (#260 J1240). The installed set
         // moves to `peers` only once they are in place, so a failure leaves relay callbacks
@@ -2714,7 +2795,7 @@ impl Node {
         if !state.client_routes.states.is_empty()
             && let Some(config) = self.config.as_ref()
             && let Err(error) =
-                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None)
+                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None, None)
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");
@@ -3611,7 +3692,19 @@ impl Node {
                 }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
-                self.save_with_snapshot_base(Some(&config), true, snapshot_base)?;
+                let saved = self.save_applied_revision(&config, snapshot_base, false);
+                if self.engine_kind == EngineKind::GotaTun
+                    && snapshot_base.is_none()
+                    && saved
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                {
+                    // A failed endpoint apply can leave durable intent ahead of runtime.
+                    // Keep the full writer's revision checks for that recovery case.
+                    self.save(Some(&config), true)?;
+                } else {
+                    saved?;
+                }
                 if snapshot_base.is_some() {
                     self.authority_reset = AuthorityResetState::Stable;
                 }
@@ -3825,7 +3918,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
-            if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+            if let Err(error) = self.save_applied_revision(&config, snapshot_base, false) {
                 restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
@@ -3943,9 +4036,9 @@ impl Node {
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
             #[cfg(feature = "test-support")]
             let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
-                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+                .and_then(|()| self.save_applied_revision(&config, snapshot_base, true));
             #[cfg(not(feature = "test-support"))]
-            let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
+            let saved = self.save_applied_revision(&config, snapshot_base, true);
             if saved.is_err() {
                 self.routes = recorded;
             }
@@ -4180,6 +4273,17 @@ impl Node {
         }
         Ok(())
     }
+}
+
+/// Restore one kernel peer after its loopback relay shim closes.
+#[cfg(all(feature = "relay", target_os = "linux"))]
+fn restore_kernel_peer(peer: &crate::dataplane::Peer) -> io::Result<()> {
+    if peer.endpoint.is_some() {
+        return crate::relay_path::prepare_kernel_handshake(peer);
+    }
+    let mut client = crate::wireguard::Client::new()?;
+    client.peers(&[], &[peer.key])?;
+    client.peers(std::slice::from_ref(peer), &[])
 }
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
 

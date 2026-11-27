@@ -1359,6 +1359,7 @@ fn server_configuration_was_supplied(matches: &ArgMatches) -> bool {
         "tls_key",
         "remote_listen",
         "remote_ca_dir",
+        "relay_port",
     ]
     .iter()
     .any(|name| matches.get_one::<String>(name).is_some())
@@ -1418,10 +1419,26 @@ fn server_args(matches: &ArgMatches) -> Result<ServerArgs, String> {
     if remote_ca_dir.is_some() && remote_listen.is_none() {
         return Err("--remote-ca-dir requires --remote-listen".to_owned());
     }
+    let relay_port = matches
+        .try_get_one::<String>("relay_port")
+        .ok()
+        .flatten()
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or_else(|| "relay port is invalid".to_owned())
+        })
+        .transpose()?;
+    if relay_port.is_some() && remote_listen.is_none() {
+        return Err("--relay-port requires --remote-listen".to_owned());
+    }
     Ok(ServerArgs {
         remote: remote_server::Options {
             remote_listen,
             remote_ca_dir,
+            relay_port,
         },
         listen,
         data: server_data_directory(
@@ -1539,8 +1556,18 @@ fn host_firewall_policy(args: &ServerArgs) -> Result<Policy, String> {
             interface: args.host_firewall_remote_interface.clone(),
             address,
             protocol: Protocol::Udp,
-            sources,
+            sources: sources.clone(),
         });
+        // The server node's relay answers the same hosts on its own UDP port (D402).
+        if let Some(port) = args.remote.relay_port {
+            listeners.push(Listener {
+                interface: args.host_firewall_remote_interface.clone(),
+                // RelayPaths binds IPv4 0.0.0.0, even when the remote TLS listener is IPv6.
+                address: SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), port),
+                protocol: Protocol::Udp,
+                sources,
+            });
+        }
     }
     let policy = Policy {
         admin_rules,

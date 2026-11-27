@@ -536,6 +536,8 @@ pub struct MeshService {
     server_configured: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
     // Rotation drivers sleep until a deadline and wake only when a peer applies a view.
     rotation_updates: tokio::sync::watch::Sender<u64>,
+    // The relay the server's own node serves, once it reported a bound port (D402 Q2, Q4).
+    server_relay: std::sync::Arc<tokio::sync::watch::Sender<Option<crate::relay_list::RelayEntry>>>,
     /// One admitted receipt finalizer per service; waiting workers remain cancelable.
     receipt_finalizer: std::sync::Arc<tokio::sync::Semaphore>,
     // Request-local authority is never installed in the shared service.
@@ -585,6 +587,7 @@ impl MeshService {
             presence: std::sync::Arc::default(),
             server_configured: std::sync::Arc::new(tokio::sync::watch::Sender::new(false)),
             rotation_updates: tokio::sync::watch::Sender::new(0),
+            server_relay: std::sync::Arc::new(tokio::sync::watch::Sender::new(None)),
             receipt_finalizer: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             fresh_authority: None,
             invalid_hosts: crate::diagnostics::InvalidHosts::default(),
@@ -680,6 +683,32 @@ impl MeshService {
             *current = configured;
             changed
         });
+    }
+
+    /// Record the relay the server's own node serves (`None` once it stopped), so every other
+    /// node's worker pushes it in that node's relay list (D402 Q2). Watchers wake only on a change.
+    pub fn set_server_relay(&self, relay: Option<crate::relay_list::RelayEntry>) {
+        self.server_relay.send_if_modified(|current| {
+            let changed = *current != relay;
+            if changed {
+                *current = relay;
+            }
+            changed
+        });
+    }
+
+    /// The relay the server's own node serves now, if any.
+    #[must_use]
+    pub fn server_relay(&self) -> Option<crate::relay_list::RelayEntry> {
+        self.server_relay.borrow().clone()
+    }
+
+    /// Watch the relay the server's own node serves.
+    #[must_use]
+    pub fn subscribe_server_relay(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<crate::relay_list::RelayEntry>> {
+        self.server_relay.subscribe()
     }
 
     /// Watch whether the server's own node holds a mesh configuration (#562).

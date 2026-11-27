@@ -1776,6 +1776,14 @@ pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, Policy
             return Ok(None);
         }
     }
+    // Rootless namespace proofs run whole `infraternal agent` processes, which cannot use the
+    // thread-local override above. A build with `test-support` (never shipped) maps the fixed
+    // layout below this private root instead, so a machine that has a real install in
+    // /var/lib/infraternal does not make the proof's nodes fail with EACCES.
+    #[cfg(feature = "test-support")]
+    if let Some(root) = std::env::var_os("INFRATERNAL_TEST_HOST_FIREWALL_ROOT") {
+        return set_mesh_listener_at(&HostFirewallPaths::under(Path::new(&root)), None, udp_port);
+    }
     set_mesh_listener_at(&HostFirewallPaths::system(), None, udp_port)
 }
 

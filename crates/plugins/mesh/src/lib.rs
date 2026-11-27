@@ -19,6 +19,9 @@ pub use socket::{MeshPlugin, parse_subscription};
 /// Public-only configuration shared by the coordinator and node component.
 pub mod dataplane;
 
+/// The relay list pushed to every node and the relay role of the server's node (D402).
+pub mod relay_list;
+
 /// Owns the host input policy shared by the server and mesh node [D386].
 #[cfg(any(feature = "server", feature = "agent"))]
 pub mod host_firewall;

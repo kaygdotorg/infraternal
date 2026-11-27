@@ -1004,12 +1004,11 @@ fn review_wait_for(counter: &std::sync::atomic::AtomicUsize, target: usize, what
     }
 }
 
-/// J780 (#483): an overflow recovery right after the node's own large route burst rewrites
+/// J780 (#483): an overflow recovery right after a large unfiltered route burst rewrites
 /// only the peer routes whose budget really changed.
 ///
-/// A refresh at mesh scale writes two routes per peer, and the kernel echoes every write to the
-/// route listener. When that listener falls behind (a loaded host), the echoes overflow its
-/// socket (`ENOBUFS`), and the recovery asks for a full inventory check and a re-derivation of
+/// At mesh scale a burst from another writer can overflow the listener's socket (`ENOBUFS`).
+/// Recovery asks for a full inventory check and a re-derivation of
 /// every budget. Both are correct, but neither may rewrite a route whose budget is already the
 /// one written: J767 measured the first steady refresh after such a recovery rewriting all
 /// 4,096 peers and holding the route-state lock for 80-90 s under load.
@@ -1035,8 +1034,7 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
         RouteRepairWorker::start(Arc::clone(&state), Arc::default()).expect("start route repair");
     let written = update_live_peer_endpoints(&state, &learned).expect("first refresh");
     assert_eq!(written, usize::from(peer_count));
-    // The first refresh's own burst may overflow the listener already; settle that first, so
-    // the forced overflow below is the only one the assertions measure.
+    // Settle any changes queued while the worker started before forcing the overflow.
     for _ in 0..3 {
         if update_live_peer_endpoints(&state, &learned).expect("settling refresh") == 0 {
             break;
@@ -1065,7 +1063,7 @@ fn overflow_after_own_route_burst_rewrites_only_changed_routes() {
             .map(|peer| (guard.route_peer(peer), guard.written[&peer.key].mtu))
             .collect();
         let burst: Vec<_> = burst.iter().map(|(peer, mtu)| (peer, *mtu)).collect();
-        Device::replace_peer_routes_on(&link, &burst).expect("rewrite every other peer");
+        Device::replace_peer_routes_on(&link, &burst, None).expect("rewrite every other peer");
     }
     // One pass repairs the deletion; after it the listener reads the overflow, and its
     // recovery asks for a second pass: the full inventory check.
@@ -1278,7 +1276,7 @@ fn route_listener_treats_a_notification_overflow_as_lost_notifications() {
         })
         .collect();
     let routes: Vec<_> = peers.iter().map(|peer| (peer, 1408_u16)).collect();
-    Device::replace_peer_routes_on(&link, &routes).expect("write the route burst");
+    Device::replace_peer_routes_on(&link, &routes, None).expect("write the route burst");
     let deleted = format!("{}/32", peers[0].addresses.ipv4);
     review_route_command(&["route", "del", &deleted, "dev", "infraternal0"]);
     let (cancel_read, _cancel) = UnixStream::pair().expect("cancel stream");

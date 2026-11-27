@@ -13,7 +13,7 @@ use infraternal_plugin_relay::{
     relay::{Limits, Relay},
     testing::{self, Authority, Purpose},
     tls,
-    wire::{HostId, LinkId, Notice},
+    wire::{HostId, LinkId, Notice, Token},
 };
 use std::{
     error::Error,
@@ -129,10 +129,10 @@ async fn run_driver() -> Result<(), Box<dyn Error>> {
     for index in 0..PAIRS {
         let a = index * 2;
         let b = a + 1;
-        let a_host = clients[a].0;
-        let b_host = clients[b].0;
-        clients[a].1.link(b_host).await?;
-        clients[b].1.link(a_host).await?;
+        // Each pair shares one opaque token (D402 Q8); its first host's id is unique per pair.
+        let pair = Token(clients[a].0.0);
+        clients[a].1.link(pair).await?;
+        clients[b].1.link(pair).await?;
         let (first_clients, second_clients) = clients.split_at_mut(b);
         let (a_notice, b_notice) = tokio::time::timeout(LINK_DEADLINE, async {
             tokio::join!(first_clients[a].2.next(), second_clients[0].2.next())
@@ -141,7 +141,7 @@ async fn run_driver() -> Result<(), Box<dyn Error>> {
         let Notice::Linked { id, .. } = a_notice.ok_or("first link notice ended")? else {
             return Err("first link notice had the wrong kind".into());
         };
-        if b_notice != Some(Notice::Linked { peer: a_host, id }) {
+        if b_notice != Some(Notice::Linked { token: pair, id }) {
             return Err("pair did not receive the same link id".into());
         }
         pairs.push((

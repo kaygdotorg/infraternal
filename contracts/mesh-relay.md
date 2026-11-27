@@ -6,26 +6,33 @@ keys and does not inspect tunnel traffic. The slice follows D163, D176, D185,
 D196, D197, D201, D313 and D316. It does not select a new transport, crypto
 engine or path selector.
 
-The relay runtime is opt-in at build time: `infraternal-plugin-relay/runtime`
+The relay runtime lives behind build features: `infraternal-plugin-relay/runtime`
 contains the service and client, `infraternal-mesh/relay` contains the bounded
 peer-socket discovery book, and `infraternal-plugin-mesh/relay` contains the
-seam C shim. None of these features is enabled by the default `infraternal`
-shipping feature set. The relay CLI declarations can be compiled without the
+seam C shim and the node's relay manager. Since D402 slice 1 the Linux
+infraternal agent builds the mesh plugin with `relay`, so every shipped Linux
+node can relay a pair and serve the relay role. The relay CLI declarations can be compiled without the
 runtime. The D243 release check records this slice's static shipping-image
 delta.
 
 ## Relay identity and connection
 
-Nodes connect to a relay over QUIC using ALPN `infraternal-relay/1`. Both
+Nodes connect to a relay over QUIC using ALPN `infraternal-relay/2` (version 2
+names links by opaque pair tokens, D402 Q8; version 1 named hosts). Both
 directions authenticate certificates issued by the deployment CA. A node
-authenticates the relay's configured DNS name and server purpose. The relay
+authenticates the relay's configured DNS name, server purpose and its relay
+URI: a relay leaf carries exactly one `urn:infraternal:relay:<uuid>` SAN, and a
+leaf without it (such as the server's leg-B leaf) is refused. Leg B refuses any
+server leaf whose DER contains that prefix, before the leaf can raise the
+server-leaf floor, so a relay's key never answers a dial meant for the server
+(D402 Q3). The relay
 accepts a node only when its verified host certificate contains exactly one
 `urn:infraternal:host:<uuid>` URI SAN and its admission callback permits that
 host. A client supplied name never establishes identity. Certificate name or
 purpose checks are not relaxed.
 
 After connecting, the node opens one bidirectional QUIC stream and writes the
-four-byte hello `IFR1`. This stream carries link requests and notices. Mesh
+four-byte hello `IFR2`. This stream carries link requests and notices. Mesh
 packets use QUIC DATAGRAM frames on the same connection. A reconnect replaces
 the previous connection for that host and ends its links; both peers must
 request their links again. Queued DATAGRAM reservations from an older
@@ -39,6 +46,50 @@ refused at either limit before a serving task is spawned. Each TLS handshake
 and control-hello wait has a five-second deadline; the source and global slots
 are released when the host is admitted or the attempt ends.
 
+## Relay list and the relay role (D402 Q2–Q4)
+
+The coordinator sends each node the control action `mesh.relays` on the same
+authenticated channel as its mesh configuration, after a configuration was
+delivered and whenever the list changes. It is a separate action, not new
+`Config` fields, because `Config` and `Chunk` refuse unknown fields and the
+previous release parses the saved `mesh-public.json` strictly. A node that
+refuses the action is not asked again until the coordinator reads its identity
+again. The body is one object:
+
+- `relays`: at most 8 entries of `name` (the relay leaf's DNS name, lowercase
+  host name), `port` (UDP, nonzero) and optional `addresses` (at most 4; empty
+  means the node resolves `name`). The node saves this part in
+  `mesh-relays.json` beside its mesh state and starts from it after a restart,
+  so it keeps its relays while the server is down (D285).
+- `serve`, only for the node that runs the relay role (the server's own node in
+  slice 1): `name`, `port`, `leaf` (relay leaf certificate PEM then PKCS#8 key
+  PEM, at most 3 KiB), `roots` (one or two CA certificates) and `revoked` (at
+  most 128 host UUIDs whose leaves still verify, from the coordinator's removal
+  tombstones). The role's key is held in memory only and never written by the
+  node. The node answers `{"accepted":true,"serving":<port>}` with the UDP port
+  it bound, and the coordinator then lists that relay for every other node. A
+  role whose port cannot be bound answers without `serving` and lists nothing.
+
+The relay role admits a host whose verified leaf chains to `roots` and is not
+in `revoked`. Every new list updates `revoked` and re-checks live connections,
+closing refused ones and their links; each connection also ends when its
+leaf's `notAfter` passes (one timer per connection, armed once). A renewed
+relay leaf is installed for new handshakes without a restart; open connections
+keep the leaf they were made with. The server keeps the relay leaf in its CA's
+`active/relay-leaf.pem` (mode 0600, written durably before it is served), 7
+days from `notBefore`, renewed at half-life while the CA is unlocked, so a
+locked cold start still serves the retained leaf. The relay role is opt-in in
+slice 1: the server runs with `--relay-port <udp-port>`. The persistent host
+firewall rule is written by `infraternal server init --system --relay-port
+<udp-port>`; a direct `infraternal server run` only binds the relay socket and
+does not change firewall state. The relay currently binds IPv4 `0.0.0.0`, so
+init opens the IPv4 UDP port even when `--remote-listen` is IPv6.
+
+A message with the maximum revoked list stays inside one 8 KiB action frame.
+A revoked host beyond the first 128 still reaches nobody, because its peers
+dropped its mesh key (D166) and so its pair tokens match nothing; it can hold a
+connection slot until its leaf expires.
+
 ## Wire formats
 
 Control messages have no separate length prefix. The first byte selects one
@@ -48,17 +99,28 @@ control stream. The largest message is 21 bytes.
 
 | Direction | Kind | Body | Total |
 | --- | --- | --- | ---: |
-| Node → relay | `0x01` Link | 16-byte host UUID | 17 bytes |
-| Node → relay | `0x02` Unlink | 16-byte host UUID | 17 bytes |
-| Relay → node | `0x81` Linked | 16-byte peer UUID, nonzero 32-bit big-endian link ID | 21 bytes |
-| Relay → node | `0x82` Unlinked | 16-byte peer UUID | 17 bytes |
+| Node → relay | `0x01` Link | 16-byte pair token | 17 bytes |
+| Node → relay | `0x02` Unlink | 16-byte pair token | 17 bytes |
+| Relay → node | `0x81` Linked | 16-byte pair token, nonzero 32-bit big-endian link ID | 21 bytes |
+| Relay → node | `0x82` Unlinked | 16-byte pair token | 17 bytes |
 
-A relay creates a link only after both authenticated hosts request each other.
-It assigns the same nonzero ID at both ends. A sender may forward only on a
+Requests never name the other host (D402 Q8). Both ends of a pair compute the
+same token: the first 16 bytes of HMAC-SHA256 keyed with the pair's X25519
+static-static secret (one end's mesh private key with the other's mesh public
+key) over the label `infraternal relay pair token v1\0` followed by the relay's
+certificate DNS name. Only the two ends know the secret, the token is one-way,
+and it differs per relay, so two relays carrying one pair see unrelated values.
+A peer key whose shared secret is all zero is refused. The relay still learns
+which two of its connections it joins; that is accepted (D402 Q8).
+
+A relay creates a link only after two different authenticated hosts request
+the same token. A token has at most two requesters; a further request for it
+is ignored without closing the connection, so nobody joins a pair that is
+waiting or linked. It assigns the same nonzero ID at both ends. A sender may forward only on a
 link whose ID belongs to its connection; unknown IDs and IDs belonging to
 another host are dropped. An Unlinked notice means the peer withdrew or left;
 the surviving request remains pending. A node can withdraw its own request
-with Unlink.
+with Unlink. Relays keep counters only, never a per-pair log.
 
 Each QUIC DATAGRAM begins with a four-byte big-endian nonzero link ID. The
 remainder is forwarded unchanged as opaque WireGuard ciphertext. The relay
@@ -67,8 +129,11 @@ link ID and sends the ciphertext to its local kernel WireGuard socket. The
 frame parser rejects a zero link ID and a header-only DATAGRAM; WireGuard
 validates the non-empty packet.
 QUIC DATAGRAM delivery is unreliable and unordered, matching the inner
-WireGuard datagram semantics. The relay-side receive queue is bounded to 8
-KiB per connection and its Quinn send queue to 128 KiB per connection. A
+WireGuard datagram semantics. The relay-side receive queue is bounded to 64
+KiB per connection and its Quinn send queue to 128 KiB per connection. Quinn
+drops the oldest DATAGRAM when the receive queue is full, which the relay's
+counters do not see; at 8 KiB that cut every TCP burst short and held a
+relayed pair at a 34 ms round trip to 1.7 Mbit/s (J1254). A
 separate forwarding budget bounds accepted DATAGRAM storage to 256 KiB per
 linked pair, 4 MiB per source host across all its pairs, and 64 MiB across the
 relay. Each frame is charged in 1 KiB units after adding 128 bytes for
@@ -82,8 +147,9 @@ does not block the control stream. A single source host can therefore use at
 most one sixteenth of the global forwarding budget, leaving the remaining
 quota available to other hosts.
 
-At the 4,096-host limit, the configured relay receive queues total at most 32
-MiB and the global forwarding budget accounts for at most another 64 MiB of
+At the 4,096-host limit, the configured relay receive queues total at most 256
+MiB (only if every host bursts at once; a queue is empty while its reader
+keeps up) and the global forwarding budget accounts for at most another 64 MiB of
 queued DATAGRAM storage. The 128 KiB per-connection send setting is a local
 ceiling; the shared global, per-host and per-pair reservations bound aggregate
 queued payloads. These figures bound DATAGRAM buffering, not fixed connection,
@@ -149,6 +215,19 @@ pairs. These measurements support seam C; they are not general latency
 budgets (#220, D313 Q1).
 
 ## Slice-1 path and failover rules
+
+The node's relay manager starts one set of relay paths for the listed relays
+with its enrolled host leaf, once the first pair needs a relay, so a node
+whose pairs all go direct holds no relay connection and pays no keep-alive
+(the slow-keep-alive home relay of D402 Q5 follows in slice 1b). After each
+accepted complete configuration, every
+peer this node may exchange packets with, new or changed, gets one deadline
+5.5 s later (one WireGuard handshake attempt plus a margin). A pair with no
+handshake since its configuration was installed is relayed and records the
+reason ("no direct handshake within 5 seconds"); `mesh status` shows it as
+"via <relay>, because <reason>". No timer repeats for a pair. When the relay
+list changes, the paths are replaced and pairs that were relayed move to the
+new paths at once.
 
 The caller requests relay service for a peer after its direct WireGuard
 handshake grace period. In this slice, `direct_failed` compares the kernel's

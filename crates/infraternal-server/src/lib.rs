@@ -43,6 +43,9 @@ pub mod embedded_mesh_state;
 mod node_bridge;
 /// The bounded run-and-wait queue of one socket's plugin calls (#556).
 mod plugin_calls;
+/// The server node's relay role: its relay leaf and the coordinator's serve source (D402).
+#[cfg(all(feature = "remote", feature = "mesh"))]
+pub mod relay_role;
 /// `release.update.*` actions over the private control socket, for `infraternal server update` (#211, D400).
 #[cfg(feature = "release")]
 pub mod release_control;

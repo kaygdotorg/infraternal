@@ -314,6 +314,11 @@ enum WorkerCommand {
         reply: sync::SyncSender<io::Result<()>>,
     },
     #[cfg(feature = "relay")]
+    RestorePeer {
+        key: PublicKey,
+        reply: sync::SyncSender<io::Result<()>>,
+    },
+    #[cfg(feature = "relay")]
     ForceHandshake {
         key: PublicKey,
         endpoint: SocketAddr,
@@ -577,7 +582,7 @@ impl Engine {
 
     /// Test seam (#265 J618): judge one packet with the live filter, exactly as the packet
     /// path would, so a namespace test can see which grants are published right now.
-    #[cfg(feature = "test-support")]
+    #[cfg(all(test, feature = "test-support"))]
     pub(crate) fn check_packet(&self, packet: &mut [u8], direction: Direction) -> bool {
         self.filter.check(packet, direction)
     }
@@ -688,6 +693,32 @@ impl Engine {
                 .map_err(|_| io::ErrorKind::BrokenPipe)?;
             result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
         })
+    }
+
+    /// Return a relay callback that reapplies this peer from the latest accepted configuration.
+    #[cfg(feature = "relay")]
+    pub(crate) fn endpoint_restorer(
+        &self,
+        key: PublicKey,
+    ) -> Arc<dyn Fn() -> io::Result<()> + Send + Sync> {
+        let commands = self.commands.clone();
+        Arc::new(move || {
+            let (reply, result) = sync::sync_channel(1);
+            commands
+                .send(WorkerCommand::RestorePeer { key, reply })
+                .map_err(|_| io::ErrorKind::BrokenPipe)?;
+            result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
+        })
+    }
+
+    /// Restore the peer's endpoint from the latest accepted configuration.
+    #[cfg(feature = "relay")]
+    pub(crate) fn restore_peer(&self, key: PublicKey) -> io::Result<()> {
+        let (reply, result) = sync::sync_channel(1);
+        self.commands
+            .send(WorkerCommand::RestorePeer { key, reply })
+            .map_err(|_| io::ErrorKind::BrokenPipe)?;
+        result.recv().map_err(|_| io::ErrorKind::BrokenPipe)?
     }
 
     /// Stop the `WireGuard` engine and join its runtime thread.
@@ -1013,6 +1044,10 @@ async fn run_worker(
                 #[cfg(feature = "relay")]
                 Some(WorkerCommand::PrepareHandshake { key, endpoint, reply }) => {
                     let _ = reply.send(state.prepare_handshake(key, endpoint).await);
+                }
+                #[cfg(feature = "relay")]
+                Some(WorkerCommand::RestorePeer { key, reply }) => {
+                    let _ = reply.send(state.restore_peer(key).await);
                 }
                 #[cfg(feature = "relay")]
                 Some(WorkerCommand::ForceHandshake { key, endpoint, reply }) => {
@@ -1461,6 +1496,33 @@ impl RuntimeState {
             })
             .await
             .map_err(|_| io::Error::other("GotaTun relay peer could not be reset."))
+    }
+
+    /// Remove the relay override and reinstall this peer from the current Mesh snapshot.
+    #[cfg(feature = "relay")]
+    async fn restore_peer(&mut self, key: PublicKey) -> io::Result<()> {
+        self.walks.abandon(key);
+        self.relayed.remove(&key);
+        let peers =
+            self.config
+                .as_ref()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .map(peer_for_policy)
+                .transpose()?
+                .unwrap_or_default();
+        if peers.is_empty() {
+            return Ok(());
+        }
+        self.device
+            .as_ref()
+            .ok_or(io::ErrorKind::NotConnected)?
+            .write(async |device| device.add_or_update_peers(peers).await)
+            .await
+            .map_err(|_| io::Error::other("GotaTun relay peer could not be restored."))
     }
 
     /// Point `key` at a relay `endpoint` and start a handshake through it at once.

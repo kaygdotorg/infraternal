@@ -583,6 +583,7 @@ async fn remote_router(
                         source: administration.memory_source(),
                         directory,
                         name,
+                        relay: None,
                     })
             });
         let identity = remote
@@ -601,6 +602,14 @@ async fn remote_router(
         .map_err(ServerError::Listener)?;
         if let Some(rotation) = rotation {
             listeners.rotate_server_leaf(rotation, identity.certificate);
+        }
+        // The server's node serves the relay role when asked to (D402 Q4); the task lives
+        // with the listeners.
+        #[cfg(feature = "mesh")]
+        if let Some(administration) = remote.ca_administration.as_ref()
+            && let Some(task) = crate::relay_role::start(administration, &remote.roots)
+        {
+            listeners.keep_task(task);
         }
         Some(listeners)
     } else {
