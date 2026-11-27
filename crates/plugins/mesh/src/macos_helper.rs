@@ -958,7 +958,11 @@ fn install_to_completion(uid: u32) -> io::Result<()> {
         stop.add(signal);
     }
     stop.thread_block()?;
-    install(uid)
+    let result = install(uid);
+    // A pending terminal signal now ends the child. Sudo reports it to the
+    // waiting up process, which removes the completed registration.
+    stop.thread_unblock()?;
+    result
 }
 
 /// Install or refresh the helper for `uid` and load it into launchd.

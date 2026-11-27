@@ -4,6 +4,7 @@ use nix::sys::signal::{Signal, kill};
 use std::{
     future::Future,
     io,
+    os::unix::process::ExitStatusExt,
     process::ExitStatus,
     sync::{
         Arc,
@@ -20,7 +21,7 @@ use tokio::{
 #[derive(Clone)]
 pub(crate) struct Cancellation {
     /// Wake pending approval or enrollment as soon as the first signal arrives.
-    received: watch::Receiver<Option<Signal>>,
+    received: watch::Sender<Option<Signal>>,
     /// Share the interruption state with a synchronous installer.
     flag: Arc<AtomicBool>,
 }
@@ -29,6 +30,30 @@ impl Cancellation {
     /// Read the signal without waiting.
     pub(super) fn received(&self) -> Option<Signal> {
         *self.received.borrow()
+    }
+
+    /// Record the first signal from this process or an installer with the foreground terminal.
+    fn record(&self, signal: Signal) {
+        self.flag.store(true, Ordering::Release);
+        self.received.send_if_modified(|received| {
+            if received.is_some() {
+                return false;
+            }
+            *received = Some(signal);
+            true
+        });
+    }
+
+    /// Recognize sudo replaying its child's termination as a signal or shell-style status.
+    fn record_child_exit(&self, status: ExitStatus) {
+        let raw = status
+            .signal()
+            .or_else(|| status.code().map(|code| code - 128));
+        if let Some(signal @ (Signal::SIGINT | Signal::SIGHUP | Signal::SIGTERM)) =
+            raw.and_then(|raw| Signal::try_from(raw).ok())
+        {
+            self.record(signal);
+        }
     }
 
     /// Share an interruption flag with the installer during synchronous activation.
@@ -52,7 +77,7 @@ impl Cancellation {
 
     /// Wait for the first signal, including one received before this wait started.
     async fn wait(&self) -> Signal {
-        let mut received = self.received.clone();
+        let mut received = self.received.subscribe();
         let received = received.wait_for(Option::is_some).await;
         received
             .ok()
@@ -65,7 +90,7 @@ impl Cancellation {
     /// Sudo forwards the signal to the installer. The installer owns any privileged
     /// rollback and must be allowed to finish, including during a service-manager call.
     pub(super) async fn wait_for_child(&self, child: &mut Child) -> io::Result<ExitStatus> {
-        tokio::select! {
+        let status = tokio::select! {
             biased;
             result = child.wait() => result,
             signal = self.wait() => {
@@ -74,7 +99,9 @@ impl Cancellation {
                 }
                 child.wait().await
             }
-        }
+        }?;
+        self.record_child_exit(status);
+        Ok(status)
     }
 
     /// Run a sudo installer that uses the terminal for its password prompt.
@@ -122,20 +149,22 @@ pub(super) fn scope<F: Future>(operation: impl FnOnce(Cancellation) -> F) -> io:
         let mut terminate = signal(SignalKind::terminate())?;
         let mut interrupt = signal(SignalKind::interrupt())?;
         let mut hangup = signal(SignalKind::hangup())?;
-        let flag = Arc::new(AtomicBool::new(false));
-        let observed = Arc::clone(&flag);
-        let (notify, received) = watch::channel(None);
+        let (received, _) = watch::channel(None);
+        let cancelled = Cancellation {
+            received,
+            flag: Arc::new(AtomicBool::new(false)),
+        };
+        let observed = cancelled.clone();
         let _monitor = Monitor(tokio::spawn(async move {
             let first = tokio::select! {
                 _ = terminate.recv() => Signal::SIGTERM,
                 _ = interrupt.recv() => Signal::SIGINT,
                 _ = hangup.recv() => Signal::SIGHUP,
             };
-            observed.store(true, Ordering::Release);
-            notify.send_replace(Some(first));
+            observed.record(first);
             std::future::pending::<()>().await;
         }));
-        Ok(operation(Cancellation { received, flag }).await)
+        Ok(operation(cancelled).await)
     })
 }
 
@@ -175,6 +204,23 @@ mod tests {
             },
             true,
         );
+    }
+
+    /// Ctrl-C in sudo's own terminal still reaches the caller's cancellation boundary.
+    #[test]
+    fn sudo_interrupt_status_is_observed_without_a_parent_signal() {
+        super::scope(|cancelled| async move {
+            let mut child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", "exit 130"])
+                .spawn()
+                .unwrap();
+            assert_eq!(
+                cancelled.wait_for_child(&mut child).await.unwrap().code(),
+                Some(130)
+            );
+            assert_eq!(cancelled.received(), Some(Signal::SIGINT));
+        })
+        .unwrap();
     }
 
     /// Ctrl-C rolls back first, emits one JSON envelope, then stops the process by SIGINT.

@@ -313,7 +313,12 @@ pub(crate) fn with_cancellation<F: std::future::Future<Output = Result<ExitCode,
         let result = command(cancelled.clone()).await;
         (result, cancelled.received())
     }) {
-        Ok((Ok(code), _)) => code,
+        Ok((Ok(code), signal)) => {
+            if let Some(signal) = signal {
+                infraternal_shim::exit_by_signal(signal);
+            }
+            code
+        }
         Ok((Err(_), Some(signal))) => {
             if json_output {
                 let _ = io::stdout().write_all(&crate::cli::output::interrupted_notice("up"));
@@ -591,79 +596,93 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
     install_preflight()?;
     let join_url = format!("{origin}/remote/join");
-    termination::scope(|cancelled| async move {
-        cancelled.check().map_err(|_| Failure::Failed)?;
-        println!("UP_STAGE=installation");
-        #[cfg(target_os = "linux")]
-        let install = install::Install::begin_accepted(accepted, &systemctl);
-        #[cfg(target_os = "macos")]
-        let install = macos::Install::begin();
-        let install = install
-            .map_err(|error| {
-                eprintln!("{error}");
-                Failure::LocalState
-            })?
-            .interrupt_on(cancelled.flag());
-        #[cfg(all(
-            target_os = "linux",
-            any(feature = "plugin-mesh", feature = "plugin-server")
-        ))]
-        let install = install
-            .with_host_firewall_policy(agent_policy)
-            .map_err(|error| {
-                eprintln!("{error}");
-                Failure::HostFirewall
-            })?;
-        // The Linux installer copies the binary while the server issues the
-        // certificate: neither needs the other, and each takes a large part of
-        // the time between the approval and the service start (#580).
-        #[cfg(target_os = "linux")]
-        let mut install = install;
-        #[cfg(target_os = "linux")]
-        let copy = {
-            let pending = install
-                .stage_image(Path::new(RUNNING_IMAGE))
+    let (result, signal) = termination::scope(|cancelled| async move {
+        let result = async {
+            cancelled.check().map_err(|_| Failure::Failed)?;
+            println!("UP_STAGE=installation");
+            #[cfg(target_os = "linux")]
+            let install = install::Install::begin_accepted(accepted, &systemctl);
+            #[cfg(target_os = "macos")]
+            let install = macos::Install::begin();
+            let install = install
                 .map_err(|error| {
                     eprintln!("{error}");
                     Failure::LocalState
+                })?
+                .interrupt_on(cancelled.flag());
+            #[cfg(all(
+                target_os = "linux",
+                any(feature = "plugin-mesh", feature = "plugin-server")
+            ))]
+            let install = install
+                .with_host_firewall_policy(agent_policy)
+                .map_err(|error| {
+                    eprintln!("{error}");
+                    Failure::HostFirewall
                 })?;
-            tokio::task::spawn_blocking(move || pending.copy())
-        };
-        println!("UP_STAGE=enrollment");
-        let joined = cancelled
-            .during(crate::remote::join_with_key(
-                &join_url,
-                Path::new(SERVICE_DATA),
-                &handoff.invitation,
-                &handoff.key_pkcs8,
-            ))
-            .await;
-        // Reap the local copy even after cancellation so rollback never races
-        // a writer still holding the staging file.
-        #[cfg(target_os = "linux")]
-        let copied = copy.await;
-        joined
-            .map_err(|_| Failure::Failed)?
-            .map_err(|error| map_remote_failure(&error))?;
-        cancelled.check().map_err(|_| Failure::Failed)?;
-        #[cfg(target_os = "linux")]
-        let activation = copied
-            .map_err(io::Error::other)
-            .and_then(|image| install.activate_copied(image?));
-        #[cfg(target_os = "macos")]
-        let activation = env::current_exe().and_then(|image| install.activate(&image, host));
-        activation.map_err(|error| {
+            // The Linux installer copies the binary while the server issues the
+            // certificate: neither needs the other, and each takes a large part of
+            // the time between the approval and the service start (#580).
+            #[cfg(target_os = "linux")]
+            let mut install = install;
+            #[cfg(target_os = "linux")]
+            let copy = {
+                let pending = install
+                    .stage_image(Path::new(RUNNING_IMAGE))
+                    .map_err(|error| {
+                        eprintln!("{error}");
+                        Failure::LocalState
+                    })?;
+                tokio::task::spawn_blocking(move || pending.copy())
+            };
+            println!("UP_STAGE=enrollment");
+            let joined = cancelled
+                .during(crate::remote::join_with_key(
+                    &join_url,
+                    Path::new(SERVICE_DATA),
+                    &handoff.invitation,
+                    &handoff.key_pkcs8,
+                ))
+                .await;
+            // Reap the local copy even after cancellation so rollback never races
+            // a writer still holding the staging file.
+            #[cfg(target_os = "linux")]
+            let copied = copy.await;
+            joined
+                .map_err(|_| Failure::Failed)?
+                .map_err(|error| map_remote_failure(&error))?;
+            cancelled.check().map_err(|_| Failure::Failed)?;
+            #[cfg(target_os = "linux")]
+            let activation = copied
+                .map_err(io::Error::other)
+                .and_then(|image| install.activate_copied(image?));
             #[cfg(target_os = "macos")]
-            eprintln!("{error}");
-            #[cfg(not(target_os = "macos"))]
-            let _ = error;
-            Failure::Partial
-        })
+            let activation = env::current_exe().and_then(|image| install.activate(&image, host));
+            activation.map_err(|error| {
+                #[cfg(target_os = "macos")]
+                eprintln!("{error}");
+                #[cfg(not(target_os = "macos"))]
+                let _ = error;
+                Failure::Partial
+            })
+        }
+        .await;
+        (result, cancelled.received())
     })
     .map_err(|error| {
         eprintln!("{error}");
         Failure::Failed
-    })?
+    })?;
+    if let Some(signal) = signal {
+        // Sudo may have owned the foreground terminal. Preserve the install result and
+        // terminate by the signal so the unprivileged caller also notices Ctrl-C.
+        println!(
+            "UP_RESULT={}",
+            result.map_or_else(Failure::exit_code, |()| 0)
+        );
+        infraternal_shim::exit_by_signal(signal);
+    }
+    result
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
