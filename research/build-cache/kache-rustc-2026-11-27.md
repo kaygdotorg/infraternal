@@ -231,3 +231,13 @@ tracked change is an appended comment in
 `crates/infraternal-link/src/lib.rs`. The two warm cases run one after
 the other in a single admitted build slot. Each has a private daemon
 runtime and retains the same 5 GiB cache cap.
+
+## One-crate edit measurements
+
+| Operation | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target/cache/combined bytes | Load 1m min/median/max | Hits/misses/dups |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| x86_64 static | 1,445.078 | 2,546.534 / 239.983 | 17.59 / 20.78 | 2,327,953,408 / 5,959,598,080 / 8,287,551,488 | 16.05 / 22.36 / 38.33 | 374 / 151 / 23 |
+
+The x86_64 output matched the unedited worktree's SHA-256. Its hit
+rate was 68.25%. Elapsed time increased by 244.418 s while median
+one-minute host load rose from 18.09 to 22.36.
