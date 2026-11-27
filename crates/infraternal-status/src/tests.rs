@@ -1140,7 +1140,16 @@ fn macos_installs_report_scope_service_and_their_own_tunnel() {
         assert_eq!(units[0].scope, scope);
         assert_eq!(units[0].name, label);
         let ids = ["agent".to_owned(), "mesh".to_owned()];
-        let activity = macos::observed(true, b"\tstate = running\n", b"").unwrap();
+        let observation = macos::observed(true, b"\tstate = running\n\tpid = 42\n", b"").unwrap();
+        assert_eq!(
+            observation,
+            macos::LaunchdStatus {
+                loaded: true,
+                running: true,
+                pid: Some(42)
+            }
+        );
+        let activity = observation.activity();
         let status =
             |activity| super::assemble(&fixture.roots(), &ids, vec![(units[0].clone(), activity)]);
         fixture.write("net/utun7/192.0.2.55", "");
@@ -1165,7 +1174,9 @@ fn macos_installs_report_scope_service_and_their_own_tunnel() {
             );
         }
         assert_eq!(state(&running, "mesh"), ("Running", "peers: 1"));
-        let stopped = status(macos::observed(false, b"", b"Could not find service").unwrap());
+        let missing = macos::observed(false, b"", b"Could not find service").unwrap();
+        assert_eq!(missing, macos::LaunchdStatus::default());
+        let stopped = status(missing.activity());
         assert_eq!(stopped.confirmed_down_count(), 1);
         assert_eq!(state(&stopped, "mesh").0, "Stopped");
         assert_eq!(

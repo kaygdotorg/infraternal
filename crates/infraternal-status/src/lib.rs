@@ -80,6 +80,10 @@ mod enrollment;
 #[cfg(any(target_os = "macos", test))]
 mod macos;
 
+/// The read-only launchd result used by both status commands on macOS.
+#[cfg(target_os = "macos")]
+pub use macos::{LaunchdStatus, macos_user_service};
+
 /// Mesh interface created by the mesh component.
 const MESH_INTERFACE: &str = "infraternal0";
 

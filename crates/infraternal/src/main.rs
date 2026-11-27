@@ -527,7 +527,7 @@ fn dispatch_up_action(
     run_unavailable(action, json_output)
 }
 
-/// Control the fixed macOS system Mesh service, keeping the privileged re-entry silent.
+/// Read the installed macOS Mesh service or control the fixed system job.
 fn run_mesh_service(
     action: &ActionDefinition,
     matches: &ArgMatches,
@@ -538,6 +538,35 @@ fn run_mesh_service(
         let operation = action.command.last().map_or("", String::as_str);
         let system_service = system_service_requested(matches);
         let command = action.command.join(" ");
+        if operation == "status" && !system_service {
+            let roots = infraternal_status::Roots::detect();
+            match infraternal_status::macos_user_service(&roots) {
+                Ok(Some(status)) => {
+                    let status = infraternal_plugin_mesh::macos_service::Status {
+                        loaded: status.loaded,
+                        running: status.running,
+                        pid: status.pid,
+                    };
+                    return report_mesh_service_status_result(
+                        command,
+                        operation,
+                        Ok(Some(status)),
+                        infraternal_status::Scope::User,
+                        json_output,
+                    );
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    return report_failure_as(
+                        &command,
+                        "The Mesh user service status is unavailable.",
+                        reason.to_owned(),
+                        json_output,
+                        Exit::Failed,
+                    );
+                }
+            }
+        }
         let Ok(executable) = std::env::current_exe() else {
             return report_failure_as(
                 &command,
@@ -552,7 +581,13 @@ fn run_mesh_service(
         if system_service {
             return report_mesh_service_system_result(&command, result, json_output);
         }
-        report_mesh_service_status_result(command, operation, result, json_output)
+        report_mesh_service_status_result(
+            command,
+            operation,
+            result,
+            infraternal_status::Scope::System,
+            json_output,
+        )
     }
     #[cfg(not(all(feature = "plugin-mesh", target_os = "macos")))]
     {
@@ -590,19 +625,21 @@ fn report_mesh_service_system_result(
     }
 }
 
+/// Render the observed launchd service and preserve the scope of the status query.
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
 fn report_mesh_service_status_result(
     command: String,
     operation: &str,
     result: io::Result<Option<infraternal_plugin_mesh::macos_service::Status>>,
+    scope: infraternal_status::Scope,
     json_output: bool,
 ) -> ExitCode {
     match result {
         Ok(Some(status)) => {
             let (state, message, exit) =
-                mesh_status_result(operation, status.loaded, status.running);
+                mesh_status_result(operation, status.loaded, status.running, scope);
             emit(
-                CommandResult::new(command, state, message, mesh_status_data(status))
+                CommandResult::new(command, state, message, mesh_status_data(status, scope))
                     .with_details(MESH_ENFORCEMENT_DETAILS),
                 json_output,
                 exit,
@@ -636,35 +673,54 @@ const MESH_ENFORCEMENT_DETAILS: &str =
 
 /// The machine-readable `mesh status` fields; `enforcement` reports the access-rule gap (#265).
 #[cfg(all(feature = "plugin-mesh", target_os = "macos"))]
-fn mesh_status_data(status: infraternal_plugin_mesh::macos_service::Status) -> serde_json::Value {
+fn mesh_status_data(
+    status: infraternal_plugin_mesh::macos_service::Status,
+    scope: infraternal_status::Scope,
+) -> serde_json::Value {
     json!({
         "loaded": status.loaded,
         "running": status.running,
         "pid": status.pid,
+        "mode": if scope == infraternal_status::Scope::User { "user" } else { "system" },
         "enforcement": infraternal_plugin_mesh::macos_node::ENFORCEMENT,
     })
 }
 
+/// Map the observed state to the status headline and exit code for the owning service.
 #[cfg(all(feature = "plugin-mesh", any(target_os = "macos", test)))]
 fn mesh_status_result(
     operation: &str,
     loaded: bool,
     running: bool,
+    scope: infraternal_status::Scope,
 ) -> (CommandState, &'static str, Exit) {
+    let user = scope == infraternal_status::Scope::User;
     match operation {
         "status" | "up" if running => (
             CommandState::Running,
-            "The Mesh system service is running.",
+            if user {
+                "The Mesh service is running in user mode."
+            } else {
+                "The Mesh system service is running."
+            },
             Exit::Ok,
         ),
         "status" if loaded => (
             CommandState::Restarting,
-            "The Mesh system service is loaded but not running.",
+            if user {
+                "The Mesh user service is loaded but not running."
+            } else {
+                "The Mesh system service is loaded but not running."
+            },
             Exit::Failed,
         ),
         "status" | "down" if !loaded => (
             CommandState::Stopped,
-            "The Mesh system service is stopped.",
+            if user {
+                "The Mesh user service is stopped."
+            } else {
+                "The Mesh system service is stopped."
+            },
             Exit::Ok,
         ),
         "up" => (
@@ -2999,13 +3055,18 @@ mod dispatch_tests {
     /// Mac mesh status reports that GotaTun enforces D164 rules in userspace.
     #[test]
     fn mesh_status_reports_userspace_access_enforcement() {
-        let data = super::mesh_status_data(infraternal_plugin_mesh::macos_service::Status {
-            loaded: true,
-            running: true,
-            pid: Some(42),
-        });
+        let data = super::mesh_status_data(
+            infraternal_plugin_mesh::macos_service::Status {
+                loaded: true,
+                running: true,
+                pid: Some(42),
+            },
+            infraternal_status::Scope::User,
+        );
         assert_eq!(data["enforcement"], "userspace");
         assert_eq!(data["running"], true);
+        assert_eq!(data["mode"], "user");
+        assert_eq!(data["pid"], 42);
         assert!(super::MESH_ENFORCEMENT_DETAILS.contains("userspace packet filter"));
     }
 
@@ -3045,11 +3106,15 @@ mod dispatch_tests {
         );
     }
 
+    /// Keep the system-service status and mutation results when no user install is selected.
     #[cfg(feature = "plugin-mesh")]
     #[test]
     fn mesh_service_status_maps_launchd_state_to_cli_result() {
+        let status = |action, loaded, running| {
+            mesh_status_result(action, loaded, running, infraternal_status::Scope::System)
+        };
         assert_eq!(
-            mesh_status_result("status", true, true),
+            status("status", true, true),
             (
                 CommandState::Running,
                 "The Mesh system service is running.",
@@ -3057,7 +3122,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("up", true, true),
+            status("up", true, true),
             (
                 CommandState::Running,
                 "The Mesh system service is running.",
@@ -3065,7 +3130,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("status", true, false),
+            status("status", true, false),
             (
                 CommandState::Restarting,
                 "The Mesh system service is loaded but not running.",
@@ -3073,7 +3138,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("status", false, false),
+            status("status", false, false),
             (
                 CommandState::Stopped,
                 "The Mesh system service is stopped.",
@@ -3081,7 +3146,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("up", true, false),
+            status("up", true, false),
             (
                 CommandState::Restarting,
                 "The Mesh system service was installed but has not started.",
@@ -3089,7 +3154,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("down", true, false),
+            status("down", true, false),
             (
                 CommandState::Failed,
                 "The Mesh system service is still loaded.",
@@ -3097,7 +3162,7 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("down", false, false),
+            status("down", false, false),
             (
                 CommandState::Stopped,
                 "The Mesh system service is stopped.",
@@ -3105,12 +3170,44 @@ mod dispatch_tests {
             )
         );
         assert_eq!(
-            mesh_status_result("unknown", false, false),
+            status("unknown", false, false),
             (
                 CommandState::Failed,
                 "The Mesh system service action is not supported.",
                 Exit::Usage,
             )
+        );
+    }
+
+    /// A user-mode machine's Mesh status describes its own loaded `LaunchAgent`.
+    #[cfg(feature = "plugin-mesh")]
+    #[test]
+    fn mesh_status_uses_the_user_mode_service_state() {
+        use infraternal_status::Scope;
+
+        assert_eq!(
+            mesh_status_result("status", true, true, Scope::User),
+            (
+                CommandState::Running,
+                "The Mesh service is running in user mode.",
+                Exit::Ok
+            ),
+        );
+        assert_eq!(
+            mesh_status_result("status", true, false, Scope::User),
+            (
+                CommandState::Restarting,
+                "The Mesh user service is loaded but not running.",
+                Exit::Failed
+            ),
+        );
+        assert_eq!(
+            mesh_status_result("status", false, false, Scope::User),
+            (
+                CommandState::Stopped,
+                "The Mesh user service is stopped.",
+                Exit::Ok
+            ),
         );
     }
 }

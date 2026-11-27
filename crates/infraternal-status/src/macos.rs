@@ -76,9 +76,52 @@ pub(super) fn target(unit: &Unit) -> String {
     }
 }
 
-/// Query the actual installed launchd job without letting a slow manager stall status.
+/// A launchd observation for an installed service. It contains no service arguments.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LaunchdStatus {
+    /// launchd has the job loaded.
+    pub loaded: bool,
+    /// launchd reports a running process.
+    pub running: bool,
+    /// The process identifier when launchd reports one for the running job.
+    pub pid: Option<u32>,
+}
+
+impl LaunchdStatus {
+    /// Map launchd's service observation to the local overview's activity.
+    pub(super) fn activity(self) -> Activity {
+        if self.running {
+            Activity::Active
+        } else {
+            Activity::Inactive
+        }
+    }
+}
+
+/// Read the installed user-mode service for `mesh status`. A missing user plist
+/// leaves system-service status to the caller. An installed but unavailable job
+/// stays a user-mode result, even when launchd cannot answer.
+///
+/// # Errors
+/// Returns a short reason when launchd cannot report the installed user job.
+#[cfg(target_os = "macos")]
+pub fn macos_user_service(roots: &crate::Roots) -> Result<Option<LaunchdStatus>, &'static str> {
+    local_units(roots)
+        .iter()
+        .find(|unit| unit.scope == Scope::User)
+        .map(service_status)
+        .transpose()
+}
+
+/// Query the actual installed launchd job for the machine overview.
 #[cfg(target_os = "macos")]
 pub(super) fn activity(unit: &Unit) -> Result<Activity, &'static str> {
+    service_status(unit).map(LaunchdStatus::activity)
+}
+
+/// Query one launchd job without letting a slow manager stall either status command.
+#[cfg(target_os = "macos")]
+fn service_status(unit: &Unit) -> Result<LaunchdStatus, &'static str> {
     let mut command = std::process::Command::new("/bin/launchctl");
     command
         .arg("print")
@@ -94,23 +137,30 @@ pub(super) fn observed(
     success: bool,
     stdout: &[u8],
     stderr: &[u8],
-) -> Result<Activity, &'static str> {
+) -> Result<LaunchdStatus, &'static str> {
     if success {
-        match String::from_utf8_lossy(stdout)
-            .lines()
-            .map(str::trim)
-            .find_map(|line| line.strip_prefix("state = "))
-        {
-            Some("running") => Ok(Activity::Active),
-            Some("not running" | "waiting" | "exited" | "spawn scheduled") => {
-                Ok(Activity::Inactive)
-            }
-            _ => Err("service manager did not provide a readable runtime state"),
-        }
+        let listing = String::from_utf8_lossy(stdout);
+        let property = |name| {
+            listing
+                .lines()
+                .map(str::trim)
+                .find_map(|line| line.strip_prefix(name))
+        };
+        let running = match property("state = ") {
+            Some("running") => true,
+            Some("not running" | "waiting" | "exited" | "spawn scheduled") => false,
+            _ => return Err("service manager did not provide a readable runtime state"),
+        };
+        let pid = running.then(|| property("pid = ")?.parse().ok()).flatten();
+        Ok(LaunchdStatus {
+            loaded: true,
+            running,
+            pid,
+        })
     } else {
         let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
         if stderr.contains("could not find service") || stderr.contains("service not found") {
-            Ok(Activity::Inactive)
+            Ok(LaunchdStatus::default())
         } else {
             Err("service manager query was refused")
         }
