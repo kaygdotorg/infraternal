@@ -967,7 +967,7 @@ pub(crate) struct UninstallReview {
     pub path_line: String,
 }
 
-/// Discover the user job from the same LaunchAgent paths as status.
+/// Discover the user job from the same `LaunchAgent` paths as status.
 pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
     let paths = Paths::for_uid(uid)?;
     let host = read_uninstall_receipt(&paths, uid)?;

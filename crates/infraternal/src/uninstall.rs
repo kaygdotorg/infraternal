@@ -393,7 +393,7 @@ fn remove(_plan: &Plan, host: &str, keep: bool) -> io::Result<Vec<String>> {
 }
 
 #[cfg(target_os = "macos")]
-/// Review the GUI user's LaunchAgent and the helper provisioned for that uid.
+/// Review the GUI user's `LaunchAgent` and the helper provisioned for that uid.
 fn user_plan(uid: u32) -> io::Result<Plan> {
     use infraternal_plugin_mesh::macos_user_mode as names;
     let review = crate::up::macos_user::review_uninstall(uid)?;
@@ -432,7 +432,7 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
 }
 
 #[cfg(target_os = "macos")]
-/// Review the root-mode LaunchDaemon and its fixed machine paths.
+/// Review the root-mode `LaunchDaemon` and its fixed machine paths.
 fn system_plan(_caller: u32) -> io::Result<Plan> {
     use infraternal_plugin_mesh::macos_service as service;
     let (host, paths_to_remove, conditional_alias) = service::review_removal()?;
@@ -460,7 +460,7 @@ fn system_plan(_caller: u32) -> io::Result<Plan> {
 }
 
 #[cfg(target_os = "macos")]
-/// The trusted system image used by the root LaunchDaemon.
+/// The trusted system image used by the root `LaunchDaemon`.
 fn system_binary(_plan: &Plan) -> PathBuf {
     infraternal_plugin_mesh::macos_service::MACHINE_BINARY.into()
 }
