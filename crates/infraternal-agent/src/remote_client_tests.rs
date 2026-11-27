@@ -70,7 +70,8 @@ async fn retirement_ends_the_remote_supervisor() {
                     Frame::Hello { .. }
                 ));
                 Transmit::default().send(&channel, 0, &close).await.unwrap();
-                connection.closed().await;
+                // Keep the endpoint alive until the client consumes this frame.
+                std::future::pending::<()>().await;
             } else {
                 drop(udp);
                 let tls = remote_tls::server_config(&server_identity, roots).unwrap();
@@ -82,15 +83,17 @@ async fn retirement_ends_the_remote_supervisor() {
                     Frame::Hello { .. }
                 ));
                 Transmit::default().send(&channel, 0, &close).await.unwrap();
-                let mut bytes = [0; 16];
-                let _ = channel.read(&mut bytes).await;
+                std::future::pending::<()>().await;
             }
         };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(8), async {
-            tokio::join!(run(&identity, Some(state.0.clone())), server)
+        let result = tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::select! {
+                result = run(&identity, Some(state.0.clone())) => result,
+                () = server => panic!("fixture stopped before the infraternal agent returned"),
+            }
         })
         .await
-        .expect("retirement must end the service loop without a retry");
+        .unwrap_or_else(|_| panic!("the retirement must end the service loop, quic={quic}"));
         assert!(is_retired(&result.unwrap_err()));
     }
 }
