@@ -958,7 +958,7 @@ mod tests {
                 key: crate::policy::model::PublicKey([1; 32]),
                 previous_key: None,
                 previous_active: false,
-                addresses: crate::dataplane::Addresses {
+                addresses: crate::policy::model::Addresses {
                     ipv4: "10.254.0.2".parse().expect("IPv4 fixture"),
                     ipv6: "fd01::2".parse().expect("IPv6 fixture"),
                 },
@@ -1105,10 +1105,14 @@ mod mesh_down_review_tests {
     fn mesh_down_action_clears_pair_state() {
         use infraternal_plugin_api::AgentPlugin;
 
-        let mut plugin = super::MeshNodePlugin::from_node(crate::node::Node::default());
-        let manager = RelayManager::new(plugin.owner.clone(), &RelayList::default());
-        plugin.relays = Some(manager.clone());
+        let mut plugin =
+            crate::node_actions::MeshNodePlugin::from_node(crate::node::Node::default());
+        plugin.relays = Some(RelayManager::new(
+            plugin.owner.clone(),
+            &RelayList::default(),
+        ));
         {
+            let manager = plugin.relays.as_ref().expect("relay manager");
             let mut state = lock(&manager.state);
             state.pairs.insert(
                 NodeId(1),
@@ -1117,7 +1121,7 @@ mod mesh_down_review_tests {
                         key: crate::policy::model::PublicKey([1; 32]),
                         previous_key: None,
                         previous_active: false,
-                        addresses: crate::dataplane::Addresses {
+                        addresses: crate::policy::model::Addresses {
                             ipv4: "10.254.0.2".parse().expect("IPv4 fixture"),
                             ipv6: "fd01::2".parse().expect("IPv6 fixture"),
                         },
@@ -1137,6 +1141,7 @@ mod mesh_down_review_tests {
 
         plugin.call("mesh.down", b"{}").expect("mesh down action");
 
+        let manager = plugin.relays.as_ref().expect("relay manager");
         let state = lock(&manager.state);
         assert!(state.pairs.is_empty());
         assert!(state.active.is_empty());

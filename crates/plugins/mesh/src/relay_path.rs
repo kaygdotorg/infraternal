@@ -2506,7 +2506,6 @@ mod review_j375_tests {
         fn route_mtu_updater(&self, _peer: &dataplane::Peer) -> RouteMtuUpdater {
             Arc::new(|_| Ok(()))
         }
-
     }
 
     /// Build a data-plane peer for relay-path tests without touching a WireGuard device.
@@ -2515,7 +2514,7 @@ mod review_j375_tests {
             key: PairSecret::from_private(&[key; 32]).unwrap().public(),
             previous_key: None,
             previous_active: false,
-            addresses: dataplane::Addresses {
+            addresses: crate::policy::model::Addresses {
                 ipv4: "10.254.0.2".parse().unwrap(),
                 ipv6: "fd01::2".parse().unwrap(),
             },
@@ -2748,8 +2747,7 @@ mod relay_identity_refresh_tests {
     #[tokio::test]
     async fn relay_reconnect_reads_fresh_client_configuration() {
         let mut authority = Authority::new();
-        let config =
-            tls::client_config(authority.issue(Purpose::Host(HostId([4; 16])))).unwrap();
+        let config = tls::client_config(authority.issue(Purpose::Host(HostId([4; 16])))).unwrap();
         let admission: Admission = Arc::new(|_| true);
         let relay = Relay::start(
             "127.0.0.1:0".parse().unwrap(),

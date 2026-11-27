@@ -12,7 +12,6 @@ use infraternal_plugin_relay::{
     wire::{HostId, LinkId, Notice, Token},
 };
 use std::{net::SocketAddr, sync::Arc, time::Duration};
-use tokio::io::AsyncWriteExt as _;
 
 const NAME: &str = "relay-1.mesh.test";
 const WAIT: Duration = Duration::from_secs(5);
