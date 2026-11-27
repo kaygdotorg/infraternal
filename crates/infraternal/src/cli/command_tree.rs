@@ -65,7 +65,7 @@ pub fn build_for_terminal(registry: &ActionRegistry) -> Command {
     use std::io::{self, IsTerminal as _};
 
     let color = super::output::RenderOptions::detect(io::stdout().is_terminal()).color;
-    build(registry)
+    let mut command = build(registry)
         .color(if color {
             clap::ColorChoice::Auto
         } else {
@@ -75,7 +75,35 @@ pub fn build_for_terminal(registry: &ActionRegistry) -> Command {
         .mut_arg("json", |arg| arg.help("Print JSON for scripts."))
         .mut_arg("server_override", |arg| {
             arg.help("Choose a server you've signed in to.")
-        })
+        });
+    if let Some(up) = registry.find(&["up"]).filter(|entry| entry.action.visible) {
+        command = command.mut_subcommand("up", |subcommand| {
+            subcommand
+                .long_about(up_help(up.action))
+                .mut_arg("server", |arg| {
+                    arg.help("HTTPS address of the server to join.")
+                })
+        });
+    }
+    command
+}
+
+/// Describe machine setup in the order it happens on this platform.
+fn up_help(action: &ActionDefinition) -> String {
+    let instructions = if cfg!(target_os = "macos") {
+        [
+            "Enter your Mac administrator password to set up mesh access.",
+            "Open the link or scan the code, then approve this Mac with your passkey.",
+            "The infraternal agent runs while you're signed in. Use --system to run it before sign-in.",
+        ]
+    } else {
+        [
+            "Open the link or scan the code, then approve this machine with your passkey.",
+            "Enter your administrator password to install and start the infraternal agent.",
+            "Check the connection with infraternal status.",
+        ]
+    };
+    long_about(action, instructions)
 }
 
 /// Find the deepest selected subcommand and return its path and input matches.
@@ -182,7 +210,10 @@ fn build_node(node: &CommandNode<'_>, inherited: &[Arg]) -> Command {
         if action.visible {
             command = command
                 .about(action.description.clone())
-                .long_about(long_about(action));
+                .long_about(long_about(
+                    action,
+                    action.instructions.iter().map(String::as_str),
+                ));
         } else if let Some(description) = &node.plugin_description {
             command = command.about(description.clone());
         }
@@ -292,12 +323,16 @@ fn hidden_inherited_arg(argument: &Arg) -> Arg {
     hidden
 }
 
-fn long_about(action: &ActionDefinition) -> String {
+/// Render the registered description, steps, examples and safety notes for help.
+fn long_about<'a>(
+    action: &ActionDefinition,
+    instructions: impl IntoIterator<Item = &'a str>,
+) -> String {
     let mut about = format!(
         "{}\n\nWhen to use:\n{}\n\nSteps:",
         action.description, action.when_to_use
     );
-    for (index, instruction) in action.instructions.iter().enumerate() {
+    for (index, instruction) in instructions.into_iter().enumerate() {
         let _ = write!(about, "\n{}. {instruction}", index + 1);
     }
     if !action.examples.is_empty() {
