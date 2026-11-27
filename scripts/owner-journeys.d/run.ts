@@ -8,6 +8,7 @@ import { checkKeys, endShell, openShell, origin, proveShell, until } from "./bro
 
 const [out, mode, fixturePath] = process.argv.slice(2);
 
+/** Ordered outcomes used to write the final summary after all independent journeys finish. */
 const results: { step: string; outcome: string; message: string; ms: number }[] = [];
 
 /** Strip join codes and secret-bearing diagnostic lines before anything is stored or printed. */
