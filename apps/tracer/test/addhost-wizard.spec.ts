@@ -940,7 +940,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await open(page);
     await page.setViewportSize(viewport);
     await openWizard(page);
-    await addTyped(page, "pat@retire.lab");
+    await addTyped(page, "root@retire.lab");
     await page.locator(".ah-consent").click();
     await inWizard(page, "Install as root").click();
     const review = wizard(page).locator(".ah-page[data-page='failure']");

@@ -910,25 +910,24 @@ export class Wizard {
       <p class="ah-lede">${escapeHtml(guide.happened)}</p>${guide.next ? `
       <p class="ah-text">${escapeHtml(guide.next)}</p>` : ""}${closing.length ? `
       <p class="ah-text" data-terminal-summary>${closing.length === 1 ? "1 open terminal. Start fresh closes it." : `${closing.length} open terminals. Start fresh closes them.`}</p>
-      <div class="ah-keyblock" data-kv></div>` : ""}${retirement ? `<div class="ah-keyblock" data-retirement></div>` : ""}${this.detailsBlock(job)}`;
+      <div class="ah-keyblock" data-kv></div>` : ""}${retirement?.install ? `<div class="ah-keyblock" data-retirement></div>` : ""}${this.detailsBlock(job)}`;
     if (closing.length) {
       const list = createKeyValueList("The terminals Start fresh closes");
       list.set(closing.map((terminal, index) => ({ key: `Terminal ${index + 1}`, value: takeoverTerminalLabel(terminal) })));
       page.querySelector<HTMLElement>("[data-kv]")!.append(list.root);
     }
-    if (retirement) {
-      const labels = ["Data folder and contents", "Service unit", "Command link", "Enablement link"];
+    if (retirement?.install) {
       const list = createKeyValueList("Paths infraternal will remove");
-      list.set(retirement.paths.map((value, index) => ({ key: value.endsWith("/infra") ? "Short command link" : labels[index] ?? "Link", value })));
+      list.set(retirement.paths.map((value) => ({ key: "", value, wide: true })));
       page.querySelector<HTMLElement>("[data-retirement]")!.append(list.root);
     }
     const open = openId ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="open-terminal" data-host-id="${escapeHtml(openId)}">${svg(ICON.terminal)}<span>Open a terminal</span></button>` : "";
     const install = guide.fix === "install-command" ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="install">Install from the host</button>` : "";
     const unlock = guide.fix === "unlock" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="unlock-retry">${svg(ICON.shieldCheck)}<span>Unlock</span></button>` : "";
     const takeOver = guide.fix === "take-over" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="review-take-over"><span>Take over</span></button>` : "";
-    const retire = retirement ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retire-install"><span>Retire and continue</span></button>` : "";
+    const retire = retirement ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retire-install"><span>${retirement.install ? "Retire and continue" : "Check installation"}</span></button>` : "";
     const secondary = retirement?.skip_challenge
-      ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep-install">Keep earlier installation</button>`
+      ? `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="keep-install">${retirement.install ? "Keep earlier installation" : "Continue setup"}</button>`
       : `<button class="ui-button ah-secondary" data-button="secondary" type="button" data-ah="back-progress">Back</button>`;
     this.setFoot(`${secondary}${install}${open}${takeOver}${unlock}${retire}${retirement || guide.fix === "none" || guide.fix === "take-over" || guide.fix === "unlock" ? "" : guide.fix === "start-fresh" ? `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="start-fresh"><span>Start fresh</span></button>` : `<button class="ui-button ah-primary" data-button="primary" type="button" data-ah="retry">${svg(ICON.retry)}<span>${guide.tone === "info" ? "Try again" : "Retry"}</span></button>`}`);
     if (closing.length) {

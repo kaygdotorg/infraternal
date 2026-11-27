@@ -815,13 +815,13 @@ impl Backend for RemoteBackend {
         })
     }
 
-    /// Bound direct root SSH's candidate accounts to this owner's removed user installs.
-    fn retired_user_ids<'a>(&'a self, authority: &'a Authority) -> Operation<'a, Vec<u32>> {
+    /// Only this owner's removed host rows can lead to an alternate-scope check.
+    fn retired_install_uids<'a>(&'a self, authority: &'a Authority) -> Operation<'a, Vec<u32>> {
         Box::pin(async move {
             self.authorize(authority).await?;
             let ids: Vec<i64> = sqlx::query_scalar(
                 "SELECT DISTINCT h.execution_uid FROM remote_hosts h
-                 WHERE h.owner_id=? AND h.mode='rootless' AND h.execution_uid>0
+                 WHERE h.owner_id=? AND h.mode IN ('rootless','rootful') AND h.execution_uid>=0
                    AND (h.revoked_at IS NOT NULL OR EXISTS(
                        SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
                    ))

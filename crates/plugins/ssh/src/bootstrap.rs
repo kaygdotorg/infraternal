@@ -264,8 +264,8 @@ pub trait Backend: Send + Sync {
         Box::pin(async { Ok(false) })
     }
 
-    /// Candidate user ids a root SSH login may inspect on this machine.
-    fn retired_user_ids<'a>(&'a self, _authority: &'a Authority) -> Operation<'a, Vec<u32>> {
+    /// Unix ids of this owner's retired installs, used to bound any alternate-scope inspection.
+    fn retired_install_uids<'a>(&'a self, _authority: &'a Authority) -> Operation<'a, Vec<u32>> {
         Box::pin(async { Ok(Vec::new()) })
     }
 
@@ -2209,12 +2209,33 @@ impl Bootstrap {
         let expected = match (remains, target.mode) {
             (previous_attempt::Remains::Installed(installed), _) => Some(installed.host),
             (_, InstallMode::Root) if check.uid == 0 || check.existing => None,
+            (_, InstallMode::Rootless) if check.sudo => {
+                if !self
+                    .may_inspect_system_install(batch, target, attempt, started, session, resources)
+                    .await?
+                {
+                    return Ok(None);
+                }
+                None
+            }
             _ => return Ok(None),
         };
-        let mode = expected.map_or(InstallMode::Rootless, |_| target.mode);
+        let mode = expected.map_or_else(
+            || match target.mode {
+                InstallMode::Root => InstallMode::Rootless,
+                InstallMode::Rootless => InstallMode::Root,
+            },
+            |_| target.mode,
+        );
         let candidates = match (mode, check.uid) {
             (InstallMode::Root, _) => vec![0],
-            (InstallMode::Rootless, 0) => self.backend.retired_user_ids(&batch.authority).await?,
+            (InstallMode::Rootless, 0) => self
+                .backend
+                .retired_install_uids(&batch.authority)
+                .await?
+                .into_iter()
+                .filter(|uid| *uid != 0)
+                .collect(),
             (InstallMode::Rootless, uid) => vec![uid],
         };
         let mut matched = None;
@@ -2255,7 +2276,7 @@ impl Bootstrap {
                 "Review the earlier infraternal installation",
                 Failure::retire_previous(
                     challenge,
-                    old.installed.host,
+                    Some(old.installed.host),
                     skip,
                     old.review_paths(different_scope),
                 ),
@@ -2268,7 +2289,12 @@ impl Bootstrap {
             )
             .await?;
         if different_scope {
-            return Ok(confirmed.then_some(OtherRetirement { old, uid, as_user }));
+            return Ok(confirmed.then_some(OtherRetirement {
+                old,
+                mode,
+                uid,
+                as_user,
+            }));
         }
         if !self
             .backend
@@ -2293,6 +2319,50 @@ impl Bootstrap {
         Ok(None)
     }
 
+    /// Request read-only administrator access before inspecting a system
+    /// install during a user install. Passwordless sudo alone grants no consent.
+    async fn may_inspect_system_install(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &Arc<dyn SshSession>,
+        resources: &mut AttemptResources,
+    ) -> Result<bool, Failure> {
+        if !self
+            .backend
+            .retired_install_uids(&batch.authority)
+            .await?
+            .contains(&0)
+            || session
+                .run(
+                    "test -f /etc/systemd/system/infraternal-agent.service",
+                    Input::Empty,
+                )
+                .await
+                .is_err()
+        {
+            return Ok(false);
+        }
+        let challenge = uuid::Uuid::new_v4();
+        self.await_confirmation(
+            batch,
+            target,
+            attempt,
+            started,
+            "Check for an earlier system installation",
+            Failure::retire_previous(challenge, None, Some(uuid::Uuid::new_v4()), Vec::new()),
+            crate::model::Leftovers {
+                challenge,
+                mode: crate::model::InstallMode::Root,
+                findings: Vec::new(),
+            },
+            resources,
+        )
+        .await
+    }
+
     /// Finish cross-scope retirement only after readiness. The old layout and
     /// the server's owner binding both have to match the reviewed observation.
     async fn retire_other_scope(
@@ -2315,7 +2385,7 @@ impl Bootstrap {
             .old
             .execute(
                 session.as_ref(),
-                crate::model::InstallMode::Rootless,
+                plan.mode,
                 uuid::Uuid::new_v4(),
                 true,
                 plan.as_user,
@@ -2546,10 +2616,12 @@ enum FreshMode {
     PutBack,
 }
 
-/// An earlier user installation reviewed during a new system installation.
+/// An earlier installation reviewed while adding the other scope.
 struct OtherRetirement {
     /// The inode, key and paths the person reviewed.
     old: previous_attempt::Retirement,
+    /// The manager and install layout to act on.
+    mode: crate::model::InstallMode,
     /// The execution uid that must still match the server ledger.
     uid: u32,
     /// A root SSH session runs the old user's commands as that uid.

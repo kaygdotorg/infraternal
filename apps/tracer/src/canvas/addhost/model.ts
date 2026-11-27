@@ -283,10 +283,12 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       tone: "info",
     };
     case "retire_previous_install": return {
-      title: `Retire the earlier installation on ${name}?`,
-      happened: failure.retirement?.different_scope
-        ? "Once the new installation connects, infraternal will stop and disable the earlier service and remove the paths below."
-        : "Infraternal will stop and disable the earlier service. The files are kept until the new installation connects.",
+      title: failure.retirement && !failure.retirement.install ? `Check for an earlier installation on ${name}?` : `Retire the earlier installation on ${name}?`,
+      happened: failure.retirement && !failure.retirement.install
+        ? "Administrator access is needed to check the system installation. If it belongs to you, you can review its files before deciding."
+        : failure.retirement?.different_scope
+          ? "Once the new installation connects, infraternal will stop and disable the earlier service and remove the paths below."
+          : "Infraternal will stop and disable the earlier service. The files are kept until the new installation connects.",
       next: "",
       fix: failure.retirement ? "retire-install" : "none",
       tone: "info",

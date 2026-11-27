@@ -321,8 +321,9 @@ struct FailureIds {
 struct RetirementOffer {
     /// Pauses only this attempt, and only a client that displays these paths can spend it.
     challenge: uuid::Uuid,
-    /// Fixed identity typed in the host's installation record.
-    install: uuid::Uuid,
+    /// The reviewed identity. An absent id requests only a read-only system check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install: Option<uuid::Uuid>,
     /// Whether the old installation is in a separate scope from the one being added.
     different_scope: bool,
     /// Cross-scope adds may continue without modifying the old install.
@@ -585,7 +586,7 @@ impl Failure {
     #[must_use]
     pub(crate) fn retire_previous(
         challenge: uuid::Uuid,
-        install: uuid::Uuid,
+        install: Option<uuid::Uuid>,
         skip_challenge: Option<uuid::Uuid>,
         paths: Vec<String>,
     ) -> Self {

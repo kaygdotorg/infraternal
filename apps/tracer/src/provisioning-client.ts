@@ -92,7 +92,7 @@ export interface FailureDetail {
    */
   closes?: { terminals: TakeoverTerminal[]; close_challenge: string };
   /** The older installation and the exact removal paths bound to the current review. */
-  retirement?: { challenge: string; install: string; different_scope: boolean; skip_challenge?: string; paths: string[] };
+  retirement?: { challenge: string; install?: string; different_scope: boolean; skip_challenge?: string; paths: string[] };
   /** Observed SHA256 host-key fingerprints; untrusted, present only for `host-key`. */
   fingerprints?: string[];
   host_key_challenge?: string;
@@ -242,12 +242,14 @@ function parseFailure(value: unknown): FailureDetail | undefined {
   if (value.kind === "retire_previous_install" && isRecord(value.retirement)) {
     const { challenge, install, different_scope, skip_challenge, paths } = value.retirement;
     if (isCanonicalUuid(challenge) && challenge !== "00000000-0000-0000-0000-000000000000"
-      && isCanonicalUuid(install) && typeof different_scope === "boolean"
+      && typeof different_scope === "boolean"
       && (different_scope ? isCanonicalUuid(skip_challenge) && skip_challenge !== challenge
         && skip_challenge !== "00000000-0000-0000-0000-000000000000" : skip_challenge === undefined)
-      && isStrings(paths) && paths.length >= 3 && paths.length <= 5
+      && isStrings(paths) && (install === undefined
+        ? different_scope && paths.length === 0
+        : isCanonicalUuid(install) && paths.length >= 3 && paths.length <= 5)
       && paths.every((path) => path.startsWith("/") && path.length <= 512 && !/[\x00-\x1f\x7f]/.test(path))) {
-      failure.retirement = { challenge, install, different_scope, paths, ...(isCanonicalUuid(skip_challenge) ? { skip_challenge } : {}) };
+      failure.retirement = { challenge, different_scope, paths, ...(isCanonicalUuid(install) ? { install } : {}), ...(isCanonicalUuid(skip_challenge) ? { skip_challenge } : {}) };
     }
   }
   // A Start fresh that closes the stuck setup's own terminals (D368, #433): both the list and its own challenge, or neither.
