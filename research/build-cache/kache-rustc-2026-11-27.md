@@ -144,6 +144,20 @@ mount. Each arm runs in a fresh namespace. I stopped the invalid
 runtimes by their recorded process IDs. Their statuses serve as
 fixture diagnostics.
 
+The repaired control run completed `cargo test --offline --locked
+--workspace --no-fail-fast` with exit 0. It reported 4,636 passed,
+405 ignored and zero failed across 244 top-level suites. Wall time
+was 2,414.400 s, user CPU was 3,554.192 s and system CPU was 654.595 s.
+The target peaked at 14,909,890,560 allocated bytes. One-minute load
+min/median/max was 8.07/24.77/60.76. The native detach test compiles
+its own example, which is included in the execution timing.
+
+The discarded namespace's init briefly survived the shutdown of its
+outer launcher. I terminated the verified old namespace init by host
+PID and removed its private temp directory. The repaired control began
+before that cleanup finished, so its first samples include the overlap.
+[Linux parent-death signal behavior](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html)
+
 [Test-build and fixture evidence](https://git.kayg.org/kayg/infraternal/issues/608#issuecomment-107336)
 
 ## Cache sharing boundary
