@@ -237,7 +237,9 @@ runtime and retains the same 5 GiB cache cap.
 | Operation | Wall s | Cargo user/sys CPU s | Daemon user/sys CPU s | Peak target/cache/combined bytes | Load 1m min/median/max | Hits/misses/dups |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | x86_64 static | 1,445.078 | 2,546.534 / 239.983 | 17.59 / 20.78 | 2,327,953,408 / 5,959,598,080 / 8,287,551,488 | 16.05 / 22.36 / 38.33 | 374 / 151 / 23 |
+| aarch64 static | 1,640.553 | 2,645.596 / 184.062 | 11.45 / 13.63 | 3,725,619,200 / 5,670,809,600 / 9,396,428,800 | 14.63 / 24.96 / 40.75 | 270 / 71 / 16 |
 
-The x86_64 output matched the unedited worktree's SHA-256. Its hit
-rate was 68.25%. Elapsed time increased by 244.418 s while median
-one-minute host load rose from 18.09 to 22.36.
+Both static outputs matched the unedited worktree's SHA-256. Hit rates
+were 68.25% on x86_64 and 75.63% on aarch64. Elapsed time rose by
+244.418 s and 213.279 s respectively. Median one-minute host load also
+rose from 18.09 to 22.36 and from 23.20 to 24.96.
