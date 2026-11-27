@@ -212,7 +212,7 @@ test.describe("recovery key entry", () => {
     await page.route("**/auth/session", (route) => route.fulfill({ status: 401, json: {} }));
     await page.emulateMedia({ colorScheme: "dark", reducedMotion: "no-preference" });
     await page.goto("/?mock=1&proto=recovery");
-    await page.getByRole("button", { name: "use recovery key", exact: true }).click();
+    await page.getByRole("button", { name: "Use recovery key", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Use your recovery key" })).toBeVisible();
     const problems: string[] = [];
     await collectRingProblems(page, testInfo, "recovery-entry", problems);

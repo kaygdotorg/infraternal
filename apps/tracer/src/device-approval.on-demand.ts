@@ -86,7 +86,7 @@ function renderChecking(host: HTMLElement, join: boolean): void {
       <div class="auth-mark">${BRAND_MARK}<span>infraternal</span></div>
       <h1 id="device-approval-title">${join ? "Add a machine" : "Approve device sign-in"}</h1>
       <p class="auth-lede">${join ? "Checking the machine that asked to join…" : "Checking the requested device and access…"}</p>
-      <p class="auth-loading" role="status" aria-live="polite">Please wait</p>
+      <p class="auth-loading" role="status" aria-live="polite">Checking request…</p>
     </section>
   </section>`;
 }
