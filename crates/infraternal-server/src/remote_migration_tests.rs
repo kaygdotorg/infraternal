@@ -1097,6 +1097,9 @@ async fn device_host_mode_migration_keeps_every_row_and_admits_devices_only_with
         "the same columns in the same order"
     );
     let mut expected = objects;
+    // The relay tombstone migration adds these alongside the host-key trigger.
+    expected.push(("index".into(), "mesh_dataplane_removed_recency".into()));
+    expected.push(("trigger".into(), "mesh_dataplane_removed_timestamp".into()));
     expected.push((
         "trigger".into(),
         "remote_certificates_key_matches_host_mode".into(),
@@ -1105,7 +1108,7 @@ async fn device_host_mode_migration_keeps_every_row_and_admits_devices_only_with
     assert_eq!(
         schema_objects(&pool).await,
         expected,
-        "every index and trigger came back, and one trigger is new"
+        "every index and trigger came back, including the current migration objects"
     );
     let uid_required: i64 = sqlx::query_scalar(
         "SELECT \"notnull\" FROM pragma_table_info('remote_hosts') WHERE name='execution_uid'",

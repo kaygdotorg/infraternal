@@ -1631,6 +1631,23 @@ impl Store {
         .await
     }
 
+    /// Up to `limit` recently removed hosts, newest first, as canonical UUID text. Old
+    /// tombstones leave the relay list after the seven-day host-leaf lifetime (D402 Q3).
+    /// # Errors
+    /// Returns a fixed public error, not database input.
+    pub async fn removed_hosts(&self, limit: usize) -> Result<Vec<String>, &'static str> {
+        let limit = i64::try_from(limit).map_err(|_| "Mesh storage unavailable.")?;
+        sqlx::query_scalar(
+            "SELECT host FROM mesh_dataplane_removed \
+             WHERE removed_at > CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) - 604800000 \
+             ORDER BY removed_at DESC, host DESC LIMIT ?",
+        )
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| "Mesh storage unavailable.")
+    }
+
     /// Attach with the independently probed rotation and authority-epoch capabilities.
     ///
     /// A `None` epoch result stays unknown in storage. The inventory maps both unknown and
@@ -3408,5 +3425,55 @@ mod candidate_tests {
             marked(&store.config(server).await.unwrap()),
             Vec::<NodeId>::new()
         );
+    }
+
+    /// The newest removal reaches relay role data despite older host-sorted tombstones.
+    #[tokio::test]
+    async fn newly_removed_host_is_not_starved_by_old_tombstones() {
+        const TOMBSTONES: usize = crate::relay_list::MAX_REVOKED;
+        let (store, _) = mesh().await;
+        for host in 0..TOMBSTONES {
+            let host = format!("00000000-0000-0000-0000-{host:012x}");
+            sqlx::query("INSERT INTO mesh_dataplane_removed(host) VALUES(?)")
+                .bind(host)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        let newest = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+        sqlx::query("INSERT INTO mesh_dataplane_removed(host) VALUES(?)")
+            .bind(newest)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        let removed = store.removed_hosts(TOMBSTONES).await.unwrap();
+        assert_eq!(removed.len(), TOMBSTONES);
+        assert!(
+            removed.iter().any(|host| host == newest),
+            "the newest tombstone was starved by older host-sorted rows"
+        );
+
+        let has_recency_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mesh_dataplane_removed') WHERE name='removed_at')",
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        if has_recency_column {
+            sqlx::query(
+                "UPDATE mesh_dataplane_removed \
+                 SET removed_at = CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) - 691200000 \
+                 WHERE host != ?",
+            )
+            .bind(newest)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                store.removed_hosts(TOMBSTONES).await.unwrap(),
+                vec![newest.to_owned()]
+            );
+        }
     }
 }

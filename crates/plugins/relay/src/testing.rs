@@ -30,8 +30,10 @@ pub struct Authority {
 pub enum Purpose<'a> {
     /// An enrolled host: client purpose, one host URI.
     Host(HostId),
-    /// A relay: server purpose, this DNS name.
+    /// A relay: server purpose, this DNS name and a relay URI (D402 Q3).
     Relay(&'a str),
+    /// A plain server leaf (the leg-B kind): server purpose, this DNS name, no relay URI.
+    Server(&'a str),
 }
 
 impl Authority {
@@ -93,6 +95,7 @@ impl Authority {
         )
     }
 
+    /// Sign one leaf for `purpose` with a fresh Ed25519 key.
     fn leaf(&mut self, purpose: Purpose<'_>) -> (X509, PKey<Private>) {
         self.serial += 1;
         let key = PKey::generate_ed25519().unwrap();
@@ -135,6 +138,14 @@ impl Authority {
                     .unwrap(),
             ),
             Purpose::Relay(dns) => (
+                ExtendedKeyUsage::new().server_auth().build().unwrap(),
+                SubjectAlternativeName::new()
+                    .dns(dns)
+                    .uri(&format!("{}{}", crate::tls::RELAY_URI, HostId([0x5a; 16])))
+                    .build(&context)
+                    .unwrap(),
+            ),
+            Purpose::Server(dns) => (
                 ExtendedKeyUsage::new().server_auth().build().unwrap(),
                 SubjectAlternativeName::new()
                     .dns(dns)

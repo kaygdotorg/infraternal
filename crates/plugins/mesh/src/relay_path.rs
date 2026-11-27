@@ -50,6 +50,17 @@
 //! is sustained and steady, so an idle pair is never woken (D81). A peer that has never
 //! answered a direct probe (an older node) is not judged: silence is not a slow path.
 //!
+//! Link requests name a pair by an opaque token, never by host (D402 Q8): both ends derive
+//! it from their static-static X25519 secret and the relay's name ([`PairSecret`],
+//! [`infraternal_plugin_relay::token::pair_token`]), so a relay cannot tell from a request
+//! who the other end is, and
+//! two relays see unrelated tokens for one pair. Callers still name pairs by a stable label
+//! ([`HostId`]: the host uuid in fixtures, any stable 16-byte id in the node). The tokens come
+//! from the peer's mesh public key as given when the pair was added and from this node's key
+//! as given at start, so a link survives a key rotation (it forwards by link id) and a
+//! reconnect asks for the same tokens; a caller that wants tokens under new keys releases the
+//! pair and adds it again.
+//!
 //! A relay sees the probe's token and could answer for the peer to look faster than
 //! it is. It cannot look faster than its own leg, which this node's QUIC connection
 //! to it measures independently; relays already hold the deployment's server-purpose
@@ -62,13 +73,14 @@ use crate::{
     wireguard,
 };
 use bytes::{BufMut, BytesMut};
+use gotatun::x25519::{PublicKey as X25519PublicKey, StaticSecret};
 use infraternal_mesh::path_choice::{Path, Samples, Selector, band, first_choice};
 use infraternal_plugin_relay::{
     client::{Client, Notices},
     probe::{self, ProbeKey},
     quinn,
     tls::Credentials,
-    wire::{self, HostId, LinkId, Notice},
+    wire::{self, HostId, LinkId, Notice, Token},
 };
 use std::{
     collections::HashMap,
@@ -76,7 +88,7 @@ use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -92,11 +104,16 @@ struct ShimSocket(AsyncFd<UdpSocket>);
 
 impl ShimSocket {
     /// Bind an ephemeral port and accept datagrams only from the engine port.
+    #[allow(unsafe_code)]
     fn bind(engine_port: u16) -> io::Result<Self> {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
         socket.set_nonblocking(true)?;
         socket.connect((Ipv4Addr::LOCALHOST, engine_port))?;
-        Ok(Self(AsyncFd::with_interest(socket, Interest::READABLE)?))
+        // SAFETY: AsyncFd owns the socket, and this wrapper only borrows it. The socket
+        // keeps the same open descriptor until AsyncFd deregisters it and drops it.
+        unsafe { AsyncFd::register_with_interest(socket, Interest::READABLE) }
+            .map(Self)
+            .map_err(|error| error.into_parts().1)
     }
 
     /// Return the loopback address advertised as this peer's endpoint.
@@ -190,6 +207,53 @@ pub fn direct_failed(
         .is_none_or(|handshake| handshake <= endpoint_installed_at)
 }
 
+/// A peer's mesh public key, the key its pair tokens come from.
+pub type PeerKey = crate::policy::model::PublicKey;
+
+/// This node's static mesh secret, held only to derive relay pair tokens (D402 Q8).
+///
+/// The pair secret is X25519(this node's static key, the peer's public key), the same value
+/// at both ends and unknown to everyone else, relays included. It never leaves this type:
+/// only the one-way token derived from it
+/// ([`infraternal_plugin_relay::token::pair_token`]) is sent.
+pub struct PairSecret {
+    secret: StaticSecret,
+    public: PeerKey,
+}
+
+impl PairSecret {
+    /// Wrap this node's 32-byte static mesh private key.
+    /// # Errors
+    /// Refuses a key that is not 32 bytes.
+    pub fn from_private(bytes: &[u8]) -> io::Result<Self> {
+        let (secret, public) = crate::gotatun_node::secret_from_bytes(bytes)?;
+        Ok(Self { secret, public })
+    }
+
+    /// This node's own mesh public key; the lower key of a pair starts its relayed session.
+    #[must_use]
+    pub fn public(&self) -> PeerKey {
+        self.public
+    }
+
+    /// The token this pair asks the relay named `relay` for. `None` for a peer key whose
+    /// shared secret is all zero (a low-order point): no real peer has such a key, and its
+    /// "secret" would be known to anyone.
+    #[must_use]
+    pub fn token(&self, peer: &PeerKey, relay: &str) -> Option<Token> {
+        let shared = self.secret.diffie_hellman(&X25519PublicKey::from(peer.0));
+        shared
+            .was_contributory()
+            .then(|| infraternal_plugin_relay::token::pair_token(shared.as_bytes(), relay))
+    }
+}
+
+impl std::fmt::Debug for PairSecret {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PairSecret([REDACTED])")
+    }
+}
+
 /// One relay in the shared, ordered list.
 #[derive(Clone, Debug)]
 pub struct RelaySpec {
@@ -217,22 +281,25 @@ pub enum Event {
 /// Watches one connection's application-payload limit and reports changed inner route budgets.
 #[derive(Default)]
 struct RelayMtuTracker {
-    last_limit: Option<Option<usize>>,
+    /// The limit last reported, once one was; `seen` false means report the next one.
+    last_limit: Option<usize>,
+    seen: bool,
 }
 
 impl RelayMtuTracker {
     /// Return a new safe mesh MTU only when Quinn's current limit changes.
     fn update(&mut self, max_datagram_size: Option<usize>) -> Option<u16> {
-        if self.last_limit == Some(max_datagram_size) {
+        if self.seen && self.last_limit == max_datagram_size {
             return None;
         }
-        self.last_limit = Some(max_datagram_size);
+        self.last_limit = max_datagram_size;
+        self.seen = true;
         Some(crate::mesh_mtu::for_relay_datagram(max_datagram_size))
     }
 
     /// Retry a failed route update on the next observation, even if Quinn's limit is unchanged.
     fn retry(&mut self) {
-        self.last_limit = None;
+        self.seen = false;
     }
 }
 
@@ -312,6 +379,10 @@ struct Live {
 /// Tracks one peer's relay control state and active path callbacks.
 struct Peer {
     host: HostId,
+    /// The peer's mesh public key when it was added; the lower key starts relayed sessions.
+    key: PeerKey,
+    /// The pair's token on each relay, by relay index (D402 Q8).
+    tokens: Vec<Token>,
     /// Moves the peer to the shim once a relay link is active (see `settle`).
     prepare_handshake: Arc<dyn Fn() -> io::Result<()> + Send + Sync>,
     /// Starts a handshake through the engine that owns this peer.
@@ -321,6 +392,10 @@ struct Peer {
     /// Moves the engine's endpoint for this peer back to its direct endpoint, keeping the
     /// session; `None` when the pair has no direct endpoint.
     use_direct: Option<Arc<dyn Fn() -> io::Result<()> + Send + Sync>>,
+    /// Reinstalls the configured peer after these relay paths stop, including an endpoint-less
+    /// peer whose last endpoint was the loopback shim.
+    restore: Arc<dyn Fn() -> io::Result<()> + Send + Sync>,
+    /// Connected loopback socket for receiving engine traffic and injecting relay traffic.
     socket: ShimSocket,
     /// A delayed session start is pending (see `settle`).
     starting: std::sync::atomic::AtomicBool,
@@ -571,11 +646,15 @@ impl PeerState {
 /// What every task of one node's relay paths shares: identity, relay connections, peers,
 /// counters and the clock the path rule reads.
 struct Shared {
-    /// This node's host id; it decides which end of a pair starts a session.
-    local: HostId,
+    /// This node's mesh public key; the lower key of a pair starts its session.
+    local: PeerKey,
+    /// Derives the pair tokens of new peers.
+    secret: PairSecret,
+    /// Which peer each pair token belongs to, for every relay (tokens differ per relay).
+    by_token: RwLock<HashMap<Token, HostId>>,
     wg_port: u16,
     endpoint: quinn::Endpoint,
-    config: quinn::ClientConfig,
+    config: ClientConfigSource,
     relays: Vec<RelaySpec>,
     live: Vec<RwLock<Option<Arc<Live>>>>,
     peers: RwLock<HashMap<HostId, Arc<Peer>>>,
@@ -589,6 +668,9 @@ struct Shared {
     /// [`RelayPaths::with_direct_probes`]); without them pairs have relay candidates only.
     probes: OnceLock<DirectProbes>,
 }
+
+/// Builds a fresh client identity for each relay connection attempt.
+type ClientConfigSource = Arc<dyn Fn() -> io::Result<quinn::ClientConfig> + Send + Sync>;
 
 impl Shared {
     /// Monotonic time since this node's relay paths started.
@@ -618,6 +700,10 @@ pub struct RelayPaths {
     shared: Arc<Shared>,
     drivers: Vec<JoinHandle<()>>,
     shims: Mutex<HashMap<HostId, JoinHandle<()>>>,
+    /// Serializes shim creation, removal and shutdown so two judges cannot orphan a socket.
+    add_peer_lock: tokio::sync::Mutex<()>,
+    /// Once set, an old judge cannot attach a new shim to paths being replaced.
+    stopped: AtomicBool,
 }
 
 /// The selected data plane's relay callbacks for one configured peer (see `settle`).
@@ -638,6 +724,16 @@ pub trait EndpointUpdater {
 
     /// Return a callback that writes this peer's route budget for a direct or relayed path.
     fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater;
+
+    /// Return a callback that restores the configured peer after the relay shim stops.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    fn restorer(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        self.handshake_preparer(peer)
+    }
 }
 
 impl EndpointUpdater for crate::node::Node {
@@ -655,23 +751,50 @@ impl EndpointUpdater for crate::node::Node {
     fn route_mtu_updater(&self, peer: &dataplane::Peer) -> RouteMtuUpdater {
         self.relay_route_mtu_updater(peer)
     }
+
+    fn restorer(
+        &self,
+        peer: &dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        self.relay_endpoint_restorer(peer)
+    }
 }
 
 impl RelayPaths {
-    /// Start connecting to every relay. Events go to `events`; a full queue drops them.
+    /// Start connecting to every relay. `secret` is this node's mesh key, for pair tokens.
+    /// Events go to `events`; a full queue drops them.
     /// # Errors
     /// Fails on an invalid identity or if no client socket can be bound.
     pub fn start(
-        local: HostId,
+        secret: PairSecret,
         wg_port: u16,
         relays: Vec<RelaySpec>,
         credentials: Credentials,
         events: mpsc::Sender<Event>,
     ) -> io::Result<Self> {
         let config = infraternal_plugin_relay::tls::client_config(credentials)?;
+        Self::start_with_config_source(secret, wg_port, relays, move || Ok(config.clone()), events)
+    }
+
+    /// Start relay paths using credentials that are re-read for each new QUIC connection.
+    /// # Errors
+    /// Fails if the initial credentials cannot build a client configuration or if no client
+    /// socket can be bound.
+    pub(crate) fn start_with_config_source(
+        secret: PairSecret,
+        wg_port: u16,
+        relays: Vec<RelaySpec>,
+        config: impl Fn() -> io::Result<quinn::ClientConfig> + Send + Sync + 'static,
+        events: mpsc::Sender<Event>,
+    ) -> io::Result<Self> {
+        let config: ClientConfigSource = Arc::new(config);
+        // Catch a bad current leaf before installing paths; later calls refresh it after renewal.
+        let _ = config()?;
         let endpoint = quinn::Endpoint::client((Ipv4Addr::UNSPECIFIED, 0).into())?;
         let shared = Arc::new(Shared {
-            local,
+            local: secret.public(),
+            secret,
+            by_token: RwLock::new(HashMap::new()),
             wg_port,
             endpoint,
             config,
@@ -691,6 +814,8 @@ impl RelayPaths {
             shared,
             drivers,
             shims: Mutex::new(HashMap::new()),
+            add_peer_lock: tokio::sync::Mutex::new(()),
+            stopped: AtomicBool::new(false),
         })
     }
 
@@ -733,8 +858,40 @@ impl RelayPaths {
         kernel: &dataplane::Peer,
         standby: bool,
     ) -> io::Result<SocketAddr> {
-        if let Some(existing) = read(&self.shared.peers).get(&peer) {
-            return existing.socket.local_addr();
+        let _serial = self.add_peer_lock.lock().await;
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(io::ErrorKind::NotConnected.into());
+        }
+        // Tokens from the key the peer's sessions use now: during a key overlap that is the
+        // previous key until the switch (`previous_active`), the same choice as its routes.
+        let key = match (kernel.previous_active, kernel.previous_key) {
+            (true, Some(previous)) => previous,
+            _ => kernel.key,
+        };
+        let tokens = self
+            .shared
+            .relays
+            .iter()
+            .map(|relay| self.shared.secret.token(&key, &relay.name))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let existing = { read(&self.shared.peers).get(&peer).cloned() };
+        if let Some(existing) = existing {
+            let (existing_endpoint, on_direct) = {
+                let state = lock(&existing.state);
+                (
+                    state.direct.as_ref().map(|direct| direct.endpoint),
+                    state.on_direct(),
+                )
+            };
+            if existing.key == key
+                && existing.tokens == tokens
+                && existing_endpoint == kernel.endpoint
+                && on_direct == standby
+            {
+                return existing.socket.local_addr();
+            }
+            self.release_locked(peer).await;
         }
         // Connected: only the selected engine's UDP socket can feed this shim. Do not
         // update the peer endpoint until settle confirms an active relay; updating both
@@ -753,6 +910,7 @@ impl RelayPaths {
             .endpoint
             .map(|_| endpoint_updater.handshake_preparer(kernel))
             .transpose()?;
+        let restore = endpoint_updater.restorer(kernel)?;
         let relays = self.shared.relays.len();
         let mut state = PeerState::new(relays);
         if let Some(endpoint) = kernel.endpoint {
@@ -760,10 +918,13 @@ impl RelayPaths {
         }
         let shim = Arc::new(Peer {
             host: peer,
+            key,
+            tokens: tokens.clone(),
             prepare_handshake,
             handshake_starter,
             route_mtu_updater,
             use_direct,
+            restore,
             socket,
             starting: std::sync::atomic::AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
@@ -773,6 +934,7 @@ impl RelayPaths {
             next_round_ms: AtomicU64::new(0),
             publishing: tokio::sync::Mutex::new(()),
         });
+        write(&self.shared.by_token).extend(tokens.into_iter().map(|token| (token, peer)));
         write(&self.shared.peers).insert(peer, shim.clone());
         let task = tokio::spawn(outbound(self.shared.clone(), shim.clone()));
         lock(&self.shims).insert(peer, task);
@@ -823,9 +985,36 @@ impl RelayPaths {
     /// Stop relaying `peer`: withdraw its requests and close its shim socket.
     /// The caller installs whatever endpoint replaces the shim.
     pub async fn release(&self, peer: HostId) {
+        let _serial = self.add_peer_lock.lock().await;
+        self.release_locked(peer).await;
+    }
+
+    /// Release `peer` only if it still owns `expected`; a stale judge cannot remove a newer
+    /// generation's shim after its relay setup finishes.
+    pub(crate) async fn release_if(&self, peer: HostId, expected: SocketAddr) {
+        let _serial = self.add_peer_lock.lock().await;
+        let matches = read(&self.shared.peers)
+            .get(&peer)
+            .and_then(|shim| shim.socket.local_addr().ok())
+            == Some(expected);
+        if matches {
+            self.release_locked(peer).await;
+        }
+    }
+
+    /// Remove the shim and withdraw outstanding requests. Caller holds `add_peer_lock`.
+    async fn release_locked(&self, peer: HostId) {
         let Some(shim) = write(&self.shared.peers).remove(&peer) else {
             return;
         };
+        {
+            let mut by_token = write(&self.shared.by_token);
+            for token in &shim.tokens {
+                if by_token.get(token) == Some(&peer) {
+                    by_token.remove(token);
+                }
+            }
+        }
         if let Some(task) = lock(&self.shims).remove(&peer) {
             task.abort();
         }
@@ -837,7 +1026,7 @@ impl RelayPaths {
         };
         for index in requested {
             if let Some(live) = live(&self.shared, index) {
-                let _ = live.client.unlink(peer).await;
+                let _ = live.client.unlink(shim.tokens[index]).await;
             }
         }
     }
@@ -913,19 +1102,64 @@ impl RelayPaths {
         }
     }
 
+    /// Whether any peer or shim registration remains for `peer`; available only to relay tests.
+    #[cfg(all(test, feature = "test-support"))]
+    pub(crate) fn has_registered_peer_for_test(&self, peer: HostId) -> bool {
+        read(&self.shared.peers).contains_key(&peer) || lock(&self.shims).contains_key(&peer)
+    }
+
     /// Stop every task and close every relay connection.
     pub async fn close(self) {
+        self.shutdown(false).await;
+    }
+
+    /// Stop shared relay state even when a manager still holds another `Arc` to these paths.
+    pub(crate) async fn shutdown(&self, restore_direct: bool) {
+        let _serial = self.add_peer_lock.lock().await;
+        self.stopped.store(true, Ordering::Release);
         for task in &self.drivers {
             task.abort();
         }
         for (_, task) in lock(&self.shims).drain() {
             task.abort();
         }
+        let peers: Vec<_> = write(&self.shared.peers)
+            .drain()
+            .map(|(_, peer)| peer)
+            .collect();
+        write(&self.shared.by_token).clear();
+        for peer in peers {
+            *write(&peer.active) = None;
+            if restore_direct {
+                let generation = {
+                    let mut state = lock(&peer.state);
+                    state.active = None;
+                    if let Some(direct) = state.direct.as_mut() {
+                        direct.on = true;
+                    }
+                    advance_generation(&peer);
+                    *lock(&peer.route_mtu_generation)
+                };
+                if !update_peer_route_mtu(&peer, generation, None).await {
+                    tracing::warn!("Could not restore peer route after relay paths stopped");
+                }
+                let restore = peer.restore.clone();
+                if !tokio::task::spawn_blocking(move || restore())
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+                {
+                    tracing::warn!("Could not restore peer endpoint after relay paths stopped");
+                }
+            }
+        }
         for slot in &self.shared.live {
             if let Some(live) = write(slot).take() {
                 live.client.close();
             }
         }
+        self.shared
+            .endpoint
+            .close(quinn::VarInt::from_u32(0), b"relay paths stopped");
         let _ =
             tokio::time::timeout(Duration::from_secs(1), self.shared.endpoint.wait_idle()).await;
     }
@@ -1296,16 +1530,17 @@ async fn direct_answers(
     mut answers: mpsc::Receiver<Answer>,
 ) {
     loop {
-        let answer = match probes.expire() {
-            Some(delay) => tokio::select! {
+        let answer = if let Some(delay) = probes.expire() {
+            tokio::select! {
                 answer = answers.recv() => answer,
                 () = tokio::time::sleep(delay) => continue,
                 () = probes.pinged() => continue,
-            },
-            None => tokio::select! {
+            }
+        } else {
+            tokio::select! {
                 answer = answers.recv() => answer,
                 () = probes.pinged() => continue,
-            },
+            }
         };
         let Some(answer) = answer else {
             return;
@@ -1431,7 +1666,7 @@ async fn request_everywhere(shared: &Arc<Shared>, peer: &Arc<Peer>) {
             send
         };
         if send {
-            let _ = live.client.link(peer.host).await;
+            let _ = live.client.link(peer.tokens[index]).await;
         }
     }
 }
@@ -1571,7 +1806,7 @@ async fn publish(shared: &Arc<Shared>, peer: &Arc<Peer>, prepare: bool) {
         let peer = peer.clone();
         let prepare_handshake = peer.prepare_handshake.clone();
         let handshake_starter = peer.handshake_starter.clone();
-        let initiates = shared.local < peer.host;
+        let initiates = shared.local < peer.key;
         tokio::spawn(async move {
             let prepared = tokio::task::spawn_blocking(move || prepare_handshake())
                 .await
@@ -1693,15 +1928,19 @@ async fn drive(shared: Arc<Shared>, index: usize) {
         } else {
             CONNECT
         };
-        if let Ok((client, notices)) = Client::connect(
-            &shared.endpoint,
-            shared.config.clone(),
-            spec.address,
-            &spec.name,
-            connect_deadline,
-        )
-        .await
-        {
+        let connection = match (shared.config)() {
+            Ok(config) => Client::connect(
+                &shared.endpoint,
+                config,
+                spec.address,
+                &spec.name,
+                connect_deadline,
+            )
+            .await
+            .ok(),
+            Err(_) => None,
+        };
+        if let Some((client, notices)) = connection {
             serve(&shared, index, client, notices).await;
             last_healthy = Some(Instant::now());
             failures = 0;
@@ -1734,17 +1973,23 @@ async fn serve(shared: &Arc<Shared>, index: usize, client: Client, mut notices: 
         request_everywhere(shared, peer).await;
     }
     while let Some(notice) = notices.next().await {
-        let (host, link) = match notice {
-            Notice::Linked { peer, id } => (peer, Some(id)),
-            Notice::Unlinked { peer } => (peer, None),
+        let (token, link) = match notice {
+            Notice::Linked { token, id } => (token, Some(id)),
+            Notice::Unlinked { token } => (token, None),
         };
-        let Some(peer) = read(&shared.peers).get(&host).cloned() else {
+        let host = read(&shared.by_token).get(&token).copied();
+        let peer = host
+            .and_then(|host| read(&shared.peers).get(&host).cloned())
+            // Tokens are per relay: one that names this pair on another relay is stray here.
+            .filter(|peer| peer.tokens.get(index) == Some(&token));
+        let Some(peer) = peer else {
             // A link for a peer this node no longer relays: withdraw it.
             if link.is_some() {
-                let _ = live.client.unlink(host).await;
+                let _ = live.client.unlink(token).await;
             }
             continue;
         };
+        let host = peer.host;
         {
             let mut links = write(&live.links);
             links.retain(|_, linked| *linked != host);
@@ -1867,6 +2112,7 @@ impl Drop for Observer {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     //! The relay trigger, link probes, link choice and loopback socket. The full data path runs
     //! in the namespace proof and `examples/relay_echo.rs`.
@@ -2286,6 +2532,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "test-support"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod review_j375_tests {
     //! Deterministically exercises a stale relay-MTU write across direct-path fallback (#381).
     use super::*;
@@ -2295,6 +2542,148 @@ mod review_j375_tests {
         tls,
     };
     use std::sync::atomic::{AtomicBool, AtomicU16};
+
+    /// An endpoint adapter that pauses concurrent shim creation before insertion.
+    struct ConcurrentAddUpdater {
+        rendezvous: Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+        prepared: Arc<std::sync::atomic::AtomicUsize>,
+        restored: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ConcurrentAddUpdater {
+        /// Create an adapter with a bounded rendezvous and callback counters.
+        fn new() -> Self {
+            Self {
+                rendezvous: Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+                prepared: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restored: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl EndpointUpdater for ConcurrentAddUpdater {
+        fn handshake_preparer(
+            &self,
+            _peer: &dataplane::Peer,
+        ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+            self.prepared.fetch_add(1, Ordering::Relaxed);
+            let (count, ready) = &*self.rendezvous;
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            ready.notify_all();
+            let (count, _) = ready
+                .wait_timeout_while(count, Duration::from_millis(100), |count| *count < 2)
+                .unwrap();
+            drop(count);
+            let restored = self.restored.clone();
+            Ok(Arc::new(move || {
+                restored.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }))
+        }
+
+        fn handshake_starter(
+            &self,
+            _peer: &dataplane::Peer,
+        ) -> io::Result<Arc<dyn Fn() + Send + Sync>> {
+            Ok(Arc::new(|| {}))
+        }
+
+        fn route_mtu_updater(&self, _peer: &dataplane::Peer) -> RouteMtuUpdater {
+            Arc::new(|_| Ok(()))
+        }
+    }
+
+    /// Build a data-plane peer for relay-path tests without touching a WireGuard device.
+    fn test_peer(key: u8) -> dataplane::Peer {
+        dataplane::Peer {
+            key: PairSecret::from_private(&[key; 32]).unwrap().public(),
+            previous_key: None,
+            previous_active: false,
+            addresses: crate::policy::model::Addresses {
+                ipv4: "10.254.0.2".parse().unwrap(),
+                ipv6: "fd01::2".parse().unwrap(),
+            },
+            endpoint: None,
+            candidates: Vec::new(),
+            ipv4_only: false,
+            side_port: false,
+        }
+    }
+
+    /// Start idle relay paths for a host identity; an empty relay list sends no network traffic.
+    async fn idle_paths(host: HostId) -> Arc<RelayPaths> {
+        let mut authority = Authority::new();
+        let credentials = authority.issue(Purpose::Host(host));
+        let (events, _receiver) = mpsc::channel(16);
+        Arc::new(
+            RelayPaths::start(
+                PairSecret::from_private(&[1; 32]).unwrap(),
+                9,
+                Vec::new(),
+                credentials,
+                events,
+            )
+            .unwrap(),
+        )
+    }
+
+    /// Two judges for one pair share one shim instead of orphaning the first socket and task.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_add_peer_reuses_one_loopback_socket() {
+        let host = HostId([7; 16]);
+        let paths = idle_paths(host).await;
+        let mut peer = test_peer(2);
+        peer.endpoint = Some("127.0.0.1:10002".parse().unwrap());
+        let mut first_updater = ConcurrentAddUpdater::new();
+        let mut second_updater = ConcurrentAddUpdater {
+            rendezvous: first_updater.rendezvous.clone(),
+            prepared: first_updater.prepared.clone(),
+            restored: first_updater.restored.clone(),
+        };
+        let prepared = first_updater.prepared.clone();
+        let first_paths = paths.clone();
+        let second_paths = paths.clone();
+        let first_peer = peer.clone();
+        let second_peer = peer.clone();
+        let first = tokio::spawn(async move {
+            first_paths
+                .relay_with_endpoint(&mut first_updater, host, &first_peer)
+                .await
+        });
+        let second = tokio::spawn(async move {
+            second_paths
+                .relay_with_endpoint(&mut second_updater, host, &second_peer)
+                .await
+        });
+
+        let first_socket = first.await.unwrap().unwrap();
+        let second_socket = second.await.unwrap().unwrap();
+        assert_eq!(first_socket, second_socket);
+        assert_eq!(prepared.load(Ordering::Relaxed), 3);
+        assert_eq!(read(&paths.shared.peers).len(), 1);
+        assert_eq!(lock(&paths.shims).len(), 1);
+        paths.shutdown(false).await;
+    }
+
+    /// Clearing the relay list restores the configured endpoint before closing a loopback shim.
+    #[tokio::test]
+    async fn stopping_relay_paths_restores_endpointless_peers() {
+        let host = HostId([6; 16]);
+        let paths = idle_paths(host).await;
+        let mut updater = ConcurrentAddUpdater::new();
+        paths
+            .relay_with_endpoint(&mut updater, host, &test_peer(6))
+            .await
+            .unwrap();
+        let restored = updater.restored.clone();
+
+        paths.shutdown(true).await;
+
+        assert_eq!(restored.load(Ordering::Relaxed), 1);
+        assert!(read(&paths.shared.peers).is_empty());
+        assert!(lock(&paths.shims).is_empty());
+    }
 
     /// A delayed relay callback must not overwrite a subsequently restored direct MTU.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2309,17 +2698,18 @@ mod review_j375_tests {
         )
         .unwrap();
         let endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-        let mut config =
+        let client_config =
             tls::client_config(authority.issue(Purpose::Host(HostId([1; 16])))).unwrap();
         let mut transport = quinn::TransportConfig::default();
         transport
             .initial_mtu(1472)
             .min_mtu(1472)
             .mtu_discovery_config(None);
-        config.transport_config(Arc::new(transport));
+        let mut client_config = client_config;
+        client_config.transport_config(Arc::new(transport));
         let (client, _notices) = Client::connect(
             &endpoint,
-            config.clone(),
+            client_config.clone(),
             relay.local_addr().unwrap(),
             "relay.mesh.test",
             Duration::from_secs(5),
@@ -2339,14 +2729,18 @@ mod review_j375_tests {
             callback_budget.store(mtu.unwrap_or(1200), Ordering::Release);
             Ok(())
         });
+        let secret = PairSecret::from_private(&[1; 32]).unwrap();
         let host = HostId([2; 16]);
         let engine = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let peer = Arc::new(Peer {
             host,
+            key: PairSecret::from_private(&[2; 32]).unwrap().public(),
+            tokens: vec![],
             prepare_handshake: Arc::new(|| Ok(())),
             handshake_starter: Arc::new(|| {}),
             route_mtu_updater: callback,
             use_direct: None,
+            restore: Arc::new(|| Ok(())),
             socket: ShimSocket::bind(engine.local_addr().unwrap().port()).unwrap(),
             starting: AtomicBool::new(false),
             route_mtu_generation: Mutex::new(0),
@@ -2361,15 +2755,17 @@ mod review_j375_tests {
         });
         let (events, _rx) = mpsc::channel(16);
         let shared = Arc::new(Shared {
-            local: HostId([1; 16]),
+            local: secret.public(),
+            secret,
+            by_token: RwLock::default(),
             wg_port: 0,
             endpoint,
-            config,
+            config: Arc::new(move || Ok(client_config.clone())),
             relays: vec![],
             live: vec![],
             peers: RwLock::new(HashMap::from([(host, peer.clone())])),
             events,
-            counters: Default::default(),
+            counters: Counters::default(),
             epoch: Instant::now(),
             tokens: AtomicU64::new(1),
             probes: OnceLock::new(),
@@ -2400,5 +2796,67 @@ mod review_j375_tests {
             final_budget, 1200,
             "inactive relay overwrote the direct path's safe route budget"
         );
+    }
+}
+
+/// Relay path credential renewal stays independent from connection and shim tests.
+#[cfg(all(test, feature = "test-support"))]
+mod relay_identity_refresh_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+    use infraternal_plugin_relay::{
+        relay::{Admission, Limits, Relay},
+        testing::{Authority, Purpose},
+        tls,
+    };
+
+    /// A reconnect after the relay closes asks the credential source for another client config.
+    #[tokio::test]
+    async fn relay_reconnect_reads_fresh_client_configuration() {
+        let mut authority = Authority::new();
+        let config = tls::client_config(authority.issue(Purpose::Host(HostId([4; 16])))).unwrap();
+        let admission: Admission = Arc::new(|_| true);
+        let relay = Relay::start(
+            "127.0.0.1:0".parse().unwrap(),
+            authority.issue(Purpose::Relay("relay.example.org")),
+            Limits::default(),
+            admission,
+        )
+        .unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let source_calls = calls.clone();
+        let source = move || {
+            source_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(config.clone())
+        };
+        let (events, _receiver) = mpsc::channel(16);
+        let paths = RelayPaths::start_with_config_source(
+            PairSecret::from_private(&[5; 32]).unwrap(),
+            9,
+            vec![RelaySpec {
+                address: relay.local_addr().unwrap(),
+                name: "relay.example.org".into(),
+            }],
+            source,
+            events,
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while relay.stats().hosts != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the initial relay connection completes");
+        relay.close().await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while calls.load(Ordering::Relaxed) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drive asks for fresh credentials before its reconnect");
+        paths.shutdown(false).await;
     }
 }
