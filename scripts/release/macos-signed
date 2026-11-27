@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+# Role: optional release-flow entry point on an arm64 Mac build host that creates
+# a per-build temporary signing keychain, imports a Developer ID .p12 from stdin,
+# runs scripts/macos-release (build, sign, notarize, staple, verify), and deletes
+# the temporary keychain on exit [D321, #615].
+#
+# No secrets live in this script, in argv, or in logs. The caller on the control
+# host reads the Developer ID .p12 and its password from 1Password and pipes a
+# single JSON object {"p12_b64": "...", "p12_pass": "..."} over SSH stdin. The
+# temporary .p12 file on the Mac is mode 0600, overwritten with zeroes and
+# unlinked immediately after `security import`. The login keychain and every
+# other keychain on the Mac are never opened, unlocked or modified.
+#
+# Run inside the repository's Nix dev shell on the arm64 Mac build host:
+#   nix develop -c scripts/release/macos-signed /absolute/output/dir --asc-dir "$HOME/.config/asc" < cert-payload.json
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'EOF'
+usage: scripts/release/macos-signed ABSOLUTE_OUTPUT_DIRECTORY --asc-dir ABSOLUTE_ASC_DIR
+  Reads {"p12_b64": "...", "p12_pass": "..."} from stdin into a temporary
+  dedicated signing keychain, runs scripts/macos-release, and deletes the
+  temporary keychain on exit.
+EOF
+    exit 2
+}
+
+[[ $# -eq 3 && "$1" = /* && "$1" != "/" && "$2" = "--asc-dir" && "$3" = /* ]] || usage
+output="${1%/}"
+asc_dir="${3%/}"
+[[ "$(uname -s)-$(uname -m)" == Darwin-arm64 ]] || {
+    printf 'scripts/release/macos-signed runs on macOS arm64 only\n' >&2
+    exit 2
+}
+[[ ! -e "$output" && ! -L "$output" ]] || {
+    printf 'release destination already exists: %s\n' "$output" >&2
+    exit 1
+}
+
+root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+umask 077
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/infraternal-macos-signed.XXXXXX")"
+kc_path="$HOME/Library/Keychains/infraternal-signing-$$.keychain-db"
+kc_pass_file="$scratch/kc.pass"
+
+cleanup() {
+    result=$?
+    trap - EXIT
+    if [[ -e "$kc_path" ]]; then
+        /usr/bin/security delete-keychain "$kc_path" >/dev/null 2>&1 || true
+        rm -f -- "$kc_path" || true
+    fi
+    rm -rf -- "$scratch" || true
+    exit "$result"
+}
+trap cleanup EXIT
+
+# Import the Developer ID .p12 from stdin into the temporary keychain without
+# passing any password through argv. Delete and zero the 0600 temp file at once.
+# Write the importer script to scratch so stdin remains the caller's pipe.
+cat >"$scratch/import-p12.py" <<'PY'
+import base64, json, os, re, secrets, subprocess, sys, tempfile
+
+os.umask(0o077)
+kc_path, kc_pass_file, scratch = sys.argv[1], sys.argv[2], sys.argv[3]
+payload = json.load(sys.stdin)
+p12_bytes = base64.b64decode(payload["p12_b64"])
+p12_pass = payload["p12_pass"]
+
+if os.path.exists(kc_path):
+    subprocess.run(
+        ["/usr/bin/security", "delete-keychain", kc_path],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if os.path.exists(kc_path):
+        os.unlink(kc_path)
+
+kc_pass = secrets.token_hex(24)
+fd = os.open(kc_pass_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+try:
+    os.write(fd, (kc_pass + "\n").encode("ascii"))
+finally:
+    os.close(fd)
+
+create_cmds = (
+    f"create-keychain -p {kc_pass} {kc_path}\n"
+    f"unlock-keychain -p {kc_pass} {kc_path}\n"
+    f"set-keychain-settings -t 7200 {kc_path}\n"
+)
+subprocess.run(
+    ["/usr/bin/security", "-i"],
+    input=create_cmds,
+    text=True,
+    check=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+
+td = tempfile.mkdtemp(prefix="p12-", dir=scratch)
+p12_path = os.path.join(td, "cert.p12")
+try:
+    pfd = os.open(p12_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(pfd, p12_bytes)
+    finally:
+        os.close(pfd)
+    import_cmds = (
+        f"import {p12_path} -k {kc_path} -P {p12_pass} -T /usr/bin/codesign\n"
+        f"set-key-partition-list -S apple-tool:,apple:,codesign: -s -k {kc_pass} {kc_path}\n"
+    )
+    subprocess.run(
+        ["/usr/bin/security", "-i"],
+        input=import_cmds,
+        text=True,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+finally:
+    if os.path.exists(p12_path):
+        with open(p12_path, "r+b") as f:
+            f.write(b"\x00" * len(p12_bytes))
+            f.flush()
+        os.unlink(p12_path)
+    os.rmdir(td)
+
+res = subprocess.run(
+    ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning", kc_path],
+    text=True,
+    capture_output=True,
+)
+matches = re.findall(
+    r'^\s*\d+\)\s+[0-9A-Fa-f]{40}\s+"Developer ID Application:[^"]+"',
+    res.stdout,
+    re.MULTILINE,
+)
+if len(matches) != 1:
+    sys.stderr.write(
+        f"expected 1 Developer ID Application identity in temporary keychain, found {len(matches)}\n"
+    )
+    sys.exit(1)
+PY
+/usr/bin/python3 -I "$scratch/import-p12.py" "$kc_path" "$kc_pass_file" "$scratch"
+
+"$root/scripts/macos-release" "$output" \
+    --keychain "$kc_path" \
+    --keychain-password-file "$kc_pass_file" \
+    --delete-keychain \
+    --asc-dir "$asc_dir"
+
+if [[ -e "$kc_path" ]]; then
+    printf 'temporary signing keychain was not deleted: %s\n' "$kc_path" >&2
+    exit 1
+fi
