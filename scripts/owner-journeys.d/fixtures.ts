@@ -8,17 +8,17 @@ import type { shellJourney, signIn, skip, step } from "./run";
 /** One leased, disposable machine. The driver owns fixture isolation and executes the real CLI. */
 interface HostFixture {
   name: string;
-  ssh: string;
-  fingerprint: string;
+  ssh?: string;
+  fingerprint?: string;
   keyFile?: string;
   driver: string;
 }
 
 /** Operator-supplied fixture addresses and executable adapters, selected only for a full run. */
 interface Fixture {
-  linux: HostFixture;
-  mac: HostFixture;
-  warmUpdate: string;
+  linux?: HostFixture;
+  mac?: HostFixture;
+  warmUpdate?: string;
 }
 
 /** Shared recording and browser functions provided by the runner. */
@@ -62,6 +62,7 @@ async function cli(executable: string, operation: string, ...args: string[]) {
 
 /** Opens Add hosts as the owner would, entering only the predeclared fixture address. */
 async function addBySsh(page: Page, fixture: HostFixture, shot: () => Promise<void>) {
+  if (!fixture.ssh || !fixture.fingerprint) throw new Error("The fixture has no pinned SSH endpoint");
   const action = await palette(page, "Add hosts");
   await action.filter({ has: page.getByText("Add hosts", { exact: true }) }).click();
   const wizard = page.getByRole("dialog", { name: "Add hosts", exact: true });
@@ -198,10 +199,14 @@ async function hostAction(page: Page, name: string, verb: "Remove" | "Forget", c
 
 /** Checks the fixture's displayed identity before any operation which might change machine state. */
 function validate(fixture: HostFixture) {
-  if (!fixture || !/^owner-journey-[a-z0-9.-]+$/.test(fixture.name) ||
-      !/^[a-z_][a-z0-9_-]*@[a-z0-9.-]+(?::[0-9]+)?$/.test(fixture.ssh) ||
-      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(fixture.fingerprint) ||
-      !fixture.driver?.startsWith("/")) throw new Error("A fixture needs a dedicated owner-journey hostname, SSH address and pinned key, and an absolute driver");
+  if (!/^[a-z0-9][a-z0-9.-]+$/.test(fixture.name) || !fixture.driver?.startsWith("/")) {
+    throw new Error("A fixture needs a hostname and an absolute driver");
+  }
+  if ((fixture.ssh || fixture.fingerprint) &&
+      (!/^[a-z_][a-z0-9_-]*@[a-z0-9.-]+(?::[0-9]+)?$/.test(fixture.ssh ?? "") ||
+       !/^SHA256:[A-Za-z0-9+/]{43}$/.test(fixture.fingerprint ?? ""))) {
+    throw new Error("An SSH endpoint needs a pinned fingerprint");
+  }
 }
 
 /** Covers one disposable machine, releasing its lease and cleaning its installation on every path. */
@@ -220,7 +225,8 @@ async function lifecycle(h: Harness, page: Page, host: HostFixture, platform: "l
       return "The fixture name is available";
     });
     if (!unique) return h.skip(`${phase}-lifecycle`, "Fixture name already present or inventory unavailable");
-    const ssh = await h.step(`${phase}-add-ssh`, page, async () => {
+    if (!host.ssh) await h.skip(`${phase}-add-ssh`, "No fixture SSH endpoint was configured");
+    const ssh = host.ssh && await h.step(`${phase}-add-ssh`, page, async () => {
       const outcome = await addBySsh(page, host, () => h.screenshot(page, `${phase}-add-ssh-outcome.png`));
       return `${outcome.added ? "Added" : "Refused; CLI alternative offered"}: ${outcome.message}`;
     });
@@ -266,29 +272,36 @@ async function lifecycle(h: Harness, page: Page, host: HostFixture, platform: "l
 
 /** Runs the warm apply and both disposable machine journeys against the same deployed test instance. */
 export async function runFixture(config: Fixture, h: Harness) {
-  validate(config.linux);
-  validate(config.mac);
-  if (config.linux.name === config.mac.name || config.linux.ssh === config.mac.ssh) throw new Error("Linux and Mac fixtures must be distinct");
-  if (!config.warmUpdate?.startsWith("/")) throw new Error("Warm update requires an absolute test-server driver");
+  if (config.linux) validate(config.linux);
+  if (config.mac) validate(config.mac);
+  if (config.linux && config.mac && (config.linux.name === config.mac.name ||
+      (config.linux.ssh && config.linux.ssh === config.mac.ssh))) throw new Error("Linux and Mac fixtures must be distinct");
+  if (!config.warmUpdate) await h.skip("warm-update", "No signed test update was staged");
   const desktop = await h.signIn("fixture-desktop", 1440, 900);
   if (desktop) {
     try {
-      await h.shellJourney(desktop.page, "embedded-before-warm");
-      const applied = await h.step("warm-update-apply", undefined, async () => {
-        const output = await cli(config.warmUpdate, "apply", origin);
-        if (!/server restarted warm/i.test(output)) throw new Error("Update did not report a successful warm restart: " + output);
-        return output;
-      });
-      if (applied) await h.shellJourney(desktop.page, "embedded-after-warm");
-      else await h.skip("embedded-after-warm", "No warm update was verified");
-      await lifecycle(h, desktop.page, config.linux, "linux");
+      if (config.warmUpdate) {
+        await h.shellJourney(desktop.page, "embedded-before-warm");
+        const applied = await h.step("warm-update-apply", undefined, async () => {
+          const output = await cli(config.warmUpdate!, "apply", origin);
+          if (!/server restarted warm/i.test(output)) throw new Error("Update did not report a successful warm restart: " + output);
+          return output;
+        });
+        if (applied) await h.shellJourney(desktop.page, "embedded-after-warm");
+        else await h.skip("embedded-after-warm", "No warm update was verified");
+      }
+      if (config.linux) await lifecycle(h, desktop.page, config.linux, "linux");
+      else await h.skip("linux-lifecycle", "No isolated Linux fixture was configured");
     } finally {
       await desktop.close();
     }
   } else await h.skip("warm-and-linux", "Desktop sign-in failed");
   const phone = await h.signIn("fixture-iphone", 393, 852);
   if (phone) {
-    try { await lifecycle(h, phone.page, config.mac, "mac"); }
+    try {
+      if (config.mac) await lifecycle(h, phone.page, config.mac, "mac");
+      else await h.skip("mac-lifecycle", "No leased Mac fixture was configured");
+    }
     finally { await phone.close(); }
   } else await h.skip("mac-lifecycle", "iPhone-sized sign-in failed");
 }

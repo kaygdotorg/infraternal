@@ -5,13 +5,15 @@ origin=https://test.ssh.kayg.org
 operation=${1:?operation required}
 candidate=${2:?absolute path to staged release binary required}
 name=${3:?disposable fixture hostname required}
-[[ $candidate = /* && -x $candidate && $name =~ ^owner-journey-[a-z0-9.-]+$ ]]
-[[ $(hostname -s) == "$name" && $(cat "$HOME/.config/infraternal-owner-journey" 2>/dev/null) == "$name" ]]
+[[ $candidate = /* && -x $candidate && $name =~ ^[a-z0-9][a-z0-9.-]+$ ]]
+[[ $(hostname) == "$name" && $(cat "$HOME/.config/infraternal-owner-journey" 2>/dev/null) == "$name" ]]
 # Only the fixture operator can authorize system mutations. There is no shared-host fallback.
 [[ $(id -u) != 0 ]]
 export LC_ALL=C
 case $(uname -s) in
     Linux)
+        # Linux up installs a system service. Only use this branch on a disposable VM.
+        [[ $name == owner-journey-* ]]
         home=/var/lib/infraternal
         installed=/usr/local/bin/infraternal
         paths=("$home" "$installed" /usr/local/bin/infra /etc/systemd/system/infraternal-agent.service /etc/systemd/system/infraternal-firewall.service)
@@ -77,7 +79,15 @@ case $operation in
         fi
         echo 'Fixture service stopped for Remove and Forget'
         ;;
-    uninstall) exec "$installed" uninstall ;;
+    uninstall)
+        if "$installed" uninstall; then exit 0; fi
+        # Older Mac releases expose removal through their install receipt.
+        [[ $(uname -s) == Darwin && -f "$home/.user-owner" ]]
+        IFS= read -r host_id < "$home/.user-owner"
+        [[ $host_id =~ ^[0-9a-f]{32}$ ]]
+        echo 'Retrying with the released user-mode removal command'
+        exec "$installed" --bootstrap-uninstall "$host_id"
+        ;;
     verify-clean) verify_clean ;;
     release)
         # A disposable fixture with a failed uninstall must be reverted by its lease owner.

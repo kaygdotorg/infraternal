@@ -75,7 +75,7 @@ function observeShell(page: Page) {
     /** Look up a run-generated receipt in the fresh shell's output. */
     hasOutput(value: string) { return tail.includes(value); },
     /** Returns only the hex field from the PTY probe's own receipt. */
-    capturedBytes(id: string) { return tail.match(new RegExp(`owner-bytes-${id}:([0-9a-f]{0,28})[.]`))?.[1]; },
+    capturedBytes(id: string) { return tail.match(new RegExp(`owner-bytes-${id}:([0-9a-f]{0,32})[.]`))?.[1]; },
   };
 }
 
@@ -120,13 +120,13 @@ export async function checkKeys(page: Page, shell: Awaited<ReturnType<typeof ope
   const id = crypto.randomUUID().slice(0, 8);
   // A temporary raw PTY read sees Ctrl+C and Ctrl+R as bytes. A VTIME deadline and restoration trap
   // return the fixture shell to its original mode even if a tested key never arrives.
-  const command = `saved=$(stty -g) && trap 'stty "$saved"' EXIT && stty -icanon -echo -isig min 0 time 50 && printf '%s%s\\n' owner-ready- ${id} && bytes=$(dd bs=1 count=14 2>/dev/null | od -An -v -tx1 | tr -d '[:space:]') && printf '%s%s:%s.\\n' owner-bytes- ${id} "$bytes"`;
+  const command = `saved=$(stty -g) && trap 'stty "$saved"' EXIT && stty -icanon -echo -isig min 0 time 50 && printf '%s%s\\n' owner-ready- ${id} && bytes=$(dd bs=1 count=16 2>/dev/null | od -An -v -tx1 | tr -d '[:space:]') && printf '%s%s:%s.\\n' owner-bytes- ${id} "$bytes"`;
   await page.keyboard.insertText("sh -c '" + command.replaceAll("'", "'\\''") + "'");
   await page.keyboard.press("Enter");
   await until(() => shell.observed.hasOutput("owner-ready-" + id), "The PTY byte reader did not become ready");
   const { receipt } = shell;
   const keys = [
-    ["Control+c", /^03$/],
+    ["Control+a", /^01$/], ["Control+c", /^03$/], ["Control+d", /^04$/],
     ["ArrowUp", /^1b(?:5b|4f)41$/], ["ArrowDown", /^1b(?:5b|4f)42$/],
     ["ArrowRight", /^1b(?:5b|4f)43$/], ["ArrowLeft", /^1b(?:5b|4f)44$/],
     ["Control+r", /^12$/],
@@ -147,6 +147,23 @@ export async function checkKeys(page: Page, shell: Awaited<ReturnType<typeof ope
   }, "The PTY did not report the received bytes");
   if (pty.found !== wire) throw new Error(`PTY received 0x${pty.found}; browser sent 0x${wire}`);
   return `${seen.join(" ")} (PTY confirmed 0x${wire})`;
+}
+
+/** Interrupts a foreground sleep and proves the same shell accepts another command immediately. */
+export async function checkInterrupt(page: Page, shell: Awaited<ReturnType<typeof openShell>>, input: ElementHandle) {
+  await input.focus();
+  const id = crypto.randomUUID().slice(0, 8);
+  await page.keyboard.insertText(`sh -c 'printf "%s%s\\n" owner-sleep- ${id}; exec sleep 30'`);
+  await page.keyboard.press("Enter");
+  await until(() => shell.observed.hasOutput("owner-sleep-" + id), "The foreground sleep did not start");
+  const started = Date.now();
+  await page.keyboard.press("Control+c");
+  const marker = "owner-interrupted-" + id;
+  // Split the marker so the echoed command cannot count as a resumed prompt.
+  await page.keyboard.insertText(`printf '%s%s\\n' owner-interrupted- ${id}`);
+  await page.keyboard.press("Enter");
+  await until(() => shell.observed.hasOutput(marker), "Ctrl+C did not return control from sleep", 5_000);
+  return `Ctrl+C interrupted sleep 30 and the shell answered in ${Date.now() - started} ms`;
 }
 
 /** Cancels once, then ends exactly the session this run opened, using its sidebar row. */

@@ -2,10 +2,9 @@
 # Owner journeys after test deploys
 
 `scripts/owner-journeys` signs in to https://test.ssh.kayg.org using compute01's
-existing test-admin helper. It opens a fresh server shell at 1440 × 900 and
-393 × 852 in Chromium. The probe requires a marker from the actual shell and
-checks the bytes for Ctrl+C, the four arrows, and Ctrl+R on the wire and at
-the remote PTY. It
+existing test-admin helper. It signs in at 1440 × 900 and 393 × 852 in Chromium. The fixture run opens fresh shells on the joined hosts. The probe requires a marker from the actual shell and
+checks the bytes for Ctrl+A, Ctrl+C, Ctrl+D, Ctrl+R and the four arrows on the wire and at
+the remote PTY. A separate check interrupts a foreground sleep with Ctrl+C. It
 asks the sidebar to end only the session it just created. The iPhone row
 exercises the phone layout in Chromium at iPhone size. Safari and physical
 iPhone behavior need separate device runs.
@@ -31,7 +30,7 @@ same fixture leases through the entire full run and restore the fixture VM
 snapshots on interruption or a failed release check. The test service can
 share a machine with production. The warm helper requires the running
 `infraternal-test.service`, its explicit test origin and its own control socket.
-Use only a signed candidate staged for that test service. Use a distinct new
+Omit `warmUpdate` to skip that row. When configured, use only a signed candidate staged for the test service. Use a distinct new
 version, record the version in the run output, and coordinate the switch so the
 operator can still promote the intended build.
 
@@ -45,11 +44,12 @@ final result file means the run was interrupted.
 ## Fixture configuration
 
 Keep the configuration on compute01 under its private operator-owned config
-directory. Use fresh dedicated VM hostnames beginning with `owner-journey-`.
-Reserve the Mac VM with the existing Mac lease and use a disposable Linux VM
-with its own network and resolver. Revert or replace a tainted fixture before
+directory. Reserve the Mac VM with the existing Mac lease. Use a disposable Linux VM
+with its own network and resolver and a hostname beginning with
+`owner-journey-`. Linux `up` installs a system service. A separate user on a
+shared Linux VM still reaches the system installer. Revert or replace a tainted fixture before
 using it again. Supply each SSH address as reachable **from the test server**
-and pin the fingerprint through the fixture's provisioning channel. Any
+and pin the fingerprint through the fixture's provisioning channel. Omit the SSH address and fingerprint to record a skip while exercising local enrollment. Any
 optional `keyFile` holds an SSH key issued to this fixture only and must have
 mode 0600. The test-admin passkey stays in its existing helper.
 
@@ -108,7 +108,7 @@ service mode before approving with the passkey. It exercises status and mesh
 status, opens a shell, stops the fixture's own service so cleanup stays
 pending, cancels the first Remove confirmation, then removes and forgets.
 It runs the public `infraternal uninstall` command locally and checks the
-installed files, services and managed network artifacts before rejoining.
+installed files, services and managed network artifacts before rejoining. Older Mac candidates can fall back to their released receipt-bound removal command.
 Failures on existing deployed builds are findings to file, including a
 missing public command or sidebar action.
 
@@ -117,8 +117,7 @@ missing public command or sidebar action.
 Schedule the following on compute01 from the reviewed checkout under the
 test-admin helper's account. Use it for the unattended smoke row, separate
 from the token-less dev-02 browser suite. It uses the same private evidence
-format. The browser row reports the warm update and fixture lifecycle as
-skipped. Use the full post-deploy invocation for those rows.
+format. The browser row runs the two passkey sign-ins and reports the warm update and fixture lifecycle as skipped. Use the full post-deploy invocation for those rows.
 
 ```sh
 cd ~/worktrees/owner-journeys-reviewed

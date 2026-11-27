@@ -4,7 +4,7 @@ import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Page } from "../../apps/tracer/node_modules/playwright";
-import { checkKeys, endShell, openShell, origin, proveShell, until } from "./browser";
+import { checkInterrupt, checkKeys, endShell, openShell, origin, proveShell, until } from "./browser";
 
 const [out, mode, fixturePath] = process.argv.slice(2);
 
@@ -84,7 +84,7 @@ export async function signIn(label: string, width: number, height: number) {
 export async function shellJourney(page: Page, label: string, machine?: string) {
   const shell = await step(`${label}-open-shell`, page, () => openShell(page, machine));
   if (!shell) {
-    for (const next of ["shell-output", "shell-keys", "sidebar-end"]) {
+    for (const next of ["shell-output", "shell-keys", "shell-interrupt", "sidebar-end"]) {
       await skip(`${label}-${next}`, "The fresh shell did not open");
     }
     return;
@@ -101,6 +101,7 @@ export async function shellJourney(page: Page, label: string, machine?: string) 
     if (handle) {
       await step(`${label}-shell-output`, page, () => proveShell(page, shell, handle));
       await step(`${label}-shell-keys`, page, () => checkKeys(page, shell, handle));
+      await step(`${label}-shell-interrupt`, page, () => checkInterrupt(page, shell, handle));
     }
   } finally {
     const ended = await step(`${label}-sidebar-end`, page, () => endShell(page, shell.receipt.id));
@@ -122,22 +123,14 @@ export async function shellJourney(page: Page, label: string, machine?: string) 
 /** Runs each browser size independently and preserves the final status even on a failed step. */
 async function main() {
   try {
-    for (const [label, width, height] of [["desktop", 1440, 900], ["iphone", 393, 852]] as const) {
-      const session = await signIn(label, width, height);
-      if (!session) {
-        await skip(`${label}-embedded-shell`, "Passkey sign-in failed");
-        continue;
-      }
-      try {
-        await shellJourney(session.page, `${label}-embedded`);
-      } finally {
-        await session.close();
-      }
-    }
     if (mode === "--fixture") {
       const { runFixture } = await import("./fixtures");
       await runFixture(JSON.parse(await readFile(fixturePath, "utf8")), { signIn, shellJourney, step, skip, screenshot });
     } else {
+      for (const [label, width, height] of [["desktop", 1440, 900], ["iphone", 393, 852]] as const) {
+        const session = await signIn(label, width, height);
+        await session?.close();
+      }
       for (const check of ["warm-update", "linux-host-lifecycle", "mac-host-lifecycle"]) {
         await skip(check, "This is the unattended browser row. Run --fixture for this journey.");
       }
