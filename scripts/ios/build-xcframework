@@ -150,7 +150,7 @@ printf '==> build the SwiftUI app and Packet Tunnel extension for the assigned S
 xcodebuild -project "$repo/ios/Infraternal.xcodeproj" -scheme InfraternalIOS \
     -configuration Release -destination "platform=iOS Simulator,id=$simulator_id" \
     -derivedDataPath "$out/DerivedData" \
-    CODE_SIGNING_ALLOWED=NO build
+    ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
 
 {
     printf 'simulator=%s\n' "$simulator_id"
