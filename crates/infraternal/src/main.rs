@@ -3284,7 +3284,11 @@ fn run_remote_agent(
         json,
         operation,
         "starting",
-        "Preparing the connection to the server.",
+        if json {
+            "Preparing the connection to the server."
+        } else {
+            "Connecting to the server."
+        },
         "",
     );
     let result = (|| -> std::io::Result<()> {
@@ -3321,7 +3325,11 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "This machine is enrolled. Connecting now; keep this running.",
+                if json {
+                    "This machine is enrolled. Connecting now; keep this running."
+                } else {
+                    "Machine joined. Keep this terminal open while the infraternal agent runs."
+                },
                 "",
             );
         }
@@ -3344,7 +3352,11 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "This machine is enrolled. Its identity is saved here.",
+                if json {
+                    "This machine is enrolled. Its identity is saved here."
+                } else {
+                    "Machine joined."
+                },
                 "infraternal agent run",
             )
         } else {
