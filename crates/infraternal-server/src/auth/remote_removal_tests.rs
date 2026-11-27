@@ -864,7 +864,7 @@ struct RetirementLockedCa;
 
 impl crate::ca::CaKeySource for RetirementLockedCa {
     /// No new certificates may be issued in this fixture.
-    fn load(&self) -> Result<crate::ca::CaMaterial, crate::ca::CaError> {
+    fn load(&self) -> std::result::Result<crate::ca::CaMaterial, crate::ca::CaError> {
         Err(crate::ca::CaError)
     }
 }
