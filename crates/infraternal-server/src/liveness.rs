@@ -425,9 +425,9 @@ mod tests {
         assert!(!route.expired());
     }
 
-    /// Stale replies cannot hide a missing response while newer probes are in flight.
+    /// Stale replies cannot hide a first miss, while a timely reply in the second allowance recovers the host link.
     #[tokio::test(start_paused = true)]
-    async fn missing_replies_expire_even_with_probes_in_flight() {
+    async fn stale_replies_do_not_hide_host_link_miss_and_valid_reply_recovers() {
         let mut route = Liveness::host_link();
         tokio::time::advance(TICK).await;
         let (nonce, stamp) = route.ping();
@@ -442,11 +442,15 @@ mod tests {
         route.pong(u64::MAX, u64::MAX);
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(route.expired());
-        // A queued reply may win the select before an overdue timer. It cannot
-        // turn suspension into a longer lease after the old lease has ended.
+        assert!(!route.retired(), "the first allowance only marks doubt");
+        assert!(route.doubt_started());
+        assert!(route.doubtful());
+        // A queued, still-issued reply can win before the second allowance and recover this same link.
         let (nonce, stamp) = route.ping();
-        route.pong(nonce, stamp);
-        assert!(route.expired());
+        assert!(route.pong(nonce, stamp));
+        assert!(!route.expired());
+        assert!(!route.doubtful());
+        assert!(!route.retired());
     }
 
     #[tokio::test(start_paused = true)]

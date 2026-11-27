@@ -212,6 +212,7 @@ async fn one_host_probe_serves_128_terminals_without_route_probes() {
     let limit = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
     assert_eq!(limit, 128, "the regression covers the host stream ceiling");
     let mut terminals = Vec::with_capacity(limit);
+    let mut inputs = Vec::with_capacity(limit);
     let mut outputs = Vec::with_capacity(limit);
     for index in 0..limit {
         let stream_id = 42 + 2 * u32::try_from(index).unwrap();
@@ -238,7 +239,7 @@ async fn one_host_probe_serves_128_terminals_without_route_probes() {
             .send(&terminal, stream_id, &Frame::Ack { in_seq_acked: 0 })
             .await
             .unwrap();
-        let (_input, output) = attachment.split();
+        let (input, output) = attachment.split();
         let mut output = output;
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), output.recv())
@@ -248,33 +249,51 @@ async fn one_host_probe_serves_128_terminals_without_route_probes() {
             TerminalOutput::Ack { in_seq_acked: 0 }
         ));
         terminals.push(terminal);
+        inputs.push(input);
         outputs.push(output);
     }
 
     // Let every route see several legacy 25 ms ticks while counting the one control-stream lease.
     let mut readers = tokio::task::JoinSet::new();
-    for terminal in terminals {
+    for (index, terminal) in terminals.into_iter().enumerate() {
+        let link = connection.clone();
+        let counted = control_pings.clone();
         readers.spawn(async move {
             let mut receive = Receive::default();
-            let saw_terminal_ping = tokio::time::timeout(Duration::from_millis(350), async {
+            let read = tokio::time::timeout(Duration::from_millis(350), async {
                 loop {
-                    let received = receive.next(&terminal).await.unwrap();
-                    if matches!(received.frame, Frame::Ping { .. }) {
-                        return true;
+                    match receive.next(&terminal).await {
+                        Ok(received) if matches!(received.frame, Frame::Ping { .. }) => {
+                            return Ok(true);
+                        }
+                        Ok(_) => {}
+                        Err(error) => return Err(error.kind()),
                     }
                 }
             })
-            .await
-            .unwrap_or(false);
-            (terminal, saw_terminal_ping)
+            .await;
+            (
+                terminal,
+                index,
+                read,
+                link.close_reason(),
+                counted.load(Ordering::SeqCst),
+            )
         });
     }
     let mut terminals = Vec::with_capacity(limit);
     while let Some(result) = readers.join_next().await {
-        let (terminal, saw_terminal_ping) = result.unwrap();
+        let (terminal, index, read, close_reason, pings) = result.unwrap();
+        let saw_terminal_ping = match read {
+            Ok(Ok(saw_ping)) => saw_ping,
+            Ok(Err(error)) => panic!(
+                "terminal {index} ended while checking for route probes: {error:?}; host link close={close_reason:?}, control probes={pings}"
+            ),
+            Err(_) => false,
+        };
         assert!(
             !saw_terminal_ping,
-            "a terminal stream received a liveness probe"
+            "terminal {index} received a liveness probe"
         );
         terminals.push(terminal);
     }
