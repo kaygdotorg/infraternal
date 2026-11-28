@@ -61,8 +61,10 @@ def main():
         assert record.is_file()
         select_terminal(client, opened['session_id'])
         terminal_marker(client, 'rootless-ready')
-        client.input(b'whoami\n')
-        client.until(b'\r\n' + os.fsencode(account) + b'\r\n')
+        # PTY output may use LF or CRLF. Shell echo cannot contain the complete
+        # marker because its account field is computed only during execution.
+        client.input(b"""printf 'whoami-%s-end\\n' "$(whoami)"\n""")
+        client.until(b'whoami-' + os.fsencode(account) + b'-end')
         assert control(client, 3, 'terminal.login.revoke', dict(person=str(person)))['revoked']
         event = client.wait_event('terminal.exited')
         assert event['session_id'] == session_id and event['status'] == -9, event
