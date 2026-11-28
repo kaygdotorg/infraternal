@@ -930,8 +930,7 @@ fn outcome(
                 "{name} was removed from the list. If infraternal is still installed, run {command} on {name}."
             )
         };
-        let manual = matches!(installation, Some(Installation::Mac(_)))
-            .then(|| manual_uninstall(mode, installation));
+        let manual = matches!(installation, Some(Installation::Mac(_))).then(|| command.to_owned());
         return (message, manual);
     }
     // Hosts that enrolled before platform facts were retained can be offline

@@ -159,10 +159,7 @@ fn pending_mac_removal_offers_the_installed_binary() {
         Some(Installation::Mac(HOST)),
         true,
     );
-    let command = format!(
-        "'/Library/Application Support/infraternal/bin/infraternal' --bootstrap-uninstall {HOST}"
-    );
-    assert_eq!(manual.as_deref(), Some(command.as_str()));
+    assert_eq!(manual.as_deref(), Some("infraternal uninstall --system"));
     assert_eq!(
         message,
         "Access revoked for host.example. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall --system on host.example."
