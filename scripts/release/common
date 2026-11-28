@@ -7,7 +7,7 @@ release_target="${CARGO_TARGET_DIR:-$HOME/.cache/codex-scratch/release-pipeline/
 release_scratch="${release_target}/release-work"
 mkdir -p "$release_scratch"
 release_version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)"/\1/p' "$release_root/Cargo.toml")"
-release_public=https://builds.infraternal.com
+release_public=https://infraternal.com
 release_signer=https://infraternal-release-signer.mail-111.workers.dev
 # Keep the vendored engine's complete readable notice inventory in every new signed bundle.
 release_license_files=(

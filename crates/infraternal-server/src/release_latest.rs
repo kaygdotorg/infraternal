@@ -79,7 +79,7 @@ impl ReleaseEngine for Engine {
 }
 
 /// The builds host every release lookup and update check uses (D184).
-const ORIGIN: &str = "https://builds.infraternal.com";
+const ORIGIN: &str = "https://infraternal.com";
 
 /// The builds host to use: [`ORIGIN`], or in a `staging-trust` build only, the
 /// `INFRATERNAL_STAGING_BUILDS_ORIGIN` loopback channel a root staging proof serves.

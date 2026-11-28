@@ -401,7 +401,7 @@ pub type Settings = Arc<
 pub struct Updater {
     /// `<data>/updates`.
     directory: PathBuf,
-    /// The builds host, for example `https://builds.infraternal.com`.
+    /// The release site origin, for example `https://infraternal.com`.
     origin: String,
     /// The running version.
     current: String,

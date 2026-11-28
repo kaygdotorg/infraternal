@@ -3,7 +3,7 @@
  * Builds the whole standalone site as a mockup for review (#339, D388): `bun run site <out>` writes a folder a static host can serve.
  *
  *   /                       the landing page
- *   /install/               downloads (placeholder links to builds.infraternal.com, D223)
+ *   /install/               signed downloads (D184, D401)
  *   /releases/ /changelog/  empty states until the first release
  *   /docs/                  the three audiences
  *   /docs/user /admin /dev  the pages of each audience, rendered by the one renderer (docs-build.ts)
@@ -21,7 +21,7 @@ import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { buildDocs, INDEX_SLUG, readUserDocs, redirectPage, USER_DOCS_DIR, type DocsIndexPage } from "./docs-build";
 import { figures, type FigureManifest } from "./docs-figure";
-import { DEFAULT_RELEASE_ORIGIN, DEFAULT_SITE_ORIGIN, installCommandFor, SERVER_IMAGE_NAME } from "./install-release";
+import { DEFAULT_SITE_ORIGIN, installCommandFor, SERVER_IMAGE_NAME } from "./install-release";
 import { AUDIENCES, escapeHtml, sitePage, type Audience } from "./site-chrome";
 
 /** The repository root, found from this file's place (`apps/tracer/`). */
@@ -105,7 +105,7 @@ function downloads(): string {
  * `edge` only when `?channel=edge` is explicitly requested) and never hard-codes a version or pushes edge builds.
  */
 function install(): string {
-  return `<div class="plain" data-install-page data-origin="${DEFAULT_RELEASE_ORIGIN}" data-site-origin="${DEFAULT_SITE_ORIGIN}" data-install-script="/docs/install-links.js">
+  return `<div class="plain" data-install-page data-site-origin="${DEFAULT_SITE_ORIGIN}" data-install-script="/docs/install-links.js">
 <h1>Install Infraternal</h1>
 <p class="lede">One static program is the server. It runs on a Linux x86-64 machine. When you add a machine, the server installs the infraternal agent there for you, so you never download that part.</p>
 <div class="note" data-install-notice hidden></div>
@@ -206,6 +206,10 @@ export async function buildSite(options: SiteOptions): Promise<void> {
   if (!installScript.success) throw new Error(`install script: ${installScript.logs.map(String).join("; ")}`);
   await cp(resolve(root, "scripts/release/install.sh"), resolve(out, "install.sh"));
   await cp(resolve(root, "release/allowed_signers"), resolve(out, "allowed_signers"));
+  // Invoke the release Function only for object URLs, preserving the static /releases/ landing page.
+  await writeFile(resolve(out, "_routes.json"), JSON.stringify({
+    version: 1, include: ["/releases/*"], exclude: ["/releases/"],
+  }) + "\n");
 
   const chrome = (title: string, body: string, area: "home" | "docs" | "install" | "releases" | "changelog", main: "docs" | "site" = "site", here?: string): string => sitePage({ title, body, area, main, ...(here ? { here } : {}) });
   await put(out, "", chrome("Infrastructure you fully own", landing(shot.html), "home", "site", "Infraternal"));

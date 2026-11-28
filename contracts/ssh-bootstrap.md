@@ -375,7 +375,7 @@ is omitted from every other failure, and existing clients may ignore it.
 
 The default server payload source uses its exact running Linux executable for
 its own architecture. For the other supported architecture, it requests the
-server's workspace version from `https://builds.infraternal.com/releases/<version>/`:
+server's workspace version from `https://infraternal.com/releases/<version>/`:
 `SHA256SUMS`, `SHA256SUMS.sig`, `VERSION`, and `infraternal-<architecture>-musl`.
 The unchanged release-signer Worker signs the manifest with Ed25519 SSHSIG,
 namespace `infraternal-release`, hash SHA-512. The binary embeds both public
