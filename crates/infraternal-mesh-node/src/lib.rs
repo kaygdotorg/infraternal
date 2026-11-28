@@ -52,3 +52,7 @@ pub mod underlay_announce;
 pub mod relay_list;
 /// Checksummed mesh revision journal frames and replay.
 pub mod state_journal;
+
+/// Userspace device and snapshot handling shared by Apple clients.
+#[cfg(all(unix, feature = "engine"))]
+pub mod engine;

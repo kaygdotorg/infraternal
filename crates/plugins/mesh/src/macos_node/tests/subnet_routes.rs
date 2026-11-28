@@ -253,7 +253,11 @@ fn a_mac_reaches_a_network_behind_a_router_peer_only_while_approved() {
         "J1169 first snapshot with two networks applied in {} us",
         applying.elapsed().as_micros()
     );
-    let interface = node.interface.clone().expect("the node has a utun");
+    let interface = node
+        .test_state()
+        .interface
+        .clone()
+        .expect("the node has a utun");
     let state = node.network_route_state(lan);
     eprintln!("J1169 {LAN} on {interface}: {state}");
     assert_eq!(state["state"], "installed", "{state}");

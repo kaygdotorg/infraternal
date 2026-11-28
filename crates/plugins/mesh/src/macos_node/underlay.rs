@@ -471,7 +471,7 @@ impl UnderlayMonitor {
 /// The worker's whole announce path on macOS: the routing-socket listener (when it could open)
 /// and the shared coalescing. [`Self::due`] yields when live sessions should announce our
 /// endpoint; the caller then calls `request_keepalives` on its `GotaTun` device.
-pub(super) struct UnderlayAnnouncer {
+pub struct UnderlayAnnouncer {
     /// The listener, or `None` when it could not open or has failed.
     monitor: Option<UnderlayMonitor>,
     /// The shared 25 ms / 250 ms coalescing over the listener's wakeups.

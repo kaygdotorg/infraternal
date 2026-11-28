@@ -155,7 +155,7 @@ fn mtu_only_authority_refresh_keeps_peer_sessions() {
     let before = super::super::J472_REBUILDS.load(Ordering::SeqCst);
     let mut replacement = current.clone();
     replacement.authority_epoch = Some(AUTHORITY_EPOCH_B.to_owned());
-    let mut budgets = super::super::PathBudgets::probe(Some(&replacement));
+    let mut budgets = super::super::probe_paths(Some(&replacement));
     // Simulate the caller's successful re-probe after its underlay path budget changed.
     for mtu in budgets.route_mtus.values_mut() {
         *mtu -= 16;
@@ -167,7 +167,8 @@ fn mtu_only_authority_refresh_keeps_peer_sessions() {
     };
     let expected_budgets = budgets.clone();
     let (reply, result) = std::sync::mpsc::sync_channel(1);
-    node.worker
+    node.test_state()
+        .worker
         .as_ref()
         .unwrap()
         .commands
