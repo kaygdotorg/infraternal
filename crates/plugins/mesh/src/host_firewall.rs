@@ -1286,6 +1286,41 @@ fn clear_role(
     Ok(report)
 }
 
+/// Withdraw an uncommitted agent install's policy without changing its loader files.
+///
+/// Reapply the saved server policy, or remove the product table if the agent
+/// was its only owner. When the installer is restoring its prior hand-written
+/// loader, let that loader restore the previous table instead. The caller
+/// holds the install journal and has already stopped the agent.
+///
+/// # Errors
+/// Returns an error if the saved role files or their live rules cannot be reconciled.
+#[cfg(target_os = "linux")]
+pub fn rollback_agent_policy(
+    paths: &HostFirewallPaths,
+    restore_saved_policy: bool,
+    nft_path: Option<&Path>,
+) -> Result<(), PolicyError> {
+    let agent = paths.agent_policy_path();
+    if read_policy_file(agent)?.is_none() {
+        return Ok(());
+    }
+    if restore_saved_policy {
+        if let Some(server) = read_policy_file(paths.server_policy_path())? {
+            apply_roles(Some(server), None, nft_path)?;
+        } else {
+            match remove_host_table(nft_path) {
+                Ok(_) => {}
+                // No loader can apply a new table without nft. Keep unwinding the install.
+                Err(PolicyError::TableRemovalFailed { source, .. })
+                    if matches!(*source, PolicyError::NftMissing { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    remove_policy_file(agent)
+}
+
 /// Read one validated role policy from its root-owned configuration file.
 ///
 /// # Errors

@@ -326,7 +326,12 @@ fn run_invocation() -> ExitCode {
     };
     let json_output = matches.get_flag("json");
     let selected = cli::command_tree::selected(&matches);
-    if json_output {
+    let scoped_up = cfg!(machine_up)
+        && matches!(
+            selected.path.first().map(String::as_str),
+            Some("up" | "__up-system")
+        );
+    if json_output && !scoped_up {
         // One envelope per command, also when Ctrl-C stops it (D303/D305).
         let command = if selected.path.is_empty() {
             "infraternal".to_owned()
@@ -823,12 +828,17 @@ fn run_up(matches: &ArgMatches, json_output: bool) -> ExitCode {
         any(feature = "plugin-server", feature = "plugin-mesh")
     )))]
     let host_firewall_allow = Vec::new();
-    // User mode is the Mac default (#146, owner 2026-11-20); --system keeps root mode.
-    #[cfg(target_os = "macos")]
-    if !matches.get_flag("system") {
-        return up::macos_user::run(server, json_output);
-    }
-    up::run(server, &host_firewall_allow, json_output)
+    up::with_cancellation(
+        |cancelled| async move {
+            // User mode is the Mac default (#146, owner 2026-11-20); --system keeps root mode.
+            #[cfg(target_os = "macos")]
+            if !matches.get_flag("system") {
+                return up::macos_user::run(server, json_output, &cancelled).await;
+            }
+            up::run(server, &host_firewall_allow, json_output, &cancelled).await
+        },
+        json_output,
+    )
 }
 
 #[cfg(machine_up)]

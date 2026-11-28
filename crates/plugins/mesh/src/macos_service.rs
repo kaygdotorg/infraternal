@@ -733,8 +733,12 @@ fn status_of(daemon: Daemon) -> io::Result<Status> {
     })
 }
 
+/// Run the launchd request to completion before a foreground install can roll it back.
 fn launchctl(arguments: &[String]) -> io::Result<Output> {
-    Command::new(LAUNCHCTL).args(arguments).output()
+    Command::new(LAUNCHCTL)
+        .args(arguments)
+        .process_group(0)
+        .output()
 }
 
 /// Runs `launchctl` and turns a non-zero exit status into an I/O error.

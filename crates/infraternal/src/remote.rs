@@ -346,11 +346,19 @@ pub(crate) async fn prepare_join_key(origin: &str, data: &Path) -> io::Result<[u
     prepared_key_digest(data)
 }
 
-/// Prepare a new machine key without reusing this user's existing agent identity.
-pub(crate) async fn prepare_machine_join_key(origin: &str, data: &Path) -> io::Result<[u8; 32]> {
+/// Verify the server route and generate the new approval key without touching local state.
+#[cfg(machine_up)]
+pub(crate) async fn prepare_machine_join_key(
+    origin: &str,
+) -> io::Result<(Zeroizing<Vec<u8>>, [u8; 32])> {
     preflight(origin, None, true).await?;
-    prepare(data).map_err(|error| local_state(error.kind()))?;
-    prepared_key_digest(data).map_err(|error| local_state(error.kind()))
+    let key = PKey::generate_ed25519().map_err(|_| local_state(io::ErrorKind::Other))?;
+    let pkcs8 = Zeroizing::new(
+        key.private_key_to_pkcs8()
+            .map_err(|_| local_state(io::ErrorKind::Other))?,
+    );
+    let digest = key_digest_from_pkcs8(&pkcs8)?;
+    Ok((pkcs8, digest))
 }
 
 fn join_csr_der(key: &PKey<openssl::pkey::Private>) -> io::Result<String> {
@@ -371,19 +379,6 @@ fn prepared_key_digest(data: &Path) -> io::Result<[u8; 32]> {
     let key = prepared_key(data)?;
     let public = key.raw_public_key().map_err(|_| refused())?;
     Ok(openssl::sha::sha256(&public))
-}
-
-/// Read the prepared private key only for a private, bounded handoff to the root helper.
-pub(crate) fn prepared_join_key_pkcs8(data: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    let key = prepared_key(data)?;
-    key.private_key_to_pkcs8()
-        .map(Zeroizing::new)
-        .map_err(|_| refused())
-}
-
-/// Remove the user's pending key after the root-owned identity has been published.
-pub(crate) fn retire_prepared_join_key(data: &Path) -> io::Result<()> {
-    retire_pending_key(data)
 }
 
 /// Derive the approved key's public digest from its private PKCS#8 handoff bytes.

@@ -1,5 +1,6 @@
 //! Retire a previous user install after the approved system install is active.
 
+use super::Cancellation;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use infraternal_plugin_ssh::{model::InstallMode, previous_attempt::Retirement};
 use std::{
@@ -43,8 +44,11 @@ pub(super) fn preference(plan: &Retirement) -> String {
     )
 }
 
-/// Print the exact paths before collecting consent. Enter keeps the old install.
-pub(super) fn confirm(plan: &Retirement) -> bool {
+/// Print the exact paths before collecting consent. Enter or Ctrl-C keeps the old install.
+pub(super) async fn confirm(plan: &Retirement, cancelled: &Cancellation) -> bool {
+    if cancelled.check().is_err() {
+        return false;
+    }
     eprintln!(
         "An earlier infraternal installation belongs to the account that approved this join."
     );
@@ -55,10 +59,7 @@ pub(super) fn confirm(plan: &Retirement) -> bool {
         eprintln!("  {path}");
     }
     eprint!("Retire the earlier installation? [y/N] ");
-    let mut answer = String::new();
-    io::stderr().flush().is_ok()
-        && io::stdin().read_line(&mut answer).is_ok()
-        && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    io::stderr().flush().is_ok() && cancelled.confirm_on_terminal().await
 }
 
 /// Recheck the reviewed installation and retire it as the original user.

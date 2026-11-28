@@ -951,26 +951,33 @@ extern "C" fn on_interrupt(_signal: nix::libc::c_int) {
     }
 }
 
-/// Restore the default action and terminate by SIGINT so calling shells stop their scripts.
+/// Terminate by SIGINT so calling shells stop their scripts.
 fn return_by_sigint() -> ! {
+    exit_by_signal(nix::sys::signal::Signal::SIGINT);
+}
+
+/// Restore a terminating signal's default action, unblock it, and re-raise it.
+pub fn exit_by_signal(signal: nix::sys::signal::Signal) -> ! {
+    let signal = signal as nix::libc::c_int;
+    let fallback = 128 + signal;
     // SAFETY: the signal action and mask are initialized before use. These syscalls are
     // async-signal-safe, so this also works when called by `on_interrupt`.
     unsafe {
         let mut action = MaybeUninit::<nix::libc::sigaction>::zeroed().assume_init();
         if nix::libc::sigemptyset(&raw mut action.sa_mask) != 0 {
-            nix::libc::_exit(130);
+            nix::libc::_exit(fallback);
         }
         action.sa_sigaction = nix::libc::SIG_DFL;
         action.sa_flags = 0;
-        if nix::libc::sigaction(nix::libc::SIGINT, &raw const action, std::ptr::null_mut()) != 0 {
-            nix::libc::_exit(130);
+        if nix::libc::sigaction(signal, &raw const action, std::ptr::null_mut()) != 0 {
+            nix::libc::_exit(fallback);
         }
 
         let mut unblocked = MaybeUninit::<nix::libc::sigset_t>::uninit();
         if nix::libc::sigemptyset(unblocked.as_mut_ptr()) != 0
-            || nix::libc::sigaddset(unblocked.as_mut_ptr(), nix::libc::SIGINT) != 0
+            || nix::libc::sigaddset(unblocked.as_mut_ptr(), signal) != 0
         {
-            nix::libc::_exit(130);
+            nix::libc::_exit(fallback);
         }
         let unblocked = unblocked.assume_init();
         if nix::libc::sigprocmask(
@@ -978,12 +985,12 @@ fn return_by_sigint() -> ! {
             &raw const unblocked,
             std::ptr::null_mut(),
         ) != 0
-            || nix::libc::raise(nix::libc::SIGINT) != 0
+            || nix::libc::raise(signal) != 0
         {
-            nix::libc::_exit(130);
+            nix::libc::_exit(fallback);
         }
-        // The default SIGINT action should have ended the process before `raise` returned.
-        nix::libc::_exit(130);
+        // The default action should have ended the process before `raise` returned.
+        nix::libc::_exit(fallback);
     }
 }
 
