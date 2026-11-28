@@ -3,13 +3,13 @@ use super::*;
 use std::io::BufRead;
 
 /// Remove only this probe's private filesystem tree, including on an assertion failure.
-struct Fixture(
+pub(super) struct Fixture(
     /// The private namespace root owned exclusively by this probe.
-    PathBuf,
+    pub(super) PathBuf,
 );
 impl Fixture {
     /// Build a private namespace root whose owner matches the invoking test account.
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!("j218-{}", uuid::Uuid::new_v4()));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
         Self(root)

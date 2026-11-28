@@ -1066,7 +1066,7 @@ mod tests {
     #[test]
     #[ignore = "Run as root in verify-privileged to validate a marked policy file."]
     fn interrupted_install_can_recover_an_agent_policy_with_a_new_inode() {
-        let fixture = crate::restart_binary::fixture::Directory::new();
+        let fixture = super::j218_review::Fixture::new();
         let owner = nix::unistd::geteuid().as_raw();
         let mut install = Install::begin(&fixture.0, owner, Path::new("/bin/false"))
             .unwrap()
