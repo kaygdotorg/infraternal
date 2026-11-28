@@ -82,7 +82,7 @@ fn resize_refusal_session_probe() {
             exited_sent: false,
             stopping: false,
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
         };
         if case == "control" {
@@ -124,6 +124,7 @@ fn resize_refusal_session_probe() {
                 "native resize error must keep the peer usable"
             );
             assert_eq!((config.cols, config.rows), (80, 24));
+            assert_eq!(cursors.last_resize_at, 0);
             assert_eq!(cursors.get(Some(0)).unwrap().requested_size, (80, 24, 0, 0));
             assert_eq!(cursors.get(Some(0)).unwrap().accepted_size, (80, 24, 0, 0));
             if case == "control" {

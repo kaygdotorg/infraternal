@@ -3,8 +3,8 @@
 //! This experiment has no login authority: its caller must already be inside one
 //! person's login. A UID shared by people is never sufficient to select a host.
 use super::{
-    CHUNK, Config, InputReply, Inputs, MAX_PEERS, Peer, Request, SessionTerminal, SocketPath,
-    consume_peer, release_size_of_departed_typist, shim_peer_uid_allowed, socket,
+    CHUNK, Config, InputReply, Inputs, MAX_PEERS, Peer, ReplaySizeCheck, Request, SessionTerminal,
+    SocketPath, consume_peer, release_size_of_departed_typist, shim_peer_uid_allowed, socket,
 };
 use crate::{
     frame::{
@@ -797,7 +797,7 @@ impl Session {
                     exited_sent: false,
                     stopping: false,
                     request: None,
-                    replay_awaits_size: false,
+                    replay_awaits_size: ReplaySizeCheck::default(),
                     echo_hidden_told: false,
                 };
                 peer.queue(&Frame::Hello {
@@ -1258,7 +1258,7 @@ mod tests {
             size: (session.config.cols, session.config.rows, 0, 0),
             cursor: Some(session.ring.head()),
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
             pending: Vec::new(),
             written: 0,

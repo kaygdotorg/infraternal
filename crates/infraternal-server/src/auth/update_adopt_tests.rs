@@ -20,6 +20,7 @@
 //! 3. **`update apply`.** Root stages and applies the `newer` release with
 //!    `infraternal server update check|apply`: warm, the boot pointer moves to it, and the
 //!    page is now the `newer` web build. `previous/web/` keeps the `adopted` one.
+//!    A fresh local PTY runs a command and exits while the server still runs from its memfd (#613).
 //! 4. **Cold start.** `systemctl restart`: a new PID runs the `newer` image through the
 //!    boot pointer (argv\[0\] is the pointer path) and serves the `newer` web build; one
 //!    passkey unlock brings the CA back (D168).
@@ -408,6 +409,12 @@ async fn boot_pointer_adoption() {
     serving(address).await;
     let apply_gap = downtime.take_ms();
     assert_eq!(unit_pid(SERVER_UNIT), pid, "one server process throughout");
+    assert!(
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .unwrap()
+            .starts_with("/memfd:infraternal-replacement (deleted)"),
+        "the server execs from the warm replacement memfd"
+    );
     assert_eq!(
         running_digest(pid),
         digest(&builds.newer),
@@ -430,8 +437,48 @@ async fn boot_pointer_adoption() {
         kept.contains(&marker(&builds.adopted)),
         "previous/ keeps its web build"
     );
+    let started = std::time::Instant::now();
+    let shell_ms = tokio::time::timeout(Duration::from_secs(30), async {
+        let fresh =
+            crate::ca_handoff::shipping_tests::open_terminals(address, &session, ORIGIN, 1).await;
+        let mut browsers = attach_all(address, &session, &fresh, ORIGIN).await;
+        let mut sent = HashMap::new();
+        assert_eq!(
+            echo_all(&mut browsers, &mut sent, "fresh-after-apply").await,
+            1
+        );
+        let shell_ms = started.elapsed().as_secs_f64() * 1000.0;
+        wire_send(
+            &mut browsers[0],
+            1,
+            &infraternal_protocol::Frame::Input {
+                in_seq: sent[&0],
+                bytes: b"exit 0\n",
+            },
+        )
+        .await;
+        let session_id = Uuid::from_bytes(fresh[0]);
+        // The shell can exit while the shim still retains its output for replay.
+        loop {
+            let wire = wire_read(&mut browsers[0]).await;
+            let message = infraternal_protocol::decode_muxed_frame(&wire).unwrap();
+            if message.stream_id == 1
+                && let infraternal_protocol::Frame::Event { event_json, .. } = message.frame
+            {
+                let event: Value = serde_json::from_slice(event_json).unwrap();
+                if event["type"] == "terminal.exited" {
+                    assert_eq!(event["session_id"], session_id.to_string());
+                    assert_eq!(event["status"], 0);
+                    break;
+                }
+            }
+        }
+        shell_ms
+    })
+    .await
+    .expect("a new local shell starts and exits after warm apply");
     println!(
-        "UPDATE case=apply bucket=warm same_pid=true ca_unlocked=true pointer=releases/{} web=newer previous_web=adopted max_healthz_gap_ms={apply_gap:.1}",
+        "UPDATE case=apply bucket=warm same_pid=true ca_unlocked=true pointer=releases/{} web=newer previous_web=adopted fresh_shell_echoed=true fresh_shell_exited=true fresh_shell_ms={shell_ms:.1} max_healthz_gap_ms={apply_gap:.1}",
         builds.newer
     );
 

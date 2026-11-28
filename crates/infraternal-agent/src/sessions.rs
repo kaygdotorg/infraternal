@@ -344,6 +344,34 @@ pub async fn connect_sequenced(path: PathBuf, id: [u8; 16]) -> io::Result<Sessio
     .await
 }
 
+/// Ask the authenticated shim to close this terminal and wait for its exit.
+/// Read from the current head so a retained shim can report exit without replaying scrollback.
+pub(crate) async fn end_terminal(path: PathBuf, id: [u8; 16]) -> io::Result<i32> {
+    const CLOSE: u64 = infraternal_shim::frame::CLOSE_SESSION;
+    let mut session = match connect_with(path.clone(), id, CLOSE).await {
+        Ok(session) => session,
+        Err(error) if gone(&error) => {
+            return infraternal_shim::ended::read(&path)?
+                .map(|(status, _)| status)
+                .ok_or(error);
+        }
+        Err(error) => return Err(error),
+    };
+    if session.caps & CLOSE == 0 {
+        return Err(io::ErrorKind::Unsupported.into());
+    }
+    send(&mut session.peer, &Frame::ReadFrom(session.head)).await?;
+    send(&mut session.peer, &Frame::CloseSession).await?;
+    let mut reader = Reader::default();
+    loop {
+        match reader.read(&mut session.peer).await? {
+            Frame::Exited(status, _) => return Ok(status),
+            Frame::Output(..) | Frame::Snapshot(..) => {}
+            _ => return Err(invalid("unexpected terminal end reply")),
+        }
+    }
+}
+
 /// Select a stable leg-B writer and advertised queue deferral before querying cursors.
 /// # Errors
 /// Refuses old shims without writer isolation instead of borrowing another device's Ack.

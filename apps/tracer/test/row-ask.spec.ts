@@ -1,7 +1,7 @@
 /**
  * "End" asks in its own row (#242, owner 2026-11-01, TASTE "A destructive row action asks in its own row"): the row's text
- * becomes "End session? End · Cancel", never a dialog or a floating card. The row keeps its height and its neighbours stay
- * put; the words are reachable by keyboard; Escape and Cancel put the row back; a press elsewhere is a no.
+ * becomes "End session? End · Keep", never a dialog or a floating card. The row keeps its height and its neighbours stay
+ * put; the words are reachable by keyboard; Escape and Keep put the row back; a press elsewhere is a no.
  */
 import { expect, test, type Page } from "playwright/test";
 
@@ -26,7 +26,7 @@ const boxes = (page: Page, ids: string[]) => page.evaluate((list) => list.map((i
 }), ids);
 
 test.describe("End asks in its row", () => {
-  test("a swipe opens the question in the row; no card, same height, neighbours stay put; Cancel and Escape restore it", async ({ page }) => {
+  test("a swipe opens the question in the row; no card, same height, neighbours stay put; Keep and Escape restore it", async ({ page }) => {
     await open(page);
     const before = await boxes(page, [ID, NEIGHBOUR]);
     // A long wheel swipe left performs "End", which asks first.
@@ -39,7 +39,7 @@ test.describe("End asks in its row", () => {
     }), [ID]);
     const ask = page.locator(".ui-row-ask");
     await expect(ask).toBeVisible();
-    await expect(ask).toHaveText(/End( session)?\?\s*End\s*·\s*Cancel/);
+    await expect(ask).toHaveText(/End( session)?\?\s*End\s*·\s*Keep/);
     // Never cut off: the whole row fits inside the row's own box, with the full question or its short form.
     expect(await page.evaluate(() => { const a = document.querySelector(".ui-row-ask")!, r = a.parentElement!.getBoundingClientRect(), last = a.querySelector(".ui-row-ask-no")!.getBoundingClientRect(); return last.right <= r.right + 0.5; })).toBe(true);
     expect(["End session?", "End?"]).toContain(await page.evaluate(() => document.querySelector(".ui-row-ask-q")!.textContent));
@@ -47,7 +47,7 @@ test.describe("End asks in its row", () => {
     await expect(page.locator(".ui-confirm-tip, [role='alertdialog']")).toHaveCount(0);
     expect(await page.evaluate(() => [...document.querySelectorAll("[role='dialog']")].map((e) => e.id))).toEqual(["palette"]);
     expect(await boxes(page, [ID, NEIGHBOUR])).toEqual(before);
-    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("button", { name: "Keep" }).click();
     await expect(ask).toHaveCount(0);
     expect(await boxes(page, [ID, NEIGHBOUR])).toEqual(before);
     expect(await page.evaluate(() => (document.querySelector(".bm-row[data-asking]") ? "asking" : "idle"))).toBe("idle");
@@ -63,7 +63,7 @@ test.describe("End asks in its row", () => {
     await expect(ask).toBeVisible();
     expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("End");
     await page.keyboard.press("ArrowRight");
-    expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("Cancel");
+    expect(await page.evaluate(() => document.activeElement?.textContent)).toBe("Keep");
     await page.keyboard.press("ArrowLeft");
     await page.keyboard.press("Escape");
     await expect(ask).toHaveCount(0);

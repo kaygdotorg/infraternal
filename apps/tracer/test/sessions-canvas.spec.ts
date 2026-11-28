@@ -225,7 +225,7 @@ test("ending a session names what is running and asks with the compact confirm",
     const tip = page.locator(".ui-confirm-tip[data-open='true']");
     await expect(tip).toBeVisible();
     await expect(tip.locator(".ui-confirm-tip-message")).toHaveText("End 'apt upgrade'?");
-    await expect(tip.locator(".ui-confirm-tip-detail")).toContainText("apt upgrade is still running");
+    await expect(tip.locator(".ui-confirm-tip-detail")).toContainText("Ending the session stops apt upgrade.");
     await expect(tip.locator("button")).toHaveCount(2);
     await expect(tip.locator("button").nth(1)).toHaveAttribute("aria-label", "End session");
     await expect(page.locator(".cl-sx-pop")).toBeVisible();
@@ -299,9 +299,9 @@ test("the tick, the cross and the dot beside a session say what they mean in a t
       await expect(page.locator(".tip")).toBeHidden();
       return text;
     };
-    expect(await tipOf("build-01/release")).toBe("Finished successfully"); // detached, a command finished well
+    expect(await tipOf("build-01/release")).toBe("Finished"); // detached, a command finished well
     expect(await tipOf("build-01/journal")).toBe("New output");
-    expect(await tipOf("build-01/bench")).toBe("Finished successfully, exit code 0"); // exited: the tick is the exit code in a picture
+    expect(await tipOf("build-01/bench")).toBe("Finished, exit code 0"); // exited: the tick is the exit code in a picture
     expect(await tipOf("build-01/migrate")).toBe("Failed, exit code 1");
   } finally { await context.close(); }
 });

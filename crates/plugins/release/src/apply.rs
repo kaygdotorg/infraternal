@@ -69,6 +69,9 @@ const MAX_PENDING: u64 = 8192;
 
 /// Why B undid itself when its health check failed.
 pub const UNHEALTHY: &str = "the new release failed its health check";
+/// Why B undid itself when it could not publish the image used for local logins.
+pub const LOGIN_IMAGE_FAILED: &str =
+    "the new release could not prepare the login image for local shells";
 /// Why B undid itself when its health check had not passed after the trial limit
 /// (about 2 minutes, D295).
 pub const TIMED_OUT: &str = "the new release did not pass its health check in time";
@@ -481,6 +484,7 @@ pub fn resume_with(
 pub fn undo_reason(reason: Option<&str>) -> &'static str {
     [
         UNHEALTHY,
+        LOGIN_IMAGE_FAILED,
         TIMED_OUT,
         FAILED_TO_START,
         SESSIONS_MISSING,

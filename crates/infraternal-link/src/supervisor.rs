@@ -1,8 +1,8 @@
 //! Keeps the enrolled server link retrying and cancels stalled offline attempts without an idle heartbeat [128,168,215], #225.
 //!
 //! How to use it: hand [`run`] a closure that makes one connection attempt and
-//! reports through its `watch::Sender<bool>` while the link is up. `run` never
-//! returns on its own; cancel it by dropping its future. [`LinkNotes`] rate
+//! reports through its `watch::Sender<bool>` while the link is up. The loop
+//! returns on authenticated retirement or when its caller cancels it. [`LinkNotes`] rate
 //! limits the "link closed" lines a caller prints for each ended connection.
 //! Both live here, outside the infraternal agent, so every client of leg B
 //! (the agent today, the iPhone extension later) retries the same way (#580).
@@ -146,13 +146,60 @@ async fn offline(mut connected: watch::Receiver<bool>) {
     }
 }
 
-/// Retry all returned errors, including local resource and credential failures.
+/// Typed final outcome from an authenticated server before control admission.
+#[derive(Debug)]
+struct InstallationRetired;
+
+impl std::fmt::Display for InstallationRetired {
+    /// The fixed local message is independent of the server's reason text.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("This installation was retired.")
+    }
+}
+
+impl std::error::Error for InstallationRetired {}
+
+/// Recognize the retirement code only on the first authenticated control reply.
+///
+/// # Errors
+/// Returns the final retirement error for the reserved control close.
+pub fn check_retirement(stream: u32, frame: &infraternal_protocol::Frame<'_>) -> io::Result<()> {
+    if stream == 0
+        && matches!(
+            frame,
+            infraternal_protocol::Frame::Close {
+                code: infraternal_protocol::CLOSE_INSTALL_RETIRED,
+                ..
+            }
+        )
+    {
+        return Err(retirement_error());
+    }
+    Ok(())
+}
+
+/// Convert a final retirement response from the pinned server into a terminal outcome.
+#[must_use]
+pub fn retirement_error() -> io::Error {
+    io::Error::other(InstallationRetired)
+}
+
+/// Whether an attempt ended with the authenticated retirement outcome.
+#[must_use]
+pub fn is_retired(error: &io::Error) -> bool {
+    let Some(source) = error.get_ref() else {
+        return false;
+    };
+    source.is::<InstallationRetired>()
+}
+
+/// Retry ordinary errors, including local resource and credential failures.
 /// `PermissionDenied` alone is not proof of revocation: TLS configuration,
 /// expired certificates and unavailable publication can all use that kind.
 /// Authenticated host removal retains its existing uninstall/stop path [134].
 /// # Errors
-/// None in practice: the loop retries every outcome and only ends when its
-/// future is dropped. The `Result` keeps the attempt's error type.
+/// Returns the typed retirement error when the authenticated server marks the
+/// installation as retired.
 pub async fn run<F, Attempt>(mut attempt: F) -> io::Result<()>
 where
     F: FnMut(watch::Sender<bool>) -> Attempt,
@@ -171,6 +218,9 @@ where
                     *live = false;
                     changed
                 });
+                if result.as_ref().is_err_and(is_retired) {
+                    return result;
+                }
                 // Never format arbitrary adapter errors, which can carry private
                 // context. A returned success is unexpected too: keep retrying.
                 eprintln!(

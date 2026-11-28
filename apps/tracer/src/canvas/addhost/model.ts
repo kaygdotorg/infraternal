@@ -41,14 +41,17 @@ function takeoverStopped(failure: FailureDetail): boolean {
 
 /** One plain sentence for a failure. An unknown or missing failure gets the generic one; the raw text stays in the details. */
 export function failureLine(failure: FailureDetail | undefined): string {
+  if (failure?.ssh_server === "netbird") return "This address uses NetBird SSH";
+  if (failure?.join_locally === "macos") return "Add this Mac from the machine itself";
   switch (failure?.kind) {
     case "unreachable": return "Couldn't reach this host";
     case "mesh-policy": return "This server can't connect to this host";
-    case "host-key": return "This host's key needs your OK";
+    case "host-key": return "Verify this host's key";
     case "auth": return "Couldn't sign in to this host";
     case "unsupported": return "This host can't run the infraternal agent yet";
     case "stale_previous_attempt": return "Leftovers from an earlier setup";
     case "setup_running": return "Setup is already running on this host";
+    case "retire_previous_install": return "Earlier infraternal installation";
     case "unrecognized_install": return takeoverStopped(failure) ? "Take over didn't finish" : "Already set up elsewhere";
     case "unproven_files": return "Setup found files it didn't create";
     case "no_account": return "Couldn't find that account on this host";
@@ -64,7 +67,7 @@ export function failureLine(failure: FailureDetail | undefined): string {
       // One short line: it heads the progress row and its failed stage, so a paragraph wrapped there in red
       // (#394). The server's full sentence is on the failure page and its Details.
       return failure.failed_step ? SHORT_STEP_LINE[failure.failed_step] : "Setting up this host didn't finish";
-    default: return "Something went wrong while setting up this host. Try again.";
+    default: return "Setup didn't finish. Open Details or try again.";
   }
 }
 
@@ -160,7 +163,7 @@ export function stagesOf(view: TargetView): StageView[] {
 }
 
 /** What fixes a failure; the wizard shows the matching page or button. */
-export type FixAction = "choose-method" | "host-key" | "install-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "unlock" | "none";
+export type FixAction = "choose-method" | "host-key" | "install-command" | "join-command" | "retry" | "start-fresh" | "replace-stuck-install" | "take-over" | "retire-install" | "unlock" | "none";
 
 /**
  * `tone` is the news, not the severity: "info" for a host that needs a decision or a wait (leftovers, a setup still
@@ -186,6 +189,18 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
   // Without a button to open its terminal (an older server sends no host id; the page may not list the host) the
   // copy carries the route itself, so the page is never a dead end. Keys follow the platform (⌘ only on Apple keyboards).
   if (failure?.already_added) return { title: `${name} is already added`, happened: "It's already in Console.", next: canOpen ? "" : `Find its terminal with ${shortcutLabel({ mac: "⌘K", other: "Ctrl K" })}.`, fix: "none", tone: "info" };
+  if (failure?.ssh_server === "netbird") return {
+    title: `Couldn't add ${name} over SSH`,
+    happened: "This address answers with NetBird's SSH server, which only accepts NetBird sign-ins.",
+    next: "Use the machine's own SSH (on macOS: Remote Login) at its LAN address, or run infraternal up on the machine.",
+    fix: "join-command", tone: "danger",
+  };
+  if (failure?.join_locally === "macos") return {
+    title: `Add ${name} from the Mac`,
+    happened: "SSH sign-in worked, but Macs join from their own terminal.",
+    next: `Run infraternal up on ${name} to add it.`,
+    fix: "join-command", tone: "info",
+  };
   switch (failure?.kind) {
     case "unreachable": return {
       title: `${name} isn't answering`,
@@ -200,7 +215,7 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "retry", tone: "danger",
     };
     case "host-key": return {
-      title: `${name} needs your OK`,
+      title: `Verify ${name}'s host key`,
       happened: `${name} showed a security key this server hasn't seen before.`,
       next: "Compare the fingerprint with the one on the host before you trust it.",
       fix: failure.fingerprints?.length ? "host-key" : "retry", tone: failure.host_key_changed || !failure.fingerprints?.length ? "danger" : "info",
@@ -281,6 +296,17 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
       fix: "retry",
       tone: "info",
     };
+    case "retire_previous_install": return {
+      title: failure.retirement && !failure.retirement.install ? `Check for an earlier installation on ${name}?` : `Retire the earlier installation on ${name}?`,
+      happened: failure.retirement && !failure.retirement.install
+        ? "Administrator access is needed to check the system installation. If it belongs to you, you can review its files before deciding."
+        : failure.retirement?.different_scope
+          ? "Once the new installation connects, infraternal will stop and disable the earlier service and remove the paths below."
+          : "Infraternal will stop and disable the earlier service. The files are kept until the new installation connects.",
+      next: "",
+      fix: failure.retirement ? "retire-install" : "none",
+      tone: "info",
+    };
     // #394: a finished install for a host id this server doesn't know, or files at the setup location that
     // a staging step can't prove are its own. Nothing was changed; the server's sentence says which, and the
     // location is in Details. Retry is right once the other server has removed it.
@@ -336,9 +362,9 @@ export function guideFor(name: string, failure: FailureDetail | undefined, canOp
         fix: "retry", tone: "danger",
       };
     default: return {
-      title: `Something went wrong with ${name}`,
-      happened: "Something went wrong while setting up this host.",
-      next: "Try again.",
+      title: `Couldn't finish setting up ${name}`,
+      happened: `Setup stopped before ${name} was ready.`,
+      next: "Open Details to see what stopped, or try again.",
       fix: "retry", tone: "danger",
     };
   }

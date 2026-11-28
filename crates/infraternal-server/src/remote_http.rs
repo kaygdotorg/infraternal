@@ -220,8 +220,7 @@ impl InvitationIssuer {
     pub(crate) fn origin(&self) -> &str {
         self.0.auth.origin()
     }
-    /// The underlying enrollment store shared with bootstrap and promotion flows.
-    #[cfg(any(feature = "ssh", test))]
+    /// The enrollment store shared by machine approval, bootstrap, and promotion.
     pub(crate) fn store(&self) -> &EnrollmentStore {
         &self.0.store
     }

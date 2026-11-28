@@ -4,6 +4,7 @@
 use infraternal_status::{Activity, Roots, probe};
 use std::{fs, os::unix::fs::symlink};
 
+/// Reserve room for a masked server recovery hint within the next-step budget.
 #[test]
 fn masked_server_recovery_keeps_next_steps_within_the_cli_limit() {
     let root = std::env::temp_dir().join(format!(
@@ -31,6 +32,7 @@ fn masked_server_recovery_keeps_next_steps_within_the_cli_limit() {
             system_units: vec![system],
             user_units: Some(user),
             run_dir: None,
+            system_run_dir: None,
             data_dirs: vec![data],
             net_class: root.join("net"),
         },

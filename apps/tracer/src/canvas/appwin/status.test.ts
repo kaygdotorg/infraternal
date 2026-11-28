@@ -49,6 +49,8 @@ test("a closed app, a missing permission, an unsupported browser and a failure e
   expect(perm.card?.action?.id).toBe("retry");
   expect(describe({ kind: "unsupported", reason: "decoder" }, ctx).card?.title).toBe("This browser can't show app windows");
   expect(describe({ kind: "failed", reason: "unreachable" }, ctx).card?.title).toBe("studio-mac can't be reached");
+  expect(describe({ kind: "failed", reason: "decode" }, ctx).card?.title).toBe("Couldn't decode the video stream");
+  expect(describe({ kind: "failed", reason: "refused" }, ctx).card?.title).toBe("Couldn't open Editor");
   expect(describe({ kind: "closed" }, { ...ctx, screen: true }).card?.title).toBe("The screen is not available");
 });
 

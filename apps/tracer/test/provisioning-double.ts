@@ -42,6 +42,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebSocket } from "ws";
+import type { FailureDetail, FailureKind } from "../src/provisioning-client";
 import type { AddHostFixture } from "../src/add-host-contract";
 import { publishSetup, runSetup } from "./setup-double";
 import { addHostFixtures } from "./prototype-fixtures";
@@ -56,8 +57,6 @@ const RETAINED_EVENTS = 1024;
 const IDENTIFIER = /^[A-Za-z0-9._-]{1,128}$/;
 
 type Step = "check" | "install" | "facts" | "connect" | "done" | "failed";
-/** The failure kinds the double can script, mirroring the server contract (contracts/ssh-bootstrap.md). */
-type FailureKind = "unreachable" | "auth" | "mesh-policy" | "host-key" | "unsupported" | "install" | "stale_previous_attempt" | "setup_running" | "unrecognized_install" | "unproven_files" | "no_account" | "authority_locked";
 const PHASES = [
   { step: "check", message: "Checking the system" },
   { step: "install", message: "Installing the infraternal agent" },
@@ -77,10 +76,11 @@ interface BootstrapEvent {
   host_id?: string;
   session_id?: string;
   leftovers?: { challenge: string; mode: "rootless" | "root"; findings: string[] };
-  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean }; closes?: { terminals: Array<{ account: string; program: string; since: number; tty?: string; others?: number }>; close_challenge: string } };
+  failure?: { host_key_changed?: boolean; failed_step?: "connect" | "upload" | "start"; refusal?: "cache" | "prepared" | "foreign"; kind: FailureKind; message: string; log_tail: string[]; setup_lock?: { machine: string; pid?: number; since: string; active: boolean; attempt?: string; sessions?: number; enrolled_with?: string; set_aside?: boolean; live?: boolean; in_use?: boolean }; fingerprints?: string[]; host_key_challenge?: string; host_key_type?: string; choose_method?: boolean; already_added?: boolean; host_id?: string; takeover?: { install: string; live: boolean }; retirement?: FailureDetail["retirement"]; closes?: { terminals: Array<{ account: string; program: string; since: number; tty?: string; others?: number }>; close_challenge: string } };
   authentication?: { method: "network" | "server-key" | "user-key" | "password"; network?: "netbird" | "tailscale" };
 }
 
+/** A named fixture and the active attempt it owns, including any confirmation pause. */
 interface Target {
   id: string;
   publication?: { host_id: string; session_id: string };
@@ -98,6 +98,8 @@ interface Target {
   timers: Set<ReturnType<typeof setTimeout>>;
   /** The one-use handle of the leftovers the attempt is paused on (#169); the attempt waits for `start-fresh`. */
   challenge: string | undefined;
+  /** Separate non-destructive choice the retirement offer may provide. */
+  skipChallenge?: string;
   /** Continues a paused attempt after `start-fresh`. */
   resume: (() => void) | undefined;
   /** Leftovers were removed (or never existed) for this host in this socket. */
@@ -137,7 +139,7 @@ function fixtureFor(address: { kind: string; value: string }): AddHostFixture | 
 }
 
 /** The scripted failure of a named host: where it stops, what it reports and what Details shows. */
-interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
+interface Failure { failed_step?: "connect" | "upload" | "start"; phase: number; beforeLogin: boolean; kind: FailureKind; message: string; evidence: string; choose?: boolean; sshServer?: "netbird"; joinLocally?: "macos"; fingerprints?: string[]; keyChanged?: boolean; alreadyAdded?: boolean; refusal?: "cache" | "prepared" | "foreign" }
 
 /** The existing host a duplicate (`added*`) names; the mock world maps it to a host it already has. */
 const ADDED_HOST_ID = "6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30";
@@ -195,6 +197,8 @@ function failureOf(target: Target): Failure | undefined {
   if (/^added/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "This host is already added. Open its terminal from Console.", evidence: "", alreadyAdded: true };
   if (/^nodetail/.test(name)) return { phase: 0, beforeLogin: true, kind: "install", message: "Setup stopped before this host was ready.", evidence: "Setup stopped before this host was ready." };
   if (/^connectfail/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "install", message: "Connecting to the host failed. Check SSH access and the host service, then try again.", evidence: "The SSH connection setup failed." };
+  if (/^netbird-ssh/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: true, kind: "auth", choose: true, sshServer: "netbird", message: "The SSH server rejected sign-in.", evidence: "The SSH server offered sign-in with a password.\nTried signing in without a key or password." };
+  if (/^mac-ssh/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unsupported", joinLocally: "macos", message: "The SSH system check found macOS. Installing over SSH requires Linux with systemd.", evidence: "" };
   if (/^(installed|takeover)/.test(name)) return { failed_step: "connect", phase: 0, beforeLogin: false, kind: "unrecognized_install", message: "This machine already has an infraternal agent from an earlier setup, so nothing was changed. If an infraternal server still lists it, remove it there to uninstall it, then add it here again.", evidence: "Setup location: /var/lib/infraternal" };
   for (const refusal of ["cache", "prepared", "foreign"] as const) {
     if (name.startsWith(`unproven-${refusal}`)) return { failed_step: "upload", phase: 1, beforeLogin: false, kind: "unproven_files", refusal, message: "Setup changed nothing.", evidence: "Setup location: /var/lib/infraternal" };
@@ -264,7 +268,9 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
     const fail = (): void => {
       if (!failure) return;
       emit(target, "failed", failure.message, {
-        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), ...(failure.refusal ? { refusal: failure.refusal } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? [failure.evidence] : [],
+        ...(failure.failed_step ? { failed_step: failure.failed_step } : {}), ...(failure.refusal ? { refusal: failure.refusal } : {}), kind: failure.kind, message: failure.message, log_tail: failure.evidence ? (failure.sshServer ? failure.evidence.split("\n") : [failure.evidence]) : [],
+        ...(failure.sshServer ? { ssh_server: failure.sshServer } : {}),
+        ...(failure.joinLocally ? { join_locally: failure.joinLocally } : {}),
         ...(failure.alreadyAdded ? { already_added: true, host_id: ADDED_HOST_ID } : {}),
         ...(failure.fingerprints ? { fingerprints: failure.fingerprints, host_key_challenge: target.id, host_key_type: "ssh-ed25519", ...(failure.keyChanged ? { host_key_changed: true } : {}) } : {}), ...(failure.choose ? { choose_method: true } : {}),
       });
@@ -374,6 +380,25 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
             });
             return;
           }
+          // A supported re-add pauses on an exact review of its old user installation.
+          if (target.name === "retire.lab" && !target.fresh) {
+            target.challenge = challengeOf(target.id);
+            target.resume = () => walk(1);
+            target.skipChallenge = challengeOf("skip-retirement");
+            emit(target, "check", "Review the earlier infraternal installation", {
+              kind: "retire_previous_install",
+              message: "This host has an earlier infraternal installation.",
+              log_tail: [],
+              retirement: {
+                challenge: target.challenge,
+                install: "c10909d1-6e81-47a3-b0f2-e5d4c3b2a190",
+                different_scope: true,
+                skip_challenge: target.skipChallenge,
+                paths: ["/home/pat/.local/share/infraternal", "/home/pat/.config/systemd/user/infraternal-agent.service", "/home/pat/.local/bin/infraternal"],
+              },
+            }, undefined, { challenge: "00000000-0000-0000-0000-000000000000", mode: "rootless", findings: [] });
+            return;
+          }
           // Hosts named `takeover*`, added as root: the old install is offered for Take over, named by its id (D359).
           if (/^takeover/.test(target.name) && target.mode === "root" && !target.fresh) {
             target.challenge = challengeOf(target.id);
@@ -465,9 +490,10 @@ export function serveProvisioning(socket: WebSocket, _request: IncomingMessage, 
     if (!started) return refuse("Start a host batch first.");
     const target = typeof command.target === "string" ? targets.get(command.target) : undefined;
     if (!target) return refuse("That host is not in this batch.");
-    if (!target.challenge || !target.resume || command.challenge !== target.challenge) return refuse("This earlier setup observation is no longer available. Retry the host check.");
+    if (!target.challenge || !target.resume || (command.challenge !== target.challenge && command.challenge !== target.skipChallenge)) return refuse("This earlier setup observation is no longer available. Retry the host check.");
     const resume = target.resume;
     target.challenge = undefined;
+    delete target.skipChallenge;
     target.resume = undefined;
     target.fresh = true;
     // The same attempt continues: no new attempt number, then the normal steps.

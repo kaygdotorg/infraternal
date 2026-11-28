@@ -681,6 +681,9 @@ pub(crate) enum ClientFailure {
 pub(crate) struct ClientResponse {
     pub(crate) status: StatusCode,
     pub(crate) retry_after: Option<Duration>,
+    /// A current approval proved this caller owns the earlier local install.
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    pub(crate) retirement_authorized: bool,
     pub(crate) body: Zeroizing<Vec<u8>>,
 }
 
@@ -713,7 +716,7 @@ pub(crate) async fn post_json(
     root: Option<&X509>,
     max_response_bytes: usize,
     request_started: &mut bool,
-    preference: Option<&'static str>,
+    preference: Option<&str>,
 ) -> Result<ClientResponse, ClientFailure> {
     use http_body_util::BodyExt;
 
@@ -781,6 +784,11 @@ pub(crate) async fn post_json(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retirement_authorized = response
+        .headers()
+        .get("infraternal-retired-install")
+        .is_some_and(|value| value == "yes");
     let body = if status == StatusCode::OK {
         let bytes = http_body_util::Limited::new(response.into_body(), max_response_bytes)
             .collect()
@@ -801,6 +809,8 @@ pub(crate) async fn post_json(
     Ok(ClientResponse {
         status,
         retry_after,
+        #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+        retirement_authorized,
         body,
     })
 }
@@ -1292,15 +1302,31 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     });
     // Components' host state goes when the service ends, by return or SIGTERM
     // (#221). Boxed once per service lifetime: the loop's future is large.
-    infraternal_agent::shutdown::run_then_stop(Box::pin(remote_client::run_with_identity_rotation(
-        &identity,
-        state,
-        publisher.clone(),
-        publisher,
-        installation.as_ref(),
-    )))
-    .await
+    let result = infraternal_agent::shutdown::run_then_stop(Box::pin(
+        remote_client::run_with_identity_rotation(
+            &identity,
+            state,
+            publisher.clone(),
+            publisher,
+            installation.as_ref(),
+        ),
+    ))
+    .await;
+    if !result.as_ref().is_err_and(remote_client::is_retired) {
+        return result;
+    }
+    eprintln!("This infraternal installation was retired by its server. Reconnects have stopped.");
+    #[cfg(target_os = "linux")]
+    if retire_service::disable(stored.execution_uid).await.is_err() {
+        eprintln!("Could not finish disabling infraternal-agent.service.");
+    }
+    Ok(())
 }
+
+/// Stops the proven systemd service, if one owns this retired process.
+#[cfg(target_os = "linux")]
+#[path = "remote_retire_service.rs"]
+mod retire_service;
 
 /// Durable record of the newest server leaf this enrollment accepted (#559).
 ///

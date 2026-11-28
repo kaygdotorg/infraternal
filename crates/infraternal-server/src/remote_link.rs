@@ -1428,6 +1428,47 @@ fn peer_caps(prefix: &[u8]) -> u64 {
     }
 }
 
+/// Send final retirement on an authenticated link before creating any host actor.
+pub(crate) async fn send_retirement(channel: &impl Channel) -> io::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut receive = Receive::default();
+        let first = receive.next(channel).await?;
+        if first.stream_id != 0
+            || !matches!(
+                first.frame,
+                Frame::Hello { version: 1, .. } | Frame::Ping { .. }
+            )
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Transmit::default()
+            .send(
+                channel,
+                0,
+                &Frame::Close {
+                    code: infraternal_protocol::CLOSE_INSTALL_RETIRED,
+                    reason: "This installation was retired.",
+                },
+            )
+            .await
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+/// Give the QUIC peer a bounded chance to read retirement before dropping
+/// the connection. Wait for its control stream so it can receive the frame.
+pub(crate) async fn send_quic_retirement(connection: quinn::Connection) {
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        let (send, receive) = connection.accept_bi().await.map_err(io::Error::other)?;
+        let control = NativeChannel::control(send, receive)?;
+        send_retirement(&control).await?;
+        connection.closed().await;
+        Ok::<_, io::Error>(())
+    })
+    .await;
+}
+
 /// A ledger-admitted candidate may prove liveness without replacing the host.
 /// Path proof remains bounded; only an admitted optional standby wait outlives it.
 async fn greeting<C: Channel>(

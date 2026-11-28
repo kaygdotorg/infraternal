@@ -4,6 +4,7 @@
 use infraternal_status::{Activity, Roots, probe_local};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
+/// Report an installed service when OS resource limits prevent its runtime query.
 #[test]
 fn refused_manager_process_preserves_unknown_and_reason() {
     if let Some(root) = std::env::var_os("STATUS_QUERY_REFUSAL_ROOT") {
@@ -26,6 +27,7 @@ fn refused_manager_process_preserves_unknown_and_reason() {
                 system_units: vec![root.join("units")],
                 user_units: None,
                 run_dir: None,
+                system_run_dir: None,
                 data_dirs: vec![],
                 net_class: root.join("net"),
             },

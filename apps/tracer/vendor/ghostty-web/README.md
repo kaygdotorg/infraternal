@@ -35,9 +35,11 @@ always answered itself (DSR 5 and 6, DA1 and DA2) are produced and queued for
 `readResponse`, and every other query stays unanswered, because the server-side engine
 answers them and a second answer would reach the program twice (D307; the
 `terminal-query-property` test proves it for all 30 corpus forms). `wasm-core.patch`
-is the one line that makes the core compile that file into the browser build, and
+is the one line that makes the core compile that file into the browser build,
 `web-api-names.patch` renames the TypeScript binding's calls to the `ghostty_web_*`
-names. The core's `libghostty-vt` feature switches (`-Dvt-features=-all,+input_encode`)
+names, and `key-encoder-102.patch` updates `KeyEncoder` to the libghostty-vt 1.0.2
+key-encoder C API (`ghostty_key_encoder_set`, 1-based `KeyEncoderOption`, `Key.FN`,
+and the `GhosttyString` UTF-8 pointer ABI and lifetime, #607). The core's `libghostty-vt` feature switches (`-Dvt-features=-all,+input_encode`)
 compile out what the page never calls (snapshots, formatters, selection, search,
 render-state objects, colour utilities, grid references, Kitty graphics), which is
 250 KB of WebAssembly. Two older core patches are gone because the core now has them:

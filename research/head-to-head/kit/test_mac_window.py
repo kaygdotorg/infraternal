@@ -208,14 +208,14 @@ class BuildHarnessTest(unittest.TestCase):
 
     def fixture(self, tmp: Path, lock_edit: str, *, split: bool = True,
                 fork_url: str | None = None) -> tuple[Path, Path]:
-        """A copy of the real mesh Cargo.toml and Cargo.lock plus a `cargo` shim.
+        """A copy of the workspace Cargo.toml and Cargo.lock plus a `cargo` shim.
 
         The shim stands in for `cargo metadata`: it rewrites the lock the way a real
         re-resolution would, with `lock_edit` as the python body deciding what moves.
         """
         src = tmp / "src"
         (src / "crates/plugins/mesh").mkdir(parents=True)
-        shutil.copy(self.ROOT / "crates/plugins/mesh/Cargo.toml", src / "crates/plugins/mesh/Cargo.toml")
+        shutil.copy(self.ROOT / "Cargo.toml", src / "Cargo.toml")
         shutil.copy(self.ROOT / "Cargo.lock", src / "Cargo.lock")
         lock = src / "Cargo.lock"
         parts = lock.read_text().split("\n[[package]]\n")
@@ -230,7 +230,7 @@ class BuildHarnessTest(unittest.TestCase):
         lock.write_text("\n[[package]]\n".join(parts))
         if fork_url is not None:
             original = source.removeprefix("git+").split("?", 1)[0]
-            for path in (lock, src / "crates/plugins/mesh/Cargo.toml"):
+            for path in (lock, src / "Cargo.toml"):
                 path.write_text(path.read_text().replace(original, fork_url))
         shim = tmp / "cargo"
         shim.write_text(
@@ -269,6 +269,7 @@ class BuildHarnessTest(unittest.TestCase):
         """The guard also accepts a fork revision from before the upstream crate extraction."""
         with tempfile.TemporaryDirectory() as tmp:
             src, shim = self.fixture(Path(tmp), self.GOOD_LOCK, split=False)
+            (src / "Cargo.toml").rename(src / "crates/plugins/mesh/Cargo.toml")
             run = self.swap(src, shim)
             self.assertEqual(run.returncode, 0, run.stderr)
 
@@ -307,7 +308,7 @@ class BuildHarnessTest(unittest.TestCase):
         """The script's own `sed` swaps the rev on the one `gotatun = ` line and nothing else."""
         with tempfile.TemporaryDirectory() as tmp:
             src, shim = self.fixture(Path(tmp), self.GOOD_LOCK)
-            toml = src / "crates/plugins/mesh/Cargo.toml"
+            toml = src / "Cargo.toml"
             before = toml.read_text().splitlines()
             run = self.swap(src, shim)
             self.assertEqual(run.returncode, 0, run.stderr)
@@ -344,7 +345,7 @@ class BuildHarnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             src, shim = self.fixture(Path(tmp), self.GOOD_LOCK)
             self.assertEqual(self.swap(src, shim, "main; rm -rf /").returncode, 2)
-            toml = src / "crates/plugins/mesh/Cargo.toml"
+            toml = src / "Cargo.toml"
             toml.write_text(re.sub(r"^gotatun = ", "gotatun_x = ", toml.read_text(), flags=re.M))
             self.assertEqual(self.swap(src, shim).returncode, 2)
 
