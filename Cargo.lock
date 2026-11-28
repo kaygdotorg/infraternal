@@ -2261,6 +2261,7 @@ dependencies = [
 name = "infraternal-client-ffi"
 version = "0.1.0"
 dependencies = [
+ "infraternal-mesh-node",
  "infraternal-protocol",
  "infraternal-sign-in",
  "serde",
@@ -2686,6 +2687,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "infraternal-link",
+ "infraternal-mesh-node",
  "quinn",
  "serde",
  "serde_json",

@@ -18,7 +18,8 @@ default = []
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-infraternal-sign-in = { path = "../infraternal-sign-in" }
+infraternal-sign-in = { version = "0.1.0", path = "../infraternal-sign-in" }
+infraternal-mesh-node = { version = "0.1.0", path = "../infraternal-mesh-node" }
 infraternal-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

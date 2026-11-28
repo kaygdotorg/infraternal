@@ -19,7 +19,8 @@ bindgen = ["uniffi/cli"]
 
 [dependencies]
 base64.workspace = true
-infraternal-link = { path = "../infraternal-link", features = ["quic", "join"] }
+infraternal-link = { version = "0.1.0", path = "../infraternal-link", features = ["quic", "join"] }
+infraternal-mesh-node = { version = "0.1.0", path = "../infraternal-mesh-node", features = ["engine"] }
 quinn.workspace = true
 serde.workspace = true
 serde_json.workspace = true

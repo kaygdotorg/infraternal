@@ -37,11 +37,11 @@ pub enum ClientError {
     NotStarted,
 }
 
-/// A malformed or non-result protocol frame returned by the extension.
+/// A malformed mesh action or protocol frame.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum ProtocolError {
-    /// The frame is truncated, malformed, oversized, or has trailing bytes.
-    #[error("the extension returned an invalid protocol frame")]
+    /// The frame or mesh action is unknown, malformed, oversized, or has trailing bytes.
+    #[error("the mesh action or protocol frame is invalid")]
     InvalidFrame,
     /// The decoded frame is not a node action result.
     #[error("the extension returned a different protocol message")]
@@ -136,14 +136,13 @@ pub fn server_origin(input: String) -> Result<ServerOrigin, ClientError> {
 /// Encode one mesh action for `NETunnelProviderSession.sendProviderMessage`.
 ///
 /// # Errors
-/// Returns `InvalidFrame` if the action name is empty or the protocol encoder
-/// refuses the bounded frame.
+/// Returns `InvalidFrame` if the shared mesh-node action parser rejects the
+/// action or input, or the protocol encoder refuses the bounded frame.
 #[uniffi::export]
 #[allow(clippy::needless_pass_by_value)] // UniFFI exports owned Swift values at this boundary.
 pub fn mesh_call(action: String, input_json: String) -> Result<Vec<u8>, ProtocolError> {
-    if action.is_empty() {
-        return Err(ProtocolError::InvalidFrame);
-    }
+    infraternal_mesh_node::node_actions::parse_action(&action, input_json.as_bytes())
+        .map_err(|_| ProtocolError::InvalidFrame)?;
     let call_id = NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut frame = Vec::new();
     encode_frame_into(
@@ -452,14 +451,14 @@ mod tests {
     /// The exported mesh helpers encode calls and accept one complete result frame.
     #[test]
     fn mesh_helpers_round_trip_one_action_result() {
-        let call = mesh_call("status".to_owned(), "{}".to_owned()).unwrap();
+        let call = mesh_call("mesh.status".to_owned(), "{}".to_owned()).unwrap();
         match decode_frame(&call).unwrap().frame {
             Frame::Call {
                 action_id,
                 input_json,
                 ..
             } => {
-                assert_eq!(action_id, "status");
+                assert_eq!(action_id, "mesh.status");
                 assert_eq!(input_json, b"{}");
             }
             _ => panic!("mesh_call must encode an action call"),
@@ -479,6 +478,22 @@ mod tests {
         reply.push(0);
         assert!(matches!(
             mesh_reply(reply),
+            Err(ProtocolError::InvalidFrame)
+        ));
+    }
+
+    /// The shared node-action parser refuses unknown actions and malformed input before framing.
+    #[test]
+    fn mesh_helpers_reject_requests_outside_the_shared_node_contract() {
+        assert!(matches!(
+            mesh_call("mesh.unknown".to_owned(), "{}".to_owned()),
+            Err(ProtocolError::InvalidFrame)
+        ));
+        assert!(matches!(
+            mesh_call(
+                "mesh.status".to_owned(),
+                r#"{"unexpected":true}"#.to_owned()
+            ),
             Err(ProtocolError::InvalidFrame)
         ));
     }

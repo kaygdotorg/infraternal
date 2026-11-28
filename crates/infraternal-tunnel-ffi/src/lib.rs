@@ -26,6 +26,13 @@ use uuid::Uuid;
 
 uniffi::setup_scaffolding!();
 
+/// Shared Apple mesh engine and node state machine available to the Packet Tunnel adapter.
+///
+/// This keeps the Packet Tunnel integration tied to `infraternal-mesh-node`
+/// instead of creating a second node state machine or packet runtime here.
+#[cfg(unix)]
+pub use infraternal_mesh_node::engine as mesh_engine;
+
 /// A P-256 key operation owned by Swift, usually `CryptoKit` or the Secure Enclave.
 #[uniffi::export(with_foreign)]
 pub trait DeviceSigner: Send + Sync {
