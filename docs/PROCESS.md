@@ -1003,15 +1003,13 @@ of its 90 assigned spec files ran". Tests tagged
 `@perf` (frame budgets and benchmarks, for example `clusters-bench`) are left out with
 `--grep-invert=@perf` and run on the performance VM.
 
-Time budgets: the wait for a build slot is bounded on its own (12 h; exit 75 and one
-`QUEUE WAIT TIMEOUT` journal line, no suite, no report), and the suite's 9 h budget
-(`timeout`, exit 124 and one `SUITE TIMEOUT` line) starts only once the slot is granted; the
-unit's `TimeoutStartSec=24h` is just a backstop. A suite that hits its budget still reports:
-`apps/tracer/nightly-reporter.ts` streams one line per finished test into `results.jsonl`
-(Playwright's own JSON only appears at the end), issues are filed for the tests that really
-failed, and the roll-up gets one note, "suite timed out after 9 h; M of K tests ran". Specs that
-did not run are never reported fixed. After the run, every leftover process of the suite account
-is killed (a Python `os.kill(-1, SIGKILL)` as that account; if that cannot run, nothing is staged).
+The system service bounds the queue, checkout, build and tests at 07:45 IST.
+It cancels unfinished browser work by process group and releases the two build
+slots before staging and issue filing. If the deadline fires, the report
+preserves the finished tests streamed to `results.jsonl`. Unfinished specs never
+count as fixed. When cutoff arrives before a manifest exists, the root helper
+publishes `last-deadline.json` with the phase that reached the deadline. See the
+operations page for manual runs and report recovery.
 
 **Token and login.** The token has issue write and repo read, and deliberately not `read:user`,
 so the reporter never calls `/user`. It is told whose markers to believe by

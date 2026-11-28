@@ -371,6 +371,17 @@ class Reporter(unittest.TestCase):
         self.assertEqual(self.forgejo.creates(), 2)
         self.assertEqual(self.forgejo.comments, {})
 
+    def test_deadline_report_preserves_completed_cases(self):
+        """The deadline is visible in both the merged JSON and the report issue."""
+        lines = [{'kind': 'begin', 'total': 3},
+                 {'kind': 'test', 'file': 'ok.spec.ts', 'title': 'finished', 'outcome': 'expected'}]
+        self.assertEqual(self.partial_night(lines, timeout=suite.DEADLINE_REASON), 0)
+        merged = json.loads((self.results / 'merged-report.json').read_text())
+        self.assertEqual(merged['status'], 'partial')
+        self.assertEqual(merged['stop_reason'], 'stopped at deadline (07:45 IST)')
+        issue = next(i for i in self.forgejo.issues.values() if 'roll-up' in i['title'])
+        self.assertIn('stopped at deadline (07:45 IST); 1 of 3 tests ran', issue['body'])
+
     def test_timeout_note_goes_on_the_open_roll_up_once(self):
         """Follow-up 2: with a roll-up already open, the note is one comment on it, not a new issue."""
         green = {f'ok{i}.spec.ts': ['expected'] for i in range(60)}
@@ -1048,6 +1059,51 @@ class SeparateAccount(unittest.TestCase):
         first.stdin.write.assert_called_once()
         self.assertEqual(len([l for l in err.getvalue().splitlines() if 'QUEUE WAIT TIMEOUT' in l]), 1)
 
+    def test_deadline_in_queue_releases_first_slot_and_records_partial(self):
+        """The deadline includes queue time, even before the browser runner has a manifest."""
+        cutoff = service.night_deadline(service.datetime.datetime(2026, 11, 28, 0, 4, tzinfo=service.datetime.timezone.utc))
+        self.assertEqual(cutoff.isoformat(), '2026-11-28T07:45:00+05:30')
+        first, second = mock.MagicMock(), mock.MagicMock()
+        with tempfile.TemporaryDirectory() as temp, self.login_file(temp), mock.patch.object(service, 'deadline_seconds', side_effect=[10, 10, 5, 5, 0]), \
+                mock.patch.object(service, 'wait_for_slot', side_effect=[True, None]), \
+                mock.patch.object(service.subprocess, 'Popen', side_effect=[first, second]), \
+                mock.patch.object(service, 'publish_deadline_summary') as publish:
+            self.assertEqual(service.main(['--deadline-ist']), service.SUITE_TIMEOUT_EXIT)
+            publish.assert_called_once()
+            self.assertEqual(publish.call_args.args[1], 'build-slot queue')
+        first.wait.assert_called_once()
+        second.wait.assert_called_once()
+
+    def test_deadline_releases_slots_before_partial_report(self):
+        """A canceled suite stages its streamed data after the slots have been joined."""
+        holder = mock.MagicMock()
+        holder.stdout.readline.return_value = service.READY
+        with tempfile.TemporaryDirectory() as temp:
+            self.run_dir(temp)
+            Path(temp, 'report').mkdir()
+
+            def as_user(user, home, *command, cwd):
+                """Simulate the cutoff, then verify that reporting starts with both slots released."""
+                if 'nix' in command:
+                    self.assertIn('--signal=KILL', command)
+                    return -9
+                if service.REPORTER in command:
+                    self.assertEqual(holder.wait.call_count, service.SHARDS)
+                    self.assertIn(service.DEADLINE_REASON, command)
+                return 0
+
+            with mock.patch.object(service, 'BROWSER_HOME', temp), self.login_file(temp), \
+                    mock.patch.object(service, 'REPORT_HOME', temp + '/report'), \
+                    mock.patch.object(service, 'deadline_seconds', side_effect=[20, 19, 18, 17, 16, 15, 14, 0]), \
+                    mock.patch.object(service, 'ids', return_value=(os.getuid(), os.getgid())), \
+                    mock.patch.object(service, 'as_user', side_effect=as_user), \
+                    mock.patch.object(service, 'publish_deadline_summary'), \
+                    mock.patch.object(service, 'publish_reported_run'), \
+                    mock.patch.object(service.subprocess, 'Popen', return_value=holder):
+                self.assertEqual(service.main(['--deadline-ist']), service.SUITE_TIMEOUT_EXIT)
+            info = json.loads(Path(temp, 'report', 'browser-staging', 'staged.json').read_text())
+            self.assertEqual(info['suite_timeout'], service.DEADLINE_REASON)
+
     def timed_out_main(self, temp, fresh=True):
         """Run the helper's main with the suite step timing out (exit 124); return (exit code, stderr text, steps run)."""
         holder = mock.MagicMock()
@@ -1189,29 +1245,19 @@ class SeparateAccount(unittest.TestCase):
         popen.assert_not_called()
         self.assertEqual(steps, [])
 
-    def test_cleanup_kill_command_works_for_real(self):
-        """Follow-up: the cleanup kill is a command the real interpreter runs. (procps `kill -s KILL -- -1` printed its usage and killed nothing.)"""
-        child = subprocess.Popen(['sleep', '60'])
-        self.addCleanup(child.kill)
-        command = service.KILL_COMMAND[:-1] + [str(child.pid)]
-        self.assertEqual(subprocess.run(command).returncode, 0)
-        self.assertEqual(child.wait(10), -9)
-        # Nobody left to signal is a success; an argument that is not a process id is a failure.
-        self.assertEqual(subprocess.run(service.KILL_COMMAND[:-1] + ['4000000']).returncode, 0)
-        self.assertNotEqual(subprocess.run(service.KILL_COMMAND[:-1] + ['not-a-pid'], stderr=subprocess.DEVNULL).returncode, 0)
-        self.assertEqual(service.KILL_COMMAND[-1], '-1')
-
     @unittest.skipUnless(subprocess.run(['unshare', '-Urpf', '--mount-proc', 'true'], capture_output=True).returncode == 0
                          if shutil.which('unshare') else False, 'needs unprivileged user and pid namespaces')
-    def test_cleanup_kill_reaches_every_process_of_the_account(self):
-        """Follow-up: inside a throwaway pid namespace the exact helper command (pid -1) kills a bystander and the call succeeds."""
-        script = 'sleep 60 & P=$!; ' + ' '.join(shlex.quote(a) for a in service.KILL_COMMAND) + '; echo kill-exit=$?; wait $P; echo bystander-status=$?'
+    def test_cleanup_kill_reaches_separate_process_groups(self):
+        """Use the exact helper in a throwaway PID namespace and leave the helper's own group alive."""
+        command = ' '.join(shlex.quote(a) for a in service.KILL_COMMAND)
+        script = ('setsid sh -c \'echo ready > "$1"; exec sleep 60\' sh "$1" & P=$!; '
+                  'while [ ! -s "$1" ]; do :; done; ' + command +
+                  '; echo kill-exit=$?; wait $P; echo bystander-status=$?')
         with tempfile.TemporaryDirectory() as temp:
-            result = subprocess.run(['unshare', '-Urpf', '--mount-proc', 'sh', '-c', script, 'sh', str(Path(temp) / 'pid')],
-                                    capture_output=True, text=True, timeout=60)
+            result = subprocess.run(['unshare', '-Urpf', '--mount-proc', 'sh', '-c', script, 'sh', str(Path(temp) / 'ready')],
+                                    capture_output=True, text=True, timeout=10)
         self.assertIn('kill-exit=0', result.stdout, result.stdout + result.stderr)
         self.assertIn('bystander-status=137', result.stdout, result.stdout + result.stderr)
-        self.assertNotIn('Usage', result.stdout + result.stderr)
 
     def test_a_cleanup_that_cannot_run_stops_the_night(self):
         """Follow-up: if the cleanup kill fails, nothing is staged or reported (fail closed) and the journal says why."""

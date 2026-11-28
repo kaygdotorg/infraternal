@@ -14,8 +14,7 @@ Asia/Kolkata with up to 15 minutes of randomized delay. Since 2026-11-20 the
 owner runs dev-02 with a host-local drop-in
 (`/etc/systemd/system/infraternal-browser-suite.timer.d/schedule.conf`) that
 moves it to 05:30 Asia/Kolkata with up to 5 minutes of delay, so the report is
-ready for the morning report; the run is expected to end by about 07:30 to
-07:45. The installer does not write that drop-in, so a reinstall keeps it and a
+ready for the morning report. The scheduled service ends browser work at 07:45 IST. The installer does not write that drop-in, so a reinstall keeps it and a
 new host needs it added by hand. Do not start gates, builds or load tests on
 dev-02 in that window. The service takes two build slots through
 `/home/claude/infraternal-ops/build-slot`, one for each Playwright shard.
@@ -73,9 +72,17 @@ sudo systemctl stop infraternal-browser-suite.service
 
 Re-enable scheduled runs with `sudo systemctl enable --now infraternal-browser-suite.timer`.
 
-The service bounds queue wait separately from the nine-hour suite budget. A
-suite timeout still produces a partial report. A queue timeout means no suite
-ran and no report was published.
+The 07:45 IST deadline includes the build-slot queue, checkout, build, and
+browser cases. If the deadline arrives during the browser run, the service
+cancels the running workload, releases the slots, and stages the streamed
+results. The merged report and the issue roll-up say “stopped at deadline.”
+The root-owned `/var/lib/infraternal-browser-pub/last-deadline.json` records
+which phase reached the cutoff, including a queue or checkout cutoff before
+the runner writes a manifest. Publication can continue after 07:45.
+The deadline path exits 124.
+
+The helper can be run directly without `--deadline-ist` for an operator-run
+suite with the previous separate queue and suite budgets.
 
 If the Forgejo token or login needs repair, rerun only the reviewed reporter
 against staged results:

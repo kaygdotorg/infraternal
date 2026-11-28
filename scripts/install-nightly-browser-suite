@@ -70,9 +70,8 @@ After=network-online.target nix-daemon.service
 Wants=network-online.target
 [Service]
 Type=oneshot
-ExecStart={SERVICE_HELPER}
-# Only a backstop: the helper bounds the queue wait (12 h) and the suite itself (9 h, counted
-# from when the slot is granted) on its own, so a long queue is never mistaken for a slow suite.
+ExecStart={SERVICE_HELPER} --deadline-ist
+# The helper cuts off build work at 07:45 IST, then stages and publishes the report.
 TimeoutStartSec=24h
 KillMode=control-group
 Nice=10
