@@ -1,0 +1,412 @@
+#!/usr/bin/python3
+"""Queue build commands on Linux. Install as ~/infraternal-ops/build-slot.
+
+The numbered flock files and ordinary FIFO interoperate with older callers.
+Only tickets created by this version carry enough information for reaping.
+"""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+OPS = Path(__file__).resolve().parent
+STATE = Path(os.environ.get("BUILD_SLOT_STATE_DIR", "/tmp/infraternal-build-slots"))
+BOOT = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+HEARTBEAT = 300
+LEASE_AGE = 600
+IDLE_AGE = 3600
+POLL = 5
+TICKET = re.compile(r"[0-9]+\.[0-9]+\Z")
+
+
+def load(path):
+    """Read an atomically published record. An empty legacy ticket has no record."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def save(path, value):
+    """Publish one complete record beside the lock, with no partially readable state."""
+    fd, name = tempfile.mkstemp(prefix=".slot-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            os.fchmod(handle.fileno(), 0o644)
+            json.dump(value, handle)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def setting(name, default):
+    """Read the live slot or disk configuration next to the executable."""
+    try:
+        return int((OPS / name).read_text())
+    except FileNotFoundError:
+        return default
+
+
+def lock(path, blocking=False):
+    """Try an exclusive advisory lock without changing the inode used by legacy callers."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o664)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def proc(pid):
+    """Read Linux start ticks, group, session, state and CPU ticks, even for commands containing spaces."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return int(fields[2]), int(fields[3]), int(fields[19]), fields[0], sum(map(int, fields[11:15]))
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return None
+
+
+def processes():
+    """Snapshot process membership and CPU once per reaper pass, shared across slots."""
+    return {int(path.name): info for path in Path("/proc").iterdir()
+            if path.name.isdecimal() and (info := proc(path.name)) is not None}
+
+
+def members(ticket, snapshot):
+    """Identify the original session's group, excluding zombies and a reused session leader."""
+    pgid, start = ticket["pgid"], ticket["start_ticks"]
+    leader = snapshot.get(pgid)
+    if ticket["boot"] != BOOT or (leader and leader[:3] != (pgid, pgid, start)):
+        return {}
+    return {str(pid): [born, ticks] for pid, (group, session, born, state, ticks) in snapshot.items()
+            if group == session == pgid and born >= start and state not in ("Z", "X")}
+
+
+def lease_live(ticket, record, now):
+    """A live supervisor renews its file. Detached BB jobs can also require a controller lease."""
+    owner = ticket.get("owner_lease")
+    if owner:
+        try:
+            return time.time() - Path(owner).stat().st_mtime < LEASE_AGE
+        except FileNotFoundError:
+            return False
+    lease = load(record.with_suffix(".lease"))
+    return bool(lease and lease["ticket"] == ticket["ticket"] and now - lease["at"] < LEASE_AGE)
+
+
+def log(message, dry_run=False):
+    """Write reap decisions to stderr and the shared audit log for timer and queue passes."""
+    line = f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} {message}"
+    print(line, file=sys.stderr, flush=True)
+    if not dry_run:
+        with (STATE / "reaper.log").open("a") as handle:
+            print(line, file=handle)
+
+
+def clear(record):
+    """Clear a retired ticket and its samples before another holder can claim the slot."""
+    for path in (record, record.with_suffix(".lease"), record.with_suffix(".cpu")):
+        path.unlink(missing_ok=True)
+
+
+def reap_locked(dry_run, now):
+    """Reap only a proven-dead group or an expired lease with a full hour of unchanged CPU."""
+    records = sorted(STATE.glob("slot.*.owner"))
+    if not records:
+        return
+    snapshot = processes()
+    for record in records:
+        ticket = load(record)
+        if not ticket:
+            continue
+        active = members(ticket, snapshot)
+        label = f"{record.stem} ticket={ticket['ticket']} pgid={ticket['pgid']} job={ticket['job']!r} thread={ticket['thread']!r}"
+        if not active:
+            log(f"{'would reap' if dry_run else 'reap'} {label}: process group gone", dry_run)
+            if not dry_run:
+                clear(record)
+            continue
+        sample_path = record.with_suffix(".cpu")
+        previous = load(sample_path)
+        if not previous or previous["ticket"] != ticket["ticket"] or previous["members"] != active:
+            if not dry_run:
+                save(sample_path, {"ticket": ticket["ticket"], "since": now, "members": active})
+            continue
+        if now - previous["since"] < IDLE_AGE or lease_live(ticket, record, now):
+            continue
+        if dry_run:
+            log(f"would reap {label}: expired lease and no CPU progress for 60 minutes", True)
+            continue
+        # Recheck the lease and group after sampling. Keep the ticket and the flock
+        # until a later pass sees the group gone (including a signal stuck in D state).
+        if lease_live(ticket, record, time.monotonic()) or members(ticket, processes()) != active:
+            continue
+        pgid = ticket["pgid"]
+        if pgid <= 1 or pgid == os.getpgrp():
+            continue
+        log(f"reap {label}: expired lease and no CPU progress for 60 minutes; SIGKILL")
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            log(f"reap refused {label}: permission denied")
+
+
+def reap(dry_run=False, force=False):
+    """Serialize state transitions, and throttle the /proc scan shared by queued callers."""
+    fd = lock(STATE / "reaper.lock")
+    if fd is None:
+        return
+    try:
+        now = time.monotonic()
+        stamp = STATE / "last-reap"
+        previous = load(stamp)
+        if force or not previous or previous["boot"] != BOOT or now - previous["at"] >= 60:
+            reap_locked(dry_run, now)
+            if not dry_run:
+                save(stamp, {"boot": BOOT, "at": now})
+    finally:
+        os.close(fd)
+
+
+def slots(reserved):
+    """Return the slot names this ticket may claim, rereading capacity on every poll."""
+    count = setting("slots", 2)
+    if reserved:
+        return ["slot.nightly"] if count > 0 and setting("reserved-nightly", 0) else []
+    return [f"slot.{i}" for i in range(1, count + 1)]
+
+
+def queue(path):
+    """List valid ticket names oldest first, ignoring atomic-write temporary files."""
+    return sorted(item for item in path.iterdir() if TICKET.fullmatch(item.name))
+
+
+def head_of_queue(ticket):
+    """Remove dead waiters safely and keep legacy FIFO ordering for ordinary work."""
+    for item in queue(ticket.parent):
+        pid = int(item.suffix[1:])
+        info, data = proc(pid), load(item)
+        if info and info[3] not in ("Z", "X") and (not data or
+                (data["boot"] == BOOT and data["waiter_start"] == info[2])):
+            return item == ticket
+        item.unlink(missing_ok=True)
+    return False
+
+
+def free_gb(path):
+    """Match GNU df -BG's whole-GiB rounding for the existing admission floors."""
+    return (shutil.disk_usage(path).free + (1 << 30) - 1) >> 30
+
+
+def disk_ok():
+    """Enforce the home floor and the separate compute01 target-disk floor."""
+    target = os.environ.get("CARGO_TARGET_DIR", "")
+    return (free_gb(Path.home()) >= setting("min-free-gb", 25)
+            and (not target.startswith("/mnt/build/") or free_gb("/mnt/build") >=
+                 int(os.environ.get("BUILD_SLOT_BUILD_MIN_FREE_GB", "60"))))
+
+
+def target_lease():
+    """Preserve compute01's protected build targets while a job is queued or running."""
+    if not os.getenv("CARGO_TARGET_DIR") and os.access("/mnt/build/targets", os.W_OK):
+        root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+        name = Path(root.stdout.strip() if root.returncode == 0 else os.getcwd()).name
+        os.environ["CARGO_TARGET_DIR"] = "/mnt/build/targets/" + re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    target = os.getenv("CARGO_TARGET_DIR", "")
+    if target.startswith("/mnt/build/targets/"):
+        path = Path(target)
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.stat().st_uid == os.getuid():
+            path.chmod(0o700)
+        lease = path / f".build-slot-lease.{os.getpid()}"
+        try:
+            lease.touch()
+        except OSError:
+            return None
+        return lease
+    return None
+
+
+def run(command, fd, record, ticket, pending):
+    """Start the command in a private session and open its start gate after recording its identity."""
+    read_fd, write_fd = os.pipe()
+    child = None
+    try:
+        # Preserve the lock across exec as with legacy holders. If this supervisor
+        # dies, a live command still holds its slot while the lease ages out.
+        child = subprocess.Popen(
+            ["perl", "-e", 'open my $gate, "<&=", shift or die $!; '
+             'read($gate, my $byte, 1) == 1 or exit 125; close $gate; '
+             '$SIG{$_}="DEFAULT" for qw(INT QUIT HUP TERM PIPE); exec @ARGV or die $!',
+             str(read_fd), "nice", "-n", "10", *command],
+            start_new_session=True, pass_fds=(fd, read_fd))
+        os.close(read_fd)
+        read_fd = None
+        ticket.update(pid=child.pid, pgid=child.pid, start_ticks=proc(child.pid)[2], started_at=time.time())
+        save(record, ticket)
+        lease = record.with_suffix(".lease")
+        save(lease, {"ticket": ticket["ticket"], "at": time.monotonic()})
+        pending.unlink(missing_ok=True)
+        os.write(write_fd, b"x")
+        while True:
+            try:
+                code = child.wait(timeout=HEARTBEAT)
+                return code if code >= 0 else 128 - code
+            except subprocess.TimeoutExpired:
+                save(lease, {"ticket": ticket["ticket"], "at": time.monotonic()})
+    finally:
+        if read_fd is not None:
+            os.close(read_fd)
+        os.close(write_fd)
+        if child is not None:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+            # The normal exit can release immediately. If children still hold the
+            # group, leave the identity and lease for the reaper.
+            guard = lock(STATE / "reaper.lock", blocking=True)
+            try:
+                if record.exists():
+                    try:
+                        os.killpg(child.pid, 0)
+                    except ProcessLookupError:
+                        clear(record)
+            finally:
+                os.close(guard)
+
+
+def acquire(command, reserved, owner_lease):
+    """Queue a ticket and let only its FIFO head claim an eligible and unlocked slot."""
+    directory = STATE / ("queue.nightly" if reserved else "queue")
+    directory.mkdir(exist_ok=True)
+    pid = os.getpid()
+    pending = directory / f"{time.time_ns()}.{pid}"
+    ticket = {"ticket": pending.name, "boot": BOOT, "waiter_pid": pid,
+              "waiter_start": proc(pid)[2], "queued_at": time.time(),
+              "job": os.getenv("BUILD_SLOT_JOB", os.getenv("JOB_TAG", ""))[:160],
+              "thread": os.getenv("BB_THREAD_ID", "")[:160],
+              "owner_lease": owner_lease, "reserved": reserved}
+    lease = target_lease()
+    try:
+        save(pending, ticket)
+        said = False
+        while True:
+            reap()
+            if head_of_queue(pending) and disk_ok():
+                for slot in slots(reserved):
+                    record = STATE / f"{slot}.owner"
+                    fd = lock(STATE / slot)
+                    if fd is None:
+                        continue
+                    try:
+                        if record.exists():
+                            continue
+                        if said:
+                            print(f"build-slot: got {slot}", file=sys.stderr, flush=True)
+                        return run(command, fd, record, ticket, pending)
+                    finally:
+                        os.close(fd)
+            if not said:
+                print(f"build-slot: waiting for {'nightly' if reserved else 'ordinary'} slot "
+                      f"(queue position {queue(directory).index(pending) + 1}; disk {'OK' if disk_ok() else 'below floor'})",
+                      file=sys.stderr, flush=True)
+                said = True
+            time.sleep(POLL)
+    finally:
+        pending.unlink(missing_ok=True)
+        if lease:
+            lease.unlink(missing_ok=True)
+
+
+def status():
+    """Show queue membership and lock status without cleaning or changing the queue."""
+    for slot in slots(False) + slots(True):
+        path = STATE / slot
+        record = load(STATE / f"{slot}.owner")
+        if path.exists():
+            with path.open("r") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    busy = bool(record)
+                except BlockingIOError:
+                    busy = True
+        else:
+            busy = False
+        detail = ""
+        if busy:
+            pid = str(record["pid"]) if record else ""
+            if not pid:
+                found = subprocess.run(["fuser", str(path)], capture_output=True, text=True).stdout.split()
+                pid = found[0] if found else ""
+            if pid:
+                brief = subprocess.run(["ps", "-o", "pid=,etime=,args=", "-p", pid],
+                                       capture_output=True, text=True).stdout.strip()[:100]
+                detail = f" ({brief or pid})"
+            if record:
+                detail += f" job={record['job']!r} thread={record['thread']!r}"
+        print(f"slot {slot.removeprefix('slot.')}: {'busy' if busy else 'free'}{detail}")
+    for directory in (STATE / "queue", STATE / "queue.nightly"):
+        if directory.exists():
+            for item in queue(directory):
+                label = "nightly" if directory.name.endswith(".nightly") else "ordinary"
+                print(f"queued: pid {item.suffix[1:]} ({label})")
+    print(f"free disk: {free_gb(Path.home())}G (floor {setting('min-free-gb', 25)}G)")
+    if Path("/mnt/build/targets").is_dir():
+        print(f"free build disk: {free_gb('/mnt/build')}G (floor {os.getenv('BUILD_SLOT_BUILD_MIN_FREE_GB', '60')}G)")
+
+
+def terminated(signum, _frame):
+    """Unwind the holder when a caller cancels it so its owned group is stopped."""
+    raise SystemExit(128 + signum)
+
+
+def main():
+    """Read operator flags, or run a command in an ordinary or reserved slot."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--status", action="store_true")
+    group.add_argument("--reap", action="store_true")
+    group.add_argument("--reap-dry-run", action="store_true")
+    group.add_argument("--reserved", choices=["nightly"])
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if args.status or args.reap or args.reap_dry_run:
+        if args.command:
+            parser.error("inspection options take no command")
+        if args.status:
+            status()
+        elif STATE.is_dir():
+            reap(dry_run=args.reap_dry_run, force=True)
+        return 0
+    if not args.command:
+        parser.error("a command is required")
+    if args.reserved and not setting("reserved-nightly", 0):
+        parser.error("no nightly reserve configured on this host")
+    owner_lease = os.getenv("BUILD_SLOT_OWNER_LEASE")
+    if owner_lease and not Path(owner_lease).is_absolute():
+        parser.error("BUILD_SLOT_OWNER_LEASE must be an absolute path")
+    STATE.mkdir(parents=True, exist_ok=True)
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, terminated)
+    command = args.command[1:] if args.command[0] == "--" else args.command
+    if not command:
+        parser.error("a command is required after --")
+    return acquire(command, args.reserved, owner_lease)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

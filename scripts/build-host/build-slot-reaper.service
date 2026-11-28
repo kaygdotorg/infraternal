@@ -1,0 +1,6 @@
+[Unit]
+Description=Check expired infraternal build slot leases
+
+[Service]
+Type=oneshot
+ExecStart=%h/infraternal-ops/build-slot --reap
