@@ -87,6 +87,10 @@ Removing a system installation may ask for your administrator password.
 Use `--keep-state` to save a private copy of the enrollment outside the old
 installation directory. A new `infraternal up` asks for fresh enrollment.
 Use `--json` to read the plan as JSON, or `--json --yes` to confirm in a script.
+Scripts running as a regular user must pass `--system` to select a system install.
+If removal is interrupted, rerun the same command. If its PATH entry or installed
+binary is already gone, use an up-to-date downloaded binary. Run it with
+administrator access for a system installation.
 
 If the server still lists the host, use **Remove** in the machine list, then
 **Forget** if the server reports that cleanup is pending.
