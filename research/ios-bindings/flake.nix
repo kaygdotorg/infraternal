@@ -24,7 +24,17 @@
       rust = pkgs.rust-bin.stable."1.99.1".minimal.override {
         targets = [ "aarch64-apple-darwin" "aarch64-apple-ios" "aarch64-apple-ios-sim" ];
       };
+      # The repository Cargo config asks rustup which compiler to use. Nix
+      # already pinned it above, so answer that query without downloading one.
+      rustupShim = pkgs.writeShellScriptBin "rustup" ''
+        if [ "$1" = which ] && [ -n "$2" ]; then
+          command -v "$2"
+          exit
+        fi
+        echo "rustup shim: only 'rustup which <tool>' is supported (nix provides the toolchain)" >&2
+        exit 1
+      '';
     in {
-      devShells.aarch64-darwin.default = pkgs.mkShellNoCC { packages = [ rust ]; };
+      devShells.aarch64-darwin.default = pkgs.mkShellNoCC { packages = [ rust rustupShim ]; };
     };
 }

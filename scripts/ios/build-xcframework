@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Build both iOS XCFrameworks and the Simulator app on kayg@std (#580, F2).
+# The caller may pass an output directory outside the checkout.
+set -euo pipefail
+
+repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+ios_toolchain="$repo/research/ios-bindings"
+lock="/tmp/infraternal-std-sim.lock"
+if [[ "${INFRATERAL_STD_SIM_LOCKED:-0}" != 1 ]]; then
+    exec lockf -k "$lock" env INFRATERAL_STD_SIM_LOCKED=1 "$0" "$@"
+fi
+
+if [[ "$(uname -s)" != Darwin ]]; then
+    printf 'build-xcframework must run on kayg@std with Xcode\n' >&2
+    exit 1
+fi
+
+simulator_id="${INFRATERAL_SIMULATOR_ID:-38E1ABE6-A982-46DD-90E1-99231E5EF91C}"
+scratch_root="$HOME/.cache/codex-scratch/j1312"
+out="${1:-$scratch_root/xcframework}"
+mkdir -p "$scratch_root" "$out" "$out/generated/client" "$out/generated/tunnel"
+out="$(cd -- "$out" && pwd -P)"
+mkdir -p "$repo/ios/Generated/Client" "$repo/ios/Generated/Tunnel" "$repo/ios/Frameworks"
+chmod 700 "$scratch_root"
+exec > >(tee "$out/build.log") 2>&1
+
+nix_bin="$(command -v nix || true)"
+if [[ -z "$nix_bin" && -x /nix/var/nix/profiles/default/bin/nix ]]; then
+    nix_bin="/nix/var/nix/profiles/default/bin/nix"
+fi
+if [[ -z "$nix_bin" ]]; then
+    printf 'Nix is not available on std\n' >&2
+    exit 1
+fi
+
+target_dir="$scratch_root/cargo-target"
+mkdir -p "$target_dir"
+trap 'rm -rf -- "$target_dir"' EXIT
+mac_sdk="$(xcrun --sdk macosx --show-sdk-path)"
+device_sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
+simulator_sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+mac_cc="$repo/research/ios-bindings/mac-cc.sh"
+ios_skip_cc="$repo/research/ios-bindings/ios-skip-cc.sh"
+
+# Every cargo command gets a fresh, private temp directory after Nix has
+# entered the shell. J952: setting TMPDIR outside Nix can leave long socket
+# paths when Nix nests its own temporary directory.
+nix_run() {
+    # The root shell adds a Nix clang wrapper that injects the macOS target
+    # into cross-target C builds. Use the measured iOS `mkShellNoCC` toolchain
+    # so ring uses Xcode's clang and the SDK selected for the current slice.
+    "$nix_bin" develop "$ios_toolchain" -c bash -c '
+        set -euo pipefail
+        scratch="$1"
+        target="$2"
+        shift 2
+        tmp="$(mktemp -d "$scratch/tmp.XXXXXX")"
+        chmod 700 "$tmp"
+        trap '\''rm -rf -- "$tmp"'\'' EXIT
+        export TMPDIR="$tmp" CARGO_TARGET_DIR="$target" CARGO_INCREMENTAL=0
+        "$@"
+    ' build-xcframework-in-nix "$scratch_root" "$target_dir" "$@"
+}
+
+common=(CC=/usr/bin/clang AR=/usr/bin/ar IPHONEOS_DEPLOYMENT_TARGET=26.0)
+linkers=("CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER=$mac_cc"
+    "CARGO_TARGET_AARCH64_APPLE_IOS_LINKER=$ios_skip_cc"
+    "CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER=$ios_skip_cc")
+
+printf '==> pinned host libraries for UniFFI binding generation\n'
+nix_run env "${common[@]}" "${linkers[@]}" "SDKROOT=$mac_sdk" cargo build --locked --release \
+    --target aarch64-apple-darwin --package infraternal-client-ffi --package infraternal-tunnel-ffi \
+    --features infraternal-client-ffi/bindgen,infraternal-tunnel-ffi/bindgen
+
+client_dylib="$target_dir/aarch64-apple-darwin/release/libinfraternal_client_ffi.dylib"
+tunnel_dylib="$target_dir/aarch64-apple-darwin/release/libinfraternal_tunnel_ffi.dylib"
+if [[ ! -f "$client_dylib" || ! -f "$tunnel_dylib" ]]; then
+    printf 'UniFFI host dylibs were not produced\n' >&2
+    exit 1
+fi
+
+printf '==> generated Swift bindings\n'
+nix_run env "${common[@]}" "${linkers[@]}" "SDKROOT=$mac_sdk" cargo run --locked --release \
+    --target aarch64-apple-darwin --package infraternal-client-ffi --features bindgen --bin client-uniffi-bindgen -- \
+    generate --library "$client_dylib" --language swift --out-dir "$out/generated/client"
+nix_run env "${common[@]}" "${linkers[@]}" "SDKROOT=$mac_sdk" cargo run --locked --release \
+    --target aarch64-apple-darwin --package infraternal-tunnel-ffi --features bindgen --bin tunnel-uniffi-bindgen -- \
+    generate --library "$tunnel_dylib" --language swift --out-dir "$out/generated/tunnel"
+
+client_swift="$(find "$out/generated/client" -maxdepth 1 -name '*.swift' -print -quit)"
+tunnel_swift="$(find "$out/generated/tunnel" -maxdepth 1 -name '*.swift' -print -quit)"
+[[ -n "$client_swift" && -n "$tunnel_swift" ]] || {
+    printf 'UniFFI did not generate Swift source files\n' >&2
+    exit 1
+}
+cp "$client_swift" "$repo/ios/Generated/Client/ClientBindings.swift"
+cp "$tunnel_swift" "$repo/ios/Generated/Tunnel/TunnelBindings.swift"
+
+make_headers() {
+    local source="$1" destination="$2" module="$3"
+    mkdir -p "$destination"
+    local header
+    header="$(find "$source" -maxdepth 1 -name '*.h' -print -quit)"
+    [[ -n "$header" ]] || { printf 'UniFFI header missing in %s\n' "$source" >&2; return 1; }
+    cp "$header" "$destination/"
+    local name
+    name="$(basename "$header")"
+    cat > "$destination/module.modulemap" <<EOF
+module $module {
+    header "$name"
+    export *
+}
+EOF
+}
+
+client_headers="$out/headers/client"
+tunnel_headers="$out/headers/tunnel"
+make_headers "$out/generated/client" "$client_headers" infraternal_client_ffiFFI
+make_headers "$out/generated/tunnel" "$tunnel_headers" infraternal_tunnel_ffiFFI
+
+build_slice() {
+    local target="$1" sdk="$2"
+    printf '==> %s static libraries\n' "$target"
+    nix_run env "${common[@]}" "${linkers[@]}" "SDKROOT=$sdk" cargo rustc --locked --release \
+        --target "$target" --package infraternal-client-ffi --lib -- --crate-type staticlib
+    nix_run env "${common[@]}" "${linkers[@]}" "SDKROOT=$sdk" cargo rustc --locked --release \
+        --target "$target" --package infraternal-tunnel-ffi --lib -- --crate-type staticlib
+}
+
+build_slice aarch64-apple-ios "$device_sdk"
+build_slice aarch64-apple-ios-sim "$simulator_sdk"
+
+client_device="$target_dir/aarch64-apple-ios/release/libinfraternal_client_ffi.a"
+client_sim="$target_dir/aarch64-apple-ios-sim/release/libinfraternal_client_ffi.a"
+tunnel_device="$target_dir/aarch64-apple-ios/release/libinfraternal_tunnel_ffi.a"
+tunnel_sim="$target_dir/aarch64-apple-ios-sim/release/libinfraternal_tunnel_ffi.a"
+
+rm -rf "$repo/ios/Frameworks/InfraternalClientFFI.xcframework" \
+    "$repo/ios/Frameworks/InfraternalTunnelFFI.xcframework"
+xcodebuild -create-xcframework \
+    -library "$client_device" -headers "$client_headers" \
+    -library "$client_sim" -headers "$client_headers" \
+    -output "$repo/ios/Frameworks/InfraternalClientFFI.xcframework"
+xcodebuild -create-xcframework \
+    -library "$tunnel_device" -headers "$tunnel_headers" \
+    -library "$tunnel_sim" -headers "$tunnel_headers" \
+    -output "$repo/ios/Frameworks/InfraternalTunnelFFI.xcframework"
+
+printf '==> build the SwiftUI app and Packet Tunnel extension for the assigned Simulator\n'
+xcodebuild -project "$repo/ios/Infraternal.xcodeproj" -scheme InfraternalIOS \
+    -configuration Release -destination "platform=iOS Simulator,id=$simulator_id" \
+    -derivedDataPath "$out/DerivedData" \
+    ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
+
+{
+    printf 'simulator=%s\n' "$simulator_id"
+    printf 'client-ios-bytes=%s\n' "$(stat -f '%z' "$client_device")"
+    printf 'client-simulator-bytes=%s\n' "$(stat -f '%z' "$client_sim")"
+    printf 'tunnel-ios-bytes=%s\n' "$(stat -f '%z' "$tunnel_device")"
+    printf 'tunnel-simulator-bytes=%s\n' "$(stat -f '%z' "$tunnel_sim")"
+} | tee "$out/sizes.txt"
+printf 'xcframeworks and Simulator app built; receipts: %s\n' "$out"

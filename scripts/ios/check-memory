@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Gate the Q3 Simulator phys_footprint samples at 20 MiB (#580).
+set -euo pipefail
+
+if (($# > 1)); then
+    printf 'usage: scripts/ios/check-memory [simulator-log]\n' >&2
+    exit 2
+fi
+
+awk -v limit=20971520 '
+    /J1312_MEMORY/ {
+        phase = ""
+        bytes = ""
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^phase=/) phase = substr($i, 7)
+            if ($i ~ /^bytes=/) bytes = substr($i, 7)
+        }
+        if (phase != "" && bytes ~ /^[0-9]+$/) {
+            measured[phase] = bytes + 0
+        }
+    }
+    END {
+        required[1] = "idle"
+        required[2] = "join_start"
+        required[3] = "csr_ready"
+        required[4] = "http_reply"
+        required[5] = "certificate_verified"
+        required[6] = "quic_connected"
+        failed = 0
+        for (i = 1; i <= 6; i++) {
+            phase = required[i]
+            if (!(phase in measured)) {
+                printf "MISSING %s phys_footprint sample\n", phase
+                failed = 1
+                continue
+            }
+            bytes = measured[phase]
+            printf "%s: %d bytes (%.2f MiB / 20 MiB)\n", phase, bytes, bytes / 1048576
+            if (bytes > limit) {
+                printf "FAIL %s exceeded the 20 MiB Simulator limit\n", phase
+                failed = 1
+            }
+        }
+        exit failed
+    }
+' "${1:--}"

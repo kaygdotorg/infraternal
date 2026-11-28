@@ -115,10 +115,12 @@ pub struct MachineRequest<'a> {
     pub host_id: Uuid,
     /// The host name the owner reads.
     pub hostname: &'a str,
-    /// The join mode, `system` or `user`.
-    pub mode: &'static str,
-    /// The uid the joined agent runs as (0 for a system join).
-    pub execution_uid: u32,
+    /// The join mode: `system` or `user` for a host, `device` for an iPhone.
+    pub mode: &'a str,
+    /// The uid for a host join. Device joins omit this field because an iPhone
+    /// has no agent execution uid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_uid: Option<u32>,
     /// The `SHA256:` fingerprint of the machine's new key; the approval binds to it.
     pub key_fingerprint: &'a str,
 }
@@ -176,7 +178,41 @@ pub fn machine_start_body(
             host_id,
             hostname,
             mode,
-            execution_uid,
+            execution_uid: Some(execution_uid),
+            key_fingerprint,
+        },
+    })
+    .map_err(|_| CheckFailure::InvalidMachine)
+}
+
+/// Build the device join start body without an execution uid.
+///
+/// Device approvals use a P-256 identity key and the server accepts them only
+/// when `mode` is `device` and `execution_uid` is absent. Host joins continue
+/// to use [`machine_start_body`], whose serialized shape remains unchanged.
+///
+/// # Errors
+/// [`CheckFailure::InvalidMachine`] when the host name or fingerprint is unusable.
+pub fn device_machine_start_body(
+    host_id: Uuid,
+    hostname: &str,
+    key_fingerprint: &str,
+) -> Result<Vec<u8>, CheckFailure> {
+    if hostname.is_empty()
+        || hostname.len() > MAX_HOSTNAME_LENGTH
+        || hostname.chars().any(char::is_control)
+        || !valid_fingerprint(key_fingerprint)
+    {
+        return Err(CheckFailure::InvalidMachine);
+    }
+    serde_json::to_vec(&MachineStartRequest {
+        device: hostname,
+        kind: "join_machine",
+        request: MachineRequest {
+            host_id,
+            hostname,
+            mode: "device",
+            execution_uid: None,
             key_fingerprint,
         },
     })

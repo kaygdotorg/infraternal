@@ -1,0 +1,33 @@
+[package]
+name = "infraternal-tunnel-ffi"
+description = "UniFFI surface for the iOS packet tunnel extension (#580)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "lib"]
+
+[[bin]]
+name = "tunnel-uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+default = []
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+base64.workspace = true
+infraternal-link = { version = "0.1.0", path = "../infraternal-link", features = ["quic", "join"] }
+infraternal-mesh-node = { version = "0.1.0", path = "../infraternal-mesh-node", features = ["engine"] }
+quinn.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "sync"] }
+uniffi.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
