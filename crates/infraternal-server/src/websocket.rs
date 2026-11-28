@@ -25,8 +25,7 @@ use crate::{
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
         CloseOwner, CloseReason, CloseRecord, CloseWho, HOST_STREAM_LIMIT, INPUT_QUEUE_FULL,
         NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER,
-        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
-        safe_websocket_reason,
+        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
     },
 };
 use axum::{
@@ -1051,18 +1050,10 @@ async fn run_socket(
                         output_open = false;
                         continue;
                     };
-                    // Proof replies stay in the host actor. A failed route returns here
-                    // for two authority gates: the browser notice, then backend rebind.
-                    let reconnect = matches!(output, TerminalOutput::RouteExpired)
-                        .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
                     if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                         &state, &user_id, &session_token, &connection_id, stream_id, output,
                         link_doubt_notices, &mut attachments, &mut ended, &mut sink, &mut encode,
                     )).await.is_err() { break; }
-                    if let Some(handle) = reconnect
-                        && while_authorized(&state, &user_id, &session_token, true,
-                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
-
                 }
                 plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
                     let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
@@ -1606,16 +1597,12 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Reconnecting
-        | TerminalOutput::RouteExpired
-        | TerminalOutput::LinkDoubt
-        | TerminalOutput::Recovered => {
+        TerminalOutput::Reconnecting | TerminalOutput::LinkDoubt | TerminalOutput::Recovered => {
             let Some((kind, awaits_ack)) = link_notice(&output, link_doubt_notices) else {
                 return Ok(());
             };
-            // Only a lost route is a close worth logging; a doubted link is kept (D300).
+            // A replaced host link is logged; a doubtful but live link is kept (D300).
             let reason = match output {
-                TerminalOutput::RouteExpired => Some(TERMINAL_ROUTE_IDLE),
                 TerminalOutput::Reconnecting => Some(AGENT_CONNECTION_DROPPED),
                 _ => None,
             };
@@ -1740,9 +1727,7 @@ where
 /// [D300, #234].
 fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'static str, bool)> {
     match output {
-        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
-            Some(("terminal.reconnecting", true))
-        }
+        TerminalOutput::Reconnecting => Some(("terminal.reconnecting", true)),
         TerminalOutput::LinkDoubt => link_doubt_notices.then_some(("terminal.link_doubt", false)),
         TerminalOutput::Recovered => {
             link_doubt_notices.then_some(("terminal.link_recovered", false))
@@ -2534,7 +2519,7 @@ where
             addhost_timeline("attach_agent_resolved");
             let attached = tokio::time::timeout(
                 BACKEND_TIMEOUT,
-                agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
+                agent.attach_browser(session, last_out_seq, input_acked, writer_stream),
             )
             .await;
             let Ok(Ok(attachment)) = attached else {
@@ -2651,17 +2636,13 @@ where
             state.close_logs.record(&close);
             Ok(())
         }
-        // A terminal's viewer went hidden or came back (#562): park or resume its route probes. A notice
-        // for a stream that already closed is the usual race with a Close and is dropped.
+        // Validate visibility notices for negotiated viewers. Host liveness is shared across
+        // the connection, so visibility does not create terminal-specific probes.
         Frame::Event {
             sub_id: 0,
             event_json,
         } if stream_id != 0 && stream_id % 2 == 1 => {
-            let hidden =
-                crate::websocket_transport::terminal_visibility_notice(event_json).ok_or(())?;
-            if let Some(attachment) = attachments.get(&stream_id) {
-                attachment.handle.set_parked(hidden).await.map_err(|_| ())?;
-            }
+            crate::websocket_transport::terminal_visibility_notice(event_json).ok_or(())?;
             Ok(())
         }
         Frame::InputReply { query_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
@@ -4063,6 +4044,7 @@ mod link_notice_tests {
     //! A kept, doubted host link is never presented as a replay [D300, #234].
     use super::*;
 
+    /// Only opted-in viewers receive doubt notices, which do not wait for an Ack.
     #[test]
     fn doubt_notices_reach_only_viewers_that_announced_them_and_never_await_an_ack() {
         assert_eq!(
@@ -4080,10 +4062,6 @@ mod link_notice_tests {
         for viewer in [false, true] {
             assert_eq!(
                 link_notice(&TerminalOutput::Reconnecting, viewer),
-                Some(("terminal.reconnecting", true))
-            );
-            assert_eq!(
-                link_notice(&TerminalOutput::RouteExpired, viewer),
                 Some(("terminal.reconnecting", true))
             );
         }

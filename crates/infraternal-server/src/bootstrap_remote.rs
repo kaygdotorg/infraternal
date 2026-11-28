@@ -1813,8 +1813,7 @@ async fn canary_output(
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
             | TerminalOutput::LinkDoubt
-            | TerminalOutput::Recovered
-            | TerminalOutput::RouteExpired => {}
+            | TerminalOutput::Recovered => {}
         }
     }
     Err(unavailable())
