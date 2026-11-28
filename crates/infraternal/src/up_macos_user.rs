@@ -90,9 +90,14 @@ impl Paths {
         let home = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid))?
             .ok_or(ErrorKind::NotFound)?
             .dir;
+        Ok(Self::from_home(home))
+    }
+
+    /// Lay out the user install inside the resolved account home.
+    fn from_home(home: PathBuf) -> Self {
         let library = home.join("Library");
         let base = macos_user_mode::user_install_base(&home);
-        Ok(Self {
+        Self {
             data: base.join("agent"),
             state: base.join("state"),
             binary: macos_user_mode::user_install_binary(&home),
@@ -102,7 +107,7 @@ impl Paths {
                 .join(format!("LaunchAgents/{}.plist", legacy::AGENT_LABEL)),
             base,
             home,
-        })
+        }
     }
 
     /// Serialize this account's install and removal without creating a lock path.
@@ -140,8 +145,8 @@ fn exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// Refuse a Mac where user mode cannot install cleanly, before any prompt or approval.
-fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
+/// Refuse an incompatible install and record whether this account already has a helper.
+fn preflight(paths: &Paths, uid: u32) -> io::Result<bool> {
     for path in [MACHINE_BASE, ROOT_MODE_PLISTS[0], ROOT_MODE_PLISTS[1]] {
         if exists(Path::new(path))? {
             return Err(io::Error::new(
@@ -163,9 +168,8 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
             ));
         }
     }
-    if let Some(registered) = macos_helper::registered_uid()?
-        && registered != uid
-    {
+    let registered = macos_helper::registered_uid()?;
+    if registered.is_some_and(|registered| registered != uid) {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
             "The mesh helper on this Mac belongs to another account. Only one account per Mac can run user mode.",
@@ -179,7 +183,7 @@ fn preflight(paths: &Paths, uid: u32) -> io::Result<()> {
             "An infraternal agent identity already exists for this user. Manage that installation instead of running infraternal up.",
         ));
     }
-    Ok(())
+    Ok(registered == Some(uid))
 }
 
 /// Install or refresh the mesh helper for `uid` with the one `sudo` prompt of user mode.
@@ -238,11 +242,11 @@ pub(crate) async fn run(
     {
         return outcome;
     }
-    preflight(&paths, uid).map_err(|error| {
+    let helper_existed = preflight(&paths, uid).map_err(|error| {
         eprintln!("{error}");
         Failure::InstallConflict
     })?;
-    let mut install = Install::new(paths, uid);
+    let mut install = Install::new(paths, uid, helper_existed);
     install_helper(
         &sudo,
         &executable,
@@ -424,12 +428,11 @@ async fn refresh_existing(
         )
         .await
     {
-        eprintln!(
-            "The existing user-mode installation was kept. Run infraternal up again to finish the update."
-        );
+        eprintln!("{}", interrupted_refresh_message(false));
         return Some(Err(failure));
     }
     let refreshed = (|| {
+        cancelled.check()?;
         if !agent_current {
             replace_binary(executable, &paths.binary)?;
         }
@@ -440,9 +443,7 @@ async fn refresh_existing(
         }
     })();
     if cancelled.received().is_some() {
-        eprintln!(
-            "The existing user-mode installation was kept. Run infraternal up again to finish the update."
-        );
+        eprintln!("{}", interrupted_refresh_message(refreshed.is_ok()));
         return Some(Err(Failure::Failed));
     }
     let local_network = if moving && refreshed.is_ok() {
@@ -682,6 +683,23 @@ async fn enroll_and_start(
     Ok((fingerprint, short_key))
 }
 
+/// Describe which user-mode installation remains when refresh is interrupted.
+fn interrupted_refresh_message(finished: bool) -> &'static str {
+    if finished {
+        "The update finished and the user-mode installation remains installed."
+    } else {
+        "The existing user-mode installation was kept. Run infraternal up again to finish the update."
+    }
+}
+
+/// A path this install published, identified without following a replacement symlink.
+struct Created {
+    /// The published name.
+    path: PathBuf,
+    /// The original device and inode.
+    identity: (u64, u64),
+}
+
 /// One user-mode install in progress; dropped before commit, it undoes this run.
 struct Install {
     /// Where the install goes.
@@ -689,7 +707,9 @@ struct Install {
     /// The person's uid.
     uid: u32,
     /// Paths this run created, oldest first, removed newest first on rollback.
-    created: Vec<PathBuf>,
+    created: Vec<Created>,
+    /// A helper registered before sudo must remain available after a retry is cancelled.
+    helper_existed: bool,
     /// Set once launchd was asked to load the `LaunchAgent`.
     agent_loaded: bool,
     /// Set once launchd reports the agent running; rollback is then skipped.
@@ -698,13 +718,31 @@ struct Install {
 
 impl Install {
     /// Start tracking before sudo can register the helper.
-    fn new(paths: Paths, uid: u32) -> Self {
+    fn new(paths: Paths, uid: u32, helper_existed: bool) -> Self {
         Self {
             paths,
             uid,
             created: Vec::new(),
+            helper_existed,
             agent_loaded: false,
             committed: false,
+        }
+    }
+
+    /// Track the inode published by this run so rollback preserves a replacement.
+    fn record(&mut self, path: PathBuf, metadata: &fs::Metadata) {
+        self.created.push(Created {
+            path,
+            identity: (metadata.dev(), metadata.ino()),
+        });
+    }
+
+    /// A same-account helper may be reused, but only this run's helper can be removed.
+    fn rollback_helper(&self, remove: impl FnOnce(u32) -> io::Result<bool>) -> io::Result<bool> {
+        if self.helper_existed {
+            Ok(false)
+        } else {
+            remove(self.uid)
         }
     }
 
@@ -712,7 +750,7 @@ impl Install {
     fn directory(&mut self, path: &Path, mode: u32) -> io::Result<()> {
         match fs::DirBuilder::new().mode(0o700).create(path) {
             Ok(()) => {
-                self.created.push(path.to_owned());
+                self.record(path.to_owned(), &fs::symlink_metadata(path)?);
                 fs::set_permissions(path, fs::Permissions::from_mode(mode))
             }
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -811,13 +849,14 @@ impl Install {
             .mode(0o700)
             .custom_flags(nix::libc::O_NOFOLLOW)
             .open(&staging)?;
+        let staged = output.metadata()?;
         let published = super::macos::publish_binary(&mut input, output, &staging, &binary);
         let _ = fs::remove_file(&staging);
         published?;
-        self.created.push(binary.clone());
+        self.record(binary.clone(), &staged);
         let receipt = self.paths.receipt();
-        write_new(&receipt, format!("{}\n", host.simple()).as_bytes(), 0o600)?;
-        self.created.push(receipt);
+        let saved = write_new(&receipt, format!("{}\n", host.simple()).as_bytes(), 0o600)?;
+        self.record(receipt, &saved);
         let log = self.paths.logs.join("agent.log");
         let plist = macos_user_mode::agent_plist(
             &binary.to_string_lossy(),
@@ -826,8 +865,8 @@ impl Install {
             &log.to_string_lossy(),
         );
         let launch_agent = self.paths.launch_agent.clone();
-        write_new(&launch_agent, plist.as_bytes(), 0o644)?;
-        self.created.push(launch_agent.clone());
+        let saved = write_new(&launch_agent, plist.as_bytes(), 0o644)?;
+        self.record(launch_agent.clone(), &saved);
         cancelled.check()?;
         self.agent_loaded = true;
         launchctl_checked(&[
@@ -850,25 +889,18 @@ impl Install {
             std::thread::sleep(Duration::from_millis(200));
         }
     }
-}
-
-impl Drop for Install {
-    /// An install dropped before commit (error, panic) stops the agent, removes this run's
-    /// paths newest first, and asks the helper to remove itself.
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        if self.agent_loaded && stop_agent(self.uid).is_err() {
-            eprintln!(
-                "Could not stop the infraternal agent. Its installation was kept so it can be removed from the server."
-            );
-            return;
-        }
-        let local_removed = self.created.drain(..).rev().fold(true, |removed, path| {
+    /// Remove this run's paths newest first, leaving replacements in place.
+    fn rollback_paths(&mut self) -> bool {
+        self.created.drain(..).rev().fold(true, |removed, created| {
+            let path = created.path;
             let result = match fs::symlink_metadata(&path) {
+                Ok(metadata) if (metadata.dev(), metadata.ino()) != created.identity => {
+                    return false;
+                }
                 Ok(metadata) if metadata.is_dir() => {
-                    if path.starts_with(&self.paths.base) || path == self.paths.logs {
+                    // The newly created agent directories own dynamically written state.
+                    // Remove their parent only when empty so a replacement child survives.
+                    if [&self.paths.data, &self.paths.state, &self.paths.logs].contains(&&path) {
                         fs::remove_dir_all(&path)
                     } else {
                         fs::remove_dir(&path)
@@ -879,18 +911,38 @@ impl Drop for Install {
                 Err(error) => Err(error),
             };
             removed & result.is_ok()
-        });
-        let helper_removed = (|| {
-            if macos_helper::registered_uid()? != Some(self.uid) {
+        })
+    }
+}
+
+impl Drop for Install {
+    /// An install dropped before commit (error, panic) stops the agent, removes this run's
+    /// paths newest first, and asks a newly installed helper to remove itself.
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self.agent_loaded && stop_agent(self.uid).is_err() {
+            eprintln!(
+                "Could not stop the infraternal agent. Its installation was kept so it can be removed from the server."
+            );
+            return;
+        }
+        let local_removed = self.rollback_paths();
+        let helper_removed = self.rollback_helper(|uid| {
+            if macos_helper::registered_uid()? != Some(uid) {
                 return Ok(false);
             }
             macos_helper::request(&Request::Remove, None)?;
             wait_for_helper_unload()?;
             Ok::<_, io::Error>(true)
-        })();
+        });
         let result = match (local_removed, helper_removed) {
             (true, Ok(true)) => {
                 "Removed the unfinished user-mode installation and its mesh helper."
+            }
+            (true, Ok(false)) if self.helper_existed => {
+                "Kept the existing mesh helper. Run infraternal up again to reuse it."
             }
             (true, Ok(false)) => "No user-mode installation was left by this attempt.",
             (false, Ok(_)) => {
@@ -926,8 +978,8 @@ fn wait_for_helper_unload() -> io::Result<()> {
     }
 }
 
-/// Create a new file with its final mode; an existing path is refused.
-fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+/// Create a file without replacing an existing path and return its published inode.
+fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<fs::Metadata> {
     use std::io::Write;
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -935,11 +987,108 @@ fn write_new(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         .mode(mode)
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(path)?;
+    let metadata = file.metadata()?;
     let result = file.write_all(contents).and_then(|()| file.sync_all());
-    if result.is_err() {
+    if result.is_err()
+        && fs::symlink_metadata(path)
+            .is_ok_and(|named| (named.dev(), named.ino()) == (metadata.dev(), metadata.ino()))
+    {
         let _ = fs::remove_file(path);
     }
-    result
+    result.map(|()| metadata)
+}
+
+/// Local rollback tests use disposable account homes and never write to launchd.
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+
+    /// A private test home that is removed even if a rollback assertion fails.
+    struct Home(PathBuf);
+
+    impl Home {
+        /// Allocate a disposable home without changing the running account's home.
+        fn new() -> Self {
+            Self(
+                nix::unistd::mkdtemp(env::temp_dir().join("infraternal-up-XXXXXX").as_path())
+                    .unwrap(),
+            )
+        }
+    }
+
+    impl Drop for Home {
+        /// Remove only this test's fixture.
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Cancellation can withdraw a newly registered helper but must keep a reused one.
+    #[test]
+    fn cancelled_install_preserves_a_helper_registered_before_sudo() {
+        let fixture = Home::new();
+        let uid = nix::unistd::geteuid().as_raw();
+        let mut install = Install::new(Paths::from_home(fixture.0.clone()), uid, true);
+        // The fixtures call the rollback decision directly and never register a real helper.
+        install.committed = true;
+        assert!(
+            !install
+                .rollback_helper(|_| panic!("helper was already installed"))
+                .unwrap()
+        );
+
+        let mut fresh = Install::new(Paths::from_home(fixture.0.clone()), uid, false);
+        fresh.committed = true;
+        assert!(
+            fresh
+                .rollback_helper(|owner| {
+                    assert_eq!(owner, uid);
+                    Ok(true)
+                })
+                .unwrap()
+        );
+    }
+
+    /// A foreign inode in the created base survives rollback, including an inode under it.
+    #[test]
+    fn rollback_preserves_replacement_paths_and_removes_its_own_state() {
+        let fixture = Home::new();
+        let uid = nix::unistd::geteuid().as_raw();
+        let paths = Paths::from_home(fixture.0.clone());
+        let state = paths.state.clone();
+        let data = paths.data.clone();
+        let receipt = paths.receipt();
+        let mut install = Install::new(paths, uid, true);
+        install.committed = true;
+        install.directories().unwrap();
+        fs::write(state.join("ours"), b"state from this install").unwrap();
+        let saved = write_new(&receipt, b"provisional receipt", 0o600).unwrap();
+        install.record(receipt.clone(), &saved);
+
+        fs::rename(&data, fixture.0.join("old-agent")).unwrap();
+        fs::create_dir(&data).unwrap();
+        fs::write(data.join("keep"), b"replacement directory").unwrap();
+        fs::rename(&receipt, fixture.0.join("old-receipt")).unwrap();
+        std::os::unix::fs::symlink(data.join("keep"), &receipt).unwrap();
+        assert!(!install.rollback_paths(), "replacement paths remain");
+
+        assert!(!state.exists());
+        assert_eq!(
+            fs::read(data.join("keep")).unwrap(),
+            b"replacement directory"
+        );
+        assert_eq!(fs::read_link(receipt).unwrap(), data.join("keep"));
+    }
+
+    /// A refresh that finished before Ctrl-C must not ask the user to rerun it.
+    #[test]
+    fn interrupted_refresh_reports_whether_the_update_finished() {
+        assert_eq!(
+            interrupted_refresh_message(true),
+            "The update finished and the user-mode installation remains installed."
+        );
+        assert!(interrupted_refresh_message(false).contains("Run infraternal up again"));
+    }
 }
 
 /// Run `/bin/launchctl` with a clean environment.
