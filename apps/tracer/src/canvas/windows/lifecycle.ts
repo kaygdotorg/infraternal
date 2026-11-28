@@ -15,6 +15,7 @@
  *
  * Every layout change measures, changes, then plays (layout/flip.ts); the terminal refits once at the new size.
  */
+import { windowTitle } from "../model/types";
 import { randomUuid } from "../../identifiers";
 import { Spring } from "../../../../../packages/ui/src/spring";
 import { triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
@@ -281,8 +282,8 @@ export function createWindows(cx: Ctx): WindowsModule {
     if (s.pinned) rec.model.sessionPinned = true;
     else delete rec.model.sessionPinned;
     if (s.screen.length) rec.model.lines = s.screen;
-    if (renamed) {
-      rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), session: s.name });
+    if (renamed || force) {
+      rec.card.setTitle(windowTitle(rec.model));
       cx.pill.paint();
     }
     // A different screen (another session, a run again): the old binding goes and the new one mounts. The work is
@@ -306,6 +307,7 @@ export function createWindows(cx: Ctx): WindowsModule {
     const inv = cx.adapters.inventory;
     if (!inv || !isTerminal(rec) || rec.model.sessionId === sessionId || !inv.get(rec.model.host, sessionId)) return;
     const previous = rec.model.sessionId;
+    delete rec.model.openedAccount;
     // The window's model first, so the change events the inventory sends see a consistent window.
     rec.model.sessionId = sessionId;
     if (previous) inv.detach(rec.model.host, previous);
@@ -390,7 +392,7 @@ export function createWindows(cx: Ctx): WindowsModule {
         if (identity.os !== undefined && m.os !== identity.os) { m.os = identity.os; rec.card.setIcon(iconFor(m)); }
         if ("user" in identity && m.user !== identity.user) {
           if (identity.user) m.user = identity.user; else delete m.user;
-          rec.card.setTitle({ host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) });
+          rec.card.setTitle(windowTitle(m));
           painted = true;
         }
       }

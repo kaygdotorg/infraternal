@@ -670,11 +670,11 @@ class AckBarrier:
             worker.join(2)
 
 
-def cleanup(state):
-    """Kill only shim PIDs authenticated by fixture-owned rendezvous sockets."""
+def cleanup(state, sockets=None):
+    """Kill only shim PIDs authenticated by this fixture’s rendezvous sockets."""
     # Discover shim pids from Hello after shutting down the daemon; cleanup
     # never depends on process names or kills unrelated user sessions.
-    for path in (state / 'sessions').glob('*'):
+    for path in (sockets if sockets is not None else state / 'sessions').glob('*'):
         if path.suffix not in ('.sock', '.upstream'):
             continue
         try:

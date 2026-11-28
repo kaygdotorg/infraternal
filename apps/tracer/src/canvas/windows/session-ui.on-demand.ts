@@ -26,6 +26,7 @@
  * The inventory is the source of truth: every change it reports repaints the windows, the tree and an open
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
+import { windowTitle } from "../model/types";
 import { endedStripText } from "../status";
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
 import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
@@ -287,6 +288,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     refusals.delete(rec);
     asked.add(rec);
     delete rec.model.sessionId;
+    delete rec.model.openedAccount;
+    rec.card.setTitle(windowTitle(rec.model));
     if (s) inventory.dismiss(rec.model.host, s.id);
     rec.binding.openNew();
     paint(rec);

@@ -58,6 +58,23 @@ test("a rootless server says why it cannot open a shell and what to do (#327)", 
   expect(terminalRefusal(await refusal({ reason: "invalid" })).message).toBe("This terminal request is not valid. Try opening a new window.");
 });
 
+/** A routed refusal names the Mac and the execution account, with a recovery step. */
+test("a remote user-mode refusal identifies the host and missing account", async () => {
+  const { terminalRefusal } = await import("../../terminal-refusal");
+  expect(terminalRefusal(await refusal({ reason: "no_login", execution_uid: 501 }), "mac-build", true)).toEqual({
+    message: "mac-build couldn't open a shell as the account with user ID 501. Check the account on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+  expect(terminalRefusal(await refusal({ reason: "no_login", execution_uid: "untrusted text" }), "mac-build", true)).toEqual({
+    message: "mac-build couldn't open a shell as its own account. Check the account on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+  expect(terminalRefusal(await refusal({ reason: "permission" }), "mac-build", true)).toEqual({
+    message: "mac-build cannot open a shell as the requested account. Check which account runs infraternal on mac-build, then try again.",
+    sessionList: false, action: "retry",
+  });
+});
+
 test("a root host without systemd says why it opens no logins and what works instead (D354)", async () => {
   const { terminalRefusal } = await import("../../terminal-refusal");
   expect(terminalRefusal(await refusal({ error: "terminal unavailable", reason: "no_systemd" }), "build-01")).toEqual({

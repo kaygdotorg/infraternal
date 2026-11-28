@@ -14,7 +14,7 @@ pub struct NodeContext {
 }
 
 /// Why a host refused to open a terminal. The reason is a fixed code that is safe to show to
-/// anyone; only the memory refusal carries numbers (the resource counters).
+/// anyone. Some refusals include the resource counters or the missing account's enrolled UID.
 ///
 /// Parsing is strict where it matters: unknown extra JSON fields are ignored so new fields can
 /// be added, but an unknown `reason` or an invalid counter is an error (fail closed).
@@ -31,8 +31,12 @@ pub enum OpenRefusal {
     Invalid,
     /// The host's account policy refused the login (a rootless host asked for an account that is not its own).
     Permission,
-    /// A rootless host has no account matching the person's name and, unlike a root host, cannot fall back to root.
-    NoLogin,
+    /// A rootless host could not find the account to open.
+    NoLogin {
+        /// The enrolled UID when the host looked up its own execution account.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_uid: Option<u32>,
+    },
     /// A root host without systemd opens no person logins: it could not prove a revoked login's
     /// processes gone (D354). A rootless agent on that host, or a host with systemd, still can.
     NoSystemd,
@@ -52,7 +56,7 @@ pub enum OpenRefusal {
 
 impl OpenRefusal {
     /// The JSON reply for a refused terminal: `{"error":"terminal unavailable", "reason": ...}`
-    /// plus the counters of the refusal, if it has any. The legacy `error` field stays next to
+    /// plus any typed details of the refusal. The legacy `error` field stays next to
     /// the typed, additive `reason`.
     ///
     /// # Errors
@@ -115,6 +119,25 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<OpenRefusal>(&json).unwrap(),
             OpenRefusal::HostUpgrading
+        );
+    }
+
+    /// Older hosts send the reason alone; newer hosts can identify the missing account.
+    #[test]
+    fn missing_login_uid_is_additive() {
+        let legacy = br#"{"reason":"no_login"}"#;
+        assert_eq!(
+            serde_json::from_slice::<OpenRefusal>(legacy).unwrap(),
+            OpenRefusal::NoLogin {
+                execution_uid: None
+            }
+        );
+        let refusal = OpenRefusal::NoLogin {
+            execution_uid: Some(501),
+        };
+        assert_eq!(
+            serde_json::from_slice::<OpenRefusal>(&refusal.json().unwrap()).unwrap(),
+            refusal
         );
     }
 

@@ -835,6 +835,15 @@ impl Install {
         ] {
             self.directory(&path, mode)?;
         }
+        // Rollback owns a newly created socket directory. Its shared cache
+        // parents can also serve a manually started infraternal agent.
+        if infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state).is_some() {
+            let (dir, created) =
+                infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
+            if created {
+                self.created.push(dir);
+            }
+        }
         Ok(())
     }
 
@@ -1107,6 +1116,8 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+    let session_cache =
+        infraternal_shim::runtime_dir::remove_managed_macos_session_dir(&paths.state);
     for directory in [&paths.base, &paths.logs] {
         match fs::remove_dir_all(directory) {
             Ok(()) => {}
@@ -1114,5 +1125,5 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    helper
+    helper.and(session_cache)
 }
