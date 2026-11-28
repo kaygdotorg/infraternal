@@ -113,25 +113,59 @@ fn create_private(path: &Path) -> io::Result<bool> {
     Ok(created)
 }
 
+/// Find the existing socket cache owned by a managed Mac user install.
+///
+/// # Errors
+/// Refuses links, unsafe ownership and unexpected filesystem errors.
+#[cfg(target_os = "macos")]
+pub fn review_managed_macos_session_dir(state: &Path) -> io::Result<Option<PathBuf>> {
+    let Some(dir) = managed_macos_session_dir(state) else {
+        return Ok(None);
+    };
+    let root = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let caches = root.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let library = caches.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    let home = library.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    for path in [home, library, caches, root, dir.as_path()] {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                let mask = if path == home || path == library {
+                    0o022
+                } else {
+                    0o077
+                };
+                if !meta.is_dir()
+                    || meta.uid() != Uid::effective().as_raw()
+                    || meta.mode() & mask != 0
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!(
+                            "{} is not a private directory of this account",
+                            path.display()
+                        ),
+                    ));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(Some(dir))
+}
+
 /// Remove only the managed Mac socket cache, after uninstall has stopped its
 /// `LaunchAgent` and authenticated the installation receipt.
 /// # Errors
 /// Refuses a nonprivate hierarchy or a filesystem failure.
 #[cfg(target_os = "macos")]
 pub fn remove_managed_macos_session_dir(state: &Path) -> io::Result<()> {
-    let Some(dir) = managed_macos_session_dir(state) else {
-        return Ok(());
-    };
-    let root = dir.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    let caches = root.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    for path in [caches, root, dir.as_path()] {
-        match check_private(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        }
+    if let Some(dir) = review_managed_macos_session_dir(state)? {
+        fs::remove_dir_all(&dir)?;
+        // Keep the receipt recoverable until the cache removal is durable.
+        fs::File::open(dir.parent().ok_or(io::ErrorKind::InvalidInput)?)?.sync_all()?;
     }
-    fs::remove_dir_all(dir)
+    Ok(())
 }
 
 /// The macOS fallback: the account's own `~/Library/Caches`.
@@ -242,10 +276,15 @@ mod tests {
             create_session_dir(&state).unwrap(),
             (install.clone(), false)
         );
+        assert_eq!(
+            review_managed_macos_session_dir(&state).unwrap(),
+            Some(install.clone())
+        );
         let manual = product.join("sessions");
         create_private(&manual).unwrap();
         remove_managed_macos_session_dir(&state).unwrap();
         assert!(!install.exists() && manual.is_dir() && target.is_dir());
+        assert_eq!(review_managed_macos_session_dir(&state).unwrap(), None);
         fs::remove_dir_all(home).unwrap();
     }
 

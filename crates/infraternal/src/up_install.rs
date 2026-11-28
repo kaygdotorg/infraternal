@@ -44,6 +44,10 @@ mod inspect;
 #[path = "up_journal.rs"]
 mod journal;
 
+/// The committed installer journal is also the ownership proof for uninstall.
+#[path = "up_uninstall.rs"]
+pub(crate) mod uninstall;
+
 /// Proof that the read-only [`preflight`] accepted a namespace.
 ///
 /// [`Install::begin_accepted`] takes it instead of running that pass a second

@@ -17,6 +17,9 @@ use infraternal_plugin_api::{
 /// Server-challenged host identity-key rotation proof and bounded wire types [285].
 #[cfg(feature = "transport")]
 pub mod identity_rotation;
+/// Host-signed requests to retire the installation during local uninstall.
+#[cfg(feature = "transport")]
+pub mod local_retirement;
 #[cfg(feature = "transport")]
 pub mod remote_bindings;
 #[cfg(feature = "transport")]
