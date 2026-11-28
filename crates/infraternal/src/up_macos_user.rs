@@ -1324,7 +1324,10 @@ mod uninstall_tests {
             [paths.launch_agent.clone()]
         );
         fs::remove_file(&paths.launch_agent).unwrap();
-        assert!(checked_uninstall_paths(&paths, uid).unwrap().is_empty());
+        assert_eq!(
+            checked_uninstall_paths(&paths, uid).unwrap(),
+            Vec::<PathBuf>::new()
+        );
         assert_eq!(read_uninstall_receipt(&paths, uid).unwrap(), host);
         write_new(&paths.launch_agent, plist.as_bytes(), 0o644).unwrap();
         let foreign = plist.replace("<string>agent</string>", "<string>server</string>");

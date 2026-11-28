@@ -57,7 +57,7 @@ fn leaves_files_it_did_not_write() {
         "example.com ssh-ed25519 AAAA\n",
     )
     .unwrap();
-    assert!(review_client_config(&root).unwrap().is_empty());
+    assert_eq!(review_client_config(&root).unwrap(), Vec::<PathBuf>::new());
     remove_client_files(&root).unwrap();
     assert!(at(&root, CONFIG_PATH).exists());
     assert!(at(&root, KNOWN_HOSTS_PATH).exists());
