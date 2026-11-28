@@ -730,7 +730,7 @@ impl SessionEvents {
 pub(crate) struct SessionEvents(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SessionEvents {
-    /// Watch `state/sessions` for entries being added or removed.
+    /// Watch the session directory for entries being added or removed.
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
         DirectoryEvents::new(&session_dir(state)).map(Self)
     }
@@ -923,7 +923,7 @@ impl SocketReadiness {
 struct SocketReadiness(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SocketReadiness {
-    /// Watch `state/sessions` for socket creation.
+    /// Watch the session directory for socket creation.
     fn new(state: &Path) -> io::Result<Self> {
         DirectoryEvents::new(&session_dir(state)).map(Self)
     }
@@ -1037,7 +1037,6 @@ pub async fn launch_with_login(
 }
 
 /// Launch an attributed shell, transferring its person fence to the durable reservation.
-#[cfg(target_os = "linux")]
 pub(crate) async fn launch_rootless_person(
     exe: &Path,
     state: &Path,
@@ -1107,19 +1106,12 @@ async fn launch_configured(
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
     let path = session_dir(state).join(format!("{name}.sock"));
-    #[cfg(target_os = "linux")]
     let mut reservation = match person {
         Some((person, guard)) => {
             Some(crate::rootless_sessions::reserve(state, person, id, guard).await?)
         }
         None => None,
     };
-    // D247 reserves durable person records on Linux. A user-mode Mac keeps
-    // the person fence outside this ordinary launch instead.
-    #[cfg(target_os = "macos")]
-    if person.is_some() {
-        return Err(io::ErrorKind::Unsupported.into());
-    }
     let watch = SocketReadiness::new(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
@@ -1260,9 +1252,16 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    // Once spawn succeeds, cancellation must leave the person record intact so
+    // revocation can still find the detached shim. Linux also cleans up the
+    // abandoned launch immediately using its lifeline.
+    let record = reservation
+        .as_mut()
+        .and_then(crate::rootless_sessions::Reservation::spawned);
     #[cfg(target_os = "macos")]
     {
-        // macOS keeps the plain launch: the cleanup guard below is Linux-only (#324).
+        // A detached Mac shim stays discoverable by its durable record.
+        drop(record);
         let mut child = child;
         if !program.is_empty() {
             child
@@ -1287,9 +1286,6 @@ async fn launch_configured(
         // that launch on EVERY way out other than success: an error, or the caller
         // dropping this future (automation's 4 s deadline does). The cleanup runs on
         // its own task and bound, so a cancelled caller cannot cancel it.
-        let record = reservation
-            .as_mut()
-            .and_then(crate::rootless_sessions::Reservation::spawned);
         let mut launch = Launch {
             child: Some(child),
             watch: Some(watch),

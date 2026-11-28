@@ -6,6 +6,7 @@ from pathlib import Path
 import pwd
 import shutil
 import sys
+import time
 import uuid
 sys.dont_write_bytecode = True
 repo = Path(__file__).resolve().parents[1]
@@ -51,17 +52,27 @@ def main():
         assert opened['account'] == account
         assert opened['requested_account'] is None
         assert not opened['fallback']
-        if sockets is not None:
-            assert (sockets / (uuid.UUID(opened['session_id']).hex + '.sock')).exists()
-            assert (state / 'infraternal-login-locks').is_dir()
-            assert not list((state / 'infraternal-login-locks').glob('*.terminal'))
+        session_id = opened['session_id']
+        terminal_id = uuid.UUID(session_id).hex
+        path = (sockets if sockets is not None else state / 'sessions') / (terminal_id + '.sock')
+        record = state / 'infraternal-login-locks' / f'{person.hex}-{terminal_id}.terminal'
+        stop = path.with_suffix('.stop')
+        assert path.is_socket() and stop.is_socket()
+        assert record.is_file()
         select_terminal(client, opened['session_id'])
         terminal_marker(client, 'rootless-ready')
         client.input(b'whoami\n')
         client.until(b'\r\n' + os.fsencode(account) + b'\r\n')
-        client.input(b'exit\n')
-        client.wait_event('terminal.exited')
+        assert control(client, 3, 'terminal.login.revoke', dict(person=str(person)))['revoked']
+        event = client.wait_event('terminal.exited')
+        assert event['session_id'] == session_id and event['status'] == -9, event
         detach(client)
+        deadline = time.monotonic() + 30
+        while path.exists() or stop.exists() or record.exists():
+            assert time.monotonic() < deadline, 'revoked shell retained its socket or ownership record'
+            time.sleep(.005)  # Poll only until the sealed shim retirement is visible on disk.
+        assert path.with_suffix('.ended').exists()
+        control(client, 4, 'terminal.open', enrolled, expected=False)
         # The exited terminal can still queue a final stream Close. Use a fresh
         # leg-B fixture for the fixed readiness command, avoiding stream reuse.
         client.kill()
@@ -86,7 +97,8 @@ def main():
         control(client, 8, 'terminal.open', refused, expected=False)
         print(json.dumps(dict(own_account_terminal=True, readiness_same_account=True,
                               su_not_called=True, switching_refused=True,
-                              revocation_fenced=True, explicit_restoration=True)))
+                              revocation_fenced=True, live_shell_reaped=True,
+                              revoked_record_and_sockets_removed=True, explicit_restoration=True)))
     finally:
         if client is not None:
             client.kill()

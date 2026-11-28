@@ -2,7 +2,7 @@
 //! Sealed inherited-account retirement also releases its durable person attribution.
 #![forbid(unsafe_code)]
 
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+use crate::session::peer_uid;
 use std::{
     fs,
     io::{self, Read, Write},
@@ -102,17 +102,13 @@ impl Cleanup {
     /// afterwards. Session ids are never reused, so only this terminal's records can
     /// match.
     #[cold]
-    pub(crate) fn retire_attribution(&self) -> io::Result<()> {
+    pub(crate) fn retire_attribution(&self, state: &Path) -> io::Result<()> {
         let socket = self.path.with_extension("sock");
         if crate::ended::read(&socket)?.is_none() {
             return Err(io::Error::other(
                 "terminal retirement has no sealed cleanup proof",
             ));
         }
-        let state = socket
-            .parent()
-            .and_then(Path::parent)
-            .ok_or(io::ErrorKind::InvalidInput)?;
         let directory = state.join("infraternal-login-locks");
         let metadata = match fs::symlink_metadata(&directory) {
             Ok(metadata) => metadata,
@@ -185,9 +181,7 @@ impl Cleanup {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(error) => return Err(error),
         };
-        let uid = getsockopt(&peer, PeerCredentials)
-            .map_err(io::Error::from)?
-            .uid();
+        let uid = peer_uid(&peer)?;
         if uid != 0 && uid != self.controller {
             return Ok(());
         }
@@ -215,12 +209,7 @@ impl Cleanup {
         }
         let mut request = [0];
         match peer.read(&mut request) {
-            Ok(1)
-                if matches!(
-                    crate::login::decode_header(&request, 0),
-                    Ok(crate::login::RequestHeader::Stop)
-                ) =>
-            {
+            Ok(1) if request == *b"!" => {
                 self.accepted = true;
                 self.requested = true;
             }
@@ -326,15 +315,15 @@ mod tests {
                 .open(path)
                 .unwrap();
         }
-        assert!(cleanup.retire_attribution().is_err());
+        assert!(cleanup.retire_attribution(&root).is_err());
         assert!(record.exists() && other.exists());
         crate::ended::record(&socket, 0, 0).unwrap();
-        cleanup.retire_attribution().unwrap();
+        cleanup.retire_attribution(&root).unwrap();
         assert!(!record.exists() && other.exists());
-        cleanup.retire_attribution().unwrap(); // Concurrent revocation is idempotent.
+        cleanup.retire_attribution(&root).unwrap(); // Concurrent revocation is idempotent.
         std::os::unix::fs::symlink(&other, &record).unwrap();
         assert_eq!(
-            cleanup.retire_attribution().unwrap_err().kind(),
+            cleanup.retire_attribution(&root).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
         assert!(fs::symlink_metadata(&record).unwrap().is_symlink());
@@ -343,7 +332,7 @@ mod tests {
         fs::write(&record, b"unexpected").unwrap();
         fs::set_permissions(&record, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            cleanup.retire_attribution().unwrap_err().kind(),
+            cleanup.retire_attribution(&root).unwrap_err().kind(),
             io::ErrorKind::PermissionDenied
         );
         assert!(record.exists());
