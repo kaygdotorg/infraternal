@@ -62,7 +62,7 @@ export function loadSetup(
 }
 
 /** Shown when the setup code could not be fetched. */
-export const SETUP_LOAD_FAILED = "Could not load setup. Check your connection; it will retry.";
+export const SETUP_LOAD_FAILED = "Couldn't load setup. Check your connection; this page retries when you're back online.";
 
 /**
  * Draws the sign-in card and wires it. The recovery card (when the build enables it) is fetched while the person reads,
@@ -82,7 +82,7 @@ function mountSignIn(
       <p class="auth-lede">Your passkey is all you need.</p>
       <div class="auth-note"><div><p class="auth-message" id="auth-error" role="alert"></p></div></div>
       <button class="auth-primary auth-login" id="login-passkey" type="button">${KEY_MARK}<span>Continue with passkey</span></button>
-      ${recoveryUiEnabled() ? '<button class="auth-text-button" id="use-recovery" type="button">use recovery key</button>' : ""}
+      ${recoveryUiEnabled() ? '<button class="auth-text-button" id="use-recovery" type="button">Use recovery key</button>' : ""}
       <div class="auth-note"><div><p class="auth-loading" id="login-loading" role="status" aria-live="polite"><span class="busy-count" hidden></span></p></div></div>
     </section>
   </section>`; });
@@ -152,9 +152,9 @@ export function validUsername(value: string): boolean {
  */
 export function safeAuthMessage(error: unknown): string {
   if (error instanceof DOMException && (error.name === "NotAllowedError" || error.name === "AbortError")) {
-    return "The passkey prompt was cancelled or timed out. Try again when you are ready.";
+    return "Passkey prompt was cancelled or timed out. Try again.";
   }
-  return error instanceof AuthError ? error.message : "The request could not be completed. Try again.";
+  return error instanceof AuthError ? error.message : "Couldn't complete sign-in. Check your connection and try again.";
 }
 
 /** The name this device is registered under: the saved `tracer.device-name`, else the platform name plus "device". */

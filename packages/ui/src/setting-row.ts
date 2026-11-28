@@ -127,7 +127,7 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
     const outcome = options.onSave?.(saved);
     if (!(outcome instanceof Promise)) return;
     const undo = (message: string): void => { if (saved !== value) return; saved = before; paintControl(saved); paintReset(); refuse(message); };
-    outcome.then((message) => { if (typeof message === "string") undo(message); }, () => undo("It could not be saved. The old value is still in use."));
+    outcome.then((message) => { if (typeof message === "string") undo(message); }, () => undo("Couldn't save this setting. Keeping the previous value."));
   };
 
   if (isTyped(spec)) {

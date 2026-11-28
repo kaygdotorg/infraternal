@@ -363,7 +363,7 @@ export class ProvisioningRun {
   confirmHostKey(target: string, challenge: string, fingerprint: string): Promise<void> {
     if (this.ended || this.confirmation) return Promise.reject(new Error("Host-key confirmation is unavailable."));
     return new Promise((resolve, reject) => {
-      const fail = (): void => { this.confirmation = undefined; reject(new Error("The host key could not be confirmed. Try again.")); };
+      const fail = (): void => { this.confirmation = undefined; reject(new Error("Couldn't confirm the host key. Check your connection and try again.")); };
       this.confirmation = { target, fingerprint, resolve, reject: fail, timer: setTimeout(fail, 5000) };
       this.send({ action: "confirm-host-key", target, challenge, fingerprint });
     });

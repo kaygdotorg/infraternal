@@ -14,7 +14,7 @@ for (const delay of [-1, 0.5, 172801, Number.MAX_SAFE_INTEGER + 1, "90000"]) {
   test(`malformed or excessive remaining wait ${delay} is denied`, async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async () => new Response(JSON.stringify({token:"public-fixture",ready_at:1800000000,delay_seconds:delay}))) as unknown as typeof fetch;
-    try { await expect(startRecovery("fixture_owner", words)).rejects.toThrow("could not be used"); }
+    try { await expect(startRecovery("fixture_owner", words)).rejects.toThrow("invalid response"); }
     finally { globalThis.fetch = original; }
   });
 }
@@ -26,7 +26,7 @@ for (const [ready, delay, valid] of [[false,60,true],[true,0,true],[false,0,fals
     try {
       const result = getRecoveryStatus("public-fixture");
       if (valid) expect((await result).ready).toBe(ready);
-      else await expect(result).rejects.toThrow("could not be used");
+      else await expect(result).rejects.toThrow("invalid response");
     } finally { globalThis.fetch = original; }
   });
 }

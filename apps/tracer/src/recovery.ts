@@ -142,7 +142,7 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       readyClock = performance.now() + status.delay_seconds * 1000;
       error.textContent = "";
     } catch {
-      if (card.isConnected) error.textContent = "The recovery time could not be refreshed. We will check again shortly.";
+      if (card.isConnected) error.textContent = "Couldn't refresh recovery time. Checking again shortly.";
     } finally {
       refreshing = false;
       if (card.isConnected && step === 1) render();
@@ -221,10 +221,10 @@ export function mountRecovery(host: HTMLElement, back: () => void,
       }
     } catch (failure: unknown) {
       error.textContent = failure instanceof AuthError && failure.status === 401
-        ? step === 0 ? "Recovery could not start. Check the username and recovery key. Older recovery words need replacing from a signed-in device." : "Recovery is not ready, expired or was cancelled. Check the available time or start again."
+        ? step === 0 ? "Couldn't start recovery. Check the username and recovery key. Older recovery words need replacing from a signed-in device." : "Recovery isn't ready, expired, or was cancelled. Check the available time or start again."
         : failure instanceof DOMException && failure.name === "InvalidStateError" ? "This device already has a passkey for this account. Choose another passkey provider or remove the old passkey from your device."
-        : failure instanceof DOMException && failure.name === "NotAllowedError" ? "The passkey prompt was cancelled. Try again when you are ready."
-        : failure instanceof AuthError ? failure.message : "Recovery could not be completed. Try again.";
+        : failure instanceof DOMException && failure.name === "NotAllowedError" ? "Passkey prompt was cancelled. Try again."
+        : failure instanceof AuthError ? failure.message : "Couldn't complete recovery. Check your connection and try again.";
     } finally { waiting.done(); busy = false; if (card.isConnected) render(); }
   }
   document.addEventListener("visibilitychange", () => {

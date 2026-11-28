@@ -166,7 +166,7 @@ Host bad name!
 
 describe("plain words", () => {
   test("an unknown or missing failure gets the generic sentence, never the server's text", () => {
-    const generic = "Something went wrong while setting up this host. Try again.";
+    const generic = "Setup didn't finish. Open Details or try again.";
     expect(failureLine(undefined)).toBe(generic);
     expect(failureLine({ kind: "teapot" as never, message: "HTTP 418 ssh_exit_255", log_tail: [] })).toBe(generic);
     expect(guideFor("h", undefined).happened).not.toMatch(/ssh|HTTP|exit/i);
