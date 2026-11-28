@@ -23,7 +23,8 @@ use serde_json::{Value, json};
 use infraternal_plugin_mesh::host_firewall::{
     AllowRule, HostFirewallPaths, Listener, Policy, PolicyRole, Protocol, apply_from_config_at,
     apply_with_ssh_connection, clear_role_from_config_at, discover_nft, read_policy_file, render,
-    set_mesh_listener_at, validate, validate_ssh_connection_on, write_policy_file,
+    rollback_agent_policy, set_mesh_listener_at, validate, validate_ssh_connection_on,
+    write_policy_file,
 };
 
 /// sshd as these namespace tests model it: listening on 22 in both families.
@@ -409,8 +410,6 @@ fn clearing_host_policy_removes_its_table_config_and_loader() {
 #[test]
 #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
 fn rollback_agent_policy_leaves_the_loader_for_install_journal_recovery() {
-    use infraternal_plugin_mesh::host_firewall::rollback_agent_policy;
-
     let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
     let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
     let config = ConfigFixture::new();
@@ -434,6 +433,90 @@ fn rollback_agent_policy_leaves_the_loader_for_install_journal_recovery() {
         .success(),
         "rollback must remove the only role's live table"
     );
+}
+
+/// Still withdraw the provisional policy when nft was never available to load it.
+#[test]
+#[ignore = "Run as root in a disposable namespace to exercise root-owned policies."]
+fn rollback_agent_policy_without_nft_leaves_the_loader_for_the_journal() {
+    let config = ConfigFixture::new();
+    write_policy_file(config.paths.agent_policy_path(), &Policy::default())
+        .expect("save the provisional agent policy");
+    config.write_owned_loader();
+
+    let absent_nft = config.paths.unit_path().with_file_name("missing-nft");
+    rollback_agent_policy(&config.paths, true, Some(&absent_nft))
+        .expect("withdraw provisional policy without nft");
+    assert!(!config.paths.agent_policy_path().exists());
+    assert!(config.paths.unit_path().is_file());
+    assert!(config.paths.enabled_path().is_symlink());
+}
+
+/// The prior loader restores its own live rules after installer rollback.
+#[test]
+#[ignore = "Run as root in a disposable namespace to exercise root-owned policies."]
+fn rollback_agent_policy_defers_live_rules_to_the_prior_loader() {
+    let config = ConfigFixture::new();
+    write_policy_file(config.paths.agent_policy_path(), &Policy::default())
+        .expect("save the provisional agent policy");
+    write_policy_file(config.paths.server_policy_path(), &Policy::default())
+        .expect("save the server policy");
+    config.write_owned_loader();
+    let before = fs::read(config.paths.server_policy_path()).expect("read the server policy");
+
+    let absent_nft = config.paths.unit_path().with_file_name("missing-nft");
+    rollback_agent_policy(&config.paths, false, Some(&absent_nft))
+        .expect("the journal restores the prior loader without running nft here");
+    assert!(!config.paths.agent_policy_path().exists());
+    assert_eq!(
+        fs::read(config.paths.server_policy_path()).expect("read the server policy"),
+        before
+    );
+    assert!(config.paths.unit_path().is_file());
+    assert!(config.paths.enabled_path().is_symlink());
+}
+
+/// With both roles present, withdraw only the agent's contribution to the live table.
+#[test]
+#[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+fn rollback_agent_policy_restores_the_saved_server_rules() {
+    #[cfg(feature = "test-support")]
+    let _sshd = sshd_on_22();
+    let nft_fixture = NftFixture::new(infraternal_plugin_mesh::host_firewall::nft_candidates());
+    let nft = discover_nft(Some(nft_fixture.path())).expect("sandbox-owned nft executable");
+    let config = ConfigFixture::new();
+    let saved = Policy {
+        admin_rules: vec!["*,*,tcp,22".parse().expect("valid SSH rule")],
+        ..Policy::default()
+    };
+    write_policy_file(config.paths.server_policy_path(), &saved).expect("save the server policy");
+    config.write_owned_loader();
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("load the server host table");
+    let server = table_json(&nft, "infraternal_host");
+    let agent = Policy {
+        admin_rules: vec!["lo,*,tcp,8675".parse().expect("valid rule")],
+        ..Policy::default()
+    };
+    write_policy_file(config.paths.agent_policy_path(), &agent).expect("save the agent policy");
+    apply_from_config_at(&config.paths, Some(&nft), Some(&config.systemctl))
+        .expect("load both roles");
+    assert_ne!(
+        accept_rules(&table_json(&nft, "infraternal_host")),
+        accept_rules(&server)
+    );
+
+    rollback_agent_policy(&config.paths, true, Some(&nft)).expect("restore the server rules");
+    assert!(!config.paths.agent_policy_path().exists());
+    assert!(config.paths.server_policy_path().is_file());
+    assert!(config.paths.unit_path().is_file());
+    assert!(config.paths.enabled_path().is_symlink());
+    let restored = table_json(&nft, "infraternal_host");
+    assert_eq!(
+        input_chain(&restored)["policy"],
+        input_chain(&server)["policy"]
+    );
+    assert_eq!(accept_rules(&restored), accept_rules(&server));
 }
 
 /// Repeating a clear after removal succeeds without changing unrelated nft state.

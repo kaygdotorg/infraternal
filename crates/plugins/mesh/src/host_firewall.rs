@@ -1282,7 +1282,13 @@ pub fn rollback_agent_policy(
         if let Some(server) = read_policy_file(paths.server_policy_path())? {
             apply_roles(Some(server), None, nft_path)?;
         } else {
-            remove_host_table(nft_path)?;
+            match remove_host_table(nft_path) {
+                Ok(_) => {}
+                // No loader can apply a new table without nft. Keep unwinding the install.
+                Err(PolicyError::TableRemovalFailed { source, .. })
+                    if matches!(*source, PolicyError::NftMissing { .. }) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     remove_policy_file(agent)
