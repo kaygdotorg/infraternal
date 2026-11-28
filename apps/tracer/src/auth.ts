@@ -13,7 +13,8 @@ export interface AuthStart {
   options: { publicKey: Record<string, unknown> };
 }
 
-interface AuthSession {
+/** The signed-in browser identity and its optional layout-session binding. */
+export interface AuthSession {
   session_incarnation?: string;
   user_id: string;
   username: string;
@@ -47,12 +48,37 @@ interface CredentialOutputs extends Record<string, unknown> {
   prf?: PrfOutputs;
 }
 
-/** Carries only a safe status message and HTTP code; response bodies may hold secrets. */
+/** Carries safe guidance, the HTTP code and an optional retry deadline. */
 export class AuthError extends Error {
-  constructor(message: string, readonly status?: number) {
+  /** Capture the safe error details supplied by the auth adapter. */
+  constructor(message: string, readonly status?: number, readonly retryAt?: number) {
     super(message);
     this.name = "AuthError";
   }
+}
+
+/** Read Retry-After as seconds or a date, with a minute's pause for older or incomplete responses. */
+function authRetryAt(header: string | null): number {
+  const now = Date.now();
+  const deadline = header && /^\d+$/.test(header) ? now + Number(header) * 1000 : Date.parse(header ?? "");
+  return Number.isSafeInteger(deadline) ? Math.max(now + 1000, deadline) : now + 60_000;
+}
+
+/** Keep the cooldown text current and retry when the server's deadline passes. */
+export function countDownToRetry(label: HTMLElement, retryAt: number, retry: () => void): void {
+  const tick = (): void => {
+    if (!label.isConnected) return;
+    const remaining = retryAt - Date.now();
+    if (remaining <= 0) {
+      label.textContent = "Reconnecting…";
+      retry();
+      return;
+    }
+    const seconds = Math.ceil(remaining / 1000);
+    label.textContent = seconds === 1 ? "Trying again in 1 second." : `Trying again in ${seconds} seconds.`;
+    window.setTimeout(tick, remaining % 1000 || 1000);
+  };
+  tick();
 }
 
 /** Public first-run state and its matching local setup-token command. */
@@ -513,7 +539,8 @@ async function post<Result = unknown>(action: string, body: unknown, headers: Re
       : action === "setup-start" && response.status === 409 ? "That username is already in use. Choose another username."
       : action === "login-finish" ? "This passkey didn't match your account. Try your registered passkey."
       : "Couldn't complete sign-in. Check your passkey or reload the page.";
-    throw new AuthError(message, response.status);
+    throw new AuthError(message, response.status,
+      response.status === 429 ? authRetryAt(response.headers.get("Retry-After")) : undefined);
   }
   if (response.status === 204) return undefined as Result;
   try {

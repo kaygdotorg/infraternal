@@ -89,6 +89,9 @@ const SQL_RENEW: &str = "UPDATE sessions SET expires=unixepoch()+? WHERE token_h
 /// A live row's cookie ordering and deadline. Binds: token hash, now.
 const SQL_COOKIE_STATE: &str =
     "SELECT login_sequence,expires FROM sessions WHERE token_hash=? AND expires>?";
+/// The indexed admission check requires a live, fully unlocked browser session.
+const SQL_ADMISSION_SESSION: &str =
+    "SELECT 1 FROM sessions WHERE token_hash=? AND unlocked=1 AND expires>?";
 /// A socket's live deadline. Binds: token hash, user, now.
 const SQL_LIVE_EXPIRY: &str =
     "SELECT expires FROM sessions WHERE token_hash=? AND user_id=? AND unlocked=1 AND expires>?";
@@ -448,6 +451,36 @@ impl Auth {
             login_sequence: row.get("login_sequence"),
             expires: row.get("expires"),
         }))
+    }
+
+    /// Return a session's budget key only while its cookie has live authority.
+    /// This indexed read leaves expiry, pending login state and recovery untouched.
+    pub(crate) async fn admission_session(
+        &self,
+        token: &str,
+        now: i64,
+        hold: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Option<String>> {
+        let token_hash = hash(token);
+        let live: Option<i64> = if let Some(db) = &self.db {
+            let token_hash = token_hash.clone();
+            db.read(move |tx| {
+                let _hold = &hold;
+                tx.prepare_cached(SQL_ADMISSION_SESSION)?
+                    .query_row(params![token_hash, now], |row| row.get(0))
+                    .optional()
+                    .map_err(infraternal_db::Error::from)
+            })
+            .await?
+        } else {
+            let _hold = hold;
+            sqlx::query_scalar(SQL_ADMISSION_SESSION)
+                .bind(&token_hash)
+                .bind(now)
+                .fetch_optional(&self.pool)
+                .await?
+        };
+        Ok(live.map(|_| token_hash))
     }
 
     /// Activate only a still-live pending cookie after the browser confirms successful unwrap.

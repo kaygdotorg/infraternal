@@ -12,7 +12,7 @@ const NOW: i64 = 1_800_000_000;
 /// The 30-day sliding session lifetime.
 const SESSION: i64 = 30 * 86_400;
 
-/// Call the HTTP adapter as a browser on loopback would, without an invitation issuer.
+/// Call the standalone HTTP adapter as a browser on loopback would.
 async fn run(
     auth: &Auth,
     action: &str,
@@ -25,6 +25,7 @@ async fn run(
         action,
         headers,
         std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        false,
         json!({}),
     )
     .await

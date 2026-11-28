@@ -19,9 +19,13 @@ worker.addEventListener("message", (event) => {
   const value: unknown = event.data;
   if (!value || typeof value !== "object" || !("type" in value) || value.type !== "cache-drawing-assets" || !("paths" in value) || !Array.isArray(value.paths)) return;
   const paths = value.paths.filter((p): p is string => typeof p === "string").map(staticUrl).filter((u): u is URL => Boolean(u));
+  // A controlled navigation already caches the document in the fetch handler.
+  const warmNavigation = !("warmNavigation" in value) || value.warmNavigation !== false;
   event.waitUntil((async () => {
     const cache = await caches.open(cacheName);
-    for (const path of ["/", ...new Set(paths.map((u) => u.pathname))]) {
+    const targets = new Set(warmNavigation ? ["/"] : []);
+    for (const url of paths) targets.add(url.pathname);
+    for (const path of targets) {
       try { const response = await fetch(path, { credentials: "omit" }); if (response.ok) await cache.put(path, response); } catch { /* keep the prior public asset while offline */ }
     }
     const keys = await cache.keys();

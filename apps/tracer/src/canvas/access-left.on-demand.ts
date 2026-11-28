@@ -115,6 +115,7 @@ export function createAccessReportInbox(core: CoreScreen, service: AccessReportS
   let stopped = false;
   let disposed = false;
   let running: Promise<void> | undefined;
+  let first: number | undefined;
   const keyOf = (entry: AccessReportEntry): string => `${entry.host_id}:${entry.person_id}`;
   const publish = (): void => {
     const items = entries.map((entry) => accessReportItem(entry, dismiss));
@@ -128,6 +129,8 @@ export function createAccessReportInbox(core: CoreScreen, service: AccessReportS
     void service.dismiss(entry.host_id, entry.person_id).catch(() => { core.toast.show({ message: "Couldn't dismiss this report. Check your connection and try again.", tone: "error", duration: 6000 }); void refresh(); });
   };
   const refresh = (): Promise<void> => running ??= (async () => {
+    window.clearTimeout(first);
+    first = undefined;
     if (stopped || disposed) return;
     try {
       const answer = await service.list();
@@ -146,10 +149,13 @@ export function createAccessReportInbox(core: CoreScreen, service: AccessReportS
       if (error instanceof AccessReportError && (error.status === 403 || error.status === 401)) { stopped = true; entries = []; publish(); }
     }
   })().finally(() => { running = undefined; });
-  const onVisible = (): void => { if (document.visibilityState === "visible") void refresh(); };
+  // Initial host snapshots and foreground events share the scheduled first read.
+  const onVisible = (): void => {
+    if (first === undefined && document.visibilityState === "visible") void refresh();
+  };
+  first = window.setTimeout(() => { void refresh(); }, FIRST_MS);
   document.addEventListener("visibilitychange", onVisible);
-  const offHosts = onHostsChange?.(() => { void refresh(); });
-  const first = window.setTimeout(() => { void refresh(); }, FIRST_MS);
+  const offHosts = onHostsChange?.(() => { if (first === undefined) void refresh(); });
   const poll = window.setInterval(() => { if (document.visibilityState === "visible") void refresh(); }, POLL_MS);
   return {
     refresh,

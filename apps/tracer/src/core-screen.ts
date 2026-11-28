@@ -1299,12 +1299,17 @@ export function mountCoreScreen(app: HTMLElement, options: CoreScreenOptions): C
   let onDevice = hasDeviceLayout();
   const prefs = loadPrefs();
   const accountPrefs: Record<"canvas" | "keys", { order: string[]; hidden: string[] }> = { canvas: { order: [], hidden: [] }, keys: { order: [], hidden: [] } };
-  void fetch("/__mock/account/toolbar", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : undefined)).then((data: { layout?: typeof accountPrefs | null } | undefined) => {
-    if (!data?.layout) return;
-    for (const id of ["canvas", "keys"] as const) if (data.layout[id]) accountPrefs[id] = data.layout[id];
-    if (!onDevice) { for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id]; applyPrefs(true); }
-  }).catch(() => undefined);
-  const saveAccount = (): void => { void fetch("/__mock/account/toolbar", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountPrefs) }).catch(() => undefined); };
+  const mockToolbar = __CLUSTERS_PREVIEW__ && options.mockMode;
+  if (mockToolbar) {
+    void fetch("/__mock/account/toolbar", { credentials: "same-origin" }).then((r) => (r.ok ? r.json() : undefined)).then((data: { layout?: typeof accountPrefs | null } | undefined) => {
+      if (!data?.layout) return;
+      for (const id of ["canvas", "keys"] as const) if (data.layout[id]) accountPrefs[id] = data.layout[id];
+      if (!onDevice) { for (const id of ["canvas", "keys"] as const) prefs[id] = accountPrefs[id]; applyPrefs(true); }
+    }).catch(() => undefined);
+  }
+  const saveAccount = (): void => {
+    if (mockToolbar) void fetch("/__mock/account/toolbar", { method: "PUT", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(accountPrefs) }).catch(() => undefined);
+  };
   const rowEl = (id: RowId): HTMLElement => (id === "canvas" ? canvasRowEl : keysRowEl);
   const controlId = (b: HTMLElement): string => b.dataset.cv ?? b.id;
   const controls = (id: RowId): HTMLButtonElement[] => [...rowEl(id).querySelectorAll<HTMLButtonElement>(":scope > button:not(.dpad)")];

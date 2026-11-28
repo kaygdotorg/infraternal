@@ -9,6 +9,67 @@ test("first run, passkey login, terminal resume, and the latency probe", async (
   await terminalScenario(page, info);
 });
 
+/** A session probe refused at startup shows a countdown and restores the layout without a click. */
+test("a throttled layout startup counts down and retries", async ({ page }, info) => {
+  await page.setViewportSize({ width: 393, height: 852 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.clock.install();
+  await page.clock.pauseAt(Date.now() + 200);
+  let sessionRequests = 0;
+  await page.route("**/auth/session", async (route) => {
+    sessionRequests++;
+    if (sessionRequests === 1) {
+      await route.fulfill({ status: 429, headers: { "Retry-After": "3" }, json: {} });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto("/?mock=1&proto=product&fresh=1");
+  await expect(page.getByRole("heading", { name: "Connect to load your layout" })).toBeVisible();
+  await expect(page.getByText("Your layout will load when the connection is ready.")).toBeVisible();
+  const countdown = page.getByRole("timer");
+  await expect(countdown).toHaveText("Trying again in 3 seconds.");
+  await expect(page.getByRole("button", { name: "Try again" })).toHaveCount(0);
+  await page.clock.fastForward(1000);
+  await expect(countdown).toHaveText("Trying again in 2 seconds.");
+  const left = await page.locator("#unavailable-title, #status-error")
+    .evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().left));
+  expect(left).toHaveLength(2);
+  for (const edge of left) expect(Math.abs(edge - left[0]!)).toBeLessThanOrEqual(0.5);
+  const path = info.outputPath("layout-retry-phone.png");
+  await page.screenshot({ path, animations: "disabled" });
+  await info.attach("layout-retry-phone", { path, contentType: "image/png" });
+  expect(sessionRequests).toBe(1);
+  await page.clock.fastForward(2000);
+  await page.clock.resume();
+  await expect(page.locator(".cl-viewport")).toBeVisible();
+  expect(sessionRequests).toBe(2);
+});
+
+/** The first visit seeds the public offline shell and a worker-controlled reload only trims it. */
+test("a controlled layout reload skips duplicate offline warming", async ({ page }) => {
+  await page.addInitScript(() => {
+    const post = ServiceWorker.prototype.postMessage;
+    ServiceWorker.prototype.postMessage = function (this: ServiceWorker, message: unknown, ...args: unknown[]) {
+      if (message && typeof message === "object" && "type" in message && message.type === "cache-drawing-assets"
+        && "paths" in message && Array.isArray(message.paths)) {
+        document.documentElement.dataset.offlineWarm = "warmNavigation" in message && message.warmNavigation === false
+          ? `trim-${message.paths.length}` : "seed";
+      }
+      return Reflect.apply(post, this, [message, ...args]);
+    };
+  });
+  await page.goto("/?mock=1&proto=product&fresh=1");
+  await expect(page.locator(".cl-viewport")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-offline-warm", "seed");
+  await page.waitForFunction(async () => Boolean(
+    navigator.serviceWorker.controller && await (await caches.open("infraternal-drawing-v1")).match("/"),
+  ));
+  await page.reload();
+  await expect(page.locator(".cl-viewport")).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-offline-warm", "trim-0");
+});
+
 /** Access failures must not expose a guessed form or browser exception details. */
 test("status failure, invalid setup token, and cancelled passkey have distinct guidance", async ({ page }, info) => {
   await page.context().request.post("/__mock/reset");

@@ -983,11 +983,7 @@ async fn build_router_core(
     } else {
         app
     };
-    let admission = SourceAdmission {
-        behind_proxy: config.behind_proxy,
-        trusted_proxies: config.trusted_proxies,
-        buckets: Arc::default(),
-    };
+    let admission = SourceAdmission::new(auth.clone(), config.behind_proxy, config.trusted_proxies);
     Ok((
         app.layer(from_fn_with_state(admission, source_admission)),
         setup_token,
@@ -1228,12 +1224,38 @@ pub(crate) async fn server_healthy(pool: &SqlitePool) -> bool {
 #[derive(Clone, Copy)]
 pub(crate) struct ClientAddress(pub(crate) IpAddr);
 
-/// Per-source auth admission trusts forwarding data only from configured peers.
+/// Auth admission separates verified sessions from public traffic and trusts only configured proxies.
 #[derive(Clone)]
 struct SourceAdmission {
+    auth: Auth,
     behind_proxy: bool,
     trusted_proxies: Vec<ProxyNetwork>,
     buckets: Arc<Mutex<HashMap<(IpAddr, bool), SourceBucket>>>,
+    sessions: Arc<Mutex<HashMap<(String, BrowserSessionLane), SourceBucket>>>,
+    session_reads: Arc<Semaphore>,
+}
+
+/// Machine and device approvals have their own capacity, independent of layout traffic.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum BrowserSessionLane {
+    /// Layout startup and other signed-in browser requests.
+    Browser,
+    /// Read or approve a pending device request.
+    Approval,
+}
+
+impl SourceAdmission {
+    /// A runtime and its router clones share all admission budgets.
+    fn new(auth: Auth, behind_proxy: bool, trusted_proxies: Vec<ProxyNetwork>) -> Self {
+        Self {
+            auth,
+            behind_proxy,
+            trusted_proxies,
+            buckets: Arc::default(),
+            sessions: Arc::default(),
+            session_reads: Arc::new(Semaphore::new(128)),
+        }
+    }
 }
 
 pub(crate) struct SourceBucket {
@@ -1241,6 +1263,7 @@ pub(crate) struct SourceBucket {
     requests: u8,
 }
 
+/// Resolve the trusted source and charge auth requests before their bodies are read.
 async fn source_admission(
     State(policy): State<SourceAdmission>,
     mut request: Request<axum::body::Body>,
@@ -1292,11 +1315,36 @@ async fn source_admission(
     let Ok(now) = unix_seconds() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    // Every auth caller is accounted to its network, never its address: an
-    // IPv6 caller rotating hosts inside one /64 must neither reset its budget
-    // nor fill the shared map and refuse everyone else (#263, J134 P2-1).
-    // Device-code requests have no process-wide ceiling, so this per-network
-    // budget is their only request limit.
+    if let Some((token, lane)) = browser_admission_token(&policy.auth, &request) {
+        // Cookie syntax grants no capacity. Bound concurrent indexed reads
+        // even when the caller sends a new invalid cookie on every request.
+        let Ok(permit) = policy.session_reads.clone().try_acquire_owned() else {
+            return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")]).into_response();
+        };
+        match policy.auth.admission_session(token, now, permit).await {
+            Ok(Some(session)) => {
+                if let Err(response) = admit_temporal_request(
+                    &mut *policy.sessions.lock().await,
+                    (session, lane),
+                    now,
+                    match lane {
+                        BrowserSessionLane::Browser => BROWSER_SESSION_PER_MINUTE,
+                        BrowserSessionLane::Approval => BROWSER_APPROVAL_PER_MINUTE,
+                    },
+                ) {
+                    return response.into_response();
+                }
+                request
+                    .extensions_mut()
+                    .insert(auth::AdmittedBrowserSession);
+                return next.run(request).await;
+            }
+            Ok(None) => {}
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        }
+    }
+    // An IPv6 caller rotating hosts inside one /64 shares one public budget.
+    // Device-code requests use a separate budget because polling has its own capability.
     let mut buckets = policy.buckets.lock().await;
     if let Err(response) = admit_temporal_request(
         &mut buckets,
@@ -1308,6 +1356,55 @@ async fn source_admission(
     }
     drop(buckets);
     next.run(request).await
+}
+
+/// Two startup reads per reload, plus headroom for foreground checks and several open tabs.
+const BROWSER_SESSION_PER_MINUTE: u8 = 240;
+
+/// Capacity for twenty complete inspect/start/finish sequences per browser session.
+const BROWSER_APPROVAL_PER_MINUTE: u8 = 60;
+
+/// Select the cookie only for same-origin browser requests whose capacity belongs to
+/// a signed-in session. Public setup, login, recovery and device-code ceremonies
+/// keep their source limit, even if a caller happens to carry a valid cookie.
+fn browser_admission_token<'a>(
+    auth: &Auth,
+    request: &'a Request<axum::body::Body>,
+) -> Option<(&'a str, BrowserSessionLane)> {
+    if request.method() != axum::http::Method::POST
+        || request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            != Some(auth.origin())
+    {
+        return None;
+    }
+    let lane = match request.uri().path() {
+        "/auth/device-inspect" | "/auth/device-approve-start" | "/auth/device-approve-finish" => {
+            BrowserSessionLane::Approval
+        }
+        "/auth/status"
+        | "/auth/session"
+        | "/auth/account-summary"
+        | "/auth/add-start"
+        | "/auth/wraps"
+        | "/auth/recovery-rotate"
+        | "/auth/recovery-cancel"
+        | "/auth/security-settings"
+        | "/auth/security-settings-update"
+        | "/auth/api-list"
+        | "/auth/api-revoke" => BrowserSessionLane::Browser,
+        _ => return None,
+    };
+    auth::cookies::session(request.headers()).map(|cookie| (cookie.token, lane))
+}
+
+/// Mount production source admission around the auth router for in-process HTTP tests.
+#[cfg(test)]
+pub(crate) fn test_auth_admission_router(auth: Auth) -> Router {
+    let admission = SourceAdmission::new(auth.clone(), false, Vec::new());
+    auth::router(auth).layer(from_fn_with_state(admission, source_admission))
 }
 
 /// The network an auth caller is accounted to: the IPv4 address,
@@ -2974,13 +3071,14 @@ mod reviewer_admission {
             .unwrap()
             .status()
     }
+    /// Verify all recovery routes share the source budget and ignore untrusted forwarding.
     #[tokio::test]
     async fn reviewer_recovery_source_limit_covers_all_routes_without_forwarding_bypass() {
-        let policy = SourceAdmission {
-            behind_proxy: false,
-            trusted_proxies: Vec::new(),
-            buckets: Arc::default(),
-        };
+        let policy = SourceAdmission::new(
+            super::device_code_admission_tests::auth().await,
+            false,
+            Vec::new(),
+        );
         let app = Router::new()
             .route(
                 "/auth/{action}",
@@ -3059,21 +3157,28 @@ mod device_code_admission_tests {
         )
     }
 
-    async fn app() -> Router {
+    /// Create an isolated auth store for the production admission middleware.
+    pub(super) async fn auth() -> Auth {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        let auth = Auth::new(pool, "auth.example.test", "https://auth.example.test")
+        Auth::new(pool, "auth.example.test", "https://auth.example.test")
             .await
-            .unwrap();
-        let admission = SourceAdmission {
-            behind_proxy: true,
-            trusted_proxies: vec!["192.0.2.0/24".parse().unwrap()],
-            buckets: Arc::default(),
-        };
+            .unwrap()
+    }
+
+    /// Mount the same auth router and trusted-proxy admission the runtime uses.
+    fn app_with_auth(auth: Auth) -> Router {
+        let admission =
+            SourceAdmission::new(auth.clone(), true, vec!["192.0.2.0/24".parse().unwrap()]);
         auth::router(auth).layer(from_fn_with_state(admission, source_admission))
+    }
+
+    /// A fresh runtime for independent source-limit tests.
+    async fn app() -> Router {
+        app_with_auth(auth().await)
     }
 
     fn join_start() -> Value {
@@ -3194,21 +3299,112 @@ mod device_code_admission_tests {
 
     /// A browser call from `source` with the app's own Origin.
     async fn browser(app: &Router, action: &str, source: &str) -> StatusCode {
+        browser_with_cookie(app, action, source, None)
+            .await
+            .status()
+    }
+
+    /// Send a browser auth POST from the given source, optionally with its selected session cookie.
+    async fn browser_with_cookie(
+        app: &Router,
+        action: &str,
+        source: &str,
+        token: Option<&str>,
+    ) -> Response {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/auth/{action}"))
+            .header("content-type", "application/json")
+            .header("origin", "https://auth.example.test")
+            .header("x-forwarded-for", source)
+            .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))));
+        let request = match token {
+            Some(token) => request.header(header::COOKIE, format!("__Host-infraternal={token}")),
+            None => request,
+        };
         app.clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(format!("/auth/{action}"))
-                    .header("content-type", "application/json")
-                    .header("origin", "https://auth.example.test")
-                    .header("x-forwarded-for", source)
-                    .extension(ConnectInfo(SocketAddr::from(([192, 0, 2, 1], 5000))))
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from("{}")).unwrap())
             .await
             .unwrap()
-            .status()
+    }
+
+    /// Reproduce both startup POSTs and an extra foreground check for each reload.
+    #[tokio::test]
+    async fn signed_in_reload_traffic_uses_a_separate_budget_per_session() {
+        let auth = auth().await;
+        let now = unix_seconds().unwrap();
+        let first = "A".repeat(43);
+        let second = "B".repeat(43);
+        let pending = "C".repeat(43);
+        let expired = "D".repeat(43);
+        sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES ('owner','owner',1,'unused','owner','Owner')")
+            .execute(auth.pool())
+            .await
+            .unwrap();
+        for (token, unlocked, expires) in [
+            (&first, true, now + 30 * 86_400),
+            (&second, true, now + 30 * 86_400),
+            (&pending, false, now + 300),
+            (&expired, true, now - 1),
+        ] {
+            sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES (?,'owner','test',?,?,?)")
+                .bind(auth::hash(token))
+                .bind(expires)
+                .bind(now)
+                .bind(unlocked)
+                .execute(auth.pool())
+                .await
+                .unwrap();
+        }
+        let app = app_with_auth(auth);
+        let source = "203.0.113.7";
+        for _ in 0..30 {
+            assert_eq!(
+                browser(&app, "session", source).await,
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for token in [&pending, &expired, &"E".repeat(43)] {
+            let response = browser_with_cookie(&app, "status", source, Some(token)).await;
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        for _ in 0..20 {
+            for action in ["status", "session", "session"] {
+                let response = browser_with_cookie(&app, action, source, Some(&first)).await;
+                assert_eq!(response.status(), StatusCode::OK, "{action}");
+            }
+        }
+        for _ in 60..BROWSER_SESSION_PER_MINUTE {
+            let response = browser_with_cookie(&app, "status", source, Some(&first)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = browser_with_cookie(&app, "session", "203.0.113.8", Some(&first)).await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers()[header::RETRY_AFTER], "60");
+        let independent = browser_with_cookie(&app, "session", source, Some(&second)).await;
+        assert_eq!(independent.status(), StatusCode::OK);
+        println!(
+            "20 reload pairs + 20 foreground checks returned 200; session charged 240, refused the next request across an address change, and left a second session at the original address admitted"
+        );
+    }
+
+    /// Missing or fabricated cookies share the original 30-request source budget.
+    #[tokio::test]
+    async fn public_reload_traffic_still_shares_the_tight_source_budget() {
+        let app = app().await;
+        let source = "203.0.113.7";
+        for attempt in 0..30 {
+            let fake = format!("{attempt:043}");
+            let token = (attempt % 2 == 0).then_some(fake.as_str());
+            let response = browser_with_cookie(&app, "status", source, token).await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let refused = browser_with_cookie(&app, "status", source, Some(&"9".repeat(43))).await;
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(refused.headers()[header::RETRY_AFTER], "60");
+        println!(
+            "30 public requests admitted, including rotating fake cookies; request 31 returned 429 with Retry-After 60"
+        );
     }
 
     #[tokio::test]
