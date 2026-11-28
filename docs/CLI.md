@@ -52,6 +52,7 @@ flags and wording. This is the map:
 | `remove-host <HOST>` | remove a host (needs `--server`) |
 | `sessions` | saved-session automation on this machine (below) |
 | `up <server>` | join this Linux machine or Mac to a server |
+| `uninstall` | review and remove the local install, with `--system` for system installs in scripts |
 | `agent join`, `agent run` | enrol this machine and keep the infraternal agent connected |
 | `mesh status`, `mesh peers`, `mesh up`, `mesh down` | this machine's Mesh node |
 | `publish`, `unpublish` | expose a local service through the node proxy |

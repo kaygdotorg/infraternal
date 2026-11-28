@@ -5,6 +5,10 @@
 #[path = "up_install.rs"]
 mod install;
 
+#[cfg(target_os = "linux")]
+/// Find and remove Linux installations published by `up`.
+pub(crate) use install::uninstall as linux_uninstall;
+
 /// Install the Mac system service after device approval.
 #[cfg(target_os = "macos")]
 #[path = "up_macos.rs"]

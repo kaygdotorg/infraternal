@@ -36,6 +36,10 @@ fn removes_the_files_infraternal_wrote() {
     )
     .unwrap();
     std::fs::write(at(&root, SOCKET_PATH), "").unwrap();
+    assert_eq!(
+        review_client_config(&root).unwrap(),
+        [at(&root, CONFIG_PATH), at(&root, KNOWN_HOSTS_PATH)]
+    );
     remove_client_files(&root).unwrap();
     assert!(!at(&root, CONFIG_PATH).exists());
     assert!(!at(&root, KNOWN_HOSTS_PATH).exists());
@@ -53,6 +57,7 @@ fn leaves_files_it_did_not_write() {
         "example.com ssh-ed25519 AAAA\n",
     )
     .unwrap();
+    assert!(review_client_config(&root).unwrap().is_empty());
     remove_client_files(&root).unwrap();
     assert!(at(&root, CONFIG_PATH).exists());
     assert!(at(&root, KNOWN_HOSTS_PATH).exists());

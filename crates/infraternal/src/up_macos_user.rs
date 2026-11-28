@@ -106,6 +106,11 @@ impl Paths {
         self.base.join(macos_user_mode::USER_RECEIPT)
     }
 
+    /// The private staging namespace for a stopped user installation.
+    fn removal_directory(&self) -> PathBuf {
+        self.base.with_file_name(".infraternal-user-removal")
+    }
+
     /// The `PATH` line `up` prints, since a per-user Mac install adds no link (D395).
     fn path_line(&self) -> String {
         format!(
@@ -958,7 +963,10 @@ pub(crate) fn uninstall_if_requested() -> Option<ExitCode> {
         }
     }
     Some(match uninstall(&paths, uid, host, false) {
-        Ok(()) => {
+        Ok(left) => {
+            for line in left {
+                eprintln!("{line}");
+            }
             println!(
                 "infraternal: user mode removed; the mesh route, DNS entry and helper are gone."
             );
@@ -983,6 +991,10 @@ pub(crate) struct UninstallReview {
     pub paths: Vec<PathBuf>,
     /// Whether the helper serves this account.
     pub helper: bool,
+    /// Existing logs that could not safely be attributed to this account.
+    pub foreign_logs: Option<PathBuf>,
+    /// A renamed installation has already stopped and released its shared paths.
+    pub retired: Option<PathBuf>,
     /// Shell configuration line displayed by `up` for manual setup.
     pub path_line: String,
 }
@@ -990,21 +1002,96 @@ pub(crate) struct UninstallReview {
 /// Discover the user job from the same `LaunchAgent` paths as status.
 pub(crate) fn review_uninstall(uid: u32) -> io::Result<UninstallReview> {
     let paths = Paths::for_uid(uid)?;
-    let host = read_uninstall_receipt(&paths, uid)?;
+    let host = match read_uninstall_receipt(&paths, uid) {
+        Ok(host) => host,
+        Err(error) if error.kind() == ErrorKind::NotFound && !exists(&paths.base)? => {
+            let (host, retired) = review_retired_user(&paths, uid)?;
+            return Ok(UninstallReview {
+                host,
+                base: paths.base.clone(),
+                data: paths.data.clone(),
+                paths: vec![retired.clone()],
+                helper: false,
+                foreign_logs: None,
+                retired: Some(retired),
+                path_line: paths.path_line(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let mut targets = checked_uninstall_paths(&paths, uid)?;
     let helper = macos_helper::registration_for_current_user()?;
     targets.push(paths.base.clone());
-    if exists(&paths.logs)? {
-        targets.push(paths.logs.clone());
-    }
+    let foreign_logs = match checked_logs(&paths.logs, uid) {
+        Ok(true) => {
+            targets.push(paths.logs.clone());
+            None
+        }
+        Ok(false) => None,
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => Some(paths.logs.clone()),
+        Err(error) => return Err(error),
+    };
     Ok(UninstallReview {
         host,
         base: paths.base.clone(),
         data: paths.data.clone(),
         paths: targets,
         helper,
+        foreign_logs,
+        retired: None,
         path_line: paths.path_line(),
     })
+}
+
+/// Find the one protected host directory published by the final atomic rename.
+fn review_retired_user(paths: &Paths, uid: u32) -> io::Result<(String, PathBuf)> {
+    let directory = paths.removal_directory();
+    if !checked_logs(&directory, uid)? {
+        return Err(ErrorKind::NotFound.into());
+    }
+    let mut found = None;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if let Some(name) = name
+            .to_str()
+            .filter(|name| macos_user_mode::receipt_names_host(&format!("{name}\n"), name))
+        {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            if found.is_some()
+                || !metadata.is_dir()
+                || metadata.uid() != uid
+                || metadata.mode() & 0o077 != 0
+            {
+                return Err(ErrorKind::PermissionDenied.into());
+            }
+            found = Some((name.to_owned(), entry.path()));
+        }
+    }
+    found.ok_or_else(|| ErrorKind::NotFound.into())
+}
+
+/// The private log directory and its ancestors from the password-database home
+/// must all be real directories under the same account.
+fn checked_logs(logs: &Path, uid: u32) -> io::Result<bool> {
+    let mut chain = logs.ancestors().take(4).collect::<Vec<_>>();
+    if chain.len() != 4 {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    while let Some(path) = chain.pop() {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_dir()
+            || metadata.uid() != uid
+            || metadata.mode() & if path == logs { 0o077 } else { 0o022 } != 0
+        {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+    }
+    Ok(true)
 }
 
 /// Read the receipt only from a private, real directory owned by the caller.
@@ -1067,12 +1154,23 @@ fn checked_uninstall_paths(paths: &Paths, uid: u32) -> io::Result<Vec<PathBuf>> 
 }
 
 /// Remove the reviewed user install as its owner, with an optional enrollment backup.
-pub(crate) fn remove_user_install(uid: u32, host: &str, keep_state: bool) -> io::Result<()> {
+pub(crate) fn remove_user_install(
+    uid: u32,
+    host: &str,
+    keep_state: bool,
+) -> io::Result<Vec<String>> {
     uninstall(&Paths::for_uid(uid)?, uid, host, keep_state)
 }
 
 /// Stop the agent, remove the helper's resolver files and registration, then this person's files.
-fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Result<()> {
+fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Result<Vec<String>> {
+    if !exists(&paths.base)? {
+        let (recorded, retired) = review_retired_user(paths, uid)?;
+        if recorded != host {
+            return Err(ErrorKind::PermissionDenied.into());
+        }
+        return delete_retired_user(&retired, &paths.removal_directory());
+    }
     if read_uninstall_receipt(paths, uid)? != host {
         return Err(io::Error::new(
             ErrorKind::PermissionDenied,
@@ -1083,7 +1181,7 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
     let backup =
         keep_state.then(|| infraternal_plugin_api::uninstall_state::destination(&paths.base, host));
     if let Some(path) = &backup {
-        infraternal_plugin_api::uninstall_state::check_destination(path)?;
+        infraternal_plugin_api::uninstall_state::check_destination(&paths.data, path, uid)?;
     }
     stop_agent(uid)?;
     // The old-name agent, if this Mac still has it: unload only; its file goes below.
@@ -1119,14 +1217,47 @@ fn uninstall(paths: &Paths, uid: u32, host: &str, keep_state: bool) -> io::Resul
             Err(error) => return Err(error),
         }
     }
-    for directory in [&paths.logs, &paths.base] {
-        match fs::remove_dir_all(directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+    let mut left = Vec::new();
+    match checked_logs(&paths.logs, uid) {
+        Ok(true) => fs::remove_dir_all(&paths.logs)?,
+        Ok(false) => {}
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            left.push(format!(
+                "Left {} because infraternal could not verify its ownership.",
+                paths.logs.display()
+            ));
         }
+        Err(error) => return Err(error),
     }
-    Ok(())
+    // Move the full install first. A retry can find the renamed directory by
+    // host even if the receipt was already removed by its directory walk.
+    let directory = paths.removal_directory();
+    match fs::DirBuilder::new().mode(0o700).create(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let retired = directory.join(host);
+    if !checked_logs(&directory, uid)? || exists(&retired)? {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    fs::rename(&paths.base, &retired)?;
+    fs::File::open(&directory)?.sync_all()?;
+    fs::File::open(paths.base.parent().ok_or(ErrorKind::InvalidInput)?)?.sync_all()?;
+    left.extend(delete_retired_user(&retired, &directory)?);
+    Ok(left)
+}
+
+/// After unlinking shared paths, all remaining deletions stay inside the renamed directory.
+fn delete_retired_user(retired: &Path, directory: &Path) -> io::Result<Vec<String>> {
+    fs::remove_dir_all(retired)?;
+    match fs::remove_dir(directory) {
+        Ok(()) => Ok(Vec::new()),
+        Err(error) if error.kind() == ErrorKind::DirectoryNotEmpty => Ok(vec![
+            "Left other files in the user removal directory.".into(),
+        ]),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -1134,6 +1265,31 @@ mod uninstall_tests {
     //! Validate the same private receipt and LaunchAgent arguments used for removal.
     #![allow(clippy::unwrap_used)]
     use super::*;
+
+    /// An owned log directory below a replaced parent never grants removal authority.
+    #[test]
+    fn uninstall_logs_refuse_a_symlinked_ancestor() {
+        let root = env::temp_dir().join(format!("iu-{}", uuid::Uuid::new_v4().simple()));
+        let home = root.join("home");
+        let directory = root.join("foreign/infraternal");
+        fs::create_dir_all(&directory).unwrap();
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(home.join("Library"))
+            .unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let uid = fs::metadata(&home).unwrap().uid();
+        std::os::unix::fs::symlink(root.join("foreign"), home.join("Library/Logs")).unwrap();
+        assert_eq!(
+            checked_logs(&home.join("Library/Logs/infraternal"), uid)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert!(directory.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     /// A user install is selected by its receipt and exact service paths. A foreign plist is refused.
     #[test]
@@ -1164,6 +1320,10 @@ mod uninstall_tests {
             checked_uninstall_paths(&paths, uid).unwrap(),
             [paths.launch_agent.clone()]
         );
+        fs::remove_file(&paths.launch_agent).unwrap();
+        assert!(checked_uninstall_paths(&paths, uid).unwrap().is_empty());
+        assert_eq!(read_uninstall_receipt(&paths, uid).unwrap(), host);
+        write_new(&paths.launch_agent, plist.as_bytes(), 0o644).unwrap();
         let foreign = plist.replace("<string>agent</string>", "<string>server</string>");
         write_new(&paths.legacy_launch_agent, foreign.as_bytes(), 0o644).unwrap();
         assert!(checked_uninstall_paths(&paths, uid).is_err());

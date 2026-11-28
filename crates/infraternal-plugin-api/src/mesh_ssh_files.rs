@@ -26,14 +26,62 @@ fn under(root: &Path, path: &str) -> PathBuf {
     root.join(path.trim_start_matches('/'))
 }
 
-/// Remove a file only if its content starts with `prefix`.
-fn remove_if_ours(path: &Path, prefix: &str) -> io::Result<()> {
-    match std::fs::read_to_string(path) {
-        Ok(content) if content.starts_with(prefix) => std::fs::remove_file(path),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+/// The file itself, its ownership and its product marker must all match.
+fn is_ours(root: &Path, path: &Path, prefix: &str, uid: u32) -> io::Result<bool> {
+    use std::{fs, io::Read, os::unix::fs::MetadataExt};
+    let mut ancestors = path
+        .ancestors()
+        .skip(1)
+        .take_while(|parent| *parent != root)
+        .collect::<Vec<_>>();
+    while let Some(parent) = ancestors.pop() {
+        match fs::symlink_metadata(parent) {
+            Ok(metadata)
+                if metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o022 == 0 => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if (opened.dev(), opened.ino()) != (metadata.dev(), metadata.ino()) {
+        return Ok(false);
+    }
+    let mut marker = vec![0; prefix.len()];
+    match file.read_exact(&mut marker) {
+        Ok(()) => Ok(marker == prefix.as_bytes()),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Find the same owned SSH configuration paths that uninstall removes.
+///
+/// # Errors
+/// Returns unexpected filesystem errors encountered when reading either marker.
+pub fn review_client_config(root: &Path) -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata(root)?.uid();
+    let mut files = Vec::new();
+    for (path, prefix) in [
+        (CONFIG_PATH, HEADER),
+        (KNOWN_HOSTS_PATH, "@cert-authority "),
+    ] {
+        let path = under(root, path);
+        if is_ours(root, &path, prefix, uid)? {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// Remove the `ssh_config.d` file and the known-hosts file under `root`, each
@@ -43,8 +91,10 @@ fn remove_if_ours(path: &Path, prefix: &str) -> io::Result<()> {
 /// # Errors
 /// Returns filesystem errors other than a missing file.
 pub fn remove_client_config(root: &Path) -> io::Result<()> {
-    remove_if_ours(&under(root, CONFIG_PATH), HEADER)?;
-    remove_if_ours(&under(root, KNOWN_HOSTS_PATH), "@cert-authority ")
+    for path in review_client_config(root)? {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 /// Remove the mesh SSH client files under `root`.

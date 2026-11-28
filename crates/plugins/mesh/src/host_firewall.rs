@@ -1222,6 +1222,29 @@ pub fn clear_role_from_config_at(
     nft_path: Option<&Path>,
     systemctl_path: Option<&Path>,
 ) -> Result<String, PolicyError> {
+    clear_role(role, paths, nft_path, systemctl_path, true)
+}
+
+/// Retire an agent's input rules and policy. The installer journal owns the
+/// separate decision about the shared systemd loader and its enablement link.
+///
+/// # Errors
+/// Refuses an unsafe policy or a firewall change that cannot finish safely.
+pub fn clear_installed_agent_rules_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    clear_role(PolicyRole::Agent, paths, nft_path, None, false)
+}
+
+/// Reconcile the selected role and optionally reconcile its shared loader.
+fn clear_role(
+    role: PolicyRole,
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+    manage_loader: bool,
+) -> Result<String, PolicyError> {
     let server = read_policy_file(paths.server_policy_path())?;
     let agent = read_policy_file(paths.agent_policy_path())?;
     let (cleared, remaining_server, remaining_agent) = match role {
@@ -1229,7 +1252,11 @@ pub fn clear_role_from_config_at(
         PolicyRole::Agent => (agent, server, None),
     };
     if cleared.is_none() {
-        return apply_from_config_at(paths, nft_path, systemctl_path);
+        return if manage_loader {
+            apply_from_config_at(paths, nft_path, systemctl_path)
+        } else {
+            Ok(String::new())
+        };
     }
 
     let no_remaining_policy = remaining_server.is_none() && remaining_agent.is_none();
@@ -1253,7 +1280,7 @@ pub fn clear_role_from_config_at(
         policy_path.display()
     );
 
-    if no_remaining_policy {
+    if no_remaining_policy && manage_loader {
         report.push_str(&remove_owned_loader(paths, systemctl_path)?);
     }
     Ok(report)

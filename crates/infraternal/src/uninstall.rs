@@ -18,34 +18,43 @@ struct Plan {
     host: Option<String>,
     /// Native installation root, also used to pin the reviewed install across sudo.
     base: PathBuf,
+    /// When removal may outlive the base, bind elevation to its ownership anchor.
+    anchor: Option<PathBuf>,
     /// Private host enrollment, read only by the installation owner.
     data: PathBuf,
     /// Files and resources affected by removal.
     targets: Vec<String>,
     /// Shell changes the installer asked the person to make manually.
     notes: Vec<String>,
+    /// A macOS rename proves the service, enrollment and shared paths are already settled.
+    retired: bool,
+    /// The Linux join journal authorizes different files from SSH bootstrap.
+    #[cfg(target_os = "linux")]
+    linux_up: bool,
 }
 
 impl Plan {
     /// Present a consistent human and JSON review without exposing enrollment material.
     fn preview(&self, keep: bool, sudo: bool) -> CommandResult<Value> {
         let mut targets = self.targets.clone();
-        if keep {
+        if !self.retired && keep {
             targets.push(format!(
                 "Save enrollment from {}",
                 safe_text(&self.data.to_string_lossy())
             ));
-        } else {
+        } else if !self.retired {
             targets.push(format!(
                 "Delete enrollment and keys in {}",
-                self.data.display()
+                safe_text(&self.data.to_string_lossy())
             ));
         }
         let mut body = targets
             .iter()
             .map(|target| format!("  {target}"))
             .collect::<Vec<_>>();
-        body.push("Ask the server to retire this host and end its remote sessions.".into());
+        if !self.retired {
+            body.push("Ask the server to retire this host and end its remote sessions.".into());
+        }
         body.extend(self.notes.iter().cloned());
         if sudo {
             body.push("Administrator access stops the system service and removes its files and network settings.".into());
@@ -60,8 +69,8 @@ impl Plan {
 
     /// Identify the reviewed directory so a replacement cannot be selected after sudo.
     fn identity(&self) -> io::Result<String> {
-        let metadata = fs::symlink_metadata(&self.base)?;
-        if !metadata.is_dir() {
+        let metadata = fs::symlink_metadata(self.anchor.as_ref().unwrap_or(&self.base))?;
+        if !(metadata.is_dir() || self.anchor.is_some() && metadata.is_file()) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         Ok(format!("{}:{}", metadata.dev(), metadata.ino()))
@@ -72,8 +81,30 @@ impl Plan {
 pub(crate) fn run(matches: &clap::ArgMatches, json: bool) -> ExitCode {
     let keep = matches.get_flag("keep_state");
     let yes = matches.get_flag("yes");
-    let plan = match discover(matches.get_flag("system")) {
+    let scripted = yes || json || !io::stdin().is_terminal();
+    let system = matches.get_flag("system");
+    let plan = match discover(system, scripted) {
         Ok(plan) => plan,
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && scripted
+                && !system
+                && !nix::unistd::geteuid().is_root() =>
+        {
+            return emit(
+                CommandResult::new(
+                    "uninstall",
+                    CommandState::Stopped,
+                    "No infraternal installation found for this account.",
+                    json!({}),
+                )
+                .with_next_step(
+                    "Use infraternal uninstall --system to review a system installation.",
+                ),
+                json,
+                Exit::Ok,
+            );
+        }
         Err(error) => return discovery_error(&error, json),
     };
     let sudo = plan.system && !nix::unistd::Uid::effective().is_root();
@@ -154,6 +185,11 @@ fn elevate(plan: &Plan, identity: &str, keep: bool, json: bool) -> ExitCode {
         if keep { "keep" } else { "remove" },
         if json { "json" } else { "text" },
     ]);
+    run_elevation(&mut command, json)
+}
+
+/// Forward the privileged command's output and exit code, including its own refusal.
+fn run_elevation(command: &mut Command, json: bool) -> ExitCode {
     if json {
         if let Ok(output) = command.output()
             && serde_json::from_slice::<Value>(&output.stdout).is_ok()
@@ -168,10 +204,11 @@ fn elevate(plan: &Plan, identity: &str, keep: bool, json: bool) -> ExitCode {
                 "Administrator access stops the system service and removes its files and mesh settings.\nGrant access to finish the uninstall. If you decline, the system installation stays in place."
             );
         }
+        // The privileged child and sudo each explain their own failures.
         if let Ok(status) = command.status()
-            && status.success()
+            && let Some(code) = exit_status(status)
         {
-            return ExitCode::SUCCESS;
+            return code;
         }
     }
     emit(
@@ -217,7 +254,7 @@ pub(crate) fn elevated_if_requested() -> Option<ExitCode> {
             json,
         ));
     }
-    Some(match discover(true) {
+    Some(match discover(true, true) {
         Ok(plan)
             if plan
                 .identity()
@@ -254,14 +291,18 @@ fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
     let Some(host) = plan.host.as_deref() else {
         return discovery_error(&io::ErrorKind::PermissionDenied.into(), json_output);
     };
-    let backup =
-        keep.then(|| infraternal_plugin_api::uninstall_state::destination(&plan.base, host));
+    let backup = (keep && !plan.retired)
+        .then(|| infraternal_plugin_api::uninstall_state::destination(&plan.base, host));
     if let Some(path) = &backup
-        && let Err(error) = infraternal_plugin_api::uninstall_state::check_destination(path)
+        && let Err(error) = infraternal_plugin_api::uninstall_state::check_destination(
+            &plan.data,
+            path,
+            nix::unistd::Uid::effective().as_raw(),
+        )
     {
         return discovery_error(&error, json_output);
     }
-    let server = crate::remote::retire_for_local_uninstall(&plan.data, host);
+    let server = !plan.retired && crate::remote::retire_for_local_uninstall(&plan.data, host);
     let left = match remove(plan, host, keep) {
         Ok(left) => left,
         Err(error) => {
@@ -279,6 +320,7 @@ fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
             );
         }
     };
+    let body = left.join("\n");
     let mut data = json!({"host_id": host, "server_retired": server, "remaining": left});
     if let Some(backup) = backup {
         data["saved_state"] = json!(backup);
@@ -289,6 +331,9 @@ fn execute(plan: &Plan, keep: bool, json_output: bool) -> ExitCode {
         "Removed infraternal from this machine.",
         data,
     );
+    if !body.is_empty() {
+        result = result.with_body(body);
+    }
     if !server {
         result = result.with_next_step("The server may still list this host. In the machine list, select Remove, then Forget if cleanup is pending.");
     }
@@ -317,15 +362,26 @@ fn safe_text(text: &str) -> String {
 }
 
 /// Discover the caller's native service first, or the system service when selected or alone.
-fn discover(system: bool) -> io::Result<Plan> {
+fn discover(system: bool, scripted: bool) -> io::Result<Plan> {
     let uid = nix::unistd::Uid::effective().as_raw();
+    choose_plan(uid, system, scripted, user_plan, system_plan)
+}
+
+/// Keep a scripted retry on the same scope even when the user's install is gone.
+fn choose_plan<T>(
+    uid: u32,
+    system: bool,
+    scripted: bool,
+    user: impl FnOnce(u32) -> io::Result<T>,
+    machine: impl FnOnce(u32) -> io::Result<T>,
+) -> io::Result<T> {
     if !system && uid != 0 {
-        match user_plan(uid) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        match user(uid) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && !scripted => {}
             result => return result,
         }
     }
-    system_plan(uid)
+    machine(uid)
 }
 
 #[cfg(target_os = "linux")]
@@ -345,7 +401,34 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
 #[cfg(target_os = "linux")]
 /// Review the installed systemd system service and associated mesh resources.
 fn system_plan(caller: u32) -> io::Result<Plan> {
-    linux_plan(0, caller)
+    let review = match crate::up::linux_uninstall::review(caller) {
+        Ok(review) => review,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return linux_plan(0, caller),
+        Err(error) => return Err(error),
+    };
+    let mut targets = paths(review.paths);
+    targets.push("Owned infraternal0 mesh interface, routes and firewall rules, if present".into());
+    targets.extend(paths(
+        infraternal_plugin_api::mesh_ssh_files::review_client_config(std::path::Path::new("/"))?,
+    ));
+    let mut notes =
+        vec!["Systemd keeps service logs in the shared journal until they expire.".into()];
+    notes.extend(paths(review.conditional).into_iter().map(|path| {
+        format!(
+            "Remove {path} if the administrator check verifies that this installation created it."
+        )
+    }));
+    Ok(Plan {
+        system: true,
+        host: review.host.map(|host| host.simple().to_string()),
+        base: "/var/lib/infraternal".into(),
+        anchor: Some(review.anchor),
+        data: "/var/lib/infraternal/agent".into(),
+        targets,
+        notes,
+        retired: false,
+        linux_up: true,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -358,26 +441,47 @@ fn linux_plan(uid: u32, caller: u32) -> io::Result<Plan> {
             "Owned infraternal0 mesh interface, routes and firewall rules, if present".into(),
         );
     }
+    let mut notes =
+        vec!["Systemd keeps service logs in the shared journal until they expire.".into()];
+    notes.extend(paths(review.conditional).into_iter().map(|path| {
+        format!(
+            "Remove {path} if the administrator check verifies that this installation created it."
+        )
+    }));
     Ok(Plan {
         system: uid == 0,
         host: Some(review.context.host),
         base: review.base,
+        anchor: None,
         data: review.context.data,
         targets,
-        notes: vec!["Systemd keeps service logs in the shared journal until they expire.".into()],
+        notes,
+        retired: false,
+        linux_up: false,
     })
 }
 
 #[cfg(target_os = "linux")]
 /// The root-owned image under the bootstrap install's binary directory.
 fn system_binary(plan: &Plan) -> PathBuf {
-    plan.base.join("bin/live")
+    plan.base.join(if plan.linux_up {
+        "bin/infraternal"
+    } else {
+        "bin/live"
+    })
 }
 
 #[cfg(target_os = "linux")]
 /// Share the legacy removal path's service, shim and kernel cleanup.
-fn remove(_plan: &Plan, host: &str, keep: bool) -> io::Result<Vec<String>> {
+fn remove(plan: &Plan, host: &str, keep: bool) -> io::Result<Vec<String>> {
     use infraternal_plugin_remote::uninstall::{cleanup_with_state, installation};
+    if plan.linux_up {
+        return crate::up::linux_uninstall::remove(
+            host.parse().map_err(io::Error::other)?,
+            keep,
+            &plan.identity()?,
+        );
+    }
     let uid = nix::unistd::Uid::effective().as_raw();
     let home = home(uid)?;
     tokio::runtime::Builder::new_current_thread()
@@ -398,7 +502,9 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
     use infraternal_plugin_mesh::macos_user_mode as names;
     let review = crate::up::macos_user::review_uninstall(uid)?;
     let mut targets = paths(review.paths);
-    targets.push("Mesh tunnel and its routes, if active".into());
+    if review.retired.is_none() {
+        targets.push("Mesh tunnel and its routes, if active".into());
+    }
     if review.helper {
         let old_helper = infraternal_plugin_mesh::macos_helper::installed_binary()
             == names::legacy::HELPER_BINARY;
@@ -418,16 +524,26 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
         targets.extend(helper_paths.map(str::to_owned));
         targets.extend(paths(names::managed_resolvers()?));
     }
+    let mut notes = vec![format!(
+        "If you added this PATH line, remove it from your shell configuration.\n  {}",
+        safe_text(&review.path_line)
+    )];
+    if let Some(logs) = review.foreign_logs {
+        notes.push(format!(
+            "Keep {} because its ownership could not be verified.",
+            safe_text(&logs.to_string_lossy())
+        ));
+    }
+    let retired = review.retired.is_some();
     Ok(Plan {
         system: false,
         host: Some(review.host),
         base: review.base,
+        anchor: review.retired,
         data: review.data,
         targets,
-        notes: vec![format!(
-            "If you added this PATH line, remove it from your shell configuration.\n  {}",
-            safe_text(&review.path_line)
-        )],
+        notes,
+        retired,
     })
 }
 
@@ -435,19 +551,23 @@ fn user_plan(uid: u32) -> io::Result<Plan> {
 /// Review the root-mode `LaunchDaemon` and its fixed machine paths.
 fn system_plan(_caller: u32) -> io::Result<Plan> {
     use infraternal_plugin_mesh::macos_service as service;
-    let (host, paths_to_remove, conditional_alias) = service::review_removal()?;
-    let mut targets = paths(paths_to_remove);
-    targets.push("Mesh tunnel and its routes, if active".into());
-    targets.extend(paths(
-        infraternal_plugin_mesh::macos_user_mode::managed_resolvers()?,
-    ));
+    let review = service::review_removal()?;
+    let mut targets = paths(review.paths);
+    if !review.retired {
+        targets.push("Mesh tunnel and its routes, if active".into());
+        targets.extend(paths(
+            infraternal_plugin_mesh::macos_user_mode::managed_resolvers()?,
+        ));
+    }
     Ok(Plan {
         system: true,
-        host,
+        host: review.host,
         base: service::MACHINE_BASE.into(),
+        anchor: Some(review.anchor),
         data: service::MACHINE_DATA.into(),
         targets,
-        notes: conditional_alias
+        notes: review
+            .conditional_alias
             .into_iter()
             .map(|path| {
                 format!(
@@ -456,6 +576,7 @@ fn system_plan(_caller: u32) -> io::Result<Plan> {
                 )
             })
             .collect(),
+        retired: review.retired,
     })
 }
 
@@ -470,14 +591,14 @@ fn system_binary(_plan: &Plan) -> PathBuf {
 fn remove(plan: &Plan, host: &str, keep: bool) -> io::Result<Vec<String>> {
     if plan.system {
         infraternal_plugin_mesh::macos_service::remove_installation(host, keep)?;
+        Ok(Vec::new())
     } else {
         crate::up::macos_user::remove_user_install(
             nix::unistd::Uid::effective().as_raw(),
             host,
             keep,
-        )?;
+        )
     }
-    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -485,6 +606,39 @@ mod tests {
     //! Consent and preview behave consistently in interactive and scripted use.
 
     use super::*;
+
+    /// A repeated scripted user removal cannot escalate to a remaining system service.
+    #[test]
+    fn scoped_script_never_falls_through_to_a_system_install() {
+        let missing = |_| Err(io::ErrorKind::NotFound.into());
+        let system_install = |_| Ok("system");
+        assert_eq!(
+            choose_plan(501, false, true, missing, system_install)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            choose_plan(501, true, true, missing, system_install).unwrap(),
+            "system"
+        );
+        assert_eq!(
+            choose_plan(501, false, false, missing, system_install).unwrap(),
+            "system"
+        );
+        assert_eq!(
+            choose_plan(501, false, true, |_| Ok("user"), system_install).unwrap(),
+            "user"
+        );
+    }
+
+    /// A refusal from the elevated child retains its original process exit class.
+    #[test]
+    fn elevated_text_refusal_keeps_the_child_exit_status() {
+        let mut child = Command::new("/bin/sh");
+        child.args(["-c", "exit 3"]);
+        assert_eq!(run_elevation(&mut child, false), ExitCode::from(3));
+    }
 
     /// Closing stdin, Enter, or a mistyped answer leaves the installation in place.
     #[test]
@@ -502,20 +656,24 @@ mod tests {
             system: true,
             host: None,
             base: "/install".into(),
-            data: "/install/enrollment".into(),
+            anchor: None,
+            data: "/install/enroll\u{1b}ment".into(),
             targets: vec!["Service".into(), "Mesh interface".into()],
             notes: Vec::new(),
+            retired: false,
+            #[cfg(target_os = "linux")]
+            linux_up: false,
         };
         let preview = plan.preview(true, true);
         assert_eq!(preview.data["system"], true);
         assert_eq!(preview.data["administrator_required"], true);
         assert_eq!(
             preview.data["remove"][2],
-            "Save enrollment from /install/enrollment"
+            "Save enrollment from /install/enroll\\u{1b}ment"
         );
         assert_eq!(
             plan.preview(false, false).data["remove"][2],
-            "Delete enrollment and keys in /install/enrollment"
+            "Delete enrollment and keys in /install/enroll\\u{1b}ment"
         );
     }
 }

@@ -1078,6 +1078,16 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     Ok((stored, snapshot))
 }
 
+/// Read the host ID from this account's private Linux enrollment.
+#[cfg(all(machine_up, target_os = "linux"))]
+pub(crate) fn local_enrolled_host(data: &Path, uid: u32) -> io::Result<uuid::Uuid> {
+    let (identity, _) = load_snapshot(data)?;
+    if identity.execution_uid != uid {
+        return Err(refused());
+    }
+    Ok(identity.host_id)
+}
+
 /// Move an enrolled identity off its legacy 7443 address before the service retries.
 fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
     let (mut stored, snapshot) = load_snapshot(data)?;
