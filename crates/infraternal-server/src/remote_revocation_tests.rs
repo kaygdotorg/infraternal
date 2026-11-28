@@ -8,28 +8,36 @@ pub(crate) async fn admitted_store(
     host: &Identity,
     root: &X509,
 ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid, [u8; 32]) {
+    admitted_store_for_login_mode(host, root, crate::enrollment::Mode::Rootless).await
+}
+
+/// Bind the certificate to the execution mode and UID used by the test host's real link.
+pub(crate) async fn admitted_store_for_login_mode(
+    host: &Identity,
+    root: &X509,
+    mode: crate::enrollment::Mode,
+) -> (EnrollmentStore, sqlx::SqlitePool, Uuid, [u8; 32]) {
     let fingerprint = openssl::sha::sha256(&host.certificate.to_der().unwrap());
     let (store, pool, _) = crate::enrollment::authority::tests::enrolled().await;
     let host_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner','rootless',1002,100)")
-        .bind(host_id.as_bytes().as_slice()).execute(&pool).await.unwrap();
+    let uid = match mode {
+        crate::enrollment::Mode::Rootless => 1002,
+        crate::enrollment::Mode::Rootful => 0,
+        crate::enrollment::Mode::Device => unreachable!("devices do not run the host test link"),
+    };
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at) VALUES(?,'owner',?,?,100)")
+        .bind(host_id.as_bytes().as_slice()).bind(mode.as_str()).bind(uid).execute(&pool).await.unwrap();
     let instant = now().unwrap();
     let key_digest = openssl::sha::sha256(&host.key.raw_public_key().unwrap());
     let token = store
-        .issue(
-            "owner",
-            host_id,
-            crate::enrollment::Mode::Rootless,
-            instant,
-            &key_digest,
-        )
+        .issue("owner", host_id, mode, instant, &key_digest)
         .await
         .unwrap();
     store
         .redeem(
             token.secret(),
             host_id,
-            crate::enrollment::Mode::Rootless,
+            mode,
             instant,
             &crate::enrollment::CertificateRecord {
                 fingerprint,

@@ -17,14 +17,24 @@ struct LoginHost {
 }
 /// Enroll a real TLS fixture whose initial control channel accepts no grants.
 async fn login_host(reply: Option<bool>) -> LoginHost {
-    login_host_action(reply, "terminal.login.revoke").await
+    login_host_action(
+        reply,
+        "terminal.login.revoke",
+        crate::enrollment::Mode::Rootless,
+    )
+    .await
 }
 /// Start an enrolled peer that serves one test action and keeps answering probes
 /// until the server disconnects it or the test stops it.
 /// Retain its exact TLS identity for reconnect proof.
-async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -> LoginHost {
+async fn login_host_action(
+    reply: Option<bool>,
+    expected_action: &'static str,
+    mode: crate::enrollment::Mode,
+) -> LoginHost {
     let (server, host_identity, root, _) = identities();
-    let (store, pool, host, fingerprint) = admitted_store(&host_identity, &root).await;
+    let (store, pool, host, fingerprint) =
+        super::revocation::admitted_store_for_login_mode(&host_identity, &root, mode).await;
     let person = Uuid::new_v4();
     sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
         .execute(&pool)
@@ -351,7 +361,24 @@ async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
 #[cfg(feature = "ssh")]
 #[tokio::test]
 async fn connected_rootless_host_prepares_its_enrolled_account() {
-    let fixture = login_host_action(Some(true), "terminal.login.prepare").await;
+    let input = observe_preparation(crate::enrollment::Mode::Rootless).await;
+    assert_eq!(input["uid"], 1002);
+    assert!(input["account"].is_null());
+}
+
+/// Preparing a rootful host sends its named override to the authenticated link.
+#[cfg(feature = "ssh")]
+#[tokio::test]
+async fn connected_rootful_host_prepares_its_named_override() {
+    let input = observe_preparation(crate::enrollment::Mode::Rootful).await;
+    assert_eq!(input["uid"], 0);
+    assert_eq!(input["account"], "deploy");
+}
+
+/// Capture the real preparation call for a connected host with a saved override.
+#[cfg(feature = "ssh")]
+async fn observe_preparation(mode: crate::enrollment::Mode) -> serde_json::Value {
+    let fixture = login_host_action(Some(true), "terminal.login.prepare", mode).await;
     let token = "remote-login-preparation-fixture";
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',unixepoch()+60,unixepoch(),1)")
         .bind(crate::auth::hash(token)).bind(fixture.person.to_string()).execute(&fixture.pool).await.unwrap();
@@ -389,10 +416,9 @@ async fn connected_rootless_host_prepares_its_enrolled_account() {
         .unwrap()
         .unwrap();
     assert_eq!(input["person"], fixture.person.to_string());
-    assert_eq!(input["uid"], 1002);
-    assert!(input["account"].is_null());
     preparation.await.unwrap();
     fixture.peer.abort();
+    input
 }
 
 /// Wait until the server observes a test peer's disconnect and releases its
