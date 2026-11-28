@@ -5,7 +5,7 @@ use crate::{
     dataplane::Config,
     firewall::Firewall,
     gotatun_node::Engine,
-    wireguard::{Client, Device, Key},
+    wireguard::{Client, Device, Key, RouteValidation},
 };
 use std::os::unix::net::UnixStream;
 use std::{
@@ -30,6 +30,8 @@ use std::{
 /// refreshes write only to that link, never to whichever link holds the shared name later.
 #[derive(Clone, Debug, Default)]
 struct PeerRouteState {
+    /// Subnet routes share the same lock as the live endpoints they are derived from.
+    client_routes: crate::subnet_routes::ClientRoutes,
     /// Active relay budgets; a peer without an entry uses its direct-path budget.
     overrides: BTreeMap<crate::policy::model::PublicKey, u16>,
     /// Live direct endpoints learned after the coordinator's configured endpoint.
@@ -262,6 +264,7 @@ fn update_relay_route_mtu(
         std::slice::from_ref(&route_peer),
         &state.overrides,
         false,
+        state.underlay.as_deref(),
     );
     if result.is_err() {
         match previous {
@@ -273,6 +276,10 @@ fn update_relay_route_mtu(
         {
             state.live_endpoints.insert(key, learned);
         }
+    } else if previous.is_some() != relay_mtu.is_some() && !state.client_routes.wanted.is_empty() {
+        // The relay uses a local shim, so its former direct endpoint no longer needs a hole.
+        state.client_routes.dirty = true;
+        state.sync_client_routes(false);
     }
     result
 }
@@ -742,6 +749,8 @@ pub struct Node {
     authority_reset: AuthorityResetState,
     pending: Option<Pending>,
     routes: BTreeSet<IpAddr>,
+    /// Proposed addresses already checked against observed foreign route prefixes.
+    route_validation: RouteValidation,
     /// Installed peers and live relay budgets; relay callbacks share it (see [`PeerRouteState`]).
     peer_route_state: Arc<Mutex<PeerRouteState>>,
     /// Passively restores deleted owned peer routes until this node goes down.
@@ -786,6 +795,7 @@ impl Default for Node {
             authority_reset: AuthorityResetState::Stable,
             pending: None,
             routes: BTreeSet::new(),
+            route_validation: RouteValidation::default(),
             peer_route_state: Arc::default(),
             route_repair: None,
             underlay_announce: Arc::default(),
@@ -1061,17 +1071,16 @@ impl Node {
             node.owned = true;
             node.kernel_owner = kernel_proof.clone();
             let identity = Device::identity_at(link.ifindex);
-            // A process can stop after marking the interface but before setting
-            // its key. With no saved configuration there are no retained mesh
-            // sessions to preserve; remove that incomplete owned startup only,
-            // by the index the proof read.
-            let incomplete = state.config.is_none()
-                && (identity
+            // A process can stop after marking the interface but before setting its key and
+            // binding its port. Such a link carries no session, whether or not a configuration
+            // from before a reboot is still saved, and no restart could adopt it. Remove that
+            // incomplete owned startup, by the index the proof read, so `up` starts afresh.
+            let incomplete = identity
+                .as_ref()
+                .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                || identity
                     .as_ref()
-                    .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
-                    || identity
-                        .as_ref()
-                        .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0));
+                    .is_ok_and(|(key, port)| key.0 == [0; 32] || *port == 0);
             if incomplete {
                 Device::delete_ifindex(link.ifindex)?;
                 node.owned = false;
@@ -1083,9 +1092,6 @@ impl Node {
                 return Ok(node);
             }
             let (public_key, mut port) = identity?;
-            if public_key.0 == [0; 32] || port == 0 {
-                return Err(io::ErrorKind::NotConnected.into());
-            }
             port = restore_kernel_listen_port(&node, link.ifindex, port)?;
             node.identity = Some(Identity {
                 public_key,
@@ -1367,6 +1373,28 @@ impl Node {
         }
         Ok(())
     }
+    /// Persist a stable apply using the prior accepted configuration as the journal base.
+    fn save_applied_revision(
+        &self,
+        config: &Config,
+        snapshot_base: Option<&Config>,
+        changed_routes: bool,
+    ) -> io::Result<()> {
+        if snapshot_base.is_none()
+            && self.authority_reset == AuthorityResetState::Stable
+            && self.engine_kind == EngineKind::GotaTun
+            && let (Some(store), Some(previous)) = (&self.store, &self.config)
+        {
+            // The access-only path cannot change the route inventory. A topology change
+            // still persists the reduced inventory after the kernel cleanup.
+            if changed_routes {
+                store.record_routes(&self.routes)?;
+            }
+            return store.save_peer_revision(previous, config, self.firewall.backend());
+        }
+        self.save_with_snapshot_base(Some(config), true, snapshot_base)
+    }
+    /// Read endpoint and traffic statistics for the currently installed peers.
     fn peer_counters(
         &self,
     ) -> io::Result<BTreeMap<crate::policy::model::PublicKey, crate::wireguard::Counters>> {
@@ -1377,6 +1405,18 @@ impl Node {
                 .as_ref()
                 .ok_or(io::ErrorKind::NotConnected)?
                 .counters(),
+        }
+    }
+
+    /// Read the actual engine membership so reconciliation can retire orphan keys.
+    fn installed_peer_keys(&self) -> io::Result<Vec<crate::policy::model::PublicKey>> {
+        match self.engine_kind {
+            EngineKind::Kernel => Ok(Device::counters()?.into_keys().collect()),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .peer_keys(),
         }
     }
 
@@ -1452,6 +1492,53 @@ impl Node {
         }
     }
 
+    /// Return a relay callback that restores this peer from its accepted Mesh configuration.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn relay_endpoint_restorer(
+        &self,
+        peer: &crate::dataplane::Peer,
+    ) -> io::Result<Arc<dyn Fn() -> io::Result<()> + Send + Sync>> {
+        match self.engine_kind {
+            EngineKind::Kernel => {
+                let peer = peer.clone();
+                Ok(Arc::new(move || restore_kernel_peer(&peer)))
+            }
+            EngineKind::GotaTun => Ok(self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .endpoint_restorer(peer.key)),
+        }
+    }
+
+    /// Restore a peer from the latest accepted snapshot after its relay shim stops.
+    /// # Errors
+    /// Reports a stopped or unavailable data plane.
+    #[cfg(feature = "relay")]
+    pub(crate) fn restore_relay_endpoint(
+        &self,
+        key: crate::policy::model::PublicKey,
+    ) -> io::Result<()> {
+        let peer =
+            self.config()
+                .and_then(|config| {
+                    config.peers.values().find(|policy| {
+                        policy.peer.key == key || policy.peer.previous_key == Some(key)
+                    })
+                })
+                .map(|policy| policy.peer.clone());
+        match self.engine_kind {
+            EngineKind::Kernel => peer.map_or(Ok(()), |peer| restore_kernel_peer(&peer)),
+            EngineKind::GotaTun => self
+                .gotatun
+                .as_ref()
+                .ok_or(io::ErrorKind::NotConnected)?
+                .restore_peer(key),
+        }
+    }
+
     /// Return a callback that keeps this peer's kernel route on its active path budget.
     ///
     /// The callback keeps only the peer's key. Each call resolves the accepted peer under the
@@ -1486,6 +1573,18 @@ impl Node {
         }
     }
 
+    /// This node's mesh key as a relay [`PairSecret`](crate::relay_path::PairSecret): the
+    /// secret both ends of a relayed pair derive their opaque link tokens from (D402 Q8).
+    /// Read from the node's saved private key; the key itself never leaves the secret.
+    /// # Errors
+    /// Fails when the node has no saved key yet (it has never been brought up).
+    #[cfg(feature = "relay")]
+    pub fn relay_pair_secret(&self) -> io::Result<crate::relay_path::PairSecret> {
+        let store = self.store.as_ref().ok_or(io::ErrorKind::NotFound)?;
+        let key = store.read_private_key()?.ok_or(io::ErrorKind::NotFound)?;
+        crate::relay_path::PairSecret::from_private(&key)
+    }
+
     /// Return a callback for learned endpoints reported by the `GotaTun` worker.
     ///
     /// The callback only updates installed peers and leaves relay budgets active. It runs route
@@ -1510,7 +1609,7 @@ impl Node {
         if remove {
             // Removal writes every peer: the record no longer describes any of them.
             state.forget_written();
-            return Device::routes_with_mtu_overrides(peers, &state.overrides, true);
+            return Device::routes_with_mtu_overrides(peers, &state.overrides, true, None);
         }
         // Only routes that differ from the record are written (#260 J1240). The installed set
         // moves to `peers` only once they are in place, so a failure leaves relay callbacks
@@ -1790,9 +1889,11 @@ impl Node {
                 }
             }
             EngineKind::GotaTun => {
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("recorded")?;
                 let adopt = self.persisted_tun_to_adopt(public_key)?;
                 let route_endpoint_updater = self.route_endpoint_updater();
-                let engine = Engine::start(
+                let (engine, tun) = Engine::start(
                     key.gotatun_secret()?,
                     public_key,
                     listen_port,
@@ -1802,14 +1903,14 @@ impl Node {
                     route_endpoint_updater,
                     Arc::clone(&self.underlay_announce),
                 )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("bound")?;
                 let (interface, port, thp_disabled, offloads_enabled) = engine.info();
                 if interface != crate::wireguard::INTERFACE
                     || port == 0
                     || !thp_disabled
                     || !offloads_enabled
                 {
-                    let mut engine = engine;
-                    let _ = engine.stop();
                     return Err(io::ErrorKind::InvalidData.into());
                 }
                 if let Some(store) = &self.store {
@@ -1818,32 +1919,32 @@ impl Node {
                     } else {
                         crate::listen_port::DEFAULT_PORT
                     };
-                    if let Err(error) = store.record_listen_port(saved) {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
+                    store.record_listen_port(saved)?;
                 }
-                let route_repair = match RouteRepairWorker::start(
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("port-recorded")?;
+                let route_repair = RouteRepairWorker::start(
                     Arc::clone(&self.peer_route_state),
                     Arc::clone(&self.underlay_announce),
-                ) {
-                    Ok(worker) => worker,
-                    Err(error) => {
-                        let mut engine = engine;
-                        let _ = engine.stop();
-                        return Err(error);
-                    }
-                };
+                )?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("route-listening")?;
+                self.save(self.config.as_ref(), true)?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("saved")?;
+                // Commit point (D332): the interface outlives this process only from here, when
+                // the saved state holds both the enabled choice and the proof that lets the next
+                // start take the link back. Every earlier stop or error drops the last queue
+                // descriptor and the kernel removes the link, so no start leaves one behind that
+                // the next start has to refuse. A node without a store can never prove a link,
+                // so its link stays transient. An adopted link is already persistent.
+                if self.store.is_some() && adopt.is_none() {
+                    tun.persist()?;
+                }
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("persisted")?;
                 self.owned = true;
                 self.gotatun = Some(engine);
-                if let Err(error) = self.save(self.config.as_ref(), true) {
-                    if let Some(mut engine) = self.gotatun.take() {
-                        let _ = engine.stop();
-                    }
-                    self.owned = false;
-                    return Err(error);
-                }
                 self.enabled = true;
                 self.route_repair = Some(route_repair);
                 let identity = Identity {
@@ -1861,6 +1962,8 @@ impl Node {
                 self.identity = Some(identity.clone());
                 // The host input table admits exactly the port this socket bound (D386).
                 self.firewall.set_listen_port(Some(identity.port))?;
+                #[cfg(test)]
+                startup_crash_tests::checkpoint("listening")?;
                 Ok(identity)
             }
         }
@@ -2573,7 +2676,12 @@ impl Node {
         &self,
         network: crate::policy::networks::Network,
     ) -> serde_json::Value {
-        self.subnet.route_json(network)
+        crate::subnet_routes::route_json(
+            lock_route_state(&self.peer_route_state)
+                .client_routes
+                .states
+                .get(&network),
+        )
     }
 
     /// Whether this node forwards for the networks it serves, for `mesh routes`.
@@ -2601,36 +2709,15 @@ impl Node {
                 return;
             }
         };
-        let wanted = crate::subnet_routes::reachable_networks(&config);
-        // Every address the tunnel's own UDP goes to, including endpoints learned since the
-        // snapshot. A network holding one is left out (see `Device::sync_network_routes`).
-        // Limit: this runs when a snapshot is applied or the node starts, not when an endpoint
-        // is learned later, so a peer that roams into an already routed network keeps that
-        // route until the next snapshot (follow-up: the live-endpoint callback has no access to
-        // the node's route status).
-        let endpoints = crate::subnet_routes::underlay_addresses(
-            &config,
-            lock_route_state(&self.peer_route_state)
-                .live_endpoints
-                .values()
-                .copied(),
-        );
-        self.subnet.routes =
-            match Device::sync_network_routes(&wanted, config.addresses.ipv4, &endpoints) {
-                Ok(states) => states,
-                Err(error) => {
-                    tracing::warn!(error = %error, "mesh subnet routes could not be installed");
-                    wanted
-                        .iter()
-                        .map(|network| {
-                            (
-                                *network,
-                                crate::subnet_routes::RouteState::Failed(error.to_string()),
-                            )
-                        })
-                        .collect()
-                }
-            };
+        {
+            let mut state = lock_route_state(&self.peer_route_state);
+            let endpoints = crate::subnet_routes::underlay_addresses(
+                &config,
+                state.live_endpoints.values().copied(),
+            );
+            state.client_routes.configure(&config, &endpoints);
+            state.sync_client_routes(true);
+        }
         let (served, _) = crate::firewall::served_networks(&config);
         if served.is_empty() {
             self.stop_forwarding();
@@ -2704,14 +2791,16 @@ impl Node {
     /// or with the link.
     fn stop_subnet_routes(&mut self) {
         self.stop_forwarding();
-        let wanted_any = !std::mem::take(&mut self.subnet.routes).is_empty();
-        if wanted_any
-            && let Some(config) = &self.config
-            && let Err(error) = Device::sync_network_routes(&[], config.addresses.ipv4, &[])
+        let mut state = lock_route_state(&self.peer_route_state);
+        if !state.client_routes.states.is_empty()
+            && let Some(config) = self.config.as_ref()
+            && let Err(error) =
+                Device::sync_network_routes(&BTreeMap::new(), config.addresses.ipv4, None, None)
             && error.kind() != io::ErrorKind::NotConnected
         {
             tracing::warn!(error = %error, "mesh subnet routes could not be removed");
         }
+        state.client_routes = crate::subnet_routes::ClientRoutes::default();
     }
 
     /// Apply one configuration chunk; [`Self::chunk`] adds the subnet-route reconcile.
@@ -3603,7 +3692,19 @@ impl Node {
                 }
                 // Persist intent before installing endpoints. Restore replays it
                 // if the process stops between the save and kernel installation.
-                self.save_with_snapshot_base(Some(&config), true, snapshot_base)?;
+                let saved = self.save_applied_revision(&config, snapshot_base, false);
+                if self.engine_kind == EngineKind::GotaTun
+                    && snapshot_base.is_none()
+                    && saved
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                {
+                    // A failed endpoint apply can leave durable intent ahead of runtime.
+                    // Keep the full writer's revision checks for that recovery case.
+                    self.save(Some(&config), true)?;
+                } else {
+                    saved?;
+                }
                 if snapshot_base.is_some() {
                     self.authority_reset = AuthorityResetState::Stable;
                 }
@@ -3694,7 +3795,7 @@ impl Node {
         let proposed: Vec<_> = std::iter::once(config.addresses)
             .chain(config.peers.values().map(|peer| peer.peer.addresses))
             .collect();
-        Device::check_routes(&proposed)?;
+        self.route_validation.check(&proposed)?;
         let old_peers = self.config.as_ref().map(|old| &old.peers);
         let changed: Vec<_> = config
             .peers
@@ -3715,10 +3816,9 @@ impl Node {
             .flatten()
             .collect();
         let retired_keys: Vec<_> = self
-            .peer_counters()?
-            .keys()
+            .installed_peer_keys()?
+            .into_iter()
             .filter(|key| !desired.contains(key))
-            .copied()
             .collect();
         let mut route_overrides_to_clear: BTreeSet<_> = retired_keys.iter().copied().collect();
         if let Some(old) = &self.config {
@@ -3818,7 +3918,7 @@ impl Node {
             #[cfg(feature = "cutoff-measure")]
             let persistence =
                 crate::cutoff_measure::Stage::new(config.node, config.version, "persist");
-            if let Err(error) = self.save_with_snapshot_base(Some(&config), true, snapshot_base) {
+            if let Err(error) = self.save_applied_revision(&config, snapshot_base, false) {
                 restore_engine(self)?;
                 self.firewall
                     .apply(self.config.as_ref().ok_or(io::ErrorKind::NotConnected)?)?;
@@ -3936,9 +4036,9 @@ impl Node {
             let recorded = std::mem::replace(&mut self.routes, desired_routes);
             #[cfg(feature = "test-support")]
             let saved = run_transaction_seam(&BEFORE_TRANSACTION_SAVE)
-                .and_then(|()| self.save_with_snapshot_base(Some(&config), true, snapshot_base));
+                .and_then(|()| self.save_applied_revision(&config, snapshot_base, true));
             #[cfg(not(feature = "test-support"))]
-            let saved = self.save_with_snapshot_base(Some(&config), true, snapshot_base);
+            let saved = self.save_applied_revision(&config, snapshot_base, true);
             if saved.is_err() {
                 self.routes = recorded;
             }
@@ -4174,6 +4274,17 @@ impl Node {
         Ok(())
     }
 }
+
+/// Restore one kernel peer after its loopback relay shim closes.
+#[cfg(all(feature = "relay", target_os = "linux"))]
+fn restore_kernel_peer(peer: &crate::dataplane::Peer) -> io::Result<()> {
+    if peer.endpoint.is_some() {
+        return crate::relay_path::prepare_kernel_handshake(peer);
+    }
+    let mut client = crate::wireguard::Client::new()?;
+    client.peers(&[], &[peer.key])?;
+    client.peers(std::slice::from_ref(peer), &[])
+}
 // No Drop cleanup: kernel state and established flows survive control process loss [166].
 
 /// Require a stable fingerprint before a remote host can start or publish its Mesh binding.
@@ -4277,3 +4388,8 @@ mod route_repair_tests;
 #[cfg(test)]
 #[path = "node_live_route_tests.rs"]
 mod live_route_tests;
+
+/// Stops or fails a Linux `GotaTun` start after each step and checks that the next one works.
+#[cfg(test)]
+#[path = "node_startup_crash_tests.rs"]
+pub(crate) mod startup_crash_tests;

@@ -33,17 +33,24 @@ fn recognizes(command: &str) -> bool {
 }
 
 #[cfg(feature = "ssh")]
+/// Pass an owned socket to OpenSSH or report a fixed local dial diagnostic.
 fn connect(args: &[OsString]) -> Option<ExitCode> {
     let [host, port] = args else { return None };
     let host = host.to_str()?;
     let port = port.to_str()?.parse::<u16>().ok()?;
-    if infraternal_plugin_ssh::socket_connector::handoff(host, port, &std::io::stdin()).is_ok() {
-        Some(ExitCode::SUCCESS)
-    } else {
-        // Fixed transport classification only; no endpoint or raw error.
-        eprintln!("ssh: connect to host: Connection failed");
-        Some(ExitCode::FAILURE)
-    }
+    Some(
+        match infraternal_plugin_ssh::socket_connector::handoff_with_diagnostic(
+            host,
+            port,
+            &std::io::stdin(),
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err((_, reason)) => {
+                eprintln!("infraternal SSH connector: {reason}");
+                ExitCode::FAILURE
+            }
+        },
+    )
 }
 
 #[cfg(target_os = "linux")]

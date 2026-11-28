@@ -5,6 +5,7 @@
 //! uninstall retires the key, interface record and rotation journal, so a later `up` starts with a
 //! fresh identity (#260, #367).
 use crate::dataplane::Config;
+#[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -17,34 +18,24 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(target_os = "linux")]
+use infraternal_mesh_node::state_journal::Delta;
+
+/// Public snapshot persisted by the host store.
+pub use infraternal_mesh_node::node_state::State;
+/// Authority and rotation records consumed by the durable host store.
+pub(crate) use infraternal_mesh_node::node_state::{
+    AuthorityRecord, RotationSecret, encode_state, merge_authority,
+};
+
+/// Public revision journal used by the Linux node.
+#[cfg(target_os = "linux")]
+#[path = "node_state_delta.rs"]
+mod delta;
+
 /// Bound public snapshots consistently with the macOS node's state reader.
 #[cfg(target_os = "linux")]
 const MAX_PUBLIC_STATE_BYTES: u64 = 16 * 1024 * 1024;
-/// Public runtime state needed to restore mesh intent without storing private key material.
-/// The accepted public mesh snapshot saved for restart, with a firewall choice on Linux.
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct State {
-    pub enabled: bool,
-    pub config: Option<Config>,
-    /// True after a new authority is fenced and until its first full snapshot is saved.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub authority_reset_pending: bool,
-    #[serde(default)]
-    #[cfg(target_os = "linux")]
-    pub backend: Option<crate::firewall::Backend>,
-}
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            config: None,
-            authority_reset_pending: false,
-            #[cfg(target_os = "linux")]
-            backend: None,
-        }
-    }
-}
 /// One node's durable local state: public snapshot, routes, identity record, private key and rotation journal.
 /// A shared directory lease stays open for this store's lifetime, so migration cannot move state while
 /// this handle can write. Short writer locks serialize updates from independent stores.
@@ -76,45 +67,15 @@ pub struct Store {
     // Authority epoch and reset marker live beside the public snapshot, which keeps the shape
     // the previous release parses (D295, #382 P2). See [`AuthorityRecord`].
     authority_path: PathBuf,
+    /// Compacted checkpoint and appended revisions selected by the public snapshot.
+    #[cfg(target_os = "linux")]
+    delta_path: PathBuf,
+    /// The journal position last checked under the Store writer lock.
+    #[cfg(target_os = "linux")]
+    delta_cursor: Mutex<Option<delta::Cursor>>,
     // Canonical public bytes avoid repeated journal fsyncs on endpoint updates
     // without retaining a second per-peer tree. No private material is cached.
     route_body: Mutex<Vec<u8>>,
-}
-
-/// A fixed-size local record makes an interrupted key switch retryable.
-/// While open it stores predecessor and candidate private keys; completion clears the predecessor
-/// private bytes and keeps only its public key for binding checks. The record never enters logs or
-/// the public snapshot.
-pub(crate) struct RotationSecret {
-    pub(crate) operation_id: String,
-    pub(crate) sequence: u64,
-    /// The predecessor private key while the journal is open; its public key after completion.
-    pub(crate) previous: [u8; 32],
-    /// The candidate private key selected by commit intent and retained for retry.
-    pub(crate) candidate: [u8; 32],
-    pub(crate) commit_requested: bool,
-    /// The candidate is the retained interface key; `previous` no longer contains private bytes.
-    pub(crate) completed: bool,
-}
-impl Drop for RotationSecret {
-    fn drop(&mut self) {
-        self.previous.zeroize();
-        self.candidate.zeroize();
-    }
-}
-impl RotationSecret {
-    /// Whether a completed marker authorizes this saved predecessor or candidate binding.
-    ///
-    /// New markers retain the predecessor's public bytes. Older markers contain zero here and
-    /// can therefore authorize only the candidate they already select.
-    pub(crate) fn completed_binding_matches(
-        &self,
-        bound: crate::policy::model::PublicKey,
-        candidate: crate::policy::model::PublicKey,
-    ) -> bool {
-        self.completed
-            && (bound == candidate || (self.previous != [0; 32] && bound.0 == self.previous))
-    }
 }
 
 /// Marks the private rotation-secret file format, version 1.
@@ -368,7 +329,16 @@ impl Store {
         let authority_path = parent.join(AUTHORITY_FILE);
         sweep_private_temporaries(&key_path, &directory_lease)?;
         sweep_rotation_temporaries(&rotation_path, &directory_lease)?;
-        let state = read_state(&path, &authority_path)?.unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let delta_path = parent.join("mesh-public.journal");
+        #[cfg(target_os = "linux")]
+        let (state, cursor) = {
+            let _writer = lock_mesh_store_writer(parent, &directory_lease)?;
+            read_journaled_state(&path, &authority_path, &delta_path)?
+        };
+        #[cfg(target_os = "macos")]
+        let state = read_legacy_state(&path, &authority_path)?;
+        let state = state.unwrap_or_default();
         if state
             .config
             .as_ref()
@@ -403,6 +373,10 @@ impl Store {
                 listen_port_path,
                 key_path,
                 authority_path,
+                #[cfg(target_os = "linux")]
+                delta_path,
+                #[cfg(target_os = "linux")]
+                delta_cursor: Mutex::new(cursor),
                 route_body: Mutex::new(route_body),
             },
             state,
@@ -1099,6 +1073,100 @@ impl Store {
     pub(crate) fn save_full_snapshot(&self, state: &State, expected: &Config) -> io::Result<()> {
         self.save_checked(state, Some(expected))
     }
+    /// Commit an ordinary stable revision, writing only changed peer policies and names where a
+    /// durable base exists. Whole snapshots still own version rewinds and authority transitions.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn save_peer_revision(
+        &self,
+        previous: &Config,
+        next: &Config,
+        backend: Option<crate::firewall::Backend>,
+    ) -> io::Result<()> {
+        let state = || State {
+            enabled: true,
+            config: Some(next.clone()),
+            authority_reset_pending: false,
+            backend,
+        };
+        #[cfg(feature = "cutoff-measure")]
+        let diff = crate::cutoff_measure::Stage::new(next.node, next.version, "journal_delta_diff");
+        let change = Delta::between(previous, next);
+        #[cfg(feature = "cutoff-measure")]
+        drop(diff);
+        let Some(change) = change else {
+            return self.save(&state());
+        };
+        #[cfg(feature = "cutoff-measure")]
+        let _write =
+            crate::cutoff_measure::Stage::new(next.node, next.version, "journal_delta_write");
+        let result = self.commit_peer_revision(previous, next, backend, &change, state);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::FileTooLarge)
+        {
+            // Keep supporting full snapshots that exceed the append format's checkpoint bound.
+            return self.save(&state());
+        }
+        result
+    }
+
+    /// Check the durable base and publish a record while no other Store can write it.
+    #[cfg(target_os = "linux")]
+    fn commit_peer_revision(
+        &self,
+        previous: &Config,
+        next: &Config,
+        backend: Option<crate::firewall::Backend>,
+        change: &Delta,
+        state: impl FnOnce() -> State,
+    ) -> io::Result<()> {
+        let writer = lock_mesh_store_writer(
+            self.path.parent().ok_or(io::ErrorKind::InvalidInput)?,
+            &self.directory_lease,
+        )?;
+        let mut cursor = self.delta_cursor.lock().map_err(|_| io::ErrorKind::Other)?;
+        if let Some(active) = cursor.as_mut()
+            && let Some(file) = delta::open(&self.delta_path, true)?
+            && active.matches(&self.path, &file, previous.version, backend)?
+        {
+            return active.append(file, &self.delta_path, change, next.peers.len(), state);
+        }
+
+        // Another Store, an old binary or recovery may have written while this handle was open.
+        // Recheck the exact accepted base before trusting a cursor from that file.
+        let (disk, loaded) =
+            read_journaled_state(&self.path, &self.authority_path, &self.delta_path)?;
+        let Some(disk) = disk else {
+            drop(cursor);
+            drop(writer);
+            return self.save(&state());
+        };
+        if disk.enabled
+            && !disk.authority_reset_pending
+            && disk.config.as_ref() == Some(next)
+            && disk.backend == backend
+        {
+            *cursor = loaded;
+            return Ok(());
+        }
+        if !disk.enabled || disk.authority_reset_pending || disk.config.as_ref() != Some(previous) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        if disk.backend != backend {
+            drop(cursor);
+            drop(writer);
+            return self.save(&state());
+        }
+        let active = if let Some(mut active) = loaded {
+            let file = delta::open(&self.delta_path, true)?.ok_or(io::ErrorKind::InvalidData)?;
+            active.append(file, &self.delta_path, change, next.peers.len(), state)?;
+            active
+        } else {
+            delta::start(&self.path, &self.delta_path, &state())?
+        };
+        *cursor = Some(active);
+        Ok(())
+    }
     /// Validate revision ownership under the directory lock before replacing the public file.
     /// # Errors
     /// Reports a stale revision, a mismatched base, or a durable write failure.
@@ -1123,7 +1191,12 @@ impl Store {
         let previous = if state.config.is_none() && full_snapshot_base.is_none() {
             None
         } else {
-            read_state(&self.path, &self.authority_path)?
+            #[cfg(target_os = "linux")]
+            let previous =
+                read_journaled_state(&self.path, &self.authority_path, &self.delta_path)?.0;
+            #[cfg(target_os = "macos")]
+            let previous = read_legacy_state(&self.path, &self.authority_path)?;
+            previous
         };
         if let Some(expected) = full_snapshot_base {
             let previous = previous.as_ref().ok_or(io::ErrorKind::InvalidData)?;
@@ -1270,31 +1343,6 @@ fn rotation_public_key(private_key: &[u8]) -> io::Result<crate::policy::model::P
 /// File beside `mesh-public.json` that holds a node's authority metadata.
 pub(crate) const AUTHORITY_FILE: &str = "mesh-authority.json";
 
-/// Authority metadata kept outside the public snapshot (D295 rollback, #382 P2).
-///
-/// The previous release parses `mesh-public.json` with `deny_unknown_fields`, so the epoch and
-/// the reset marker cannot live there: a rolled-back binary would fail to read its own state and
-/// leave the node without a mesh. They live in this separate file, which older releases never
-/// open. The snapshot file keeps exactly the older shape.
-///
-/// Writers update the snapshot first and this record second. Readers treat a missing or stale
-/// record as harmless: a wrong or missing epoch only makes the next server snapshot count as an
-/// authority change, and a reset marker is honoured only over a peer-free deny snapshot.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct AuthorityRecord {
-    /// The server authority epoch the saved snapshot came from, if it carried one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) epoch: Option<String>,
-    /// Snapshot metadata retained for exact-base persistence checks, never a continuity proof.
-    /// Reset recovery revalidates the operation from the incoming authenticated full snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) rotation_operation: Option<crate::dataplane::RotationContinuation>,
-    /// True after a new authority was fenced and until its first full snapshot is saved.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) reset_pending: bool,
-}
-
 /// Read the authority record, treating a missing, unreadable or malformed file as empty.
 ///
 /// An empty record is always safe to act on (see [`AuthorityRecord`]), so a damaged file is
@@ -1339,77 +1387,11 @@ pub(crate) fn write_authority(path: &Path, record: &AuthorityRecord) -> io::Resu
     write_public(path, &serde_json::to_vec(record).map_err(io::Error::other)?)
 }
 
-/// Move the authority metadata out of a snapshot about to be written, returning the stripped
-/// copy for the snapshot file and the record for [`AUTHORITY_FILE`].
-pub(crate) fn split_authority(
-    config: Option<&Config>,
-    reset_pending: bool,
-) -> (Option<Config>, AuthorityRecord) {
-    let mut stripped = config.cloned();
-    let epoch = stripped
-        .as_mut()
-        .and_then(|config| config.authority_epoch.take());
-    let rotation_operation = stripped
-        .as_mut()
-        .and_then(|config| config.rotation_operation.take());
-    (
-        stripped,
-        AuthorityRecord {
-            epoch,
-            rotation_operation,
-            reset_pending,
-        },
-    )
-}
-
-/// Fill a just-read snapshot's authority metadata from its record.
-///
-/// Values written inline by earlier builds of this change win. The record's epoch applies only
-/// to an epoch-less snapshot. Its reset marker applies only when the snapshot is peer-free and
-/// deny-by-default, the state a reset writes first; anything else means the record is older
-/// than the snapshot, and is ignored.
-pub(crate) fn merge_authority(
-    config: Option<&mut Config>,
-    reset_pending: &mut bool,
-    record: AuthorityRecord,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    config.rotation_operation = record.rotation_operation;
-    if config.authority_epoch.is_none() {
-        config.authority_epoch = record.epoch;
-    }
-    if record.reset_pending
-        && config.peers.is_empty()
-        && config.default_policy == crate::dataplane::DefaultPolicy::Deny
-    {
-        *reset_pending = true;
-    }
-}
-
-/// Encode `state` for `mesh-public.json` in the previous release's shape, plus its record.
-/// # Errors
-/// Reports a serialization failure.
-fn encode_state(state: &State) -> io::Result<(Vec<u8>, AuthorityRecord)> {
-    let (config, authority) = split_authority(state.config.as_ref(), state.authority_reset_pending);
-    let legacy = State {
-        enabled: state.enabled,
-        config,
-        authority_reset_pending: false,
-        #[cfg(target_os = "linux")]
-        backend: state.backend,
-    };
-    Ok((
-        serde_json::to_vec(&legacy).map_err(io::Error::other)?,
-        authority,
-    ))
-}
-
 /// Read `mesh-public.json` and merge its authority record (see [`merge_authority`]).
 /// # Errors
 /// Reports an unsafe or unreadable snapshot file.
-fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
+#[cfg(target_os = "macos")]
+fn read_legacy_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
     let Some(mut state) = read_public::<State>(path)? else {
         return Ok(None);
     };
@@ -1419,6 +1401,31 @@ fn read_state(path: &Path, authority_path: &Path) -> io::Result<Option<State>> {
         read_authority(authority_path),
     );
     Ok(Some(state))
+}
+
+/// Restore the journal selected by a legacy snapshot, or read its safe fallback. The caller
+/// holds the writer lock so neither file can transition while the two are being matched.
+#[cfg(target_os = "linux")]
+fn read_journaled_state(
+    path: &Path,
+    authority_path: &Path,
+    journal_path: &Path,
+) -> io::Result<(Option<State>, Option<delta::Cursor>)> {
+    let Some((mut state, token)) = delta::read_anchor(path)? else {
+        return Ok((None, None));
+    };
+    if let Some(token) = token
+        && let Some(journal) = delta::open(journal_path, false)?
+        && let Some((state, cursor)) = delta::replay(path, journal, token)?
+    {
+        return Ok((Some(state), Some(cursor)));
+    }
+    merge_authority(
+        state.config.as_mut(),
+        &mut state.authority_reset_pending,
+        read_authority(authority_path),
+    );
+    Ok((Some(state), None))
 }
 
 /// Read an owned public state file without following links.

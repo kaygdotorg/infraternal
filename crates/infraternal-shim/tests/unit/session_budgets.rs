@@ -29,7 +29,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
         };
         let frame = Frame::Output(13, vec![b'x'; 4096]);
@@ -79,7 +79,7 @@ mod budgets {
             exited_sent: true,
             stopping: false,
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
         };
         let mut terminal = Terminal::new(20, 4).unwrap();
@@ -173,7 +173,7 @@ mod budgets {
             exited_sent: false,
             stopping: false,
             request: None,
-            replay_awaits_size: false,
+            replay_awaits_size: ReplaySizeCheck::default(),
             echo_hidden_told: false,
         };
         let mut terminal = Terminal::new(200, 60).unwrap();

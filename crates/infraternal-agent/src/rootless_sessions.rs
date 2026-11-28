@@ -6,7 +6,6 @@
 
 use crate::sessions::{self, Manager, Reader, Session};
 use infraternal_shim::frame::{Frame, SHELL_CLEANUP};
-#[cfg(target_os = "linux")]
 use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
 use std::{
     fs::{self, File},
@@ -18,14 +17,12 @@ use std::{
 
 /// An unsuccessful spawn removes its reservation; after spawn the record must
 /// survive cancellation, so a later revocation can find the detached shim.
-#[cfg(target_os = "linux")]
 pub(crate) struct Reservation {
     /// A failed or cancelled launch removes its unconsumed reservation first.
     path: Option<PathBuf>,
     /// Release the person fence only after the record cleanup above.
     _person: crate::logins::PersonGuard,
 }
-#[cfg(target_os = "linux")]
 impl Reservation {
     /// The shim has started: the record must now survive this reservation. Returns its path so a
     /// launch that later fails can retire it once the terminal is proven stopped.
@@ -33,7 +30,6 @@ impl Reservation {
         self.path.take()
     }
 }
-#[cfg(target_os = "linux")]
 impl Drop for Reservation {
     /// Remove an unconsumed record before the owned person fence is released.
     fn drop(&mut self) {
@@ -46,7 +42,6 @@ impl Drop for Reservation {
 /// Reserve ownership durably before spawn, without occupying the host reactor.
 /// The returned reservation owns the launch fence. Cancellation releases an
 /// unstarted job's fence; an executing write retains it through record cleanup.
-#[cfg(target_os = "linux")]
 pub(crate) async fn reserve(
     state: &Path,
     person: uuid::Uuid,
@@ -79,7 +74,8 @@ pub(crate) async fn reserve(
         .0
 }
 
-/// Carry one person's fence through durable reservation, spawn and readiness.
+/// Reserve ownership under the person fence before launching an inherited shell.
+/// On macOS the shim starts inside the existing GUI login (D335).
 #[cold]
 pub(crate) async fn launch(
     exe: &Path,
@@ -150,7 +146,7 @@ async fn cleanup(state: &Path, person: uuid::Uuid) -> io::Result<Option<io::Erro
         })
         .collect::<io::Result<Vec<_>>>()?;
     let mut failure = None;
-    for entry in fs::read_dir(state.join("sessions"))? {
+    for entry in fs::read_dir(infraternal_shim::runtime_dir::session_dir(state))? {
         let path = entry?.path();
         if path.extension().is_some_and(|ext| ext == "sock") {
             let id = path

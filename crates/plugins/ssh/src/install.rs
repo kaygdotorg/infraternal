@@ -649,6 +649,9 @@ start_setup_lease
                 return Err(crate::previous_attempt::classify(failure));
             }
             match receipt.as_slice() {
+                b"CHECK platform macos\n" if stdout.is_empty() => {
+                    return Err(Failure::macos_join().at(InstallStep::Connect));
+                }
                 b"CHECK ready dd\n" => break true,
                 b"CHECK ready head\n" => break false,
                 _ => {}
@@ -1041,7 +1044,7 @@ fi
         // environment must never preset them (an inherited setup_check=yes would
         // turn every refusal into success), so the prelude fixes them (#305).
         format!(
-            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || {{ printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71; }}\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71 ;; esac\nfi\n{body}",
+            "set -euC\nsetup_check=no setup_blocked=no setup_guarded=no setup_allow_locked_inspection=no runtime_locked=no lease_runtime=no preserve_session=no retirement_approved=no previous_kind= parent= up_root_base=/var/lib/infraternal\numask 077\nhost={}\ntransaction={}\nbase=\"{base}\"\nlauncher=\"{launcher}\"\nunit=\"{unit}\"\nmanager={}\nwanted={wanted}\nif [ -e \"$base\" ] || [ -L \"$base\" ]; then\n    [ ! -L \"$base\" ] && [ -d \"$base\" ] && [ -O \"$base\" ] || {{ printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71; }}\n    case \"$(stat -c '%a' \"$base\")\" in {private_modes}) ;; *) printf 'INFRATERNAL_REFUSED foreign\\n' >&2; exit 71 ;; esac\nfi\n{body}",
             shell_quote(&host),
             shell_quote(&transaction.simple().to_string()),
             shell_quote(manager)
@@ -1546,8 +1549,14 @@ pub fn parse_refusal(receipt: &[u8], step: InstallStep) -> Option<Failure> {
         let status = receipt.strip_prefix(b"FAIL connect ")?;
         let mut upload = b"FAIL upload ".to_vec();
         upload.extend_from_slice(status);
-        return parse_refusal(&upload, InstallStep::Upload)
-            .map(|failure| failure.at(InstallStep::Connect));
+        return parse_refusal(&upload, InstallStep::Upload).map(|mut failure| {
+            if failure.exit_status == Some(1) {
+                failure.log_tail.push(
+                    "The read-only SSH system check stopped before it could confirm this host supports SSH installation.",
+                );
+            }
+            failure.at(InstallStep::Connect)
+        });
     }
     let (prefix, transfer) = match step {
         InstallStep::Upload => (b"STEP upload\n".as_slice(), true),

@@ -1,0 +1,10 @@
+# Daily compute01 test-server smoke. Fixture mutation and the warm update stay in the deploy hook.
+[Unit]
+Description=Schedule the Infraternal owner browser journeys
+
+[Timer]
+OnCalendar=*-*-* 04:45:00 Asia/Kolkata
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -29,6 +29,11 @@
 //!   write starts from the older durable value.
 //! - The check runs after chain, name and expiry verification, never instead
 //!   of them. It adds ordering, not trust.
+//! - A relay leaf is never the server (D402 Q3). Relay leaves are
+//!   server-purpose too and may name the same host, so a relay's key could
+//!   otherwise answer a dial meant for the server. Every relay leaf carries a
+//!   `urn:infraternal:relay:<uuid>` URI SAN, and `admit` refuses any leaf
+//!   whose DER contains that prefix, before it can raise the floor.
 use std::{
     io,
     sync::{Arc, Mutex},
@@ -96,6 +101,9 @@ impl ServerLeafFloor {
     /// refused this host's identity" and starts certificate recovery and the
     /// predecessor fallback, which a stale server must not trigger.
     pub fn admit(&self, leaf_der: &[u8]) -> io::Result<()> {
+        if carries_relay_uri(leaf_der) {
+            return Err(refused());
+        }
         let not_before = not_before_seconds(leaf_der)?;
         let mut newest = self.newest.lock().map_err(|_| refused())?;
         if not_before < *newest {
@@ -123,6 +131,17 @@ impl ServerLeafFloor {
             .map_err(|_| refused())?;
         self.admit(chain.first().ok_or_else(refused)?)
     }
+}
+
+/// The URI SAN prefix that marks a relay leaf (D402 Q3).
+const RELAY_URI: &[u8] = b"urn:infraternal:relay:";
+
+/// Whether the certificate's DER contains the relay URI prefix anywhere. A URI SAN is stored
+/// as its plain ASCII bytes, so a relay leaf always matches; a match anywhere else (say, in a
+/// subject name) is refused too, which is the safe side for a leaf that should be the server's.
+fn carries_relay_uri(der: &[u8]) -> bool {
+    der.windows(RELAY_URI.len())
+        .any(|window| window == RELAY_URI)
 }
 
 /// A leaf's `notBefore` as Unix seconds, read from its DER.
@@ -329,6 +348,19 @@ mod tests {
         let mut certificate = der(SEQUENCE, &tbs);
         certificate.extend(der(SEQUENCE, &[]));
         der(SEQUENCE, &certificate)
+    }
+
+    /// A leaf carrying the relay URI is refused before its time is read, so it never raises
+    /// the floor; the same skeleton without it is admitted (D402 Q3).
+    #[test]
+    fn a_relay_leaf_is_never_admitted_as_the_server() {
+        let floor = ServerLeafFloor::default();
+        let mut relay = certificate(&der(UTC_TIME, b"300101000000Z"), true);
+        relay.extend_from_slice(b"urn:infraternal:relay:5a5a5a5a-5a5a-5a5a-5a5a-5a5a5a5a5a5a");
+        assert!(floor.admit(&relay).is_err());
+        assert_eq!(floor.newest(), None);
+        let server = certificate(&der(UTC_TIME, b"300101000000Z"), true);
+        assert!(floor.admit(&server).is_ok());
     }
 
     /// The window reads both ends; a broken `notAfter` refuses the whole

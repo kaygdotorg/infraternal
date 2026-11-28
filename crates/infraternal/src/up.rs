@@ -5,6 +5,10 @@
 #[path = "up_install.rs"]
 mod install;
 
+#[cfg(target_os = "linux")]
+/// Find and remove Linux installations published by `up`.
+pub(crate) use install::uninstall as linux_uninstall;
+
 /// Install the Mac system service after device approval.
 #[cfg(target_os = "macos")]
 #[path = "up_macos.rs"]
@@ -38,12 +42,17 @@ use std::{
     process::{Command, ExitCode, Stdio},
     time::Duration,
 };
-use tokio::time::Instant;
+use termination::Cancellation;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time::Instant,
+};
 use url::Url;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use crate::trusted_program::{ToolError, trusted_program};
+use infraternal_plugin_api::elevation_prompt::ElevationPrompt;
 #[cfg(all(
     target_os = "linux",
     any(feature = "plugin-mesh", feature = "plugin-server")
@@ -105,7 +114,7 @@ const HELPER_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A user-facing failure class with a stable D303 exit status.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Failure {
+pub(crate) enum Failure {
     InvalidServer,
     Permission,
     Expired,
@@ -210,6 +219,70 @@ impl Failure {
         }
     }
 
+    /// Give a person the cause and a recovery step that fits the failure.
+    const fn text(self) -> (&'static str, &'static str) {
+        match self {
+            Self::InvalidServer => (
+                "Enter the server's HTTPS address.",
+                "Use the address from your browser without anything after the hostname and optional port.",
+            ),
+            Self::Permission => (
+                self.message(),
+                "Check with a server administrator that this machine is allowed to join.",
+            ),
+            Self::Expired => (
+                self.message(),
+                "Run infraternal up again and approve the new code.",
+            ),
+            Self::Unreachable => (
+                "Couldn't reach the server over HTTPS.",
+                "Check the address and open it in your browser before retrying.",
+            ),
+            Self::Partial => (
+                "The machine joined, but setup stopped before it finished.",
+                "Run infraternal status to see what started before you retry.",
+            ),
+            Self::Unsupported => (
+                self.message(),
+                "Ask a server administrator to update the server before you retry.",
+            ),
+            Self::Throttled => (self.message(), "Wait before you request a new code."),
+            Self::Runtime | Self::Failed => (
+                "Couldn't complete the machine join.",
+                "Check the server address in your browser, then run infraternal up again.",
+            ),
+            Self::LocalState => (
+                "Couldn't read or write local infraternal files.",
+                "Check permissions and free disk space.",
+            ),
+            Self::SudoUnavailable => (
+                "Can't ask for administrator access because sudo is missing.",
+                "Install sudo, then run infraternal up again.",
+            ),
+            Self::SudoDenied => (
+                "Administrator access was denied.",
+                "Run infraternal up from an administrator account and approve the prompt.",
+            ),
+            Self::UntrustedTool => (
+                "Couldn't verify that the system tools are owned by root.",
+                "Ask an administrator to restore ownership before you retry.",
+            ),
+            Self::InstallConflict => (
+                "Can't install infraternal with this machine's current setup.",
+                "Resolve the conflict shown above, then run infraternal up again.",
+            ),
+            Self::HostFirewall => (
+                "The firewall settings are invalid.",
+                "Check the --host-firewall-allow format with infraternal up --help.",
+            ),
+            Self::NoSystemd => (
+                "This machine doesn't have systemd.",
+                "Run infraternal up on a machine that uses systemd.",
+            ),
+        }
+    }
+
+    /// Return the numeric status used by the privileged install handoff.
     const fn exit_code(self) -> u8 {
         self.exit().code()
     }
@@ -286,7 +359,11 @@ struct Handoff {
     admin_rules: Vec<String>,
 }
 
-struct ApprovedInvitation(JoinInvitation);
+/// The approved join, carrying its optional prior-install proof separately from the invitation.
+struct ApprovedInvitation(
+    JoinInvitation,
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))] bool,
+);
 
 impl ApprovedInvitation {
     fn wipe(&mut self) {
@@ -300,48 +377,51 @@ impl Drop for ApprovedInvitation {
     }
 }
 
-/// The invoking user's on-disk copy of the pending machine key, between its
-/// preparation and [`take_join_key`]. A failure in that short window deletes
-/// it on return or unwind (#263, J134 P3-5). A signal does not run `Drop`, so
-/// the copy must not outlive that window: see [`take_join_key`].
-struct PendingKeyCopy<'a>(&'a Path);
-
-impl Drop for PendingKeyCopy<'_> {
-    fn drop(&mut self) {
-        // Best effort; take_join_key has normally removed it already.
-        let _ = crate::remote::retire_prepared_join_key(self.0);
+/// Run a top-level join with cleanup before its final interrupt envelope and exit signal.
+pub(crate) fn with_cancellation<F: std::future::Future<Output = Result<ExitCode, Failure>>>(
+    command: impl FnOnce(Cancellation) -> F,
+    json_output: bool,
+) -> ExitCode {
+    match termination::scope(|cancelled| async move {
+        let result = command(cancelled.clone()).await;
+        (result, cancelled.received())
+    }) {
+        Ok((Ok(code), signal)) => {
+            if let Some(signal) = signal {
+                infraternal_shim::exit_by_signal(signal);
+            }
+            code
+        }
+        Ok((Err(_), Some(signal))) => {
+            if json_output {
+                let _ = io::stdout().write_all(&crate::cli::output::interrupted_notice("up"));
+            }
+            infraternal_shim::exit_by_signal(signal);
+        }
+        Ok((Err(failure), None)) => fail(json_output, failure),
+        Err(_) => fail(json_output, Failure::Runtime),
     }
 }
 
-/// Read the prepared machine key into zeroizing memory and delete its file at
-/// once, before the code is shown. Nothing is then on disk during the
-/// ten-minute wait or the root helper run, so Ctrl-C, a closed terminal or
-/// SIGTERM cannot leave a root service's key readable in the user's home
-/// (#263, J145 P3-1). A retry needs a new approval anyway, so it gets a new
-/// key. Rejected: a signal handler that deletes the file, which adds async
-/// signal-safety and still loses to SIGKILL.
-fn take_join_key(data: &Path) -> Result<Zeroizing<Vec<u8>>, Failure> {
-    let key = crate::remote::prepared_join_key_pkcs8(data).map_err(|_| Failure::LocalState)?;
-    crate::remote::retire_prepared_join_key(data).map_err(|_| Failure::LocalState)?;
-    Ok(key)
-}
+/// Offer local retirement for a previous user installation after machine approval.
+#[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+#[path = "up_retire_previous.rs"]
+mod retire_previous;
 
 /// Request a fresh machine approval, wait for its one-use enrollment receipt, and install it.
-pub(crate) fn run(
+pub(crate) async fn run(
     server_input: &str,
     host_firewall_allow: &[String],
     json_output: bool,
-) -> ExitCode {
-    let server = match server_url(server_input) {
-        Ok(server) => server,
-        Err(failure) => return fail(json_output, failure),
-    };
+    cancelled: &Cancellation,
+) -> Result<ExitCode, Failure> {
+    let server = server_url(server_input)?;
     let origin = server.origin().ascii_serialization();
     // The code and link are a live approval capability for ten minutes. Show
     // them only to a person at a terminal, never into a pipe, file or CI log,
     // and do not wait out the lifetime when nobody can see them (#263).
     if !approval_display_is_terminal(json_output) {
-        return needs_terminal(&origin, json_output);
+        return Ok(needs_terminal(&origin, json_output));
     }
     // A redirected invocation exits before approval, so it should not fail a
     // host-policy check that only matters when installation can continue.
@@ -355,14 +435,14 @@ pub(crate) fn run(
             Err(env::VarError::NotPresent) => None,
             Err(env::VarError::NotUnicode(_)) => {
                 eprintln!("infraternal up: the active SSH path could not be read safely");
-                return fail(json_output, Failure::HostFirewall);
+                return Err(Failure::HostFirewall);
             }
         };
         match agent_host_firewall_rules(host_firewall_allow, ssh_connection.as_deref()) {
             Ok(rules) => rules,
             Err(error) => {
                 eprintln!("infraternal up host firewall: {error}");
-                return fail(json_output, Failure::HostFirewall);
+                return Err(Failure::HostFirewall);
             }
         }
     };
@@ -379,76 +459,67 @@ pub(crate) fn run(
     // Find both privileged programs before an approval is requested, so a
     // missing or replaceable one never wastes the owner's passkey approval.
     let Ok(executable) = env::current_exe() else {
-        return fail(json_output, Failure::Permission);
+        return Err(Failure::Permission);
     };
-    let mut sudo = match sudo_command(&executable, &origin, json_output) {
-        Ok(command) => command,
-        Err(failure) => return fail(json_output, failure),
-    };
+    let sudo = sudo_command(&executable, &origin, json_output)?;
     #[cfg(target_os = "linux")]
-    if let Err(failure) = trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd) {
-        return fail(json_output, failure);
-    }
-    if let Err(failure) = install_preflight() {
-        return fail(json_output, failure);
-    }
+    trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd)?;
+    install_preflight()?;
     let hostname = local_hostname();
     let host_id = uuid::Uuid::new_v4();
-    let Ok(data) = crate::remote::default_data() else {
-        return fail(json_output, Failure::LocalState);
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let old = retire_previous::inspect(json_output);
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retirement_hint = old.as_ref().map(retire_previous::preference);
+    #[cfg(not(all(target_os = "linux", feature = "plugin-ssh")))]
+    let retirement_hint: Option<String> = None;
+    let approval = async {
+        let (key_pkcs8, key_digest) = crate::remote::prepare_machine_join_key(&origin)
+            .await
+            .map_err(|error| map_remote_failure(&error))?;
+        let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(key_digest));
+        let short_key = machine_key_short(&fingerprint).ok_or(Failure::Failed)?;
+        let body = machine_start_body(host_id, &hostname, &fingerprint, JoinMode::System)?;
+        let approval = start_approval(&server, &body).await?;
+        let link = join_approval_link(&server, &approval.user_code);
+        print_approval(json_output, &short_key, &approval.user_code, &link)?;
+        let invitation = wait_for_approval(
+            &server,
+            &approval,
+            host_id,
+            &origin,
+            JoinMode::System,
+            retirement_hint.as_deref(),
+        )
+        .await?;
+        Ok::<_, Failure>((invitation, key_pkcs8, key_digest, fingerprint, short_key))
     };
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return fail(json_output, Failure::Runtime);
-    };
-    let key_digest = match runtime.block_on(crate::remote::prepare_machine_join_key(&origin, &data))
-    {
-        Ok(digest) => digest,
-        Err(error) => return fail(json_output, map_remote_failure(&error)),
-    };
-    let _key_copy = PendingKeyCopy(&data);
-    let key_pkcs8 = match take_join_key(&data) {
-        Ok(key) => key,
-        Err(failure) => return fail(json_output, failure),
-    };
-    if crate::remote::key_digest_from_pkcs8(&key_pkcs8).ok() != Some(key_digest) {
-        return fail(json_output, Failure::LocalState);
-    }
-    let fingerprint = format!("SHA256:{}", STANDARD_NO_PAD.encode(key_digest));
-    let Some(short_key) = machine_key_short(&fingerprint) else {
-        return fail(json_output, Failure::Failed);
-    };
-    let body = match machine_start_body(host_id, &hostname, &fingerprint, JoinMode::System) {
-        Ok(body) => body,
-        Err(failure) => return fail(json_output, failure),
-    };
-    let approval = match runtime.block_on(start_approval(&server, &body)) {
-        Ok(approval) => approval,
-        Err(failure) => return fail(json_output, failure),
-    };
-    let link = join_approval_link(&server, &approval.user_code);
-    if let Err(failure) = print_approval(json_output, &short_key, &approval.user_code, &link) {
-        return fail(json_output, failure);
-    }
-    let mut invitation = match runtime.block_on(wait_for_approval(
-        &server,
-        &approval,
-        host_id,
-        &origin,
-        JoinMode::System,
-    )) {
-        Ok(invitation) => invitation,
-        Err(failure) => return fail(json_output, failure),
-    };
-    let payload = match encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules) {
-        Ok(payload) => payload,
-        Err(failure) => return fail(json_output, failure),
+    let approved = cancelled
+        .during(approval)
+        .await
+        .unwrap_or(Err(Failure::Failed));
+    let (mut invitation, key_pkcs8, key_digest, fingerprint, short_key) =
+        approved.inspect_err(|_| eprintln!("No system service was installed."))?;
+    let payload = encode_handoff(&invitation.0, &key_pkcs8, &key_digest, &admin_rules)?;
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retire = match old {
+        Some(plan) if invitation.1 && retire_previous::confirm(&plan, cancelled).await => {
+            Some(plan)
+        }
+        _ => None,
     };
     invitation.wipe();
-    if let Err(failure) = invoke_sudo(&mut sudo, &payload) {
-        return fail(json_output, failure);
+    let installed = invoke_sudo(sudo, &payload, json_output, cancelled).await;
+    if cancelled.received().is_some() {
+        if installed.is_ok() {
+            eprintln!("The installation finished and the system service remains installed.");
+        }
+        return Err(Failure::Failed);
+    }
+    installed?;
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    if let Some(plan) = retire {
+        retire_previous::finish(&plan);
     }
     #[cfg(all(
         target_os = "linux",
@@ -465,14 +536,11 @@ pub(crate) fn run(
     } else {
         "This machine joined the server and its system service is active."
     };
-    let success_body = if host_firewall_service.is_some() {
-        format!(
-            "Machine joined as {hostname}.\nService: active\nHost input firewall: mesh input only (infraternal-firewall.service)\nCommand: {PATH_BINARY}"
-        )
-    } else {
-        format!("Machine joined as {hostname}.\nService: active\nCommand: {PATH_BINARY}")
-    };
-    emit(
+    let mut success_body = format!("Server   {origin}\nCommand  {PATH_BINARY}");
+    if host_firewall_service.is_some() {
+        success_body.push_str("\nFirewall  Filters incoming mesh traffic");
+    }
+    Ok(emit(
         CommandResult::new(
             "up",
             CommandState::Ready,
@@ -490,10 +558,12 @@ pub(crate) fn run(
                 "host_firewall_status": if host_firewall_service.is_some() { "active" } else { "unavailable" },
             }),
         )
-        .with_body(success_body),
+        .with_text_message(joined_message(&hostname))
+        .with_body(success_body)
+        .with_text_next(vec!["Check this machine with infraternal status.".to_owned()]),
         json_output,
         Exit::Ok,
-    )
+    ))
 }
 
 /// Parse the small administrator-rule list used by a fresh system installation.
@@ -611,6 +681,8 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
         trusted_tool(&SYSTEMCTL_CANDIDATES, Failure::NoSystemd).map_err(|_| Failure::Failed)?;
     let mut invitation = ApprovedInvitation(
         serde_json::from_slice(&handoff.invitation).map_err(|_| Failure::Permission)?,
+        #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+        false,
     );
     validate_invitation(&invitation.0, &origin, None, JoinMode::System)?;
     if crate::remote::key_digest_from_pkcs8(&handoff.key_pkcs8).ok() != Some(handoff.key_digest) {
@@ -624,74 +696,93 @@ fn run_helper_inner(server_input: &str) -> Result<(), Failure> {
     #[cfg(target_os = "macos")]
     install_preflight()?;
     let join_url = format!("{origin}/remote/join");
-    termination::run(|interrupted| async move {
-        #[cfg(target_os = "linux")]
-        let install = install::Install::begin_accepted(accepted, &systemctl);
-        #[cfg(target_os = "macos")]
-        let install = macos::Install::begin();
-        let install = install
-            .map_err(|error| {
-                eprintln!("{error}");
-                Failure::LocalState
-            })?
-            .interrupt_on(interrupted);
-        #[cfg(all(
-            target_os = "linux",
-            any(feature = "plugin-mesh", feature = "plugin-server")
-        ))]
-        let install = install
-            .with_host_firewall_policy(agent_policy)
-            .map_err(|error| {
-                eprintln!("{error}");
-                Failure::HostFirewall
-            })?;
-        // The Linux installer copies the binary while the server issues the
-        // certificate: neither needs the other, and each takes a large part of
-        // the time between the approval and the service start (#580).
-        #[cfg(target_os = "linux")]
-        let mut install = install;
-        #[cfg(target_os = "linux")]
-        let copy = {
-            let pending = install
-                .stage_image(Path::new(RUNNING_IMAGE))
+    let (result, signal) = termination::scope(|cancelled| async move {
+        let result = async {
+            cancelled.check().map_err(|_| Failure::Failed)?;
+            println!("UP_STAGE=installation");
+            #[cfg(target_os = "linux")]
+            let install = install::Install::begin_accepted(accepted, &systemctl);
+            #[cfg(target_os = "macos")]
+            let install = macos::Install::begin();
+            let install = install
                 .map_err(|error| {
                     eprintln!("{error}");
                     Failure::LocalState
+                })?
+                .interrupt_on(cancelled.flag());
+            #[cfg(all(
+                target_os = "linux",
+                any(feature = "plugin-mesh", feature = "plugin-server")
+            ))]
+            let install = install
+                .with_host_firewall_policy(agent_policy)
+                .map_err(|error| {
+                    eprintln!("{error}");
+                    Failure::HostFirewall
                 })?;
-            tokio::task::spawn_blocking(move || pending.copy())
-        };
-        println!("UP_STAGE=enrollment");
-        let joined = crate::remote::join_with_key(
-            &join_url,
-            Path::new(SERVICE_DATA),
-            &handoff.invitation,
-            &handoff.key_pkcs8,
-        )
-        .await
-        .map_err(|error| map_remote_failure(&error));
-        // The copy is waited for even after a failed enrollment, so nothing is
-        // still writing when the installer rolls back.
-        #[cfg(target_os = "linux")]
-        let copied = copy.await;
-        joined?;
-        #[cfg(target_os = "linux")]
-        let activation = copied
-            .map_err(io::Error::other)
-            .and_then(|image| install.activate_copied(image?));
-        #[cfg(target_os = "macos")]
-        let activation = env::current_exe().and_then(|image| install.activate(&image, host));
-        activation.map_err(|error| {
+            // The Linux installer copies the binary while the server issues the
+            // certificate: neither needs the other, and each takes a large part of
+            // the time between the approval and the service start (#580).
+            #[cfg(target_os = "linux")]
+            let mut install = install;
+            #[cfg(target_os = "linux")]
+            let copy = {
+                let pending = install
+                    .stage_image(Path::new(RUNNING_IMAGE))
+                    .map_err(|error| {
+                        eprintln!("{error}");
+                        Failure::LocalState
+                    })?;
+                tokio::task::spawn_blocking(move || pending.copy())
+            };
+            println!("UP_STAGE=enrollment");
+            let joined = cancelled
+                .during(crate::remote::join_with_key(
+                    &join_url,
+                    Path::new(SERVICE_DATA),
+                    &handoff.invitation,
+                    &handoff.key_pkcs8,
+                ))
+                .await;
+            // Reap the local copy even after cancellation so rollback never races
+            // a writer still holding the staging file.
+            #[cfg(target_os = "linux")]
+            let copied = copy.await;
+            joined
+                .map_err(|_| Failure::Failed)?
+                .map_err(|error| map_remote_failure(&error))?;
+            cancelled.check().map_err(|_| Failure::Failed)?;
+            #[cfg(target_os = "linux")]
+            let activation = copied
+                .map_err(io::Error::other)
+                .and_then(|image| install.activate_copied(image?));
             #[cfg(target_os = "macos")]
-            eprintln!("{error}");
-            #[cfg(not(target_os = "macos"))]
-            let _ = error;
-            Failure::Partial
-        })
+            let activation = env::current_exe().and_then(|image| install.activate(&image, host));
+            activation.map_err(|error| {
+                #[cfg(target_os = "macos")]
+                eprintln!("{error}");
+                #[cfg(not(target_os = "macos"))]
+                let _ = error;
+                Failure::Partial
+            })
+        }
+        .await;
+        (result, cancelled.received())
     })
     .map_err(|error| {
         eprintln!("{error}");
         Failure::Failed
-    })?
+    })?;
+    if let Some(signal) = signal {
+        // Sudo may have owned the foreground terminal. Preserve the install result and
+        // terminate by the signal so the unprivileged caller also notices Ctrl-C.
+        println!(
+            "UP_RESULT={}",
+            result.map_or_else(Failure::exit_code, |()| 0)
+        );
+        infraternal_shim::exit_by_signal(signal);
+    }
+    result
 }
 
 fn server_url(input: &str) -> Result<Url, Failure> {
@@ -746,6 +837,13 @@ fn shown_hostname(name: &str) -> String {
     }
 }
 
+/// Use the server inventory's hostname normalization for the join confirmation.
+fn joined_message(hostname: &str) -> String {
+    let name = infraternal_plugin_api::host_name::machine_name(hostname);
+    let machine = name.as_deref().unwrap_or("This machine");
+    format!("{machine} joined the server.")
+}
+
 /// The device-approval request body for one fresh machine, built by the shared sign-in crate
 /// from this join mode's wire text and execution uid.
 fn machine_start_body(
@@ -781,14 +879,19 @@ fn machine_key_short(fingerprint: &str) -> Option<String> {
     )
 }
 
+/// Pack two QR rows into each terminal line, with a four-module quiet zone.
 fn approval_qr(link: &str) -> Result<String, Failure> {
     let qr = QrCode::encode_text(link, QrCodeEcc::Low).map_err(|_| Failure::Failed)?;
     let size = qr.size();
     let mut rendered = String::new();
-    for y in -4..size + 4 {
+    for y in (-4..size + 4).step_by(2) {
         for x in -4..size + 4 {
-            let dark = x >= 0 && y >= 0 && x < size && y < size && qr.get_module(x, y);
-            rendered.push_str(if dark { "##" } else { "  " });
+            rendered.push(match (qr.get_module(x, y), qr.get_module(x, y + 1)) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            });
         }
         rendered.push('\n');
     }
@@ -823,27 +926,51 @@ fn needs_terminal(origin: &str, json_output: bool) -> ExitCode {
     )
 }
 
+/// Print the link and matching codes on the interactive stream used for approval.
 fn print_approval(
     json_output: bool,
     short_key: &str,
     user_code: &str,
     link: &str,
 ) -> Result<(), Failure> {
-    let qr = approval_qr(link)?;
-    if json_output {
-        eprintln!("Open this link and approve this machine with your passkey:\n{link}");
-        eprintln!("Code: {user_code}    Machine key: {short_key}");
-        eprintln!("{qr}");
-        eprintln!("Waiting for approval...");
-        io::stderr().flush().map_err(|_| Failure::Runtime)?;
+    use infraternal_plugin_api::present;
+    let options =
+        crate::cli::output::RenderOptions::detect(approval_display_is_terminal(json_output));
+    let details = format!("Code         {user_code}\nMachine key  {short_key}");
+    let codes = present::panel(&details, 0, options.usable_width(), options.terminal);
+    let qr = if options.terminal {
+        let qr = approval_qr(link)?;
+        if qr
+            .lines()
+            .next()
+            .is_some_and(|row| row.chars().count() <= options.width)
+        {
+            if options.color {
+                // A light quiet zone lets the same code scan against light and dark themes.
+                format!("\u{1b}[30;107m{qr}\u{1b}[0m")
+            } else {
+                qr
+            }
+        } else {
+            String::new()
+        }
     } else {
-        println!("Open this link and approve this machine with your passkey:\n{link}");
-        println!("Code: {user_code}    Machine key: {short_key}");
-        println!("{qr}");
-        println!("Waiting for approval...");
-        io::stdout().flush().map_err(|_| Failure::Runtime)?;
+        String::new()
+    };
+    let out = format!(
+        "Open this link to approve the machine with your passkey.\n{link}\n\n{codes}\n{qr}Waiting for approval.\n"
+    );
+    let write = |stream: &mut dyn Write| {
+        stream
+            .write_all(out.as_bytes())
+            .and_then(|()| stream.flush())
+    };
+    if json_output {
+        write(&mut io::stderr().lock())
+    } else {
+        write(&mut io::stdout().lock())
     }
-    Ok(())
+    .map_err(|_| Failure::Runtime)
 }
 
 /// Start machine approval and check the server returned the expected capability shapes.
@@ -870,6 +997,7 @@ async fn wait_for_approval(
     host_id: uuid::Uuid,
     origin: &str,
     join: JoinMode,
+    retirement_hint: Option<&str>,
 ) -> Result<ApprovedInvitation, Failure> {
     let deadline = Instant::now() + approval.lifetime;
     let body = Zeroizing::new(
@@ -893,7 +1021,7 @@ async fn wait_for_approval(
             server,
             "/auth/device-redeem",
             &body,
-            Some("wait=10"),
+            Some(retirement_hint.unwrap_or("wait=10")),
             remaining.min(POLL_INTERVAL + REQUEST_TIMEOUT),
         )
         .await
@@ -906,6 +1034,8 @@ async fn wait_for_approval(
             StatusCode::OK => {
                 let invitation = ApprovedInvitation(
                     serde_json::from_slice(&response.body).map_err(|_| Failure::Failed)?,
+                    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+                    response.retirement_authorized,
                 );
                 validate_invitation(&invitation.0, origin, Some(host_id), join)?;
                 return Ok(invitation);
@@ -930,7 +1060,7 @@ async fn post_json(
     server: &Url,
     path: &'static str,
     body: &[u8],
-    preference: Option<&'static str>,
+    preference: Option<&str>,
     timeout: Duration,
 ) -> Result<crate::remote::ClientResponse, Failure> {
     let mut request_started = false;
@@ -1092,6 +1222,7 @@ fn take_u32(bytes: &[u8], offset: &mut usize) -> Result<usize, Failure> {
     usize::try_from(u32::from_be_bytes(value)).map_err(|_| Failure::Permission)
 }
 
+/// Read `length` bytes from `bytes` starting at `offset` into a zeroizing buffer.
 fn take_bytes(
     bytes: &[u8],
     offset: &mut usize,
@@ -1101,6 +1232,32 @@ fn take_bytes(
     let value = bytes.get(*offset..end).ok_or(Failure::Permission)?;
     *offset = end;
     Ok(Zeroizing::new(value.to_vec()))
+}
+
+/// Select the elevation explanation matching what this platform's `up` actually installs.
+const fn system_elevation_prompt() -> ElevationPrompt {
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "plugin-mesh", feature = "plugin-server")
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: true,
+        }
+    }
+    #[cfg(all(
+        target_os = "linux",
+        not(any(feature = "plugin-mesh", feature = "plugin-server"))
+    ))]
+    {
+        ElevationPrompt::LinuxSystemInstall {
+            host_firewall: false,
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ElevationPrompt::MacosSystemInstall
+    }
 }
 
 /// The one sudo invocation: a root-owned sudo runs this binary's hidden helper.
@@ -1127,33 +1284,59 @@ fn trusted_tool(candidates: &[&str], missing: Failure) -> Result<PathBuf, Failur
 }
 
 /// Send enrollment input privately and preserve local preflight refusals from the helper.
-fn invoke_sudo(command: &mut Command, payload: &[u8]) -> Result<(), Failure> {
-    let mut child = command
+async fn invoke_sudo(
+    command: Command,
+    payload: &[u8],
+    json_output: bool,
+    cancelled: &Cancellation,
+) -> Result<(), Failure> {
+    if cancelled.received().is_some() {
+        eprintln!("No system service was installed.");
+        return Err(Failure::Failed);
+    }
+    system_elevation_prompt().print_to_stderr(json_output);
+    let mut child = tokio::process::Command::from(command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|_| Failure::SudoUnavailable)?;
     let mut stdin = child.stdin.take().ok_or(Failure::Runtime)?;
-    stdin.write_all(payload).map_err(|_| Failure::Partial)?;
-    drop(stdin);
-    let output = child.wait_with_output().map_err(|_| Failure::Partial)?;
+    let mut stdout = child.stdout.take().ok_or(Failure::Runtime)?;
+    let mut output = Vec::new();
+    let (status, sent, read) = tokio::join!(
+        cancelled.wait_for_child(&mut child),
+        async move { cancelled.during(stdin.write_all(payload)).await },
+        stdout.read_to_end(&mut output),
+    );
+    let status = status.map_err(|_| Failure::Partial)?;
+    read.map_err(|_| Failure::Partial)?;
     if output
-        .stdout
         .split(|byte| *byte == b'\n')
         .any(|line| line == b"UP_PREFLIGHT_REFUSED")
     {
         return Err(Failure::InstallConflict);
     }
-    if let Some(code) = parse_result_marker(&output.stdout) {
+    let installation_started = output
+        .split(|byte| *byte == b'\n')
+        .any(|line| line == b"UP_STAGE=installation");
+    if let Some(code) = parse_result_marker(&output) {
         if code == 0 {
-            Ok(())
-        } else {
-            Err(Failure::from_code(code).unwrap_or(Failure::Partial))
+            return Ok(());
         }
-    } else if output.status.success() {
-        Err(Failure::Partial)
-    } else if output.status.code().is_some_and(|code| code == 1) {
+        if !installation_started {
+            eprintln!("No system service was installed.");
+        }
+        return Err(Failure::from_code(code).unwrap_or(Failure::Partial));
+    }
+    if installation_started {
+        eprintln!(
+            "The system installer did not confirm cleanup. Check the local installation before retrying."
+        );
+    } else {
+        eprintln!("No system service was installed.");
+    }
+    if status.code() == Some(1) && sent.is_ok() {
         Err(Failure::SudoDenied)
     } else {
         Err(Failure::Partial)
@@ -1276,7 +1459,13 @@ fn run_systemctl(
     expected_output: Option<&str>,
 ) -> io::Result<()> {
     // Root runs systemctl with a fixed environment, not whatever sudo kept.
-    let output = Command::new(systemctl)
+    use std::os::unix::process::CommandExt;
+    let mut command = Command::new(systemctl);
+    if !matches!(arguments.first().copied(), Some("is-active" | "show")) {
+        // A manager write must finish before the installer can revert it.
+        command.process_group(0);
+    }
+    let output = command
         .args(arguments)
         .env_clear()
         .env("PATH", HELPER_PATH)
@@ -1314,17 +1503,16 @@ fn map_remote_failure(error: &io::Error) -> Failure {
     }
 }
 
+/// Report the join failure with the original script message and a human recovery step.
 fn fail(json_output: bool, failure: Failure) -> ExitCode {
-    if json_output {
-        emit(
-            CommandResult::new("up", failure.state(), failure.message(), json!({})),
-            true,
-            failure.exit(),
-        )
-    } else {
-        eprintln!("{}", failure.message());
-        ExitCode::from(failure.exit_code())
-    }
+    let (message, next) = failure.text();
+    emit(
+        CommandResult::new("up", failure.state(), failure.message(), json!({}))
+            .with_text_message(message)
+            .with_text_next(vec![next.to_owned()]),
+        json_output,
+        failure.exit(),
+    )
 }
 
 /// Local enrollment, privilege, and transactional installation regressions.
@@ -1404,20 +1592,33 @@ mod tests {
         }
     }
 
+    /// Each half block represents the same QR bits as the underlying matrix.
     #[test]
-    fn approval_qr_renders_a_square_matrix_with_a_four_module_quiet_zone() {
+    fn approval_qr_renders_half_blocks_with_a_quiet_zone() {
         let link = "https://mesh.example.org/#join=AbCdEfGhIjKlMnOp";
         let rendered = approval_qr(link).unwrap();
         let rows = rendered.lines().collect::<Vec<_>>();
-        let quiet_zone = " ".repeat(8);
+        let qr = qrcodegen::QrCode::encode_text(link, qrcodegen::QrCodeEcc::Low).unwrap();
+        let size = usize::try_from(qr.size()).unwrap();
+        assert_eq!(rows.len(), (size + 8).div_ceil(2));
+        for (row, text) in rows.iter().enumerate() {
+            assert_eq!(text.chars().count(), size + 8);
+            for (column, glyph) in text.chars().enumerate() {
+                let x = i32::try_from(column).unwrap() - 4;
+                let y = i32::try_from(row * 2).unwrap() - 4;
+                assert_eq!(matches!(glyph, '█' | '▀'), qr.get_module(x, y));
+                assert_eq!(matches!(glyph, '█' | '▄'), qr.get_module(x, y + 1));
+            }
+        }
+    }
 
-        assert_eq!(rows.len(), 37);
-        assert!(rows.iter().all(|row| row.len() == 74));
-        assert_eq!(rows.first(), Some(&" ".repeat(74).as_str()));
-        assert_eq!(rows.last(), Some(&" ".repeat(74).as_str()));
-        assert!(
-            rows.iter()
-                .all(|row| { row.starts_with(&quiet_zone) && row.ends_with(&quiet_zone) })
+    /// The join confirmation shows the same short machine label as inventory.
+    #[test]
+    fn joined_confirmation_uses_the_inventory_name() {
+        assert_eq!(super::joined_message("MBP.local"), "mbp joined the server.");
+        assert_eq!(
+            super::joined_message("localhost"),
+            "This machine joined the server."
         );
     }
 
@@ -1610,88 +1811,6 @@ mod tests {
         assert_eq!(mode(&base.join("bin")), 0o755);
         assert_eq!(mode(&base.join("bin/infraternal")), 0o755);
         assert_eq!(mode(&base.join("agent")), 0o700, "state stays private");
-    }
-
-    /// Child half of `a_signal_during_up_leaves_no_copy_of_the_machine_key`:
-    /// takes the key the way `up` does, then waits like `up` waits.
-    #[test]
-    #[ignore = "run only as a child process that the parent signals"]
-    fn hold_a_taken_join_key() {
-        let data = Path::new(&std::env::var_os("UP_TEST_KEY_DIR").unwrap()).to_path_buf();
-        let _copy = super::PendingKeyCopy(&data);
-        let key = super::take_join_key(&data).unwrap();
-        assert!(!key.is_empty());
-        println!("\nKEY_TAKEN");
-        std::thread::sleep(std::time::Duration::from_secs(60));
-    }
-
-    #[test]
-    fn a_signal_during_up_leaves_no_copy_of_the_machine_key() {
-        // J145 P3-1: Ctrl-C, a closed terminal or SIGTERM skip Drop.
-        use nix::sys::signal::{Signal, kill};
-        use std::io::BufRead;
-        for signal in [Signal::SIGINT, Signal::SIGHUP, Signal::SIGTERM] {
-            let temporary = TemporaryDirectory::new();
-            let data = temporary.0.join("data");
-            fs::create_dir(&data).unwrap();
-            fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
-            // The key `up` prepared before the code is shown.
-            crate::remote::prepared_join_key_pkcs8(&data).unwrap();
-            assert_eq!(fs::read_dir(&data).unwrap().count(), 1);
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "up::tests::hold_a_taken_join_key",
-                    "--ignored",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env("UP_TEST_KEY_DIR", &data)
-                .stdout(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-            let ready = stdout
-                .lines()
-                .map_while(Result::ok)
-                .any(|line| line == "KEY_TAKEN");
-            assert!(ready, "the child never took the key");
-            kill(
-                nix::unistd::Pid::from_raw(i32::try_from(child.id()).unwrap()),
-                signal,
-            )
-            .unwrap();
-            let status = child.wait().unwrap();
-            assert!(!status.success(), "{signal:?}: the child was not stopped");
-            assert_eq!(
-                fs::read_dir(&data).unwrap().count(),
-                0,
-                "{signal:?}: the key copy survived the signal"
-            );
-        }
-    }
-
-    #[test]
-    fn a_failed_up_leaves_no_copy_of_the_machine_key() {
-        // J134 P3-5: the key stayed in the user's home after any failure.
-        let temporary = TemporaryDirectory::new();
-        let data = temporary.0.join("data");
-        fs::create_dir(&data).unwrap();
-        fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
-        // The same preparation `up` runs after its server preflight.
-        let key = crate::remote::prepared_join_key_pkcs8(&data).unwrap();
-        assert!(crate::remote::key_digest_from_pkcs8(&key).is_ok());
-        let before = fs::read_dir(&data).unwrap().count();
-        assert_eq!(before, 1, "one pending key file");
-        {
-            let _copy = super::PendingKeyCopy(&data);
-            // Any failure return happens here.
-        }
-        assert_eq!(
-            fs::read_dir(&data).unwrap().count(),
-            0,
-            "the key copy was left behind"
-        );
     }
 
     #[test]
@@ -1945,28 +2064,139 @@ mod tests {
         assert!(failure.message().contains("local"));
     }
 
+    /// A missing sudo executable reports which local dependency is unavailable.
     #[test]
     fn missing_sudo_has_a_local_not_found_cause() {
         let temporary = TemporaryDirectory::new();
-        let mut command = std::process::Command::new(temporary.0.join("missing-sudo"));
+        let command = std::process::Command::new(temporary.0.join("missing-sudo"));
 
-        let failure = invoke_sudo(&mut command, b"").unwrap_err();
+        let failure = super::termination::scope(|cancelled| async move {
+            invoke_sudo(command, b"", false, &cancelled)
+                .await
+                .unwrap_err()
+        })
+        .unwrap();
 
         assert_eq!(failure.exit(), Exit::NotFound);
         assert!(failure.message().contains("sudo"));
     }
 
+    /// A sudo refusal stays a local permission error even if the child never reads stdin.
     #[test]
     fn sudo_denial_has_a_local_permission_cause() {
         let temporary = TemporaryDirectory::new();
         let sudo = temporary.0.join("sudo");
         crate::test_executable::write(&sudo, "#!/bin/sh\nexit 1\n", 0o755);
-        let mut command = std::process::Command::new(sudo);
+        let command = std::process::Command::new(sudo);
 
-        let failure = invoke_sudo(&mut command, b"").unwrap_err();
+        let failure = super::termination::scope(|cancelled| async move {
+            invoke_sudo(command, b"", false, &cancelled)
+                .await
+                .unwrap_err()
+        })
+        .unwrap();
 
         assert_eq!(failure.exit(), Exit::NotAllowed);
         assert!(failure.message().contains("sudo"));
+    }
+
+    /// Run the system elevation boundary with the test's sudo fixture and real signal handlers.
+    #[test]
+    #[ignore = "run only in the password-prompt test's private terminal"]
+    fn sudo_password_prompt_child() {
+        let fixture = std::env::var_os("INFRATERNAL_TEST_SUDO_FIXTURE").unwrap();
+        let mut sudo = std::process::Command::new(Path::new(&fixture).join("sudo"));
+        sudo.current_dir(fixture);
+        // End libtest's status line before the CLI emits its JSON envelope.
+        println!();
+        super::with_cancellation(
+            |cancelled| async move {
+                invoke_sudo(sudo, b"", true, &cancelled).await?;
+                Ok(std::process::ExitCode::SUCCESS)
+            },
+            true,
+        );
+    }
+
+    /// Ctrl-C at the password prompt leaves the system installation baseline intact.
+    #[test]
+    fn ctrl_c_at_sudo_password_prompt_leaves_a_clean_baseline() {
+        use nix::{
+            poll::{PollFd, PollFlags, poll},
+            pty::openpty,
+        };
+        use std::{
+            io::{Read, Write},
+            os::{fd::AsFd, unix::process::ExitStatusExt},
+            process::{Command, Stdio},
+        };
+
+        let temporary = TemporaryDirectory::new();
+        fs::write(temporary.0.join("keep"), b"existing").unwrap();
+        crate::test_executable::write(
+            &temporary.0.join("sudo"),
+            "#!/bin/sh\nprintf 'Password: ' >/dev/tty\nread -r password </dev/tty || exit 1\n: >installed\n",
+            0o755,
+        );
+        let tty = openpty(None, None).unwrap();
+        let mut terminal = fs::File::from(tty.master);
+        // A private controlling terminal delivers VINTR to the CLI and sudo's foreground group.
+        let mut command = Command::new("setsid");
+        command
+            .arg("--ctty")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "up::tests::sudo_password_prompt_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("INFRATERNAL_TEST_SUDO_FIXTURE", &temporary.0)
+            .env("TERM", "xterm")
+            .env_remove("NO_COLOR")
+            .stdin(tty.slave.try_clone().unwrap())
+            .stdout(Stdio::piped())
+            .stderr(tty.slave);
+        infraternal_shim::prepare_child(&mut command);
+        let mut child = crate::restart_binary::fixture::ChildGuard::new(command.spawn().unwrap());
+        drop(command);
+
+        let mut prompt = Vec::new();
+        while !prompt.ends_with(b"Password: ") {
+            let mut ready = [PollFd::new(terminal.as_fd(), PollFlags::POLLIN)];
+            assert_eq!(poll(&mut ready, 5000_u16).unwrap(), 1, "no password prompt");
+            let mut bytes = [0; 1024];
+            let count = terminal.read(&mut bytes).unwrap();
+            assert_ne!(count, 0, "terminal closed before the password prompt");
+            prompt.extend_from_slice(&bytes[..count]);
+        }
+        terminal.write_all(b"\x03").unwrap();
+
+        let mut done = [PollFd::new(
+            child.process().stdout.as_ref().unwrap().as_fd(),
+            PollFlags::POLLHUP,
+        )];
+        assert_eq!(poll(&mut done, 5000_u16).unwrap(), 1, "sudo kept running");
+        let output = child.output();
+        assert_eq!(output.status.signal(), Some(nix::libc::SIGINT));
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let envelopes: Vec<serde_json::Value> = stdout
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(envelopes.len(), 1, "{stdout}");
+        assert_eq!(envelopes[0]["error"]["code"], "interrupted");
+        assert!(!temporary.0.join("installed").exists());
+        assert_eq!(fs::read(temporary.0.join("keep")).unwrap(), b"existing");
+        let prompt = String::from_utf8(prompt).unwrap();
+        let action = prompt
+            .find("Infraternal needs administrator privileges")
+            .unwrap();
+        let benefit = prompt.find("If you grant it, you get:").unwrap();
+        let loss = prompt.find("If you don't, you won't be able to").unwrap();
+        assert!(action < benefit && benefit < loss);
+        assert!(!prompt.contains('\x1b'), "JSON mode styled the prompt");
     }
 
     #[test]
@@ -2088,5 +2318,17 @@ mod tests {
         let start = lines.iter().position(|line| line.starts_with("ExecStart="));
         assert!(relabel.is_some(), "{unit}");
         assert!(relabel < start, "{unit}");
+    }
+
+    /// #616: `infraternal up` selects the Linux system install elevation prompt
+    /// matching whether this build includes the host input firewall.
+    #[test]
+    fn system_elevation_prompt_matches_linux_features() {
+        assert_eq!(
+            super::system_elevation_prompt(),
+            super::ElevationPrompt::LinuxSystemInstall {
+                host_firewall: cfg!(any(feature = "plugin-mesh", feature = "plugin-server")),
+            }
+        );
     }
 }

@@ -51,6 +51,18 @@ both nodes while Access still denies the pair (the steady state of a long-lived 
 opens the pair and measures, so its numbers are comparable with the candidates model. A rebind
 gets no help: the new mapping reaches the peer only through the server's next observation.
 
+The relay model (D402)
+----------------------
+`--model relay` is the candidates model plus the relay manager's first slice. A third real node
+sits on the public core and serves the relay role, exactly as the server's own node does: it
+gets `mesh.relays` with a relay leaf from a disposable CA and answers with its bound UDP port.
+Both measured nodes get `mesh.relays` naming that relay, and a host leaf from the same CA
+through the test-only `INFRATERNAL_TEST_RELAY_HOST_LEAF` hook (so the binary under test must be
+built with `infraternal-plugin-mesh/test-support`). Their relay manager relays a pair that has
+no handshake 5.5 s after its configuration was installed. Each row records whether the pair
+went direct or through the relay, why, and what the relay counted. `--relay-fixture` names the
+`relay_fixture` example that issues the certificates.
+
 NAT model
 ---------
 Every router is described by a `Nat`: how it maps (endpoint-independent with an
@@ -920,12 +932,143 @@ def run_product_profile(scenario: Scenario, binary: str, coordinator_path: str, 
         topology.cleanup()
 
 
+RELAY_NAME = "relay.mesh.test"
+RELAY_PORT = 3478
+HOST_UUIDS = {"A": "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a", "B": "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"}
+
+
+def private_file(path: Path, text: str) -> Path:
+    """Write `text` to a new 0600 file (keys never sit in a readable file)."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as handle:
+        handle.write(text)
+    return path
+
+
+def relay_certificates(relay_fixture: str) -> dict[str, object]:
+    """A disposable CA with a host leaf per side and one relay leaf, from `relay_fixture certs`."""
+    request = json.dumps({"hosts": list(HOST_UUIDS.values()), "relays": [RELAY_NAME]})
+    return json.loads(run(relay_fixture, "certs", input_data=request + "\n"))
+
+
+def relay_status(node: object) -> dict[str, object]:
+    """The relay part of a node's `mesh.status`, or the refusal text."""
+    try:
+        return node.call("mesh.status", {}).get("relay") or {}
+    except Exception as error:
+        return {"error": str(error)}
+
+
+def run_relay_profile(
+    scenario: Scenario, binary: str, coordinator_path: str, scratch: str, relay_fixture: str
+) -> dict[str, object]:
+    """The relay model: candidates plus a relay node on the public core (module docs)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from mesh_agent_fixture import BinaryNode, CoordinatorFixture
+
+    topology = Topology(scenario)
+    nodes: list[BinaryNode] = []
+    pingers: list[Pinger] = []
+    coordinator = None
+    row: dict[str, object] = {"scenario": scenario.name, "summary": scenario.summary, "coordinator_model": "relay"}
+    try:
+        certificates = relay_certificates(relay_fixture)
+        ca = private_file(Path(scratch) / "ca.pem", certificates["ca"])
+        topology.create()
+        topology.add_server()
+        relay = BinaryNode(binary, scratch, topology.node_pid["S"])
+        nodes.append(relay)
+        leaf = certificates["relays"][RELAY_NAME]
+        served = relay.call("mesh.relays", {"serve": {
+            "name": RELAY_NAME, "port": RELAY_PORT, "leaf": leaf["cert"] + leaf["key"],
+            "roots": [certificates["ca"]]}})
+        row["relay_served"] = served
+        assert served.get("serving"), served
+        for side in ("A", "B"):
+            host = certificates["hosts"][HOST_UUIDS[side]]
+            path = private_file(Path(scratch) / f"host-{side}.pem", host["cert"] + host["key"])
+            os.environ["INFRATERNAL_TEST_RELAY_HOST_LEAF"] = str(path)
+            os.environ["INFRATERNAL_TEST_RELAY_CA"] = str(ca)
+            try:
+                nodes.append(BinaryNode(binary, scratch, topology.node_pid[side]))
+            finally:
+                os.environ.pop("INFRATERNAL_TEST_RELAY_HOST_LEAF", None)
+                os.environ.pop("INFRATERNAL_TEST_RELAY_CA", None)
+        members = nodes[1:]
+        identities = [json.loads(node.stdout.readline()) for node in members]
+        ports = {"A": identities[0]["port"], "B": identities[1]["port"]}
+        row["engine"] = (members[0].call("mesh.status", {}).get("engine_selection") or {}).get("engine")
+        row["listen_ports"] = ports
+        topology.configure(ports)
+        listed = {"relays": [{"name": RELAY_NAME, "port": served["serving"], "addresses": [SERVER_ADDRESS]}]}
+        for node in members:
+            node.call("mesh.relays", listed)
+        endpoints = topology.reflexive_endpoints(ports)
+        row["published_endpoints"] = endpoints
+        coordinator = CoordinatorFixture(coordinator_path)
+        snapshot = coordinator.configuration("allow", identities, endpoints)
+        target = snapshot["addresses"][1]["ipv4"]
+        pinger = Pinger(topology.nodes["A"], target)
+        pingers.append(pinger)
+        applied = time.monotonic()
+        for index, node in enumerate(members):
+            for chunk in snapshot["chunks"][index]:
+                node.request(chunk)
+        first = pinger.first_after(applied, FIRST_PACKET_TIMEOUT_SECONDS)
+        row["connected"] = first is not None
+        row["first_packet_ms"] = round(first * 1000) if first is not None else None
+        status = relay_status(members[0])
+        row["relayed"] = bool(status.get("relayed"))
+        row["direct"] = first is not None and not row["relayed"]
+        row["relay_a"] = status
+        row["relay_b"] = relay_status(members[1])
+        row["relay_node"] = relay_status(relay)
+        row["what_the_user_sees"] = peer_view(members[0])
+        if first is None:
+            row["conntrack"] = topology.conntrack()
+            return row
+        pinger.take()
+        # sleep: one second of unloaded pings gives the at-rest round-trip baseline.
+        time.sleep(1.0)
+        rest = pinger.take()
+        row["rtt_p50_ms_rest"] = percentile(rest, 0.5)
+        pinger.stop()
+        loaded = Pinger(topology.nodes["A"], target, interval=0.02)
+        pingers.append(loaded)
+        load = tcp_load(topology.nodes["A"], topology.nodes["B"], target, LOAD_SECONDS)
+        samples = loaded.take()
+        loaded.stop()
+        row["throughput"] = load
+        row["loaded_p99_ms"] = percentile(samples, 0.99)
+        row["relay_node_after_load"] = relay_status(relay)
+        row["relay_a_after_load"] = relay_status(members[0])
+        # The route budget a relayed pair runs on (the relay's DATAGRAM size sets it).
+        row["node_a_routes"] = ns(topology.nodes["A"], "ip", "route", "show", "table", "all",
+                                  check=False).splitlines()
+        return row
+    finally:
+        for pinger in pingers:
+            pinger.stop()
+        if coordinator is not None:
+            coordinator.child.kill()
+            coordinator.child.wait(timeout=5)
+        for node in nodes:
+            try:
+                node.close()
+            except Exception as error:
+                row.setdefault("cleanup_errors", []).append(str(error))
+        topology.cleanup()
+
+
 def run_profile(
-    scenario: Scenario, binary: str, coordinator_path: str, scratch: str, model: str = "production"
+    scenario: Scenario, binary: str, coordinator_path: str, scratch: str, model: str = "production",
+    relay_fixture: str | None = None,
 ) -> dict[str, object]:
     """Build the network, start both nodes, connect them as production would, and measure."""
     if model == "product":
         return run_product_profile(scenario, binary, coordinator_path, scratch)
+    if model == "relay":
+        return run_relay_profile(scenario, binary, coordinator_path, scratch, relay_fixture)
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from mesh_agent_fixture import BinaryNode, CoordinatorFixture
 
@@ -1032,7 +1175,7 @@ def inner(args: argparse.Namespace) -> int:
     Path("/run/netns").mkdir(parents=True, exist_ok=True)
     scenario = scenario_named(args.scenario[0])
     try:
-        row = run_profile(scenario, args.binary, args.coordinator, args.scratch, args.model)
+        row = run_profile(scenario, args.binary, args.coordinator, args.scratch, args.model, args.relay_fixture)
     except Exception as error:
         row = {"scenario": scenario.name, "harness_error": f"{type(error).__name__}: {error}"}
     print("ROW " + json.dumps(row, sort_keys=True), flush=True)
@@ -1053,9 +1196,17 @@ def outer(args: argparse.Namespace) -> int:
         command = ["unshare", "-Urnm", "--propagation", "private", sys.executable, os.path.abspath(__file__),
                    "--inner", "--binary", args.binary, "--coordinator", args.coordinator,
                    "--scratch", str(state), "--scenario", scenario.name, "--model", args.model]
+        if args.relay_fixture:
+            command += ["--relay-fixture", args.relay_fixture]
         started = time.monotonic()
+        environment = {**os.environ, "TMPDIR": str(state)}
+        if args.model == "relay":
+            # The relay model needs a test-support build anyway; give its nodes a private host
+            # firewall root, so a machine with a real install in /var/lib/infraternal still works.
+            (state / "firewall-root").mkdir(mode=0o700)
+            environment["INFRATERNAL_TEST_HOST_FIREWALL_ROOT"] = str(state / "firewall-root")
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                   start_new_session=True, env={**os.environ, "TMPDIR": str(state)})
+                                   start_new_session=True, env=environment)
         try:
             stdout, stderr = process.communicate(timeout=PROFILE_CAP_SECONDS)
             lines = [line[4:] for line in stdout.splitlines() if line.startswith("ROW ")]
@@ -1069,7 +1220,7 @@ def outer(args: argparse.Namespace) -> int:
         row["node_logs"] = [str(path) for path in logs]
         rows.append(row)
         print(json.dumps({key: row.get(key) for key in (
-            "scenario", "direct", "first_packet_ms", "rtt_p50_ms_rest", "loaded_p99_ms",
+            "scenario", "direct", "relayed", "first_packet_ms", "rtt_p50_ms_rest", "loaded_p99_ms",
             "rebind_recovery_ms", "after_idle_first_packet_ms", "harness_error", "wall_seconds")}), flush=True)
         if args.report:
             write_report(args, rows)
@@ -1102,9 +1253,11 @@ def main() -> None:
     parser.add_argument("--scratch", help="private directory for node state and logs")
     parser.add_argument("--report", help="absolute path for the JSON report")
     parser.add_argument("--scenario", action="append", default=[], help="run only this profile; repeatable")
-    parser.add_argument("--model", choices=("production", "candidates", "product"), default="production",
+    parser.add_argument("--model", choices=("production", "candidates", "product", "relay"), default="production",
                         help="what the coordinator publishes: production's local port, the measured candidates "
-                             "model, or the shipped candidate code with the server's own node (#515)")
+                             "model, the shipped candidate code with the server's own node (#515), or "
+                             "candidates with a relay node (D402)")
+    parser.add_argument("--relay-fixture", help="absolute path of the relay_fixture example (--model relay)")
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.list:
@@ -1114,6 +1267,8 @@ def main() -> None:
         value = getattr(args, name)
         if not value or not Path(value).is_absolute():
             parser.error(f"--{name} must be an absolute path")
+    if args.model == "relay" and not (args.relay_fixture and Path(args.relay_fixture).is_absolute()):
+        parser.error("--model relay needs --relay-fixture as an absolute path")
     raise SystemExit(inner(args) if args.inner else outer(args))
 
 

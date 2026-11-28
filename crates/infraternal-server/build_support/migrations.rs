@@ -72,7 +72,11 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
                  no-transaction support to the runner first (#473)"
             )));
         }
-        let executable = compact_sql::compact(&sql);
+        let executable = if version == 20_261_125_055_624 {
+            guarded_device_host_mode(&sql)
+        } else {
+            compact_sql::compact(&sql)
+        };
         writeln!(generated,
             "sqlx::migrate::Migration {{ version: {}, description: std::borrow::Cow::Borrowed({description:?}), migration_type: sqlx::migrate::MigrationType::{kind}, sql: sqlx::SqlStr::from_static({executable:?}), checksum: std::borrow::Cow::Borrowed(&{:?}), no_tx: {no_tx} }},",
             grouped(version), &checksum[..]).map_err(io::Error::other)?;
@@ -87,6 +91,14 @@ pub fn generate(directory: &Path, output: &Path) -> io::Result<()> {
     fs::write(output.join("runner_migrations.rs"), runner)?;
     generated.push_str("] ), ..sqlx::migrate::Migrator::DEFAULT };\n");
     fs::write(output.join("compact_migrations.rs"), generated)
+}
+
+/// Wrap the shipped schema rewrite in checks executed within its migration
+/// transaction. The checksum still identifies the original migration file.
+fn guarded_device_host_mode(sql: &str) -> String {
+    let before = include_str!("device_host_mode_guard_before.sql");
+    let after = include_str!("device_host_mode_guard_after.sql");
+    compact_sql::compact(&format!("{before}\n{sql}\n{after}"))
 }
 
 /// A version as a Rust literal with `_` between groups of three digits.

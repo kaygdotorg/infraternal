@@ -171,6 +171,7 @@ fn root_add_host_refuses_a_user_owned_unit_source() {
         system_units: vec![fixture.clone()],
         user_units: None,
         run_dir: Some(fixture.join("wrong-runtime")),
+        system_run_dir: None,
         data_dirs: vec![],
         net_class: fixture.join("net"),
     };
@@ -202,6 +203,7 @@ fn root_add_host_refuses_a_group_writable_unit_file() {
         system_units: vec![fixture.clone()],
         user_units: None,
         run_dir: Some(fixture.join("wrong-runtime")),
+        system_run_dir: None,
         data_dirs: vec![],
         net_class: fixture.join("net"),
     };
@@ -238,6 +240,7 @@ fn root_add_host_refuses_a_world_writable_dropin() {
         system_units: vec![fixture.clone()],
         user_units: None,
         run_dir: Some(fixture.join("wrong-runtime")),
+        system_run_dir: None,
         data_dirs: vec![],
         net_class: fixture.join("net"),
     };
@@ -267,6 +270,7 @@ fn root_add_host_refuses_a_writable_unit_path_chain() {
         system_units: vec![fixture.clone()],
         user_units: None,
         run_dir: Some(fixture.join("wrong-runtime")),
+        system_run_dir: None,
         data_dirs: vec![],
         net_class: fixture.join("net"),
     };

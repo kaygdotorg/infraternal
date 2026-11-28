@@ -17,12 +17,24 @@ struct LoginHost {
 }
 /// Enroll a real TLS fixture whose initial control channel accepts no grants.
 async fn login_host(reply: Option<bool>) -> LoginHost {
-    login_host_action(reply, "terminal.login.revoke").await
+    login_host_action(
+        reply,
+        "terminal.login.revoke",
+        crate::enrollment::Mode::Rootless,
+    )
+    .await
 }
-/// Start an enrolled peer and retain its exact TLS identity for reconnect proof.
-async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -> LoginHost {
+/// Start an enrolled peer that serves one test action and keeps answering probes
+/// until the server disconnects it or the test stops it.
+/// Retain its exact TLS identity for reconnect proof.
+async fn login_host_action(
+    reply: Option<bool>,
+    expected_action: &'static str,
+    mode: crate::enrollment::Mode,
+) -> LoginHost {
     let (server, host_identity, root, _) = identities();
-    let (store, pool, host, fingerprint) = admitted_store(&host_identity, &root).await;
+    let (store, pool, host, fingerprint) =
+        super::revocation::admitted_store_for_login_mode(&host_identity, &root, mode).await;
     let person = Uuid::new_v4();
     sqlx::query("UPDATE users SET owner=0 WHERE id='owner'")
         .execute(&pool)
@@ -54,7 +66,8 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
             .await
             .unwrap();
         let mut receive = Receive::default();
-        Transmit::default()
+        let mut transmit = Transmit::default();
+        transmit
             .send(
                 &connection.channel,
                 0,
@@ -67,32 +80,47 @@ async fn login_host_action(reply: Option<bool>, expected_action: &'static str) -
             .await
             .unwrap();
         receive.next(&connection.channel).await.unwrap();
-        if let Ok(request) = receive.next(&connection.channel).await
-            && let Frame::Call {
-                call_id,
-                action_id,
-                input_json,
-            } = request.frame
-        {
-            assert_eq!(action_id, expected_action);
-            seen.send(serde_json::from_slice(input_json).unwrap())
-                .unwrap();
-            if let Some(revoked) = reply {
-                let json = serde_json::json!({"revoked":revoked}).to_string();
-                let _ = Transmit::default()
-                    .send(
-                        &connection.channel,
-                        0,
-                        &Frame::Result {
-                            call_id,
-                            ok: true,
-                            json: json.as_bytes(),
-                        },
-                    )
-                    .await;
+        let mut seen = Some(seen);
+        while let Ok(request) = receive.next(&connection.channel).await {
+            match request.frame {
+                Frame::Ping { nonce, sent_us } => {
+                    if transmit
+                        .send(&connection.channel, 0, &Frame::Pong { nonce, sent_us })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Frame::Call {
+                    call_id,
+                    action_id,
+                    input_json,
+                } => {
+                    let Some(seen) = seen.take() else {
+                        continue;
+                    };
+                    assert_eq!(action_id, expected_action);
+                    seen.send(serde_json::from_slice(input_json).unwrap())
+                        .unwrap();
+                    if let Some(revoked) = reply {
+                        let json = serde_json::json!({"revoked":revoked}).to_string();
+                        let _ = transmit
+                            .send(
+                                &connection.channel,
+                                0,
+                                &Frame::Result {
+                                    call_id,
+                                    ok: true,
+                                    json: json.as_bytes(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                _ => {}
             }
         }
-        let _ = receive.next(&connection.channel).await;
     });
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
@@ -329,11 +357,28 @@ async fn unconfirmed_person_cleanup_does_not_block_host_authority_cut() {
     eprintln!("login_cleanup confirmed=false authority_cut=true retirement_pending=true");
 }
 
-/// Preferred host overrides reach an admitted remote actor before any terminal opens.
+/// Preparing a user-mode host asks its authenticated link to use its enrolled UID, even with a stored override.
 #[cfg(feature = "ssh")]
 #[tokio::test]
-async fn connected_remote_host_prepares_its_persons_preferred_account() {
-    let fixture = login_host_action(Some(true), "terminal.login.prepare").await;
+async fn connected_rootless_host_prepares_its_enrolled_account() {
+    let input = observe_preparation(crate::enrollment::Mode::Rootless).await;
+    assert_eq!(input["uid"], 1002);
+    assert!(input["account"].is_null());
+}
+
+/// Preparing a rootful host sends its named override to the authenticated link.
+#[cfg(feature = "ssh")]
+#[tokio::test]
+async fn connected_rootful_host_prepares_its_named_override() {
+    let input = observe_preparation(crate::enrollment::Mode::Rootful).await;
+    assert_eq!(input["uid"], 0);
+    assert_eq!(input["account"], "deploy");
+}
+
+/// Capture the real preparation call for a connected host with a saved override.
+#[cfg(feature = "ssh")]
+async fn observe_preparation(mode: crate::enrollment::Mode) -> serde_json::Value {
+    let fixture = login_host_action(Some(true), "terminal.login.prepare", mode).await;
     let token = "remote-login-preparation-fixture";
     sqlx::query("INSERT INTO sessions(token_hash,user_id,device,expires,fresh,unlocked) VALUES(?,?,'fixture',unixepoch()+60,unixepoch(),1)")
         .bind(crate::auth::hash(token)).bind(fixture.person.to_string()).execute(&fixture.pool).await.unwrap();
@@ -371,9 +416,9 @@ async fn connected_remote_host_prepares_its_persons_preferred_account() {
         .unwrap()
         .unwrap();
     assert_eq!(input["person"], fixture.person.to_string());
-    assert_eq!(input["account"], "deploy");
     preparation.await.unwrap();
     fixture.peer.abort();
+    input
 }
 
 /// Wait until the server observes a test peer's disconnect and releases its

@@ -120,6 +120,71 @@ impl EnrollmentStore {
         })
     }
 
+    /// Confirm that this exact certificate belongs to a permanently retired install.
+    ///
+    /// Preserve pending cleanup, temporary admission barriers and same-uid
+    /// certificate rotations. An unknown fingerprint cannot prove retirement.
+    pub(crate) async fn installation_retired(
+        &self,
+        fingerprint: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM remote_certificates c
+             JOIN remote_hosts h ON c.host_id=h.id
+             WHERE c.fingerprint=? AND h.mode IN ('rootless','rootful')
+             AND ((h.revoked_at IS NOT NULL AND NOT EXISTS(
+                 SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id AND q.confirmed=0
+             ) AND NOT EXISTS(
+                 SELECT 1 FROM remote_host_promotions p WHERE p.host_id=h.id AND p.cleanup='uninstall'
+             )) OR (h.mode='rootful' AND c.role='active' AND c.execution_uid>0
+                 AND c.revoked_at IS NOT NULL)))",
+        )
+        .bind(fingerprint.as_slice())
+        .fetch_one(&self.0)
+        .await?)
+    }
+
+    /// Match an earlier bootstrap's local enrollment to the same person's retired host.
+    /// The exact mode, execution uid and newest certificate key bind the old install.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_matches(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+        digest: &[u8; 32],
+    ) -> Result<bool, EnrollmentError> {
+        let key = self.retired_bootstrap_key(owner, host, uid).await?;
+        Ok(key.is_some_and(|key| openssl::sha::sha256(&key) == *digest))
+    }
+
+    /// Look up a retired enrollment by owner, host, and Unix account before runtime inspection.
+    #[cfg(feature = "remote")]
+    pub(crate) async fn retired_bootstrap_key(
+        &self,
+        owner: &str,
+        host: Uuid,
+        uid: u32,
+    ) -> Result<Option<[u8; 32]>, EnrollmentError> {
+        let key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT c.public_key FROM remote_hosts h
+             JOIN remote_certificates c ON c.host_id=h.id
+             WHERE h.owner_id=? AND h.id=? AND h.execution_uid=?
+               AND h.mode IN ('rootless','rootful') AND c.execution_uid=h.execution_uid
+               AND c.role='active' AND c.key_algorithm='ed25519'
+               AND (h.revoked_at IS NOT NULL OR EXISTS(
+                   SELECT 1 FROM remote_host_removals r WHERE r.host_id=h.id AND r.owner_id=h.owner_id
+               ))
+             ORDER BY c.not_before DESC LIMIT 1",
+        )
+        .bind(owner)
+        .bind(host.as_bytes().as_slice())
+        .bind(i64::from(uid))
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(key.and_then(|key| key.try_into().ok()))
+    }
+
     /// Admit a pending or retired host only for retained cleanup, never new work.
     /// The certificate must still be exact, valid and individually unrevoked.
     pub(crate) async fn admit_cleanup(
@@ -312,6 +377,12 @@ impl EnrollmentStore {
                 crate::access_report::store(&mut transaction, host, person, &report, now).await?;
             }
         }
+        if pending && answer.is_none() {
+            // A signed local uninstall owns the files. The server only had
+            // to complete the login receipt, and must never ask it to uninstall again.
+            sqlx::query("UPDATE remote_host_removals SET host_cleanup='retained',completed_at=MAX(requested_at,unixepoch()) WHERE host_id=? AND owner_id=? AND uninstall=0 AND host_cleanup='pending'")
+                .bind(host.as_bytes().as_slice()).bind(person.to_string()).execute(&mut *transaction).await?;
+        }
         // Keep tombstoning and its trigger effects in the same transaction as
         // the durable receipt. A foreign or duplicate receipt changes nothing.
         sqlx::query("UPDATE remote_hosts SET revoked_at=MAX(created_at,unixepoch()) WHERE id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=remote_hosts.id AND q.person_id=? AND q.confirmed=0)")
@@ -429,6 +500,75 @@ impl EnrollmentStore {
         if changed != 1 {
             return Err(EnrollmentError::Denied);
         }
+        self.commit_revocation(transaction, host, now).await
+    }
+
+    /// Retire only the installation that signed this request with its enrolled host key.
+    /// Recheck authority under the writer lock so a replaced certificate cannot retire its successor.
+    pub(crate) async fn retire_from_installation(
+        &self,
+        request: &infraternal_plugin_remote::local_retirement::Request,
+        now: i64,
+    ) -> Result<(), EnrollmentError> {
+        if now < 0 || now.abs_diff(request.signed_at) > 120 || request.signature.len() != 64 {
+            return Err(EnrollmentError::Denied);
+        }
+        let host = request.host_id;
+        let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+            "SELECT public_key FROM remote_certificates WHERE fingerprint=? AND host_id=? AND key_algorithm='ed25519'",
+        )
+        .bind(request.fingerprint.as_slice())
+        .bind(host.as_bytes().as_slice())
+        .fetch_optional(&self.0)
+        .await?;
+        let key = public_key
+            .and_then(|key| crate::identity_key::IdentityKey::from_stored("ed25519", &key))
+            .ok_or(EnrollmentError::Denied)?;
+        if !key.verify(
+            &infraternal_plugin_remote::local_retirement::transcript(request),
+            &request.signature,
+        ) {
+            return Err(EnrollmentError::Denied);
+        }
+        let mut transaction = self.0.begin().await?;
+        let changed = sqlx::query(
+            "UPDATE remote_hosts SET id=id WHERE id=? AND created_at<=? \
+             AND mode IN ('rootless','rootful') AND EXISTS(SELECT 1 FROM remote_certificates c \
+             WHERE c.fingerprint=? AND c.host_id=remote_hosts.id AND c.role='active' \
+             AND c.execution_uid=remote_hosts.execution_uid AND c.key_algorithm='ed25519' AND c.public_key=? \
+             AND c.not_before<=? AND c.not_after>? AND c.revoked_at IS NULL)",
+        )
+        .bind(host.as_bytes().as_slice()).bind(now).bind(request.fingerprint.as_slice())
+        .bind(key.as_bytes()).bind(now).bind(now)
+        .execute(&mut *transaction).await?.rows_affected();
+        if changed != 1 {
+            return Err(EnrollmentError::Denied);
+        }
+        let retired: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM remote_hosts WHERE id=?")
+                .bind(host.as_bytes().as_slice())
+                .fetch_one(&mut *transaction)
+                .await?;
+        if retired {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) \
+             SELECT u.id,'remote.host.uninstall',?,0,?,'{}' FROM remote_hosts h \
+             JOIN users u ON u.id=h.owner_id WHERE h.id=? AND NOT EXISTS \
+             (SELECT 1 FROM remote_login_cleanup q WHERE q.host_id=h.id)",
+        )
+        .bind(host.to_string())
+        .bind(now)
+        .bind(host.as_bytes().as_slice())
+        .execute(&mut *transaction)
+        .await?;
+        // This host runs its own local uninstall. Mark removal so the login
+        // receipt takes the short removal path without an access report or a
+        // second uninstall request. Preserve an earlier browser removal.
+        sqlx::query("INSERT INTO remote_host_removals(host_id,owner_id,requested_at,uninstall,host_cleanup) \
+            SELECT id,owner_id,?,0,'pending' FROM remote_hosts WHERE id=? ON CONFLICT(host_id) DO NOTHING")
+            .bind(now).bind(host.as_bytes().as_slice()).execute(&mut *transaction).await?;
         self.commit_revocation(transaction, host, now).await
     }
 
@@ -602,28 +742,45 @@ pub(crate) mod tests {
     pub(crate) async fn enrolled_with_pool(
         pool: sqlx::SqlitePool,
     ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
+        enrolled_with_key(pool, [3; 32]).await
+    }
+
+    /// Enroll one fixture host with a key supplied by the test that will prove possession.
+    async fn enrolled_with_key(
+        pool: sqlx::SqlitePool,
+        key: [u8; 32],
+    ) -> (EnrollmentStore, sqlx::SqlitePool, Uuid) {
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         sqlx::query("INSERT INTO users (id, name, owner, recovery_hash, username, display_name) VALUES ('owner', 'owner', 1, 'test', 'owner', 'Owner')").execute(&pool).await.unwrap();
         let host = Uuid::from_u128(42);
         sqlx::query("INSERT INTO remote_hosts (id, owner_id, mode, execution_uid, created_at) VALUES (?, 'owner', 'rootless', 1002, 100)")
             .bind(host.as_bytes().as_slice()).execute(&pool).await.unwrap();
         let store = EnrollmentStore::new(pool.clone());
-        let key_digest = openssl::sha::sha256(&[3u8; 32]);
+        let key_digest = openssl::sha::sha256(&key);
+        let mut record = certificate(1, 100);
+        record.public_key = crate::identity_key::IdentityKey::Ed25519(key);
         let token = store
             .issue("owner", host, Mode::Rootless, 100, &key_digest)
             .await
             .unwrap();
         store
-            .redeem(
-                token.secret(),
-                host,
-                Mode::Rootless,
-                100,
-                &certificate(1, 100),
-            )
+            .redeem(token.secret(), host, Mode::Rootless, 100, &record)
             .await
             .unwrap();
         (store, pool, host)
+    }
+
+    /// Record the final cleanup receipt for a fixture with the legacy owner name.
+    /// This name cannot send the production UUID-based receipt itself.
+    pub(crate) async fn finish_fixture_cleanup(pool: &sqlx::SqlitePool, host: Uuid) {
+        let receipt = sqlx::query(
+            "UPDATE remote_login_cleanup SET confirmed=1 WHERE host_id=? AND confirmed=0",
+        )
+        .bind(host.as_bytes().as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(receipt.rows_affected(), 1);
     }
 
     /// Turns the fixture's enrolled host into a `device` row (#580) so a test can give
@@ -717,6 +874,58 @@ pub(crate) mod tests {
             not_before: now,
             not_after: now + 604_800,
         }
+    }
+
+    /// The exact host key may revoke its host. Other keys and modified requests leave authority live.
+    #[tokio::test]
+    async fn installation_retirement_requires_the_enrolled_host_signature() {
+        use infraternal_plugin_remote::local_retirement::{Request, transcript};
+        use openssl::{pkey::PKey, sign::Signer};
+
+        let key = PKey::generate_ed25519().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let (store, pool, host) =
+            enrolled_with_key(pool, key.raw_public_key().unwrap().try_into().unwrap()).await;
+        let mut request = Request {
+            host_id: host,
+            fingerprint: [1; 32],
+            signed_at: 150,
+            signature: vec![0; 64],
+        };
+        assert!(matches!(
+            store.retire_from_installation(&request, 150).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.signature = Signer::new_without_digest(&key)
+            .unwrap()
+            .sign_oneshot_to_vec(&transcript(&request))
+            .unwrap();
+        assert!(matches!(
+            store.retire_from_installation(&request, 271).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.host_id = Uuid::from_u128(43);
+        assert!(matches!(
+            store.retire_from_installation(&request, 150).await,
+            Err(EnrollmentError::Denied)
+        ));
+        request.host_id = host;
+        assert!(store.admit(&[1; 32], 150).await.is_ok());
+        store.retire_from_installation(&request, 150).await.unwrap();
+        assert!(store.admit(&[1; 32], 150).await.is_err());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM mesh_audit WHERE action='remote.host.uninstall'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

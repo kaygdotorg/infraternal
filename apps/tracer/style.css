@@ -566,9 +566,23 @@ button { color: inherit; }
 .result-text .result-label { flex: none; line-height: 1.25rem; }
 .result-snippet { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; color: var(--fg-3); font: var(--fw-secondary) var(--text-caption)/1.35 var(--font-mono); overflow-wrap: anywhere; }
 .result-snippet mark { background: color-mix(in srgb, var(--accent) 32%, transparent); color: var(--fg); border-radius: var(--r-xs); padding: 0 0.125rem; }
-/* Forget keeps its short state readable on a phone; its host title yields the space instead (D369, #435). */
+/* Forget shows both the action and the state. Narrow rows put the state below the label (#591). */
 .result[data-action^="canvas:forgethost:"] .result-label { flex: 1 1 0; }
 .result[data-action^="canvas:forgethost:"] .result-hint { flex: none; }
+@media (max-width: 720px) {
+  .result[data-action^="canvas:forgethost:"] {
+    display: grid;
+    grid-template-columns: 1.25rem minmax(0, 1fr);
+    row-gap: 0.125rem;
+    padding-block: 0.5rem;
+  }
+  .result[data-action^="canvas:forgethost:"] .result-hint {
+    grid-column: 2;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+}
 .swatch { height: 0.875rem; border-radius: 50%; }
 .palette-empty { margin: 1rem 0.5rem; color: var(--fg-2); font-size: var(--text-body); }
 .palette-foot { display: flex; align-items: center; gap: 0.25rem; margin: 0; padding: 0.625rem 0.875rem; border-top: 1px solid var(--line); color: var(--fg-3); font-size: var(--text-caption); }

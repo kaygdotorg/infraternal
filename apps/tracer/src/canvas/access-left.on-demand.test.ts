@@ -120,7 +120,7 @@ test("Dismiss takes the line away at once and tells the server; a failed dismiss
   await new Promise((resolve) => setTimeout(resolve, 0));
   await source.refresh();
   expect(calls).toEqual(["6f1d0a52-7c3e-4b8a-9d21-0a5e4c7b1f30/0b2f6f4e-8d0a-4f43-9a8a-3f2f5f0c1a01"]);
-  expect(said).toContain("The report could not be dismissed. Try again.");
+  expect(said).toContain("Couldn't dismiss this report. Check your connection and try again.");
   expect(published.get("access-left")?.length).toBe(1);
   fail = false;
   pressFirstAction();

@@ -712,3 +712,16 @@ status is the command's own failure. The master connection has no command
 status and matches on the line alone. The answer also covers a directory lookup
 that failed, so the wording says the host couldn't find the account, not that
 it has none.
+
+Connection failures can include fixed public diagnostics for DNS, TCP refusal
+or timeout, a changed host key, and the SSH methods the peer offered or the
+client tried. A refused sign-in can also carry
+`ssh_server: "netbird"` when the peer identifies itself that way during SSH
+version exchange. The browser uses it to offer a local `infraternal up`
+command. The identification does not establish trust or change sign-in policy.
+Raw SSH diagnostics, advertised version strings, and credential material are
+never included in these fields.
+
+A macOS platform receipt from the signed-in read-only check returns `unsupported` with
+`join_locally: "macos"`. SSH setup still installs the Linux payload only.
+The browser offers local enrollment after the successful Mac sign-in.

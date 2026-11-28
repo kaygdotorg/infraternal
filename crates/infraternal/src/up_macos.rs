@@ -75,8 +75,13 @@ pub(super) fn preflight() -> io::Result<()> {
             )));
         }
     }
+    if infraternal_plugin_mesh::macos_helper::registered_uid()?.is_some() {
+        return Err(refused(
+            "This Mac has a user-mode mesh helper. Remove the user-mode installation before installing the system service.".to_owned(),
+        ));
+    }
     if nix::unistd::Uid::effective().is_root()
-        && macos_service::control("status", false, Path::new(MACHINE_BINARY))?
+        && macos_service::control("status", false, Path::new(MACHINE_BINARY), false)?
             .is_some_and(|status| status.loaded)
     {
         return Err(refused(
@@ -383,7 +388,8 @@ impl Install {
         let deadline = Instant::now() + START_WAIT;
         loop {
             self.check_interruption()?;
-            if macos_service::control("status", false, binary)?.is_some_and(|status| status.running)
+            if macos_service::control("status", false, binary, false)?
+                .is_some_and(|status| status.running)
             {
                 break;
             }
@@ -401,9 +407,19 @@ impl Install {
 
     /// Stop the service if this run started it, then remove only this run's own paths.
     fn rollback(&mut self) {
+        let mut removed = true;
         if self.service {
             // Bootout and disable; a job that never loaded is already stopped.
-            let _ = self.lock.set_service("down", Path::new(MACHINE_BINARY));
+            removed = self
+                .lock
+                .set_service("down", Path::new(MACHINE_BINARY))
+                .is_ok();
+            if !removed {
+                eprintln!(
+                    "Could not stop the system service. Its installation files were kept for uninstall."
+                );
+                return;
+            }
         }
         for entry in self.created.drain(..).rev() {
             // Skip a path that is gone or now names another inode: not ours to remove.
@@ -421,13 +437,14 @@ impl Install {
             } else {
                 fs::remove_file(&entry.path)
             };
-            if let Err(error) = result {
-                eprintln!(
-                    "infraternal: could not remove {} during rollback ({:?}); remove it before retrying.",
-                    entry.path.display(),
-                    error.kind()
-                );
-            }
+            removed &= result.is_ok();
+        }
+        if removed {
+            eprintln!("Removed the unfinished system installation.");
+        } else {
+            eprintln!(
+                "Some system installation files remain. Remove the unfinished installation before retrying."
+            );
         }
     }
 }

@@ -10,6 +10,8 @@ pub mod bootstrap;
 mod child_exit;
 pub mod cli;
 pub mod config;
+/// Fixed setup facts extracted from OpenSSH's local diagnostics.
+mod connection_diagnostics;
 pub mod credentials;
 pub mod duplex;
 pub mod install;

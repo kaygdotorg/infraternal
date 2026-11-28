@@ -4,6 +4,7 @@
 use infraternal_status::{Activity, Roots, probe_local};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
+/// A stalled query leaves other services in its manager observable.
 #[test]
 fn stalled_units_preserve_other_units_in_each_manager() {
     if let Some(root) = std::env::var_os("STATUS_UNIT_ISOLATION_ROOT") {
@@ -26,6 +27,7 @@ fn stalled_units_preserve_other_units_in_each_manager() {
                 },
                 user_units: (scope == "user").then_some(units),
                 run_dir: None,
+                system_run_dir: None,
                 data_dirs: vec![],
                 net_class: root.join("net"),
             };

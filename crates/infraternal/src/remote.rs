@@ -346,11 +346,19 @@ pub(crate) async fn prepare_join_key(origin: &str, data: &Path) -> io::Result<[u
     prepared_key_digest(data)
 }
 
-/// Prepare a new machine key without reusing this user's existing agent identity.
-pub(crate) async fn prepare_machine_join_key(origin: &str, data: &Path) -> io::Result<[u8; 32]> {
+/// Verify the server route and generate the new approval key without touching local state.
+#[cfg(machine_up)]
+pub(crate) async fn prepare_machine_join_key(
+    origin: &str,
+) -> io::Result<(Zeroizing<Vec<u8>>, [u8; 32])> {
     preflight(origin, None, true).await?;
-    prepare(data).map_err(|error| local_state(error.kind()))?;
-    prepared_key_digest(data).map_err(|error| local_state(error.kind()))
+    let key = PKey::generate_ed25519().map_err(|_| local_state(io::ErrorKind::Other))?;
+    let pkcs8 = Zeroizing::new(
+        key.private_key_to_pkcs8()
+            .map_err(|_| local_state(io::ErrorKind::Other))?,
+    );
+    let digest = key_digest_from_pkcs8(&pkcs8)?;
+    Ok((pkcs8, digest))
 }
 
 fn join_csr_der(key: &PKey<openssl::pkey::Private>) -> io::Result<String> {
@@ -371,19 +379,6 @@ fn prepared_key_digest(data: &Path) -> io::Result<[u8; 32]> {
     let key = prepared_key(data)?;
     let public = key.raw_public_key().map_err(|_| refused())?;
     Ok(openssl::sha::sha256(&public))
-}
-
-/// Read the prepared private key only for a private, bounded handoff to the root helper.
-pub(crate) fn prepared_join_key_pkcs8(data: &Path) -> io::Result<Zeroizing<Vec<u8>>> {
-    let key = prepared_key(data)?;
-    key.private_key_to_pkcs8()
-        .map(Zeroizing::new)
-        .map_err(|_| refused())
-}
-
-/// Remove the user's pending key after the root-owned identity has been published.
-pub(crate) fn retire_prepared_join_key(data: &Path) -> io::Result<()> {
-    retire_pending_key(data)
 }
 
 /// Derive the approved key's public digest from its private PKCS#8 handoff bytes.
@@ -681,6 +676,9 @@ pub(crate) enum ClientFailure {
 pub(crate) struct ClientResponse {
     pub(crate) status: StatusCode,
     pub(crate) retry_after: Option<Duration>,
+    /// A current approval proved this caller owns the earlier local install.
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    pub(crate) retirement_authorized: bool,
     pub(crate) body: Zeroizing<Vec<u8>>,
 }
 
@@ -713,7 +711,7 @@ pub(crate) async fn post_json(
     root: Option<&X509>,
     max_response_bytes: usize,
     request_started: &mut bool,
-    preference: Option<&'static str>,
+    preference: Option<&str>,
 ) -> Result<ClientResponse, ClientFailure> {
     use http_body_util::BodyExt;
 
@@ -781,6 +779,11 @@ pub(crate) async fn post_json(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs);
+    #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+    let retirement_authorized = response
+        .headers()
+        .get("infraternal-retired-install")
+        .is_some_and(|value| value == "yes");
     let body = if status == StatusCode::OK {
         let bytes = http_body_util::Limited::new(response.into_body(), max_response_bytes)
             .collect()
@@ -801,6 +804,8 @@ pub(crate) async fn post_json(
     Ok(ClientResponse {
         status,
         retry_after,
+        #[cfg(all(target_os = "linux", feature = "plugin-ssh"))]
+        retirement_authorized,
         body,
     })
 }
@@ -1068,6 +1073,16 @@ fn load_snapshot(data: &Path) -> io::Result<(StoredIdentity, Snapshot)> {
     Ok((stored, snapshot))
 }
 
+/// Read the host ID from this account's private Linux enrollment.
+#[cfg(all(machine_up, target_os = "linux"))]
+pub(crate) fn local_enrolled_host(data: &Path, uid: u32) -> io::Result<uuid::Uuid> {
+    let (identity, _) = load_snapshot(data)?;
+    if identity.execution_uid != uid {
+        return Err(refused());
+    }
+    Ok(identity.host_id)
+}
+
 /// Move an enrolled identity off its legacy 7443 address before the service retries.
 fn migrate_identity(data: &Path) -> io::Result<StoredIdentity> {
     let (mut stored, snapshot) = load_snapshot(data)?;
@@ -1119,6 +1134,101 @@ async fn direct_endpoint(
     .next()
 }
 
+/// The enrolled host leaf, its key and the deployment CA from `data`, for relay connections.
+/// Read-only: it never migrates the stored identity.
+#[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+fn relay_host_leaf(
+    data: &Path,
+) -> io::Result<infraternal_plugin_mesh::node_actions::RelayHostLeaf> {
+    let (stored, _) = load_snapshot(data)?;
+    let key_der = decode_candidate_key(&stored.key_der)?;
+    // The key file holds PKCS#8; re-encode through OpenSSL so a malformed one is refused here.
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    Ok(infraternal_plugin_mesh::node_actions::RelayHostLeaf {
+        certificate: B64.decode(&stored.certificate_der).map_err(|_| refused())?,
+        key: Zeroizing::new(key.private_key_to_pkcs8().map_err(|_| refused())?),
+        roots: vec![B64.decode(&stored.ca_der).map_err(|_| refused())?],
+    })
+}
+
+/// Send a bounded, host-signed retirement request before stopping the local service.
+/// A false result means the caller should offer the server's Remove and Forget path.
+#[cfg(machine_up)]
+pub(crate) fn retire_for_local_uninstall(data: &Path, host: &str) -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .is_ok_and(|runtime| {
+            runtime.block_on(async {
+                tokio::time::timeout(Duration::from_secs(8), request_local_retirement(data, host))
+                    .await
+                    .is_ok_and(|result| result.is_ok())
+            })
+        })
+}
+
+/// Authenticate the HTTPS origin and send proof only for the reviewed host.
+#[cfg(machine_up)]
+async fn request_local_retirement(data: &Path, host: &str) -> io::Result<()> {
+    use infraternal_plugin_remote::local_retirement::{self, Request};
+    let (stored, _) = load_snapshot(data)?;
+    if stored.host_id.simple().to_string() != host
+        || stored.execution_uid != nix::unistd::Uid::effective().as_raw()
+    {
+        return Err(refused());
+    }
+    let origin = stored.public_origin.as_deref().ok_or_else(refused)?;
+    let url = url::Url::parse(origin).map_err(|_| refused())?;
+    if url.scheme() != "https" || url.origin().ascii_serialization() != origin {
+        return Err(refused());
+    }
+    let root = identity_https_root(&stored)?;
+    let certificate = B64.decode(&stored.certificate_der).map_err(|_| refused())?;
+    let signed_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|time| i64::try_from(time.as_secs()).ok())
+        .ok_or_else(refused)?;
+    let mut request = Request {
+        host_id: stored.host_id,
+        fingerprint: openssl::sha::sha256(&certificate),
+        signed_at,
+        signature: Vec::new(),
+    };
+    let key_der = decode_candidate_key(&stored.key_der)?;
+    let key = PKey::private_key_from_pkcs8(&key_der).map_err(|_| refused())?;
+    request.signature = openssl::sign::Signer::new_without_digest(&key)
+        .and_then(|mut signer| signer.sign_oneshot_to_vec(&local_retirement::transcript(&request)))
+        .map_err(|_| refused())?;
+    let body = serde_json::to_vec(&request).map_err(io::Error::other)?;
+    let response = post_json(
+        &url,
+        local_retirement::PATH,
+        body.into(),
+        root.as_ref(),
+        256,
+        &mut false,
+        None,
+    )
+    .await
+    .map_err(|_| refused())?;
+    if response.status != StatusCode::NO_CONTENT {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Load the same public HTTPS trust the enrollment uses when dialing its server.
+fn identity_https_root(stored: &StoredIdentity) -> io::Result<Option<X509>> {
+    if stored.https_system_roots {
+        return Ok(None);
+    }
+    let trusted = stored.https_der.as_ref().unwrap_or(&stored.ca_der);
+    X509::from_der(&B64.decode(trusted).map_err(|_| refused())?)
+        .map(Some)
+        .map_err(|_| refused())
+}
+
 /// Run the remote client from the stored identity in `data`.
 pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     let stored = migrate_identity(data)?;
@@ -1131,16 +1241,7 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         infraternal_agent::host_os::enrolled_without_direct_endpoint();
     }
     let public_origin = stored.public_origin.clone().ok_or_else(refused)?;
-    let https_root = if stored.https_system_roots {
-        None
-    } else if let Some(https) = &stored.https_der {
-        Some(X509::from_der(&B64.decode(https).map_err(|_| refused())?).map_err(|_| refused())?)
-    } else {
-        Some(
-            X509::from_der(&B64.decode(&stored.ca_der).map_err(|_| refused())?)
-                .map_err(|_| refused())?,
-        )
-    };
+    let https_root = identity_https_root(&stored)?;
     let certificate = X509::from_der(&B64.decode(&stored.certificate_der).map_err(|_| refused())?)
         .map_err(|_| refused())?;
     let key_der = decode_candidate_key(&stored.key_der)?;
@@ -1153,6 +1254,15 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
         .public_eq(&key)
     {
         return Err(Failure::IdentityMismatch.error(io::ErrorKind::PermissionDenied));
+    }
+    // The mesh node presents this host leaf to relays (D402 Q3), read fresh at each start of
+    // its relay paths so a renewed leaf is picked up.
+    #[cfg(all(feature = "plugin-mesh", target_os = "linux"))]
+    {
+        let data = data.to_owned();
+        infraternal_plugin_mesh::node_actions::set_relay_credentials(std::sync::Arc::new(
+            move || relay_host_leaf(&data),
+        ));
     }
     let identity = RemoteIdentity {
         host_id: stored.host_id,
@@ -1197,15 +1307,31 @@ pub(crate) async fn run(data: &Path, state: Option<PathBuf>) -> io::Result<()> {
     });
     // Components' host state goes when the service ends, by return or SIGTERM
     // (#221). Boxed once per service lifetime: the loop's future is large.
-    infraternal_agent::shutdown::run_then_stop(Box::pin(remote_client::run_with_identity_rotation(
-        &identity,
-        state,
-        publisher.clone(),
-        publisher,
-        installation.as_ref(),
-    )))
-    .await
+    let result = infraternal_agent::shutdown::run_then_stop(Box::pin(
+        remote_client::run_with_identity_rotation(
+            &identity,
+            state,
+            publisher.clone(),
+            publisher,
+            installation.as_ref(),
+        ),
+    ))
+    .await;
+    if !result.as_ref().is_err_and(remote_client::is_retired) {
+        return result;
+    }
+    eprintln!("This infraternal installation was retired by its server. Reconnects have stopped.");
+    #[cfg(target_os = "linux")]
+    if retire_service::disable(stored.execution_uid).await.is_err() {
+        eprintln!("Could not finish disabling infraternal-agent.service.");
+    }
+    Ok(())
 }
+
+/// Stops the proven systemd service, if one owns this retired process.
+#[cfg(target_os = "linux")]
+#[path = "remote_retire_service.rs"]
+mod retire_service;
 
 /// Durable record of the newest server leaf this enrollment accepted (#559).
 ///

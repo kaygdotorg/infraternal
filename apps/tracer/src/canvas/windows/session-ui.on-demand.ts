@@ -26,6 +26,7 @@
  * The inventory is the source of truth: every change it reports repaints the windows, the tree and an open
  * manager. This module never changes a session itself except through the inventory's verbs.
  */
+import { windowTitle } from "../model/types";
 import { endedStripText } from "../status";
 import { mountConfirmTip, type ConfirmTipController } from "../../../../../packages/ui/src/tooltip";
 import { markMotion, triggeredByKeyboard } from "../../../../../packages/ui/src/input-source";
@@ -287,6 +288,8 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     refusals.delete(rec);
     asked.add(rec);
     delete rec.model.sessionId;
+    delete rec.model.openedAccount;
+    rec.card.setTitle(windowTitle(rec.model));
     if (s) inventory.dismiss(rec.model.host, s.id);
     rec.binding.openNew();
     paint(rec);
@@ -482,7 +485,7 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
       const act = target.closest<HTMLElement>(".cl-sx-act")?.dataset.act;
       const how: PopoverSource = event.detail === 0 ? "keyboard" : "pointer";
       if (act === "rename") { this.edit(li, host, s); return; }
-      if (act === "end") { this.confirmEnd(target.closest<HTMLElement>(".cl-sx-act")!, li, host, s); return; }
+      if (act === "end") { this.confirmEnd(target.closest<HTMLElement>(".cl-sx-act")!, host, s); return; }
       if (act === "dismiss") { this.remove(li, () => dismissSession(host, s)); return; }
       if (act === "again") { this.popover.close(); inventory.runAgain(host, s.id); this.choose(s, how, false); return; }
       if (act === "beside") { this.popover.close(); void cx.win.newWindow(this.rec, "right", s.id); return; }
@@ -502,19 +505,19 @@ export function createSessionUi(cx: Ctx): SessionUiPart {
     }
 
     /** Asks before ending session `s` of `host`, in a confirmation anchored to the row. */
-    private confirmEnd(anchor: HTMLElement, li: HTMLElement, host: string, s: SessionRecord): void {
+    private confirmEnd(anchor: HTMLElement, host: string, s: SessionRecord): void {
       confirm?.close(false);
       confirm = mountConfirmTip(anchor, {
         boundary: this.rec.card.root,
         message: `End '${s.name}'?`,
-        detail: s.running ? `${s.running} is still running. Ending the session stops it.` : "Nothing is running in it.",
+        detail: s.running ? `Ending the session stops ${s.running}.` : "Ending the session closes its shell and stops programs running in it.",
         confirmLabel: "End session",
         cancelLabel: "Cancel",
-        onConfirm: () => {
+        onConfirm: async () => {
           confirm = undefined;
-          // Ending this window's own session closes the window, and the card with it.
-          if (s.id === this.rec.model.sessionId) { this.popover.close(); inventory.end(host, s.id); closeWindowOf(host, s.id); return; }
-          this.remove(li, () => { inventory.end(host, s.id); closeWindowOf(host, s.id); });
+          if (!await inventory.end(host, s.id)) return;
+          if (s.id === this.rec.model.sessionId) this.popover.close();
+          closeWindowOf(host, s.id);
         },
         onCancel: () => { confirm = undefined; },
       });

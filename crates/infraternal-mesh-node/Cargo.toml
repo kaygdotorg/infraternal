@@ -1,0 +1,46 @@
+# Portable parts of the mesh node shared by host plugins and native clients.
+[package]
+name = "infraternal-mesh-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Preserve the policy default selected by the host build.
+ee = []
+# The node path is optional so coordinator-only builds can use the wire types.
+engine = ["dep:bytes", "dep:foldhash", "dep:gotatun", "dep:nix", "dep:tokio", "dep:ipnetwork", "dep:tracing"]
+# Carries the same optional DNS fields as the mesh plugin.
+mesh-dns = ["dep:hickory-proto"]
+# Preserve the subsecond handshake counter used by relayed paths.
+relay = []
+# Expose the node fixtures needed by the platform plugin's tests.
+test-support = []
+
+[dependencies]
+infraternal-mesh = { version = "0.1.0", path = "../infraternal-mesh" }
+infraternal-plugin-api.workspace = true
+bytes = { workspace = true, optional = true }
+foldhash = { version = "0.2", optional = true }
+hickory-proto = { workspace = true, optional = true }
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zeroize.workspace = true
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "net", "macros"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+gotatun = { workspace = true, optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+nix = { version = "0.32", default-features = false, optional = true }
+ipnetwork = { version = "0.21.1", optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+nix = { version = "0.32", default-features = false, features = ["time"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "test-util"] }
+
+[lints]
+workspace = true

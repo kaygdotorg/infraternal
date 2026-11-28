@@ -13,9 +13,23 @@ import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { rmSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { createServer as createHttpsServer } from "node:https";
-import { request as httpRequest } from "node:http";
+import { createServer as createHttpsServer, type Server as HttpsServer } from "node:https";
+import {
+  createSecureServer as createHttp2SecureServer,
+  type Http2SecureServer,
+  type Http2ServerRequest,
+  type Http2ServerResponse,
+  type ServerHttp2Session,
+} from "node:http2";
+import {
+  request as httpRequest,
+  type IncomingHttpHeaders,
+  type IncomingMessage,
+  type OutgoingHttpHeaders,
+  type ServerResponse,
+} from "node:http";
 import { createServer, type AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { tmpdir, userInfo } from "node:os";
 import { resolve } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
@@ -144,10 +158,85 @@ export interface Bridge {
   cookie: string;
 }
 
+/** Transport protocol spoken by the fixture's local TLS front. */
+export type RealServerProtocol = "http1" | "http2";
+
+/** Hop-by-hop response headers forbidden on HTTP/2 responses (RFC 9113 §8.2.2). */
+const HTTP2_FORBIDDEN_RESPONSE_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/**
+ * Resolves the fixture TLS front protocol from an explicit option or `REAL_SERVER_PROTOCOL`.
+ * Defaults to `"http1"` so existing specs keep their historical single-protocol behavior unless opted in.
+ */
+export function resolveServerProtocol(requested?: RealServerProtocol): RealServerProtocol {
+  if (requested !== undefined) return requested;
+  const raw = process.env.REAL_SERVER_PROTOCOL;
+  if (raw === undefined || raw === "" || raw === "http1") return "http1";
+  if (raw === "http2") return "http2";
+  throw new Error(`REAL_SERVER_PROTOCOL must be "http1" or "http2" (got ${JSON.stringify(raw)})`);
+}
+
+/**
+ * Translates incoming HTTP/1.1 or HTTP/2 request headers for the HTTP/1.1 loopback backend.
+ * Drops HTTP/2 pseudo-headers (`:method`, `:scheme`, `:authority`, `:path`, ...) that `node:http` rejects
+ * and preserves `:authority` as `host` when the request carries no explicit `host` header.
+ */
+export function forwardRequestHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
+  const forwarded: OutgoingHttpHeaders = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined || name.startsWith(":")) continue;
+    forwarded[name] = value;
+  }
+  const authority = headers[":authority"];
+  if (forwarded.host === undefined && typeof authority === "string" && authority.length > 0) {
+    forwarded.host = authority;
+  }
+  return forwarded;
+}
+
+/**
+ * Translates response headers from the HTTP/1.1 backend for the fixture's TLS front.
+ * When replying over HTTP/2, removes hop-by-hop headers forbidden by RFC 9113 §8.2.2 (including any
+ * header names listed in `connection`) so `node:http2` does not abort the stream.
+ */
+export function forwardResponseHeaders(headers: IncomingHttpHeaders, http2: boolean): OutgoingHttpHeaders {
+  const forwarded: OutgoingHttpHeaders = {};
+  if (!http2) {
+    for (const [name, value] of Object.entries(headers)) {
+      if (value !== undefined) forwarded[name] = value;
+    }
+    return forwarded;
+  }
+  const connectionTokens = new Set<string>();
+  const rawConnection = headers.connection;
+  const connectionValues = Array.isArray(rawConnection) ? rawConnection : rawConnection ? [rawConnection] : [];
+  for (const entry of connectionValues) {
+    for (const token of entry.split(",")) {
+      const normalized = token.trim().toLowerCase();
+      if (normalized) connectionTokens.add(normalized);
+    }
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    const lower = name.toLowerCase();
+    if (HTTP2_FORBIDDEN_RESPONSE_HEADERS.has(lower) || connectionTokens.has(lower)) continue;
+    forwarded[name] = value;
+  }
+  return forwarded;
+}
+
 /** The listeners, process generations, and private state owned by one real-server fixture. */
 export interface RealServer {
   /** The private remote endpoint chosen for this fixture, retained across its restarts. */
   remoteListen?: string;
+  /** Transport protocol served by the local TLS front (`"http1"` or `"http2"`). */
+  protocol: RealServerProtocol;
   origin: string;
   backend: string;
   bridges: Bridge[];
@@ -276,6 +365,8 @@ export async function startRealServer(options: {
   systemd?: boolean;
   /** Public fixture certificate only; private TLS material remains in memory. */
   certificate?: (pem: string) => Promise<void>;
+  /** Transport protocol for the local TLS front (`"http1"` default, or `"http2"` with HTTP/1.1 WebSocket fallback). */
+  protocol?: RealServerProtocol;
   /** Seeds controlled public host trust before any bootstrap operation. */
   prepareData?: (directory: string) => Promise<void>;
   /** Real shell fixtures supply a private startup directory without touching the VM user's files. */
@@ -326,18 +417,60 @@ export async function startRealServer(options: {
   if (code !== 0) throw new Error("test certificate generation failed");
   const certificate = pem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/)?.[0] ?? "";
   await options.certificate?.(certificate);
-  const tls = createHttpsServer({
-    key: pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0] ?? "",
-    cert: certificate,
-  }, (req, res) => {
-    const upstream = httpRequest(backend + (req.url ?? "/"), { method: req.method, headers: req.headers, agent: false }, (response) => {
-      res.writeHead(response.statusCode ?? 500, response.headers);
-      response.pipe(res);
+  const protocol = resolveServerProtocol(options.protocol);
+  let privateKey = pem.match(/-----BEGIN PRIVATE KEY-----[\s\S]*?-----END PRIVATE KEY-----/)?.[0] ?? "";
+  const writeProxyHead = (
+    res: ServerResponse | Http2ServerResponse,
+    statusCode: number,
+    headers?: OutgoingHttpHeaders,
+  ): void => {
+    if ("stream" in res) res.writeHead(statusCode, headers);
+    else res.writeHead(statusCode, headers);
+  };
+  const proxyRequest = (
+    req: IncomingMessage | Http2ServerRequest,
+    res: ServerResponse | Http2ServerResponse,
+  ): void => {
+    const isHttp2 = req.httpVersionMajor >= 2;
+    const upstream = httpRequest(
+      backend + (req.url ?? "/"),
+      { method: req.method, headers: forwardRequestHeaders(req.headers), agent: false },
+      (response) => {
+        if (res.writableEnded || res.destroyed) {
+          response.resume();
+          return;
+        }
+        writeProxyHead(res, response.statusCode ?? 500, forwardResponseHeaders(response.headers, isHttp2));
+        response.pipe(res);
+      },
+    );
+    upstream.on("error", () => {
+      if (!res.headersSent && !res.writableEnded && !res.destroyed) {
+        writeProxyHead(res, 502);
+        res.end();
+      } else if (!res.destroyed) {
+        res.destroy();
+      }
     });
-    upstream.on("error", () => { res.writeHead(502); res.end(); });
+    res.on("close", () => {
+      if (!res.writableEnded) upstream.destroy();
+    });
     req.pipe(upstream);
-  });
+  };
+  const h2Sessions = new Set<ServerHttp2Session>();
+  const tls: HttpsServer | Http2SecureServer = protocol === "http2"
+    // `allowHTTP1: true` serves HTTP/2 over ALPN `h2` for page and asset requests while still allowing
+    // browsers to open HTTP/1.1 TLS `Upgrade: websocket` connections for `/v1/ws` (RFC 8441 is not advertised).
+    ? createHttp2SecureServer({ key: privateKey, cert: certificate, allowHTTP1: true }, proxyRequest)
+    : createHttpsServer({ key: privateKey, cert: certificate }, proxyRequest);
+  if (protocol === "http2") {
+    (tls as Http2SecureServer).on("session", (session) => {
+      h2Sessions.add(session);
+      session.once("close", () => h2Sessions.delete(session));
+    });
+  }
   pem = "";
+  privateKey = "";
   await new Promise<void>((r) => tls.listen(options.port ?? 0, address, r));
   // A browser's Origin never carries the scheme's default port, and the server pins its public origin the same way
   // (`Url::origin`), so on 443 the fixture must name it without ":443" or every WebSocket upgrade is refused with 403.
@@ -417,7 +550,7 @@ export async function startRealServer(options: {
   const activeBrowsers = new Set<WebSocket>();
   const front = new WebSocketServer({ noServer: true });
   let browserOfflineUntil = 0;
-  tls.on("upgrade", async (request, socket, head) => {
+  tls.on("upgrade", async (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     if (Date.now() < browserOfflineUntil) { socket.destroy(); return; }
     // Frame delay starts after open. This separate fixture control models the handshake ordering;
     // every subsequent byte still travels through the real server and PTY unchanged.
@@ -636,6 +769,8 @@ export async function startRealServer(options: {
   /** Dispose every owned resource even when the normal service stop fails. */
   const dispose = (): Promise<void> => disposal ??= (async () => {
     front.close();
+    for (const session of h2Sessions) session.destroy();
+    h2Sessions.clear();
     tls.close();
     try { await stop(); }
     finally {
@@ -687,6 +822,7 @@ export async function startRealServer(options: {
 
     const fixture: RealServer = {
       ...(remoteListen ? { remoteListen } : {}),
+      protocol,
       origin, backend, bridges, token: setupToken, binary, dataDir: state, get pid() { return child.pid!; },
       retainBrowserRoutes() { for (const browser of activeBrowsers) retainedBrowsers.add(browser); },
       async restart(whileStopped) {

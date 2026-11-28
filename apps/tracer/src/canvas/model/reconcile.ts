@@ -4,7 +4,7 @@ import { CELL } from "../layout/geometry";
 import { loadGroups } from "../layout/groups-handle";
 import { columnsFromDocument, viewFromDocument, type CanvasDocument, type DocTarget, type DocView } from "./document";
 import { makeBody } from "../views/body";
-import type { WindowModel } from "./types";
+import { windowTitle, type WindowModel } from "./types";
 
 /** Metadata changes leave terminal geometry and device focus alone. */
 function place(view: ViewRec, document: DocView): void {
@@ -65,8 +65,9 @@ export async function reconcile(cx: Ctx, read: () => SharedPaint, resolve: (targ
           Object.assign(rec.model, model);
         }
         if (!sameHost) cx.details?.refresh(rec.model.id);
+        if (retargeted) delete rec.model.openedAccount;
         if (retargeted && (!sameHost || !rec.binding?.retarget?.(rec.model))) { rec.binding?.dispose(); makeBody(cx, rec); rec.binding?.setActive(cx.state.activeWin === rec); }
-        if (relabel) rec.card.setTitle({ host: rec.model.host, ...(rec.model.user ? { user: rec.model.user } : {}), ...(rec.model.session ? { session: rec.model.session } : {}) });
+        if (relabel || retargeted) rec.card.setTitle(windowTitle(rec.model));
       }
     }
     // Bindings keep the original model object. Columns must share it so asynchronous reference

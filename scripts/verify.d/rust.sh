@@ -199,6 +199,7 @@ rust_check_cli_plugin_compile_out() {
     local plugins=(
         infraternal-agent
         infraternal-mesh
+        infraternal-mesh-node
         infraternal-plugin-backup
         infraternal-canvas-model
         infraternal-plugin-canvas
@@ -314,7 +315,8 @@ rust_check_macos_compile() {
     local -a clippy=(env "${env[@]}" cargo clippy --locked --target aarch64-apple-darwin)
     "${clippy[@]}" "${release_macos_host_cargo_args[@]}" -- -D warnings || failed=1
     "${clippy[@]}" "${release_macos_helper_cargo_args[@]}" -- -D warnings || failed=1
-    "${clippy[@]}" --package infraternal-plugin-mesh --features agent --lib --tests -- -D warnings || failed=1
+    "${clippy[@]}" --package infraternal-mesh-node --package infraternal-plugin-mesh \
+        --features infraternal-plugin-mesh/agent --lib --tests -- -D warnings || failed=1
     "${clippy[@]}" --package infraternal-agent --features mesh,desktop --lib --tests -- -D warnings || failed=1
     "${clippy[@]}" --package infraternal-plugin-desktop --features desktop --lib --bins --tests -- -D warnings || failed=1
     return "$failed"
@@ -327,6 +329,8 @@ rust_check_macos_compile() {
 # features the packet tunnel extension uses: the QUIC link and the join (#580,
 # L3). Once the FFI crates exist they pull it in, and this stays as a direct check.
 IOS_LINK_FEATURES=quic,join
+# Check the features used by the packet path, beyond the default wire models.
+IOS_MESH_NODE_FEATURES=engine,mesh-dns
 rust_ios_client_crates() {
     local crate
     IOS_CLIENT_CRATES=()
@@ -360,6 +364,7 @@ rust_check_ios_compile() {
         env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" "${packages[@]}" || failed=1
         # The iPhone's link client with the features the extension uses (L3).
         env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" --package infraternal-link --features "$IOS_LINK_FEATURES" || failed=1
+        env "${APPLE_CHECK_ENV[@]}" cargo check --locked --target "$target" --package infraternal-mesh-node --features "$IOS_MESH_NODE_FEATURES" || failed=1
     done
     return "$failed"
 }
@@ -378,6 +383,8 @@ rust_check_ios_dependency_guard() {
         printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
     done
     tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package infraternal-link --features "$IOS_LINK_FEATURES")" || return 1
+    printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
+    tree="$(cargo tree --locked --target aarch64-apple-ios -e normal,features --prefix none --package infraternal-mesh-node --features "$IOS_MESH_NODE_FEATURES")" || return 1
     printf '%s\n' "$tree" | python3 scripts/verify.d/ios-dependency-guard.py || failed=1
     return "$failed"
 }
@@ -474,21 +481,49 @@ rust_static_build_check() {
     return "$failed"
 }
 
+# Runs `cargo test <args>` with a hang bound around the TEST RUN only (#509, #596).
+# Usage: rust_bounded_cargo_test <seconds> <cargo test args>...
+# The build comes first, untimed (`--no-run`): a cold compile on a loaded host can
+# take most of the budget, and a timeout that covers it reports a slow build as a
+# hung test (exit 124, seen once on a busy compute01). The timeout then starts on
+# an up-to-date build, so it measures only what it is meant to catch: a test
+# binary that never ends. Failure of the build keeps cargo's own exit code.
+rust_bounded_cargo_test() {
+    local limit="$1"
+    shift
+    cargo test "$@" --no-run || return $?
+    if command -v timeout >/dev/null; then
+        timeout --kill-after=30 "$limit" cargo test "$@"
+    else
+        cargo test "$@"
+    fi
+}
+
 # The `test` row (#509). Runs every workspace test binary even after one
 # fails: plain `cargo test` stops at the first failing binary, so a flake in an
 # early package hid the results of every later package. `--no-fail-fast` keeps
 # the exit code non-zero when anything failed. Because the log is then huge, the
 # failing test names and binaries are repeated at the end. The row's exit code is
-# cargo's own, unchanged.
+# cargo's own, unchanged, unless the test run reaches its hang bound
+# (VERIFY_TEST_TIMEOUT, 5400 s, three times a measured 30-minute run): then it is
+# 124 or 137 and the tests that never reported a result are listed (#596).
 rust_test_workspace() {
     local log status
     log="$(mktemp)" || return 1
-    cargo test --workspace --locked --no-fail-fast 2>&1 | tee "$log"
+    local limit="${VERIFY_TEST_TIMEOUT:-5400}"
+    rust_bounded_cargo_test "$limit" --workspace --locked --no-fail-fast 2>&1 | tee "$log"
     status="${PIPESTATUS[0]}"
     if ((status != 0)); then
         printf '\n--- failing tests (#509) ---\n'
         { grep -E '^test .+ \.\.\. FAILED$|^error: test failed' "$log" | sort -u; } || :
         printf -- '--- end of failing tests ---\n'
+    fi
+    if ((status == 124 || status == 137)); then
+        printf '\nTEST RUN STOPPED (exit %s; hang bound %s s, VERIFY_TEST_TIMEOUT). Slow tests with no result:\n' \
+            "$status" "$limit"
+        awk '/^test .* has been running for over/ { slow[$2] = 1 }
+             /^test .* \.\.\. / { delete slow[$2] }
+             END { for (name in slow) print "  " name }' "$log"
     fi
     rm -f "$log"
     return "$status"

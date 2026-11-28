@@ -30,6 +30,81 @@ async fn update_listener(
 /// a rotation is open (J273 P3-2). Each probe is a few small calls on an authenticated channel.
 const UNKNOWN_SUPPORT_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The largest peer control reply any mesh coordinator parser accepts.
+const MAX_COORDINATION_REPLY_BYTES: usize = infraternal_plugin_api::channel::MAX_CONTROL_JSON;
+
+/// Decode one bounded reply from a node, before JSON can allocate from it.
+fn parse_coordination_reply<T: serde::de::DeserializeOwned>(reply: &[u8]) -> Option<T> {
+    if reply.len() > MAX_COORDINATION_REPLY_BYTES {
+        return None;
+    }
+    serde_json::from_slice(reply).ok()
+}
+
+/// Deserialize at most `maximum` sequence items, without reserving from an untrusted size hint.
+fn deserialize_bounded_sequence<'de, D, T>(
+    deserializer: D,
+    maximum: usize,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    /// The private visitor that stops a peer list at its protocol count limit.
+    struct BoundedSequence<T> {
+        maximum: usize,
+        marker: std::marker::PhantomData<T>,
+    }
+
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for BoundedSequence<T> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence with at most {} items", self.maximum)
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let capacity = sequence.size_hint().unwrap_or(0).min(self.maximum);
+            let mut items = Vec::with_capacity(capacity);
+            while items.len() < self.maximum {
+                let Some(item) = sequence.next_element()? else {
+                    return Ok(items);
+                };
+                items.push(item);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::invalid_length(
+                    self.maximum.saturating_add(1),
+                    &self,
+                ));
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_seq(BoundedSequence {
+        maximum,
+        marker: std::marker::PhantomData,
+    })
+}
+
+/// Bound the coordinator's private LAN candidate list to one address per family.
+fn deserialize_lan<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<std::net::SocketAddr>, D::Error> {
+    deserialize_bounded_sequence(deserializer, crate::candidates::MAX_LAN)
+}
+
+/// Bound one node's advertised routes before building the deserialized vector.
+fn deserialize_advertised<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<crate::policy::networks::Network>, D::Error> {
+    deserialize_bounded_sequence(deserializer, MAX_ADVERTISED_NETWORKS)
+}
+
 /// The authenticated identity and the additive capabilities proved for its reply.
 struct IdentityProbe {
     /// The node identity and values returned by the successful request.
@@ -131,10 +206,10 @@ pub fn parse_routes(reply: &[u8]) -> Option<Vec<crate::policy::networks::Network
     struct Reply {
         #[serde(default)]
         routes: bool,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_advertised")]
         advertised: Vec<crate::policy::networks::Network>,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     (reply.routes && reply.advertised.len() <= MAX_ADVERTISED_NETWORKS).then_some(reply.advertised)
 }
 
@@ -150,7 +225,7 @@ pub fn parse_side_socket(reply: &[u8]) -> Option<bool> {
         #[serde(default)]
         side_port: bool,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.side_socket.then_some(reply.side_port)
 }
 
@@ -166,7 +241,7 @@ pub fn parse_ipv6_state(reply: &[u8]) -> Option<bool> {
         #[serde(default)]
         ipv4_only: bool,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.ipv6_state.then_some(reply.ipv4_only)
 }
 
@@ -180,10 +255,10 @@ pub fn parse_candidates(reply: &[u8]) -> Option<Vec<std::net::SocketAddr>> {
     struct Reply {
         #[serde(default)]
         candidates: bool,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "deserialize_lan")]
         lan: Vec<std::net::SocketAddr>,
     }
-    let reply: Reply = serde_json::from_slice(reply).ok()?;
+    let reply: Reply = parse_coordination_reply(reply)?;
     reply.candidates.then_some(reply.lan)
 }
 
@@ -279,9 +354,7 @@ where
 
 /// Decode an identity reply, refusing an unset key or port.
 fn parse_identity(reply: &[u8]) -> Option<Identity> {
-    serde_json::from_slice::<Option<Identity>>(reply)
-        .ok()
-        .flatten()
+    parse_coordination_reply::<Option<Identity>>(reply)?
         .filter(|identity| identity.public_key.0 != [0; 32] && identity.port != 0)
 }
 
@@ -292,7 +365,7 @@ async fn read_hostname(channel: &dyn NodeChannel) -> Option<String> {
         .call("host.facts.read", br#"{"includeLive":false}"#.to_vec())
         .await
         .ok()?;
-    let facts: serde_json::Value = serde_json::from_slice(&reply).ok()?;
+    let facts: serde_json::Value = parse_coordination_reply(&reply)?;
     facts["hostname"].as_str().map(str::to_owned)
 }
 
@@ -322,6 +395,16 @@ pub async fn run(
     let mut known_ipv4_only = false;
     let mut presence_updates = service.subscribe_presence();
     let mut rotation_updates = service.subscribe_rotation_progress();
+    // The relay list this node last accepted, and what wakes the worker to send a new one:
+    // the server node's relay coming or going, or (on the server's own worker) a new leaf.
+    let mut relays = crate::relay_list::Pushed::default();
+    let mut relay_updates = service.subscribe_server_relay();
+    let mut serve_updates = crate::relay_list::serve_source()
+        .filter(|_| channel.is_server())
+        .map(|source| source.changes.clone());
+    // A restarted infraternal agent has lost its relay role (its key lives in memory only):
+    // send the list again.
+    let mut agent_restarts = channel.agent_restarts();
     let mut listener: ServerListener = None;
     let mut attach_retry: Option<std::time::Duration> = None;
     // Retry an ambiguous probe without weakening the identity request.
@@ -335,6 +418,7 @@ pub async fn run(
     loop {
         if refresh_identity {
             refresh_identity = false;
+            relays.reset();
             let identity = read_identity(channel.as_ref()).await;
             if let Some(probe) = identity {
                 let identity = probe.identity;
@@ -357,7 +441,7 @@ pub async fn run(
                         .call("mesh.status", b"{}".to_vec())
                         .await
                         .ok()
-                        .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok())
+                        .and_then(|reply| parse_coordination_reply::<serde_json::Value>(&reply))
                         .and_then(|reply| reply["server_link"]["source_port"].as_u64())
                         .and_then(|port| u16::try_from(port).ok())
                         .filter(|port| *port != 0)
@@ -582,7 +666,7 @@ pub async fn run(
                         .call("mesh.configure", input)
                         .await
                         .ok()
-                        .and_then(|reply| serde_json::from_slice::<serde_json::Value>(&reply).ok());
+                        .and_then(|reply| parse_coordination_reply::<serde_json::Value>(&reply));
                     #[cfg(feature = "cutoff-measure")]
                     drop(ack);
                     if !reply.as_ref().is_some_and(|reply| {
@@ -652,6 +736,18 @@ pub async fn run(
         if channel.is_server() {
             service.set_server_configured(installed.is_some());
         }
+        // The relay list follows a delivered configuration, so a node learns its relays from
+        // the same link and only once it is a member (D402 Q2). It is sent only on a change.
+        if binding.is_some() && installed.is_some() {
+            relay_updates.borrow_and_update();
+            if let Some(updates) = serve_updates.as_mut() {
+                updates.borrow_and_update();
+            }
+            crate::relay_list::push(&store, &service, channel.as_ref(), &mut relays).await;
+        } else if channel.is_server() && binding.is_none() {
+            // The server's node left the mesh: its relay is gone for everyone.
+            service.set_server_relay(None);
+        }
         // Consume our completed finalizer's publication before reading durable receipts.
         // Coalesced peer progress is covered by that read; later progress stays unseen.
         rotation_updates.borrow_and_update();
@@ -690,6 +786,9 @@ pub async fn run(
             },
             result=presence_updates.changed()=>if result.is_err() {return;},
             result=rotation_updates.changed()=>if result.is_err() {return;},
+            result=relay_updates.changed()=>if result.is_err() {return;},
+            () = watch_optional(serve_updates.as_mut()) => {},
+            () = watch_optional(agent_restarts.as_mut()) => relays.reset(),
             () = tokio::time::sleep(std::time::Duration::from_secs(5)), if ack_retry.is_some() => {
                 if let Some((node, revision)) = ack_retry
                     && service.finalize_applied(node, revision).await.is_ok()
@@ -709,6 +808,17 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Wait for the next change of an optional watch; forever when there is none or its sender is
+/// gone, so the caller's other select arms wake the worker.
+async fn watch_optional<T>(updates: Option<&mut tokio::sync::watch::Receiver<T>>) {
+    if let Some(updates) = updates
+        && updates.changed().await.is_ok()
+    {
+        return;
+    }
+    std::future::pending::<()>().await;
 }
 
 /// Sleep for `delay`, or forever when there is no deadline; the caller's other select arms then wake the worker.
@@ -743,6 +853,7 @@ mod tests {
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
+    /// Ensure every server migration has a unique version.
     #[test]
     fn server_migrations_have_unique_versions() {
         let migrations = sqlx::migrate!("../../infraternal-server/migrations");
@@ -754,6 +865,36 @@ mod tests {
                 migration.version
             );
         }
+    }
+
+    /// Refuse peer candidate arrays that exceed their advertised shape.
+    #[test]
+    fn peer_candidate_replies_refuse_more_addresses_than_the_protocol_allows() {
+        let reply = serde_json::json!({
+            "candidates": true,
+            "lan": ["10.0.0.1:51820", "[fd00::1]:51820", "10.0.0.2:51820"]
+        });
+        assert_eq!(parse_candidates(reply.to_string().as_bytes()), None);
+    }
+
+    /// Refuse peer route arrays that exceed the accepted route count.
+    #[test]
+    fn peer_route_replies_refuse_more_than_the_advertised_network_limit() {
+        let advertised: Vec<String> = (0..=MAX_ADVERTISED_NETWORKS)
+            .map(|index| format!("10.0.{index}.0/24"))
+            .collect();
+        let reply = serde_json::json!({"routes": true, "advertised": advertised});
+        assert_eq!(parse_routes(reply.to_string().as_bytes()), None);
+    }
+
+    /// Refuse peer replies before serde reads beyond the `NodeChannel` byte ceiling.
+    #[test]
+    fn peer_reply_parsers_refuse_bytes_over_the_node_channel_limit() {
+        let oversized = vec![b' '; MAX_COORDINATION_REPLY_BYTES + 1];
+        assert_eq!(parse_candidates(&oversized), None);
+        assert_eq!(parse_routes(&oversized), None);
+        assert_eq!(parse_ipv6_state(&oversized), None);
+        assert_eq!(parse_side_socket(&oversized), None);
     }
 
     struct Lease(Arc<AtomicUsize>);
@@ -1057,6 +1198,11 @@ mod tests {
                         .hostname
                         .map(|name| format!(r#"{{"hostname":"{name}"}}"#).into_bytes())
                         .ok_or("host facts disabled");
+                }
+                if action == crate::relay_list::ACTION {
+                    // This modelled node predates relay lists (D402): it refuses the action,
+                    // and the worker stops asking until it reads the identity again.
+                    return Err(infraternal_plugin_api::node_channel::CALL_REFUSED);
                 }
                 assert_eq!(action, "mesh.configure");
                 if !self.server && self.supports_server_paths() {

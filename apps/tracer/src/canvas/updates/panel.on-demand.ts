@@ -59,9 +59,9 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
   actions.append(apply, check, back);
 
   const settings = el("div", "ui-setting-list");
-  const refuse = (error: unknown): string => (error instanceof Error ? error.message : "That did not work. Try again.");
+  const refuse = (error: unknown): string => (error instanceof Error ? error.message : "Update action failed. Check your connection and try again.");
   const channel = createSettingRow({
-    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel, caption: false,
+    id: "update-channel", title: "Channel", spec: CHANNEL, value: source.facts().channel,
     explain: "Stable is the tested release. Edge gets every build first and may break.",
     onSave: (v: SettingValue) => {
       if (v !== "edge") return source.setChannel(v as Channel).then(() => undefined, refuse);
@@ -74,7 +74,7 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
     },
   });
   const quiet = createSettingRow({
-    id: "update-quiet", title: "Quiet Window", spec: QUIET, value: source.facts().quietMinutes,
+    id: "update-quiet", title: "Quiet window", spec: QUIET, value: source.facts().quietMinutes,
     explain: "An update installs only after nobody has typed or opened a session for this long.",
     onSave: (v: SettingValue) => source.setQuietMinutes(Number(v)).then(() => undefined, refuse),
   });
@@ -110,7 +110,7 @@ export function renderUpdates(cx: Ctx, pane: HTMLElement, source: UpdatesSource)
         ...(can.check ? { press: { tip: "Check for updates now", run: () => run(() => source.check()) } } : {}) },
       { key: "Running", value: `${facts.running} · ${facts.channel}` },
     ];
-    if (facts.checkedAt !== undefined) rows.push({ key: "Last Checked", value: ago(facts.checkedAt, now) });
+    if (facts.checkedAt !== undefined) rows.push({ key: "Last checked", value: ago(facts.checkedAt, now) });
     status.set(rows);
     detail.textContent = line.detail ?? "";
     detail.toggleAttribute("hidden", !line.detail);

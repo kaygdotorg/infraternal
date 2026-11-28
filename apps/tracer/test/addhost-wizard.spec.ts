@@ -775,6 +775,51 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 
     await expect(details).not.toContainText("Connecting to the host failed.");
     await page.screenshot({ path: tracerEvidencePath("addhost-netbird-connect", `connect-failure-${viewport.width}.png`) });
   });
+
+  test(`NetBird SSH failure offers local enrollment and preserves the sign-in details at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "netbird-ssh.lab");
+    await expect(page.getByRole("heading", { name: "Couldn't add netbird-ssh.lab over SSH" })).toBeVisible();
+    const failure = onScreen(page, "failure");
+    const heading = failure.getByRole("heading");
+    const advice = failure.getByText(/Use the machine's own SSH/);
+    await expect(advice).toBeVisible();
+    const details = failure.locator(".ah-details");
+    await details.locator("summary").click();
+    await expect(details).toContainText("The SSH server offered sign-in with a password.");
+    await expect(details).toContainText("Tried signing in without a key or password.");
+    const [titleBox, adviceBox] = await Promise.all([heading.boundingBox(), advice.boundingBox()]);
+    expect(Math.abs(titleBox!.x - adviceBox!.x)).toBeLessThanOrEqual(0.5);
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await details.locator("pre").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `netbird-details-${viewport.width}.png`) });
+    await inWizard(page, "Use infraternal up").click();
+    await expect(onScreen(page, "install")).toContainText(`infraternal up '${new URL(page.url()).origin}'`);
+    await expect(onScreen(page, "install")).toContainText("approve the machine with your passkey");
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `join-command-${viewport.width}.png`) });
+    await inWizard(page, "Back").click();
+    await expect(failure).toContainText("NetBird's SSH server");
+  });
+
+  test(`macOS SSH system check offers local enrollment at ${viewport.width}`, async ({ page }) => {
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "mac-ssh.lab");
+    const failure = onScreen(page, "failure");
+    await expect(failure.getByRole("heading", { name: "Add mac-ssh.lab from the Mac" })).toBeVisible();
+    await expect(failure).toContainText("SSH sign-in worked.");
+    const details = failure.locator(".ah-details");
+    await details.locator("summary").click();
+    await expect(details).toContainText("The SSH system check found macOS.");
+    await expect(wizard(page).locator(".ah-page.is-leaving")).toHaveCount(0);
+    await page.screenshot({ path: tracerEvidencePath("addhost-614", `macos-details-${viewport.width}.png`) });
+    await inWizard(page, "Use infraternal up").click();
+    await expect(onScreen(page, "install")).toContainText(`infraternal up '${new URL(page.url()).origin}'`);
+  });
 }
 
 // #394 (owner, production): a root add of minipc01 showed the exit-71 paragraph, and the progress row wrapped it in red.
@@ -930,6 +975,42 @@ for (const [host, title] of [
 }
 
 // ── D359: Take over a finished install of another server (#394) ─────────────────────────────────────────────
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 393, height: 852 }]) {
+  test(`re-add reviews exact retirement paths at ${viewport.width}`, async ({ page }) => {
+    const sent: Array<Record<string, unknown>> = [];
+    page.on("websocket", (socket) => socket.on("framesent", ({ payload }) => {
+      if (typeof payload === "string") { try { sent.push(JSON.parse(payload) as Record<string, unknown>); } catch { /* unrelated binary protocol */ } }
+    }));
+    await open(page);
+    await page.setViewportSize(viewport);
+    await openWizard(page);
+    await addTyped(page, "root@retire.lab");
+    await page.locator(".ah-consent").click();
+    await inWizard(page, "Install as root").click();
+    const review = wizard(page).locator(".ah-page[data-page='failure']");
+    await expect(review.getByRole("heading", { name: "Retire the earlier installation on retire.lab?" })).toBeVisible({ timeout: 15_000 });
+    const paths = review.locator("[data-retirement] .ui-kv-value");
+    await expect(paths).toHaveText([
+      "/home/pat/.local/share/infraternal",
+      "/home/pat/.config/systemd/user/infraternal-agent.service",
+      "/home/pat/.local/bin/infraternal",
+    ]);
+    await expect(inWizard(page, "Keep earlier installation")).toBeVisible();
+    expect(sent.filter((command) => command.action === "start-fresh")).toHaveLength(0);
+    const offset = await review.evaluate((panel) => {
+      const left = (selector: string): number => panel.querySelector(selector)!.getBoundingClientRect().left;
+      return Math.max(Math.abs(left(".ah-lede") - left(".ah-title")), Math.abs(left("[data-retirement]") - left(".ah-title")));
+    });
+    expect(offset).toBeLessThanOrEqual(0.5);
+    await expect(wizard(page).locator(".ah-page")).toHaveCount(1);
+    await page.screenshot({ path: tracerEvidencePath("addhost-retirement", `review-${viewport.width}.png`) });
+    await inWizard(page, "Retire and continue").click();
+    await expect.poll(() => sent.filter((command) => command.action === "start-fresh").length).toBe(1);
+    expect(sent.find((command) => command.action === "start-fresh")?.challenge).not.toBe("00000000-0000-0000-0000-000000000000");
+    await expect(page.locator(".ah-run[data-state='done']")).toBeVisible({ timeout: 15_000 });
+  });
+}
 
 /** The old install's id the provisioning double reports for `takeover*` hosts. */
 const TAKEOVER_INSTALL = "c10909d16e8147a3b0f2e5d4c3b2a190";

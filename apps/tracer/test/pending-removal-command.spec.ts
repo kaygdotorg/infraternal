@@ -13,16 +13,18 @@ async function removeOffline(
   hostCleanup: "unreachable" | "pending",
   expired: boolean | "finish" = false,
   repeat = false,
+  upInstall = false,
 ): Promise<string> {
   await page.request.post("/__mock/reset");
   const id = "11111111-2222-3333-4444-555555555555";
+  const name = upInstall ? "mbp" : "offline-worker";
   const manual = `/usr/local/bin/infraternal --bootstrap-uninstall ${id.replaceAll("-", "")}`;
   let pending = false;
   let finishes = 0;
   let renewed = !expired;
   let push: (() => void) | undefined;
   await page.route("**/remote/hosts/actions", route => route.fulfill({ json: { id: "remote.host.remove", label: "Remove host" } }));
-  await page.route("**/remote/hosts/remove/start", route => (renewed || expired === "finish") ? route.fulfill({ json: { review: "fixture-review", action: { host_id: id, host: "offline-worker", uninstall: true } } }) : route.fulfill({ status: 428 }));
+  await page.route("**/remote/hosts/remove/start", route => (renewed || expired === "finish") ? route.fulfill({ json: { review: "fixture-review", action: { host_id: id, host: name, uninstall: true } } }) : route.fulfill({ status: 428 }));
   await page.route("**/remote/hosts/reauth/start", route => route.fulfill({ json: { ceremony: "fixture-ceremony", options: { publicKey: { challenge: "AQID", rpId: "localhost", allowCredentials: [] } } } }));
   await page.route("**/remote/hosts/reauth/finish", route => { renewed = true; return route.fulfill({ json: { ok: true } }); });
   await page.route("**/remote/hosts/remove/finish", route => {
@@ -34,7 +36,9 @@ async function removeOffline(
       pending = true;
       push?.();
     }
-    return route.fulfill({ json: { state: "pending", host_id: id, host_cleanup: hostCleanup, message: "offline-worker: revoked, cleanup pending.", manual } });
+    return route.fulfill({ json: { state: "pending", host_id: id, host_cleanup: hostCleanup, up_install: upInstall,
+      message: upInstall ? "Access revoked for mbp. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall on mbp." : "offline-worker: revoked, cleanup pending.",
+      manual: upInstall ? null : manual } });
   });
   await page.routeWebSocket(/\/v1\/ws(?:\?|$)/, socket => {
     const server = socket.connectToServer();
@@ -46,7 +50,7 @@ async function removeOffline(
           return;
         }
         if (frame.type === "Call" && frame.actionId === "remote.host.list") {
-          socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: [{ id, name: "offline-worker", online: false, ...(pending ? { state: "pending" } : {}) }], next: null })) })));
+          socket.send(Buffer.from(encodeMuxedFrame(0, { type: "Result", callId: frame.callId, ok: true, json: new TextEncoder().encode(JSON.stringify({ hosts: [{ id, name, online: false, ...(pending ? { state: "pending" } : {}) }], next: null })) })));
           return;
         }
       }
@@ -59,8 +63,8 @@ async function removeOffline(
   await (await metadata).finished();
   await expect.poll(() => Boolean(push)).toBe(true);
   await page.keyboard.press("Control+Shift+K");
-  await page.locator("#palette-input").fill("Remove host: offline-worker");
-  await page.getByRole("option").filter({ hasText: "Remove host: offline-worker" }).click();
+  await page.locator("#palette-input").fill(`Remove host: ${name}`);
+  await page.getByRole("option").filter({ hasText: `Remove host: ${name}` }).click();
   await page.getByRole("button", { name: "Remove", exact: true }).click();
   if (repeat) {
     const pendingToast = page.locator(".ui-toast").filter({ hasText: "uninstalls infraternal as soon as it connects" });
@@ -69,8 +73,8 @@ async function removeOffline(
     await expect(pendingToast).toHaveCount(0);
     await page.keyboard.press("Control+Shift+K");
     await expect(page.locator("#palette-input")).toBeVisible();
-    await page.locator("#palette-input").fill("Remove host: offline-worker");
-    await page.getByRole("option").filter({ hasText: "Remove host: offline-worker" }).click();
+    await page.locator("#palette-input").fill(`Remove host: ${name}`);
+    await page.getByRole("option").filter({ hasText: `Remove host: ${name}` }).click();
     const repeatedResponse = page.waitForResponse(response => response.url().endsWith("/remote/hosts/remove/finish"));
     await page.getByRole("button", { name: "Remove", exact: true }).click();
     const response = await repeatedResponse;
@@ -157,6 +161,15 @@ for (const width of [1440, 393]) {
       await expect(page.locator(".ui-toast").filter({ hasText: "Passkey confirmation was cancelled or timed out." })).toBeVisible();
       expect(renewals).toBe(0);
       expect(removals).toBe(0);
+    });
+    /** A Mac already uninstalled through an older CLI gets its name and the next action. */
+    test("offline up install offers Forget in plain words", async ({ page }) => {
+      await removeOffline(page, "pending", false, false, true);
+      const toast = page.locator(".ui-toast").filter({ hasText: "Access revoked for mbp." });
+      await expect(toast.locator(".ui-toast-message")).toHaveText("Access revoked for mbp. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall on mbp.");
+      await expect(toast).toHaveAttribute("data-icon", "true");
+      await expect(toast.getByRole("button", { name: "Copy command" })).toHaveCount(0);
+      await page.screenshot({ animations: "disabled", path: tracerEvidencePath("pending-up", `${width}.png`) });
     });
     /** The real production toast copies the command without withdrawing the pending host. */
     test("pending removal offers Copy command", async ({ page }) => {

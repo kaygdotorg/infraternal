@@ -24,6 +24,10 @@
    "documented": 143,
    "total": 198
   },
+  "rust:crates/infraternal-mesh-node": {
+   "documented": 718,
+   "total": 718
+  },
   "rust:crates/infraternal-mesh/fuzz": {
    "documented": 2,
    "total": 2

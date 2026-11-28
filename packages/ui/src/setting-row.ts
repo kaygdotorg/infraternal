@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 /**
  * One setting as a row (issue #304), in one column on one left edge: its name, a one-line plain explanation, its value with
- * a Reset that appears only when the value is not the default, and under them the default and the allowed range.
+ * a Reset that appears only when the value is not the default, and (for typed settings) under them the default and allowed range.
  *
  *   Connection keys
  *   How often every machine swaps the keys that encrypt mesh traffic (WireGuard).
  *   [ 7 d ] (↺)
  *   Default 7 d · allowed 1 to 30 days
+ *
+ * Switch and choice rows omit the "Default …" caption by default because their options already speak for themselves (TASTE §4, #598).
  *
  * Stacked rather than side by side because a window can be a fifth of the screen wide (five to a row): a field beside the
  * name would leave the name a sliver and wrap it.
@@ -39,8 +41,9 @@ export interface SettingRowOptions {
   /** The saved value to start from; the default when absent. */
   value?: SettingValue;
   /**
-   * Whether the line "Default … · allowed …" is shown under the control (default true). A choice whose default is plain from its
-   * own words (Stable or Edge) turns it off: the owner found "Default Stable" under that switch noise (#211, 2026-11-22).
+   * Whether the line "Default … · allowed …" is shown under the control. Typed settings (duration, number, text) default
+   * to `true` so their allowed range stays visible; switch and choice rows default to `false` so captions like
+   * "Default On", "Default System" and "Default Mine" do not add noise (TASTE §4, #211, #598).
    */
   caption?: boolean;
   /**
@@ -90,8 +93,8 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
   const q = <T extends HTMLElement>(selector: string): T => root.querySelector<T>(selector)!;
   q(".ui-setting-title").textContent = options.title;
   q(".ui-setting-explain").textContent = options.explain;
-  if (options.caption === false) q(".ui-setting-caption").remove();
-  else q(".ui-setting-caption").textContent = captionFor(spec);
+  if (options.caption ?? isTyped(spec)) q(".ui-setting-caption").textContent = captionFor(spec);
+  else q(".ui-setting-caption").remove();
   const reset = q<HTMLButtonElement>(".ui-setting-reset");
   const control = q<HTMLElement>(".ui-setting-control");
   const refusal = q<HTMLElement>(".ui-setting-refusal");
@@ -124,7 +127,7 @@ export function createSettingRow(options: SettingRowOptions): SettingRow {
     const outcome = options.onSave?.(saved);
     if (!(outcome instanceof Promise)) return;
     const undo = (message: string): void => { if (saved !== value) return; saved = before; paintControl(saved); paintReset(); refuse(message); };
-    outcome.then((message) => { if (typeof message === "string") undo(message); }, () => undo("It could not be saved. The old value is still in use."));
+    outcome.then((message) => { if (typeof message === "string") undo(message); }, () => undo("Couldn't save this setting. Keeping the previous value."));
   };
 
   if (isTyped(spec)) {

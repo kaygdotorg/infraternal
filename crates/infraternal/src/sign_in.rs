@@ -580,7 +580,9 @@ pub(crate) fn run(server_input: &str, requested: &[&str], json_output: bool) -> 
                     "scopes": scopes,
                     "stored": true,
                 }),
-            ),
+            )
+            .with_text_message(format!("Signed in to {origin}."))
+            .with_body(format!("Device  {device}\nAccess  {}", scopes.join(", "))),
             json_output,
             Exit::Ok,
         ),
@@ -612,12 +614,16 @@ async fn run_flow(
             "expires_in_seconds": approval.lifetime.as_secs(),
         }),
     )
-    .with_body(format!(
-        "Open this link and approve with your passkey:\n{link}\n\nCode: {}\nDevice: {device}\nScopes: {}",
+    .with_text_message("Open the link to approve sign-in with your passkey.")
+    .with_panel(format!(
+        "{link}\n\nCode    {}\nDevice  {device}\nAccess  {}",
         approval.user_code,
         scopes.join(", "),
     ))
-    .with_next_step("Keep this command running while you review and approve the device.");
+    .with_next_step("Keep this command running while you review and approve the device.")
+    .with_text_next(vec![
+        "Keep this terminal open until sign-in finishes.".to_owned(),
+    ]);
     // Progress does not mark the command's final result, so Ctrl-C can still emit D303's 130 result.
     print_progress(&progress, json_output, false);
 
@@ -1072,6 +1078,7 @@ fn exit_for_failure(failure: Failure) -> Exit {
     }
 }
 
+/// Give sign-in failures a recovery step and preserve the machine result.
 fn fail(json_output: bool, failure: Failure) -> ExitCode {
     let (state, message, next) = match failure {
         Failure::InvalidServer => (
@@ -1160,9 +1167,14 @@ fn fail(json_output: bool, failure: Failure) -> ExitCode {
             "Check the server's device keys and revoke a matching key before retrying sign-in.",
         ),
     };
-    emit(
-        CommandResult::new("sign-in", state, message, json!({})).with_next_step(next),
-        json_output,
-        exit_for_failure(failure),
-    )
+    let mut result = CommandResult::new("sign-in", state, message, json!({})).with_next_step(next);
+    if failure == Failure::InvalidServer {
+        result = result
+            .with_text_message("Enter the server's HTTPS address.")
+            .with_text_next(vec![
+                "Use the address from your browser without anything after the hostname and optional port."
+                    .to_owned(),
+            ]);
+    }
+    emit(result, json_output, exit_for_failure(failure))
 }

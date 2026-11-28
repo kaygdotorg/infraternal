@@ -252,6 +252,33 @@ pub trait Backend: Send + Sync {
     ) -> Operation<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+    /// A host-local enrollment proof matched against this owner's retired host record.
+    /// This is checked both before the offer and before any destructive step.
+    fn owns_retired_install<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+        _uid: u32,
+        _digest: [u8; 32],
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Unix ids of this owner's retired installs, used to bound any alternate-scope inspection.
+    fn retired_install_uids<'a>(&'a self, _authority: &'a Authority) -> Operation<'a, Vec<u32>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    /// Authorize the marker and execution uid before running the earlier install's runtime helper.
+    fn owns_retired_install_marker<'a>(
+        &'a self,
+        _authority: &'a Authority,
+        _host: uuid::Uuid,
+        _uid: u32,
+    ) -> Operation<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
     /// Whether the infraternal agent of an earlier setup's journal (`host`) is
     /// connected to this server now. Its leftovers are then in use, never offered
     /// for cleanup (#305, J257). Backends without host links have none.
@@ -1010,6 +1037,25 @@ impl Bootstrap {
                 }
             }
         }
+        let ready_message = if result.is_ok()
+            && let Some((session, plan)) = resources.retire_after_commit
+        {
+            // The new installation is committed. Closing the wizard while
+            // this cleanup runs cannot roll that installation back.
+            let retired = tokio::time::timeout(
+                Duration::from_secs(30),
+                self.retire_other_scope(&batch, &session, &plan),
+            )
+            .await
+            .unwrap_or(false);
+            if retired {
+                "The host is ready and the earlier infraternal installation was retired."
+            } else {
+                "The host is ready. Retirement of the earlier infraternal installation did not finish."
+            }
+        } else {
+            "The infraternal agent is ready."
+        };
         let mut states = lock(&batch.states);
         if let Some(state) = states.get_mut(&target.id) {
             state.start_fresh = None;
@@ -1033,7 +1079,7 @@ impl Bootstrap {
                 &target,
                 attempt,
                 Step::Done,
-                "The infraternal agent is ready.",
+                ready_message,
                 started,
                 None,
             ),
@@ -1518,7 +1564,18 @@ impl Bootstrap {
             // carries a new host id and would refuse it (exit 71) on this and
             // every retry; answer now, before anything is written (#394). In
             // root mode it may be taken over instead (D359).
-            if let previous_attempt::Remains::Installed(installed) = &remains {
+            let retire_in_other_scope = if server_origin.is_some() && replacement_host.is_none() {
+                Box::pin(self.review_retired_install(
+                    batch, target, attempt, started, &session, &check, &remains, resources,
+                ))
+                .await?
+                .map(|plan| (session.clone(), plan))
+            } else {
+                None
+            };
+            if let previous_attempt::Remains::Installed(installed) = &remains
+                && resources.set_aside.is_none()
+            {
                 self.take_over(
                     batch,
                     target,
@@ -1813,6 +1870,7 @@ impl Bootstrap {
                     None,
                 )?;
             }
+            resources.retire_after_commit = retire_in_other_scope;
             Ok(())
         })
     }
@@ -1979,10 +2037,9 @@ impl Bootstrap {
             .get_mut(id)
             .ok_or_else(|| Failure::unsupported("This host is not in the batch."))?;
         if !state.running
-            || state
-                .start_fresh
-                .as_ref()
-                .is_none_or(|pending| pending.challenge != challenge)
+            || state.start_fresh.as_ref().is_none_or(|pending| {
+                pending.challenge != challenge && pending.skip != Some(challenge)
+            })
         {
             return Err(Failure::unsupported(
                 "This earlier setup observation is no longer available. Retry the host check.",
@@ -1992,7 +2049,8 @@ impl Bootstrap {
             .start_fresh
             .take()
             .ok_or_else(|| Failure::unsupported("This host is not waiting to start fresh."))?;
-        pending.resume.send(()).map_err(|()| {
+        let confirmed = pending.challenge == challenge;
+        pending.resume.send(confirmed).map_err(|_| {
             Failure::unsupported("This host setup observation expired. Retry the host check.")
         })
     }
@@ -2090,15 +2148,16 @@ impl Bootstrap {
         offer: Failure,
         mut leftovers: crate::model::Leftovers,
         resources: &mut AttemptResources,
-    ) -> Result<(), Failure> {
-        let challenge = if let Some(close) = offer.terminal_confirmation() {
-            // Older UIs submit only this generic challenge, without showing terminals.
-            // Keep their action harmless; the terminal-aware step submits the offer's challenge.
+    ) -> Result<bool, Failure> {
+        let challenge = if let Some(close) = offer.review_confirmation() {
+            // Older clients submit the generic challenge without the required explicit review.
+            // Only a client that shows the offer can submit its distinct challenge.
             leftovers.challenge = uuid::Uuid::nil();
             close
         } else {
             leftovers.challenge
         };
+        let skip = offer.skip_retirement_challenge();
         {
             let (resume, resumed) = oneshot::channel();
             {
@@ -2106,7 +2165,11 @@ impl Bootstrap {
                 let state = states
                     .get_mut(&target.id)
                     .ok_or_else(|| Failure::install("The host setup is unavailable."))?;
-                state.start_fresh = Some(PendingFresh { challenge, resume });
+                state.start_fresh = Some(PendingFresh {
+                    challenge,
+                    skip,
+                    resume,
+                });
             }
             emit_with_leftovers(
                 batch,
@@ -2120,7 +2183,7 @@ impl Bootstrap {
             );
             let held = resources.slot.take().is_some();
             tokio::time::timeout(CONFIRMATION_WAIT, async {
-                resumed.await.map_err(|_| {
+                let confirmed = resumed.await.map_err(|_| {
                     Failure::install("Host provisioning stopped while waiting to start fresh.")
                 })?;
                 if held {
@@ -2132,12 +2195,222 @@ impl Bootstrap {
                             .map_err(|_| Failure::install("Bootstrap is shutting down."))?,
                     );
                 }
-                Ok::<_, Failure>(())
+                Ok::<_, Failure>(confirmed)
             })
             .await
-            .map_err(|_| Failure::install("Host confirmation exceeded its time limit."))??;
+            .map_err(|_| Failure::install("Host confirmation exceeded its time limit."))?
         }
-        Ok(())
+    }
+
+    /// Review the finished install in this scope, or the SSH account's older user
+    /// install alongside a new system install. Shared accounts need their own proof.
+    async fn review_retired_install(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &Arc<dyn SshSession>,
+        check: &Check,
+        remains: &previous_attempt::Remains,
+        resources: &mut AttemptResources,
+    ) -> Result<Option<OtherRetirement>, Failure> {
+        use crate::model::InstallMode;
+
+        let expected = match (remains, target.mode) {
+            (previous_attempt::Remains::Installed(installed), _) => Some(installed.host),
+            (_, InstallMode::Root) if check.uid == 0 || check.existing => None,
+            (_, InstallMode::Rootless) if check.sudo => {
+                if !self
+                    .may_inspect_system_install(batch, target, attempt, started, session, resources)
+                    .await?
+                {
+                    return Ok(None);
+                }
+                None
+            }
+            _ => return Ok(None),
+        };
+        let mode = expected.map_or_else(
+            || match target.mode {
+                InstallMode::Root => InstallMode::Rootless,
+                InstallMode::Rootless => InstallMode::Root,
+            },
+            |_| target.mode,
+        );
+        let candidates = match (mode, check.uid) {
+            (InstallMode::Root, _) => vec![0],
+            (InstallMode::Rootless, 0) => self
+                .backend
+                .retired_install_uids(&batch.authority)
+                .await?
+                .into_iter()
+                .filter(|uid| *uid != 0)
+                .collect(),
+            (InstallMode::Rootless, uid) => vec![uid],
+        };
+        let mut matched = None;
+        for uid in candidates {
+            let as_user = (check.uid == 0 && uid != 0).then_some(uid);
+            let Some(candidate) =
+                previous_attempt::Retirement::candidate(session.as_ref(), mode, as_user).await
+            else {
+                continue;
+            };
+            if expected.is_some_and(|id| id != candidate.host)
+                || !self
+                    .backend
+                    .owns_retired_install_marker(&batch.authority, candidate.host, uid)
+                    .await?
+            {
+                continue;
+            }
+            let Some(old) =
+                previous_attempt::Retirement::inspect(session.as_ref(), mode, as_user, &candidate)
+                    .await
+            else {
+                continue;
+            };
+            if self
+                .backend
+                .owns_retired_install(&batch.authority, candidate.host, uid, old.enrolled.digest)
+                .await?
+            {
+                matched = Some((old, uid, as_user));
+                break;
+            }
+        }
+        let Some((old, uid, as_user)) = matched else {
+            return Ok(None);
+        };
+        let challenge = uuid::Uuid::new_v4();
+        let different_scope = mode != target.mode;
+        let skip = different_scope.then(uuid::Uuid::new_v4);
+        let confirmed = self
+            .await_confirmation(
+                batch,
+                target,
+                attempt,
+                started,
+                "Review the earlier infraternal installation",
+                Failure::retire_previous(
+                    challenge,
+                    Some(old.installed.host),
+                    skip,
+                    old.review_paths(different_scope),
+                ),
+                crate::model::Leftovers {
+                    challenge,
+                    mode,
+                    findings: Vec::new(),
+                },
+                resources,
+            )
+            .await?;
+        if different_scope {
+            return Ok(confirmed.then_some(OtherRetirement {
+                old,
+                mode,
+                uid,
+                as_user,
+            }));
+        }
+        if !self
+            .backend
+            .owns_retired_install(
+                &batch.authority,
+                old.installed.host,
+                uid,
+                old.enrolled.digest,
+            )
+            .await?
+        {
+            return Err(Failure::install(CHANGED_WHILE_WAITING));
+        }
+        let token = uuid::Uuid::new_v4();
+        resources.set_aside = Some(SetAside {
+            session: session.clone(),
+            previous: old.installed.taken_over(token),
+            kind: previous_attempt::AsideKind::TakenOver,
+        });
+        old.execute(session.as_ref(), mode, token, false, None)
+            .await?;
+        Ok(None)
+    }
+
+    /// Request read-only administrator access before inspecting a system
+    /// install during a user install. Passwordless sudo alone grants no consent.
+    async fn may_inspect_system_install(
+        &self,
+        batch: &BatchInner,
+        target: &Target,
+        attempt: u32,
+        started: Instant,
+        session: &Arc<dyn SshSession>,
+        resources: &mut AttemptResources,
+    ) -> Result<bool, Failure> {
+        if !self
+            .backend
+            .retired_install_uids(&batch.authority)
+            .await?
+            .contains(&0)
+            || session
+                .run(
+                    "test -f /etc/systemd/system/infraternal-agent.service",
+                    Input::Empty,
+                )
+                .await
+                .is_err()
+        {
+            return Ok(false);
+        }
+        let challenge = uuid::Uuid::new_v4();
+        self.await_confirmation(
+            batch,
+            target,
+            attempt,
+            started,
+            "Check for an earlier system installation",
+            Failure::retire_previous(challenge, None, Some(uuid::Uuid::new_v4()), Vec::new()),
+            crate::model::Leftovers {
+                challenge,
+                mode: crate::model::InstallMode::Root,
+                findings: Vec::new(),
+            },
+            resources,
+        )
+        .await
+    }
+
+    /// Finish cross-scope retirement only after readiness. The old layout and
+    /// the server's owner binding both have to match the reviewed observation.
+    async fn retire_other_scope(
+        &self,
+        batch: &BatchInner,
+        session: &Arc<dyn SshSession>,
+        plan: &OtherRetirement,
+    ) -> bool {
+        matches!(
+            self.backend
+                .owns_retired_install(
+                    &batch.authority,
+                    plan.old.installed.host,
+                    plan.uid,
+                    plan.old.enrolled.digest
+                )
+                .await,
+            Ok(true)
+        ) && plan
+            .old
+            .execute(
+                session.as_ref(),
+                plan.mode,
+                uuid::Uuid::new_v4(),
+                true,
+                plan.as_user,
+            )
+            .await
+            .is_ok()
     }
 
     /// D359: a root-mode add found a finished install of another server. Offer
@@ -2362,6 +2635,18 @@ enum FreshMode {
     PutBack,
 }
 
+/// An earlier installation reviewed while adding the other scope.
+struct OtherRetirement {
+    /// The inode, key and paths the person reviewed.
+    old: previous_attempt::Retirement,
+    /// The manager and install layout to act on.
+    mode: crate::model::InstallMode,
+    /// The execution uid that must still match the server ledger.
+    uid: u32,
+    /// A root SSH session runs the old user's commands as that uid.
+    as_user: Option<u32>,
+}
+
 /// An install this attempt set aside, or may have: put back if the attempt fails.
 struct SetAside {
     session: Arc<dyn SshSession>,
@@ -2397,6 +2682,8 @@ struct AttemptResources {
     /// attempt waits for a person to confirm, taken again once they do (#305 P3-2).
     slot: Option<tokio::sync::OwnedSemaphorePermit>,
     /// A stuck install set aside for Replace or Re-enroll; put back if this attempt fails.
+    /// An approved cleanup in the other scope, run after the new install is ready.
+    retire_after_commit: Option<(Arc<dyn SshSession>, OtherRetirement)>,
     set_aside: Option<SetAside>,
     installation: Option<Installation>,
     host: Option<uuid::Uuid>,
@@ -2429,9 +2716,14 @@ fn setup_failure_stage(failure: &Failure) -> crate::setup::Stage {
     }
 }
 
+/// The current review in this attempt, with a separate non-destructive choice when possible.
 struct PendingFresh {
+    /// Consent to the reviewed operation.
     challenge: uuid::Uuid,
-    resume: oneshot::Sender<()>,
+    /// Continue the new install without retiring a different scope.
+    skip: Option<uuid::Uuid>,
+    /// True for consent, false to keep the previous install.
+    resume: oneshot::Sender<bool>,
 }
 
 struct HostState {

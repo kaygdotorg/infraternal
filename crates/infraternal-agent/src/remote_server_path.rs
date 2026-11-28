@@ -18,7 +18,7 @@ use super::{
     Connected, RemoteIdentity, dial_preferred,
     dial_runtime::DialRuntime,
     quic_session_on,
-    supervisor::{LinkNotes, MAX_BACKOFF, retry_delay},
+    supervisor::{LinkNotes, MAX_BACKOFF, check_retirement, is_retired, retry_delay},
 };
 use crate::{channel::Channel, daemon, remote_quic, remote_tls};
 use infraternal_plugin_api::server_path::{ServerLink, ServerLinkKind, ServerLinkReason};
@@ -154,12 +154,15 @@ async fn connect(
                     && let Some(renewal) = renewal =>
             {
                 recovery_attempted = true;
-                if renewal
+                if let Err(recovery) = renewal
                     .recover(enrolled_address, &identity.server_name)
                     .await
-                    .is_err()
                 {
-                    return Err(error);
+                    return Err(if is_retired(&recovery) {
+                        recovery
+                    } else {
+                        error
+                    });
                 }
                 refreshed = current_credentials(identity, Some(renewal))?;
             }
@@ -276,6 +279,7 @@ async fn connect_with_predecessor_fallback(
     }
 }
 
+/// Prove reachability on a candidate control stream and retain a final refusal.
 async fn prove_channel<C: Channel>(
     channel: &C,
     receive: &mut crate::transport::Receive,
@@ -293,6 +297,7 @@ async fn prove_channel<C: Channel>(
         )
         .await?;
     let response = receive.next(channel).await?;
+    check_retirement(response.stream_id, &response.frame)?;
     if response.stream_id != 0
         || response.frame != (infraternal_protocol::Frame::Pong { nonce, sent_us: 0 })
     {
@@ -427,11 +432,24 @@ async fn to_enrolled(
     answered(connection, path, since, false).await
 }
 
+/// How a controlled server path ended or changed transport.
 enum Steered {
     /// The session or its transport ended; the caller reconnects.
     Ended,
+    /// The server marked the installation permanently retired.
+    Retired(io::Error),
     /// A TCP link was replaced by a separately proven QUIC link.
     Replaced(Box<Link>, ServerLinkReason),
+}
+
+impl Steered {
+    /// Retain a final retirement signal when the selected session returns.
+    fn ended(result: io::Result<()>) -> Self {
+        match result {
+            Err(error) if is_retired(&error) => Self::Retired(error),
+            _ => Self::Ended,
+        }
+    }
 }
 
 /// A late mesh reply wakes a fresh authenticated proof rather than waiting for
@@ -540,7 +558,7 @@ async fn steer(
             // A retained mesh dial is already authenticated, but its active
             // session must consume Hello before missing bits mean refusal.
             tokio::select! {
-                _ = &mut active => return Steered::Ended,
+                result = &mut active => return Steered::ended(result),
                 changed = capabilities.changed() => if changed.is_err() { return Steered::Ended },
                 changed = proposals.changed() => if changed.is_err() { return Steered::Ended },
             }
@@ -551,14 +569,14 @@ async fn steer(
             Path::Enrolled => {
                 let Some(mesh) = proposed.filter(|_| supports_proof) else {
                     tokio::select! {
-                        _ = &mut active => return Steered::Ended,
+                        result = &mut active => return Steered::ended(result),
                         changed = proposals.changed() => if changed.is_err() { return Steered::Ended },
                         changed = capabilities.changed() => if changed.is_err() { return Steered::Ended },
                     }
                     continue;
                 };
                 tokio::select! {
-                    _ = &mut active => return Steered::Ended,
+                    result = &mut active => return Steered::ended(result),
                     changed = proposals.changed() => {
                         if changed.is_err() { return Steered::Ended }
                         continue;
@@ -573,7 +591,7 @@ async fn steer(
                 );
                 remote_quic::probe_liveness(connection);
                 let moved = tokio::select! {
-                    _ = &mut active => return Steered::Ended,
+                    result = &mut active => return Steered::ended(result),
                     moved = candidate(connection, path, &mut proposals, &mut capabilities) => moved,
                 };
                 let latest = *proposals.borrow_and_update();
@@ -596,7 +614,7 @@ async fn steer(
                     // both-dead recovery must finish this proof before redialing.
                     let returned = tokio::select! {
                         biased;
-                        _ = &mut active => return Steered::Ended,
+                        result = &mut active => return Steered::ended(result),
                         returned = to_enrolled(link, registry, *reason) => returned,
                         () = retry_path(path, not_before, retry_since),
                             if moved != Candidate::Unreachable => true,
@@ -634,7 +652,7 @@ async fn steer(
                     })
                 {
                     let interrupted = tokio::select! {
-                        _ = &mut active => return Steered::Ended,
+                        result = &mut active => return Steered::ended(result),
                         changed = proposals.changed() => {
                             if changed.is_err() { return Steered::Ended }
                             false
@@ -669,7 +687,7 @@ async fn steer(
                 }
                 retry_since = std::time::Instant::now();
                 let returned = tokio::select! {
-                    _ = &mut active => return Steered::Ended,
+                    result = &mut active => return Steered::ended(result),
                     returned = to_enrolled(link, registry, *reason) => returned,
                 };
                 if proposed.is_none() {
@@ -718,7 +736,11 @@ async fn replacement(
         // particular, an explicit component down cannot leave a probe running.
         tokio::select! {
             result = connect(identity, renewal, destination, ServerLinkKind::Mesh, true) => {
-                if let Ok(link) = result { return Ok((link, ServerLinkReason::MeshProven)); }
+                match result {
+                    Ok(link) => return Ok((link, ServerLinkReason::MeshProven)),
+                    Err(error) if is_retired(&error) => return Err(error),
+                    Err(_) => {}
+                }
                 report(registry, Some(live), ServerLinkReason::MeshRefused);
             }
             changed = paths.changed() => {
@@ -745,8 +767,11 @@ async fn replace_tcp(
 ) -> Steered {
     let replacing = replacement(link, identity, renewal, registry, cooling);
     tokio::select! {
-        result = replacing => result.map_or(Steered::Ended, |(next, why)| Steered::Replaced(Box::new(next), why)),
-        _ = active => Steered::Ended,
+        result = replacing => match result {
+            Ok((next, why)) => Steered::Replaced(Box::new(next), why),
+            Err(error) => Steered::ended(Err(error)),
+        },
+        result = active => Steered::ended(result),
     }
 }
 
@@ -816,8 +841,14 @@ async fn available(
     };
     tokio::pin!(mesh, fallback);
     tokio::select! {
-        result = &mut mesh => match result { Ok(link) => Ok(link), Err(_) => fallback.await },
-        result = &mut fallback => match result { Ok(link) => Ok(link), Err(_) => mesh.await },
+        result = &mut mesh => match result {
+            Err(error) if !is_retired(&error) => fallback.await,
+            result => result,
+        },
+        result = &mut fallback => match result {
+            Err(error) if !is_retired(&error) => mesh.await,
+            result => result,
+        },
         _ = paths.changed() => Err(io::ErrorKind::Interrupted.into()),
     }
 }
@@ -849,7 +880,7 @@ pub(super) async fn run(
 /// dial fails, runs one HTTPS session before trying direct again, so the
 /// server port stays optional (D196, D291, #146).
 /// # Errors
-/// Only when the host's credentials are no longer usable.
+/// Returns permanent retirement or a local failure that the outer supervisor must handle.
 // One supervisor loop owns path selection, proof and the optional failure
 // observer; splitting it would pass the same retained link state around.
 pub(super) async fn run_observed(
@@ -892,6 +923,7 @@ pub(super) async fn run_observed(
                     }
                     link
                 }
+                Err(error) if is_retired(&error) => return Err(error),
                 Err(error) => {
                     #[cfg(any(test, feature = "native-streams"))]
                     super::observe_failure(observer, "dial", &error);
@@ -977,6 +1009,7 @@ pub(super) async fn run_observed(
                 reason = why;
                 cooling = false;
             }
+            Steered::Retired(error) => return Err(error),
             Steered::Ended => {
                 // A transport close can race a component down; the current
                 // applied preference owns the reason.
@@ -1036,8 +1069,8 @@ async fn run_https(
 ///
 /// Returns `Ok(true)` when a session ran (however it ended) and `Ok(false)`
 /// when the origin could not be reached; the caller owns the retry delay.
-/// Only expired or unusable credentials are an error. The link always ends
-/// reported as disconnected.
+/// Expired or unusable credentials and authenticated retirement are errors.
+/// The link always ends reported as disconnected.
 async fn https_once(
     identity: &RemoteIdentity,
     state: &std::path::Path,
@@ -1118,11 +1151,12 @@ async fn https_once(
     connected.send_replace(false);
     channel.retire();
     registry.set_server_link(disconnected);
+    let retry_reason = match active {
+        Err(error) if is_retired(&error) => return Err(error),
+        result => result.err().map(|error| error.kind()),
+    };
     if let Some(line) = notes.note(started, || {
-        format!(
-            "Infraternal agent HTTPS server link closed (error {:?}); reconnecting",
-            active.err().map(|error| error.kind())
-        )
+        format!("Infraternal agent HTTPS server link closed (error {retry_reason:?}); reconnecting")
     }) {
         eprintln!("{line}");
     }

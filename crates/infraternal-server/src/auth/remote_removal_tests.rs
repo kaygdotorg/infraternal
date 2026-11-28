@@ -816,6 +816,129 @@ async fn waiting_reports_beyond_the_shown_ones_are_counted() {
     assert_eq!(value["reports"][0]["recorded_at"], 120, "newest first");
 }
 
+/// Record the owner Mac's approval and active certificate without SSH install coordinates.
+async fn joined_mac(f: &Fixture, key: &[u8], now: i64) -> (Uuid, [u8; 32]) {
+    sqlx::query("UPDATE sessions SET fresh=?,expires=? WHERE token_hash=?")
+        .bind(now)
+        .bind(now + 3600)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    let host = Uuid::new_v4();
+    let fingerprint = openssl::sha::sha256(host.as_bytes());
+    sqlx::query("INSERT INTO remote_hosts(id,owner_id,mode,execution_uid,created_at,hostname,device_approved,device_os) VALUES(?,?,'rootless',501,1,'MBP.local',1,'macOS')")
+        .bind(host.as_bytes().as_slice()).bind(&f.user).execute(&f.auth.pool).await.unwrap();
+    sqlx::query("INSERT INTO remote_certificates(fingerprint,host_id,issuer_fingerprint,public_key,not_before,not_after,execution_uid) VALUES(?,?,zeroblob(32),?,?,?,501)")
+        .bind(fingerprint.as_slice()).bind(host.as_bytes().as_slice()).bind(key)
+        .bind(now - 604_800 + 3600).bind(now + 3600).execute(&f.auth.pool).await.unwrap();
+    (host, fingerprint)
+}
+
+/// A Mac uninstalled without notifying its server still offers a named, actionable Forget path.
+#[tokio::test]
+async fn removing_an_offline_up_install_names_the_mac_and_offers_forget() {
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let (host, _) = joined_mac(&f, &[7; 32], now).await;
+    let service = removal(&f);
+    let start = service.start(&f.session, host, true, now).await.unwrap();
+    assert_eq!(start["action"]["host"], "mbp");
+    let result = service
+        .finish_host(&f.session, host, str_field(&start, "review"), now)
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "pending");
+    assert_eq!(result["up_install"], true);
+    assert_eq!(result["manual"], Value::Null);
+    assert_eq!(
+        result["message"],
+        "Access revoked for mbp. Already uninstalled infraternal? Choose Forget. If it's still installed, run infraternal uninstall on mbp."
+    );
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+    assert!(!live(&f, host).await);
+}
+
+/// A cold-locked signer for the retirement route, which needs only the host's proof.
+struct RetirementLockedCa;
+
+impl crate::ca::CaKeySource for RetirementLockedCa {
+    /// No new certificates may be issued in this fixture.
+    fn load(&self) -> std::result::Result<crate::ca::CaMaterial, crate::ca::CaError> {
+        Err(crate::ca::CaError)
+    }
+}
+
+/// A local uninstall signed by the approved Mac retires the row after its ordinary login receipt.
+#[tokio::test]
+async fn local_uninstall_retires_an_up_install_without_a_browser_remove() {
+    use infraternal_plugin_remote::local_retirement::{self, Request, transcript};
+    use openssl::{pkey::PKey, sign::Signer};
+    use tower::ServiceExt;
+
+    let f = fixture().await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    let signing = PKey::generate_ed25519().unwrap();
+    let (host, fingerprint) = joined_mac(&f, &signing.raw_public_key().unwrap(), now).await;
+    let mut request = Request {
+        host_id: host,
+        fingerprint,
+        signed_at: now,
+        signature: Vec::new(),
+    };
+    request.signature = Signer::new_without_digest(&signing)
+        .unwrap()
+        .sign_oneshot_to_vec(&transcript(&request))
+        .unwrap();
+    assert!(removal(&f).start(&f.session, host, true, now).await.is_ok());
+    let store = crate::enrollment::EnrollmentStore::new(f.auth.pool.clone());
+    let app = crate::remote_http::router_with_store(
+        f.auth.clone(),
+        f.auth.pool.clone(),
+        store.clone(),
+        std::sync::Arc::new(RetirementLockedCa),
+        crate::remote_http::EnrollmentEndpoint {
+            ca_der: Vec::new(),
+            endpoint: "127.0.0.1:4443".parse().unwrap(),
+            server_name: "localhost".into(),
+        },
+    );
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri(local_retirement::PATH)
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&request).unwrap(),
+        ))
+        .unwrap();
+    let mut inventory = store.2.subscribe();
+    let person = Uuid::parse_str(&f.user).unwrap();
+    let (retired, receipt) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(app.oneshot(request), async {
+            inventory.changed().await.unwrap();
+            assert!(store.removal_requested(host).await.unwrap());
+            assert!(!store.pending_uninstall(host).await.unwrap());
+            store
+                .confirm_removal_cleanup(host, person, None, None)
+                .await
+        })
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        retired.unwrap().status(),
+        axum::http::StatusCode::NO_CONTENT
+    );
+    receipt.unwrap();
+    assert!(!live(&f, host).await);
+    assert!(
+        removal(&f)
+            .start(&f.session, host, true, now)
+            .await
+            .is_err()
+    );
+}
+
 /// A removed host with its original removal record and a 14-minute-old admin approval.
 async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
     let host = owned_host(f).await;
@@ -841,7 +964,7 @@ async fn forget_fixture(f: &Fixture, valid: bool) -> Uuid {
 }
 
 /// Exercise the bounded same-origin browser route, including its session authority.
-async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+async fn forget_response(f: &Fixture, host: Uuid) -> axum::response::Response {
     use tower::ServiceExt;
     crate::remote_removal_http::router(f.auth.clone(), removal(f))
         .oneshot(
@@ -856,14 +979,61 @@ async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
         )
         .await
         .unwrap()
-        .status()
+}
+
+/// Get the browser route's status when the caller does not need its response body.
+async fn forget_request(f: &Fixture, host: Uuid) -> axum::http::StatusCode {
+    forget_response(f, host).await.status()
+}
+
+/// The browser's result uses the inventory label for both reported and fallback names.
+#[tokio::test]
+async fn forget_message_matches_inventory_name() {
+    use infraternal_plugin_remote::inventory::Inventory;
+
+    let f = fixture().await;
+    let inventory = crate::remote_inventory::Source {
+        pool: f.auth.pool.clone(),
+        hosts: crate::remote_runtime::RemoteHosts::default(),
+        #[cfg(feature = "mesh")]
+        mesh: None,
+    };
+    for hostname in [None, Some("Workshop.local")] {
+        let host = forget_fixture(&f, true).await;
+        sqlx::query("DELETE FROM remote_host_bootstrap WHERE host_id=?")
+            .bind(host.as_bytes().as_slice())
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE remote_hosts SET hostname=?,reported_os='macOS' WHERE id=?")
+            .bind(hostname)
+            .bind(host.as_bytes().as_slice())
+            .execute(&f.auth.pool)
+            .await
+            .unwrap();
+
+        let listed = inventory.list(&f.user, None).await.unwrap();
+        let name = listed["hosts"][0]["name"].as_str().unwrap();
+        let expected = match hostname {
+            Some(_) => "workshop".to_owned(),
+            None => format!("macos-{}", &host.simple().to_string()[..6]),
+        };
+        assert_eq!(name, expected);
+        let response = forget_response(&f, host).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let result: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(result["message"], format!("{name} was forgotten here."));
+    }
 }
 
 /// Forget removes pending delivery and inventory visibility while preserving denial and audit.
 #[tokio::test]
-async fn forget_retired_host_keeps_audit_and_denial() {
+async fn forget_pending_host_keeps_audit_and_denial() {
     let f = fixture().await;
-    let host = forget_fixture(&f, false).await;
+    let host = forget_fixture(&f, true).await;
     sqlx::query("INSERT INTO mesh_audit(user_id,action,resource,revision,occurred_at,detail_json) VALUES(?,'remote.host.remove',?,0,1,'{}')")
         .bind(&f.user).bind(host.to_string()).execute(&f.auth.pool).await.unwrap();
     assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
@@ -923,11 +1093,40 @@ async fn forget_retired_host_keeps_audit_and_denial() {
     );
 }
 
-/// A live certificate, another owner, or an expired admin window cannot be forgotten.
+/// A pending host can renew the same owner's expired admin window and finish Forget.
 #[tokio::test]
-async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
+async fn forget_passkey_renews_admin_window_for_pending_host() {
+    let mut f = fixture().await;
+    let host = forget_fixture(&f, true).await;
+    let now = crate::runtime::unix_seconds().unwrap();
+    sqlx::query("UPDATE sessions SET fresh=? WHERE token_hash=?")
+        .bind(now - 901)
+        .bind(hash(&f.session))
+        .execute(&f.auth.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        forget_request(&f, host).await,
+        axum::http::StatusCode::PRECONDITION_REQUIRED
+    );
+
+    let service = removal(&f);
+    let start = service
+        .reauth_start(&f.session, host, now)
+        .await
+        .expect("the pending host should be eligible for a renewal challenge");
+    let proof = f.software.login(&start, ORIGIN, true);
+    service
+        .reauth_finish(&f.session, host, str_field(&start, "ceremony"), proof, now)
+        .await
+        .expect("a valid proof should renew the current owner session");
+    assert_eq!(forget_request(&f, host).await, axum::http::StatusCode::OK);
+}
+
+/// Forget requires pending cleanup, ownership, and a fresh admin window.
+#[tokio::test]
+async fn forget_rechecks_state_owner_and_admin_window() {
     for rule in [
-        "pending",
         "other-owner",
         "non-owner",
         "expired",
@@ -935,7 +1134,7 @@ async fn forget_retired_host_rechecks_state_owner_and_admin_window() {
         "confirmed",
     ] {
         let f = fixture().await;
-        let host = forget_fixture(&f, rule == "pending").await;
+        let host = forget_fixture(&f, true).await;
         match rule {
             "other-owner" => {
                 sqlx::query("INSERT INTO users(id,name,owner,recovery_hash) VALUES('other','other',0,'unused')").execute(&f.auth.pool).await.unwrap();

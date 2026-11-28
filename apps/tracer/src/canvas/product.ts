@@ -58,6 +58,7 @@ import { TAKEOVER_COPY, watchTakeover } from "./takeover-notice";
 /** How long the host list waits for the first terminal to settle before it starts on its own. */
 const HOSTS_FALLBACK_MS = 2000;
 
+/** Startup options for {@link mountProductCanvas}: host identity, account scope, hooks and deferred-style guard. */
 export interface ProductCanvasOptions {
   /** Isolated preview documents never use the production transport. */
   previewStore?: CanvasStore;
@@ -156,7 +157,12 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   const offRoundTrip = connection.onRoundTrip((ms) => { roundTrip = ms; core.setRoundTrip(ms); setLinkRoundTrip(ms); });
   // More windows than one socket takes (the server allows 32 attachments per socket) open on further sockets.
   const pool = new ConnectionPool(connection);
-  const inventory = createLiveInventory({ accountId: options.accountId, host: options.host.name });
+  const inventory = createLiveInventory({
+    accountId: options.accountId,
+    host: options.host.name,
+    async requestEnd(id) { await connection.call("terminal.end", { session_id: id }); },
+    onEndError() { core.toast.show({ message: "Couldn't end the session. Check the host connection and try again.", tone: "error" }); },
+  });
   let disposed = false, hostsStarted = false, hostsReady = false;
   let startHosts = (): void => {};
   let offHosts: (() => void) | undefined;
@@ -169,6 +175,7 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
     ...(options.onFirstClient ? { onFirstClient: options.onFirstClient } : {}),
     onFirstTerminalSettled: () => { hostsReady = true; startHosts(); },
     onSessionGone: inventory.gone,
+    isEndingSession: inventory.isEnding,
     getEndedSession: (host, id) => {
       const session = inventory.get(host, id);
       return session?.gone ? (session.exit ? { status: session.exit.code } : {}) : undefined;
@@ -257,18 +264,18 @@ export async function mountProductCanvas(core: CoreScreen, options: ProductCanva
   });
   let readyRemoval: import("./context").Adapters["hostRemoval"];
   const removal: NonNullable<import("./context").Adapters["hostRemoval"]> = { label: () => readyRemoval?.label(), forget: (id, name, anchor, returnFocus) => readyRemoval?.forget?.(id, name, anchor, returnFocus), remove: (id, name, anchor, returnFocus, confirmed) => readyRemoval?.remove(id, name, anchor, returnFocus, confirmed) ?? Promise.resolve({ state: "refused" as const, message: "Host removal is still loading. Try again in a moment." }) };
-  // Registry metadata is optional chrome: load it without delaying the first terminal.
+  const offStartup = connection.onWelcome(() => startup.welcomed());
+  const saved = await store.load();
+  offStartup();
+  startup.dispose();
+  startupOver = true;
+  // Registry metadata is optional chrome: load it once the layout and styles are in so it never delays the first terminal (#573).
   void onDemand(() => import("./host-removal.on-demand")).then((module) => module.createHostRemoval(core, (id) => {
     setupPendingHostIds.delete(id);
     sessions.forgetHost(id);
     for (const view of canvas.cx.views.values()) for (const rec of [...view.wins.values()]) if (rec.model.hostId === id) canvas.cx.win.close(rec);
     canvas.flush();
   })).then((adapter) => { readyRemoval = adapter; });
-  const offStartup = connection.onWelcome(() => startup.welcomed());
-  const saved = await store.load();
-  offStartup();
-  startup.dispose();
-  startupOver = true;
   const offTakeoverWelcome = connection.onWelcome(() => takeover.welcomed());
   /** Ends the takeover toast and its listeners (both teardown paths). */
   const disposeTakeover = (): void => { offTakeoverWelcome(); document.removeEventListener("visibilitychange", onTakeoverVisibility); takeover.dispose(); };

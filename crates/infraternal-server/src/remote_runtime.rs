@@ -107,7 +107,11 @@ async fn deliver_login_cleanup(
     link: RemoteLink,
     person: Uuid,
 ) -> io::Result<()> {
-    let _cleanup = LOGIN_CLEANUPS.acquire(authority.identity.host).await?;
+    let _cleanup = tokio::select! {
+        biased;
+        () = authority.cancelled() => return Ok(()),
+        permit = LOGIN_CLEANUPS.acquire(authority.identity.host) => permit?,
+    };
     // This transport never enters inventory, plugin routing or the host
     // actor map. The distinct-host lane bounds active and waiting cleanup jobs.
     // A lost acknowledgement leaves the durable outbox for next reconnect.
@@ -126,13 +130,14 @@ async fn deliver_login_cleanup(
     let (actor, accepts) = EmbeddedAgent::remote(authority.identity.execution_uid);
     let mut inventory = actor.session_inventory();
     accepts
-        .try_send(link.authorize(authority))
+        .try_send(link.authorize(authority.clone()))
         .map_err(|_| io::ErrorKind::WouldBlock)?;
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         async {
             tokio::select! {
                 biased;
+                () = authority.cancelled() => None,
                 delivered = async {
                     let revoked = crate::remote_guard::durable_cleanup(actor.downgrade(), person, report).await?;
                     if !uninstall {
@@ -1164,6 +1169,15 @@ impl RemoteListeners {
         self.endpoint.local_addr()
     }
 
+    /// Run `task` for the listeners' lifetime; dropping the listeners aborts it (the server
+    /// node's relay leaf rotation, D402, lives here).
+    pub(crate) fn keep_task(
+        &mut self,
+        task: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        self.tasks.spawn(task);
+    }
+
     /// Keep the served leaf fresh for the listeners' lifetime (#559): start
     /// the `server_leaf` rotation task, which reissues the leaf while the CA
     /// is unlocked and installs each durable new leaf here. `current` is the
@@ -1181,7 +1195,7 @@ impl RemoteListeners {
         };
         self.tasks.spawn(crate::server_leaf::run(
             rotation,
-            current,
+            Some(current),
             move |identity| swap.install(identity),
         ));
     }

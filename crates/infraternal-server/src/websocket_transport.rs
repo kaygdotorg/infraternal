@@ -4,7 +4,7 @@ use super::websocket::{
     AuthorityMiss, Inbound, MAX_ATTACHMENTS, MAX_SOCKET_BUFFER, ReceiveFailure, WebSocketState,
     receive_wire, send_messages,
 };
-use crate::liveness::Liveness;
+use crate::liveness::{Liveness, RESPONSE_CEILING};
 use crate::stream_close::{
     CLIENT_WENT_AWAY, CloseReason, IDLE_TIMEOUT, PROTOCOL_ERROR, REPLY_QUEUE_FULL, RESUME_REFUSED,
     SERVER_WRITE_FAILED,
@@ -18,7 +18,7 @@ use futures_util::{
 use infraternal_protocol::{Frame, decode_muxed_frame, encode_muxed_frame_into};
 use std::sync::{
     Arc, Mutex as LeaseMutex,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::{
     pin::Pin,
@@ -26,8 +26,8 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 
-// One attach plus its credit per admitted window. Payload admission also has a
-// byte bound: a client cannot turn these small-frame slots into 64 full-size frames.
+/// Space for one attach plus its credit per admitted window. The reader also
+/// charges payload bytes against the fixed socket budget before enqueueing.
 const INPUT_SLOTS: usize = MAX_ATTACHMENTS * 2;
 const CONTROL_SLOTS: usize = 128;
 // Ready replies plus one probe remain below the framing buffer and yield after a bounded turn.
@@ -35,6 +35,12 @@ const PROOF_BATCH: usize = 64;
 // Application progress keeps the first-tick cadence briefly. Content-free
 // proofs bypass this window, and its expiry creates no separate timer.
 const FAST_PROBE_WINDOW: std::time::Duration = std::time::Duration::from_millis(250);
+/// How long a challenged socket has to send anything at all (#562): two ceiling allowances, what
+/// the slowest visible route gets before its lease retires it.
+const CHALLENGE_ALLOWANCE: std::time::Duration = RESPONSE_CEILING.saturating_mul(2);
+/// How long a socket that answered a challenge is not asked again. A full host keeps being
+/// retried by the page it refused, and a hidden phone must not be woken by every retry (#317).
+const CHALLENGE_REST: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -91,9 +97,15 @@ struct Queued {
     _bytes: OwnedSemaphorePermit,
 }
 
+/// A control message the proof task writes ahead of queued application output.
 enum Reply {
-    Wire { nonce: u64, sent_us: u64 },
+    Wire {
+        nonce: u64,
+        sent_us: u64,
+    },
     Transport(bytes::Bytes),
+    /// A native Ping that only asks the browser to answer; it carries no route correlation.
+    Challenge,
 }
 
 /// Native WebSocket pongs are opaque to browser JavaScript, so carry the existing
@@ -144,6 +156,9 @@ struct Context {
     socket_close: LeaseMutex<SocketClose>,
     closed: Notify,
     proof_changed: Notify,
+    /// Messages received from the browser, of any kind: proof that it was there when each
+    /// arrived. Only [`challenges`] reads it.
+    heard: AtomicU64,
 }
 
 impl Context {
@@ -195,6 +210,10 @@ impl Context {
             .map_err(|_| ())
     }
 
+    /// Write the queued control replies, plus a route probe when one is due, as one batch.
+    ///
+    /// `active` says whether the route is probed at all (it has attached terminals); only then can
+    /// its lease expire here. `Err` means the socket has ended and its reason is recorded.
     async fn transmit(
         &self,
         mut first: Option<Reply>,
@@ -224,6 +243,7 @@ impl Context {
                     Message::Binary(Bytes::copy_from_slice(encoded))
                 }
                 Reply::Transport(bytes) => Message::Pong(bytes),
+                Reply::Challenge => Message::Ping(Bytes::new()),
             };
             messages.push(message);
         }
@@ -304,12 +324,15 @@ impl Transport {
             socket_close: LeaseMutex::new(SocketClose::default()),
             closed: Notify::new(),
             proof_changed: Notify::new(),
+            heard: AtomicU64::new(0),
         });
         let (send, input) = mpsc::channel(INPUT_SLOTS);
         let (reply, replies) = mpsc::channel(CONTROL_SLOTS);
         let (active, activity) = watch::channel(false);
         let mut tasks = tokio::task::JoinSet::new();
         // Erase both future types once per connection to share task bookkeeping code.
+        // Weak, so the reply queue still closes when the reader ends.
+        tasks.spawn(challenges(context.clone(), reply.downgrade()).boxed());
         tasks.spawn(read(context.clone(), reader, receive, send, reply).boxed());
         tasks.spawn(proofs(context.clone(), activity, replies, authority).boxed());
         // Keep one serialized WebSocket writer. The existing send timeout still
@@ -477,9 +500,9 @@ fn visibility_notice(json: &[u8]) -> Option<bool> {
         .then(|| notice.get("hidden")?.as_bool())?
 }
 
-/// The per-terminal sibling of [`visibility_notice`]: a terminal's viewer is hidden (page hidden or its window
-/// off the canvas) or shown again. Sent on the terminal's own stream; the socket loop parks or resumes that
-/// terminal's route probes [#562]. Same size bound and strict shape; anything else is `None`.
+/// Accept a terminal visibility notice's strict shape for compatibility. The server's liveness lease
+/// is shared by the host link, so this notice never parks or resumes a terminal-specific probe [#562].
+/// Same size bound as [`visibility_notice`]; anything else is `None`.
 pub(crate) fn terminal_visibility_notice(json: &[u8]) -> Option<bool> {
     if json.len() > 128 {
         return None;
@@ -516,6 +539,7 @@ async fn read(
                 break;
             }
         };
+        context.heard.fetch_add(1, Ordering::Relaxed);
         let (incoming, size) = match incoming {
             Inbound::SocketClose { code, reason } => {
                 context.set_socket_close(SocketClose { code, reason });
@@ -745,6 +769,33 @@ async fn proofs(
     }
     if context.end_reason() == EndReason::Open {
         context.retire(EndReason::ServerWriteFailed);
+    }
+}
+
+/// Probes the browser when its account asks (a host is full, #562), whether or not the page is
+/// hidden, and ends the socket if nothing at all arrives within [`CHALLENGE_ALLOWANCE`]. A browser
+/// answers the native Ping without running page JavaScript, so a live background tab keeps its
+/// socket. After an answer the next request waits out [`CHALLENGE_REST`]; requests made meanwhile
+/// merge into one. Parked, with no timer, until asked.
+async fn challenges(context: Arc<Context>, replies: mpsc::WeakSender<Reply>) {
+    loop {
+        context.viewer.challenged().await;
+        let heard = context.heard.load(Ordering::Relaxed);
+        // A full reply queue skips the Ping; only a peer that keeps sending fills it, and
+        // its messages answer the challenge.
+        if !replies
+            .upgrade()
+            .is_some_and(|replies| queue_reply(&replies, Reply::Challenge))
+        {
+            break;
+        }
+        // The browser's time to answer.
+        tokio::time::sleep(CHALLENGE_ALLOWANCE).await;
+        if context.heard.load(Ordering::Relaxed) == heard {
+            context.retire(EndReason::IdleTimeout);
+            break;
+        }
+        tokio::time::sleep(CHALLENGE_REST).await;
     }
 }
 

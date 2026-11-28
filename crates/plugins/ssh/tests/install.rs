@@ -2869,8 +2869,43 @@ async fn duplex_check_carries_terminal_confirmation_records_larger_than_512_byte
 }
 
 #[tokio::test]
+/// The real check wrapper stops on a Darwin userland before asking for Linux ownership or staging.
+async fn duplex_check_routes_macos_to_local_enrollment() {
+    let fixture = Fixture::new();
+    executable(
+        &fixture.root.join("tools/uname"),
+        "#!/bin/sh\n[ \"$*\" = -s ] || exit 65\nprintf 'Darwin\\n'\n",
+    );
+    let session = SingleCheckChannel {
+        local: Local {
+            root: fixture.root.clone(),
+        },
+        streams: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let check = infraternal_plugin_ssh::previous_attempt::check_script(
+        infraternal_plugin_ssh::model::InstallMode::Root,
+    );
+    let failure = Installation::check_channel(&session, &check)
+        .await
+        .err()
+        .unwrap();
+    let wire = serde_json::to_value(failure).unwrap();
+    assert_eq!(wire["join_locally"], "macos");
+    assert_eq!(wire["kind"], "unsupported");
+    assert_eq!(wire["failed_step"], "connect");
+    assert!(
+        wire["message"]
+            .as_str()
+            .unwrap()
+            .contains("system check found macOS")
+    );
+    assert!(!fixture.base().exists());
+}
+
+/// A failed read-only SSH check retains its status and names the operation in Details.
+#[tokio::test]
 async fn duplex_check_refuses_named_failures_and_oversized_records_before_staging() {
-    for status in [71, 73, 75] {
+    for status in [1, 71, 73, 75] {
         let f = Fixture::new();
         let session = Local {
             root: f.root.clone(),
@@ -2880,6 +2915,14 @@ async fn duplex_check_refuses_named_failures_and_oversized_records_before_stagin
             .err()
             .unwrap();
         assert_eq!(failure.exit_status, Some(status));
+        if status == 1 {
+            assert!(
+                failure
+                    .log_tail
+                    .iter()
+                    .any(|line| line.contains("read-only SSH system check"))
+            );
+        }
         assert!(matches!(
             failure.failed_step,
             Some(infraternal_plugin_ssh::model::InstallStep::Connect)

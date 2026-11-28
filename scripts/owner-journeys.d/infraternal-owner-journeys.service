@@ -1,0 +1,11 @@
+# Unattended owner smoke on compute01 using a reviewed checkout and its existing test-admin helper.
+[Unit]
+Description=Infraternal test server owner browser journeys
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/worktrees/owner-journeys-reviewed
+Environment=PATH=%h/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/bin:/bin
+ExecStart=%h/infraternal-ops/build-slot nix develop -c scripts/owner-journeys --browser-only
+UMask=0077
+TimeoutStartSec=60min

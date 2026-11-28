@@ -151,8 +151,6 @@ pub(crate) enum TerminalOutput {
     /// The doubted host link answered again: clear only the `LinkDoubt`
     /// indicator. It never confirms a replay; replays own their fences [D300].
     Recovered,
-    /// A route expired; only an authenticated browser consumer may request rebind.
-    RouteExpired,
     /// The server or infraternal agent retired one terminal stream with a safe reason.
     Closed {
         who: CloseWho,
@@ -244,47 +242,24 @@ impl AttachmentHandle {
         if std::time::Instant::now() >= expires {
             return false;
         }
-        let (completed, fence) = oneshot::channel();
-        let published = async {
-            self.0
-                .input
-                .send(ForwardInput::Fence(completed))
-                .await
-                .map_err(|_| ())?;
-            fence.await.map_err(|_| ())
-        };
         if !matches!(
-            tokio::time::timeout_at(expires.into(), published).await,
+            tokio::time::timeout_at(expires.into(), self.publish_queued_input()).await,
             Ok(Ok(()))
         ) {
             return false;
         }
         self.reply(query_seq, bytes, expires)
     }
-    /// Tells the host actor whether this attachment's viewer is hidden (page hidden or the window
-    /// off the canvas). A parked attachment is sent no 25 ms route probes, so its shim sleeps; the
-    /// first show starts a fresh lease at once [#562, D265, D300]. Queued like any command, never
-    /// dropped: a lost "shown" notice would leave a visible terminal unprobed.
-    pub async fn set_parked(&self, parked: bool) -> Result<(), AgentError> {
+    /// Wait until the input forwarder has put every preceding frame in the
+    /// host command FIFO. The caller can then enqueue work behind those frames.
+    pub(crate) async fn publish_queued_input(&self) -> Result<(), AgentError> {
+        let (completed, fence) = oneshot::channel();
         self.0
-            .commands
-            .send(Command::Park {
-                attachment_id: self.0.id,
-                parked,
-            })
+            .input
+            .send(ForwardInput::Fence(completed))
             .await
-            .map_err(|_| AgentError::Unavailable)
-    }
-
-    /// Rebind only after the browser consumer admits the transition under its authority gate.
-    pub async fn reconnect(&self) -> Result<(), AgentError> {
-        self.0
-            .commands
-            .send(Command::Reconnect {
-                attachment_id: self.0.id,
-            })
-            .await
-            .map_err(|_| AgentError::Unavailable)
+            .map_err(|_| AgentError::Unavailable)?;
+        fence.await.map_err(|_| AgentError::Unavailable)
     }
 }
 
@@ -794,7 +769,6 @@ impl EmbeddedAgent {
     }
 
     /// Attach one device to a user-owned terminal session and request replay from its last offsets.
-    // Native attachments belong to remote bootstrap; browser-only builds use monitored routes.
     #[cfg(any(test, all(feature = "remote", feature = "ssh")))]
     pub async fn attach(
         &self,
@@ -803,29 +777,29 @@ impl EmbeddedAgent {
         last_in_seq: u64,
         stream_id: u32,
     ) -> Result<TerminalAttachment, AgentError> {
-        self.attach_with_proofs(session_id, last_out_seq, last_in_seq, stream_id, false)
+        self.attach_session(session_id, last_out_seq, last_in_seq, stream_id)
             .await
     }
 
-    /// Attach a browser route whose shim proofs are owned by the shared host actor.
-    pub async fn attach_monitored(
+    /// Attach a browser terminal; its host actor reports liveness for the shared link.
+    pub async fn attach_browser(
         &self,
         session_id: [u8; 16],
         last_out_seq: u64,
         last_in_seq: u64,
         stream_id: u32,
     ) -> Result<TerminalAttachment, AgentError> {
-        self.attach_with_proofs(session_id, last_out_seq, last_in_seq, stream_id, true)
+        self.attach_session(session_id, last_out_seq, last_in_seq, stream_id)
             .await
     }
 
-    async fn attach_with_proofs(
+    /// Attach one terminal stream and carry its cursor and credit state into the actor.
+    async fn attach_session(
         &self,
         session_id: [u8; 16],
         last_out_seq: u64,
         last_in_seq: u64,
         stream_id: u32,
-        monitored: bool,
     ) -> Result<TerminalAttachment, AgentError> {
         let (output_tx, output) = mpsc::channel(OUTPUT_QUEUE_SLOTS);
         let (input, input_rx) = mpsc::channel(INPUT_CAPACITY);
@@ -844,7 +818,6 @@ impl EmbeddedAgent {
                 last_in_seq,
                 output: output_tx,
                 input_credit,
-                monitored,
                 reply,
             })
             .await
@@ -966,7 +939,6 @@ enum Command {
         last_in_seq: u64,
         output: mpsc::Sender<TerminalOutput>,
         input_credit: watch::Sender<u64>,
-        monitored: bool,
         reply: oneshot::Sender<Result<(u64, u32), AgentError>>,
     },
     Input {
@@ -982,18 +954,10 @@ enum Command {
     Detach {
         attachment_id: u64,
     },
-    Reconnect {
-        attachment_id: u64,
-    },
-    /// The viewer of this attachment went hidden (`parked`) or came back (#562).
-    Park {
-        attachment_id: u64,
-        parked: bool,
-    },
 }
 
 /// The host-link actor's state for one browser attachment: its cursors, retained unacknowledged
-/// input, granted output credit, route liveness, and the byte-bounded queue its output goes to.
+/// input, granted output credit, and the byte-bounded queue its output goes to.
 struct AttachmentState {
     session_id: [u8; 16],
     stream_id: u32,
@@ -1008,10 +972,6 @@ struct AttachmentState {
     awaiting_ack: bool,
     // Initial attachment stays cut-through; only replacement orders replay behind an Ack.
     replaying: bool,
-    // Browser-only monitoring leaves parked native writers' existing lifecycle intact.
-    // The same actor tick owns the lease; a Pong never needs a payload forwarder.
-    route: Option<Liveness>,
-    proof_rebind_pending: bool,
     // Every send goes through the byte-bounded queue so its ledger sees each item.
     output: OutputQueue,
 }
@@ -1428,7 +1388,6 @@ async fn run_actor(
     let mut hot = ();
     #[cfg(not(feature = "remote"))]
     let mut writes = ();
-    let mut probe_queue = std::collections::VecDeque::new();
     let mut liveness = Liveness::host_link();
     // Windows told about the current doubt episode on the current link; only
     // they get its recovery. Every lease reset and every lost link clears it.
@@ -1465,7 +1424,7 @@ async fn run_actor(
                 event = hot.next(&attachments) => {
                     if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                         writes.stop().await;
-                        // The promoted connection has not answered this route's probes yet.
+                        // The promoted connection has not answered this link's probes yet.
                         fresh_host_lease(&mut liveness, &mut doubted);
                     }
                     process_priming(event, &mut hot, &mut connection, &mut attachments, &mut routes, &mut pending, &changes, &mut writes).await;
@@ -1479,7 +1438,6 @@ async fn run_actor(
             continue;
         }
         if connection.is_none() {
-            probe_queue.clear();
             if source.closed() {
                 return;
             }
@@ -1518,7 +1476,7 @@ async fn run_actor(
         let Some(link) = connection.as_mut() else {
             continue;
         };
-        // Nothing probes an unused host link. A later attachment gets a fresh lease.
+        // Nothing probes an unused host link. A later attachment gets one fresh shared lease.
         if attachments.is_empty() {
             fresh_host_lease(&mut liveness, &mut doubted);
         }
@@ -1531,17 +1489,6 @@ async fn run_actor(
             remote.control_read_ready(control_ready);
         }
         tokio::select! {
-            () = std::future::ready(()), if !probe_queue.is_empty() => {
-                // One remote proof per turn preserves incoming/priming/command interleaving.
-                let Some(id) = probe_queue.pop_front() else { continue; };
-                if !route_proofs::probe(link, &mut attachments, id).await
-                    && let Some(old) = connection.take() {
-                    #[cfg(feature = "remote")]
-                    writes.stop().await;
-                    connection_lost(old, &mut attachments, &mut routes, &mut pending);
-                    probe_queue.clear();
-                }
-            }
             (stream, success) = next_writes(&mut writes) => {
                 #[cfg(not(feature = "remote"))]
                 let _ = (stream, success);
@@ -1559,7 +1506,7 @@ async fn run_actor(
                 #[cfg(feature = "remote")]
                 if matches!(event, priming::Event::Incoming(Some(Incoming::Activate))) {
                     writes.stop().await;
-                    // The promoted connection has not answered this route's probes yet.
+                    // The promoted connection has not answered this link's probes yet.
                     fresh_host_lease(&mut liveness, &mut doubted);
                 }
                 #[cfg(feature = "remote")]
@@ -1568,18 +1515,18 @@ async fn run_actor(
                 match event {}
             }
             _ = ticks.tick(), if !attachments.is_empty() => {
+                // One control-stream lease detects host-link death for every viewer. Terminal
+                // streams carry terminal data only and never receive independent liveness probes.
                 // Local FIFO pressure says nothing about peer health. A skipped
                 // probe starts no reply lease; outstanding leases still expire.
                 let probe_ok = !control_ready || {
                     let (nonce, sent_us) = liveness.ping();
                     write_frame(link, 0, &Frame::Ping { nonce, sent_us }).await
                 };
-                let available = matches!(*session_inventory.borrow(), SessionInventoryState::Available(_));
                 // One miss may be a single lost packet held behind retransmission:
                 // the windows show reconnecting and the link stays [D300].
                 report_doubt(&mut liveness, &mut doubted, &attachments);
-                if (liveness.retired() || !probe_ok
-                    || !route_proofs::tick(link, &mut attachments, &mut routes, &mut pending, available, &mut probe_queue).await)
+                if (liveness.retired() || !probe_ok)
                     && let Some(old) = connection.take() {
                         #[cfg(feature = "remote")]
                         writes.stop().await;
@@ -2521,7 +2468,6 @@ async fn process_command(
             last_in_seq,
             output,
             input_credit,
-            monitored,
             reply,
         } => {
             #[cfg(feature = "remote")]
@@ -2599,61 +2545,10 @@ async fn process_command(
                     credit: 0,
                     awaiting_ack: true,
                     replaying: false,
-                    route: monitored.then(Liveness::new),
-                    proof_rebind_pending: false,
                     output: output.into(),
                 },
             );
             let _ = reply.send(Ok((attachment_id, stream_id)));
-            true
-        }
-        Command::Park {
-            attachment_id,
-            parked,
-        } => {
-            if let Some(attachment) = attachments.get_mut(&attachment_id) {
-                // Suspending drops the old lease's correlations; resuming starts a fresh lease,
-                // so the next tick probes at once and a route that died while parked expires
-                // within the startup allowance instead of at a stale deadline.
-                if let Some(route) = &mut attachment.route {
-                    route.set_suspended(parked);
-                }
-            }
-            true
-        }
-        Command::Reconnect { attachment_id } => {
-            let Some(attachment) = attachments.get_mut(&attachment_id) else {
-                return true;
-            };
-            // A shared-link replacement already replays this attachment once, and
-            // a stream whose exit notice already disarmed route probing must not
-            // be torn down or reattached as an unresponsive route (#579).
-            if attachment.awaiting_ack || !attachment.proof_rebind_pending {
-                return true;
-            }
-            if !write_frame(
-                connection,
-                attachment.stream_id,
-                &Frame::Close {
-                    code: 1013,
-                    reason: "terminal route unresponsive",
-                },
-            )
-            .await
-            {
-                return false;
-            }
-            if reattach(connection, attachment).await {
-                return true;
-            }
-            let stream_id = attachment.stream_id;
-            if !contain_terminal_failure(connection, stream_id).await {
-                return false;
-            }
-            // Dropping the route ends its output, which closes this one browser stream
-            // so it attaches again from its delivered offsets.
-            attachments.remove(&attachment_id);
-            routes.remove(&stream_id);
             true
         }
         Command::Reply {
@@ -3238,15 +3133,6 @@ async fn process_incoming(
             if decode_session_id(notice.session_id()) != Some(attachment.session_id) {
                 return false;
             }
-            if matches!(notice, TerminalNotice::Exited { .. }) {
-                // Once the host emits an ordered exit notice, the infraternal
-                // agent's relay task has finished and dropped this stream, so it
-                // will not answer further route pings. Disarm route liveness
-                // probing so a normal exit is never logged as
-                // `terminal_route_unresponsive` or retried as a dead route (#579).
-                attachment.route = None;
-                attachment.proof_rebind_pending = false;
-            }
             // The same queue preserves notice/repaint ordering and retires a slow viewer only.
             if attachment
                 .output
@@ -3284,17 +3170,6 @@ async fn process_incoming(
             // The backend may have accepted input whose Ack died with the old browser.
             // Its first reattach Ack is authoritative for this same durable writer.
             let replay = attachment.replaying;
-            if attachment.awaiting_ack && attachment.route.is_some() {
-                // A reattach builds a new lease; a hidden viewer's must start suspended too [#562].
-                let hidden = attachment
-                    .route
-                    .as_ref()
-                    .is_some_and(Liveness::is_suspended);
-                let mut route = Liveness::new();
-                route.set_suspended(hidden);
-                attachment.route = Some(route);
-                attachment.proof_rebind_pending = false;
-            }
             attachment.replaying = false;
             let acknowledged = usize::try_from(in_seq_acked - attachment.last_in_seq)
                 .unwrap_or(usize::MAX)
@@ -3375,32 +3250,15 @@ async fn process_incoming(
         Incoming::Ping { nonce, sent_us } => {
             write_frame(connection, CONTROL_STREAM, &Frame::Pong { nonce, sent_us }).await
         }
-        Incoming::Pong {
-            stream_id,
-            nonce,
-            sent_us,
-        } => {
-            let Some(attachment) = routes
-                .get(&stream_id)
-                .and_then(|id| attachments.get_mut(id))
-            else {
-                return true;
-            };
-            if let Some(route) = &mut attachment.route {
-                route.pong(nonce, sent_us);
-                return true;
-            }
-            // Unmonitored native consumers never use a shim proof as payload.
-            // An unsolicited or stale proof cannot wake or renew such a route.
+        Incoming::Pong { .. } => {
+            // Stream-zero Pongs were correlated with the shared host lease above. Any terminal
+            // stream reply is stale and must not renew an attachment-specific lease.
             true
         }
         Incoming::ControlEvent | Incoming::SessionInventory(_) => true,
         Incoming::Disconnected | Incoming::Hello { .. } => false,
     }
 }
-
-#[path = "embedded_route_proofs.rs"]
-mod route_proofs;
 
 /// A full reader or an invalid input producer retires only its attachment. The PTY/ring remain
 /// in the shim; reconnect can catch up from the browser's last delivered offset.
@@ -3480,11 +3338,14 @@ fn decode_event(stream_id: u32, sub_id: u32, event_json: &[u8], wire: &Bytes) ->
     })
 }
 
+/// Decode the next complete host-link frame while preserving its borrowed payload.
+/// Correlated Pong frames carry only scalar state, so consume them without
+/// allocating or retaining a payload buffer.
 async fn read_incoming(connection: &mut AgentConnection) -> Option<Incoming> {
     loop {
         match decode_muxed_frame(&connection.receive) {
             Ok(decoded) => {
-                // Route proofs contain scalars only. Consume their already
+                // Pongs contain only liveness scalars. Consume their already
                 // validated envelope without sharing a buffer or decoding it
                 // again; payload frames retain the existing borrowed path.
                 if let Frame::Pong { nonce, sent_us } = decoded.frame {
@@ -3731,10 +3592,10 @@ fn connection_lost(
     tokio::spawn(cleanup_connection(connection));
 }
 
-/// A new or promoted host link starts a fresh lease with no doubt episode: a
-/// doubt raised on an earlier link never confirms windows on this one [#234].
+/// A new or promoted host link restarts the lease without reusing correlation IDs;
+/// a doubt raised earlier never confirms windows on the current link [#234].
 fn fresh_host_lease(liveness: &mut Liveness, doubted: &mut Vec<u64>) {
-    *liveness = Liveness::host_link();
+    liveness.restart();
     doubted.clear();
 }
 
@@ -3764,7 +3625,7 @@ fn notify_doubt(
     doubted: &mut Vec<u64>,
     attachments: &HashMap<u64, AttachmentState>,
 ) {
-    let settled = |a: &AttachmentState| !a.awaiting_ack && !a.proof_rebind_pending;
+    let settled = |a: &AttachmentState| !a.awaiting_ack;
     if recovered {
         doubted.retain(|id| {
             attachments.get(id).is_some_and(|a| {

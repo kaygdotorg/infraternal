@@ -21,6 +21,7 @@
 use crate::policy::model::PublicKey;
 use gotatun::x25519::{PublicKey as X25519PublicKey, StaticSecret};
 use nix::unistd::Uid;
+use ring::rand::{SecureRandom as _, SystemRandom};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -285,9 +286,11 @@ fn publish(state: &Path, bytes: &[u8; KEY_LENGTH]) -> io::Result<()> {
     result
 }
 
+/// Generate a private `WireGuard` key with the system random source.
 fn generate() -> io::Result<Zeroizing<[u8; KEY_LENGTH]>> {
     let mut bytes = Zeroizing::new([0_u8; KEY_LENGTH]);
-    openssl::rand::rand_bytes(&mut *bytes)
+    SystemRandom::new()
+        .fill(&mut *bytes)
         .map_err(|_| io::Error::other("System random generator unavailable."))?;
     Ok(bytes)
 }

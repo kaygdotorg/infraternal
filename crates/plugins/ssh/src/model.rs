@@ -195,6 +195,9 @@ pub enum FailureKind {
     /// an earlier setup. Nothing was changed; the location goes in Details.
     #[serde(rename = "unrecognized_install")]
     UnrecognizedInstall,
+    /// Add host found this person's previous install and is waiting for its exact path review.
+    #[serde(rename = "retire_previous_install")]
+    RetirePreviousInstall,
     /// A staging step met files at the setup location that it cannot prove are
     /// infraternal's own (exit 71), and changed nothing. `refusal` says which
     /// check refused, when the host named it (#394, J314 P2-1).
@@ -295,6 +298,10 @@ pub struct Failure {
 /// Each uuid keeps its own field, so one can never be read or sent as the other.
 #[derive(Clone, Debug, Default)]
 struct FailureIds {
+    /// The peer's self-reported SSH identification, used only as recovery guidance.
+    netbird_ssh: bool,
+    /// The authenticated system check reported macOS, which uses local enrollment.
+    macos_join: bool,
     /// Binds a host-key confirmation to the observation that produced it.
     host_key_challenge: Option<uuid::Uuid>,
     /// The owner's existing host that makes this an already-added failure.
@@ -307,8 +314,27 @@ struct FailureIds {
     refusal: Option<Refusal>,
     /// A finished install of another server that this attempt offers to take over (D359).
     takeover: Option<TakeoverOffer>,
+    /// This person's earlier install and the challenge for the file review.
+    retirement: Option<RetirementOffer>,
     /// The terminals a Start fresh of a stuck first install closes once confirmed (D368, #433).
     closes: Option<TerminalClose>,
+}
+
+/// The file review before the Add host flow can retire a previous installation.
+#[derive(Clone, Debug, Serialize)]
+struct RetirementOffer {
+    /// Pauses only this attempt, and only a client that displays these paths can spend it.
+    challenge: uuid::Uuid,
+    /// The reviewed identity. An absent id requests only a read-only system check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    install: Option<uuid::Uuid>,
+    /// Whether the old installation is in a separate scope from the one being added.
+    different_scope: bool,
+    /// Cross-scope adds may continue without modifying the old install.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skip_challenge: Option<uuid::Uuid>,
+    /// First the data directory, then the unit and launcher links.
+    paths: Vec<String>,
 }
 
 /// The open terminals a Start fresh confirmation lists and closes (D368, #433): a first install that
@@ -413,7 +439,7 @@ impl Serialize for Failure {
     {
         use serde::ser::SerializeStruct;
 
-        let mut state = serializer.serialize_struct("Failure", 16)?;
+        let mut state = serializer.serialize_struct("Failure", 17)?;
         state.serialize_field("kind", &self.kind)?;
         state.serialize_field("message", &self.public_message())?;
         state.serialize_field("log_tail", &self.log_tail)?;
@@ -425,6 +451,9 @@ impl Serialize for Failure {
         }
         if let Some(takeover) = self.ids.as_deref().and_then(|ids| ids.takeover.as_ref()) {
             state.serialize_field("takeover", takeover)?;
+        }
+        if let Some(retirement) = self.ids.as_deref().and_then(|ids| ids.retirement.as_ref()) {
+            state.serialize_field("retirement", retirement)?;
         }
         if let Some(closes) = self.ids.as_deref().and_then(|ids| ids.closes.as_ref()) {
             state.serialize_field("closes", closes)?;
@@ -453,6 +482,16 @@ impl Serialize for Failure {
         if self.choose_method {
             state.serialize_field("choose_method", &self.choose_method)?;
         }
+        if self.netbird_ssh() {
+            state.serialize_field("ssh_server", "netbird")?;
+        }
+        if self
+            .ids
+            .as_deref()
+            .is_some_and(|details| details.macos_join)
+        {
+            state.serialize_field("join_locally", "macos")?;
+        }
         if let Some(uuid) = self.ids.as_deref().and_then(|ids| ids.host_key_challenge) {
             state.serialize_field("host_key_challenge", &uuid)?;
         }
@@ -466,6 +505,28 @@ impl Serialize for Failure {
 }
 
 impl Failure {
+    /// Explain how to enroll a Mac after its SSH system check succeeded.
+    pub(crate) fn macos_join() -> Self {
+        let mut failure = Self::unsupported(
+            "The SSH system check found macOS. Installing over SSH requires Linux with systemd.",
+        );
+        failure.ids.get_or_insert_with(Box::default).macos_join = true;
+        failure
+    }
+
+    /// Record the peer's self-reported SSH software for the recovery UI.
+    pub(crate) fn with_netbird_ssh(mut self) -> Self {
+        self.ids.get_or_insert_with(Box::default).netbird_ssh = true;
+        self
+    }
+
+    /// True when the failed connection identified itself as the embedded SSH server.
+    pub(crate) fn netbird_ssh(&self) -> bool {
+        self.ids
+            .as_deref()
+            .is_some_and(|details| details.netbird_ssh)
+    }
+
     #[must_use]
     pub fn new(kind: FailureKind, message: &'static str) -> Self {
         Self {
@@ -557,6 +618,33 @@ impl Failure {
         self
     }
 
+    /// Confirm this owner's previous installation with the complete reviewed path list.
+    #[must_use]
+    pub(crate) fn retire_previous(
+        challenge: uuid::Uuid,
+        install: Option<uuid::Uuid>,
+        skip_challenge: Option<uuid::Uuid>,
+        paths: Vec<String>,
+    ) -> Self {
+        let mut failure = Self::new(
+            FailureKind::RetirePreviousInstall,
+            "This host has an earlier infraternal installation.",
+        );
+        failure.ids.get_or_insert_with(Box::default).retirement = Some(RetirementOffer {
+            challenge,
+            install,
+            different_scope: skip_challenge.is_some(),
+            skip_challenge,
+            paths,
+        });
+        failure
+    }
+
+    /// The only challenge that skips retirement, available when scopes differ.
+    pub(crate) fn skip_retirement_challenge(&self) -> Option<uuid::Uuid> {
+        self.ids.as_deref()?.retirement.as_ref()?.skip_challenge
+    }
+
     /// List the stuck first install's own open terminals, which its Start fresh closes (D368, #433).
     #[must_use]
     pub(crate) fn with_closing_terminals(
@@ -588,10 +676,13 @@ impl Failure {
         self
     }
 
-    /// The terminal-aware confirmation challenge, absent for ordinary cleanup and terminal-free takeover.
+    /// An explicit destructive review challenge. Generic cleanup consent cannot use it.
     #[must_use]
-    pub(crate) fn terminal_confirmation(&self) -> Option<uuid::Uuid> {
+    pub(crate) fn review_confirmation(&self) -> Option<uuid::Uuid> {
         let ids = self.ids.as_deref()?;
+        if let Some(offer) = &ids.retirement {
+            return Some(offer.challenge);
+        }
         ids.takeover
             .as_ref()
             .and_then(|offer| offer.close_challenge)
@@ -795,6 +886,7 @@ impl Failure {
             FailureKind::HostKey => "host-key",
             FailureKind::Unreachable | FailureKind::MeshPolicy => "transport",
             FailureKind::UnrecognizedInstall => "unrecognized-install",
+            FailureKind::RetirePreviousInstall => "retire-previous-install",
             FailureKind::UnprovenFiles => "unproven-files",
             FailureKind::NoAccount => "no-account",
             FailureKind::AuthorityLocked => "authority-locked",

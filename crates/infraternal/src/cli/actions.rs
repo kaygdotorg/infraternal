@@ -151,6 +151,7 @@ fn cli_plugin() -> PluginDefinition {
     #[cfg(machine_up)]
     {
         plugin.actions.push(up_action());
+        plugin.actions.push(uninstall_action());
         plugin.actions.push(up_system_action());
     }
     #[cfg(not(machine_up))]
@@ -361,7 +362,7 @@ fn hosted_server_actions() -> Vec<ActionDefinition> {
                 [
                     (
                         "host_id".to_owned(),
-                        JsonSchema::string("ID of the retired-unreachable host to forget."),
+                        JsonSchema::string("ID of the revoked host with pending cleanup to forget."),
                     ),
                     (
                         "dry_run".to_owned(),
@@ -557,6 +558,102 @@ fn up_action() -> ActionDefinition {
     #[cfg(not(machine_up))]
     let action = action.not_available_yet();
     action
+}
+
+/// Describe the removal preview and the explicit opt-in used by scripts.
+#[cfg(machine_up)]
+fn uninstall_action() -> ActionDefinition {
+    let lines = |description| {
+        JsonSchema::array(
+            JsonSchema::string("A line of uninstall output."),
+            description,
+        )
+    };
+    let data = JsonSchema::object(
+        [
+            (
+                "system".to_owned(),
+                JsonSchema::boolean("The plan targets the system installation."),
+            ),
+            (
+                "remove".to_owned(),
+                lines("Files and resources named in the removal plan."),
+            ),
+            (
+                "notes".to_owned(),
+                lines("Other removal details, including any shell setup the installer printed."),
+            ),
+            (
+                "keep_state".to_owned(),
+                JsonSchema::boolean("The plan preserves the enrollment."),
+            ),
+            (
+                "administrator_required".to_owned(),
+                JsonSchema::boolean("Applying the plan requires administrator privileges."),
+            ),
+            (
+                "host_id".to_owned(),
+                JsonSchema::string("Host ID named in the local installation receipt."),
+            ),
+            (
+                "saved_state".to_owned(),
+                JsonSchema::string("Path of the saved enrollment directory when requested."),
+            ),
+            (
+                "server_retired".to_owned(),
+                JsonSchema::boolean("The server confirmed retirement of the host."),
+            ),
+            (
+                "remaining".to_owned(),
+                lines("Resources left in place because they did not belong to this install."),
+            ),
+        ],
+        [],
+    );
+    ActionDefinition::new(
+        ["uninstall"],
+        "Remove infraternal from this machine.",
+        "Review and remove this machine's installed infraternal agent.",
+        [
+            "Review which service, files and network resources will be removed.",
+            "Confirm interactively, or pass --yes to confirm in a script.",
+            "Use --keep-state to save the enrollment before removal.",
+        ],
+        JsonSchema::object(
+            [
+                (
+                    "system".to_owned(),
+                    JsonSchema::boolean("Select the system installation."),
+                ),
+                (
+                    "keep_state".to_owned(),
+                    JsonSchema::boolean("Save the private enrollment in a separate directory."),
+                ),
+                (
+                    "dry_run".to_owned(),
+                    JsonSchema::boolean("Show the uninstall plan without removing anything."),
+                ),
+                (
+                    "yes".to_owned(),
+                    JsonSchema::boolean("Confirm removal without an interactive prompt."),
+                ),
+            ],
+            [],
+        ),
+        JsonSchema::command_result_with(data),
+        ActionContract::new(
+            ActionTarget::Global,
+            ActionEffect::Destructive,
+            "cli.uninstall",
+            DryRun::Required,
+        ),
+    )
+    .with_cli_handler(CliHandler::Uninstall)
+    .with_safety(infraternal_plugin_api::SafetyNotes {
+        destructive: true,
+        dry_run_first: true,
+        notes: Vec::new(),
+    })
 }
 
 #[cfg(machine_up)]

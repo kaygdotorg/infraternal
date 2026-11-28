@@ -26,7 +26,7 @@ fn percentile(sorted: &[u128], per_mille: usize) -> u128 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "Measurement only: run on a build or performance VM"]
 async fn session_step_under_concurrent_load() {
-    let _guard = SERIAL.lock().await;
+    let _guard = SERIAL.lock_for_measurement().await;
     let (pool, path) = disk_pool("session-bench").await;
     let (auth, token) = empty_with_pool(pool).await;
     let f = fixture_with_bootstrap(auth, token).await;

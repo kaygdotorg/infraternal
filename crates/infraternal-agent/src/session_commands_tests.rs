@@ -96,6 +96,29 @@ async fn input_and_resize_keep_their_shared_fifo_order_around_credit() {
     assert_eq!(credit, 5);
 }
 
+/// A leading size report can ride with replay before any credit is spent.
+/// A report after input must stay behind it and preserve the credit fence.
+#[tokio::test]
+async fn only_an_already_queued_leading_resize_can_ride_with_replay() {
+    let (mut sender, mut receiver) = channel();
+    assert_eq!(receiver.take_initial_resize(), None);
+    sender.try_send(Command::Credit(5)).unwrap();
+    sender.try_send(Command::Resize(60, 24, 0, 0)).unwrap();
+    sender.try_send(Command::Input(7, vec![1])).unwrap();
+    sender.try_send(Command::Credit(9)).unwrap();
+    sender.try_send(Command::Resize(80, 24, 0, 0)).unwrap();
+
+    assert_eq!(receiver.take_initial_resize(), Some((60, 24, 0, 0)));
+    assert_eq!(receiver.take_initial_resize(), None);
+    assert!(matches!(receiver.next().await, Some(Command::Credit(5))));
+    assert!(matches!(receiver.next().await, Some(Command::Input(7, _))));
+    assert!(matches!(receiver.next().await, Some(Command::Credit(9))));
+    assert!(matches!(
+        receiver.next().await,
+        Some(Command::Resize(80, 24, 0, 0))
+    ));
+}
+
 #[tokio::test]
 async fn credit_allowance_does_not_cross_ordered_command_barriers() {
     let (mut sender, mut receiver) = channel();

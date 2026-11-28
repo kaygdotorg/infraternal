@@ -127,7 +127,12 @@ impl Master {
             }
         })
         .await
-        .map_err(|_| Failure::new(FailureKind::Unreachable, "The SSH connection timed out."))??;
+        .map_err(|_| {
+            Failure::new(
+                FailureKind::Unreachable,
+                crate::connection_diagnostics::TIMEOUT,
+            )
+        })??;
         Ok(master)
     }
 

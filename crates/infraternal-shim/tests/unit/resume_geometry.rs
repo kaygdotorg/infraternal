@@ -1,5 +1,5 @@
-//! A viewer that attaches at a different size than the output was written at
-//! must still see the shim's screen (#521, D13).
+//! A viewer that attaches after a geometry change must still see the shim's
+//! screen (#521, D13).
 //!
 //! Raw PTY bytes only make sense at the width they were produced for. A shell
 //! wraps a long line by printing past the margin and then returning with `\r`,
@@ -16,11 +16,9 @@
 //! recreates a soft wrap by printing to the session's margin, and a wider
 //! viewer would not wrap there.
 //!
-//! Known gap, kept on purpose: a tab that reopens at the session's current
-//! size still gets the raw replay, even when the ring begins with bytes from
-//! before an earlier resize. Every session is spawned at 80x24 and resized by
-//! its first viewer, so this needs its own measured change now that shell
-//! snapshots can be exact (#521).
+//! At the session's current size, a first replay crossing the last applied
+//! resize tries an exact Snapshot. If the engine refuses, the retained bytes
+//! are still replayed raw.
 //!
 //! D74 as amended (owner, 2026-11-16): the tab that typed last keeps the
 //! size only while it is attached. Once it has left, the next tab that
@@ -201,7 +199,7 @@ fn peer() -> Peer {
         trailing: Vec::new(),
         deferred: None,
         attached: true,
-        caps: APPROXIMATE_SNAPSHOT,
+        caps: APPROXIMATE_SNAPSHOT | MULTI_WRITER,
         input_reply: None,
         writer: Some(0),
         shared_writer: false,
@@ -213,7 +211,7 @@ fn peer() -> Peer {
         exited_sent: false,
         stopping: false,
         request: None,
-        replay_awaits_size: false,
+        replay_awaits_size: ReplaySizeCheck::default(),
         echo_hidden_told: false,
     }
 }
@@ -955,6 +953,130 @@ fn backlog(first: u64, bytes: usize) -> Vec<u8> {
     }
     out.truncate(bytes);
     out
+}
+
+/// Reopen a blank terminal at the current geometry after a live resize.
+#[test]
+fn reopening_after_a_resize_reaches_the_live_frame() {
+    let threshold = usize::try_from(SNAPSHOT_FIRST_BACKLOG).unwrap();
+    for bytes in [8 * 1024, threshold - 1024] {
+        for alternate in [false, true] {
+            let mut session = Session::new(80, 24);
+            session.ring = Ring::new(DEFAULT_CAPACITY);
+            let mut live = peer();
+            let mut reference = Terminal::new(80, 24).unwrap();
+            let mut before = backlog(1, bytes);
+            if alternate {
+                before.extend_from_slice(b"\x1b[?1049h\x1b[H");
+            }
+            before.extend_from_slice(b"\r\n");
+            before.extend_from_slice(&[b'w'; 135]);
+            before.extend_from_slice(b"\x1b[20;72HWIDTH-EDIT");
+            live.cursor = Some(0);
+            session.output(&before);
+            session.deliver(&mut live, &mut reference);
+            session.resize(&mut live, 60, 24);
+            reference.resize(60, 24).unwrap();
+            session.output(b"\x1b[22;1Hpost-resize");
+            session.deliver(&mut live, &mut reference);
+            session.leave(&[]);
+
+            let mut tab = peer();
+            let mut viewer = Terminal::new(60, 24).unwrap();
+            session.handle(&mut tab, Frame::ReadFrom(0));
+            session.resize(&mut tab, 60, 24);
+            assert_eq!(
+                session.deliver(&mut tab, &mut viewer),
+                Some(Repaint::Exact),
+                "bytes={bytes}, alternate={alternate}"
+            );
+            assert!(tab.request.is_none(), "one exact Snapshot is enough");
+            assert_eq!(viewer.screen_difference(&reference), 0);
+        }
+    }
+}
+
+/// The boundary survives output and repeated reports of the current size.
+/// Bytes starting at the boundary were produced in the current geometry.
+#[test]
+fn only_a_cursor_before_the_last_size_change_tries_an_exact_repaint() {
+    let mut session = Session::new(80, 24);
+    let mut live = peer();
+    session.output(b"original grid");
+    let resize_at = session.ring.head();
+    session.resize(&mut live, 60, 24);
+    session.output(b"current grid\r\n");
+    session.handle(
+        &mut live,
+        Frame::Resize {
+            cols: 60,
+            rows: 24,
+            px_w: 600,
+            px_h: 240,
+        },
+    );
+    for (from, expect_snapshot) in [(resize_at - 1, true), (resize_at, false)] {
+        let mut tab = peer();
+        session.handle(&mut tab, Frame::ReadFrom(from));
+        session.resize(&mut tab, 60, 24);
+        assert_eq!(
+            matches!(tab.request, Some(Request::SnapshotFirst(seq)) if seq == from),
+            expect_snapshot
+        );
+        if !expect_snapshot {
+            assert!(matches!(tab.request, Some(Request::Read(seq)) if seq == from));
+        }
+    }
+    live.cursor = Some(resize_at - 1);
+    session.handle(&mut live, Frame::ReadFrom(resize_at - 1));
+    assert!(matches!(live.request, Some(Request::Read(seq)) if seq == resize_at - 1));
+    let mut capture = peer();
+    capture.caps = 0;
+    session.handle(&mut capture, Frame::ReadFrom(0));
+    assert!(matches!(capture.request, Some(Request::Read(0))));
+}
+
+/// Another typist keeps the session's size. A staged smaller viewer gets
+/// raw bytes, while a same-size viewer can use the exact repaint.
+#[test]
+fn a_staged_viewer_confirms_its_size_before_the_resize_crossing_shortcut() {
+    let mut session = Session::new(80, 24);
+    session.output(&typed_at_42());
+    session.resize(&mut peer(), 60, 24);
+    assert_eq!(session.cursors.active_writer, Some(0));
+    session.cursors.select(1, (60, 24, 0, 0)).unwrap();
+    let mut tab = peer();
+    tab.writer = Some(1);
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    assert!(matches!(tab.request, Some(Request::Read(0))));
+    session.resize(&mut tab, 50, 24);
+    assert!(matches!(tab.request, Some(Request::Read(0))));
+
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    let mut viewer = Terminal::new(60, 24).unwrap();
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    session.resize(&mut tab, 60, 24);
+    assert_eq!(session.deliver(&mut tab, &mut viewer), Some(Repaint::Exact));
+    assert_eq!(viewer.screen_difference(&session.terminal), 0);
+}
+
+/// An exact serializer refusal after a resize preserves raw replay even
+/// when the peer supports approximate Snapshots.
+#[test]
+fn a_resize_crossing_reopen_keeps_raw_bytes_when_exact_export_refuses() {
+    let mut session = Session::new(80, 24);
+    let mut live = peer();
+    session.output(b"original grid");
+    session.resize(&mut live, 60, 24);
+    session.output(b"\x1b]133;A\x07post-resize");
+    let mut tab = peer();
+    let mut viewer = Terminal::new(60, 24).unwrap();
+    session.handle(&mut tab, Frame::ReadFrom(0));
+    session.resize(&mut tab, 60, 24);
+    assert!(matches!(tab.request, Some(Request::SnapshotFirst(0))));
+    assert_eq!(session.deliver(&mut tab, &mut viewer), None);
+    assert!(tab.request.is_none());
+    assert_eq!(tab.cursor, Some(session.ring.head()));
 }
 
 /// A tab that saw `before` and comes back after `away` more bytes, at the

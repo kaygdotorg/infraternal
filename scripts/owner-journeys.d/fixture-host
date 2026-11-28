@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Run normal infraternal commands on a leased, disposable Linux or Mac fixture VM.
+set -euo pipefail
+origin=https://test.ssh.kayg.org
+operation=${1:?operation required}
+candidate=${2:?absolute path to staged release binary required}
+name=${3:?disposable fixture hostname required}
+[[ $candidate = /* && -x $candidate && $name =~ ^[a-z0-9][a-z0-9.-]+$ ]]
+[[ $(hostname) == "$name" && $(cat "$HOME/.config/infraternal-owner-journey" 2>/dev/null) == "$name" ]]
+# Only the fixture operator can authorize system mutations. There is no shared-host fallback.
+[[ $(id -u) != 0 ]]
+export LC_ALL=C
+case $(uname -s) in
+    Linux)
+        # Linux up installs a system service. Only use this branch on a disposable VM.
+        [[ $name == owner-journey-* ]]
+        home=/var/lib/infraternal
+        installed=/usr/local/bin/infraternal
+        paths=("$home" "$installed" /usr/local/bin/infra /etc/systemd/system/infraternal-agent.service /etc/systemd/system/infraternal-firewall.service)
+        ;;
+    Darwin)
+        home="$HOME/Library/Application Support/infraternal"
+        installed="$home/bin/infraternal"
+        paths=("$home" "$HOME/Library/Logs/infraternal" "$HOME/Library/LaunchAgents/kayg.infraternal.agent.plist"
+            /Library/LaunchDaemons/kayg.infraternal.mesh-helper.plist /Library/PrivilegedHelperTools/kayg.infraternal.mesh-helper
+            /var/run/kayg.infraternal.mesh-helper.sock /etc/resolver/internal)
+        ;;
+    *) exit 2 ;;
+esac
+[[ $candidate != "$home/"* && $candidate != "$installed" ]]
+
+# Verify both filesystem and running-service residue, including Linux's own firewall table.
+verify_clean() {
+    local item
+    for item in "${paths[@]}"; do
+        if [[ -e $item || -L $item ]]; then
+            printf 'Fixture still has %s\n' "$item" >&2
+            return 1
+        fi
+    done
+    if [[ $(uname -s) == Linux ]]; then
+        if systemctl is-active --quiet infraternal-agent.service infraternal-firewall.service; then
+            echo 'An infraternal system service is still active' >&2
+            return 1
+        fi
+        local tables
+        tables=$(sudo -n nft list tables) || return 1
+        if [[ $tables == *'table inet infraternal_host'* ]] || ip link show infraternal0 >/dev/null 2>&1; then
+            echo 'The fixture still has the infraternal firewall table or interface' >&2
+            return 1
+        fi
+    else
+        if launchctl print "gui/$(id -u)/kayg.infraternal.agent" >/dev/null 2>&1 ||
+            sudo -n launchctl print system/kayg.infraternal.mesh-helper >/dev/null 2>&1; then
+            echo 'An infraternal launchd service is still loaded' >&2
+            return 1
+        fi
+    fi
+    echo 'Fixture install paths, service and managed network artifacts are absent'
+}
+
+case $operation in
+    prepare)
+        [[ ${4:-} == "$origin" && ${5:-} == "$name" ]]
+        sudo -n true
+        verify_clean
+        ;;
+    up)
+        [[ ${4:-} == "$origin" && -t 1 ]]
+        exec "$candidate" up "$origin"
+        ;;
+    status) exec "$installed" status ;;
+    mesh-status) exec "$installed" mesh status ;;
+    offline)
+        if [[ $(uname -s) == Linux ]]; then
+            sudo -n systemctl stop infraternal-agent.service
+        else
+            launchctl bootout "gui/$(id -u)/kayg.infraternal.agent"
+        fi
+        echo 'Fixture service stopped for Remove and Forget'
+        ;;
+    uninstall)
+        if "$installed" uninstall; then exit 0; fi
+        # Older Mac releases expose removal through their install receipt.
+        [[ $(uname -s) == Darwin && -f "$home/.user-owner" ]]
+        IFS= read -r host_id < "$home/.user-owner"
+        [[ $host_id =~ ^[0-9a-f]{32}$ ]]
+        echo 'Retrying with the released user-mode removal command'
+        exec "$installed" --bootstrap-uninstall "$host_id"
+        ;;
+    verify-clean) verify_clean ;;
+    release)
+        # A disposable fixture with a failed uninstall must be reverted by its lease owner.
+        verify_clean
+        ;;
+    *) exit 2 ;;
+esac

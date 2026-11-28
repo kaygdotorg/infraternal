@@ -1222,6 +1222,29 @@ pub fn clear_role_from_config_at(
     nft_path: Option<&Path>,
     systemctl_path: Option<&Path>,
 ) -> Result<String, PolicyError> {
+    clear_role(role, paths, nft_path, systemctl_path, true)
+}
+
+/// Retire an agent's input rules and policy. The installer journal owns the
+/// separate decision about the shared systemd loader and its enablement link.
+///
+/// # Errors
+/// Refuses an unsafe policy or a firewall change that cannot finish safely.
+pub fn clear_installed_agent_rules_at(
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+) -> Result<String, PolicyError> {
+    clear_role(PolicyRole::Agent, paths, nft_path, None, false)
+}
+
+/// Reconcile the selected role and optionally reconcile its shared loader.
+fn clear_role(
+    role: PolicyRole,
+    paths: &HostFirewallPaths,
+    nft_path: Option<&Path>,
+    systemctl_path: Option<&Path>,
+    manage_loader: bool,
+) -> Result<String, PolicyError> {
     let server = read_policy_file(paths.server_policy_path())?;
     let agent = read_policy_file(paths.agent_policy_path())?;
     let (cleared, remaining_server, remaining_agent) = match role {
@@ -1229,7 +1252,11 @@ pub fn clear_role_from_config_at(
         PolicyRole::Agent => (agent, server, None),
     };
     if cleared.is_none() {
-        return apply_from_config_at(paths, nft_path, systemctl_path);
+        return if manage_loader {
+            apply_from_config_at(paths, nft_path, systemctl_path)
+        } else {
+            Ok(String::new())
+        };
     }
 
     let no_remaining_policy = remaining_server.is_none() && remaining_agent.is_none();
@@ -1253,10 +1280,45 @@ pub fn clear_role_from_config_at(
         policy_path.display()
     );
 
-    if no_remaining_policy {
+    if no_remaining_policy && manage_loader {
         report.push_str(&remove_owned_loader(paths, systemctl_path)?);
     }
     Ok(report)
+}
+
+/// Withdraw an uncommitted agent install's policy without changing its loader files.
+///
+/// Reapply the saved server policy, or remove the product table if the agent
+/// was its only owner. When the installer is restoring its prior hand-written
+/// loader, let that loader restore the previous table instead. The caller
+/// holds the install journal and has already stopped the agent.
+///
+/// # Errors
+/// Returns an error if the saved role files or their live rules cannot be reconciled.
+#[cfg(target_os = "linux")]
+pub fn rollback_agent_policy(
+    paths: &HostFirewallPaths,
+    restore_saved_policy: bool,
+    nft_path: Option<&Path>,
+) -> Result<(), PolicyError> {
+    let agent = paths.agent_policy_path();
+    if read_policy_file(agent)?.is_none() {
+        return Ok(());
+    }
+    if restore_saved_policy {
+        if let Some(server) = read_policy_file(paths.server_policy_path())? {
+            apply_roles(Some(server), None, nft_path)?;
+        } else {
+            match remove_host_table(nft_path) {
+                Ok(_) => {}
+                // No loader can apply a new table without nft. Keep unwinding the install.
+                Err(PolicyError::TableRemovalFailed { source, .. })
+                    if matches!(*source, PolicyError::NftMissing { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    remove_policy_file(agent)
 }
 
 /// Read one validated role policy from its root-owned configuration file.
@@ -1264,6 +1326,16 @@ pub fn clear_role_from_config_at(
 /// # Errors
 /// Returns an error when the file is unsafe, oversized, unreadable, or malformed.
 pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
+    read_policy_file_for_owner(path, 0)
+}
+
+/// Read the marked policy for the owner of a checked installation namespace.
+///
+/// # Errors
+/// Rejects unsafe file metadata, oversized input or a foreign policy marker.
+pub fn read_policy_file_for_owner(path: &Path, owner: u32) -> Result<Option<Policy>, PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    refuse_live_test_policy(path)?;
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1274,7 +1346,11 @@ pub fn read_policy_file(path: &Path) -> Result<Option<Policy>, PolicyError> {
         Err(error) => return Err(PolicyError::Io(error)),
     };
     let metadata = file.metadata().map_err(PolicyError::Io)?;
-    if !metadata.is_file() || !safe_policy_owner(&metadata) || metadata.len() > MAX_POLICY_BYTES {
+    #[cfg(unix)]
+    let approved_owner = metadata.uid() == owner && metadata.mode() & 0o022 == 0;
+    #[cfg(not(unix))]
+    let approved_owner = metadata.is_file();
+    if !metadata.is_file() || !approved_owner || metadata.len() > MAX_POLICY_BYTES {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
     }
     let capacity =
@@ -1320,6 +1396,8 @@ pub fn serialize_policy_file(policy: &Policy) -> Result<Vec<u8>, PolicyError> {
 /// # Errors
 /// Returns an error for invalid settings, unsafe paths, or failed file operations.
 pub fn write_policy_file(path: &Path, policy: &Policy) -> Result<(), PolicyError> {
+    #[cfg(any(test, feature = "test-support"))]
+    refuse_live_test_policy(path)?;
     validate_fields(policy)?;
     let Some(parent) = path.parent() else {
         return Err(PolicyError::UnsafePolicy(path.to_owned()));
@@ -1758,10 +1836,70 @@ fn reload_systemd(systemctl: &Path, removed_unit: &Path) -> Result<(), PolicyErr
 /// Returns an error when the role files are unsafe or the merged nft update fails.
 pub fn set_mesh_listener(udp_port: Option<u16>) -> Result<Option<String>, PolicyError> {
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(paths) = TEST_POLICY_PATHS.with(|current| current.borrow().clone()) {
-        return set_mesh_listener_at(&paths, None, udp_port);
+    {
+        if let Some(paths) = TEST_POLICY_PATHS.with(|current| current.borrow().clone()) {
+            return set_mesh_listener_at(&paths, None, udp_port);
+        }
+        if let Some(root) = std::env::var_os(TEST_HOST_FIREWALL_ROOT) {
+            let paths = fixture_policy_paths(Path::new(&root))?;
+            return set_mesh_listener_at(&paths, None, udp_port);
+        }
+        // Standalone test builds without configured host policy model an
+        // unenrolled host. The privileged runner must provide its fixture root.
+        if std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_none() {
+            return Ok(None);
+        }
+    }
+    // Rootless namespace proofs run whole `infraternal agent` processes, which cannot use the
+    // thread-local override above. A build with `test-support` (never shipped) maps the fixed
+    // layout below this private root instead, so a machine that has a real install in
+    // /var/lib/infraternal does not make the proof's nodes fail with EACCES.
+    #[cfg(feature = "test-support")]
+    if let Some(root) = std::env::var_os("INFRATERNAL_TEST_HOST_FIREWALL_ROOT") {
+        return set_mesh_listener_at(&HostFirewallPaths::under(Path::new(&root)), None, udp_port);
     }
     set_mesh_listener_at(&HostFirewallPaths::system(), None, udp_port)
+}
+
+/// The private policy layout shared with fixture subprocesses and worker threads.
+#[cfg(any(test, feature = "test-support"))]
+const TEST_HOST_FIREWALL_ROOT: &str = "INFRATERNAL_TEST_HOST_FIREWALL_ROOT";
+
+/// Refuse to open or modify the installed policy when the fixture runner is active.
+#[cfg(any(test, feature = "test-support"))]
+fn refuse_live_test_policy(path: &Path) -> Result<(), PolicyError> {
+    if path.starts_with("/var/lib/infraternal")
+        && (std::env::var_os("INFRATERNAL_VERIFY_OUTER_NETNS").is_some()
+            || std::env::var_os(TEST_HOST_FIREWALL_ROOT).is_some())
+    {
+        return Err(PolicyError::Io(io::Error::other(format!(
+            "privileged test refused to access live state at {}; set {TEST_HOST_FIREWALL_ROOT} to a private fixture directory",
+            path.display()
+        ))));
+    }
+    Ok(())
+}
+
+/// Resolve a fixture's alternate root before forming any policy paths.
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_policy_paths(root: &Path) -> Result<HostFirewallPaths, PolicyError> {
+    let invalid_root = || {
+        PolicyError::Io(io::Error::other(format!(
+            "{TEST_HOST_FIREWALL_ROOT} must name an existing private directory: {}",
+            root.display()
+        )))
+    };
+    if !root.is_absolute() || root.starts_with("/var/lib/infraternal") {
+        return Err(invalid_root());
+    }
+    let resolved = root.canonicalize().map_err(|_| invalid_root())?;
+    if resolved == Path::new("/")
+        || resolved.starts_with("/var/lib/infraternal")
+        || !resolved.is_dir()
+    {
+        return Err(invalid_root());
+    }
+    Ok(HostFirewallPaths::under(&resolved))
 }
 
 // Node-level namespace tests drive `set_mesh_listener` through a real mesh node,

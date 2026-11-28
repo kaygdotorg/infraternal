@@ -129,6 +129,78 @@ chmod +x infraternal-aarch64-darwin && ./infraternal-aarch64-darwin up https://<
 
 `allowed_signers` is `release/allowed_signers` from this repository.
 
+### Signed and notarized macOS bundle (D321, #615)
+
+App windows on macOS require Developer ID-signed, notarized executables sharing
+one Apple Team ID (`infraternal`, `infraternal-desktop-helper`, and
+`InfraternalCaptureHelper.app`), because the agent's cross-user helper check
+(`crates/infraternal-shim/src/code_identity.rs`) rejects ad-hoc or unsigned
+helpers and macOS TCC/Gatekeeper require a signed, stapled app bundle.
+
+This optional release step runs on the arm64 Mac build host inside the
+repository's Nix dev shell (`nix develop`), using:
+
+- a **temporary, dedicated signing keychain** created for the single build and
+  deleted on exit (the login keychain and every other keychain on the Mac are
+  never opened, unlocked or modified);
+- an App Store Connect API key directory on the Mac (`~/.config/asc` holding
+  `AuthKey_<KEY_ID>.p8` mode `0600`, `key-id.txt`, and `issuer-id.txt`);
+- the Developer ID Application `.p12` and its password read from 1Password on
+  the control host and streamed over SSH stdin into `scripts/release/macos-signed`.
+
+No signing certificate, password, or API key is stored in the repository, passed
+in argv, or written to logs:
+
+```sh
+# On the control host (reads the 1Password service-account token in a subshell
+# and streams the .p12 + password over SSH stdin to the arm64 Mac build host):
+(
+  OP_SERVICE_ACCOUNT_TOKEN="$(cat ~/.config/1passwd/infraternal.env)"
+  export OP_SERVICE_ACCOUNT_TOKEN
+  tmp="$(mktemp -d)" && chmod 0700 "$tmp" && trap 'rm -rf -- "$tmp"' EXIT
+  op read 'op://Apps / Infraternal/Apple Certificates/Developer ID Application.p12' --out-file "$tmp/cert.p12" >/dev/null
+  op read 'op://Apps / Infraternal/Apple Certificates/password' > "$tmp/pass.txt"
+  python3 -c '
+import base64, json, sys
+print(json.dumps({
+    "p12_b64": base64.b64encode(open(sys.argv[1], "rb").read()).decode("ascii"),
+    "p12_pass": open(sys.argv[2], encoding="utf-8").read().rstrip("\r\n"),
+}))
+' "$tmp/cert.p12" "$tmp/pass.txt"
+) | netbird ssh kayg@std.vpn.kayg.org \
+  'nix develop /path/to/checkout -c /path/to/checkout/scripts/release/macos-signed /absolute/output/dir --asc-dir "$HOME/.config/asc"'
+```
+
+`scripts/release/macos-signed` invokes `scripts/macos-release` with
+`--delete-keychain` and `--asc-dir`, builds the `release_macos_host_cargo_args`
+CLI and `release_macos_helper_cargo_args` desktop helper, assembles
+`InfraternalCaptureHelper.app` with `scripts/desktop-helper-bundle`, signs all
+three with the hardened runtime and a secure timestamp, submits to Apple's
+notary service, staples `InfraternalCaptureHelper.app`, verifies `codesign
+--verify --strict`, verifies all three share one Team ID and satisfy the agent's
+helper `PeerRequirement`, runs `spctl -a -vv` and `xcrun stapler validate` on
+the app bundle, writes `infraternal-macos-arm64-<version>-<commit>.zip` and
+`SHA256SUMS`, and deletes the temporary keychain before exiting.
+
+To install the signed bundle into an existing user-mode macOS install
+(`~/Library/Application Support/infraternal/bin`, D395) and restart the agent:
+
+```sh
+unzip -q infraternal-macos-arm64-<version>-<commit>.zip -d /tmp/infraternal-mac-unpack
+src="/tmp/infraternal-mac-unpack/infraternal-macos-arm64-<version>-<commit>"
+bin="$HOME/Library/Application Support/infraternal/bin"
+mkdir -p "$bin"
+# Stage and atomically replace binaries so macOS does not invalidate running code pages.
+install -m 0755 "$src/infraternal" "$bin/infraternal.new" && mv -f "$bin/infraternal.new" "$bin/infraternal"
+ln -sfn infraternal "$bin/infra"
+install -m 0755 "$src/infraternal-desktop-helper" "$bin/infraternal-desktop-helper.new" && mv -f "$bin/infraternal-desktop-helper.new" "$bin/infraternal-desktop-helper"
+rm -rf "$bin/InfraternalCaptureHelper.app.new"
+ditto "$src/InfraternalCaptureHelper.app" "$bin/InfraternalCaptureHelper.app.new"
+rm -rf "$bin/InfraternalCaptureHelper.app"
+mv "$bin/InfraternalCaptureHelper.app.new" "$bin/InfraternalCaptureHelper.app"
+launchctl kickstart -k "gui/$(id -u)/kayg.infraternal.agent"
+```
+
 The orchestrator supplies `CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
 `R2_SECRET_ACCESS_KEY` and `RELEASE_CALLER_TOKEN` in the publishing process
 environment, then runs:

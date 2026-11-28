@@ -11,6 +11,7 @@
  * - App-window shape fitting uses this same resize host from its on-demand body.
  * - The window's kind decides its actions: only a terminal has split controls, only terminals and logs close.
  */
+import { windowTitle } from "../model/types";
 import { createWindowCard, type WindowAction } from "../../../../../packages/ui/src/window-card";
 import { attachWindowResize, type ResizeFrame, type ResizeStart, type WindowResizeHost } from "../../../../../packages/ui/src/window-resize";
 import type { Ctx, ViewRec, WinRec } from "../context";
@@ -62,7 +63,7 @@ export function makeWindow(cx: Ctx, c: ViewRec, m: WindowModel): WinRec {
   if (m.kind !== "terminal" && cx.adapters.docs?.for(m)) actions.unshift({ id: "docs", label: "Read about this window", icon: ICON.help, onSelect: (e) => { const source = e.detail === 0 ? "keyboard" : "pointer"; void onDemand(() => import("./docs-action.on-demand")).then((m) => { m.openWindowDocs(cx, rec, source); }); } });
   // An app window or a screen is named by what it shows ("Notebook · Today"); the machine it lives on is the quiet part that gives
   // way first in a narrow pill, with its OS mark in front (D208). A terminal is the other way round: the machine, then its session.
-  const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : { host: m.host, ...(m.user ? { user: m.user } : {}), ...(m.session ? { session: m.session } : {}) };
+  const title = m.kind === "app" || m.kind === "screen" ? { host: m.session ?? m.host, session: m.host } : windowTitle(m);
   const card = createWindowCard({ id: m.id, title, icon: iconFor(m), status: m.kind === "terminal" && !m.noAccess ? "live" : m.kind === "app" || m.kind === "screen" ? "connecting" : "none", actions, label: `${m.host} ${m.session ?? m.kind}`, onLockChange: (locked) => {
     // The lock icon on the window is the input lock (the padlock): one lock at a time, on this window.
     const held = cx.inputLock.state;

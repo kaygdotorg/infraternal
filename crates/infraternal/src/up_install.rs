@@ -44,6 +44,10 @@ mod inspect;
 #[path = "up_journal.rs"]
 mod journal;
 
+/// The committed installer journal is also the ownership proof for uninstall.
+#[path = "up_uninstall.rs"]
+pub(crate) mod uninstall;
+
 /// Proof that the read-only [`preflight`] accepted a namespace.
 ///
 /// [`Install::begin_accepted`] takes it instead of running that pass a second
@@ -95,7 +99,7 @@ fn check_preflight(
             "A completed infraternal installation is recorded on this host. Manage the existing service; inspect /.infraternal-up.journal as root before preparing a fresh host.",
         ));
     }
-    validate_recovery(recovery)?;
+    validate_recovery(root, recovery)?;
     // The early user check cannot read other users' executable descriptors. Only
     // the privileged repeat can authorize writes, and it inspects the whole host.
     if root == Path::new("/") && nix::unistd::geteuid().is_root() {
@@ -106,8 +110,11 @@ fn check_preflight(
     if let Some(metadata) = remaining(&base, recovery)? {
         check_directory(&metadata, owner)?;
         let mut entries = fs::read_dir(&base).map_err(|_| refused("An existing protected infraternal data directory was found. Use the existing service; infraternal up requires a fresh host and will not change its permissions."))?;
-        if entries.any(|entry| entry.map_or(true, |entry| !recovery.owns(&entry.path())))
-            || metadata.mode() & 0o7777 != 0o711
+        if entries.any(|entry| {
+            entry.map_or(true, |entry| {
+                !owns_recovery_path(root, recovery, &entry.path())
+            })
+        }) || metadata.mode() & 0o7777 != 0o711
         {
             return Err(refused(
                 "An existing infraternal data directory was found. Use the server's embedded infraternal agent or the existing machine service; infraternal up will not change this directory.",
@@ -164,8 +171,28 @@ fn remaining(path: &Path, recovery: &journal::Snapshot) -> io::Result<Option<fs:
     }
 }
 
+/// A registered agent can atomically republish only its own recorded, marked role policy.
+fn owns_recovery_path(root: &Path, recovery: &journal::Snapshot, path: &Path) -> bool {
+    if recovery.owns(path) {
+        return true;
+    }
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    {
+        !recovery.committed
+            && recovery.registered
+            && path == root.join(host_firewall::AGENT_POLICY_PATH.trim_start_matches('/'))
+            && recovery.created.iter().any(|entry| entry.path == path)
+            && host_firewall::read_policy_file(path).is_ok_and(|policy| policy.is_some())
+    }
+    #[cfg(not(any(feature = "plugin-mesh", feature = "plugin-server")))]
+    {
+        let _ = root;
+        false
+    }
+}
+
 /// Refuse foreign descendants before recovery writes anything; enrollment alone owns its children.
-fn validate_recovery(recovery: &journal::Snapshot) -> io::Result<()> {
+fn validate_recovery(root: &Path, recovery: &journal::Snapshot) -> io::Result<()> {
     if recovery.committed {
         return Ok(());
     }
@@ -175,7 +202,7 @@ fn validate_recovery(recovery: &journal::Snapshot) -> io::Result<()> {
         }
         if fs::symlink_metadata(&entry.path)?.is_dir() {
             for child in fs::read_dir(&entry.path)? {
-                if !recovery.owns(&child?.path()) {
+                if !owns_recovery_path(root, recovery, &child?.path()) {
                     return Err(refused(
                         "An unfinished infraternal installation contains a path outside its recovery journal. Inspect it as root before retrying; no installation paths were changed.",
                     ));
@@ -901,12 +928,23 @@ impl Install {
         if self.registered && own_unit {
             run_systemctl(&self.systemctl, &["stop", SERVICE_NAME], None)?;
         }
-        if self.registered
-            && own_firewall_unit
-            && let Err(error) =
-                run_systemctl(&self.systemctl, &["stop", HOST_FIREWALL_SERVICE], None)
-        {
-            eprintln!("Could not stop the host firewall during rollback: {error}");
+        if self.registered && own_firewall_unit {
+            run_systemctl(&self.systemctl, &["stop", HOST_FIREWALL_SERVICE], None)?;
+        }
+        #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+        if self.registered && self.root == Path::new("/") {
+            let paths = host_firewall::HostFirewallPaths::system();
+            if self
+                .created
+                .iter()
+                .any(|entry| entry.path == paths.agent_policy_path())
+            {
+                // The service can republish its own marked policy with an updated
+                // listener before it stops, so its inode need not be the one recorded.
+                // The journal still proves there was no prior agent role file here.
+                host_firewall::rollback_agent_policy(&paths, self.replaced.is_empty(), None)
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+            }
         }
         self.restore_replaced_units()?;
         for created in self.created.iter().rev() {
@@ -935,12 +973,14 @@ impl Install {
         if self.registered {
             let _ = run_systemctl(&self.systemctl, &["daemon-reload"], None);
         }
-        if self.registered
-            && !self.replaced.is_empty()
-            && let Err(error) =
-                run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None)
-        {
-            eprintln!("Could not restore the prior host firewall service: {error}");
+        if self.registered && !self.replaced.is_empty() {
+            run_systemctl(&self.systemctl, &["restart", HOST_FIREWALL_SERVICE], None).map_err(
+                |error| {
+                    io::Error::other(format!(
+                        "Could not restore the prior host firewall service: {error}"
+                    ))
+                },
+            )?;
         }
         if let Some(error) = failure {
             return Err(error);
@@ -1010,10 +1050,13 @@ impl Install {
 impl Drop for Install {
     /// Normal errors and handled signals use the same cleanup as next-run durable recovery.
     fn drop(&mut self) {
+        let started = !self.created.is_empty();
         if self.rollback().is_err() {
             eprintln!(
-                "Could not finish rollback of this infraternal installation. Retry sudo infraternal up to recover its private journal."
+                "Could not finish rollback of this infraternal installation. Retry infraternal up to recover its private journal."
             );
+        } else if started && !self.committed {
+            eprintln!("Removed the unfinished system installation.");
         }
     }
 }
@@ -1022,6 +1065,44 @@ impl Drop for Install {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A new inode is recoverable only for the recorded agent role with a valid product marker.
+    #[cfg(any(feature = "plugin-mesh", feature = "plugin-server"))]
+    #[test]
+    #[ignore = "Run as root in verify-privileged to validate a marked policy file."]
+    fn interrupted_install_can_recover_an_agent_policy_with_a_new_inode() {
+        let fixture = super::j218_review::Fixture::new();
+        let owner = nix::unistd::geteuid().as_raw();
+        let mut install = Install::begin(&fixture.0, owner, Path::new("/bin/false"))
+            .unwrap()
+            .with_host_firewall_policy(Policy::default())
+            .unwrap();
+        install.install_host_firewall().unwrap();
+        install.journal.register().unwrap();
+        // Simulate a helper that exited without unwinding. Release the lock
+        // without rolling back or putting a commit record in the journal.
+        install.committed = true;
+        drop(install);
+        let mut recovery = journal::inspect(&fixture.0, owner).unwrap();
+        assert!(recovery.registered && !recovery.committed);
+        let path = fixture
+            .0
+            .join(host_firewall::AGENT_POLICY_PATH.trim_start_matches('/'));
+        assert!(recovery.owns(&path));
+
+        let staging = path.with_extension("staged");
+        let marked = host_firewall::serialize_policy_file(&Policy::default()).unwrap();
+        fs::write(&staging, &marked).unwrap();
+        fs::rename(&staging, &path).unwrap();
+        assert!(!recovery.owns(&path));
+        validate_recovery(&fixture.0, &recovery).unwrap();
+
+        fs::write(&path, b"foreign").unwrap();
+        assert!(validate_recovery(&fixture.0, &recovery).is_err());
+        fs::write(&path, &marked).unwrap();
+        recovery.created.retain(|entry| entry.path != path);
+        assert!(validate_recovery(&fixture.0, &recovery).is_err());
+    }
+
     /// Unsupported no-replace syscalls must preserve exclusive creation and durable rollback ownership.
     #[test]
     fn directory_publication_fallback_is_exclusive_and_owned() {

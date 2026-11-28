@@ -45,12 +45,8 @@ fn removes_only_permissions(old: &Config, next: &Config) -> bool {
         })
 }
 
-/// The two owner-selected Linux frontends; kernel policy is retained independently of processes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum Backend {
-    Nft,
-    NfTables,
-}
+/// The Linux frontend selected in a saved mesh snapshot.
+pub use infraternal_mesh_node::node_state::Backend;
 
 /// The live state of the optional kernel-only guard for a `GotaTun` node.
 #[derive(Clone, Debug, serde::Serialize)]
@@ -683,11 +679,25 @@ impl Firewall {
         aliases: &[crate::policy::model::Addresses],
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> io::Result<()> {
-        if self.nft_required() {
-            self.require_nft()?;
-        } else if !self.select_optional_backend() {
+        #[cfg(feature = "cutoff-measure")]
+        let lookup =
+            crate::cutoff_measure::Stage::new(config.node, config.version, "guard_tool_lookup");
+        // A trusted nft is the first choice unless this node retained the compatibility
+        // frontend explicitly. Resolve it once for selection, execution and status.
+        let preferred = (!self.is_fallback()).then(nft);
+        let nft_path = match preferred {
+            Some(Ok(path)) => {
+                self.backend = Some(Backend::Nft);
+                Some(path)
+            }
+            Some(Err(error)) if self.nft_required() => return Err(error),
+            _ => None,
+        };
+        if nft_path.is_none() && !self.select_optional_backend() {
             return Ok(());
         }
+        #[cfg(feature = "cutoff-measure")]
+        drop(lookup);
         if !self.installed
             && let Err(error) = self.adopt()
         {
@@ -699,18 +709,30 @@ impl Firewall {
         }
         let applied = if self.is_fallback() {
             self.guard_script = None;
-            crate::iptables::apply_guard_only(config, aliases, proxy_ingress)
+            crate::iptables::apply_guard_only(config, aliases, proxy_ingress).map(|()| None)
         } else {
-            self.install_nft_guard(GuardScript::new(config, aliases, proxy_ingress))
+            nft_path.map_or_else(nft, Ok).and_then(|path| {
+                self.install_nft_guard(config, aliases, proxy_ingress, &path)?;
+                Ok(Some(path))
+            })
         };
         match applied {
-            Ok(()) => {
+            Ok(nft_path) => {
                 self.installed = true;
                 self.fallback_complete = self.is_fallback();
-                self.previous = Some(config.clone());
-                self.previous_aliases = aliases.to_vec();
                 self.previous_fence = false;
-                self.refresh_guard_status();
+                if let Some(path) = nft_path {
+                    self.guard_status = KernelGuardStatus {
+                        state: "installed",
+                        missing: Vec::new(),
+                        detail: format!(
+                            "nft at {} installed the kernel-only guard",
+                            path.display()
+                        ),
+                    };
+                } else {
+                    self.refresh_guard_status();
+                }
                 Ok(())
             }
             Err(error) if self.nft_required() => Err(error),
@@ -720,7 +742,7 @@ impl Firewall {
             }
         }
     }
-    /// Install the nft guard `script`, sending only what differs from the table this process
+    /// Install the nft guard, sending only what differs from the table this process
     /// last installed (#260 J1240).
     ///
     /// An unchanged table sends nothing, and changed address sets send one element transaction;
@@ -729,19 +751,56 @@ impl Firewall {
     /// replaced whole as well, so the result is always exactly `script`.
     /// # Errors
     /// Reports a missing nft or a refused full replacement; the recorded table is then unknown.
-    fn install_nft_guard(&mut self, script: GuardScript) -> io::Result<()> {
+    fn install_nft_guard(
+        &mut self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+        proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
+        nft: &Path,
+    ) -> io::Result<()> {
+        #[cfg(feature = "cutoff-measure")]
+        let build =
+            crate::cutoff_measure::Stage::new(config.node, config.version, "guard_ruleset_build");
         let installed = self.guard_script.take().filter(|_| self.installed);
-        let nft = nft()?;
-        let update = installed
-            .as_ref()
-            .map_or(GuardUpdate::Replace, |installed| {
-                script.update_from(installed)
-            });
-        let done = match update {
-            GuardUpdate::Unchanged => Ok(()),
-            GuardUpdate::Elements(changes) => run(&nft, &["-f", "-"], &changes)
-                .or_else(|_| run(&nft, &["-f", "-"], &script.render(true))),
-            GuardUpdate::Replace => run(&nft, &["-f", "-"], &script.render(self.installed)),
+        let (script, changes) = match installed {
+            Some(mut current) if current.matches_addresses(config, aliases) => {
+                let rest = render_guard_rest(config, aliases, proxy_ingress);
+                let changes = if current.rest == rest {
+                    GuardUpdate::Unchanged
+                } else {
+                    current.rest = rest;
+                    GuardUpdate::Replace
+                };
+                (current, changes)
+            }
+            installed => {
+                let script = GuardScript::new(config, aliases, proxy_ingress);
+                let changes = installed
+                    .as_ref()
+                    .map_or(GuardUpdate::Replace, |current| script.update_from(current));
+                (script, changes)
+            }
+        };
+        let (batch, is_delta) = match changes {
+            GuardUpdate::Unchanged => (None, false),
+            GuardUpdate::Elements(changes) => (Some(changes), true),
+            GuardUpdate::Replace => (Some(script.render(self.installed)), false),
+        };
+        #[cfg(feature = "cutoff-measure")]
+        drop(build);
+        let done = if let Some(batch) = batch {
+            #[cfg(feature = "cutoff-measure")]
+            let _invoke =
+                crate::cutoff_measure::Stage::new(config.node, config.version, "guard_nft_invoke");
+            run(nft, &["-f", "-"], &batch).or_else(|error| {
+                if is_delta {
+                    run(nft, &["-f", "-"], &script.render(true))
+                } else {
+                    Err(error)
+                }
+            })
+        } else {
+            Ok(())
         };
         if done.is_ok() {
             self.guard_script = Some(script);
@@ -1162,6 +1221,8 @@ fn render_guard_only(
 /// peers). [`GuardScript::update_from`] turns two scripts into that smaller transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct GuardScript {
+    /// The local, alias and peer addresses in snapshot order, for cheap unchanged checks.
+    owners: Vec<crate::policy::model::Addresses>,
     /// Every mesh IPv4 address the guard fences: this node's, its aliases', and each peer's.
     mesh4: std::collections::BTreeSet<std::net::Ipv4Addr>,
     /// The IPv6 addresses of the same owners.
@@ -1189,20 +1250,38 @@ impl GuardScript {
         aliases: &[crate::policy::model::Addresses],
         proxy_ingress: &infraternal_mesh::proxy_ports::MeshProxyIngress,
     ) -> Self {
-        let owners = std::iter::once(&config.addresses)
-            .chain(aliases)
-            .chain(config.peers.values().map(|peer| &peer.peer.addresses));
+        let owners: Vec<_> = Self::owners(config, aliases).copied().collect();
         let mut mesh4 = std::collections::BTreeSet::new();
         let mut mesh6 = std::collections::BTreeSet::new();
-        for address in owners {
+        for address in &owners {
             mesh4.insert(address.ipv4);
             mesh6.insert(address.ipv6);
         }
         Self {
+            owners,
             mesh4,
             mesh6,
             rest: render_guard_rest(config, aliases, proxy_ingress),
         }
+    }
+
+    /// Visit the address sources in the same order for every equivalent snapshot.
+    fn owners<'a>(
+        config: &'a Config,
+        aliases: &'a [crate::policy::model::Addresses],
+    ) -> impl Iterator<Item = &'a crate::policy::model::Addresses> {
+        std::iter::once(&config.addresses)
+            .chain(aliases)
+            .chain(config.peers.values().map(|peer| &peer.peer.addresses))
+    }
+
+    /// Exact equality of sources proves set equality, including duplicate or moved addresses.
+    fn matches_addresses(
+        &self,
+        config: &Config,
+        aliases: &[crate::policy::model::Addresses],
+    ) -> bool {
+        self.owners.iter().eq(Self::owners(config, aliases))
     }
 
     /// The complete table as one `nft -f` script; `replace` deletes the installed table first,
@@ -2035,13 +2114,18 @@ mod tests {
     /// left the host table's kernel objects untouched, independent of how a
     /// given nft version prints them as text.
     fn host_table_json(nft: &std::path::Path) -> Vec<serde_json::Value> {
+        table_json(nft, "infraternal_host")
+    }
+
+    /// Read the named table as JSON objects in rule order, skipping CLI metadata.
+    fn table_json(nft: &std::path::Path, name: &str) -> Vec<serde_json::Value> {
         let output = Command::new(nft)
-            .args(["-j", "list", "table", "inet", "infraternal_host"])
+            .args(["-j", "list", "table", "inet", name])
             .output()
-            .expect("list the host input table");
+            .expect("list the live table");
         assert!(
             output.status.success(),
-            "list the host input table: {}",
+            "list the live table: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let document: serde_json::Value =
@@ -2055,7 +2139,7 @@ mod tests {
             .collect();
         assert!(
             objects.iter().any(|object| object.get("rule").is_some()),
-            "host table snapshot must contain its rules: {objects:?}"
+            "table snapshot must contain its rules: {objects:?}"
         );
         objects
     }
@@ -2136,6 +2220,71 @@ mod tests {
         run(&nft, &["-f", "-"], &format!("delete table inet {TABLE}\n")).expect("external removal");
         filter.remove().expect("already absent owned table");
         assert!(!filter.installed);
+    }
+    /// Apply a sequence of address-set element changes to the same live table. The last table
+    /// must equal a fresh render including its chains and both IPv4 and IPv6 sets.
+    #[test]
+    #[ignore = "Run inside a dedicated network namespace with CAP_NET_ADMIN."]
+    fn consecutive_guard_deltas_match_a_full_ruleset_rebuild() {
+        let _nft_override = crate::host_firewall::NftTestPathOverride::with_fixed_nft_fixture();
+        let nft = super::nft().expect("fixed root-owned nft path");
+        let mut firewall =
+            Firewall::for_node(Some(Backend::Nft), crate::gotatun_node::EngineKind::GotaTun);
+        let mut config = config();
+        let ingress = infraternal_mesh::proxy_ports::MeshProxyIngress::default();
+        firewall
+            .install_kernel_guard(&config, &[], &ingress)
+            .expect("first guard");
+        let handle = |objects: &[serde_json::Value]| {
+            objects
+                .iter()
+                .find_map(|entry| entry.get("table")?.get("handle")?.as_u64())
+                .expect("live table handle")
+        };
+        let original_handle = handle(&table_json(&nft, TABLE));
+        for id in 2_u32..=25 {
+            let mut peer = config
+                .peers
+                .remove(&NodeId(u64::from(id)))
+                .expect("peer being moved");
+            let next = id + 2000;
+            peer.peer.addresses = Addresses {
+                ipv4: std::net::Ipv4Addr::from(0x0afe_0000 + next),
+                ipv6: std::net::Ipv6Addr::from((0xfd01_u128 << 112) + u128::from(next)),
+            };
+            config.peers.insert(NodeId(u64::from(next)), peer);
+            config.version += 1;
+            firewall
+                .install_kernel_guard(&config, &[], &ingress)
+                .expect("apply peer address delta");
+            assert_eq!(firewall.guard_status.state, "installed");
+        }
+        let normalize = |mut objects: Vec<serde_json::Value>| {
+            for item in &mut objects {
+                for object in item.as_object_mut().expect("table object").values_mut() {
+                    if let Some(object) = object.as_object_mut() {
+                        object.remove("handle");
+                        if let Some(serde_json::Value::Array(elements)) = object.get_mut("elem") {
+                            elements.sort_by_key(ToString::to_string);
+                        }
+                    }
+                }
+            }
+            objects
+        };
+        let incremental = table_json(&nft, TABLE);
+        assert_eq!(
+            handle(&incremental),
+            original_handle,
+            "no table replacement"
+        );
+        run(
+            &nft,
+            &["-f", "-"],
+            &render_guard_only(&config, true, &[], &ingress),
+        )
+        .expect("replace the whole guard");
+        assert_eq!(normalize(incremental), normalize(table_json(&nft, TABLE)));
     }
     /// First adoption replaces an unmarked product-owned mesh table safely.
     #[test]

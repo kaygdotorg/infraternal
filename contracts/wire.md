@@ -497,27 +497,29 @@ satisfying a mesh proof with ambiguous connection-wide progress.
 
 ## 9. Route liveness (D265, #199)
 
-Use the existing `Ping`/`Pong` layouts in both directions. With active terminal
-routes the server probes the browser control stream, the shared infraternal
-daemon control stream and each attached terminal stream. Terminal-stream Pong
-on leg B follows the selected shim writer's existing `InputStateRequest` fence;
-a daemon control reply alone never establishes session readiness. One shim
-fence may be in flight per data link and is discarded when that link is parked.
+Use the existing `Ping`/`Pong` layouts in both directions. With at least one
+attached terminal, the server probes the browser control stream and one shared
+infraternal agent control stream for that host link. It does not probe individual
+terminal streams: those streams carry terminal data, and one correlated host
+reply renews liveness for every attachment on that link. A terminal stream EOF
+or reset is forwarded as a `Close` for that terminal; a host control reply does
+not claim that an individual shim is responsive.
 
-A selected writer's state fence can also carry written-input progress
-(shim contract, capability bit 0). Forward newly advanced progress through the
-existing terminal Ack before its correlated Pong, including when output is
-parked. Unchanged fences remain Pong-only: they do not add repeated Ack frames
-or storage work. Merely accepted input is never acknowledged as written.
+The shared host-link lease starts when the first terminal attaches and stops
+when the last one detaches. It remains active regardless of terminal viewer
+visibility, so a dead host is still detected while all its browser viewers are
+hidden. A `terminal.visibility` notice may be accepted on the terminal stream,
+but it does not park or restart host liveness. A `connection.visibility` notice
+still pauses the browser socket's own probes as described below.
 
 Local send-queue pressure alone never retires a connection or terminal for a
 liveness probe (#234). Skip a scheduled Ping before issuing its correlation
 when the bounded FIFO has no room; skipping never starts or renews a reply
-deadline. A best-effort Pong or terminal-command Ping may likewise be omitted
-at capacity. Outstanding correlated replies retain the timeout below. Reliable
-control replies defer their producers until bounded FIFO capacity returns,
-preserving ordering, including the census-before-open-result fence. Actual
-transport errors and closed writers still retire their connections.
+deadline. A best-effort Pong may likewise be omitted at capacity. Outstanding
+correlated replies retain the timeout below. Reliable control replies defer
+their producers until bounded FIFO capacity returns, preserving ordering,
+including the census-before-open-result fence. Actual transport errors and
+closed writers still retire their connections.
 
 When both peers advertise Hello caps bit 2 (`VIEWER_VISIBILITY`), the viewer
 may send a control-stream
@@ -552,7 +554,14 @@ frames, not muxed `Ping` frames (#317). The payload is 16 bytes: `nonce` then
 answers with the control Pong that echoes it, without running page code, so a
 visible idle page does no liveness work of its own. A Pong of any other length
 is ignored. Hidden suspension (above) covers these frames too: a hidden page
-gets no probe of any kind. The browser sends muxed `Ping` only on demand: when
+gets no liveness probe of any kind. The one exception is a full host (#562):
+when an attach is refused because the host already carries its bound of
+terminals, the server sends each socket of that account, hidden or not, one
+WebSocket Ping with an empty payload. A socket from which nothing at all
+arrives within 4 s is ended as idle, which releases its terminals; the viewer's
+resume capability is unaffected. A socket that answered is not asked again for
+30 s. The browser answers without page code, so a viewer needs no change. The
+browser sends muxed `Ping` only on demand: when
 the page becomes visible, gains focus, is shown again from the page cache or
 comes back online, and on its first input after a quiet second. A fully
 answered route keeps no client timer. An on-demand probe has the allowance
@@ -574,11 +583,11 @@ initialize `srtt = RTT`, `rttvar = RTT / 2`; subsequent samples update
 The browser response allowance follows the host formula below (#244). A proven
 foreground browser route doubts its first miss and retires after two consecutive
 allowances without a correlated reply; startup still has a two-second grace.
-Host routes (the primary host link and its terminal streams) carry ordered
-replies that one lost packet holds back for about one more round trip, so
-their allowance is `clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300].
-On the primary host link a first miss only marks the route doubtful: the
-link, its streams and writers stay. Each settled stream of a viewer that set
+The shared primary host link carries ordered replies that one lost packet holds
+back for about one more round trip, so its allowance is
+`clamp(2 × srtt + 4 × rttvar + 75 ms, 250 ms, 2 s)` [D300]. On the host link a
+first miss only marks it doubtful: the link, its streams and writers stay. Each
+settled stream of a viewer that set
 browser Hello caps bit 1 (`LINK_DOUBT_NOTICES`) receives
 `{"type":"terminal.link_doubt","session_id":"UUID"}`. The viewer shows that
 the link may be reconnecting and changes nothing else: live output is not

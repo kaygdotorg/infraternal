@@ -25,6 +25,7 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
     title: `Remove ${name}?`,
     effect: REMOVAL_EFFECT,
     named: true,
+    tone: "danger",
     confirmLabel: "Remove",
     cancelLabel: "Keep",
     onConfirm,
@@ -32,12 +33,13 @@ export function confirmHostRemoval(name: string, anchor: HTMLElement | null, onC
   });
 }
 
-/** Confirm D369's server-only forgetting, explicitly distinguishing it from machine cleanup. */
+/** Confirm that forgetting a revoked host ends server delivery and may leave its installation behind. */
 export function confirmHostForget(name: string, anchor: HTMLElement | null, onConfirm: () => void, returnFocus?: () => void): ConfirmTipController {
   return mountConfirmTip(anchor, {
     title: `Forget ${name}?`,
-    effect: "Remove this host from the list and stop its pending cleanup. Keep the audit record. This does not touch the machine itself or uninstall infraternal from it.",
+    effect: "Removes this host from the list and stops uninstall retries. If the infraternal agent is still installed on it, uninstall it on the machine itself.",
     named: true,
+    tone: "danger",
     confirmLabel: "Forget",
     cancelLabel: "Keep",
     onConfirm,

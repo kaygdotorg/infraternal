@@ -25,8 +25,7 @@ use crate::{
         ATTACH_UNOWNED, AUTHORITY_UNAVAILABLE, CLIENT_WENT_AWAY, CONNECTION_LIMIT, CREDIT_REFUSED,
         CloseOwner, CloseReason, CloseRecord, CloseWho, HOST_STREAM_LIMIT, INPUT_QUEUE_FULL,
         NO_SESSION, PROTOCOL_ERROR, RESUME_REFUSED, StreamCloseLog, TAKEN_OVER,
-        TERMINAL_ROUTE_IDLE, classify_terminal_close, safe_agent_close_reason,
-        safe_websocket_reason,
+        classify_terminal_close, safe_agent_close_reason, safe_websocket_reason,
     },
 };
 use axum::{
@@ -108,8 +107,9 @@ const MAX_RESUME_ROWS: i64 = 4096;
 /// account's new sockets (#572 finding 4). 64 is four times the live limit: a person whose 16 tabs all drop and
 /// reconnect several times inside the 120 s window still resumes each of them. The global cap stays the backstop.
 const MAX_USER_RESUME_ROWS: i64 = 64;
-// Reject further AttachTerm requests on a socket at this bound.
-pub(super) const MAX_ATTACHMENTS: usize = 32;
+/// Bound the stream and writer metadata held by one browser socket. A socket
+/// can carry a full host's terminal streams within this limit (D214, #562).
+pub(super) const MAX_ATTACHMENTS: usize = infraternal_plugin_api::channel::MAX_TERMINAL_STREAMS;
 // Enough to cover every stream on a server socket while keeping the exit-status sidecar small.
 const MAX_ENDED_SESSION_STATUSES: i64 = 128;
 // A blocked websocket writer applies backpressure to each bounded attachment pump.
@@ -472,6 +472,19 @@ impl WebSocketState {
             .unwrap_or_else(|| Arc::new(AccountSockets::new(MAX_USER_CONNECTIONS)));
         users.insert(user.to_owned(), Arc::downgrade(&account));
         Some(account)
+    }
+
+    /// Ask every socket of the account to prove its browser still answers, so that a socket
+    /// whose browser is gone releases the terminals it holds (#562).
+    fn challenge_account_sockets(&self, user: &str) {
+        let account = self
+            .users
+            .lock()
+            .ok()
+            .and_then(|users| users.get(user).and_then(std::sync::Weak::upgrade));
+        if let Some(account) = account {
+            account.challenge_all();
+        }
     }
 
     /// Reserve per-user capacity before Hello. When the account is full, the new page takes over the socket of the
@@ -979,6 +992,12 @@ async fn run_socket(
                             && !plugins.owns_stream(decoded.stream_id)
                             && (plugins.opens_native_stream(&decoded.frame) || matches!(decoded.frame, Frame::AttachTerm { .. }))
                             && attachments.len() + plugins.active_streams() >= MAX_ATTACHMENTS {
+                            // The browser may already have sent Credit and Resize behind
+                            // this attach. Retire the stream so those frames spare its siblings.
+                            if matches!(decoded.frame, Frame::AttachTerm { .. })
+                                && ended.insert(decoded.stream_id).is_err() {
+                                break;
+                            }
                             if while_authorized(&state, &user_id, &session_token, true,
                                 send_frame(&mut sink, decoded.stream_id, &Frame::Close { code: 1013, reason: "stream limit" }, &mut encode)
                             ).await.is_err() { break; }
@@ -1031,18 +1050,10 @@ async fn run_socket(
                         output_open = false;
                         continue;
                     };
-                    // Proof replies stay in the host actor. A failed route returns here
-                    // for two authority gates: the browser notice, then backend rebind.
-                    let reconnect = matches!(output, TerminalOutput::RouteExpired)
-                        .then(|| attachments.get(&stream_id).map(|a| a.handle.clone())).flatten();
                     if while_authorized(&state, &user_id, &session_token, true, handle_terminal_output(
                         &state, &user_id, &session_token, &connection_id, stream_id, output,
                         link_doubt_notices, &mut attachments, &mut ended, &mut sink, &mut encode,
                     )).await.is_err() { break; }
-                    if let Some(handle) = reconnect
-                        && while_authorized(&state, &user_id, &session_token, true,
-                            async { handle.reconnect().await.map_err(|_| ()) }).await.is_err() { break; }
-
                 }
                 plugin_call = pending_plugin_calls.join_next(), if !pending_plugin_calls.is_empty() => {
                     let Some(Ok((call_id, result))) = plugin_call else { loop_result = Err(()); break; };
@@ -1586,16 +1597,12 @@ where
             .await
             .is_ok()
         }
-        TerminalOutput::Reconnecting
-        | TerminalOutput::RouteExpired
-        | TerminalOutput::LinkDoubt
-        | TerminalOutput::Recovered => {
+        TerminalOutput::Reconnecting | TerminalOutput::LinkDoubt | TerminalOutput::Recovered => {
             let Some((kind, awaits_ack)) = link_notice(&output, link_doubt_notices) else {
                 return Ok(());
             };
-            // Only a lost route is a close worth logging; a doubted link is kept (D300).
+            // A replaced host link is logged; a doubtful but live link is kept (D300).
             let reason = match output {
-                TerminalOutput::RouteExpired => Some(TERMINAL_ROUTE_IDLE),
                 TerminalOutput::Reconnecting => Some(AGENT_CONNECTION_DROPPED),
                 _ => None,
             };
@@ -1720,9 +1727,7 @@ where
 /// [D300, #234].
 fn link_notice(output: &TerminalOutput, link_doubt_notices: bool) -> Option<(&'static str, bool)> {
     match output {
-        TerminalOutput::Reconnecting | TerminalOutput::RouteExpired => {
-            Some(("terminal.reconnecting", true))
-        }
+        TerminalOutput::Reconnecting => Some(("terminal.reconnecting", true)),
         TerminalOutput::LinkDoubt => link_doubt_notices.then_some(("terminal.link_doubt", false)),
         TerminalOutput::Recovered => {
             link_doubt_notices.then_some(("terminal.link_recovered", false))
@@ -2260,7 +2265,7 @@ where
         }
         Frame::Call {
             call_id,
-            action_id: "terminal.startup",
+            action_id: action_id @ ("terminal.startup" | "terminal.end"),
             input_json,
         } if stream_id == CONTROL_STREAM
             && input_json.len() <= 8192
@@ -2270,9 +2275,14 @@ where
             let user = user_id.to_owned();
             let token = session_token.to_owned();
             let input = input_json.to_vec();
+            let end = action_id == "terminal.end";
             pending_plugin_calls.submit(false, async move {
                 let result = while_authorized_value(&state, &user, &token, false, async {
-                    Ok(startup_call(&state, &user, &input).await)
+                    Ok(if end {
+                        end_terminal(&state, &user, &token, &input).await
+                    } else {
+                        startup_call(&state, &user, &input).await
+                    })
                 })
                 .await
                 .unwrap_or(Err(AgentError::Unavailable));
@@ -2509,13 +2519,17 @@ where
             addhost_timeline("attach_agent_resolved");
             let attached = tokio::time::timeout(
                 BACKEND_TIMEOUT,
-                agent.attach_monitored(session, last_out_seq, input_acked, writer_stream),
+                agent.attach_browser(session, last_out_seq, input_acked, writer_stream),
             )
             .await;
             let Ok(Ok(attachment)) = attached else {
                 // A full link refuses at once with its own plain sentence (#562);
                 // every other failure keeps the generic one.
                 let refusal = if matches!(attached, Ok(Err(AgentError::StreamLimit))) {
+                    // Some of those terminals may belong to a browser that is gone. Ask every
+                    // socket of the account to answer; the browser's retry finds the places
+                    // the silent ones gave up.
+                    state.challenge_account_sockets(user_id);
                     HOST_STREAM_LIMIT
                 } else {
                     AGENT_CONNECTION_REFUSED
@@ -2622,17 +2636,13 @@ where
             state.close_logs.record(&close);
             Ok(())
         }
-        // A terminal's viewer went hidden or came back (#562): park or resume its route probes. A notice
-        // for a stream that already closed is the usual race with a Close and is dropped.
+        // Validate visibility notices for negotiated viewers. Host liveness is shared across
+        // the connection, so visibility does not create terminal-specific probes.
         Frame::Event {
             sub_id: 0,
             event_json,
         } if stream_id != 0 && stream_id % 2 == 1 => {
-            let hidden =
-                crate::websocket_transport::terminal_visibility_notice(event_json).ok_or(())?;
-            if let Some(attachment) = attachments.get(&stream_id) {
-                attachment.handle.set_parked(hidden).await.map_err(|_| ())?;
-            }
+            crate::websocket_transport::terminal_visibility_notice(event_json).ok_or(())?;
             Ok(())
         }
         Frame::InputReply { query_seq, bytes } if stream_id != 0 && stream_id % 2 == 1 => {
@@ -3306,16 +3316,14 @@ async fn open_terminal(
     let person =
         uuid::Uuid::parse_str(user_id).map_err(|_| crate::embedded::AgentError::Rejected)?;
     #[cfg(feature = "ssh")]
-    let account = Some(
-        crate::preferred_accounts::resolve(
-            &state.pool,
-            user_id,
-            &crate::auth::hash(session_token),
-            host,
-        )
-        .await
-        .map_err(|_| crate::embedded::AgentError::Unavailable)?,
-    );
+    let account = crate::preferred_accounts::resolve(
+        &state.pool,
+        user_id,
+        &crate::auth::hash(session_token),
+        host,
+    )
+    .await
+    .map_err(|_| crate::embedded::AgentError::Unavailable)?;
     #[cfg(not(feature = "ssh"))]
     let account = None;
     // Login access (D235 Q14): the same check as mesh SSH. The host applies it
@@ -3378,6 +3386,61 @@ async fn open_terminal(
     }
     state.sessions_changed();
     Ok(opened)
+}
+
+/// The browser identifies the session. Only the account's persisted row selects its host.
+async fn end_terminal(
+    state: &WebSocketState,
+    user: &str,
+    token: &str,
+    input: &[u8],
+) -> Result<Vec<u8>, AgentError> {
+    /// The only field the browser can use to identify the terminal to end.
+    #[derive(serde::Deserialize)]
+    struct EndTerminal {
+        /// Stable terminal ID returned by the open call and the inventory.
+        session_id: uuid::Uuid,
+    }
+    if crate::update_activity::frozen() {
+        return Err(AgentError::Unavailable);
+    }
+    let EndTerminal { session_id } =
+        serde_json::from_slice(input).map_err(|_| AgentError::Rejected)?;
+    let host = session_host_id(&state.pool, user, session_id.as_bytes())
+        .await
+        .map_err(|()| AgentError::Unavailable)?
+        .ok_or(AgentError::Rejected)?;
+    if session_gone(&state.pool, user, session_id.as_bytes())
+        .await
+        .map_err(|()| AgentError::Unavailable)?
+    {
+        return Ok(b"{}".to_vec());
+    }
+    let agent = terminal_agent(state, user, host)
+        .await
+        .map_err(|()| AgentError::Unavailable)?;
+    let id = serde_json::to_vec(&session_id).map_err(|_| AgentError::Rejected)?;
+    let reply = tokio::time::timeout(BACKEND_TIMEOUT, agent.call("terminal.end".to_owned(), id))
+        .await
+        .map_err(|_| AgentError::Unavailable)??;
+    let status = serde_json::from_slice::<i32>(&reply).map_err(|_| AgentError::Unavailable)?;
+    crate::terminal_exit::record_status_on_writer(
+        &state.auth,
+        &state.pool,
+        user,
+        token,
+        session_id.as_bytes(),
+        status,
+    )
+    .await
+    .map_err(|()| AgentError::Unavailable)?;
+    state
+        .queries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire(session_id.into_bytes());
+    state.sessions_changed();
+    Ok(b"{}".to_vec())
 }
 
 /// Core-only builds select the local host and refuse every remote selection.
@@ -3981,6 +4044,7 @@ mod link_notice_tests {
     //! A kept, doubted host link is never presented as a replay [D300, #234].
     use super::*;
 
+    /// Only opted-in viewers receive doubt notices, which do not wait for an Ack.
     #[test]
     fn doubt_notices_reach_only_viewers_that_announced_them_and_never_await_an_ack() {
         assert_eq!(
@@ -3998,10 +4062,6 @@ mod link_notice_tests {
         for viewer in [false, true] {
             assert_eq!(
                 link_notice(&TerminalOutput::Reconnecting, viewer),
-                Some(("terminal.reconnecting", true))
-            );
-            assert_eq!(
-                link_notice(&TerminalOutput::RouteExpired, viewer),
                 Some(("terminal.reconnecting", true))
             );
         }

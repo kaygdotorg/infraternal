@@ -9,14 +9,12 @@ safety notes.
 
 ## Human and JSON output
 
-Every command prints the same shape for people: the answer in one plain
-sentence first, then short aligned blocks, then `Why` (failures only) and
-`Next` (only a follow-up that is true for this state, at most three). Tables
-show a header only from two rows, size each column to its widest value, and
-wrap only the last column. Width comes from the terminal, then `$COLUMNS`,
-then 80, and never exceeds 100. Colour and the state mark (`●` `○` `!` `✕`)
-appear only on a terminal; colour is off with `NO_COLOR`. Failures go to
-standard error.
+Commands lead with the answer and show details in short aligned blocks.
+Follow-up actions appear as bullets. UTF-8 terminals can draw table borders
+and frame related details. Redirected output uses plain separators.
+Colour is off when `NO_COLOR` is set to a nonempty value. Width comes from
+the terminal, then `$COLUMNS`, then 80, with a maximum of 100 columns. Long
+URLs and other unbroken values stay copyable. Failures go to standard error.
 
 Every command, including hidden internal ones, accepts `--json`. JSON is one
 compact line per result on standard output, also for failures and usage
@@ -52,6 +50,7 @@ flags and wording. This is the map:
 | `remove-host <HOST>` | remove a host (needs `--server`) |
 | `sessions` | saved-session automation on this machine (below) |
 | `up <server>` | join this Linux machine or Mac to a server |
+| `uninstall` | review and remove the local install, with `--system` for system installs in scripts |
 | `agent join`, `agent run` | enrol this machine and keep the infraternal agent connected |
 | `mesh status`, `mesh peers`, `mesh up`, `mesh down` | this machine's Mesh node |
 | `publish`, `unpublish` | expose a local service through the node proxy |
@@ -97,6 +96,11 @@ on a terminal; non-interactive use must pass `--yes`. The top-level help also
 lists `server init` as the first server-setup command. The legacy
 `infraternal server install` path remains hidden from help and only prints
 migration guidance; it does not create or change a service.
+
+`--relay-port` enables the server node's IPv4 UDP relay socket and requires
+`--remote-listen`. `infraternal server init --system --relay-port` writes the
+persistent host-firewall rule for that socket. A direct `infraternal server
+run` binds the socket but does not change firewall state.
 
 `--data` always selects the server data directory when supplied. Without it,
 server commands that read or create server data use the `--data` path recorded
@@ -205,8 +209,8 @@ default. Run it as the person who uses the Mac, without `sudo`:
 - The infraternal agent runs as you, from
   `~/Library/LaunchAgents/kayg.infraternal.agent.plist`, with its files in
   `~/Library/Application Support/infraternal` and its log in
-  `~/Library/Logs/infraternal/agent.log` (D395). `up` prints the `PATH` line
-  to add.
+  `~/Library/Logs/infraternal/agent.log` (D395). `up` shows the full path to
+  the installed command and offers to add it to `PATH` for new zsh sessions.
 - Only one account per Mac can use user mode, and not beside root mode.
 - A Mac that joined with an older build has the same pieces under `org.infraternal.*`
   names. Run `infraternal up` again: it asks for the administrator password once,
@@ -216,7 +220,7 @@ default. Run it as the person who uses the Mac, without `sudo`:
   the program by its new identifier (`kayg.infraternal`); click Allow.
   Removal takes both the old and the new pieces.
 - To remove it, run
-  `~/Library/Application\ Support/infraternal/bin/infraternal --bootstrap-uninstall <host>`
+  `infraternal uninstall`
   as the same person. It stops the agent, which drops the mesh interface and
   its routes, removes the helper's resolver file and the helper itself, and
   deletes the files above. It needs no password.
@@ -262,9 +266,10 @@ remote setup failure detail. `hosts remove <id> --dry-run` shows what would be
 removed and changes nothing. `hosts remove <id>` first shows that same dry run, asks
 `Type yes to confirm`, and only then removes the host and uninstalls its
 infraternal agent (D28). `--yes` skips the question for scripts; `--json` and
-pipes need it. `hosts forget <id>` is for a host that was retired and cannot be
-reached: it drops the list entry and its pending cleanup, keeps the audit record
-and does not touch the machine. It has the same `--dry-run` and `--yes`. Inside its `hosts:write` scope the key needs no further passkey tap
+pipes need it. The owner can use `hosts forget <id>` as soon as a host loses
+access and shows pending cleanup. This drops the list entry, stops pending
+cleanup and keeps the audit record. The dry run explains how to clean up any
+remaining installation on the host. This command also supports `--dry-run` and `--yes`. Inside its `hosts:write` scope the key needs no further passkey tap
 (D333); the tap was the key's approval, and every call is audited. Reads are
 counted per key and minute rather than logged one row per call.
 

@@ -95,7 +95,7 @@ export function renderNetworks(cx: Ctx, pane: HTMLElement, source: RoutesSource)
     }
 
     const keep: SettingRow = createSettingRow({
-      id: `keep-source-${n.routeId}`, title: "Keep Each Machine's Address", spec: KEEP_SOURCE, value: n.keepSource, caption: false,
+      id: `keep-source-${n.routeId}`, title: "Keep each machine's address", spec: KEEP_SOURCE, value: n.keepSource,
       explain: `Off: the network sees ${n.router}'s address and needs nothing else. On: it sees each machine's own mesh address, and needs a route back to the mesh through ${n.router}.`,
       onSave: (v) => { void source.setKeepSource(n.id, v === true).catch(failed); },
     });
@@ -127,7 +127,7 @@ export function renderNetworks(cx: Ctx, pane: HTMLElement, source: RoutesSource)
     cleanup = [];
     root.replaceChildren();
     if (!list.length) {
-      root.append(el("p", "cl-settings-later", "No machine advertises a network. When one does, it waits here for you to approve it."));
+      root.append(el("p", "cl-settings-later", "No networks shared yet. When a machine offers a subnet, it appears here for approval."));
       return;
     }
     for (const n of list) root.append(block(n));

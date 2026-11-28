@@ -15,6 +15,7 @@ use axum::{
     routing::post,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+use infraternal_plugin_remote::local_retirement;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::{
@@ -219,8 +220,7 @@ impl InvitationIssuer {
     pub(crate) fn origin(&self) -> &str {
         self.0.auth.origin()
     }
-    /// The underlying enrollment store shared with bootstrap and promotion flows.
-    #[cfg(any(feature = "ssh", test))]
+    /// The enrollment store shared by machine approval, bootstrap, and promotion.
     pub(crate) fn store(&self) -> &EnrollmentStore {
         &self.0.store
     }
@@ -262,6 +262,7 @@ pub(crate) fn unavailable_router() -> Router {
         .route("/remote/invitations", post(unavailable))
         .route("/remote/join", post(unavailable))
         .route("/remote/revocations", post(unavailable))
+        .route(local_retirement::PATH, post(unavailable))
 }
 
 /// Runtime supplies the same event scope used by its admitted host transports.
@@ -286,6 +287,7 @@ pub(crate) fn router_with_store(
         .route("/remote/invitations", post(invite))
         .route("/remote/join", post(join))
         .route("/remote/revocations", post(revoke))
+        .route(local_retirement::PATH, post(retire_local))
         .layer(axum::extract::DefaultBodyLimit::max(8192))
         .layer(from_fn_with_state(api.clone(), admission))
         .with_state(api)
@@ -313,13 +315,33 @@ async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Accept the exact installed host's signature and wait for the existing login cleanup receipt.
+async fn retire_local(
+    State(api): State<Api>,
+    Json(request): Json<local_retirement::Request>,
+) -> Result<StatusCode, StatusCode> {
+    let now = now()?;
+    api.store
+        .retire_from_installation(&request, now)
+        .await
+        .map_err(|error| match error {
+            crate::enrollment::EnrollmentError::Denied => StatusCode::FORBIDDEN,
+            crate::enrollment::EnrollmentError::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn admission(State(api): State<Api>, request: Request, next: Next) -> Response {
     tokio::time::timeout(Duration::from_secs(5), admit_request(api, request, next))
         .await
         .unwrap_or_else(|_| StatusCode::REQUEST_TIMEOUT.into_response())
 }
+/// Reserve a bounded request slot and authorize owner routes before reading their bodies.
 async fn admit_request(api: Api, request: Request, next: Next) -> Response {
-    let owner = request.uri().path() != "/remote/join";
+    let owner = !matches!(
+        request.uri().path(),
+        "/remote/join" | local_retirement::PATH
+    );
     let _source = if owner {
         if request
             .headers()

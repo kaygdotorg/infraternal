@@ -42,17 +42,24 @@ const palette = async (page: Page, text: string): Promise<void> => {
 };
 const active = (page: Page): Promise<string | undefined> => page.evaluate(() => document.querySelector<HTMLElement>('.cl[data-view="settings"] .ui-window[data-active]')?.dataset.windowId);
 
-/** Rows inside one window: the name, help, control and range share one left edge; the control and its Reset share a centre line. */
+/** Rows inside one window: the name, help, control and (for typed settings) range share one left edge; switch and choice rows carry no caption; the control and its Reset share a centre line. */
 async function checkRows(page: Page, windowId: string): Promise<number> {
-  const rows = await page.evaluate((id) => [...document.querySelectorAll(`[data-window-id="${id}"] .ui-setting`)].map((r) => {
+  const rows = await page.evaluate((id) => [...document.querySelectorAll<HTMLElement>(`[data-window-id="${id}"] .ui-setting`)].map((r) => {
     const q = (s: string): DOMRect => r.querySelector(s)!.getBoundingClientRect();
-    const t = q(".ui-setting-title"), e = q(".ui-setting-explain"), c = q(".ui-setting-caption"), i = q(".ui-setting-field"), b = q(".ui-setting-reset");
-    return { tl: t.left, el: e.left, cl: c.left, il: i.left, im: (i.top + i.bottom) / 2, bm: (b.top + b.bottom) / 2, ir: i.right, bl: b.left, order: [t.top, e.top, i.top, c.top] };
+    const kind = r.dataset.kind ?? "";
+    const t = q(".ui-setting-title"), e = q(".ui-setting-explain"), cap = r.querySelector(".ui-setting-caption")?.getBoundingClientRect(), i = q(".ui-setting-field"), b = q(".ui-setting-reset");
+    return { kind, tl: t.left, el: e.left, cl: cap?.left ?? null, il: i.left, im: (i.top + i.bottom) / 2, bm: (b.top + b.bottom) / 2, ir: i.right, bl: b.left, order: cap ? [t.top, e.top, i.top, cap.top] : [t.top, e.top, i.top] };
   }), windowId);
   for (const [n, r] of rows.entries()) {
+    const typed = r.kind === "duration" || r.kind === "number" || r.kind === "text";
     near(r.el, r.tl, `row ${n} explain left edge`);
     near(r.il, r.tl, `row ${n} control left edge`);
-    near(r.cl, r.tl, `row ${n} caption left edge`);
+    if (typed) {
+      expect(r.cl, `row ${n} (${r.kind}) keeps its default/range caption`).not.toBeNull();
+      near(r.cl!, r.tl, `row ${n} caption left edge`);
+    } else {
+      expect(r.cl, `row ${n} (${r.kind}) omits the redundant "Default …" caption`).toBeNull();
+    }
     near(r.bm, r.im, `row ${n} reset/control centre`);
     near(r.bl - r.ir, rows[0]!.bl - rows[0]!.ir, `row ${n} control-to-reset gap`);
     near(r.tl, rows[0]!.tl, `row ${n} left edge`);
@@ -309,7 +316,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   await expect(preview).toBeVisible();
   await page.waitForTimeout(450);
   // Connection Keys is the 7-day key (D317): its quick facts come from the docs index as the docs wrote them.
-  await expect(preview.locator(".ui-dp-title")).toHaveText("Connection Keys");
+  await expect(preview.locator(".ui-dp-title")).toHaveText("Connection keys");
   await expect(preview.locator(".ui-dp-lead")).toContainText("Default every 7 days");
   await expect(preview.locator(".ui-dp-bullet")).toHaveCount(1);
   expect(await docsOnScreen(page), "the preview alone does not open the page").toBe(false);
@@ -346,7 +353,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
 
   // ⌘K goes straight to one setting: its window comes into view, the breadcrumb follows, the row is shown.
   await palette(page, "wireguard");
-  const found = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Connection Keys$/ }) });
+  const found = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Connection keys$/ }) });
   await expect(found).toBeVisible();
   await shot(page, "09-palette-wireguard");
   await found.click();
@@ -354,7 +361,7 @@ test("desktop: a row of windows for each component, breadcrumb, sidebar, \"?\", 
   expect(await active(page)).toBe("s-mesh-keys");
   expect(await crumbs(page)).toEqual(["Settings", "Mesh", "Keys"]);
   await palette(page, "browsers stay");
-  const browserRow = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Browsers Stay Signed In For$/ }) });
+  const browserRow = page.locator('.result[data-action^="canvas:settings:"]', { has: page.locator(".result-label", { hasText: /^Browser session length$/ }) });
   await expect(browserRow).toBeVisible();
   await browserRow.click();
   await page.waitForTimeout(500);
@@ -442,7 +449,7 @@ test("phone: a row for each component, the breadcrumb fits, rows align, \"?\" op
   await phoneQuestion.click();
   await expect(page.locator(".ui-sheet")).toBeVisible();
   await page.waitForTimeout(500);
-  await expect(page.locator(".ui-sheet .ui-dp-title")).toHaveText("Connection Keys");
+  await expect(page.locator(".ui-sheet .ui-dp-title")).toHaveText("Connection keys");
   await checkPreview(page, "sheet");
   await shot(page, "p03-preview");
   await page.evaluate(() => {

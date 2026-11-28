@@ -6,7 +6,7 @@
 #![cfg_attr(test, allow(clippy::expect_used, clippy::unwrap_used))]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod child;
-#[cfg(all(feature = "host-login", target_os = "linux"))]
+#[cfg(any(all(feature = "host-login", target_os = "linux"), target_os = "macos"))]
 mod cleanup;
 #[cfg(all(feature = "host-diagnostics", target_os = "linux"))]
 mod host_trace;
@@ -347,6 +347,12 @@ pub fn stdout_columns() -> Option<u16> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn exit_on_interrupt(notice: Vec<u8>) {
     pty::exit_on_interrupt(notice);
+}
+
+/// End by the original terminating signal after the caller finishes cleanup.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn exit_by_signal(signal: nix::sys::signal::Signal) -> ! {
+    pty::exit_by_signal(signal);
 }
 
 /// Restore SIGTERM's default action and re-raise it, after a process handled

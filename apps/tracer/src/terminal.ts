@@ -90,8 +90,8 @@ interface GhosttyActivityControls {
 export interface TerminalHooks {
   /** Return true when a product surface presents the refusal and its session-list action. */
   onOpenRefused?: (message: string, sessionList: boolean, action: RefusalAction, calm: boolean) => boolean;
-  /** Only a public session id; writer/resume capabilities remain in memory. */
-  onSessionCreated?: (sessionId: string) => void;
+  /** The public session ID and the account the host actually opened. */
+  onSessionCreated?: (sessionId: string, account?: string) => void;
   onAttached?: (resumed: boolean, terminal: TerminalClient) => void;
   onDisconnected?: (forced: boolean) => void;
   /**
@@ -710,22 +710,27 @@ export class TerminalClient {
   }
 
   /**
+   * Starts fetching and compiling the terminal engine's wasm early, without creating a renderer or waiting on fonts (#573).
+   * Safe to call before the canvas mounts so the engine compiles in parallel with layout loading.
+   */
+  static warmEngine(): void {
+    if (!TerminalClient.rendererPreparation) {
+      const renderer = loadEngine().then((engine) => { TerminalClient.engine = engine; });
+      TerminalClient.rendererPreparation = renderer;
+      void renderer.catch(() => {
+        if (TerminalClient.rendererPreparation === renderer) TerminalClient.rendererPreparation = undefined;
+      });
+    }
+  }
+
+  /**
    * Loads the font and the terminal engine once and shares the work between every caller: the engine's wasm file is
    * fetched and compiled here (`src/engine-wasm.ts`), and the loaded engine is kept for the renderers built afterwards.
    * @param font the face whose upright files gate the first paint
    */
   private static async prepareResources(font: MonoFont): Promise<void> {
-    let renderer = TerminalClient.rendererPreparation;
-    if (!renderer) {
-      renderer = loadEngine().then((engine) => { TerminalClient.engine = engine; });
-      TerminalClient.rendererPreparation = renderer;
-      // Concurrent opens/preparation must share one instance. A failed optional
-      // warm-up must not poison the later session's ordinary initialization.
-      void renderer.catch(() => {
-        if (TerminalClient.rendererPreparation === renderer) TerminalClient.rendererPreparation = undefined;
-      });
-    }
-    await Promise.all([loadFont(font), renderer]);
+    TerminalClient.warmEngine();
+    await Promise.all([loadFont(font), TerminalClient.rendererPreparation]);
   }
 
   get isConnected(): boolean { return this.attachmentConfirmed; }
@@ -1347,7 +1352,8 @@ export class TerminalClient {
       try {
         const sessionId = requireString(result.session_id);
         this.sessionId = uuidBytes(sessionId);
-        this.config.hooks?.onSessionCreated?.(sessionId);
+        const account = typeof result.account === "string" && result.account ? result.account : undefined;
+        this.config.hooks?.onSessionCreated?.(sessionId, account);
         this.attachRequested = true;
         this.tryAttach();
       } catch {
@@ -1356,7 +1362,7 @@ export class TerminalClient {
     }, (error: unknown) => {
       this.openCallSent = false;
       if (!this.closed && this.conn.isOpen) {
-        const refusal = terminalRefusal(error, this.config.hostName);
+        const refusal = terminalRefusal(error, this.config.hostName, Boolean(hostId));
         if (!this.config.hooks?.onOpenRefused?.(refusal.message, refusal.sessionList, refusal.action, refusal.calm === true)) this.setStatus(refusal.message);
       }
     });

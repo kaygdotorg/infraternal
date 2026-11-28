@@ -30,10 +30,6 @@ def census(client, session_id, present, deadline):
 
 
 def idle(client, label, sessions):
-    # Startup and exit cleanup can still resume after its last Pong is written.
-    # Settle that finite work in the probe, then keep the full zero-activation
-    # assertion. A daemon timer would still fail the unchanged 2.2 s window.
-    time.sleep(0.1)
     result = assert_process_idle(client.child.pid, label)
     print(f'event_idle label={label!r} sessions={sessions} slices={result.total_slices} '
           f'seconds={result.elapsed_seconds:.3f} rss_kib={rss(client.child.pid)}', flush=True)

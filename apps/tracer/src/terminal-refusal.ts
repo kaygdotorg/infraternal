@@ -18,7 +18,7 @@ export type RefusalAction = "retry" | "add-host" | "sessions" | "none";
 export interface TerminalRefusal { message: string; sessionList: boolean; action: RefusalAction; calm?: true }
 
 /** Turns a refused `ssh.session.open` into the words and the action its window shows. */
-export function terminalRefusal(error: unknown, hostName?: string): TerminalRefusal {
+export function terminalRefusal(error: unknown, hostName?: string, remote = false): TerminalRefusal {
   const host = hostName?.trim() || "This host";
   if (error instanceof ActionRefused) {
     switch (error.reason) {
@@ -28,13 +28,16 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
         return { message: `${host} is low on memory${details}. Close sessions you no longer need.`, sessionList: true, action: "sessions" };
       }
       case "invalid": return { message: "This terminal request is not valid. Try opening a new window.", sessionList: false, action: "none" };
-      // A server that runs without root can only log in as its own user; say so and name the way forward (#327).
-      // Both rootless reasons share one short sentence (D336): it must fit about three lines at 393 px.
-      // Asking again cannot change the account, so the action is a host that can.
-      case "permission":
-      case "no_login": return { message: ROOTLESS, sessionList: false, action: "add-host" };
+      case "permission": return remote
+        ? { message: `${host} cannot open a shell as the requested account. Check which account runs infraternal on ${host}, then try again.`, sessionList: false, action: "retry" }
+        : { message: ROOTLESS, sessionList: false, action: "add-host" };
+      case "no_login": {
+        if (!remote) return { message: ROOTLESS, sessionList: false, action: "add-host" };
+        const account = error.executionUid === undefined ? "its own account" : `the account with user ID ${error.executionUid}`;
+        return { message: `${host} couldn't open a shell as ${account}. Check the account on ${host}, then try again.`, sessionList: false, action: "retry" };
+      }
       // The host has systemd but was too busy to answer when the login started: asking again usually works.
-      case "probe_timeout": return { message: `${host} was too busy to start a shell just now. Try again in a moment.`, sessionList: false, action: "retry" };
+      case "probe_timeout": return { message: `${host} is too busy to start a shell. Try again in a moment.`, sessionList: false, action: "retry" };
       // A root host without systemd cannot prove a revoked login is gone, so it opens none (D354). Name the two ways
       // that work; the action is a host that can.
       case "no_systemd": return {
@@ -53,5 +56,5 @@ export function terminalRefusal(error: unknown, hostName?: string): TerminalRefu
       case "unavailable": return { message: `${host} is offline or cannot reach this server. Check its network, then try again.`, sessionList: false, action: "retry" };
     }
   }
-  return { message: "The server could not open this terminal. Try again.", sessionList: false, action: "retry" };
+  return { message: "Couldn't open this terminal. Check your connection and try again.", sessionList: false, action: "retry" };
 }
