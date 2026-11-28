@@ -11,6 +11,7 @@ use infraternal_shim::frame::{
     APPROXIMATE_SNAPSHOT, Frame, FrameRef, MAX_FRAME, MULTI_WRITER, SEQUENCED_INPUT, SHARED_WRITER,
 };
 use infraternal_shim::readiness::Registration;
+use infraternal_shim::runtime_dir::{create_session_dir, session_dir};
 #[cfg(target_os = "linux")]
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use nix::unistd::Uid;
@@ -316,7 +317,7 @@ pub fn state_path(path: Option<PathBuf>) -> io::Result<PathBuf> {
 pub fn state(path: Option<PathBuf>) -> io::Result<PathBuf> {
     let path = state_path(path)?;
     private(&path)?;
-    private(&path.join("sessions"))?;
+    create_session_dir(&path)?;
     Ok(path)
 }
 
@@ -514,9 +515,7 @@ async fn handshake(path: PathBuf, id: [u8; 16], requested: Option<u64>) -> io::R
 /// The rendezvous socket a session's shim listens on, derived from its id alone.
 #[must_use]
 pub fn rendezvous(state: &Path, id: [u8; 16]) -> PathBuf {
-    state
-        .join("sessions")
-        .join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()))
+    session_dir(state).join(format!("{}.sock", uuid::Uuid::from_bytes(id).simple()))
 }
 
 /// True when a connect to a rendezvous proves that no shim is there: the
@@ -599,7 +598,7 @@ pub fn discover(
 async fn discover_inner(state: &Path) -> io::Result<Vec<Session>> {
     let mut tasks = JoinSet::new();
     let mut sessions = Vec::new();
-    for entry in fs::read_dir(state.join("sessions"))? {
+    for entry in fs::read_dir(session_dir(state))? {
         let entry = entry?;
         let path = entry.path();
         // Markers are published only after bind. If their socket is absent,
@@ -731,9 +730,9 @@ impl SessionEvents {
 pub(crate) struct SessionEvents(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SessionEvents {
-    /// Watch `state/sessions` for entries being added or removed.
+    /// Watch the session directory for entries being added or removed.
     pub(crate) fn new(state: &Path) -> io::Result<Self> {
-        DirectoryEvents::new(&state.join("sessions")).map(Self)
+        DirectoryEvents::new(&session_dir(state)).map(Self)
     }
 
     pub(crate) async fn changed(&self) -> io::Result<()> {
@@ -924,9 +923,9 @@ impl SocketReadiness {
 struct SocketReadiness(DirectoryEvents);
 #[cfg(target_os = "macos")]
 impl SocketReadiness {
-    /// Watch `state/sessions` for socket creation.
+    /// Watch the session directory for socket creation.
     fn new(state: &Path) -> io::Result<Self> {
-        DirectoryEvents::new(&state.join("sessions")).map(Self)
+        DirectoryEvents::new(&session_dir(state)).map(Self)
     }
     /// Wait for the next directory change; after a refused connect, also wake once 1 ms later (see above).
     async fn changed(&self, refused: bool) -> io::Result<()> {
@@ -1106,20 +1105,13 @@ async fn launch_configured(
     }
     let id = uuid::Uuid::new_v4();
     let name = id.simple().to_string();
-    let path = state.join("sessions").join(format!("{name}.sock"));
-    #[cfg(target_os = "linux")]
+    let path = session_dir(state).join(format!("{name}.sock"));
     let mut reservation = match person {
         Some((person, guard)) => {
             Some(crate::rootless_sessions::reserve(state, person, id, guard).await?)
         }
         None => None,
     };
-    // Durable rootless person records belong to inherited host logins, which
-    // are Linux-only (D247); a macOS person shell comes from the root agent.
-    #[cfg(target_os = "macos")]
-    if person.is_some() {
-        return Err(io::ErrorKind::Unsupported.into());
-    }
     let watch = SocketReadiness::new(state)?;
     let mut command = if matches!(manager, Manager::Detached) {
         isolated(exe)
@@ -1260,9 +1252,16 @@ async fn launch_configured(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
+    // Once spawn succeeds, cancellation must leave the person record intact so
+    // revocation can still find the detached shim. Linux also cleans up the
+    // abandoned launch immediately using its lifeline.
+    let record = reservation
+        .as_mut()
+        .and_then(crate::rootless_sessions::Reservation::spawned);
     #[cfg(target_os = "macos")]
     {
-        // macOS keeps the plain launch: the cleanup guard below is Linux-only (#324).
+        // A detached Mac shim stays discoverable by its durable record.
+        drop(record);
         let mut child = child;
         if !program.is_empty() {
             child
@@ -1287,9 +1286,6 @@ async fn launch_configured(
         // that launch on EVERY way out other than success: an error, or the caller
         // dropping this future (automation's 4 s deadline does). The cleanup runs on
         // its own task and bound, so a cancelled caller cannot cancel it.
-        let record = reservation
-            .as_mut()
-            .and_then(crate::rootless_sessions::Reservation::spawned);
         let mut launch = Launch {
             child: Some(child),
             watch: Some(watch),

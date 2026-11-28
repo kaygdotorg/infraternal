@@ -7,7 +7,6 @@ use std::{
     io::{self, IsTerminal, Write},
     process::{Command, Stdio},
 };
-use tokio::io::AsyncReadExt;
 
 /// Inspect only this Unix account. Root cannot guess who owns the user install.
 pub(super) fn inspect(json_output: bool) -> Option<Retirement> {
@@ -60,31 +59,7 @@ pub(super) async fn confirm(plan: &Retirement, cancelled: &Cancellation) -> bool
         eprintln!("  {path}");
     }
     eprint!("Retire the earlier installation? [y/N] ");
-    if io::stderr().flush().is_err() {
-        return false;
-    }
-    // Use a foreground child for the terminal read. Blocking stdin in the CLI
-    // can resume its read after SIGINT and keep waiting instead of unwinding.
-    let Ok(mut child) = tokio::process::Command::new("/bin/sh")
-        .args(["-c", "IFS= read -r answer; printf '%s' \"$answer\""])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .spawn()
-    else {
-        return false;
-    };
-    let Some(mut stdout) = child.stdout.take() else {
-        let _ = child.kill().await;
-        return false;
-    };
-    let mut answer = String::new();
-    let (status, read) = tokio::join!(
-        cancelled.wait_for_child(&mut child),
-        stdout.read_to_string(&mut answer),
-    );
-    status.is_ok_and(|status| status.success())
-        && read.is_ok()
-        && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+    io::stderr().flush().is_ok() && cancelled.confirm_on_terminal().await
 }
 
 /// Recheck the reviewed installation and retire it as the original user.

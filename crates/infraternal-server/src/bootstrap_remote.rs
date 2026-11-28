@@ -1334,15 +1334,16 @@ fn route_unavailable() -> Failure {
     Failure::install("The infraternal agent did not connect. Check the host's service and network.")
 }
 
+/// Confirms an enrolled host can open its selected login before add-host completes.
 async fn confirm_preferred_login(
     actor: &EmbeddedAgent,
     person: Uuid,
-    account: String,
+    account: Option<String>,
     grant: crate::embedded::LoginGrant,
 ) -> Result<(), Failure> {
     // The PTY probe alone bypasses preferred account/PAM admission. Reuse the
     // exact preparation path used before real terminal opens, after restoration.
-    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, Some(account), grant))
+    tokio::time::timeout(Duration::from_secs(10), actor.prepare_login(person, account, grant))
         .await.map_err(|_| unavailable())?.map_err(|_| Failure::install(
             "The host connected, but its preferred account login could not open. Check the host login path and try again."))
 }
@@ -1812,8 +1813,7 @@ async fn canary_output(
             TerminalOutput::Ack { .. }
             | TerminalOutput::Reconnecting
             | TerminalOutput::LinkDoubt
-            | TerminalOutput::Recovered
-            | TerminalOutput::RouteExpired => {}
+            | TerminalOutput::Recovered => {}
         }
     }
     Err(unavailable())

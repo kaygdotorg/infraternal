@@ -896,6 +896,13 @@ fn parse_failure(registry: &ActionRegistry, error: &clap::Error, json: bool) -> 
         | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
             if !json =>
         {
+            // Terminal help changes labels only. Keep those changes off the
+            // startup path used by successful commands and private workers.
+            if let Err(display) = cli::command_tree::build_for_terminal(registry).try_get_matches()
+                && display.kind() == error.kind()
+            {
+                display.exit();
+            }
             error.exit()
         }
         _ => emit(cli::usage::result(&tree, &args, error), json, Exit::Usage),
@@ -981,26 +988,49 @@ fn status_result(
         components.push(json!({"name":"CA", "state":state, "state_detail":detail}));
         rows.push(vec!["CA".to_owned(), state, detail]);
     }
-    let tint = |column: usize, text: &str| {
-        (options.color && column == 1)
-            .then(|| cli::output::state_tint(text))
-            .flatten()
-    };
     let mut result = CommandResult::new(
         command,
         state,
         message,
         json!({"role": node.role.id(), "components": components}),
     )
-    .with_body(infraternal_plugin_api::present::table(
+    .with_panel(infraternal_plugin_api::present::table(
         &["Component", "State", "Detail"],
         &rows,
         0,
-        options.usable_width(),
-        Some(&tint),
+        options
+            .usable_width()
+            .saturating_sub(if options.terminal { 4 } else { 0 }),
+        None,
     ));
+    if rows.is_empty() {
+        result.body = Some(String::new());
+    }
     for step in next {
         result = result.with_next_step(step);
+    }
+    if node.role == infraternal_status::Role::None {
+        let steps = [
+            (
+                &["up"][..],
+                "Join a server with infraternal up <server-url>.",
+            ),
+            (
+                &["server", "init"][..],
+                "Set up a server with infraternal server init.",
+            ),
+        ]
+        .into_iter()
+        .filter(|(path, _)| {
+            registry
+                .find(path)
+                .is_some_and(|entry| entry.action.visible)
+        })
+        .map(|(_, step)| step.to_owned())
+        .collect();
+        result = result
+            .with_text_message("Infraternal isn't set up on this machine.")
+            .with_text_next(steps);
     }
     let down = node.confirmed_down_count();
     (result, down)
@@ -1200,12 +1230,13 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
         .iter()
         .map(|entry| vec![entry.command.clone(), entry.description.clone()])
         .collect();
-    let body = infraternal_plugin_api::present::table(
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let body = infraternal_plugin_api::present::terminal_table(
         &["Command", "What it does"],
         &rows,
         0,
-        cli::output::RenderOptions::detect(false).usable_width(),
-        None,
+        options.usable_width(),
+        options.terminal,
     );
     let name = path.join(" ");
     Some(emit(
@@ -1215,6 +1246,7 @@ fn run_group(registry: &ActionRegistry, path: &[&str], json_output: bool) -> Opt
             format!("infraternal {name} has {}.", count_commands(commands.len())),
             json!({"commands": commands}),
         )
+        .with_text_message(format!("Choose a command for infraternal {name}."))
         .with_body(body)
         .with_next_step(format!("infraternal {name} <command> --help")),
         json_output,
@@ -1996,9 +2028,15 @@ fn confirm_server_setup(
     if !io::stdin().is_terminal() {
         return Err("pass --yes in non-interactive mode, or use --dry-run first".to_owned());
     }
-    print!(
-        "Create and start the {scope} server service on {listen} with data in {data_dir}? [y/N] ",
+    let options = cli::output::RenderOptions::detect(io::stdout().is_terminal());
+    let description = format!("Listen on  {listen}\nData       {data_dir}");
+    let panel = infraternal_plugin_api::present::panel(
+        &description,
+        0,
+        options.usable_width(),
+        options.terminal,
     );
+    print!("Start the {scope} server service?\n\n{panel}\nStart [y/N] ");
     io::stdout()
         .flush()
         .map_err(|_| "the confirmation prompt could not be displayed".to_owned())?;
@@ -2074,11 +2112,19 @@ fn install_server(
                 "infraternal status"
             });
             if install_args.dry_run {
+                result = result
+                    .with_text_message("Preview server setup")
+                    .with_text_next(vec![
+                        "Review the plan, then repeat this command without --dry-run.".to_owned(),
+                    ]);
                 // The unit file is data for a person to read and copy: the generic renderer
                 // would reflow its lines into prose and break it.
                 result = result.with_body(plan);
-            } else if !moved_text.is_empty() {
-                result = result.with_body(moved_text);
+            } else {
+                result = result.with_text_message("Installed and enabled the server service.");
+                if !moved_text.is_empty() {
+                    result = result.with_body(moved_text);
+                }
             }
             print_result(&result, json_output, false);
             ExitCode::SUCCESS
@@ -3363,7 +3409,11 @@ fn run_remote_agent(
         json,
         operation,
         "starting",
-        "Preparing the connection to the server.",
+        if json {
+            "Preparing the connection to the server."
+        } else {
+            "Connecting to the server."
+        },
         "",
     );
     let result = (|| -> std::io::Result<()> {
@@ -3400,7 +3450,11 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "This machine is enrolled. Connecting now; keep this running.",
+                if json {
+                    "This machine is enrolled. Connecting now; keep this running."
+                } else {
+                    "Machine joined. Keep this terminal open while the infraternal agent runs."
+                },
                 "",
             );
         }
@@ -3423,7 +3477,11 @@ fn run_remote_agent(
                 json,
                 operation,
                 "enrolled",
-                "This machine is enrolled. Its identity is saved here.",
+                if json {
+                    "This machine is enrolled. Its identity is saved here."
+                } else {
+                    "Machine joined."
+                },
                 "infraternal agent run",
             )
         } else {

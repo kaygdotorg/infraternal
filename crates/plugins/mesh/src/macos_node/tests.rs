@@ -375,6 +375,7 @@ fn recording_worker_with_replace_hook(
     Worker {
         commands,
         join: Some(join),
+        probe_paths: super::probe_paths,
     }
 }
 
@@ -487,7 +488,7 @@ fn restored_snapshot_replaces_stale_peers() {
         rotation_continuity: true,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
         store: Some(store),
@@ -501,7 +502,7 @@ fn restored_snapshot_replaces_stale_peers() {
         path: Some(state_path),
         binding: None,
         network_status: super::subnet::NetworkStatus::default(),
-    };
+    });
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("initial epoch snapshot");
     }
@@ -541,7 +542,7 @@ fn same_authority_equal_revision_conflict_is_refused() {
         rotation_continuity: true,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
         store: None,
@@ -555,7 +556,7 @@ fn same_authority_equal_revision_conflict_is_refused() {
         path: None,
         binding: None,
         network_status: super::subnet::NetworkStatus::default(),
-    };
+    });
     let result = chunks_with_epoch(None, &conflicting, AUTHORITY_EPOCH_A)
         .into_iter()
         .try_for_each(|chunk| node.chunk(chunk).map(|_| ()));
@@ -593,7 +594,7 @@ fn equal_revision_restore_retires_stale_peers() {
         rotation_continuity: true,
     };
     let applied_configs = Arc::new(Mutex::new(Vec::new()));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
         store: None,
@@ -607,7 +608,7 @@ fn equal_revision_restore_retires_stale_peers() {
         path: None,
         binding: None,
         network_status: super::subnet::NetworkStatus::default(),
-    };
+    });
     for chunk in chunks_with_epoch(None, &current, AUTHORITY_EPOCH_A) {
         node.chunk(chunk).expect("current epoch snapshot");
     }
@@ -649,7 +650,7 @@ fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement()
         rotation_continuity: true,
     };
     let applied_configs = Arc::new(Mutex::new(vec![current.clone()]));
-    let mut node = Node {
+    let mut node = Node::from_test_state(super::NodeState {
         enabled: true,
         worker: Some(recording_worker(Arc::clone(&applied_configs))),
         store: None,
@@ -663,7 +664,7 @@ fn authority_replacement_waits_for_complete_snapshot_before_worker_replacement()
         path: None,
         binding: None,
         network_status: super::subnet::NetworkStatus::default(),
-    };
+    });
     let mut complete = chunks_with_epoch(None, &replacement, AUTHORITY_EPOCH_B)
         .pop()
         .expect("one full snapshot");

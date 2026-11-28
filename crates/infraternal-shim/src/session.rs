@@ -706,7 +706,7 @@ mod peer_uid_tests {
 /// The connecting process's effective uid, recorded by the kernel at connect
 /// time: `SO_PEERCRED` on Linux, `getpeereid` (`LOCAL_PEERCRED`) on macOS.
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
     Ok(getsockopt(stream, PeerCredentials)
         .map_err(io::Error::from)?
@@ -714,7 +714,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
 }
 #[cfg(target_os = "macos")]
 /// The connecting process's effective uid on macOS, from `getpeereid` (`LOCAL_PEERCRED`).
-fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(nix::unistd::getpeereid(stream)
         .map_err(io::Error::from)?
         .0
@@ -805,6 +805,7 @@ impl ChildSignals {
 /// Creates the session's private rendezvous socket under the runtime state
 /// directory (the configured one, the root runtime directory, or the
 /// account's private runtime directory) and returns it with its path.
+/// Bind the shim in the same private session directory the host will watch.
 fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
     let state = if let Some(path) = &config.state {
         path.clone()
@@ -822,8 +823,7 @@ fn socket(config: &Config) -> io::Result<(UnixListener, SocketPath)> {
         runtime.join("infraternal")
     };
     private_dir(&state)?;
-    let sessions = state.join("sessions");
-    private_dir(&sessions)?;
+    let (sessions, _) = crate::runtime_dir::create_session_dir(&state)?;
     let mut id = String::with_capacity(32);
     for byte in config.session {
         let _ = write!(id, "{byte:02x}");
@@ -985,7 +985,7 @@ fn run_configured(
     let (listener, path) = socket(&config)?;
     // Bind before spawning: a conflicting endpoint must not leave a new
     // untracked shell behind. Cleanup Hello carries identity only.
-    #[cfg(feature = "host-login")]
+    #[cfg(any(feature = "host-login", target_os = "macos"))]
     let mut cleanup =
         if !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness {
             Some(terminal_cleanup(&path.0, &config)?)
@@ -1066,13 +1066,14 @@ fn run_configured(
                     .unwrap_or_else(|| -status.signal().unwrap_or(1)),
             );
         }
-        #[cfg(feature = "host-login")]
+        #[cfg(any(feature = "host-login", target_os = "macos"))]
         if let Some(cleanup) = &mut cleanup
             && cleanup.requested()
         {
             if exit.is_none() {
                 pty.child.kill()?;
             } else {
+                #[cfg(feature = "host-login")]
                 crate::login::finish_children()?;
                 cleanup.confirm();
             }
@@ -1203,13 +1204,13 @@ fn run_configured(
             .iter()
             .any(|p| p.attached && matches!(p.caps, SESSION_OWNER | SHELL_CLEANUP))
             || {
-                #[cfg(feature = "host-login")]
+                #[cfg(any(feature = "host-login", target_os = "macos"))]
                 {
                     cleanup
                         .as_ref()
                         .is_some_and(|cleanup| cleanup.peer().is_some())
                 }
-                #[cfg(not(feature = "host-login"))]
+                #[cfg(not(any(feature = "host-login", target_os = "macos")))]
                 {
                     false
                 }
@@ -1232,9 +1233,15 @@ fn run_configured(
                 crate::login::finish_children()?;
             }
             crate::ended::record(&path.0, status, ring.head())?;
-            #[cfg(feature = "host-login")]
+            #[cfg(any(feature = "host-login", target_os = "macos"))]
             if let Some(cleanup) = &cleanup {
-                cleanup.retire_attribution()?;
+                // An explicit state path can keep sockets in a separate Mac cache.
+                let state = config
+                    .state
+                    .as_deref()
+                    .or_else(|| path.0.parent().and_then(Path::parent))
+                    .ok_or(io::ErrorKind::InvalidInput)?;
+                cleanup.retire_attribution(state)?;
             }
             return Ok(());
         }
@@ -1277,7 +1284,7 @@ fn run_configured(
             if let Some(descriptor) = pty.child.descriptor() {
                 fds[3] = PollFd::new(descriptor, PollFlags::POLLIN);
             }
-            #[cfg(feature = "host-login")]
+            #[cfg(any(feature = "host-login", target_os = "macos"))]
             if let Some(cleanup) = &cleanup {
                 fds[4] = PollFd::new(cleanup.listener().as_fd(), PollFlags::POLLIN);
                 if let Some(peer) = cleanup.peer() {
@@ -1348,7 +1355,7 @@ fn run_configured(
                 crate::login::reap_terminal_jobs(exit.is_none().then(|| pty.child.id()))?;
             }
         }
-        #[cfg(feature = "host-login")]
+        #[cfg(any(feature = "host-login", target_os = "macos"))]
         if let Some(cleanup) = &mut cleanup {
             // Lifecycle descriptors never depend on input capacity or ordinary
             // link admission. Its fixed request is independent of input bytes.
@@ -1413,7 +1420,7 @@ fn run_configured(
                                 // Its ownership EOF could otherwise overtake
                                 // buffered output/Exited in the host relay.
                                 | if config.readiness { 0 } else { SESSION_OWNER }
-                                | if cfg!(feature = "host-login") && !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness { SHELL_CLEANUP } else { 0 }
+                                | if cfg!(any(feature = "host-login", target_os = "macos")) && !Uid::effective().is_root() && config.login_socket.is_none() && !config.readiness { SHELL_CLEANUP } else { 0 }
                                 | SHARED_WRITER,
                             session: config.session,
                             pid: std::process::id(),
@@ -1573,7 +1580,7 @@ fn run_configured(
     }
 }
 
-#[cfg(feature = "host-login")]
+#[cfg(any(feature = "host-login", target_os = "macos"))]
 #[cold]
 fn terminal_cleanup(path: &Path, config: &Config) -> io::Result<crate::cleanup::Cleanup> {
     let mut proof = Vec::new();
@@ -1593,7 +1600,8 @@ fn terminal_cleanup(path: &Path, config: &Config) -> io::Result<crate::cleanup::
     proof.extend_from_slice(&Frame::ShellStopped.encode()?);
     crate::cleanup::Cleanup::bind(path, Uid::effective().as_raw(), proof)
 }
-// Cleanup must not enlarge the ordinary input request's instruction working set.
+/// Stop the owned child for a peer that negotiated the cleanup capability.
+/// Keep this on the cold path so ordinary terminal input stays small.
 #[cold]
 #[inline(never)]
 fn stop_shell(
@@ -1604,7 +1612,7 @@ fn stop_shell(
     exited: bool,
 ) -> io::Result<bool> {
     if !matches!(frame, FrameRef::Owned(Frame::StopShell))
-        || !cfg!(feature = "host-login")
+        || !cfg!(any(feature = "host-login", target_os = "macos"))
         || Uid::effective().is_root()
         || config.login_socket.is_some()
         || config.readiness

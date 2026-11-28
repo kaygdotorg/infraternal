@@ -29,8 +29,9 @@
 
 use super::{
     Cancellation, Failure, JoinMode, SUDO_CANDIDATES, approval_display_is_terminal,
-    join_approval_link, local_hostname, machine_key_short, machine_start_body, map_remote_failure,
-    needs_terminal, print_approval, server_url, start_approval, trusted_tool, wait_for_approval,
+    join_approval_link, joined_message, local_hostname, machine_key_short, machine_start_body,
+    map_remote_failure, needs_terminal, print_approval, server_url, start_approval, trusted_tool,
+    wait_for_approval,
 };
 use crate::cli::output::{CommandResult, CommandState, Exit, emit};
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
@@ -46,7 +47,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, ErrorKind, Read},
+    io::{self, ErrorKind, IsTerminal, Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -121,19 +122,107 @@ impl Paths {
     fn receipt(&self) -> PathBuf {
         self.base.join(macos_user_mode::USER_RECEIPT)
     }
+}
 
-    /// The `PATH` line `up` prints, since a per-user Mac install adds no link (D395).
-    fn path_line(&self) -> String {
-        format!(
-            "export PATH=\"{}:$PATH\"",
-            self.binary
-                .parent()
-                .unwrap_or(&self.base)
-                .display()
-                .to_string()
-                .replace('"', "\\\"")
-        )
+/// Add the installed command to future interactive zsh sessions if the user agrees.
+async fn offer_path(paths: &Paths, cancelled: &Cancellation) {
+    if cancelled.check().is_err() {
+        return;
     }
+    let Some(directory) = paths.binary.parent() else {
+        return;
+    };
+    if env::var_os("PATH")
+        .is_some_and(|path| env::split_paths(&path).any(|entry| entry == directory))
+    {
+        return;
+    }
+    let Some(shell) = env::var_os("SHELL") else {
+        return;
+    };
+    // Do not claim to configure another shell or guess which startup file it reads.
+    if Path::new(&shell)
+        .file_name()
+        .is_none_or(|name| name != "zsh")
+    {
+        return;
+    }
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return;
+    }
+    let config_dir = env::var_os("ZDOTDIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || Some(paths.home.clone()),
+            |value| {
+                let path = PathBuf::from(value);
+                path.is_absolute().then_some(path)
+            },
+        );
+    let Some(config_dir) = config_dir else {
+        return;
+    };
+    let config = config_dir.join(".zshrc");
+    let mut stderr = io::stderr().lock();
+    let prompt = "Add infraternal to PATH for new zsh sessions? [y/N] ";
+    if write!(stderr, "\n{prompt}")
+        .and_then(|()| stderr.flush())
+        .is_err()
+    {
+        return;
+    }
+    drop(stderr);
+    if cancelled.confirm_on_terminal().await {
+        let mut stderr = io::stderr().lock();
+        match add_to_zsh_path(&config, directory) {
+            Ok(()) => {
+                let _ = writeln!(stderr, "Open a new terminal to run infraternal.");
+            }
+            Err(_) => {
+                let _ = writeln!(
+                    stderr,
+                    "Couldn't update .zshrc. Run infraternal using the full path shown above."
+                );
+            }
+        }
+    }
+}
+
+/// Append one shell-safe PATH line. Refuse special files, links and other users' files.
+fn add_to_zsh_path(config: &Path, directory: &Path) -> io::Result<()> {
+    /// Bound the read before scanning for the existing entry.
+    const LIMIT: usize = 1024 * 1024;
+    let directory = directory
+        .to_str()
+        .filter(|path| !path.contains(['\n', '\r', ':']))
+        .ok_or(ErrorKind::InvalidInput)?;
+    let line = format!(
+        "export PATH='{}':\"$PATH\"",
+        directory.replace('\'', "'\\''")
+    );
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(config)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != nix::unistd::Uid::current().as_raw() {
+        return Err(ErrorKind::PermissionDenied.into());
+    }
+    file.lock()?;
+    let mut previous = String::new();
+    (&file)
+        .take(LIMIT as u64 + 1)
+        .read_to_string(&mut previous)?;
+    if previous.len() > LIMIT {
+        return Err(ErrorKind::InvalidData.into());
+    }
+    if !previous.lines().any(|existing| existing == line) {
+        writeln!(&file, "\n{line}")?;
+    }
+    Ok(())
 }
 
 /// Whether a path exists, without following a final link.
@@ -271,8 +360,7 @@ pub(crate) async fn run(
     install.committed = true;
     let paths = &install.paths;
     let local_network = local_network_outcome(&paths.state, cancelled).await?;
-    let path_line = paths.path_line();
-    Ok(emit(
+    let result = emit(
         CommandResult::new(
             "up",
             CommandState::Ready,
@@ -289,13 +377,18 @@ pub(crate) async fn run(
                 "local_network": local_network.map(LocalNetwork::word),
             }),
         )
+        .with_text_message(joined_message(&hostname))
         .with_body(format!(
-            "Mac joined as {hostname} (user mode).\nService: active ({AGENT_LABEL})\nCommand: {}\nAdd it to your PATH:\n  {path_line}",
+            "Server   {origin}\nMode     Runs while you're signed in to this Mac\nCommand  {}",
             paths.binary.display()
         )),
         json_output,
         Exit::Ok,
-    ))
+    );
+    if !json_output {
+        offer_path(paths, cancelled).await;
+    }
+    Ok(result)
 }
 
 /// The optional Local Network prompt follows commit, so cancellation keeps the install.
@@ -331,7 +424,7 @@ async fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         return first;
     }
     eprintln!(
-        "macOS asks whether infraternal may find devices on your local network. Click Allow, so this Mac reaches mesh peers on the same network directly. Waiting up to {} seconds…",
+        "Click Allow in the macOS Local Network prompt to connect directly to nearby mesh machines. Waiting up to {} seconds.",
         LOCAL_NETWORK_WAIT.as_secs()
     );
     let last = poll_local_network(&file, LOCAL_NETWORK_WAIT, |state| {
@@ -342,7 +435,7 @@ async fn wait_for_local_network(state: &Path) -> Option<LocalNetwork> {
         eprintln!("Local Network access allowed.");
     } else {
         eprintln!(
-            "Local Network access is not allowed yet. Peers on other networks work; to reach peers on this network, turn on infraternal under System Settings > Privacy & Security > Local Network. No restart is needed."
+            "Local Network access is off. To connect directly to nearby mesh machines, turn on infraternal in System Settings > Privacy & Security > Local Network."
         );
     }
     last
@@ -822,6 +915,16 @@ impl Install {
         ] {
             self.directory(&path, mode)?;
         }
+        // Rollback owns a newly created socket directory. Its shared cache
+        // parents can also serve a manually started infraternal agent.
+        if infraternal_shim::runtime_dir::managed_macos_session_dir(&self.paths.state).is_some() {
+            let (dir, created) =
+                infraternal_shim::runtime_dir::create_session_dir(&self.paths.state)?;
+            if created {
+                let metadata = fs::symlink_metadata(&dir)?;
+                self.record(dir, &metadata);
+            }
+        }
         Ok(())
     }
 
@@ -1009,10 +1112,16 @@ mod rollback_tests {
     impl Home {
         /// Allocate a disposable home without changing the running account's home.
         fn new() -> Self {
-            Self(
+            let home = Self(
                 nix::unistd::mkdtemp(env::temp_dir().join("infraternal-up-XXXXXX").as_path())
                     .unwrap(),
-            )
+            );
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(home.0.join("Library/Caches"))
+                .unwrap();
+            home
         }
     }
 
@@ -1078,6 +1187,42 @@ mod rollback_tests {
             b"replacement directory"
         );
         assert_eq!(fs::read_link(receipt).unwrap(), data.join("keep"));
+    }
+
+    /// Remove an empty cache this run created and keep an earlier cache and durable reservations.
+    #[test]
+    fn rollback_keeps_existing_session_cache_and_reservations() {
+        if nix::unistd::geteuid().is_root() {
+            return;
+        }
+        for existing in [false, true] {
+            let home = Home::new();
+            let paths = Paths::from_home(home.0.clone());
+            let cache = infraternal_shim::runtime_dir::managed_macos_session_dir(&paths.state)
+                .expect("the fixture's long managed state uses the socket cache");
+            let reservations = paths.state.join("infraternal-login-locks");
+            let record =
+                reservations.join(format!("{}-{}.terminal", "1".repeat(32), "2".repeat(32)));
+            let earlier_socket = cache.join("earlier.sock");
+            if existing {
+                infraternal_shim::runtime_dir::create_session_dir(&paths.state).unwrap();
+                fs::write(&earlier_socket, b"earlier socket state").unwrap();
+                fs::create_dir_all(reservations).unwrap();
+                fs::write(&record, b"earlier reservation").unwrap();
+            }
+            let mut install = Install::new(paths, nix::unistd::geteuid().as_raw(), true);
+            install.committed = true;
+            install.directories().unwrap();
+            assert!(cache.is_dir());
+            assert!(install.rollback_paths());
+            if existing {
+                assert_eq!(fs::read(earlier_socket).unwrap(), b"earlier socket state");
+                assert_eq!(fs::read(record).unwrap(), b"earlier reservation");
+            } else {
+                assert!(!cache.exists());
+            }
+            assert!(cache.parent().unwrap().is_dir());
+        }
     }
 
     /// A refresh that finished before Ctrl-C must not ask the user to rerun it.
@@ -1262,6 +1407,8 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
+    let session_cache =
+        infraternal_shim::runtime_dir::remove_managed_macos_session_dir(&paths.state);
     for directory in [&paths.base, &paths.logs] {
         match fs::remove_dir_all(directory) {
             Ok(()) => {}
@@ -1269,5 +1416,5 @@ fn uninstall(paths: &Paths, uid: u32, host: &str) -> io::Result<()> {
             Err(error) => return Err(error),
         }
     }
-    helper
+    helper.and(session_cache)
 }

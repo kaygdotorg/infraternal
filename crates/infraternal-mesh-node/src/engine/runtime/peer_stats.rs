@@ -5,12 +5,12 @@
 //! These run on the worker's current-thread runtime, which also carries the packet path, so each
 //! is one `peers()` read of the device and no blocking work.
 
-use super::{CounterMap, RuntimeState};
+use super::{CounterMap, HostNet, RuntimeState};
+use crate::peer_stats;
 use crate::policy::model::PublicKey;
-use infraternal_mesh_node::peer_stats;
 use std::{io, net::SocketAddr};
 
-impl RuntimeState {
+impl<H: HostNet> RuntimeState<H> {
     /// Give the admission guard the endpoints `GotaTun` confirmed for active installed peers.
     ///
     /// A peer that roamed (a NAT rebinding, a new network) is confirmed at its new address by
@@ -20,7 +20,7 @@ impl RuntimeState {
     /// routes has no path to vouch for. With no device the list is emptied. The shared feed
     /// takes the guard's write lock only on a change. The worker calls it when the engine reports
     /// a changed confirmed endpoint and after commands that change the peers.
-    pub(super) async fn admit_confirmed_endpoints(&mut self) -> Vec<(PublicKey, SocketAddr)> {
+    pub async fn admit_confirmed_endpoints(&mut self) -> Vec<(PublicKey, SocketAddr)> {
         let endpoints = self.confirmed_peer_endpoints().await;
         self.confirmed_feed
             .offer(
@@ -32,7 +32,7 @@ impl RuntimeState {
     }
 
     /// One authenticated address per active installed key, shared by admission and subnet routing.
-    pub(super) async fn confirmed_peer_endpoints(&self) -> Vec<(PublicKey, SocketAddr)> {
+    pub async fn confirmed_peer_endpoints(&self) -> Vec<(PublicKey, SocketAddr)> {
         let Some(device) = self.device.as_ref() else {
             return Vec::new();
         };
@@ -42,7 +42,7 @@ impl RuntimeState {
     /// Read every installed peer's handshake time, byte counts and endpoint.
     /// # Errors
     /// Reports a stopped device.
-    pub(super) async fn counters(&self) -> io::Result<CounterMap> {
+    pub async fn counters(&self) -> io::Result<CounterMap> {
         let device = self.device.as_ref().ok_or(io::ErrorKind::NotConnected)?;
         let peers = device.read(async |read| read.peers().await).await;
         Ok(peer_stats::counters(peers))

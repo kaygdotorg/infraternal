@@ -104,6 +104,40 @@ impl Cancellation {
         Ok(status)
     }
 
+    /// Read consent through a foreground child that Ctrl-C can stop and reap.
+    #[cfg(any(target_os = "macos", all(target_os = "linux", feature = "plugin-ssh")))]
+    pub(super) async fn confirm_on_terminal(&self) -> bool {
+        use std::process::Stdio;
+        use tokio::io::AsyncReadExt;
+
+        if self.check().is_err() {
+            return false;
+        }
+        // Use a foreground child for the terminal read. Blocking stdin in the CLI
+        // can resume its read after SIGINT and keep waiting instead of unwinding.
+        let Ok(mut child) = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "IFS= read -r answer; printf '%s' \"$answer\""])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .spawn()
+        else {
+            return false;
+        };
+        let Some(mut stdout) = child.stdout.take() else {
+            let _ = child.kill().await;
+            return false;
+        };
+        let mut answer = String::new();
+        let (status, read) = tokio::join!(
+            self.wait_for_child(&mut child),
+            stdout.read_to_string(&mut answer),
+        );
+        status.is_ok_and(|status| status.success())
+            && read.is_ok()
+            && matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+            && self.received().is_none()
+    }
+
     /// Explain the elevation just before starting a cancellable sudo password prompt.
     #[cfg(target_os = "macos")]
     pub(super) async fn sudo_status(

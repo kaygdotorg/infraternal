@@ -22,6 +22,7 @@ async fn remote_targets(
         .collect()
 }
 
+/// Prepares each connected host with the same account selection as a terminal open.
 pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str) {
     let Ok(person) = uuid::Uuid::parse_str(user) else {
         return;
@@ -43,6 +44,17 @@ pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str)
             let state = state.clone();
             async move {
                 let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                    // Keep the stored mode and the actor's execution UID on the
+                    // same side of a promotion, as terminal opens do.
+                    #[cfg(feature = "remote")]
+                    let _admission = if let Some(host) = host {
+                        let Ok(admission) = state.remote_hosts.admit_terminal_open(host) else {
+                            return;
+                        };
+                        Some(admission)
+                    } else {
+                        None
+                    };
                     let Ok(account) =
                         crate::preferred_accounts::resolve(&state.pool, user, digest, host).await
                     else {
@@ -57,7 +69,7 @@ pub(super) async fn prepare(state: Arc<WebSocketState>, user: &str, token: &str)
                     else {
                         return;
                     };
-                    let _ = actor.prepare_login(person, Some(account), grant).await;
+                    let _ = actor.prepare_login(person, account, grant).await;
                 })
                 .await;
             }

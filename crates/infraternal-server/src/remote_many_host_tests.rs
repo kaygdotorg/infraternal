@@ -90,7 +90,14 @@ async fn run_many_host_fixture() {
         .unwrap();
     sqlx::query("INSERT INTO users(id,name,owner,recovery_hash,username,display_name) VALUES (?,'owner',1,'unused',?,'Owner')")
         .bind(&owner)
-        .bind(account)
+        .bind(&account)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    // Signup gives a new owner D235's starter rule. This fixture inserts its
+    // owner directly, so mirror that row instead of relying on a host default.
+    sqlx::query("INSERT INTO login_rules(subject,account_kind,account,host_id,created_at) VALUES (?,'any',NULL,NULL,unixepoch())")
+        .bind(&owner)
         .execute(&fixture.pool)
         .await
         .unwrap();

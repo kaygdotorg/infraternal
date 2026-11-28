@@ -73,7 +73,7 @@ pub(crate) fn run(
     });
     match result {
         Ok((message, body, data)) => emit(
-            CommandResult::new(&command, CommandState::Ready, message, data).with_body(body),
+            CommandResult::new(&command, CommandState::Ready, message, data).with_panel(body),
             json_output,
             Exit::Ok,
         ),

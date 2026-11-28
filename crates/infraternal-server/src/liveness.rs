@@ -1,11 +1,10 @@
-//! Bounded correlated Ping/Pong deadlines for pipelined and answer-paced routes [D265, #199].
+//! Bounded correlated Ping/Pong deadlines for browser routes and shared host links [D265, #199].
 //!
-//! Host routes follow the measured path [D300]: a reply held behind one lost
+//! Host links follow the measured path [D300]: a reply held behind one lost
 //! packet on the ordered stream is retransmitted after about one more round
 //! trip, so their allowance spans two smoothed round trips. The primary host
 //! link only reports doubt on its first miss and retires on the second
-//! consecutive one. Browser routes likewise doubt one missed allowance; terminal
-//! routes still rebind on the first miss. Hidden viewers park their probe lease.
+//! consecutive one. Browser routes likewise doubt one missed allowance.
 //! Browser routes carry these probes as native WebSocket Ping control frames,
 //! which the browser answers without running page JavaScript [#317].
 
@@ -24,14 +23,14 @@ const HOST_MARGIN: Duration = Duration::from_millis(75);
 /// The longest reply allowance a route gets. It bounds dead-host detection on slow or jittery
 /// paths and is the startup grace; the browser socket's answer to a challenge is sized from it.
 pub(crate) const RESPONSE_CEILING: Duration = Duration::from_secs(2);
+/// Keep two ceiling allowances at the 25 ms cadence plus boundary replies correlated.
+const ISSUED_PROBE_LIMIT: usize = 164;
 
-/// Which reply allowance and miss policy a route follows.
+/// Which reply allowance and miss policy a liveness lease follows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Allowance {
     /// Browser routes: two round trips and first-miss doubt [D300, #244].
     Browser,
-    /// Host terminal routes: two round trips; the first miss ends the lease.
-    Terminal,
     /// The primary host link: two round trips; the first miss only raises doubt.
     /// `pinned` is set when a doubt recovered while the allowance sat at its
     /// ceiling: the path needs more than the ceiling allows, so further early
@@ -55,7 +54,8 @@ pub(crate) struct Liveness {
 }
 
 impl Liveness {
-    pub(crate) fn new() -> Self {
+    /// Start a fresh lease with the selected reply and miss policy.
+    fn fresh(allowance: Allowance, answer_paced: bool) -> Self {
         let now = Instant::now();
         Self {
             origin: now,
@@ -64,8 +64,8 @@ impl Liveness {
             acked: 0,
             issued: VecDeque::new(),
             suspended: false,
-            answer_paced: false,
-            allowance: Allowance::Terminal,
+            answer_paced,
+            allowance,
             srtt: None,
             rttvar: Duration::ZERO,
             // Before the first sample, allow greeting/replay and an unknown link RTT.
@@ -75,22 +75,18 @@ impl Liveness {
 
     /// Browser routes pace idle requests from their correlated answers.
     pub(crate) fn answer_paced() -> Self {
-        Self {
-            answer_paced: true,
-            allowance: Allowance::Browser,
-            ..Self::new()
-        }
+        Self::fresh(Allowance::Browser, true)
     }
 
     /// The primary host link doubts before it retires [D300].
     pub(crate) fn host_link() -> Self {
-        Self {
-            allowance: Allowance::HostLink {
+        Self::fresh(
+            Allowance::HostLink {
                 doubt: false,
                 pinned: false,
             },
-            ..Self::new()
-        }
+            false,
+        )
     }
 
     /// A hidden viewer may stop executing altogether. Keep its socket and writer
@@ -103,12 +99,14 @@ impl Liveness {
     }
 
     /// True while the viewer is hidden: no probe is due and none is owed [#562].
+    #[cfg(test)]
     pub(crate) fn is_suspended(&self) -> bool {
         self.suspended
     }
 
     /// Restart monitoring on the same transport without reusing a prior probe ID.
     /// Clearing issued requests disarms the lease; the clock and counter survive.
+    /// Host-link restarts also clear the previous link's doubt and pinned state.
     pub(crate) fn restart(&mut self) {
         self.answered = Instant::now();
         self.acked = 0;
@@ -116,6 +114,10 @@ impl Liveness {
         self.srtt = None;
         self.rttvar = Duration::ZERO;
         self.issued.clear();
+        if let Allowance::HostLink { doubt, pinned } = &mut self.allowance {
+            *doubt = false;
+            *pinned = false;
+        }
     }
 
     /// Startup pipelines samples; a sampled route waits for its actual answer.
@@ -162,6 +164,7 @@ impl Liveness {
             .then(|| self.answered + allowance + Duration::from_nanos(1))
     }
 
+    /// Issue a correlated probe while preserving any outstanding reply deadline.
     pub(crate) fn ping(&mut self) -> (u64, u64) {
         // Never move an outstanding deadline: pipelining cannot mask silence.
         if self.issued.is_empty() {
@@ -173,9 +176,9 @@ impl Liveness {
         self.sent = u64::try_from(self.origin.elapsed().as_micros())
             .unwrap_or(u64::MAX)
             .max(self.sent.saturating_add(1));
-        // Two ceiling allowances admit at most 160 ticks; bound retained
-        // correlation regardless. Eviction cannot renew readiness.
-        if self.issued.len() == 128 {
+        // Two ceiling allowances span 160 ticks; the extra entries cover timer
+        // boundary probes without keeping correlations beyond a bounded window.
+        if self.issued.len() >= ISSUED_PROBE_LIMIT {
             self.issued.pop_front();
         }
         self.issued.push_back(self.sent);
@@ -244,17 +247,12 @@ impl Liveness {
         matches!(self.allowance, Allowance::HostLink { doubt: true, .. })
     }
 
-    /// The lease is over: a host link after its second consecutive allowance,
-    /// browser routes also after two, terminal routes after one. No reply can renew it afterwards.
+    /// A proven lease ends after two allowances; an unproven link ends at its startup grace.
     pub(crate) fn retired(&self) -> bool {
-        if matches!(
-            self.allowance,
-            Allowance::HostLink { .. } | Allowance::Browser
-        ) && self.acked != 0
-        {
-            !self.suspended && !self.issued.is_empty() && self.answered.elapsed() > self.budget * 2
-        } else {
+        if self.acked == 0 {
             self.expired()
+        } else {
+            !self.suspended && !self.issued.is_empty() && self.answered.elapsed() > self.budget * 2
         }
     }
 }
@@ -306,29 +304,10 @@ mod tests {
         assert!(!route.retired());
     }
 
-    /// A terminal route whose viewer is hidden owes no reply, however long an old probe sat unanswered, and
-    /// its first show starts a fresh lease that still expires on silence [#562].
-    #[tokio::test(start_paused = true)]
-    async fn a_parked_terminal_route_never_expires_and_resumes_with_a_fresh_lease() {
-        let mut route = Liveness::new();
-        route.ping();
-        route.set_suspended(true);
-        tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(!route.expired() && !route.retired());
-        assert!(route.next_probe_due(false).is_none());
-        route.set_suspended(false);
-        assert!(!route.expired(), "the old probe's deadline is gone");
-        route.ping();
-        tokio::time::advance(Duration::from_secs(3)).await;
-        assert!(
-            route.expired(),
-            "a route silent after the show still expires"
-        );
-    }
-
+    /// A scheduler stall does not expire a peer that answers within its allowance.
     #[tokio::test(start_paused = true)]
     async fn healthy_reply_survives_a_150ms_server_stall() {
-        for mut route in [Liveness::new(), Liveness::answer_paced()] {
+        for mut route in [Liveness::host_link(), Liveness::answer_paced()] {
             let (nonce, stamp) = route.ping();
             tokio::time::advance(Duration::from_millis(1)).await;
             assert!(route.pong(nonce, stamp));
@@ -396,9 +375,10 @@ mod tests {
         assert_eq!(route.budget, Duration::from_millis(250));
     }
 
+    /// Sending again cannot renew an outstanding reply deadline.
     #[tokio::test(start_paused = true)]
     async fn pipelined_requests_do_not_renew_an_outstanding_deadline() {
-        let mut route = Liveness::new();
+        let mut route = Liveness::host_link();
         tokio::time::advance(TICK).await;
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -420,9 +400,10 @@ mod tests {
         assert!(route.expired(), "another request cannot renew readiness");
     }
 
+    /// A late local callback does not charge the peer for a probe not yet sent.
     #[tokio::test(start_paused = true)]
     async fn late_native_probe_keeps_its_unissued_reply_allowance() {
-        let mut route = Liveness::new();
+        let mut route = Liveness::host_link();
         tokio::time::advance(TICK).await;
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
@@ -434,9 +415,10 @@ mod tests {
         assert!(route.pong(nonce, stamp), "local delay is not peer silence");
     }
 
+    /// Server work after a timely answer does not expire the lease before another probe.
     #[tokio::test(start_paused = true)]
     async fn delayed_server_probe_does_not_expire_an_answered_route() {
-        let mut route = Liveness::new();
+        let mut route = Liveness::host_link();
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(1)).await;
         route.pong(nonce, stamp);
@@ -451,9 +433,10 @@ mod tests {
         assert!(!route.expired());
     }
 
+    /// Stale replies cannot hide a first miss, while a timely reply in the second allowance recovers the host link.
     #[tokio::test(start_paused = true)]
-    async fn missing_replies_expire_even_with_probes_in_flight() {
-        let mut route = Liveness::new();
+    async fn stale_replies_do_not_hide_host_link_miss_and_valid_reply_recovers() {
+        let mut route = Liveness::host_link();
         tokio::time::advance(TICK).await;
         let (nonce, stamp) = route.ping();
         tokio::time::advance(Duration::from_millis(150)).await;
@@ -467,11 +450,15 @@ mod tests {
         route.pong(u64::MAX, u64::MAX);
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(route.expired());
-        // A queued reply may win the select before an overdue timer. It cannot
-        // turn suspension into a longer lease after the old lease has ended.
+        assert!(!route.retired(), "the first allowance only marks doubt");
+        assert!(route.doubt_started());
+        assert!(route.doubtful());
+        // A queued, still-issued reply can win before the second allowance and recover this same link.
         let (nonce, stamp) = route.ping();
-        route.pong(nonce, stamp);
-        assert!(route.expired());
+        assert!(route.pong(nonce, stamp));
+        assert!(!route.expired());
+        assert!(!route.doubtful());
+        assert!(!route.retired());
     }
 
     #[tokio::test(start_paused = true)]
@@ -563,6 +550,50 @@ mod tests {
         assert!(route.pong(fresh.0, fresh.1));
     }
 
+    /// A host-link restart clears its prior doubt episode without resetting the nonce sequence.
+    #[tokio::test(start_paused = true)]
+    async fn j1264_restarting_host_monitoring_resets_doubt_and_pin_state() {
+        let mut route = Liveness::host_link();
+        route.allowance = Allowance::HostLink {
+            doubt: true,
+            pinned: true,
+        };
+        let previous_nonce = route.ping().0;
+
+        route.restart();
+
+        assert!(!route.doubtful());
+        assert!(matches!(
+            route.allowance,
+            Allowance::HostLink {
+                doubt: false,
+                pinned: false
+            }
+        ));
+        assert!(route.ping().0 > previous_nonce);
+    }
+
+    /// The oldest issued probe stays correlated through two full response ceilings.
+    #[tokio::test(start_paused = true)]
+    async fn j1264_oldest_host_probe_remains_correlated_through_two_response_ceilings() {
+        let mut route = Liveness::host_link();
+        let first = route.ping();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(route.pong(first.0, first.1));
+        // Model a slow path at the ceiling, where a reply may remain valid for four seconds.
+        route.budget = RESPONSE_CEILING;
+
+        let oldest = route.ping();
+        for _ in 1..=160 {
+            tokio::time::advance(TICK).await;
+            route.ping();
+        }
+        assert!(
+            route.pong(oldest.0, oldest.1),
+            "a reply inside the two-ceiling retirement allowance stays issued"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn recent_application_progress_preserves_the_first_tick_cadence() {
         let mut route = Liveness::answer_paced();
@@ -585,9 +616,10 @@ mod tests {
         }
     }
 
+    /// Browser and host-link estimators use the same allowance after one retransmission.
     #[tokio::test(start_paused = true)]
     async fn host_and_browser_allowance_cover_one_loss_recovery() {
-        let mut host = Liveness::new();
+        let mut host = Liveness::host_link();
         let mut browser = Liveness::answer_paced();
         tokio::time::advance(TICK).await;
         for rtt in [100, 200] {
@@ -602,21 +634,22 @@ mod tests {
         assert_eq!(browser.budget, Duration::from_millis(550));
     }
 
+    /// The host-link allowance keeps its LAN floor and both configured bounds.
     #[tokio::test(start_paused = true)]
     async fn host_allowance_has_a_floor_a_settled_long_haul_value_and_a_ceiling() {
-        let mut lan = Liveness::new();
+        let mut lan = Liveness::host_link();
         settle(&mut lan, Duration::from_millis(1), 50).await;
         assert_eq!(
             lan.budget,
             Duration::from_millis(250),
             "LAN keeps the floor"
         );
-        let mut long_haul = Liveness::new();
+        let mut long_haul = Liveness::host_link();
         settle(&mut long_haul, Duration::from_millis(150), 200).await;
         // One retransmission of a lost ordered reply costs about one more round trip.
         assert!(long_haul.budget >= Duration::from_millis(375));
         assert!(long_haul.budget < Duration::from_millis(380));
-        let mut far = Liveness::new();
+        let mut far = Liveness::host_link();
         settle(&mut far, Duration::from_millis(1500), 20).await;
         assert_eq!(
             far.budget,
@@ -743,19 +776,5 @@ mod tests {
             "an unproven link has no health to doubt"
         );
         assert!(route.retired());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn terminal_routes_still_end_their_lease_on_the_first_miss() {
-        let mut route = Liveness::new();
-        let (nonce, stamp) = route.ping();
-        tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(route.pong(nonce, stamp));
-        tokio::time::advance(TICK).await;
-        let (nonce, stamp) = route.ping();
-        tokio::time::advance(route.budget + Duration::from_nanos(1)).await;
-        assert!(!route.doubt_started());
-        assert!(route.retired());
-        assert!(!route.pong(nonce, stamp));
     }
 }
