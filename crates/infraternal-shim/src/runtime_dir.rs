@@ -21,6 +21,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// State suffix owned by the macOS user-mode installer.
+#[cfg(target_os = "macos")]
+const MANAGED_MACOS_STATE: &str = "Library/Application Support/infraternal/state";
+
 /// Returns the private runtime directory of the current (non-root) account.
 ///
 /// `XDG_RUNTIME_DIR` wins when it is set. Otherwise, on macOS only, the answer
@@ -58,10 +62,16 @@ pub fn session_dir(state: &Path) -> PathBuf {
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn managed_macos_session_dir(state: &Path) -> Option<PathBuf> {
-    let managed = Path::new("Library/Application Support/infraternal/state");
+    macos_session_dir_for_uid(state, Uid::effective())
+}
+
+/// Select the private cache only for the long state paths of user-mode installs.
+#[cfg(target_os = "macos")]
+fn macos_session_dir_for_uid(state: &Path, uid: Uid) -> Option<PathBuf> {
+    let managed = Path::new(MANAGED_MACOS_STATE);
     // Darwin's 104-byte sun_path includes the terminator. Count the separator,
     // 32 hex characters and ".sock" in bytes, as the kernel does.
-    if Uid::effective().is_root()
+    if uid.is_root()
         || !state.is_absolute()
         || !state.ends_with(managed)
         || state.join("sessions").as_os_str().len() + 1 + 32 + 5 < 104
@@ -166,6 +176,78 @@ fn check_private(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::DirBuilderExt;
+
+    /// Darwin accepts 103 pathname bytes and rejects the next byte. The
+    /// installer cache changes neither custom paths nor root-mode locations.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_mac_sessions_move_at_the_darwin_socket_limit() {
+        let leaf = format!("{}.sock", "1".repeat(32));
+        let used = Path::new("/")
+            .join(MANAGED_MACOS_STATE)
+            .join("sessions")
+            .join(&leaf)
+            .as_os_str()
+            .len();
+        let home = Path::new("/").join("a".repeat(102 - used));
+        let fits = home.join(MANAGED_MACOS_STATE);
+        let long_home = Path::new("/").join("a".repeat(103 - used));
+        let long = long_home.join(MANAGED_MACOS_STATE);
+        let user = Uid::from_raw(501);
+        assert_eq!(fits.join("sessions").join(&leaf).as_os_str().len(), 103);
+        assert_eq!(long.join("sessions").join(&leaf).as_os_str().len(), 104);
+        assert_eq!(macos_session_dir_for_uid(&fits, user), None);
+        assert_eq!(
+            macos_session_dir_for_uid(&long, user),
+            Some(long_home.join("Library/Caches/infraternal/up"))
+        );
+        assert_eq!(macos_session_dir_for_uid(&long, Uid::from_raw(0)), None);
+        assert_eq!(macos_session_dir_for_uid(&long.join("custom"), user), None);
+    }
+
+    /// Cache creation and uninstall both reject links at every owned level.
+    /// A successful uninstall preserves the manual infraternal agent's cache.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn managed_mac_cache_refuses_links_and_removes_only_the_install_cache() {
+        if Uid::effective().is_root() {
+            return;
+        }
+        let home =
+            std::env::temp_dir().join(format!("infraternal-macos-home-{}", std::process::id()));
+        let state = home.join(MANAGED_MACOS_STATE);
+        let target = home.join("symlink-target");
+        fs::create_dir_all(home.join("Library")).unwrap();
+        create_private(&target).unwrap();
+        let cache = home.join("Library/Caches");
+        let product = cache.join("infraternal");
+        let install = product.join("up");
+        for path in [&cache, &product, &install] {
+            std::os::unix::fs::symlink(&target, path).unwrap();
+            assert_eq!(
+                create_session_dir(&state).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(
+                remove_managed_macos_session_dir(&state).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            fs::remove_file(path).unwrap();
+            if path != &install {
+                create_private(path).unwrap();
+            }
+        }
+        assert_eq!(create_session_dir(&state).unwrap(), (install.clone(), true));
+        assert_eq!(
+            create_session_dir(&state).unwrap(),
+            (install.clone(), false)
+        );
+        let manual = product.join("sessions");
+        create_private(&manual).unwrap();
+        remove_managed_macos_session_dir(&state).unwrap();
+        assert!(!install.exists() && manual.is_dir() && target.is_dir());
+        fs::remove_dir_all(home).unwrap();
+    }
 
     /// A fresh 0700 directory of this account is accepted; widening it to 0755 is refused.
     #[test]
