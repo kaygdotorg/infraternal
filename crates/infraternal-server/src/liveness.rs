@@ -164,6 +164,7 @@ impl Liveness {
             .then(|| self.answered + allowance + Duration::from_nanos(1))
     }
 
+    /// Issue a correlated probe while preserving any outstanding reply deadline.
     pub(crate) fn ping(&mut self) -> (u64, u64) {
         // Never move an outstanding deadline: pipelining cannot mask silence.
         if self.issued.is_empty() {

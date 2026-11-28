@@ -2240,7 +2240,7 @@ async fn j1264_fresh_host_lease_keeps_nonce_sequence_and_rejects_stale_pong() {
 
     fresh_host_lease(&mut liveness, &mut doubted);
 
-    assert!(doubted.is_empty());
+    assert_eq!(doubted, [] as [u64; 0]);
     let new_probe = liveness.ping();
     assert!(
         new_probe.0 > old_probe.0,
