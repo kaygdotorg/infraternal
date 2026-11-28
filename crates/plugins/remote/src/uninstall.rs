@@ -953,7 +953,9 @@ pub async fn retire_sessions(runtime: &Path, uid: u32) -> io::Result<()> {
     for path in [runtime, &runtime.join("sessions")] {
         match std::fs::symlink_metadata(path) {
             Ok(metadata)
-                if metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o077 == 0 => {}
+                if metadata.is_dir()
+                    && metadata.uid() == uid
+                    && metadata.mode().trailing_zeros() >= 6 => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error),
             Ok(_) => return Err(denied()),
